@@ -80,6 +80,7 @@ async fn run_turn_uses_existing_session_transcript() {
     let mut request = make_request_with_session("second turn", &session_id);
     request.test_llm = Some(llm);
     request.test_project_root = Some(fixture.project_root.clone());
+    request.workspace_override = Some(test_workspace_override());
 
     let result = run_turn(fixture.session_api, request).await.unwrap();
 
@@ -291,6 +292,7 @@ async fn run_turn_commits_parent_from_initial_transcript() {
     let mut request = make_request_with_session("second turn", &session_id);
     request.test_llm = Some(llm);
     request.test_project_root = Some(fixture.project_root.clone());
+    request.workspace_override = Some(test_workspace_override());
 
     let result = run_turn(session_api, request).await.unwrap();
 

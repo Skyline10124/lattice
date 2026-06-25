@@ -464,7 +464,7 @@ async fn outcome_matrix_workspace_less_completed_not_applicable() {
     let outcome = outcome_workspace_less();
     assert_eq!(outcome.status, TurnCommitStatus::Completed);
     assert_eq!(outcome.disposition, WorkspaceDisposition::NotApplicable);
-    assert_eq!(outcome.resource_action, ResourceAction::None);
+    assert_eq!(outcome.resource_action, ResourceAction::Destroy);
     assert!(!outcome.candidate_exported);
     assert!(!outcome.verification_acquired);
     assert!(outcome.promoted_ref_committed.is_none());
@@ -590,7 +590,7 @@ async fn outcome_matrix_baseline_movement_completed_pending_conflict() {
     );
     assert_eq!(outcome.status, TurnCommitStatus::Completed);
     assert_eq!(outcome.disposition, WorkspaceDisposition::PendingConflict);
-    assert_eq!(outcome.resource_action, ResourceAction::None);
+    assert_eq!(outcome.resource_action, ResourceAction::Destroy);
 }
 
 #[tokio::test]
@@ -784,7 +784,7 @@ async fn outcome_matrix_retention_only_pending_worktree_and_verify_retain() {
         true,
         LifecycleFailureKind::BaselineMovement,
     );
-    assert_eq!(pc.resource_action, ResourceAction::None);
+    assert_eq!(pc.resource_action, ResourceAction::Destroy);
 
     // promoted uses ReleaseAfterCandidatePin.
     let promoted = outcome_promoted("r".into(), true);

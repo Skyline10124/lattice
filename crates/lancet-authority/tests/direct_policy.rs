@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct authority policy semantics: determinism and workspace write-region
+//! Authority policy semantics: determinism and workspace write-deny (blacklist)
 //! behavior.
 
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use serde_json::json;
 
 fn project_config() -> PolicyConfig {
     let mut config = PolicyConfig::defaults_for_project_root(PathBuf::from("/home/user/project"));
-    config.workspace.allowed_write_paths = vec!["src/**".into()];
+    config.workspace.denied_write_patterns = vec![".git/**".into()];
     config
 }
 
@@ -39,9 +39,9 @@ fn direct_input(method: &str, params: serde_json::Value) -> PolicyInput {
 }
 
 #[test]
-fn direct_allows_observation_without_write_paths() {
+fn direct_allows_observation_without_denied_patterns() {
     let mut config = project_config();
-    config.workspace.allowed_write_paths.clear();
+    config.workspace.denied_write_patterns.clear();
     let hook = DefaultPolicyHook::new(config);
     let input = direct_input(
         "observe.workspace",
@@ -51,30 +51,26 @@ fn direct_allows_observation_without_write_paths() {
 }
 
 #[test]
-fn direct_denies_mutation_without_write_paths() {
+fn direct_allows_mutation_with_no_denied_patterns() {
+    // Blacklist semantics: no denied patterns → all paths allowed
     let mut config = project_config();
-    config.workspace.allowed_write_paths.clear();
+    config.workspace.denied_write_patterns.clear();
     let hook = DefaultPolicyHook::new(config);
     let input = direct_input(
         "mutate.create",
         json!({"path": "src/new.rs", "content": "x"}),
     );
-    assert!(matches!(
-        hook.decide(&input),
-        PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::PathOutsideScope,
-            ..
-        }
-    ));
+    assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
 }
 
 #[test]
-fn direct_allows_mutation_with_configured_write_paths() {
+fn direct_allows_mutation_not_in_deny_list() {
     let hook = DefaultPolicyHook::new(project_config());
     let input = direct_input(
         "mutate.create",
         json!({"path": "src/new.rs", "content": "x"}),
     );
+    // src/new.rs is not in the deny list (only .git/** is) → allowed
     assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
 }
 
@@ -105,21 +101,16 @@ fn direct_allows_diagnostic_command() {
 }
 
 #[test]
-fn direct_denies_workspace_mutating_command_without_write_paths() {
+fn direct_allows_workspace_mutating_command_with_blacklist() {
+    // Blacklist semantics: no denied patterns → workspace-mutating command allowed
     let mut config = project_config();
-    config.workspace.allowed_write_paths.clear();
+    config.workspace.denied_write_patterns.clear();
     let hook = DefaultPolicyHook::new(config);
     let input = direct_input(
         "exec.command_run",
         json!({"argv": ["cargo", "build"], "declared_impact": "workspace_mutation"}),
     );
-    assert!(matches!(
-        hook.decide(&input),
-        PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::PathOutsideScope,
-            ..
-        }
-    ));
+    assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
 }
 
 #[test]
@@ -186,9 +177,10 @@ fn direct_decision_is_deterministic() {
 }
 
 #[test]
-fn workspace_policy_rejects_git_paths() {
+fn workspace_policy_validates_denied_patterns() {
+    // .. traversal in denied patterns is rejected
     let policy = WorkspacePolicy {
-        allowed_write_paths: vec![".git/config".into()],
+        denied_write_patterns: vec!["../etc".into()],
     };
     assert!(policy.validate().is_err());
 }
@@ -196,7 +188,7 @@ fn workspace_policy_rejects_git_paths() {
 #[test]
 fn workspace_policy_shared_by_mutate_and_command_regions() {
     let policy = WorkspacePolicy {
-        allowed_write_paths: vec!["crates/**".into()],
+        denied_write_patterns: vec!["crates/**".into()],
     };
     let cep = lancet_authority::CepPolicyConfig::defaults_for_project_root("/tmp/project");
     let mutate_region = policy.authorized_region_for("mutate.create", None, &cep);
@@ -205,9 +197,9 @@ fn workspace_policy_shared_by_mutate_and_command_regions() {
         Some(&lancet_authority::policy::command::EffectiveImpact::WorkspaceMutation),
         &cep,
     );
-    assert!(!mutate_region.write_path_prefixes.is_empty());
+    assert!(!mutate_region.denied_write_path_prefixes.is_empty());
     assert_eq!(
-        mutate_region.write_path_prefixes,
-        command_region.write_path_prefixes
+        mutate_region.denied_write_path_prefixes,
+        command_region.denied_write_path_prefixes
     );
 }

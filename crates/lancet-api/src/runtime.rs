@@ -129,7 +129,7 @@ impl LancetRuntime {
             model_id,
             runtime_version,
             execution,
-            direct_verify,
+            verify_config,
         } = config;
 
         let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools)?;
@@ -180,7 +180,7 @@ impl LancetRuntime {
             default_policy_hook: Some(default_hook),
             cep_mode,
             execution,
-            direct_verify,
+            verify_config,
         };
 
         let (client, lifecycle) = LancetServer::spawn(server_config, DEFAULT_CHANNEL_CAPACITY)?;
@@ -250,9 +250,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_config_defaults_have_no_execution() {
+    fn runtime_config_defaults_have_null_execution() {
         let config = LancetRuntimeConfig::new(".");
-        assert!(config.execution.is_none());
-        assert!(config.direct_verify.is_none());
+        assert_eq!(config.execution.upper.execution_backend, "null");
+        assert!(config.verify_config.is_none());
     }
 }

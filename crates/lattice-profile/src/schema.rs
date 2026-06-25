@@ -24,10 +24,12 @@ pub struct AgentProfile {
     pub lancet: LancetSection,
     /// Upper workspace execution environment configuration.
     ///
-    /// Absent `[workspace]` means no Upper is requested; the field defaults to `None`.
-    /// Older profiles without `[workspace]` still parse.
-    #[serde(default)]
-    pub workspace: Option<WorkspaceSection>,
+    /// The `[workspace]` section is **mandatory** — every turn unconditionally
+    /// starts a microVM (MSB/Upper). Profiles without `[workspace]` fail to
+    /// parse. The `image` field within the section is optional at the schema
+    /// level but required at runtime; the provisioner fails fast if it is
+    /// missing when Upper preparation begins.
+    pub workspace: WorkspaceSection,
 }
 
 // ── Workspace schema types ────────────────────────────────────────────────────
@@ -117,8 +119,8 @@ where
 ///
 /// Most fields are `Option<T>` with `#[serde(default)]` so missing fields fall back to
 /// caller defaults. Lifecycle limit fields (`cleanup_rounds`, `max_pending_snapshots`)
-/// are non-optional `u32` with bounded defaults. Older profiles without `[workspace]`
-/// still parse and produce `AgentProfile.workspace = None`.
+/// are non-optional `u32` with bounded defaults. The `[workspace]` section is
+/// mandatory in `AgentProfile`; profiles without it fail to parse.
 ///
 /// **Security invariant:** credentials are turn-time injection only.
 /// This section stores only references (`CredentialRef`); resolved values are never
@@ -293,12 +295,17 @@ pub struct LancetPolicySection {
     pub path: Option<String>,
 }
 
-/// `[lancet.workspace]` — immutable Direct write-region policy.
+/// `[lancet.workspace]` — immutable write-deny policy (blacklist).
+///
+/// A path is allowed unless it matches any denied pattern. Glob patterns
+/// (e.g. `".git/**"`) deny a directory subtree; exact paths deny a single
+/// file. No system-level denies are hardcoded — if a user removes
+/// `".git/**"` from the deny list, that is their choice.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LancetWorkspacePolicySection {
     #[serde(default)]
-    pub allowed_write_paths: Vec<String>,
+    pub denied_write_patterns: Vec<String>,
 }
 
 /// `[lancet.verify]` — immutable Direct post-mutation verify command.
@@ -499,6 +506,8 @@ model = "sonnet"
 
 [prompt]
 system = "You are a helpful assistant."
+
+[workspace]
 "#;
         let profile = parse(toml).unwrap();
         assert_eq!(profile.schema_version, 1);
@@ -532,6 +541,8 @@ enabled = ["observe.workspace", "exec.command_run"]
 max_retries = 2
 initial_delay_ms = 250
 max_delay_ms = 1000
+
+[workspace]
 "#;
         let profile = parse(toml).unwrap();
         assert_eq!(
@@ -805,9 +816,15 @@ system = "hi"
 "#
     }
 
+    /// Minimal prefix with a `[workspace]` section — for tests that don't
+    /// add their own `[workspace]` section in the format string.
+    fn minimal_profile_with_workspace() -> String {
+        format!("{}\n[workspace]\n", minimal_profile_prefix())
+    }
+
     #[test]
     fn cep_defaults_to_enforce_when_section_absent() {
-        let profile = parse(minimal_profile_prefix()).unwrap();
+        let profile = parse(&minimal_profile_with_workspace()).unwrap();
         assert_eq!(profile.lancet.mode, CepMode::Enforce);
         assert!(profile.lancet.extensions.is_empty());
     }
@@ -816,6 +833,8 @@ system = "hi"
     fn cep_parses_enforce_mode() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet]
 mode = "enforce"
@@ -831,6 +850,8 @@ mode = "enforce"
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [lancet]
 mode = "warn"
 "#,
@@ -844,6 +865,8 @@ mode = "warn"
     fn cep_parses_off_mode() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet]
 mode = "off"
@@ -859,6 +882,8 @@ mode = "off"
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [lancet]
 mode = "permissive"
 "#,
@@ -871,6 +896,8 @@ mode = "permissive"
     fn cep_rejects_scalar_extension_typos() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet]
 mod = "off"
@@ -885,6 +912,8 @@ mod = "off"
     fn cep_parses_typed_prof02_sub_tables() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet]
 mode = "enforce"
@@ -930,6 +959,8 @@ max_web_response_bytes = 2048
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [lancet]
 mode = "enforce"
 
@@ -952,6 +983,8 @@ some_field = true
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [lancet]
 mode = "enforce"
 "#,
@@ -968,6 +1001,8 @@ mode = "enforce"
     fn cep_observation_rejects_network_only_field() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet.observation]
 max_web_response_bytes = 1024
@@ -987,6 +1022,8 @@ max_web_response_bytes = 1024
     fn cep_command_section_parses_all_fields() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet]
 mode = "enforce"
@@ -1038,7 +1075,7 @@ inherited_env = ["PATH", "HOME"]
 
     #[test]
     fn cep_command_section_defaults_when_absent() {
-        let profile = parse(minimal_profile_prefix()).unwrap();
+        let profile = parse(&minimal_profile_with_workspace()).unwrap();
         assert!(profile.lancet.command.is_none());
     }
 
@@ -1046,6 +1083,8 @@ inherited_env = ["PATH", "HOME"]
     fn cep_command_section_partial_fields_use_defaults() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet]
 mode = "enforce"
@@ -1068,6 +1107,8 @@ default_timeout_ms = 30000
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [lancet]
 mode = "enforce"
 
@@ -1088,6 +1129,8 @@ unknown_field = true
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [lancet]
 mode = "enforce"
 
@@ -1105,6 +1148,8 @@ allowed_roots = ["."]
     fn cep_command_section_moved_from_extensions_to_typed() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet]
 mode = "enforce"
@@ -1159,6 +1204,8 @@ model = "sonnet"
 
 [prompt]
 system = "hi"
+
+[workspace]
 "#;
         let profile = parse(toml).unwrap();
         assert!(profile.tools.enabled.is_empty());
@@ -1166,7 +1213,7 @@ system = "hi"
 
     #[test]
     fn llm_retry_defaults_when_section_absent() {
-        let profile = parse(minimal_profile_prefix()).unwrap();
+        let profile = parse(&minimal_profile_with_workspace()).unwrap();
         assert_eq!(profile.llm.retry.max_retries, 3);
         assert_eq!(profile.llm.retry.initial_delay_ms, 500);
         assert_eq!(profile.llm.retry.max_delay_ms, 3_000);
@@ -1176,6 +1223,8 @@ system = "hi"
     fn llm_retry_parses_explicit_values() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [llm.retry]
 max_retries = 0
@@ -1193,12 +1242,14 @@ max_delay_ms = 2
     // ── WorkspaceSection / EgressPolicyConfig / CredentialRef ─────────────────
 
     #[test]
-    fn workspace_section_missing_parses() {
-        // Older profiles without [workspace] still parse; workspace field is None.
-        let profile = parse(minimal_profile_prefix()).unwrap();
+    fn workspace_section_missing_fails() {
+        // Profiles without [workspace] fail to parse — the section is mandatory.
+        let toml = minimal_profile_prefix();
+        let err = parse(toml).unwrap_err();
         assert!(
-            profile.workspace.is_none(),
-            "workspace must be None when [workspace] is absent"
+            err.to_string().contains("workspace")
+                || err.to_string().contains("missing field"),
+            "missing [workspace] must be a parse error, got: {err}"
         );
     }
 
@@ -1214,7 +1265,7 @@ egress = "blocked"
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let ws = profile.workspace.as_ref().unwrap();
+        let ws = &profile.workspace;
         assert_eq!(ws.egress, Some(EgressPolicyConfig::Blocked));
         assert!(ws.credentials.is_empty());
         assert!(ws.allowed_egress_targets.is_empty());
@@ -1233,7 +1284,7 @@ allowed_egress_targets = ["api.openai.com", "pypi.org"]
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let ws = profile.workspace.as_ref().unwrap();
+        let ws = &profile.workspace;
         assert_eq!(ws.egress, Some(EgressPolicyConfig::Allowlist));
         assert_eq!(
             ws.allowed_egress_targets,
@@ -1248,6 +1299,8 @@ allowed_egress_targets = ["api.openai.com", "pypi.org"]
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [[workspace.credentials]]
 env_var_name = "OPENAI_API_KEY"
 
@@ -1257,7 +1310,7 @@ env_var_name = "ANTHROPIC_API_KEY"
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let ws = profile.workspace.as_ref().unwrap();
+        let ws = &profile.workspace;
         assert_eq!(ws.credentials.len(), 2);
         assert_eq!(ws.credentials[0].env_var_name, "OPENAI_API_KEY");
         assert_eq!(ws.credentials[1].env_var_name, "ANTHROPIC_API_KEY");
@@ -1296,21 +1349,23 @@ unexpected_key = "bad"
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [lancet.workspace]
-allowed_write_paths = ["src/**", "crates/foo/**"]
+denied_write_patterns = [".git/**", ".env"]
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile: AgentProfile = parse(&toml).unwrap();
-        let paths = &profile
+        let patterns = &profile
             .lancet
             .workspace
             .as_ref()
             .unwrap()
-            .allowed_write_paths;
+            .denied_write_patterns;
         assert_eq!(
-            paths,
-            &vec!["src/**".to_string(), "crates/foo/**".to_string()]
+            patterns,
+            &vec![".git/**".to_string(), ".env".to_string()]
         );
     }
 
@@ -1319,8 +1374,10 @@ allowed_write_paths = ["src/**", "crates/foo/**"]
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [lancet.workspace]
-allowed_write_paths = ["src/**"]
+denied_write_patterns = [".git/**"]
 unexpected = true
 "#,
             prefix = minimal_profile_prefix()
@@ -1332,6 +1389,8 @@ unexpected = true
     fn lancet_verify_roundtrip() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet.verify]
 argv = ["cargo", "test", "-p", "lattice-api"]
@@ -1360,7 +1419,7 @@ egress = "open"
             prefix = minimal_profile_prefix()
         );
         let profile: AgentProfile = parse(&toml).unwrap();
-        assert!(profile.workspace.as_ref().unwrap().image.is_none());
+        assert!(&profile.workspace.image.is_none());
         let docs = include_str!("schema.rs");
         assert!(docs.contains("no provisioner default is implied by the profile schema"));
     }
@@ -1385,7 +1444,7 @@ env_var_name = "PYPI_TOKEN"
         );
 
         let profile: AgentProfile = parse(&toml_input).unwrap();
-        let ws = profile.workspace.as_ref().unwrap();
+        let ws = &profile.workspace;
         assert_eq!(ws.egress, Some(EgressPolicyConfig::Allowlist));
         assert_eq!(
             ws.image.as_deref(),
@@ -1442,6 +1501,8 @@ env_var_name = "PYPI_TOKEN"
         let toml = format!(
             r#"{prefix}
 
+[workspace]
+
 [lancet.policy]
 path = "policy.toml"
 "#,
@@ -1454,7 +1515,7 @@ path = "policy.toml"
 
     #[test]
     fn cep_section_without_policy_defaults_to_none() {
-        let profile = parse(minimal_profile_prefix()).unwrap();
+        let profile = parse(&minimal_profile_with_workspace()).unwrap();
         assert!(profile.lancet.policy.is_none());
     }
 
@@ -1462,6 +1523,8 @@ path = "policy.toml"
     fn cep_policy_section_rejects_unknown_fields() {
         let toml = format!(
             r#"{prefix}
+
+[workspace]
 
 [lancet.policy]
 unknown = true
@@ -1488,7 +1551,7 @@ egress = "open"
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let ws = profile.workspace.as_ref().unwrap();
+        let ws = &profile.workspace;
         assert_eq!(ws.cleanup_rounds, 3, "default cleanup_rounds must be 3");
         assert_eq!(
             ws.max_pending_snapshots, 5,
@@ -1508,7 +1571,7 @@ max_pending_snapshots = 20
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let ws = profile.workspace.as_ref().unwrap();
+        let ws = &profile.workspace;
         assert_eq!(ws.cleanup_rounds, 10);
         assert_eq!(ws.max_pending_snapshots, 20);
 
@@ -1533,7 +1596,7 @@ max_pending_snapshots = 1
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let ws = profile.workspace.as_ref().unwrap();
+        let ws = &profile.workspace;
         assert_eq!(ws.cleanup_rounds, 1);
         assert_eq!(ws.max_pending_snapshots, 1);
 
@@ -1547,7 +1610,7 @@ max_pending_snapshots = 100
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml_upper).unwrap();
-        let ws = profile.workspace.as_ref().unwrap();
+        let ws = &profile.workspace;
         assert_eq!(ws.cleanup_rounds, 32);
         assert_eq!(ws.max_pending_snapshots, 100);
     }
@@ -1723,13 +1786,11 @@ env_var_name = "SUPER_SECRET_KEY"
     }
 
     #[test]
-    fn workspace_absent_section_parses_with_none() {
-        // Profiles without [workspace] still parse; lifecycle code must apply
-        // limits only when an Upper exists.
-        let profile = parse(minimal_profile_prefix()).unwrap();
-        assert!(
-            profile.workspace.is_none(),
-            "absent [workspace] must produce None, not a default WorkspaceSection"
-        );
+    fn workspace_mandatory_section_present_in_minimal_prefix() {
+        // The minimal_profile_with_workspace helper includes [workspace];
+        // it must parse and produce a default WorkspaceSection.
+        let profile = parse(&minimal_profile_with_workspace()).unwrap();
+        assert_eq!(profile.workspace.cleanup_rounds, 3);
+        assert_eq!(profile.workspace.max_pending_snapshots, 5);
     }
 }

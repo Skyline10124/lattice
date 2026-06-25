@@ -18,19 +18,10 @@ use lancet_native::UpperContext;
 /// Default Upper wall-clock lifetime when the profile omits an explicit budget.
 pub const DEFAULT_UPPER_LIFETIME_SECS: u64 = 3600;
 
-const UPPER_BACKED_TOOLS: &[&str] = &[
-    "observe.workspace",
-    "mutate.create",
-    "mutate.edit",
-    "mutate.batch",
-    "exec.command_run",
-];
-
 /// Resolved immutable Upper configuration before adapter construction.
 #[derive(Clone, Debug)]
 pub struct ResolvedUpperConfig {
     pub spec: UpperSpec,
-    pub requires_upper: bool,
 }
 
 /// One prepared Upper with its execution bridge.
@@ -48,6 +39,18 @@ pub struct UpperLease {
 }
 
 impl UpperLease {
+    /// Create a lease with a workspace but no Upper handle.
+    ///
+    /// The lease will not destroy anything on drop. Used for test scaffolding
+    /// where a real Upper is not needed.
+    pub fn without_handle(workspace: Arc<dyn Workspace>) -> Self {
+        Self {
+            workspace,
+            handle: None,
+            retained: false,
+        }
+    }
+
     pub fn workspace(&self) -> &Arc<dyn Workspace> {
         &self.workspace
     }
@@ -139,12 +142,6 @@ impl From<WorkspaceError> for UpperPrepareError {
     }
 }
 
-pub fn upper_backed_tools_enabled(enabled_tools: &[String]) -> bool {
-    enabled_tools
-        .iter()
-        .any(|tool| UPPER_BACKED_TOOLS.contains(&tool.as_str()))
-}
-
 pub fn resolve_explicit_image_or_template(
     image: &str,
 ) -> Result<ImageOrTemplate, UpperPrepareError> {
@@ -221,36 +218,15 @@ fn map_egress(section: &WorkspaceSection) -> EgressPolicy {
 pub fn resolve_upper_config(
     profile: &LoadedAgentProfile,
     project_root: &Path,
-    enabled_tools: &[String],
     baseline_oid: Option<&str>,
 ) -> Result<ResolvedUpperConfig, UpperPrepareError> {
-    let requires_upper = upper_backed_tools_enabled(enabled_tools);
-    let section = match profile.profile.workspace.as_ref() {
-        Some(section) => section,
-        None if requires_upper => return Err(UpperPrepareError::MissingWorkspaceSection),
-        None => {
-            return Ok(ResolvedUpperConfig {
-                requires_upper: false,
-                spec: UpperSpec {
-                    image_or_template: ImageOrTemplate::Image(String::new()),
-                    baseline_oid: String::new(),
-                    host_repo_path: project_root.to_path_buf(),
-                    egress: EgressPolicy::Blocked,
-                    credentials: vec![],
-                    timeout_secs: DEFAULT_UPPER_LIFETIME_SECS,
-                    cpus: 1,
-                    memory_mb: 512,
-                },
-            });
-        }
-    };
+    let section = &profile.profile.workspace;
 
-    if requires_upper
-        && section
-            .image
-            .as_deref()
-            .map(str::trim)
-            .is_none_or(str::is_empty)
+    if section
+        .image
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
     {
         return Err(UpperPrepareError::MissingWorkspaceSource);
     }
@@ -270,7 +246,6 @@ pub fn resolve_upper_config(
     let credentials = resolve_credentials(&section.credentials)?;
 
     Ok(ResolvedUpperConfig {
-        requires_upper,
         spec: UpperSpec {
             image_or_template,
             baseline_oid: baseline,
@@ -288,10 +263,6 @@ pub async fn prepare_upper(
     config: &ResolvedUpperConfig,
     workspace_override: Option<Arc<dyn Workspace>>,
 ) -> Result<PreparedUpper, UpperPrepareError> {
-    if !config.requires_upper {
-        return Err(UpperPrepareError::MissingWorkspaceSource);
-    }
-
     let workspace = workspace_override.unwrap_or_else(|| {
         Arc::new(lattice_workspace::microsandbox::MicrosandboxWorkspace::from_env())
             as Arc<dyn Workspace>
@@ -344,7 +315,7 @@ mod upper_workspace_source_tests {
                 },
                 llm: LlmSection::default(),
                 lancet: LancetSection::default(),
-                workspace: Some(WorkspaceSection {
+                workspace: WorkspaceSection {
                     egress: None,
                     credentials: vec![],
                     image: image.map(str::to_string),
@@ -353,57 +324,16 @@ mod upper_workspace_source_tests {
                     allowed_egress_targets: vec![],
                     cleanup_rounds: 3,
                     max_pending_snapshots: 5,
-                }),
+                },
             },
             system_prompt: "sys".into(),
         }
     }
 
     #[test]
-    fn upper_workspace_source_missing_section_fails() {
-        let profile = LoadedAgentProfile {
-            path: PathBuf::from("/tmp/agent.toml"),
-            package_dir: PathBuf::from("/tmp"),
-            profile: AgentProfile {
-                schema_version: 1,
-                agent: AgentSection {
-                    name: "t".into(),
-                    model: "m".into(),
-                    description: None,
-                },
-                prompt: PromptSection {
-                    system: Some("sys".into()),
-                    system_path: None,
-                },
-                tools: ToolsSection {
-                    enabled: vec!["observe.workspace".into()],
-                },
-                llm: LlmSection::default(),
-                lancet: LancetSection::default(),
-                workspace: None,
-            },
-            system_prompt: "sys".into(),
-        };
-        let err = resolve_upper_config(
-            &profile,
-            Path::new("."),
-            &["observe.workspace".into()],
-            None,
-        )
-        .unwrap_err();
-        assert!(matches!(err, UpperPrepareError::MissingWorkspaceSection));
-    }
-
-    #[test]
     fn upper_workspace_source_missing_image_fails() {
         let profile = profile_with_workspace(None);
-        let err = resolve_upper_config(
-            &profile,
-            Path::new("."),
-            &["observe.workspace".into()],
-            None,
-        )
-        .unwrap_err();
+        let err = resolve_upper_config(&profile, Path::new("."), None).unwrap_err();
         assert!(matches!(err, UpperPrepareError::MissingWorkspaceSource));
     }
 
@@ -489,7 +419,7 @@ mod upper_config_tests {
                 },
                 llm: LlmSection::default(),
                 lancet: LancetSection::default(),
-                workspace: Some(WorkspaceSection {
+                workspace: WorkspaceSection {
                     egress: None,
                     credentials: vec![],
                     image: Some("docker.io/library/python:3.12-slim".into()),
@@ -498,13 +428,11 @@ mod upper_config_tests {
                     allowed_egress_targets: vec![],
                     cleanup_rounds: 3,
                     max_pending_snapshots: 5,
-                }),
+                },
             },
             system_prompt: "sys".into(),
         };
-        let cfg = resolve_upper_config(&profile, dir.path(), &["observe.workspace".into()], None)
-            .unwrap();
-        assert!(cfg.requires_upper);
+        let cfg = resolve_upper_config(&profile, dir.path(), None).unwrap();
         assert!(matches!(
             cfg.spec.image_or_template,
             ImageOrTemplate::Image(_)

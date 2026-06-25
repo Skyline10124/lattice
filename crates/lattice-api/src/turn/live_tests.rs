@@ -61,6 +61,12 @@ async fn stream_turn_live_with_agent(
     tool_definitions: Vec<lattice_llm::ToolDefinition>,
 ) -> crate::session::Result<TurnEventStream> {
     let (cep_client, _server) = lancet_native::CepTransport::pair(1);
+    let upper_lease = super::upper::UpperLease::without_handle(
+        Arc::new(
+            lattice_workspace::testing::DeterministicWorkspace::new()
+                .expect("deterministic workspace for test"),
+        ) as Arc<dyn lattice_workspace::Workspace>,
+    );
     let deps = super::cep::ProductionTurnDeps {
         agent_loop,
         tool_definitions,
@@ -70,7 +76,7 @@ async fn stream_turn_live_with_agent(
         audit_context: Arc::new(tokio::sync::RwLock::new(
             lancet_native::CepAuditContext::default(),
         )),
-        upper_lease: None,
+        upper_lease,
         #[cfg(test)]
         build_metrics: super::cep::CepRuntimeBuildMetrics {
             adapter_instances: 0,
@@ -125,7 +131,16 @@ fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::Loa
             tools: lattice_profile::ToolsSection { enabled: vec![] },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
-            workspace: None,
+            workspace: lattice_profile::WorkspaceSection {
+                egress: None,
+                credentials: vec![],
+                image: Some("test-template".to_string()),
+                cpus: None,
+                memory_mb: None,
+                allowed_egress_targets: vec![],
+                cleanup_rounds: 3,
+                max_pending_snapshots: 5,
+            },
         },
         system_prompt: system_prompt.to_string(),
     }

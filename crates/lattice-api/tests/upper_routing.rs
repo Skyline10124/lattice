@@ -215,7 +215,7 @@ async fn direct_runtime_fixture(
 
     let mut policy = PolicyConfig::defaults_for_project_root(lower.to_path_buf());
     policy.workspace = WorkspacePolicy {
-        allowed_write_paths: vec![".".into()],
+        denied_write_patterns: vec![],
     };
 
     let audit_dir = TempDir::new().expect("audit temp");
@@ -227,8 +227,8 @@ async fn direct_runtime_fixture(
         audit: AuditBacking::File(audit_dir.path().join("audit.db")),
         model_id: "test".into(),
         runtime_version: "test".into(),
-        execution: Some(execution),
-        direct_verify: None,
+        execution,
+        verify_config: None,
     })
     .expect("runtime");
 
@@ -421,11 +421,11 @@ async fn upper_routing_e2e() {
             llm: LlmSection::default(),
             lancet: LancetSection {
                 workspace: Some(LancetWorkspacePolicySection {
-                    allowed_write_paths: vec![".".into()],
+                    denied_write_patterns: vec![],
                 }),
                 ..Default::default()
             },
-            workspace: Some(WorkspaceSection {
+            workspace: WorkspaceSection {
                 image: Some("docker.io/library/alpine:3.19".into()),
                 egress: None,
                 credentials: vec![CredentialRef {
@@ -436,7 +436,7 @@ async fn upper_routing_e2e() {
                 allowed_egress_targets: vec![],
                 cleanup_rounds: 3,
                 max_pending_snapshots: 5,
-            }),
+            },
         },
         system_prompt: "test".into(),
     };
@@ -655,7 +655,7 @@ async fn adapter_failure_has_no_lower_fallback() {
             },
             llm: LlmSection::default(),
             lancet: LancetSection::default(),
-            workspace: Some(WorkspaceSection {
+            workspace: WorkspaceSection {
                 image: Some("docker.io/library/alpine:3.19".into()),
                 egress: None,
                 credentials: vec![],
@@ -664,7 +664,7 @@ async fn adapter_failure_has_no_lower_fallback() {
                 allowed_egress_targets: vec![],
                 cleanup_rounds: 3,
                 max_pending_snapshots: 5,
-            }),
+            },
         },
         system_prompt: "test".into(),
     };
@@ -720,6 +720,34 @@ async fn generated_profiles_are_executable_host_only() {
     };
 
     let dir = TempDir::new().expect("dir");
+    // Wave 5: resolve_upper_config requires a git repo to resolve HEAD.
+    std::fs::write(dir.path().join("README.md"), "init\n").expect("write");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@lattice.local"])
+        .current_dir(dir.path())
+        .status()
+        .expect("git config email");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "lattice-test"])
+        .current_dir(dir.path())
+        .status()
+        .expect("git config name");
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .status()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "init"])
+        .current_dir(dir.path())
+        .status()
+        .expect("git commit");
+
     let llm: Arc<dyn LlmClient> = Arc::new(FakeStreamingLlmClient::builder().build());
 
     for toml_str in [
@@ -729,6 +757,10 @@ async fn generated_profiles_are_executable_host_only() {
         default_dev_template("t", "sonnet"),
     ] {
         let profile: lattice_profile::AgentProfile = toml::from_str(&toml_str).expect("parse");
+        // Wave 5: all tools require Upper, so the profile must have a
+        // workspace image. Set one for the test.
+        let mut profile = profile;
+        profile.workspace.image = Some("docker.io/library/alpine:3.19".into());
         let loaded = LoadedAgentProfile {
             path: dir.path().join("agent.toml"),
             package_dir: dir.path().to_path_buf(),
@@ -753,11 +785,14 @@ async fn generated_profiles_are_executable_host_only() {
             test_llm: Some(llm.clone()),
             test_project_root: Some(dir.path().to_string_lossy().into()),
             test_persist_audit: None,
-            workspace_override: None,
+            workspace_override: Some(Arc::new(
+                lattice_workspace::testing::DeterministicWorkspace::new()
+                    .expect("deterministic workspace"),
+            )),
         };
         let _stream = stream_turn(session_api, request)
             .await
-            .expect("host-only profile reaches Direct runtime");
+            .expect("default profile reaches runtime");
     }
 }
 

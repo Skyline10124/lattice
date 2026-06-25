@@ -100,17 +100,13 @@ struct Workspace {
     loaded: LoadedAgentProfile,
 }
 
-fn workspace_toml_suffix(enabled_tools: &[&str]) -> &'static str {
-    if support::upper_backed_tools_enabled(enabled_tools) {
-        r#"
+fn workspace_toml_suffix(_enabled_tools: &[&str]) -> &'static str {
+    r#"
 [workspace]
 image = "test-template"
 [lancet.workspace]
-allowed_write_paths = ["src/**"]
+denied_write_patterns = [".git/**"]
 "#
-    } else {
-        ""
-    }
 }
 
 fn setup_workspace(enabled_tools: &[&str]) -> Workspace {

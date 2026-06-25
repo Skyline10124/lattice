@@ -33,8 +33,6 @@ pub enum ResourceAction {
     Retain,
     /// Release the Upper after the candidate ref is durably pinned.
     ReleaseAfterCandidatePin,
-    /// No resource action (e.g. no workspace turn).
-    None,
 }
 
 /// Turn lifecycle outcome: the terminal classification of a complete turn.
@@ -249,7 +247,7 @@ pub fn classify_lifecycle_failure(
     let (disposition, resource_action, messages) = match failure_kind {
         LifecycleFailureKind::WorkspaceLess => (
             WorkspaceDisposition::NotApplicable,
-            ResourceAction::None,
+            ResourceAction::Destroy,
             vec!["no workspace configured".to_string()],
         ),
         LifecycleFailureKind::CleanupExhaustion => (
@@ -284,7 +282,7 @@ pub fn classify_lifecycle_failure(
         ),
         LifecycleFailureKind::BaselineMovement => (
             WorkspaceDisposition::PendingConflict,
-            ResourceAction::None,
+            ResourceAction::Destroy,
             vec!["baseline moved during promotion".to_string()],
         ),
         LifecycleFailureKind::ExportRejected { reason } => (
@@ -375,7 +373,7 @@ pub fn outcome_workspace_less() -> TurnLifecycleOutcome {
         status: TurnCommitStatus::Completed,
         disposition: WorkspaceDisposition::NotApplicable,
         messages: vec!["no workspace configured".to_string()],
-        resource_action: ResourceAction::None,
+        resource_action: ResourceAction::Destroy,
         candidate_exported: false,
         verification_acquired: false,
         promoted_ref_committed: None,
@@ -393,7 +391,6 @@ pub fn outcome_workspace_less() -> TurnLifecycleOutcome {
 /// - **ReleaseAfterCandidatePin:** candidate pin (caller prerequisite) →
 ///   release snapshot → commit.
 /// - **Destroy:** destroy Upper → commit.
-/// - **None:** commit only.
 ///
 /// For `pending_conflict`: no snapshot is ever retained.
 /// Never rewrites a committed lifecycle row.
@@ -457,11 +454,6 @@ pub fn finalize_turn(
         ResourceAction::Destroy => {
             // Destroy is handled by the caller via UpperLease::destroy.
             // Just commit the session.
-            commit_fn(outcome, snapshot_name)?
-        }
-        ResourceAction::None => {
-            // No resource action; just commit.
-            // For pending_conflict: NO snapshot is retained.
             commit_fn(outcome, snapshot_name)?
         }
     };

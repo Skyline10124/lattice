@@ -313,7 +313,6 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
     use super::test_support::build_test_production_deps;
 
     let dir = TempDir::new().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
 
     let llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()

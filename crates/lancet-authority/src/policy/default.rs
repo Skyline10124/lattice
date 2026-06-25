@@ -77,42 +77,41 @@ pub struct MethodPolicy {
     pub max_todo_ops: Option<usize>,
 }
 
-// ── Workspace write policy (Direct mode) ───────────────────────────────
+// ── Workspace write policy (blacklist) ─────────────────────────────────
 
-/// Immutable workspace write-region policy for Direct authority.
+/// Immutable workspace write-deny policy (blacklist).
 ///
-/// Shared by `mutate.*` and workspace-mutating `exec.command_run` decisions.
+/// A path is allowed unless it matches any denied pattern. Shared by
+/// `mutate.*` and workspace-mutating `exec.command_run` decisions.
+/// No system-level denies are hardcoded — the deny list is user-controlled.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct WorkspacePolicy {
-    pub allowed_write_paths: Vec<String>,
+    pub denied_write_patterns: Vec<String>,
 }
 
 impl WorkspacePolicy {
-    /// Validate every configured write pattern using Guard L1 write-pattern rules.
+    /// Validate every configured deny pattern using Guard L1 write-pattern rules.
     pub fn validate(&self) -> Result<(), String> {
         use crate::guard::normalize_write_path_pattern;
-        for pattern in &self.allowed_write_paths {
+        for pattern in &self.denied_write_patterns {
             if pattern.is_empty() {
-                return Err("allowed_write_paths entry must not be empty".into());
+                return Err("denied_write_patterns entry must not be empty".into());
             }
             if pattern.contains('\0') {
-                return Err("allowed_write_paths entry must not contain NUL bytes".into());
+                return Err("denied_write_patterns entry must not contain NUL bytes".into());
             }
             if pattern.contains("..") {
-                return Err("allowed_write_paths entry must not contain '..' traversal".into());
+                return Err("denied_write_patterns entry must not contain '..' traversal".into());
             }
             if Path::new(pattern).is_absolute() {
-                return Err("allowed_write_paths entry must be project-root-relative".into());
-            }
-            if is_git_write_pattern(pattern) {
-                return Err("allowed_write_paths must not include .git paths".into());
+                return Err("denied_write_patterns entry must be project-root-relative".into());
             }
             normalize_write_path_pattern(pattern).map_err(|e| e.message)?;
         }
         Ok(())
     }
 
-    /// Build the post-policy authorized region for a Direct method decision.
+    /// Build the post-policy authorized region for a method decision.
     pub fn authorized_region_for(
         &self,
         method: &str,
@@ -126,7 +125,7 @@ impl WorkspacePolicy {
         match method {
             "observe.workspace" => {
                 region.kinds.insert(ImpactKind::WorkspaceObservation);
-                // Direct observation effects are Upper-relative; authorize the workspace root sentinel.
+                // Observation effects are Upper-relative; authorize the workspace root sentinel.
                 region.observation_roots = vec![PathBuf::from(".")];
             }
             "fetch.web" => {
@@ -135,9 +134,9 @@ impl WorkspacePolicy {
             }
             "mutate.create" | "mutate.edit" | "mutate.batch" => {
                 region.kinds.insert(ImpactKind::WorkspaceMutation);
-                apply_workspace_write_paths(
+                apply_denied_write_patterns(
                     &mut region,
-                    &self.allowed_write_paths,
+                    &self.denied_write_patterns,
                     &policy.project_root,
                 );
             }
@@ -146,9 +145,9 @@ impl WorkspacePolicy {
                 region.command_allowed = true;
                 if matches!(command_impact, Some(EffectiveImpact::WorkspaceMutation)) {
                     region.kinds.insert(ImpactKind::WorkspaceMutation);
-                    apply_workspace_write_paths(
+                    apply_denied_write_patterns(
                         &mut region,
-                        &self.allowed_write_paths,
+                        &self.denied_write_patterns,
                         &policy.project_root,
                     );
                 }
@@ -167,7 +166,7 @@ impl WorkspacePolicy {
     }
 }
 
-fn apply_workspace_write_paths(
+fn apply_denied_write_patterns(
     region: &mut crate::effect::region::AuthorizedEffectRegion,
     patterns: &[String],
     _project_root: &Path,
@@ -176,15 +175,13 @@ fn apply_workspace_write_paths(
     for pattern in patterns {
         if let Ok(parsed) = normalize_write_path_pattern(pattern) {
             match parsed {
-                WritePathPattern::ExactFile(path) => region.write_paths.push(path),
-                WritePathPattern::DirectoryGlob(path) => region.write_path_prefixes.push(path),
+                WritePathPattern::ExactFile(path) => region.denied_write_paths.push(path),
+                WritePathPattern::DirectoryGlob(path) => {
+                    region.denied_write_path_prefixes.push(path)
+                }
             }
         }
     }
-}
-
-fn is_git_write_pattern(pattern: &str) -> bool {
-    pattern == ".git" || pattern.starts_with(".git/") || pattern.contains("/.git/")
 }
 
 // ── Unified policy config ──────────────────────────────────────────────
@@ -345,8 +342,8 @@ impl PolicyConfig {
             self.denied_effect_kinds = deny.iter().cloned().collect();
         }
         if let Some(workspace) = &external.workspace {
-            if let Some(paths) = &workspace.allowed_write_paths {
-                self.workspace.allowed_write_paths = paths.clone();
+            if let Some(patterns) = &workspace.denied_write_patterns {
+                self.workspace.denied_write_patterns = patterns.clone();
             }
             self.workspace.validate()?;
         }
@@ -418,7 +415,7 @@ pub struct ExternalPolicyFile {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalWorkspacePolicy {
-    pub allowed_write_paths: Option<Vec<String>>,
+    pub denied_write_patterns: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -678,38 +675,17 @@ impl DefaultPolicyHook {
             }
             if let Some(cmd) = &resolved.resolved_command
                 && cmd.effective_impact == EffectiveImpact::WorkspaceMutation
-                && self.config.workspace.allowed_write_paths.is_empty()
             {
-                return RichPolicyOutcome {
-                    decision: PolicyDecision::Denied {
-                        reason_code: PolicyReasonCode::PathOutsideScope,
-                        message:
-                            "workspace-mutating command denied: no allowed_write_paths configured"
-                                .into(),
-                        action_required: None,
-                    },
-                    evidence: PolicyEvidence {
-                        command_classification: Some(cmd.effective_impact.clone()),
-                        ..Default::default()
-                    },
-                };
+                // Blacklist semantics: an empty denied_write_patterns means all
+                // workspace paths are allowed. No deny-at-policy-time here;
+                // per-path deny enforcement happens in Guard L1 / validate_path_facts.
+                let _ = cmd;
             }
         }
 
-        if matches!(
-            resolved.method.as_str(),
-            "mutate.create" | "mutate.edit" | "mutate.batch"
-        ) && self.config.workspace.allowed_write_paths.is_empty()
-        {
-            return RichPolicyOutcome {
-                decision: PolicyDecision::Denied {
-                    reason_code: PolicyReasonCode::PathOutsideScope,
-                    message: "workspace mutation denied: no allowed_write_paths configured".into(),
-                    action_required: None,
-                },
-                evidence: PolicyEvidence::default(),
-            };
-        }
+        // No allowlist gate for mutate.* — blacklist semantics mean an empty
+        // denied_write_patterns allows all workspace paths. Per-path deny
+        // enforcement happens in Guard L1 / validate_path_facts.
 
         if let Some(denied) = self.check_network_and_budget(resolved, method_policy) {
             return denied;
@@ -883,10 +859,10 @@ mod tests {
         assert_eq!(outcome.decision, PolicyDecision::Allowed);
     }
 
-    // ── Test 2: mutate.create with no allowed_write_paths ─────────
+    // ── Test 2: mutate.create with no denied_write_patterns (blacklist allows all) ─────────
 
     #[test]
-    fn default_hook_denies_create_with_no_write_paths() {
+    fn default_hook_allows_create_with_no_denied_patterns() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
             method: "mutate.create".into(),
@@ -895,13 +871,7 @@ mod tests {
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
-        assert!(matches!(
-            outcome.decision,
-            PolicyDecision::Denied {
-                reason_code: PolicyReasonCode::PathOutsideScope,
-                ..
-            }
-        ));
+        assert_eq!(outcome.decision, PolicyDecision::Allowed);
     }
 
     // ── Test 3: exec.command_run with denied argv ───────────────────────────

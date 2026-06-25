@@ -8,13 +8,14 @@
 //! diff, and leaves the envelope valid for same-turn repair.
 
 use crate::execution_backend::{
-    DirectVerifyConfig, ExecRequest, ExecutionBackendError, ExecutionRouting, PathFacts,
-    PathIntent, PathKind, RoutingInvocationState,
+    VerifyConfig, ExecRequest, ExecutionBackendError, ExecutionRouting,
+    PathFacts as BackendPathFacts, PathIntent, PathKind as BackendPathKind,
+    RoutingInvocationState,
 };
 use crate::executor::process::{ExecuteConfig, execute_argv};
 use crate::server::registry::Cancellation;
 use lancet_authority::effect::region::AuthorizedEffectRegion;
-use lancet_authority::guard::{DirectPathFacts, DirectPathKind, validate_direct_path_facts};
+use lancet_authority::guard::{PathFacts, PathKind, validate_path_facts};
 use lancet_authority::policy::command::{
     CommandPolicy, EffectiveImpact, build_allowed_params_env, classify_command,
 };
@@ -200,8 +201,8 @@ pub async fn run_verify(
 }
 
 /// Normalize a Direct verify profile config into one Upper [`ExecRequest`].
-pub fn normalize_direct_verify_request(
-    config: &DirectVerifyConfig,
+pub fn normalize_verify_config_request(
+    config: &VerifyConfig,
     policy: &CommandPolicy,
 ) -> Result<ExecRequest, CepError> {
     if config.argv.is_empty() {
@@ -273,7 +274,7 @@ pub fn normalize_direct_verify_request(
 /// A completed non-success exit code returns `Ok` with `success = false`
 /// (`VerificationFailure` stage).
 pub async fn run_verify_with_backend(
-    config: &DirectVerifyConfig,
+    config: &VerifyConfig,
     execution: &ExecutionRouting,
     command_policy: &CommandPolicy,
     cancellation: &mut Cancellation,
@@ -293,7 +294,7 @@ pub async fn run_verify_with_backend(
         ));
     }
 
-    let request = normalize_direct_verify_request(config, command_policy)?;
+    let request = normalize_verify_config_request(config, command_policy)?;
     let cwd = request.cwd.clone();
     let cwd_str = cwd.as_str();
 
@@ -304,7 +305,7 @@ pub async fn run_verify_with_backend(
         .await
         .map_err(|err| verify_backend_error(&config.argv, err))?;
 
-    validate_direct_verify_cwd(cwd_str, &path_facts, authorized_region)?;
+    validate_verify_config_cwd(cwd_str, &path_facts, authorized_region)?;
 
     if cancellation.is_cancelled() {
         return Err(CepError::new(
@@ -335,37 +336,37 @@ pub async fn run_verify_with_backend(
     })
 }
 
-fn validate_direct_verify_cwd(
+fn validate_verify_config_cwd(
     path: &str,
-    facts: &PathFacts,
+    facts: &BackendPathFacts,
     authorized_region: &AuthorizedEffectRegion,
 ) -> Result<(), CepError> {
-    let direct_facts = path_facts_to_direct(facts);
+    let path_facts = path_facts_to_guard(facts);
     let empty_region = AuthorizedEffectRegion::empty();
     let region = if path == "." {
         &empty_region
     } else {
         authorized_region
     };
-    validate_direct_path_facts(path, &direct_facts, region)
+    validate_path_facts(path, &path_facts, region)
 }
 
-fn path_facts_to_direct(facts: &PathFacts) -> DirectPathFacts {
-    DirectPathFacts {
+fn path_facts_to_guard(facts: &BackendPathFacts) -> PathFacts {
+    PathFacts {
         normalized_path: facts.normalized_path.clone(),
         exists: facts.exists,
-        kind: facts.kind.map(path_kind_to_direct),
+        kind: facts.kind.map(path_kind_to_guard),
         parent_exists: facts.parent_exists,
-        parent_kind: facts.parent_kind.map(path_kind_to_direct),
+        parent_kind: facts.parent_kind.map(path_kind_to_guard),
         canonical_under_workspace: facts.canonical_under_workspace,
     }
 }
 
-fn path_kind_to_direct(kind: PathKind) -> DirectPathKind {
+fn path_kind_to_guard(kind: BackendPathKind) -> PathKind {
     match kind {
-        PathKind::File => DirectPathKind::File,
-        PathKind::Directory => DirectPathKind::Directory,
-        PathKind::Symlink => DirectPathKind::Symlink,
+        BackendPathKind::File => PathKind::File,
+        BackendPathKind::Directory => PathKind::Directory,
+        BackendPathKind::Symlink => PathKind::Symlink,
     }
 }
 
@@ -567,14 +568,15 @@ mod verify_tests {
         assert_eq!(outcome.exit_code, 1);
     }
 
-    mod direct_verify {
+    mod verify_config {
         use super::*;
         use crate::execution_backend::{
             DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend, ExecutionBackendError,
-            ExecutionRouting, FindRequest, GrepMatch, GrepRequest, PathFacts, PathIntent,
+            ExecutionRouting, FindRequest, GrepMatch, GrepRequest, PathFacts as BackendPathFacts, PathIntent,
             RoutingInvocationState, UpperContext, WorkspacePath,
         };
         use lancet_authority::effect::region::AuthorizedEffectRegion;
+use lancet_protocol::ImpactKind;
         use std::future::Future;
         use std::pin::Pin;
         use std::sync::{Arc, Mutex};
@@ -583,13 +585,13 @@ mod verify_tests {
         struct VerifySpyBackend {
             resolve_calls: Mutex<Vec<(String, PathIntent)>>,
             exec_calls: Mutex<Vec<ExecRequest>>,
-            resolve_result: Mutex<Option<Result<PathFacts, ExecutionBackendError>>>,
+            resolve_result: Mutex<Option<Result<BackendPathFacts, ExecutionBackendError>>>,
             exec_result: Mutex<Option<Result<ExecOutput, ExecutionBackendError>>>,
         }
 
         impl VerifySpyBackend {
-            fn cwd_facts(path: &str) -> PathFacts {
-                PathFacts {
+            fn cwd_facts(path: &str) -> BackendPathFacts {
+                BackendPathFacts {
                     normalized_path: path.to_string(),
                     exists: true,
                     kind: Some(crate::execution_backend::PathKind::Directory),
@@ -610,7 +612,7 @@ mod verify_tests {
                 &self,
                 path: &WorkspacePath,
                 intent: PathIntent,
-            ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+            ) -> Pin<Box<dyn Future<Output = Result<BackendPathFacts, ExecutionBackendError>> + Send + '_>>
             {
                 self.resolve_calls
                     .lock()
@@ -753,8 +755,8 @@ mod verify_tests {
             (execution, spy)
         }
 
-        fn direct_config() -> DirectVerifyConfig {
-            DirectVerifyConfig {
+        fn direct_config() -> VerifyConfig {
+            VerifyConfig {
                 argv: vec!["echo".into(), "ok".into()],
                 cwd: WorkspacePath::project_root(),
                 timeout_ms: Some(5_000),
@@ -763,7 +765,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn direct_verify_uses_backend_argv_env_timeout_cwd() {
+        async fn verify_config_uses_backend_argv_env_timeout_cwd() {
             let policy = default_policy();
             let (execution, spy) = routing_with_spy();
             let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -797,9 +799,9 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn direct_verify_omitted_cwd_uses_project_root_sentinel() {
+        async fn verify_config_omitted_cwd_uses_project_root_sentinel() {
             let policy = default_policy();
-            let config = DirectVerifyConfig {
+            let config = VerifyConfig {
                 argv: vec!["echo".into(), "root".into()],
                 cwd: WorkspacePath::project_root(),
                 timeout_ms: None,
@@ -827,10 +829,10 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn direct_verify_cwd_preflight_denial_before_exec() {
+        async fn verify_config_cwd_preflight_denial_before_exec() {
             let policy = default_policy();
             let (execution, spy) = routing_with_spy();
-            *spy.resolve_result.lock().unwrap() = Some(Ok(PathFacts {
+            *spy.resolve_result.lock().unwrap() = Some(Ok(BackendPathFacts {
                 normalized_path: ".git".into(),
                 exists: true,
                 kind: Some(crate::execution_backend::PathKind::Directory),
@@ -839,7 +841,7 @@ mod verify_tests {
                 byte_size: None,
                 canonical_under_workspace: true,
             }));
-            let config = DirectVerifyConfig {
+            let config = VerifyConfig {
                 argv: vec!["echo".into(), "bad".into()],
                 cwd: WorkspacePath::parse(".git").unwrap(),
                 timeout_ms: None,
@@ -849,13 +851,27 @@ mod verify_tests {
             let mut cancel = Cancellation::new(cancel_rx);
             let routing_state = RoutingInvocationState::default();
 
+            // Blacklist semantics: explicitly deny .git to trigger guard denial
+            let mut kinds = std::collections::BTreeSet::new();
+            kinds.insert(ImpactKind::WorkspaceMutation);
+            let denied_region = AuthorizedEffectRegion {
+                kinds,
+                read_paths: Vec::new(),
+                observation_roots: Vec::new(),
+                denied_write_paths: Vec::new(),
+                denied_write_path_prefixes: vec![std::path::PathBuf::from(".git")],
+                hosts: Vec::new(),
+                session_state_allowed: false,
+                command_allowed: false,
+            };
+
             let err = run_verify_with_backend(
                 &config,
                 &execution,
                 &policy,
                 &mut cancel,
                 &routing_state,
-                &AuthorizedEffectRegion::empty(),
+                &denied_region,
             )
             .await
             .unwrap_err();
@@ -867,7 +883,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn direct_verify_cancellation_before_exec() {
+        async fn verify_config_cancellation_before_exec() {
             let policy = default_policy();
             let (execution, _spy) = routing_with_spy();
             let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -891,7 +907,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn direct_verify_nonzero_expected_exit_is_failure_outcome() {
+        async fn verify_config_nonzero_expected_exit_is_failure_outcome() {
             let policy = default_policy();
             let (execution, spy) = routing_with_spy();
             *spy.exec_result.lock().unwrap() = Some(Ok(ExecOutput {
@@ -899,7 +915,7 @@ mod verify_tests {
                 stdout: String::new(),
                 stderr: "fail".into(),
             }));
-            let config = DirectVerifyConfig {
+            let config = VerifyConfig {
                 argv: vec!["echo".into(), "fail".into()],
                 cwd: WorkspacePath::project_root(),
                 timeout_ms: None,
@@ -926,7 +942,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn direct_verify_adapter_error_is_distinct_from_verify_failure() {
+        async fn verify_config_adapter_error_is_distinct_from_verify_failure() {
             let policy = default_policy();
             let (execution, spy) = routing_with_spy();
             *spy.exec_result.lock().unwrap() = Some(Err(ExecutionBackendError::ExecutionFailed {
@@ -957,7 +973,7 @@ mod verify_tests {
             std::sync::atomic::AtomicBool::new(false);
 
         #[tokio::test]
-        async fn direct_verify_never_invokes_host_run_verify() {
+        async fn verify_config_never_invokes_host_run_verify() {
             HOST_VERIFY_SENTINEL.store(false, std::sync::atomic::Ordering::SeqCst);
             struct HostVerifyGuard;
             impl Drop for HostVerifyGuard {

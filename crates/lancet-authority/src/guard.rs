@@ -243,10 +243,10 @@ fn normalize_lexical(path: &str) -> Result<PathBuf, CepError> {
     Ok(result)
 }
 
-/// Check whether a target path is within the WritePath scope of the active envelope.
+/// Check whether a target path is denied by the write-scope blacklist.
 ///
-/// Returns `Ok(())` if the target matches any WritePath pattern.
-/// Returns `Err(ReplanRequired)` if target is inside project root but outside scope.
+/// Returns `Ok(())` if the target does NOT match any denied write pattern.
+/// Returns `Err(ReplanRequired)` if target matches a denied pattern (agent should try another path).
 /// Returns `Err(GuardDenied)` if target escapes project root or symlink escape detected.
 ///
 /// All paths are resolved relative to `project_root`.
@@ -256,7 +256,7 @@ fn normalize_lexical(path: &str) -> Result<PathBuf, CepError> {
 pub fn check_write_scope(
     target_path: &str,
     project_root: &str,
-    write_path_patterns: &[String],
+    denied_write_patterns: &[String],
 ) -> Result<(), CepError> {
     // Reject NUL in target
     if target_path.contains('\0') {
@@ -311,8 +311,8 @@ pub fn check_write_scope(
         )));
     }
 
-    // Check each WritePath pattern
-    for pattern_str in write_path_patterns {
+    // Check each denied write pattern — if any matches, the path is denied
+    for pattern_str in denied_write_patterns {
         let pattern = normalize_write_path_pattern(pattern_str)?;
         match pattern {
             WritePathPattern::ExactFile(pattern_path) => {
@@ -320,7 +320,7 @@ pub fn check_write_scope(
                 let pattern_canonical =
                     canonicalize_pattern_path(&pattern_resolved, &project_root_canonical)?;
                 if target_canonical == pattern_canonical {
-                    return Ok(());
+                    return Err(replan_required(target_path, denied_write_patterns));
                 }
             }
             WritePathPattern::DirectoryGlob(dir_path) => {
@@ -328,14 +328,14 @@ pub fn check_write_scope(
                 let dir_canonical =
                     canonicalize_pattern_dir(&dir_resolved, &project_root_canonical)?;
                 if target_canonical.starts_with(&dir_canonical) {
-                    return Ok(());
+                    return Err(replan_required(target_path, denied_write_patterns));
                 }
             }
         }
     }
 
-    // No pattern matched — target is inside project root but outside scope
-    Err(replan_required(target_path, write_path_patterns))
+    // No denied pattern matched — target is allowed
+    Ok(())
 }
 
 /// Canonicalize a target path, handling both existing and non-existing files.
@@ -482,20 +482,20 @@ fn replan_required(target: &str, patterns: &[String]) -> CepError {
     )
 }
 
-/// Adapter-reported filesystem facts validated in Direct mode (no host paths).
+/// Adapter-reported filesystem facts validated against the write-deny blacklist.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DirectPathFacts {
+pub struct PathFacts {
     pub normalized_path: String,
     pub exists: bool,
-    pub kind: Option<DirectPathKind>,
+    pub kind: Option<PathKind>,
     pub parent_exists: bool,
-    pub parent_kind: Option<DirectPathKind>,
+    pub parent_kind: Option<PathKind>,
     pub canonical_under_workspace: bool,
 }
 
 /// Kind of filesystem object observed by the execution adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DirectPathKind {
+pub enum PathKind {
     File,
     Directory,
     Symlink,
@@ -504,10 +504,11 @@ pub enum DirectPathKind {
 /// Validate adapter-reported path facts against a policy-produced authorized region.
 ///
 /// Policy already decided whether the write is authorized; this function only
-/// checks that returned facts match the request and stay within the region.
-pub fn validate_direct_path_facts(
+/// checks that returned facts match the request and are not in the denied region.
+/// No system-level denies are hardcoded — the deny list is entirely user-controlled.
+pub fn validate_path_facts(
     path: &str,
-    facts: &DirectPathFacts,
+    facts: &PathFacts,
     authorized_region: &crate::effect::region::AuthorizedEffectRegion,
 ) -> Result<(), CepError> {
     if path.contains('\0') || path.contains("..") || Path::new(path).is_absolute() {
@@ -524,26 +525,23 @@ pub fn validate_direct_path_facts(
         return Err(permission_denied("path escapes workspace containment"));
     }
 
-    if is_denied_direct_path(&facts.normalized_path) {
-        return Err(permission_denied("path targets forbidden metadata"));
-    }
-
-    if !authorized_region.write_paths.is_empty()
-        || !authorized_region.write_path_prefixes.is_empty()
-    {
-        let normalized_path = Path::new(&facts.normalized_path);
-        let covered = authorized_region
-            .write_paths
+    // Blacklist semantics: deny if the path matches any denied pattern.
+    // No hardcoded system-level denies — the deny list is user-controlled.
+    let normalized_path = Path::new(&facts.normalized_path);
+    let denied = authorized_region
+        .denied_write_paths
+        .iter()
+        .any(|p| p.as_os_str() == facts.normalized_path.as_str())
+        || authorized_region
+            .denied_write_path_prefixes
             .iter()
-            .any(|p| p.as_os_str() == facts.normalized_path.as_str())
-            || authorized_region.write_path_prefixes.iter().any(|prefix| {
+            .any(|prefix| {
                 crate::effect::region::relative_path_within_prefix(normalized_path, prefix)
             });
-        if !covered {
-            return Err(permission_denied(
-                "path is outside the policy-authorized write region",
-            ));
-        }
+    if denied {
+        return Err(permission_denied(
+            "path matches a denied write pattern",
+        ));
     }
 
     let _ = facts.exists;
@@ -551,15 +549,6 @@ pub fn validate_direct_path_facts(
     let _ = facts.parent_exists;
     let _ = facts.parent_kind;
     Ok(())
-}
-
-fn is_denied_direct_path(path: &str) -> bool {
-    path == ".git"
-        || path.starts_with(".git/")
-        || path.contains("/.git/")
-        || path == ".lattice"
-        || path.starts_with(".lattice/")
-        || path.contains("/.lattice/")
 }
 
 /// Result of evaluating a policy hook.
@@ -830,41 +819,44 @@ mod guard_l1_tests {
         let root = dir.path().to_str().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
 
-        let result = check_write_scope("main.rs", root, &["main.rs".into()]);
+        // No denied patterns → allowed
+        let result = check_write_scope("main.rs", root, &[]);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn dir_glob_matches_child() {
+    fn dir_glob_denies_child() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::create_dir_all(dir.path().join("src/lib")).unwrap();
         std::fs::write(dir.path().join("src/lib/mod.rs"), "pub mod foo;").unwrap();
 
-        let result = check_write_scope("src/lib/mod.rs", root, &["src/**".into()]);
-        assert!(result.is_ok());
+        // src/** is denied → src/lib/mod.rs is denied
+        let err = check_write_scope("src/lib/mod.rs", root, &["src/**".into()]).unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
     }
 
     #[test]
-    fn simple_prefix_matches_child() {
+    fn simple_prefix_denies_child() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
 
-        let result = check_write_scope("src/main.rs", root, &["src".into()]);
-        assert!(result.is_ok());
+        // src is denied → src/main.rs is denied
+        let err = check_write_scope("src/main.rs", root, &["src".into()]).unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
     }
 
     #[test]
-    fn target_outside_scope_returns_replan_required() {
+    fn target_not_denied_is_allowed() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::write(dir.path().join("README.md"), "# Test").unwrap();
 
-        let err = check_write_scope("README.md", root, &["src/**".into()]).unwrap_err();
-        assert_eq!(err.code, CepErrorCode::ReplanRequired);
-        assert_eq!(err.retriability, Retriability::RequiresReplan);
+        // README.md is not in the deny list → allowed
+        let result = check_write_scope("README.md", root, &["src/**".into()]);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -872,7 +864,7 @@ mod guard_l1_tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
 
-        let err = check_write_scope("../outside.txt", root, &["src/**".into()]).unwrap_err();
+        let err = check_write_scope("../outside.txt", root, &[]).unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
     }
 
@@ -890,7 +882,7 @@ mod guard_l1_tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
 
-        let err = check_write_scope("src/\0file", root, &["src/**".into()]).unwrap_err();
+        let err = check_write_scope("src/\0file", root, &[]).unwrap_err();
         assert_eq!(err.code, CepErrorCode::PathContainment);
     }
 
@@ -906,39 +898,42 @@ mod guard_l1_tests {
         // Create a symlink inside project root pointing outside
         std::os::unix::fs::symlink(&outside_file, dir.path().join("link.txt")).unwrap();
 
-        let err = check_write_scope("link.txt", root, &["link.txt".into()]).unwrap_err();
+        let err = check_write_scope("link.txt", root, &[]).unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
     }
 
     #[test]
-    fn multiple_patterns_first_match_wins() {
+    fn multiple_patterns_first_deny_wins() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
 
+        // src/** is denied → src/main.rs is denied even if tests/** is also denied
         let patterns = vec!["tests/**".into(), "src/**".into()];
-        let result = check_write_scope("src/main.rs", root, &patterns);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn no_patterns_returns_replan_required() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        std::fs::write(dir.path().join("file.txt"), "data").unwrap();
-
-        let err = check_write_scope("file.txt", root, &[]).unwrap_err();
+        let err = check_write_scope("src/main.rs", root, &patterns).unwrap_err();
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
     }
 
     #[test]
-    fn new_file_in_scope_succeeds() {
+    fn no_patterns_allows_all() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "data").unwrap();
+
+        // No denied patterns → all paths allowed
+        let result = check_write_scope("file.txt", root, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn new_file_not_denied_succeeds() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
 
-        let result = check_write_scope("src/new_file.rs", root, &["src/**".into()]);
+        // src/new_file.rs is not denied → allowed
+        let result = check_write_scope("src/new_file.rs", root, &[]);
         assert!(result.is_ok());
     }
 }
@@ -1137,63 +1132,81 @@ mod policy_tests {
     }
 
     #[test]
-    fn direct_path_facts_accepts_workspace_root() {
+    fn path_facts_accepts_workspace_root() {
         use crate::effect::region::AuthorizedEffectRegion;
         let region = AuthorizedEffectRegion::empty();
-        let facts = DirectPathFacts {
+        let facts = PathFacts {
             normalized_path: ".".into(),
             exists: true,
-            kind: Some(DirectPathKind::Directory),
+            kind: Some(PathKind::Directory),
             parent_exists: true,
-            parent_kind: Some(DirectPathKind::Directory),
+            parent_kind: Some(PathKind::Directory),
             canonical_under_workspace: true,
         };
-        assert!(validate_direct_path_facts(".", &facts, &region).is_ok());
+        assert!(validate_path_facts(".", &facts, &region).is_ok());
     }
 
     #[test]
-    fn direct_path_facts_rejects_mismatched_path() {
+    fn path_facts_rejects_mismatched_path() {
         use crate::effect::region::AuthorizedEffectRegion;
         let region = AuthorizedEffectRegion::empty();
-        let facts = DirectPathFacts {
+        let facts = PathFacts {
             normalized_path: "src/other.rs".into(),
             exists: true,
-            kind: Some(DirectPathKind::File),
+            kind: Some(PathKind::File),
             parent_exists: true,
-            parent_kind: Some(DirectPathKind::Directory),
+            parent_kind: Some(PathKind::Directory),
             canonical_under_workspace: true,
         };
-        assert!(validate_direct_path_facts("src/main.rs", &facts, &region).is_err());
+        assert!(validate_path_facts("src/main.rs", &facts, &region).is_err());
     }
 
     #[test]
-    fn direct_path_facts_rejects_non_canonical_containment() {
+    fn path_facts_rejects_non_canonical_containment() {
         use crate::effect::region::AuthorizedEffectRegion;
         let region = AuthorizedEffectRegion::empty();
-        let facts = DirectPathFacts {
+        let facts = PathFacts {
             normalized_path: "src/main.rs".into(),
             exists: true,
-            kind: Some(DirectPathKind::File),
+            kind: Some(PathKind::File),
             parent_exists: true,
-            parent_kind: Some(DirectPathKind::Directory),
+            parent_kind: Some(PathKind::Directory),
             canonical_under_workspace: false,
         };
-        assert!(validate_direct_path_facts("src/main.rs", &facts, &region).is_err());
+        assert!(validate_path_facts("src/main.rs", &facts, &region).is_err());
     }
 
     #[test]
-    fn direct_path_facts_rejects_git_targets() {
+    fn path_facts_rejects_denied_pattern() {
         use crate::effect::region::AuthorizedEffectRegion;
-        let region = AuthorizedEffectRegion::empty();
-        let facts = DirectPathFacts {
+        use std::path::PathBuf;
+        let mut region = AuthorizedEffectRegion::empty();
+        region.denied_write_path_prefixes.push(PathBuf::from(".git"));
+        let facts = PathFacts {
             normalized_path: ".git/config".into(),
             exists: true,
-            kind: Some(DirectPathKind::File),
+            kind: Some(PathKind::File),
             parent_exists: true,
-            parent_kind: Some(DirectPathKind::Directory),
+            parent_kind: Some(PathKind::Directory),
             canonical_under_workspace: true,
         };
-        assert!(validate_direct_path_facts(".git/config", &facts, &region).is_err());
+        assert!(validate_path_facts(".git/config", &facts, &region).is_err());
+    }
+
+    #[test]
+    fn path_facts_allows_when_no_denied_patterns() {
+        use crate::effect::region::AuthorizedEffectRegion;
+        let region = AuthorizedEffectRegion::empty();
+        let facts = PathFacts {
+            normalized_path: "src/main.rs".into(),
+            exists: true,
+            kind: Some(PathKind::File),
+            parent_exists: true,
+            parent_kind: Some(PathKind::Directory),
+            canonical_under_workspace: true,
+        };
+        // No denied patterns → all paths allowed
+        assert!(validate_path_facts("src/main.rs", &facts, &region).is_ok());
     }
 
     #[test]

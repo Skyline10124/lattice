@@ -27,7 +27,7 @@ use lancet_catalog::methods::session::TodoWrite;
 use lancet_catalog::methods::workspace::{Batch, Create, Edit, ObserveWorkspace};
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
-    CepAuditContext, CepAuditStore, CepClient, DirectVerifyConfig, ExecutionRouting, WorkspacePath,
+    CepAuditContext, CepAuditStore, CepClient, ExecutionRouting, VerifyConfig, WorkspacePath,
     impact_kind_for_method, impact_kind_label, wire_code_for_error,
 };
 use lancet_protocol::error::{
@@ -179,7 +179,7 @@ pub(crate) struct ProductionTurnDeps {
     pub cep_client: CepClient,
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
-    pub upper_lease: Option<UpperLease>,
+    pub upper_lease: UpperLease,
     #[cfg(test)]
     pub build_metrics: CepRuntimeBuildMetrics,
 }
@@ -255,22 +255,22 @@ pub(crate) fn cep_policy_from_profile(
     })
 }
 
-fn workspace_policy_from_lancet(lancet: &LancetSection) -> Result<WorkspacePolicy, ApiError> {
+fn workspace_policy_from_profile(lancet: &LancetSection) -> Result<WorkspacePolicy, ApiError> {
     let mut workspace = WorkspacePolicy::default();
     if let Some(section) = lancet.workspace.as_ref() {
-        workspace.allowed_write_paths = section.allowed_write_paths.clone();
+        workspace.denied_write_patterns = section.denied_write_patterns.clone();
     }
     workspace.validate().map_err(|err| {
-        ApiError::BadRequest(format!("lancet.workspace.allowed_write_paths: {err}"))
+        ApiError::BadRequest(format!("lancet.workspace.denied_write_patterns: {err}"))
     })?;
     Ok(workspace)
 }
 
-/// Lower `[lancet.verify]` into immutable Direct verify configuration.
+/// Lower `[lancet.verify]` into immutable verify configuration.
 pub(crate) fn direct_verify_from_profile(
     lancet: &LancetSection,
     _runtime_project_root: &Path,
-) -> Result<Option<DirectVerifyConfig>, ApiError> {
+) -> Result<Option<VerifyConfig>, ApiError> {
     let Some(section) = lancet.verify.as_ref() else {
         return Ok(None);
     };
@@ -290,7 +290,7 @@ pub(crate) fn direct_verify_from_profile(
         })?,
         None => WorkspacePath::project_root(),
     };
-    Ok(Some(DirectVerifyConfig {
+    Ok(Some(VerifyConfig {
         argv: section.argv.clone(),
         cwd,
         timeout_ms: section.timeout_ms,
@@ -437,7 +437,7 @@ pub(crate) fn load_policy_config(
         network: cep_context.network,
         budget: cep_context.budget,
         observation: cep_context.observation,
-        workspace: workspace_policy_from_lancet(lancet)?,
+        workspace: workspace_policy_from_profile(lancet)?,
         project_root: cep_context.project_root,
         denied_effect_kinds: cep_context.denied_effect_kinds,
     };
@@ -578,7 +578,7 @@ pub(crate) async fn build_production_turn_deps(
     // Pass None for baseline_oid to maintain backward compatibility.
     // Future lifecycle orchestration will inject the preflight baseline from
     // resolve_turn_target when Upper-backed turns are activated.
-    let upper_config = resolve_upper_config(loaded_profile, Path::new(project_root), enabled_tools, None)
+    let upper_config = resolve_upper_config(loaded_profile, Path::new(project_root), None)
         .map_err(|err| match err {
             UpperPrepareError::MissingWorkspaceSection
             | UpperPrepareError::MissingWorkspaceSource => {
@@ -588,22 +588,15 @@ pub(crate) async fn build_production_turn_deps(
             }
             other => ApiError::BadRequest(other.to_string()),
         })?;
-    let mut upper_lease: Option<UpperLease> = None;
-    let execution = if upper_config.requires_upper {
-        match prepare_upper(&upper_config, request.workspace_override.clone()).await {
-            Ok(prepared) => {
-                let upper_context = prepared.backend.upper_context().clone();
-                upper_lease = Some(prepared.lease);
-                Some(ExecutionRouting {
-                    backend: Arc::new(prepared.backend),
-                    upper: upper_context,
-                })
-            }
-            Err(err) => return Err(ApiError::BadRequest(err.to_string())),
-        }
-    } else {
-        None
+    let prepared = prepare_upper(&upper_config, request.workspace_override.clone())
+        .await
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    let upper_context = prepared.backend.upper_context().clone();
+    let execution = ExecutionRouting {
+        backend: Arc::new(prepared.backend),
+        upper: upper_context,
     };
+    let mut upper_lease = prepared.lease;
 
     let runtime_result = LancetRuntime::build(LancetRuntimeConfig {
         project_root: PathBuf::from(project_root),
@@ -614,7 +607,7 @@ pub(crate) async fn build_production_turn_deps(
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
         execution,
-        direct_verify: lancet
+        verify_config: lancet
             .map(|section| direct_verify_from_profile(section, Path::new(project_root)))
             .transpose()?
             .flatten(),
@@ -624,9 +617,7 @@ pub(crate) async fn build_production_turn_deps(
     let runtime = match runtime_result {
         Ok(runtime) => runtime,
         Err(err) => {
-            if let Some(mut lease) = upper_lease.take() {
-                let _ = lease.destroy().await;
-            }
+            let _ = upper_lease.destroy().await;
             return Err(err);
         }
     };
@@ -696,8 +687,14 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         audit,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
-        execution: None,
-        direct_verify: None,
+        execution: ExecutionRouting {
+            backend: Arc::new(lancet_native::NullExecutionBackend),
+            upper: lancet_native::UpperContext {
+                execution_backend: "null".into(),
+                upper_workspace_id: "null".into(),
+            },
+        },
+        verify_config: None,
     })
     .map_err(map_lancet_err)?;
     let parts = runtime.into_parts();
@@ -716,6 +713,10 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         llm,
         tool_executor: adapter,
     }));
+    let upper_lease = UpperLease::without_handle(Arc::new(
+        lattice_workspace::testing::DeterministicWorkspace::new()
+            .expect("deterministic workspace for test scaffolding"),
+    ) as Arc<dyn lattice_workspace::Workspace>);
     Ok(ProductionTurnDeps {
         agent_loop,
         tool_definitions,
@@ -723,7 +724,7 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         cep_client: parts.client,
         audit: parts.audit,
         audit_context: parts.audit_context,
-        upper_lease: None,
+        upper_lease,
         build_metrics: CepRuntimeBuildMetrics {
             adapter_instances: 1,
             transport_pairs: 1,
@@ -1011,31 +1012,31 @@ mod cep_context_profile_policy {
     }
 
     #[test]
-    fn workspace_policy_from_profile_lowers_allowed_write_paths() {
+    fn workspace_policy_from_profile_lowers_denied_write_patterns() {
         let dir = TempDir::new().unwrap();
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
-                allowed_write_paths: vec!["src/**".into()],
+                denied_write_patterns: vec!["src/**".into()],
             }),
             ..Default::default()
         };
         let config = load_policy_config(&cep, dir.path()).expect("policy config");
-        assert_eq!(config.workspace.allowed_write_paths, vec!["src/**"]);
+        assert_eq!(config.workspace.denied_write_patterns, vec!["src/**"]);
     }
 
     #[test]
-    fn workspace_policy_from_profile_rejects_git_paths() {
+    fn workspace_policy_from_profile_rejects_traversal_patterns() {
         let dir = TempDir::new().unwrap();
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
-                allowed_write_paths: vec![".git/config".into()],
+                denied_write_patterns: vec!["../etc/passwd".into()],
             }),
             ..Default::default()
         };
         let err = load_policy_config(&cep, dir.path()).unwrap_err();
         assert!(
             err.to_string()
-                .contains("lancet.workspace.allowed_write_paths"),
+                .contains("lancet.workspace.denied_write_patterns"),
             "{err}"
         );
     }
@@ -1064,7 +1065,7 @@ mod cep_context_profile_policy {
     fn workspace_policy_from_profile_absent_defaults_empty() {
         let dir = TempDir::new().unwrap();
         let config = load_policy_config(&LancetSection::default(), dir.path()).expect("policy");
-        assert!(config.workspace.allowed_write_paths.is_empty());
+        assert!(config.workspace.denied_write_patterns.is_empty());
     }
 
     #[test]
@@ -1072,7 +1073,7 @@ mod cep_context_profile_policy {
         let dir = TempDir::new().unwrap();
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
-                allowed_write_paths: vec!["src/**".into()],
+                denied_write_patterns: vec!["src/**".into()],
             }),
             ..Default::default()
         };
@@ -1106,8 +1107,8 @@ mod cep_context_profile_policy {
             &hook.config().to_cep_policy_config(),
         );
         assert_eq!(
-            region.write_path_prefixes,
-            command_region.write_path_prefixes
+            region.denied_write_path_prefixes,
+            command_region.denied_write_path_prefixes
         );
     }
 }
@@ -1122,11 +1123,11 @@ mod turn_wiring {
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_profile::{
         AgentProfile, AgentSection, LancetSection, LlmSection, LoadedAgentProfile, PromptSection,
-        ToolsSection,
+        ToolsSection, WorkspaceSection,
     };
     use tempfile::TempDir;
 
-    fn host_only_profile(enabled: Vec<String>) -> LoadedAgentProfile {
+    fn profile_with_workspace(enabled: Vec<String>) -> LoadedAgentProfile {
         LoadedAgentProfile {
             path: PathBuf::from("/tmp/agent.toml"),
             package_dir: PathBuf::from("/tmp"),
@@ -1144,10 +1145,55 @@ mod turn_wiring {
                 tools: ToolsSection { enabled },
                 llm: LlmSection::default(),
                 lancet: LancetSection::default(),
-                workspace: None,
+                workspace: WorkspaceSection {
+                    egress: None,
+                    credentials: vec![],
+                    image: Some("test-template".into()),
+                    cpus: None,
+                    memory_mb: None,
+                    allowed_egress_targets: vec![],
+                    cleanup_rounds: 3,
+                    max_pending_snapshots: 5,
+                },
             },
             system_prompt: "sys".into(),
         }
+    }
+
+    fn deterministic_workspace() -> Arc<dyn lattice_workspace::Workspace> {
+        Arc::new(
+            lattice_workspace::testing::DeterministicWorkspace::new()
+                .expect("deterministic workspace for test"),
+        )
+    }
+
+    fn init_git_repo(root: &std::path::Path) {
+        std::fs::write(root.join("README.md"), "init\n").expect("write README");
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@lattice.local"])
+            .current_dir(root)
+            .status()
+            .expect("git user.email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "lattice-test"])
+            .current_dir(root)
+            .status()
+            .expect("git user.name");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .status()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(root)
+            .status()
+            .expect("git commit");
     }
 
     #[tokio::test]
@@ -1157,6 +1203,7 @@ mod turn_wiring {
             std::env::set_var("XDG_STATE_HOME", state.path());
         }
         let project = TempDir::new().unwrap();
+        init_git_repo(project.path());
         let legacy_dir = project.path().join(".lattice");
         std::fs::create_dir_all(&legacy_dir).unwrap();
         let legacy_path = legacy_dir.join("cep_audit.db");
@@ -1188,7 +1235,7 @@ mod turn_wiring {
 
         let llm: Arc<dyn lattice_agent::LlmClient> =
             Arc::new(FakeStreamingLlmClient::builder().build());
-        let profile = host_only_profile(vec![TodoWrite::NAME.to_string()]);
+        let profile = profile_with_workspace(vec![TodoWrite::NAME.to_string()]);
         let request = RunTurnRequest {
             input: "hi".into(),
             session_id: "s".into(),
@@ -1197,7 +1244,7 @@ mod turn_wiring {
             test_llm: Some(llm.clone()),
             test_project_root: Some(project.path().to_string_lossy().into()),
             test_persist_audit: Some(false),
-            workspace_override: None,
+            workspace_override: Some(deterministic_workspace()),
         };
         let enabled_tools = [TodoWrite::NAME.to_string()];
         let deps = build_production_turn_deps(ProductionTurnDepsInput {
@@ -1232,11 +1279,12 @@ mod turn_wiring {
     }
 
     #[tokio::test]
-    async fn upper_lifecycle_host_only_has_no_lease() {
+    async fn upper_lifecycle_session_tool_creates_lease() {
         let dir = TempDir::new().unwrap();
+        init_git_repo(dir.path());
         let llm: Arc<dyn lattice_agent::LlmClient> =
             Arc::new(FakeStreamingLlmClient::builder().build());
-        let profile = host_only_profile(vec![TodoWrite::NAME.to_string()]);
+        let profile = profile_with_workspace(vec![TodoWrite::NAME.to_string()]);
         let request = RunTurnRequest {
             input: "hi".into(),
             session_id: "s".into(),
@@ -1245,7 +1293,7 @@ mod turn_wiring {
             test_llm: Some(llm.clone()),
             test_project_root: None,
             test_persist_audit: None,
-            workspace_override: None,
+            workspace_override: Some(deterministic_workspace()),
         };
         let enabled_tools = [TodoWrite::NAME.to_string()];
         let deps = build_production_turn_deps(ProductionTurnDepsInput {
@@ -1259,8 +1307,8 @@ mod turn_wiring {
             loaded_profile: &profile,
         })
         .await
-        .expect("host-only direct deps");
-        assert!(deps.upper_lease.is_none());
+        .expect("direct deps");
+        assert!(deps.upper_lease.handle().is_some());
     }
 
     #[test]

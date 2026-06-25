@@ -91,7 +91,7 @@ enabled = {enabled:?}
 [workspace]
 image = "test-template"
 [lancet.workspace]
-allowed_write_paths = ["src/**"]
+denied_write_patterns = [".git/**"]
 [lancet.command]
 allowed_diagnostic_commands = [["echo"]]
 "#

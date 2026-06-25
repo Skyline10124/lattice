@@ -7,14 +7,14 @@ use crate::edit::content_hash;
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::execution_backend::{
     DirectoryEntry as BackendDirectoryEntry, ExecutionBackendError, ExecutionRouting, FindRequest,
-    GrepRequest, PathFacts, PathIntent, WorkspacePath,
+    GrepRequest, PathFacts as BackendPathFacts, PathIntent, WorkspacePath,
 };
 use crate::executor::render::render_file_slice;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_audit::{RejectionRecord, RejectionStage};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::effect::region::AuthorizedEffectRegion;
-use lancet_authority::guard::{DirectPathFacts, DirectPathKind, validate_direct_path_facts};
+use lancet_authority::guard::{PathFacts, PathKind, validate_path_facts};
 use lancet_authority::policy::CepPolicyConfig;
 use lancet_authority::policy::budget::BudgetExhausted;
 use lancet_catalog::CepMethod;
@@ -155,19 +155,8 @@ fn path_not_found(path: &str) -> CepError {
 }
 
 
-fn direct_execution(ctx: &HandlerContext) -> Result<&ExecutionRouting, CepError> {
-    ctx.execution.as_ref().ok_or_else(|| {
-        CepError::new(
-            CepErrorCode::ExecutionFailed,
-            "Direct observation requires an Upper execution backend",
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "observe.workspace".into(),
-                exit_code: None,
-                stderr: Some("missing execution backend".into()),
-            }),
-            Retriability::Permanent,
-        )
-    })
+fn direct_execution(ctx: &HandlerContext) -> &ExecutionRouting {
+    &ctx.execution
 }
 
 fn parse_observation_path(raw: &str, field: &str) -> Result<WorkspacePath, CepError> {
@@ -184,29 +173,29 @@ fn parse_observation_path(raw: &str, field: &str) -> Result<WorkspacePath, CepEr
     })
 }
 
-fn path_facts_to_direct(facts: &PathFacts) -> DirectPathFacts {
-    DirectPathFacts {
+fn path_facts_to_guard(facts: &BackendPathFacts) -> PathFacts {
+    PathFacts {
         normalized_path: facts.normalized_path.clone(),
         exists: facts.exists,
-        kind: facts.kind.map(direct_path_kind),
+        kind: facts.kind.map(path_kind),
         parent_exists: facts.parent_exists,
-        parent_kind: facts.parent_kind.map(direct_path_kind),
+        parent_kind: facts.parent_kind.map(path_kind),
         canonical_under_workspace: facts.canonical_under_workspace,
     }
 }
 
-fn direct_path_kind(kind: crate::execution_backend::PathKind) -> DirectPathKind {
+fn path_kind(kind: crate::execution_backend::PathKind) -> PathKind {
     match kind {
-        crate::execution_backend::PathKind::File => DirectPathKind::File,
-        crate::execution_backend::PathKind::Directory => DirectPathKind::Directory,
-        crate::execution_backend::PathKind::Symlink => DirectPathKind::Symlink,
+        crate::execution_backend::PathKind::File => PathKind::File,
+        crate::execution_backend::PathKind::Directory => PathKind::Directory,
+        crate::execution_backend::PathKind::Symlink => PathKind::Symlink,
     }
 }
 
-fn validate_direct_observation_facts(path: &str, facts: &PathFacts) -> Result<(), CepError> {
-    validate_direct_path_facts(
+fn validate_direct_observation_facts(path: &str, facts: &BackendPathFacts) -> Result<(), CepError> {
+    validate_path_facts(
         path,
-        &path_facts_to_direct(facts),
+        &path_facts_to_guard(facts),
         &AuthorizedEffectRegion::empty(),
     )
 }
@@ -291,7 +280,7 @@ async fn handle_direct_read_file(
     method: &str,
 ) -> Result<ReadFileResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = direct_execution(&ctx)?;
+    let execution = direct_execution(&ctx);
     let ws_path = parse_observation_path(&params.path, "path")?;
     ws_path.require_file_path().map_err(|err| {
         CepError::new(
@@ -417,7 +406,7 @@ async fn handle_direct_list_directory(
     method: &str,
 ) -> Result<ListDirectoryResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = direct_execution(&ctx)?;
+    let execution = direct_execution(&ctx);
     let raw_path = if params.path.is_empty() {
         ".".to_string()
     } else {
@@ -527,7 +516,7 @@ async fn handle_direct_grep(
     method: &str,
 ) -> Result<GrepResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = direct_execution(&ctx)?;
+    let execution = direct_execution(&ctx);
     let ws_path = parse_observation_path(path, "path")?;
     let _re = Regex::new(&params.pattern).map_err(|e| {
         CepError::new(
@@ -654,7 +643,7 @@ async fn handle_direct_find_files(
     method: &str,
 ) -> Result<FindFilesResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = direct_execution(&ctx)?;
+    let execution = direct_execution(&ctx);
     let ws_path = parse_observation_path(path, "path")?;
 
     ctx.mark_adapter_preflight_invoked();
@@ -781,7 +770,7 @@ mod tests {
     use super::*;
     use crate::execution_backend::{
         DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-        GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
+        GrepMatch, GrepRequest, PathFacts as BackendPathFacts, PathIntent, UpperContext, WorkspacePath,
     };
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
@@ -826,7 +815,7 @@ mod tests {
             &self,
             path: &WorkspacePath,
             _intent: PathIntent,
-        ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+        ) -> Pin<Box<dyn Future<Output = Result<BackendPathFacts, ExecutionBackendError>> + Send + '_>>
         {
             let full = self.resolve(path);
             let path_str = path.as_str().to_string();
@@ -858,7 +847,7 @@ mod tests {
                 None
             };
             Box::pin(async move {
-                Ok(PathFacts {
+                Ok(BackendPathFacts {
                     normalized_path: path_str,
                     exists,
                     kind: Some(kind),
@@ -1163,14 +1152,14 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: Some(ExecutionRouting {
+                execution: ExecutionRouting {
                     backend,
                     upper: UpperContext {
                         execution_backend: "host-fs".into(),
                         upper_workspace_id: "test-upper".into(),
                     },
-                }),
-                direct_verify: None,
+                },
+                verify_config: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
@@ -1331,14 +1320,14 @@ mod tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: Some(ExecutionRouting {
+            execution: ExecutionRouting {
                 backend: Arc::new(HostFsBackend::new(root)),
                 upper: UpperContext {
                     execution_backend: "host-fs".into(),
                     upper_workspace_id: "test-upper".into(),
                 },
-            }),
-            direct_verify: None,
+            },
+            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
         let params = ReadFileParams {
@@ -1385,14 +1374,14 @@ mod tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: Some(ExecutionRouting {
+            execution: ExecutionRouting {
                 backend: Arc::new(HostFsBackend::new(root)),
                 upper: UpperContext {
                     execution_backend: "host-fs".into(),
                     upper_workspace_id: "test-upper".into(),
                 },
-            }),
-            direct_verify: None,
+            },
+            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
         let params = ReadFileParams {
@@ -1632,14 +1621,14 @@ mod tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: Some(ExecutionRouting {
+            execution: ExecutionRouting {
                 backend: Arc::new(HostFsBackend::new(root)),
                 upper: UpperContext {
                     execution_backend: "host-fs".into(),
                     upper_workspace_id: "test-upper".into(),
                 },
-            }),
-            direct_verify: None,
+            },
+            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
         let params = GrepParams {
@@ -1662,7 +1651,7 @@ mod tests {
         use super::*;
         use crate::execution_backend::{
             DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-            GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
+            GrepMatch, GrepRequest, PathFacts as BackendPathFacts, PathIntent, UpperContext, WorkspacePath,
         };
         use std::future::Future;
         use std::pin::Pin;
@@ -1682,11 +1671,11 @@ mod tests {
                 &self,
                 path: &WorkspacePath,
                 _intent: PathIntent,
-            ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+            ) -> Pin<Box<dyn Future<Output = Result<BackendPathFacts, ExecutionBackendError>> + Send + '_>>
             {
                 let path_str = path.as_str().to_string();
                 Box::pin(async move {
-                    Ok(PathFacts {
+                    Ok(BackendPathFacts {
                         normalized_path: path_str.clone(),
                         exists: true,
                         kind: Some(crate::execution_backend::PathKind::File),
@@ -1843,14 +1832,14 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: Some(ExecutionRouting {
+                execution: ExecutionRouting {
                     backend,
                     upper: UpperContext {
                         execution_backend: "obs-spy".into(),
                         upper_workspace_id: "upper-1".into(),
                     },
-                }),
-                direct_verify: None,
+                },
+                verify_config: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             }
         }

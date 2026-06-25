@@ -5,6 +5,7 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub(crate) enum ToolError {
+    #[allow(dead_code)]
     #[error("IO error accessing {path}: {error}")]
     IoError {
         path: String,

@@ -10,20 +10,6 @@ use lattice_api::RunTurnRequest;
 use lattice_workspace::Workspace;
 use lattice_workspace::testing::DeterministicWorkspace;
 
-const UPPER_BACKED_TOOLS: &[&str] = &[
-    "observe.workspace",
-    "mutate.create",
-    "mutate.edit",
-    "mutate.batch",
-    "exec.command_run",
-];
-
-pub fn upper_backed_tools_enabled(enabled_tools: &[&str]) -> bool {
-    enabled_tools
-        .iter()
-        .any(|tool| UPPER_BACKED_TOOLS.contains(tool))
-}
-
 pub fn init_git_repo(root: &Path) {
     std::process::Command::new("git")
         .args(["init", "-q"])
@@ -56,8 +42,8 @@ pub fn deterministic_workspace() -> Arc<dyn Workspace> {
     Arc::new(DeterministicWorkspace::new().expect("deterministic workspace for integration tests"))
 }
 
-pub fn attach_upper_fixture(mut request: RunTurnRequest, enabled_tools: &[&str]) -> RunTurnRequest {
-    if upper_backed_tools_enabled(enabled_tools) && request.workspace_override.is_none() {
+pub fn attach_upper_fixture(mut request: RunTurnRequest, _enabled_tools: &[&str]) -> RunTurnRequest {
+    if request.workspace_override.is_none() {
         request.workspace_override = Some(deterministic_workspace());
     }
     request

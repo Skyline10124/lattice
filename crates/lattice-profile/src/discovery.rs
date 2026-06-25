@@ -124,6 +124,8 @@ model = "{model}"
 
 [prompt]
 system = "hello"
+
+[workspace]
 "#
         );
         std::fs::write(dir.join("agent.toml"), toml).unwrap();

@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 #[cfg(test)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
@@ -50,7 +50,250 @@ async fn apply_patch(
         }
     };
 
-    apply_parsed_patch(&EditStorage::envelope_host(project_root), limits, document).await
+    let storage = test_storage(project_root);
+    apply_parsed_patch(&storage, limits, document).await
+}
+
+#[cfg(test)]
+fn test_storage(project_root: &Path) -> EditStorage {
+    use crate::execution_backend::{ExecutionRouting, UpperContext};
+    use std::sync::Arc;
+    EditStorage::direct(
+        ExecutionRouting {
+            backend: Arc::new(HostFsBackend::new(project_root)),
+            upper: UpperContext {
+                execution_backend: "host-fs".into(),
+                upper_workspace_id: "test-upper".into(),
+            },
+        },
+        lancet_authority::effect::region::AuthorizedEffectRegion::empty(),
+    )
+}
+
+#[cfg(test)]
+struct HostFsBackend {
+    root: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl HostFsBackend {
+    fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        let raw = root.into();
+        Self {
+            root: std::fs::canonicalize(&raw).unwrap_or(raw),
+        }
+    }
+
+    fn resolve(&self, path: &WorkspacePath) -> PathBuf {
+        if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        }
+    }
+}
+
+#[cfg(test)]
+impl crate::execution_backend::ExecutionBackend for HostFsBackend {
+    fn backend_name(&self) -> &str {
+        "host-fs"
+    }
+
+    fn resolve_path(
+        &self,
+        path: &WorkspacePath,
+        _intent: crate::execution_backend::PathIntent,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::execution_backend::PathFacts,
+                        crate::execution_backend::ExecutionBackendError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        let full = self.resolve(path);
+        let path_str = path.as_str().to_string();
+        let exists = full.exists();
+        let kind = if full.is_dir() {
+            crate::execution_backend::PathKind::Directory
+        } else if full.is_symlink() {
+            crate::execution_backend::PathKind::Symlink
+        } else {
+            crate::execution_backend::PathKind::File
+        };
+        let canonical_under_workspace = if full.is_symlink() {
+            full.canonicalize()
+                .map(|c| c.starts_with(&self.root))
+                .unwrap_or(false)
+        } else {
+            true
+        };
+        let parent_exists = full.parent().map(|p| p.exists()).unwrap_or(false);
+        let parent_kind = full.parent().and_then(|p| {
+            if p.is_dir() {
+                Some(crate::execution_backend::PathKind::Directory)
+            } else {
+                None
+            }
+        });
+        Box::pin(async move {
+            Ok(crate::execution_backend::PathFacts {
+                normalized_path: path_str,
+                exists,
+                kind: Some(kind),
+                parent_exists,
+                parent_kind,
+                byte_size: None,
+                canonical_under_workspace,
+            })
+        })
+    }
+
+    fn read_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<u8>, crate::execution_backend::ExecutionBackendError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        let full = self.resolve(path);
+        Box::pin(async move { std::fs::read(&full).map_err(|e| io_err(e)) })
+    }
+
+    fn write_file(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), crate::execution_backend::ExecutionBackendError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        let full = self.resolve(path);
+        let content = content.to_vec();
+        Box::pin(async move {
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).map_err(io_err)?;
+            }
+            std::fs::write(&full, content).map_err(io_err)
+        })
+    }
+
+    fn remove_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), crate::execution_backend::ExecutionBackendError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        let full = self.resolve(path);
+        Box::pin(async move { std::fs::remove_file(&full).map_err(io_err) })
+    }
+
+    fn list_dir(
+        &self,
+        _path: &WorkspacePath,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<crate::execution_backend::DirectoryEntry>,
+                        crate::execution_backend::ExecutionBackendError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
+    }
+
+    fn grep(
+        &self,
+        _request: &crate::execution_backend::GrepRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<crate::execution_backend::GrepMatch>,
+                        crate::execution_backend::ExecutionBackendError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
+    }
+
+    fn find_files(
+        &self,
+        _request: &crate::execution_backend::FindRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<WorkspacePath>,
+                        crate::execution_backend::ExecutionBackendError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
+    }
+
+    fn exec(
+        &self,
+        _request: &crate::execution_backend::ExecRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::execution_backend::ExecOutput,
+                        crate::execution_backend::ExecutionBackendError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
+    }
+
+    fn changed_paths(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<WorkspacePath>,
+                        crate::execution_backend::ExecutionBackendError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+#[cfg(test)]
+fn io_err(e: std::io::Error) -> crate::execution_backend::ExecutionBackendError {
+    crate::execution_backend::ExecutionBackendError::Unavailable {
+        message: e.to_string(),
+    }
 }
 
 pub(crate) async fn apply_parsed_patch(
@@ -937,7 +1180,7 @@ mod tests {
             .collect();
 
         let plan = build_apply_plan(
-            &EditStorage::envelope_host(dir.path()),
+            &test_storage(dir.path()),
             &PatchApplyLimits::default(),
             &document,
             attempted_operations,

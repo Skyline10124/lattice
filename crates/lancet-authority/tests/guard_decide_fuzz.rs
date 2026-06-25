@@ -30,13 +30,14 @@ use serde_json::json;
 
 fn test_config() -> PolicyConfig {
     let mut config = PolicyConfig::defaults_for_project_root(PathBuf::from("/home/user/project"));
-    config.workspace.allowed_write_paths = vec!["src/**".into()];
+    config.workspace.denied_write_patterns = vec!["src/**".into()];
     config
 }
 
-fn test_config_no_write_paths() -> PolicyConfig {
+#[allow(dead_code)]
+fn test_config_no_denied_patterns() -> PolicyConfig {
     let mut config = PolicyConfig::defaults_for_project_root(PathBuf::from("/home/user/project"));
-    config.workspace.allowed_write_paths.clear();
+    config.workspace.denied_write_patterns.clear();
     config
 }
 
@@ -129,13 +130,7 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
 
 fn deny_path_inputs() -> Vec<PolicyInput> {
     vec![
-        // Mutation without configured write paths (PathOutsideScope)
-        PolicyInput {
-            method: "mutate.create".into(),
-            params: json!({ "path": "src/new.rs", "content": "x" }),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(10, default_budget()),
-        },
+        // Observation budget exhausted → denied
         PolicyInput {
             method: "observe.workspace".into(),
             params: json!({ "mode": "read_file", "path": "src/lib.rs" }),
@@ -193,7 +188,7 @@ proptest! {
     /// Property: deny-path inputs always produce a Denied decision with non-empty message.
     #[test]
     fn guard_decide_fuzz_deny_has_reason(input in arb_deny_path_input()) {
-        let hook = DefaultPolicyHook::new(test_config_no_write_paths());
+        let hook = DefaultPolicyHook::new(test_config());
         let outcome = hook.decide_with_evidence(&input);
         prop_assert!(
             matches!(outcome.decision, PolicyDecision::Denied { .. }),

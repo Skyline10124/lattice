@@ -248,7 +248,7 @@ async fn run_live_turn_task(
     prepared: PreparedTurn,
     request: RunTurnRequest,
     turn_tx: mpsc::Sender<TurnEvent>,
-    mut deps: ProductionTurnDeps,
+    deps: ProductionTurnDeps,
 ) {
     let ProductionTurnDeps {
         agent_loop,
@@ -259,9 +259,10 @@ async fn run_live_turn_task(
         audit_context,
         upper_lease,
         ..
-    } = &mut deps;
+    } = deps;
 
-    let mut upper_lease = upper_lease.take();
+    let mut upper_lease = upper_lease;
+    let mut runtime = runtime;
 
     let turn_id = format!(
         "{}:{}",
@@ -354,15 +355,13 @@ async fn run_live_turn_task(
 
     // 6b. Resource teardown: destroy the Upper (no snapshot retained in the
     // current non-promotion flow).
-    if let Some(mut lease) = upper_lease.take()
-        && let Err(err) = lease.destroy().await
-    {
+    if let Err(err) = upper_lease.destroy().await {
         agent_result = fold_upper_destroy_error(agent_result, err);
     }
 
     {
         let ctx = audit_context.read().await;
-        if let Err(err) = store_turn_attestation(audit, &ctx, &turn_id) {
+        if let Err(err) = store_turn_attestation(&audit, &ctx, &turn_id) {
             eprintln!("failed to store turn attestation for {turn_id}: {err}");
         }
     }
@@ -592,7 +591,7 @@ mod tests {
         );
         assert_eq!(
             outcome.resource_action,
-            super::super::lifecycle::ResourceAction::None
+            super::super::lifecycle::ResourceAction::Destroy
         );
     }
 

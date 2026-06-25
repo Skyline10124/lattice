@@ -42,5 +42,5 @@ pub use turn::{
 
 #[doc(hidden)]
 pub use turn::CepExecutorAdapter;
-pub use turn::upper::{ResolvedUpperConfig, resolve_upper_config};
+pub use turn::upper::{ResolvedUpperConfig, UpperPrepareError, resolve_upper_config};
 pub use turn::workspace_backend::WorkspaceExecutionBackend;

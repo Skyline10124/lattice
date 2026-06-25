@@ -287,29 +287,29 @@ pub struct ExecOutput {
     pub stderr: String,
 }
 
-/// Immutable host configuration for Direct-mode post-mutation verification.
+/// Immutable configuration for post-mutation verification.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DirectVerifyConfig {
+pub struct VerifyConfig {
     pub argv: Vec<String>,
     pub cwd: WorkspacePath,
     pub timeout_ms: Option<u64>,
     pub expected_exit_code: i32,
 }
 
-impl DirectVerifyConfig {
-    pub fn validate(&self) -> Result<(), DirectVerifyConfigError> {
+impl VerifyConfig {
+    pub fn validate(&self) -> Result<(), VerifyConfigError> {
         if self.argv.is_empty() {
-            return Err(DirectVerifyConfigError::EmptyArgv);
+            return Err(VerifyConfigError::EmptyArgv);
         }
         self.cwd
             .require_file_path()
-            .map_err(|_| DirectVerifyConfigError::InvalidCwd)?;
+            .map_err(|_| VerifyConfigError::InvalidCwd)?;
         Ok(())
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum DirectVerifyConfigError {
+pub enum VerifyConfigError {
     #[error("direct verify argv must not be empty")]
     EmptyArgv,
     #[error("direct verify cwd must be a file-capable relative path")]
@@ -385,6 +385,89 @@ pub trait ExecutionBackend: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>;
 }
 
+/// Minimal no-op execution backend for test scaffolding.
+///
+/// All operations return `ExecutionBackendError`. This is only suitable for
+/// configurations that don't exercise workspace mutation, command execution,
+/// or observation handlers — e.g. audit replay or session-state-only tests.
+#[derive(Clone)]
+pub struct NullExecutionBackend;
+
+impl ExecutionBackend for NullExecutionBackend {
+    fn backend_name(&self) -> &str {
+        "null"
+    }
+
+    fn resolve_path(
+        &self,
+        _path: &WorkspacePath,
+        _intent: PathIntent,
+    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    }
+
+    fn read_file(
+        &self,
+        _path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>> {
+        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    }
+
+    fn write_file(
+        &self,
+        _path: &WorkspacePath,
+        _content: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
+        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    }
+
+    fn remove_file(
+        &self,
+        _path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
+        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    }
+
+    fn list_dir(
+        &self,
+        _path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    }
+
+    fn grep(
+        &self,
+        _request: &GrepRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    }
+
+    fn find_files(
+        &self,
+        _request: &FindRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    }
+
+    fn exec(
+        &self,
+        _request: &ExecRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>> {
+        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    }
+
+    fn changed_paths(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,8 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn direct_verify_config_rejects_invalid() {
-        let bad = DirectVerifyConfig {
+    fn verify_config_config_rejects_invalid() {
+        let bad = VerifyConfig {
             argv: vec![],
             cwd: WorkspacePath::project_root(),
             timeout_ms: None,

@@ -111,7 +111,7 @@ enabled = ["exec.command_run"]
 [workspace]
 image = "test-template"
 [lancet.workspace]
-allowed_write_paths = ["src/**"]
+denied_write_patterns = [".git/**"]
 "#;
     std::fs::write(profile_dir.join("agent.toml"), profile).expect("profile");
 

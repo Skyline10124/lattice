@@ -109,7 +109,7 @@ fn command_composite_handler() -> MethodRegistry {
             region.kinds.insert(ImpactKind::CommandExecution);
             region.kinds.insert(ImpactKind::WorkspaceMutation);
             region.command_allowed = true;
-            region.write_path_prefixes.push(PathBuf::from("/project"));
+            region.denied_write_path_prefixes.push(PathBuf::from("/project"));
             ctx.authorized_region.set(region);
             ctx.record_effect(ObservedEffect {
                 kind: ImpactKind::CommandExecution,
@@ -308,12 +308,12 @@ async fn effect_deny_catches_command_composite_workspace_mutation() {
     server_task.abort();
 }
 
-/// Off mode: policy/capability deny still returns Err when the
-/// envelope lacks the required capability.
+/// Off mode: policy deny still returns Err when the effect kind is denied
+/// by policy config.
 ///
 /// Off does NOT re-enable legacy direct tool calls. The CEP policy hook always runs.
-/// A `mutate.create` call without a declared `WritePath` capability must be
-/// denied even in Off mode.
+/// A `mutate.create` call whose `WorkspaceMutation` impact kind is in
+/// `denied_effect_kinds` must be denied even in Off mode.
 #[tokio::test]
 async fn cep_mode_off_policy_deny_still_enforced() {
     let dir = TempDir::new().expect("temp workspace");
@@ -324,16 +324,16 @@ async fn cep_mode_off_policy_deny_still_enforced() {
     let mut registry = MethodRegistry::new();
     register_production_method_registry(&mut registry).expect("production registry");
 
-    // Base envelope: ReadPath only — no WritePath or RunCommand.
-
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.cep_mode = CepMode::Off; // Off: effect check skipped, but policy still runs.
 
-    // Set up a proper policy hook for the workspace root.
+    // Set up a policy hook that denies WorkspaceMutation impact kind.
     {
         use lancet_authority::CepTurnContext;
         use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
-        let policy_cfg = PolicyConfig::defaults_for_project_root(canonical.clone());
+        use lancet_protocol::ImpactKind;
+        let mut policy_cfg = PolicyConfig::defaults_for_project_root(canonical.clone());
+        policy_cfg.denied_effect_kinds.insert(ImpactKind::WorkspaceMutation);
         let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
         config.policy_hook = hook.clone();
         config.default_policy_hook = Some(hook);
@@ -344,7 +344,7 @@ async fn cep_mode_off_policy_deny_still_enforced() {
     let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
     tokio::task::yield_now().await;
 
-    // mutate.create without WritePath in any envelope -> policy denial.
+    // mutate.create with WorkspaceMutation impact denied by policy -> denial.
     // Off mode does NOT bypass the policy check.
     use lancet_catalog::methods::workspace::{Create, CreateParams};
     let err = client
@@ -354,19 +354,18 @@ async fn cep_mode_off_policy_deny_still_enforced() {
             create_parents: false,
         })
         .await
-        .expect_err("mutate.create without WritePath must be denied even in Off mode");
+        .expect_err("mutate.create with denied impact kind must be denied even in Off mode");
 
     assert!(
-        matches!(err.code, CepErrorCode::ReplanRequired | CepErrorCode::GuardDenied),
-        "off mode policy deny must be ReplanRequired or GuardDenied, got {:?}: {}",
+        matches!(err.code, CepErrorCode::Reserved),
+        "off mode policy deny must be Reserved (policy_config_invalid), got {:?}: {}",
         err.code,
         err.message
     );
     assert!(
-        err.message.contains("write_paths")
-            || err.message.contains("workspace mutation")
-            || err.message.contains("WritePath"),
-        "denial message must reference capability: {}",
+        err.message.contains("impact kind")
+            || err.message.contains("denied by policy config"),
+        "denial message must reference denied impact kind: {}",
         err.message
     );
 

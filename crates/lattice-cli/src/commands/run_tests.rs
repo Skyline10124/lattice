@@ -65,7 +65,10 @@ fn loaded_profile(model: &str) -> lattice_profile::LoadedAgentProfile {
             tools: lattice_profile::ToolsSection { enabled: vec![] },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
-            workspace: None,
+            workspace: lattice_profile::WorkspaceSection {
+                image: Some("docker.io/library/alpine:3.19".into()),
+                ..Default::default()
+            },
         },
         system_prompt: String::new(),
     }
@@ -145,6 +148,34 @@ impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
 #[tokio::test]
 async fn run_integration_commits_existing_session() {
     let temp = tempfile::tempdir().unwrap();
+    // Wave 5: resolve_upper_config requires a git repo to resolve HEAD.
+    std::fs::write(temp.path().join("README.md"), "init\n").expect("write");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@lattice.local"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git config email");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "lattice-test"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git config name");
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(temp.path())
+        .status()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "init"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git commit");
+
     let session_api = lattice_api::SessionApi::git(temp.path());
     let created = session_api
         .create_session(lattice_api::CreateSessionRequest {
@@ -163,7 +194,10 @@ async fn run_integration_commits_existing_session() {
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
         test_persist_audit: None,
-        workspace_override: None,
+        workspace_override: Some(std::sync::Arc::new(
+            lattice_workspace::testing::DeterministicWorkspace::new()
+                .expect("deterministic workspace"),
+        )),
     };
 
     let result = lattice_api::run_turn(session_api, request).await;
@@ -303,10 +337,10 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
                 },
                 llm: lattice_profile::LlmSection::default(),
                 lancet: lattice_profile::LancetSection::default(),
-                workspace: Some(WorkspaceSection {
+                workspace: WorkspaceSection {
                     image: Some("docker.io/library/alpine:3.19".into()),
                     ..Default::default()
-                }),
+                },
             },
             system_prompt: String::new(),
         }),

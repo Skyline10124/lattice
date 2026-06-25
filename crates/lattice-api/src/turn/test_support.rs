@@ -13,7 +13,6 @@ use lattice_session::SessionGraphStore;
 use lattice_workspace::testing::DeterministicWorkspace;
 
 use super::types::RunTurnRequest;
-use super::upper::upper_backed_tools_enabled;
 use crate::session::SessionApi;
 
 pub(super) fn make_test_run_turn_request(
@@ -46,6 +45,14 @@ pub(super) async fn build_test_production_deps(
     lancet: Option<&lattice_profile::LancetSection>,
     workspace_override: Option<Arc<dyn lattice_workspace::Workspace>>,
 ) -> super::cep::ProductionTurnDeps {
+    // Ensure a git repo exists so resolve_upper_config can resolve HEAD.
+    let root = std::path::Path::new(project_root);
+    if !root.join(".git").exists() {
+        std::fs::write(root.join("README.md"), "init\n").expect("write README");
+        init_test_git_repo(root);
+    }
+    let workspace_override =
+        workspace_override.or_else(|| Some(test_workspace_override()));
     let request = make_test_run_turn_request(
         llm.clone(),
         in_memory_audit,
@@ -168,7 +175,7 @@ pub(super) fn make_loaded_profile_with_tools(
     system_prompt: &str,
     enabled_tools: &[String],
 ) -> lattice_profile::LoadedAgentProfile {
-    let workspace = upper_backed_tools_enabled(enabled_tools).then(|| WorkspaceSection {
+    let workspace = WorkspaceSection {
         egress: None,
         credentials: vec![],
         image: Some("test-template".to_string()),
@@ -177,7 +184,7 @@ pub(super) fn make_loaded_profile_with_tools(
         allowed_egress_targets: vec![],
         cleanup_rounds: 3,
         max_pending_snapshots: 5,
-    });
+    };
     lattice_profile::LoadedAgentProfile {
         path: std::path::PathBuf::from("/tmp/test/agent.toml"),
         package_dir: std::env::current_dir().unwrap_or_else(|_| "/tmp".into()),
@@ -231,7 +238,7 @@ fn init_test_git_repo(root: &std::path::Path) {
         .expect("git commit");
 }
 
-fn test_workspace_override() -> Arc<dyn lattice_workspace::Workspace> {
+pub(super) fn test_workspace_override() -> Arc<dyn lattice_workspace::Workspace> {
     Arc::new(DeterministicWorkspace::new().expect("deterministic workspace for upper-backed tests"))
 }
 
@@ -250,7 +257,7 @@ pub(super) fn with_test_llm(
             enabled_tools,
         ));
     }
-    if upper_backed_tools_enabled(enabled_tools) && request.workspace_override.is_none() {
+    if request.workspace_override.is_none() {
         request.workspace_override = Some(test_workspace_override());
     }
     request

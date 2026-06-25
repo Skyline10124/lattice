@@ -111,8 +111,8 @@ mod scaffold_tests {
             })),
             audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
             cep_mode: CepMode::Off,
-            execution: None,
-            direct_verify: None,
+            execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
+            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         }
     }

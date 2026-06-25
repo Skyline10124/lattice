@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use lancet_authority::policy::default::PolicyConfig;
-use lancet_native::{DirectVerifyConfig, ExecutionRouting};
+use lancet_native::{ExecutionRouting, VerifyConfig};
 use lancet_protocol::policy::CepMode;
 use sha2::{Digest, Sha256};
 
@@ -126,10 +126,11 @@ pub struct LancetRuntimeConfig {
     pub model_id: String,
     /// Runtime version string recorded in the audit context and attestations.
     pub runtime_version: String,
-    /// Optional Upper execution routing; `None` for host-only.
-    pub execution: Option<ExecutionRouting>,
-    /// Immutable Direct-mode verify configuration from runtime setup.
-    pub direct_verify: Option<DirectVerifyConfig>,
+    /// Upper (MSB) execution routing — always present since MSB is the sole
+    /// execution path.
+    pub execution: ExecutionRouting,
+    /// Immutable verify configuration from runtime setup.
+    pub verify_config: Option<VerifyConfig>,
 }
 
 impl LancetRuntimeConfig {
@@ -148,8 +149,14 @@ impl LancetRuntimeConfig {
             audit: AuditBacking::InMemory,
             model_id: String::new(),
             runtime_version: String::new(),
-            execution: None,
-            direct_verify: None,
+            execution: ExecutionRouting {
+                backend: std::sync::Arc::new(lancet_native::NullExecutionBackend),
+                upper: lancet_native::UpperContext {
+                    execution_backend: "null".into(),
+                    upper_workspace_id: "null".into(),
+                },
+            },
+            verify_config: None,
         }
     }
 }

@@ -14,13 +14,13 @@ use crate::enforcement::verify::{
     VerifyCommandSpec, run_verify_with_backend, verify_failed_error,
 };
 use crate::execution_backend::{
-    ExecRequest, ExecutionBackendError, PathFacts, PathIntent, WorkspacePath,
+    ExecRequest, ExecutionBackendError, PathFacts as BackendPathFacts, PathIntent, WorkspacePath,
 };
 use crate::executor::process::BoundedStreamOutput;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_audit::{RejectionRecord, RejectionStage};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
-use lancet_authority::guard::{DirectPathFacts, DirectPathKind, validate_direct_path_facts};
+use lancet_authority::guard::{PathFacts, PathKind, validate_path_facts};
 use lancet_authority::policy::command::{
     EffectiveImpact, build_allowed_params_env, classify_command,
 };
@@ -137,10 +137,7 @@ async fn execute_direct_command_inner(
     let effective_env = build_allowed_params_env(&params.env, policy)?;
     let cwd = resolve_direct_command_cwd(params.cwd.as_deref())?;
 
-    let execution = ctx
-        .execution
-        .as_ref()
-        .ok_or_else(|| direct_backend_unavailable_error(method))?;
+    let execution = &ctx.execution;
 
     ctx.mark_adapter_preflight_invoked();
     let path_facts = execution
@@ -196,8 +193,8 @@ async fn execute_direct_command_inner(
             direct_command_backend_error(method, &params.argv, err)
         })?;
 
-        let has_write_region = !authorized_region.write_paths.is_empty()
-            || !authorized_region.write_path_prefixes.is_empty();
+        let has_write_region = !authorized_region.denied_write_paths.is_empty()
+            || !authorized_region.denied_write_path_prefixes.is_empty();
         let mut out_of_scope_paths = Vec::new();
         for path in &changed {
             let effect = ObservedEffect {
@@ -227,7 +224,7 @@ async fn execute_direct_command_inner(
     }
 
     if effective_impact == EffectiveImpact::WorkspaceMutation
-        && let Some(verify_config) = ctx.direct_verify.as_ref()
+        && let Some(verify_config) = ctx.verify_config.as_ref()
     {
         let mut verify_cancel = ctx.cancellation.clone();
         match run_verify_with_backend(
@@ -243,7 +240,7 @@ async fn execute_direct_command_inner(
             Ok(outcome) if !outcome.success => {
                 ctx.record_rejection(RejectionRecord {
                     rejection_stage: RejectionStage::VerificationFailure,
-                    denial_source: "direct_verify".into(),
+                    denial_source: "verify_config".into(),
                 });
                 let spec = verify_spec_from_direct(verify_config);
                 return Err(verify_failed_error(&spec, &outcome));
@@ -329,15 +326,15 @@ fn resolve_direct_command_cwd(raw: Option<&str>) -> Result<WorkspacePath, CepErr
 
 fn validate_direct_command_cwd(
     path: &str,
-    facts: &PathFacts,
+    facts: &BackendPathFacts,
     authorized_region: &lancet_authority::effect::region::AuthorizedEffectRegion,
 ) -> Result<(), CepError> {
-    let direct_facts = DirectPathFacts {
+    let path_facts = PathFacts {
         normalized_path: facts.normalized_path.clone(),
         exists: facts.exists,
-        kind: facts.kind.map(direct_path_kind_from_backend),
+        kind: facts.kind.map(path_kind_from_backend),
         parent_exists: facts.parent_exists,
-        parent_kind: facts.parent_kind.map(direct_path_kind_from_backend),
+        parent_kind: facts.parent_kind.map(path_kind_from_backend),
         canonical_under_workspace: facts.canonical_under_workspace,
     };
     // Workspace root as cwd is always permitted — skip write-region check.
@@ -347,14 +344,14 @@ fn validate_direct_command_cwd(
     } else {
         authorized_region
     };
-    validate_direct_path_facts(path, &direct_facts, region)
+    validate_path_facts(path, &path_facts, region)
 }
 
-fn direct_path_kind_from_backend(kind: crate::execution_backend::PathKind) -> DirectPathKind {
+fn path_kind_from_backend(kind: crate::execution_backend::PathKind) -> PathKind {
     match kind {
-        crate::execution_backend::PathKind::File => DirectPathKind::File,
-        crate::execution_backend::PathKind::Directory => DirectPathKind::Directory,
-        crate::execution_backend::PathKind::Symlink => DirectPathKind::Symlink,
+        crate::execution_backend::PathKind::File => PathKind::File,
+        crate::execution_backend::PathKind::Directory => PathKind::Directory,
+        crate::execution_backend::PathKind::Symlink => PathKind::Symlink,
     }
 }
 
@@ -375,17 +372,17 @@ fn record_direct_command_effects(
 fn direct_command_scope(
     authorized_region: &lancet_authority::effect::region::AuthorizedEffectRegion,
 ) -> ObservedScope {
-    if let Some(prefix) = authorized_region.write_path_prefixes.first() {
+    if let Some(prefix) = authorized_region.denied_write_path_prefixes.first() {
         return ObservedScope::Root(prefix.to_string_lossy().to_string());
     }
-    if let Some(path) = authorized_region.write_paths.first() {
+    if let Some(path) = authorized_region.denied_write_paths.first() {
         return ObservedScope::Root(path.to_string_lossy().to_string());
     }
     ObservedScope::Root(".".into())
 }
 
 fn verify_spec_from_direct(
-    config: &crate::execution_backend::DirectVerifyConfig,
+    config: &crate::execution_backend::VerifyConfig,
 ) -> VerifyCommandSpec {
     VerifyCommandSpec {
         argv: config.argv.clone(),
@@ -405,10 +402,11 @@ fn record_direct_backend_rejection(
     });
 }
 
+#[allow(dead_code)]
 fn direct_backend_unavailable_error(method: &str) -> CepError {
     CepError::new(
         CepErrorCode::ExecutionFailed,
-        "Direct command execution requires an Upper execution backend",
+        "command execution requires an Upper execution backend",
         CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
             command: method.into(),
             exit_code: None,

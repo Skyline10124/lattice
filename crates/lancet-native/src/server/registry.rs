@@ -3,7 +3,7 @@
 
 //! Native handler context and registry type binding.
 
-use crate::execution_backend::{DirectVerifyConfig, ExecutionRouting, RoutingInvocationState};
+use crate::execution_backend::{VerifyConfig, ExecutionRouting, RoutingInvocationState};
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use lancet_audit::{CepAuditContext, CepAuditStore, RejectionRecord};
 use lancet_authority::policy::CepTurnContext;
@@ -22,7 +22,7 @@ pub type MethodRegistry = lancet_dispatch::MethodRegistry<HandlerContext>;
 #[allow(dead_code)]
 pub fn handler_routing_defaults() -> (
     Option<ExecutionRouting>,
-    Option<DirectVerifyConfig>,
+    Option<VerifyConfig>,
     RoutingInvocationState,
 ) {
     (
@@ -48,10 +48,11 @@ pub struct HandlerContext {
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     pub audit: Arc<CepAuditStore>,
     pub cep_mode: CepMode,
-    /// Optional Upper execution routing; `None` for host-only.
-    pub execution: Option<ExecutionRouting>,
-    /// Immutable Direct-mode verify configuration from runtime setup.
-    pub direct_verify: Option<DirectVerifyConfig>,
+    /// Upper (MSB) execution routing — always present since MSB is the sole
+    /// execution path.
+    pub execution: ExecutionRouting,
+    /// Immutable verify configuration from runtime setup.
+    pub verify_config: Option<VerifyConfig>,
     /// Monotonic per-call adapter/backend invocation flags.
     pub routing_invocation: RoutingInvocationState,
 }
@@ -70,11 +71,8 @@ impl std::fmt::Debug for HandlerContext {
             .field("default_policy_hook", &self.default_policy_hook)
             .field("audit_context", &self.audit_context)
             .field("cep_mode", &self.cep_mode)
-            .field(
-                "execution",
-                &self.execution.as_ref().map(|_| "<ExecutionRouting>"),
-            )
-            .field("direct_verify", &self.direct_verify)
+            .field("execution", &"<ExecutionRouting>")
+            .field("verify_config", &self.verify_config)
             .field("routing_invocation", &self.routing_invocation)
             .finish()
     }
@@ -112,7 +110,7 @@ impl HandlerContext {
     /// Record routing identity and accurate invocation flags for durable audit metadata.
     pub fn record_routing_metadata(&self) {
         self.record_durable_metadata(build_routing_metadata(
-            self.execution.as_ref(),
+            Some(&self.execution),
             &self.routing_invocation,
         ));
     }
@@ -300,7 +298,7 @@ mod tests {
         }
 
         fn test_ctx(
-            execution: Option<ExecutionRouting>,
+            execution: ExecutionRouting,
         ) -> HandlerContext {
             let default_hook = Arc::new(DefaultPolicyHook::new(
                 lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
@@ -322,7 +320,7 @@ mod tests {
                 audit: Arc::new(CepAuditStore::in_memory().expect("audit")),
                 cep_mode: CepMode::Off,
                 execution,
-                direct_verify: None,
+                verify_config: None,
                 routing_invocation: RoutingInvocationState::default(),
             }
         }
@@ -344,7 +342,7 @@ mod tests {
 
         #[test]
         fn policy_denial_precedes_adapter() {
-            let ctx = test_ctx(Some(execution_routing()));
+            let ctx = test_ctx(execution_routing());
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::PolicyGate,
                 denial_source: "cep_policy".into(),
@@ -359,7 +357,7 @@ mod tests {
 
         #[test]
         fn path_denial_records_preflight_only() {
-            let ctx = test_ctx(Some(execution_routing()));
+            let ctx = test_ctx(execution_routing());
             ctx.mark_adapter_preflight_invoked();
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::AdapterPreflight,
@@ -373,7 +371,7 @@ mod tests {
 
         #[test]
         fn backend_failure_records_both_invocations() {
-            let ctx = test_ctx(Some(execution_routing()));
+            let ctx = test_ctx(execution_routing());
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
             ctx.record_rejection(RejectionRecord {
@@ -388,12 +386,12 @@ mod tests {
 
         #[test]
         fn verification_failure_after_backend() {
-            let ctx = test_ctx(Some(execution_routing()));
+            let ctx = test_ctx(execution_routing());
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::VerificationFailure,
-                denial_source: "direct_verify".into(),
+                denial_source: "verify_config".into(),
             });
             let meta = metadata(&ctx);
             assert_eq!(meta["adapter_preflight_invoked"], true);
@@ -403,7 +401,7 @@ mod tests {
 
         #[test]
         fn success_has_no_rejection_fields() {
-            let ctx = test_ctx(Some(execution_routing()));
+            let ctx = test_ctx(execution_routing());
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
             let meta = metadata(&ctx);
@@ -412,18 +410,26 @@ mod tests {
         }
 
         #[test]
-        fn host_only_omits_backend_identity() {
-            let ctx = test_ctx(None);
+        fn null_backend_records_backend_identity() {
+            use crate::execution_backend::{ExecutionRouting, NullExecutionBackend, UpperContext};
+            let routing = ExecutionRouting {
+                backend: Arc::new(NullExecutionBackend),
+                upper: UpperContext {
+                    execution_backend: "null".into(),
+                    upper_workspace_id: "null-upper".into(),
+                },
+            };
+            let ctx = test_ctx(routing);
             let meta = metadata(&ctx);
             assert_eq!(meta["adapter_preflight_invoked"], false);
             assert_eq!(meta["backend_invoked"], false);
-            assert!(meta.get("execution_backend").is_none());
-            assert!(meta.get("upper_workspace_id").is_none());
+            assert_eq!(meta["execution_backend"], "null");
+            assert_eq!(meta["upper_workspace_id"], "null-upper");
         }
 
         #[test]
         fn invocation_flags_are_monotonic() {
-            let ctx = test_ctx(Some(execution_routing()));
+            let ctx = test_ctx(execution_routing());
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
             ctx.mark_adapter_preflight_invoked();

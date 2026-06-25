@@ -281,8 +281,8 @@ mod cep_native_registry_tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: None,
-            direct_verify: None,
+            execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
+            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
 
@@ -311,7 +311,7 @@ mod cep_native_registry_tests {
         let registry = production_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-        config.execution = Some(test_execution(root));
+        config.execution = test_execution(root);
         let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
             lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from(root),

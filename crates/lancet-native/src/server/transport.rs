@@ -3,7 +3,7 @@
 
 //! Native CEP server lifecycle layered on dispatch transport.
 
-use crate::execution_backend::{DirectVerifyConfig, ExecutionRouting};
+use crate::execution_backend::{ExecutionRouting, UpperContext, VerifyConfig};
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use crate::server::registry::{HandlerContext, MethodRegistry, build_routing_metadata};
 use lancet_audit::{
@@ -37,10 +37,11 @@ pub struct ServerRunConfig {
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     /// CEP enforcement mode.
     pub cep_mode: CepMode,
-    /// Optional Upper execution routing; `None` for host-only.
-    pub execution: Option<ExecutionRouting>,
-    /// Immutable Direct-mode verify configuration from runtime setup.
-    pub direct_verify: Option<DirectVerifyConfig>,
+    /// Upper (MSB) execution routing — always present since MSB is the sole
+    /// execution path.
+    pub execution: ExecutionRouting,
+    /// Immutable verify configuration from runtime setup.
+    pub verify_config: Option<VerifyConfig>,
 }
 
 impl ServerRunConfig {
@@ -61,8 +62,14 @@ impl ServerRunConfig {
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
-            execution: None,
-            direct_verify: None,
+            execution: ExecutionRouting {
+                backend: Arc::new(crate::execution_backend::NullExecutionBackend),
+                upper: UpperContext {
+                    execution_backend: "null".into(),
+                    upper_workspace_id: "test-upper".into(),
+                },
+            },
+            verify_config: None,
         }
     }
 }
@@ -115,7 +122,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         default_policy_hook,
         cep_mode,
         execution,
-        direct_verify,
+        verify_config,
     } = config;
 
     let id = call.id();
@@ -144,7 +151,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     let turn_id = ctx_snapshot.turn_id.clone();
 
     durable_metadata.record(build_routing_metadata(
-        execution.as_ref(),
+        Some(&execution),
         &routing_invocation,
     ));
 
@@ -163,7 +170,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         audit: Arc::clone(&audit),
         cep_mode: cep_mode.clone(),
         execution: execution.clone(),
-        direct_verify: direct_verify.clone(),
+        verify_config: verify_config.clone(),
         routing_invocation: routing_invocation.clone(),
     };
 
@@ -171,7 +178,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     let observed_effects = effect_ledger.snapshot();
 
     durable_metadata.record(build_routing_metadata(
-        execution.as_ref(),
+        Some(&execution),
         &routing_invocation,
     ));
 

@@ -25,8 +25,8 @@ use lancet_authority::effect::ledger::{
     EffectSource, ObservedEffect, ObservedLineChange, ObservedLineChangeKind, ObservedScope,
 };
 use lancet_authority::effect::region::AuthorizedEffectRegion;
-use lancet_authority::guard::validate_direct_path_facts;
-use lancet_authority::guard::{DirectPathFacts, DirectPathKind};
+use lancet_authority::guard::validate_path_facts;
+use lancet_authority::guard::{PathFacts, PathKind};
 use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
@@ -39,7 +39,7 @@ use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// Register native workspace mutation methods.
 pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -50,36 +50,24 @@ pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), Ce
 }
 
 struct MutationAuthorization {
-    project_root: Option<String>,
-    direct: Option<DirectMutationAuth>,
+    direct: MutationAuth,
 }
 
-struct DirectMutationAuth {
+struct MutationAuth {
     execution: ExecutionRouting,
     authorized_region: AuthorizedEffectRegion,
 }
 
 impl MutationAuthorization {
-    fn project_root(&self) -> &str {
-        self.project_root
-            .as_deref()
-            .expect("project_root required in Envelope mode")
-    }
-
     fn edit_storage(&self) -> EditStorage {
-        if let Some(direct) = &self.direct {
-            EditStorage::direct(direct.execution.clone(), direct.authorized_region.clone())
-        } else {
-            EditStorage::envelope_host(self.project_root())
-        }
+        EditStorage::direct(
+            self.direct.execution.clone(),
+            self.direct.authorized_region.clone(),
+        )
     }
 
-    fn is_direct(&self) -> bool {
-        self.direct.is_some()
-    }
-
-    fn direct(&self) -> &DirectMutationAuth {
-        self.direct.as_ref().expect("direct auth required")
+    fn direct(&self) -> &MutationAuth {
+        &self.direct
     }
 }
 
@@ -108,23 +96,11 @@ async fn handle_create_as(
         authorize_workspace_mutation(&ctx, method, &params, std::slice::from_ref(&params.path))
             .await?;
 
-    let create = if auth.is_direct() {
-        preflight_direct_create(&auth, &params, method).await?
-    } else {
-        preflight_create_file(auth.project_root(), &params, method)?
-    };
+    let create = preflight_direct_create(&auth, &params, method).await?;
 
-    if auth.is_direct() {
-        write_direct_create(&ctx, &auth, &create).await?;
-    } else {
-        write_preflighted_create(auth.project_root(), &create).await?;
-    }
+    write_direct_create(&ctx, &auth, &create).await?;
 
-    if auth.is_direct() {
-        record_direct_created_dir_effects(&ctx, &create);
-    } else {
-        record_created_dir_effects(&ctx, auth.project_root(), &create);
-    }
+    record_direct_created_dir_effects(&ctx, &create);
     ctx.record_effect(direct_mutation_path_effect(
         &auth,
         &create.path,
@@ -211,11 +187,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
                     content: content.clone(),
                     create_parents: *create_parents,
                 };
-                create_inputs.push(if auth.is_direct() {
-                    preflight_direct_create(&auth, &params, Batch::NAME).await?
-                } else {
-                    preflight_create_file(auth.project_root(), &params, Batch::NAME)?
-                });
+                create_inputs.push(preflight_direct_create(&auth, &params, Batch::NAME).await?);
             }
             BatchOperation::EditFile {
                 path,
@@ -263,23 +235,11 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
     let mut created_dirs = Vec::new();
     let mut seen_created_dirs = HashSet::new();
     for create in &create_inputs {
-        if auth.is_direct() {
-            write_direct_create(&ctx, &auth, create).await?;
-            record_direct_created_dir_effects(&ctx, create);
-        } else {
-            write_preflighted_create(auth.project_root(), create).await?;
-            for dir in &create.created_dirs {
-                if seen_created_dirs.insert(dir.clone()) {
-                    record_created_dir_effect(&ctx, auth.project_root(), dir);
-                    created_dirs.push(dir.clone());
-                }
-            }
-        }
-        if auth.is_direct() {
-            for dir in &create.created_dirs {
-                if seen_created_dirs.insert(dir.clone()) {
-                    created_dirs.push(dir.clone());
-                }
+        write_direct_create(&ctx, &auth, create).await?;
+        record_direct_created_dir_effects(&ctx, create);
+        for dir in &create.created_dirs {
+            if seen_created_dirs.insert(dir.clone()) {
+                created_dirs.push(dir.clone());
             }
         }
         ctx.record_effect(direct_mutation_path_effect(
@@ -342,18 +302,7 @@ async fn authorize_direct_mutation(
     method: &str,
     changed_paths: &[String],
 ) -> Result<MutationAuthorization, CepError> {
-    let execution = ctx.execution.clone().ok_or_else(|| {
-        CepError::new(
-            CepErrorCode::ExecutionFailed,
-            "Direct mutation requires an Upper execution backend",
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: method.into(),
-                exit_code: None,
-                stderr: Some("missing execution backend".into()),
-            }),
-            Retriability::Permanent,
-        )
-    })?;
+    let execution = ctx.execution.clone();
     let authorized_region = ctx
         .authorized_region
         .get()
@@ -397,15 +346,15 @@ async fn authorize_direct_mutation(
         } else {
             ws_path.as_str()
         };
-        let direct_facts = DirectPathFacts {
+        let path_facts = PathFacts {
             normalized_path: facts.normalized_path.clone(),
             exists: facts.exists,
-            kind: facts.kind.map(direct_path_kind),
+            kind: facts.kind.map(path_kind),
             parent_exists: facts.parent_exists,
-            parent_kind: facts.parent_kind.map(direct_path_kind),
+            parent_kind: facts.parent_kind.map(path_kind),
             canonical_under_workspace: facts.canonical_under_workspace,
         };
-        if let Err(err) = validate_direct_path_facts(guard_path, &direct_facts, &authorized_region)
+        if let Err(err) = validate_path_facts(guard_path, &path_facts, &authorized_region)
         {
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::AdapterPreflight,
@@ -416,19 +365,18 @@ async fn authorize_direct_mutation(
     }
 
     Ok(MutationAuthorization {
-        project_root: None,
-        direct: Some(DirectMutationAuth {
+        direct: MutationAuth {
             execution,
             authorized_region,
-        }),
+        },
     })
 }
 
-fn direct_path_kind(kind: crate::execution_backend::PathKind) -> DirectPathKind {
+fn path_kind(kind: crate::execution_backend::PathKind) -> PathKind {
     match kind {
-        crate::execution_backend::PathKind::File => DirectPathKind::File,
-        crate::execution_backend::PathKind::Directory => DirectPathKind::Directory,
-        crate::execution_backend::PathKind::Symlink => DirectPathKind::Symlink,
+        crate::execution_backend::PathKind::File => PathKind::File,
+        crate::execution_backend::PathKind::Directory => PathKind::Directory,
+        crate::execution_backend::PathKind::Symlink => PathKind::Symlink,
     }
 }
 
@@ -488,7 +436,7 @@ fn record_mutation_replan_metadata(
         &[],
         &[],
         expected_hash_status,
-        ctx.direct_verify.is_some(),
+        ctx.verify_config.is_some(),
         replan_reason,
         false,
     );
@@ -518,24 +466,13 @@ async fn run_mutation_verify_if_configured(
     method: &str,
     _auth: &MutationAuthorization,
 ) -> Result<(), CepError> {
-    let Some(verify_config) = ctx.direct_verify.as_ref() else {
+    let Some(verify_config) = ctx.verify_config.as_ref() else {
         return Ok(());
     };
     let policy = &ctx.cep_context.policy.command;
     let mut cancellation = ctx.cancellation.clone();
     ctx.mark_backend_invoked();
-    let execution = ctx.execution.as_ref().ok_or_else(|| {
-        CepError::new(
-            CepErrorCode::ExecutionFailed,
-            "verify requires an Upper execution backend",
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: method.into(),
-                exit_code: None,
-                stderr: Some("missing execution backend".into()),
-            }),
-            Retriability::Permanent,
-        )
-    })?;
+    let execution = &ctx.execution;
     let authorized_region = ctx
         .authorized_region
         .get()
@@ -553,10 +490,10 @@ async fn run_mutation_verify_if_configured(
         Ok(outcome) if !outcome.success => {
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::VerificationFailure,
-                denial_source: "direct_verify".into(),
+                denial_source: "verify_config".into(),
             });
             emit_verify_failed(ctx, method, outcome.exit_code).await;
-            let spec = direct_verify_spec(verify_config);
+            let spec = verify_config_spec(verify_config);
             Err(verify_failed_error(&spec, &outcome))
         }
         Ok(_) => {
@@ -573,61 +510,6 @@ async fn run_mutation_verify_if_configured(
             Err(err)
         }
     }
-}
-
-fn preflight_create_file(
-    project_root: &str,
-    params: &CreateParams,
-    method: &str,
-) -> Result<PreflightCreate, CepError> {
-    let (full_path, _parent) = resolve_create_target(project_root, &params.path)?;
-    let created_dirs = missing_parent_dirs(project_root, &params.path)?;
-    if !created_dirs.is_empty() && !params.create_parents {
-        return Err(CepError::new(
-            CepErrorCode::ExecutionFailed,
-            format!(
-                "parent directory for '{}' does not exist; set create_parents=true on {method} to create missing parent directories",
-                params.path
-            ),
-            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                field: "create_parents".into(),
-                reason: "missing parent directories require create_parents=true".into(),
-            }),
-            Retriability::Permanent,
-        ));
-    }
-    if full_path.exists() {
-        return Err(CepError::new(
-            CepErrorCode::ExecutionFailed,
-            format!(
-                "target file '{}' already exists; mutate.create only creates new files",
-                params.path
-            ),
-            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                field: "path".into(),
-                reason: "target already exists".into(),
-            }),
-            Retriability::Permanent,
-        ));
-    }
-
-    Ok(PreflightCreate {
-        path: params.path.clone(),
-        content: params.content.clone(),
-        full_path,
-        bytes_written: params.content.len() as u64,
-        created_dirs,
-    })
-}
-
-async fn write_preflighted_create(
-    project_root: &str,
-    create: &PreflightCreate,
-) -> Result<(), CepError> {
-    if !create.created_dirs.is_empty() {
-        create_parent_dirs_secure(project_root, &create.path).await?;
-    }
-    create_file_secure(project_root, &create.path, &create.content).await
 }
 
 async fn preflight_direct_create(
@@ -809,15 +691,11 @@ fn patch_diag_to_cep(diag: crate::edit::types::PatchDiagnostic) -> CepError {
 }
 
 fn direct_mutation_path_effect(
-    auth: &MutationAuthorization,
+    _auth: &MutationAuthorization,
     path: &str,
-    full_path: &Path,
+    _full_path: &Path,
 ) -> ObservedEffect {
-    let scope = if auth.is_direct() {
-        ObservedScope::Path(PathBuf::from(path))
-    } else {
-        ObservedScope::Path(full_path.to_path_buf())
-    };
+    let scope = ObservedScope::Path(PathBuf::from(path));
     ObservedEffect {
         kind: ImpactKind::WorkspaceMutation,
         scope,
@@ -837,28 +715,13 @@ fn record_direct_created_dir_effects(ctx: &HandlerContext, create: &PreflightCre
     }
 }
 
-fn direct_verify_spec(config: &crate::execution_backend::DirectVerifyConfig) -> VerifyCommandSpec {
+fn verify_config_spec(config: &crate::execution_backend::VerifyConfig) -> VerifyCommandSpec {
     VerifyCommandSpec {
         argv: config.argv.clone(),
         cwd: Some(config.cwd.as_str().to_string()),
         timeout_ms: config.timeout_ms,
         expected_exit_code: Some(config.expected_exit_code),
     }
-}
-
-fn record_created_dir_effects(ctx: &HandlerContext, project_root: &str, create: &PreflightCreate) {
-    for dir in &create.created_dirs {
-        record_created_dir_effect(ctx, project_root, dir);
-    }
-}
-
-fn record_created_dir_effect(ctx: &HandlerContext, project_root: &str, dir: &str) {
-    ctx.record_effect(ObservedEffect {
-        kind: ImpactKind::WorkspaceMutation,
-        scope: ObservedScope::Path(Path::new(project_root).join(dir)),
-        required_capability: RequiredCapability::WritePath,
-        source: EffectSource::HandlerBackend,
-    });
 }
 
 fn batch_target_paths(params: &BatchParams) -> Result<Vec<String>, CepError> {
@@ -895,11 +758,7 @@ async fn compile_edit_patch(
     auth: &MutationAuthorization,
     params: &EditParams,
 ) -> Result<String, CepError> {
-    let fragment = if auth.is_direct() {
-        compile_edit_operation_fragment_direct(&auth.edit_storage(), params).await?
-    } else {
-        compile_edit_operation_fragment(auth.project_root(), params)?
-    };
+    let fragment = compile_edit_operation_fragment_direct(&auth.edit_storage(), params).await?;
     Ok(format!("*** Begin Patch\n{fragment}*** End Patch\n"))
 }
 
@@ -909,11 +768,7 @@ async fn compile_batch_edit_patch(
 ) -> Result<String, CepError> {
     let mut patch = String::from("*** Begin Patch\n");
     for edit in edits {
-        let fragment = if auth.is_direct() {
-            compile_edit_operation_fragment_direct(&auth.edit_storage(), edit).await?
-        } else {
-            compile_edit_operation_fragment(auth.project_root(), edit)?
-        };
+        let fragment = compile_edit_operation_fragment_direct(&auth.edit_storage(), edit).await?;
         patch.push_str(&fragment);
     }
     patch.push_str("*** End Patch\n");
@@ -951,57 +806,6 @@ async fn compile_edit_operation_fragment_direct(
                     command: "mutate.edit.compile".into(),
                     exit_code: Some(1),
                     stderr: Some(diag.message),
-                }),
-                Retriability::Permanent,
-            )
-        })?;
-
-    let current_hash = content_hash(before.as_bytes());
-    if current_hash != params.expected_hash {
-        return Err(CepError::new(
-            CepErrorCode::ReplanRequired,
-            format!(
-                "expected_hash for '{}' is stale: expected {}, current {}; observe.workspace read_file again",
-                params.path, params.expected_hash, current_hash
-            ),
-            CepErrorData::Guard(GuardErrorData {
-                method: Edit::NAME.into(),
-                reason: "ReplanRequired: stale expected_hash".into(),
-            }),
-            Retriability::RequiresReplan,
-        ));
-    }
-
-    let after = apply_semantic_edit_operations(&before, &params.edits)?;
-    compile_update_fragment(&params.path, &params.expected_hash, &before, &after)
-}
-
-fn compile_edit_operation_fragment(
-    project_root: &str,
-    params: &EditParams,
-) -> Result<String, CepError> {
-    if params.edits.is_empty() {
-        return Err(validation_error(
-            "edits",
-            "mutate.edit requires at least one edit operation",
-        ));
-    }
-    if params.path.contains('\n') || params.path.contains('\r') {
-        return Err(validation_error(
-            "path",
-            "path must not contain newline characters",
-        ));
-    }
-
-    let before =
-        std::fs::read_to_string(Path::new(project_root).join(&params.path)).map_err(|err| {
-            CepError::new(
-                CepErrorCode::ExecutionFailed,
-                format!("cannot read edit target '{}': {err}", params.path),
-                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                    command: "mutate.edit.compile".into(),
-                    exit_code: Some(1),
-                    stderr: Some(err.to_string()),
                 }),
                 Retriability::Permanent,
             )
@@ -1263,13 +1067,7 @@ async fn apply_compiled_patch(
         .collect::<Vec<_>>();
 
     for changed_path in &changed_files {
-        let abs_path = if auth.is_direct() {
-            PathBuf::from(changed_path)
-        } else if Path::new(changed_path).is_relative() {
-            PathBuf::from(auth.project_root()).join(changed_path)
-        } else {
-            PathBuf::from(changed_path)
-        };
+        let abs_path = PathBuf::from(changed_path);
         let changes = result
             .changed_files
             .iter()
@@ -1330,276 +1128,6 @@ fn semantic_replan_error(reason: impl Into<String>) -> CepError {
         }),
         Retriability::RequiresReplan,
     )
-}
-
-fn resolve_create_target(
-    project_root: &str,
-    relative_path: &str,
-) -> Result<(PathBuf, PathBuf), CepError> {
-    validate_relative_workspace_path(relative_path)?;
-
-    let full_path = Path::new(project_root).join(relative_path);
-    let parent = full_path.parent().map(Path::to_path_buf).ok_or_else(|| {
-        CepError::new(
-            CepErrorCode::ExecutionFailed,
-            format!("cannot resolve parent for '{relative_path}'"),
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "create".into(),
-                exit_code: None,
-                stderr: Some("no parent directory".into()),
-            }),
-            Retriability::Permanent,
-        )
-    })?;
-
-    Ok((full_path, parent))
-}
-
-fn validate_relative_workspace_path(relative_path: &str) -> Result<(), CepError> {
-    if relative_path.is_empty() {
-        return Err(validation_error("path", "path must not be empty"));
-    }
-
-    if relative_path.contains('\0') {
-        return Err(CepError::new(
-            CepErrorCode::PathContainment,
-            format!("path contains NUL byte: '{relative_path}'"),
-            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                field: "path".into(),
-                reason: "contains NUL byte".into(),
-            }),
-            Retriability::Permanent,
-        ));
-    }
-
-    let path = Path::new(relative_path);
-    if path.is_absolute() {
-        return Err(CepError::new(
-            CepErrorCode::PathContainment,
-            format!("absolute path denied: '{relative_path}'"),
-            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                field: "path".into(),
-                reason: "absolute path is outside workspace scope".into(),
-            }),
-            Retriability::Permanent,
-        ));
-    }
-
-    for component in path.components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(CepError::new(
-                    CepErrorCode::PathContainment,
-                    format!("path traversal denied: '{relative_path}' contains '..'"),
-                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                        field: "path".into(),
-                        reason: "contains '..'".into(),
-                    }),
-                    Retriability::Permanent,
-                ));
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(CepError::new(
-                    CepErrorCode::PathContainment,
-                    format!("path escapes workspace scope: '{relative_path}'"),
-                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                        field: "path".into(),
-                        reason: "path escapes workspace scope".into(),
-                    }),
-                    Retriability::Permanent,
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn missing_parent_dirs(project_root: &str, relative_path: &str) -> Result<Vec<String>, CepError> {
-    validate_relative_workspace_path(relative_path)?;
-
-    let root = Path::new(project_root);
-    let relative = Path::new(relative_path);
-    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
-    let mut current = root.to_path_buf();
-    let mut missing = Vec::new();
-
-    for component in parent.components() {
-        match component {
-            Component::Normal(name) => current.push(name),
-            Component::CurDir => continue,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(CepError::new(
-                    CepErrorCode::PathContainment,
-                    format!("path escapes workspace scope: '{relative_path}'"),
-                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                        field: "path".into(),
-                        reason: "path escapes workspace scope".into(),
-                    }),
-                    Retriability::Permanent,
-                ));
-            }
-        }
-
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(CepError::new(
-                    CepErrorCode::PathContainment,
-                    format!("parent directory '{}' is a symlink", current.display()),
-                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                        field: "path".into(),
-                        reason: "parent directory is a symlink".into(),
-                    }),
-                    Retriability::Permanent,
-                ));
-            }
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(CepError::new(
-                    CepErrorCode::ExecutionFailed,
-                    format!("parent path '{}' is not a directory", current.display()),
-                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                        field: "path".into(),
-                        reason: "parent path is not a directory".into(),
-                    }),
-                    Retriability::Permanent,
-                ));
-            }
-            Ok(_) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(workspace_relative_path(root, &current));
-            }
-            Err(err) => {
-                return Err(CepError::new(
-                    CepErrorCode::ExecutionFailed,
-                    format!(
-                        "cannot inspect parent directory '{}': {err}",
-                        current.display()
-                    ),
-                    CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                        command: "create".into(),
-                        exit_code: None,
-                        stderr: Some(err.to_string()),
-                    }),
-                    Retriability::Permanent,
-                ));
-            }
-        }
-    }
-
-    Ok(missing)
-}
-
-fn workspace_relative_path(project_root: &Path, path: &Path) -> String {
-    path.strip_prefix(project_root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn ensure_existing_parent_chain_safe(
-    project_root: &str,
-    relative_path: &str,
-) -> Result<(), CepError> {
-    let missing = missing_parent_dirs(project_root, relative_path)?;
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(CepError::new(
-            CepErrorCode::ExecutionFailed,
-            format!(
-                "parent directory for '{}' does not exist: {}",
-                relative_path,
-                missing.join(", ")
-            ),
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "create".into(),
-                exit_code: None,
-                stderr: Some("parent directory does not exist".into()),
-            }),
-            Retriability::Permanent,
-        ))
-    }
-}
-
-async fn create_parent_dirs_secure(
-    project_root: &str,
-    relative_path: &str,
-) -> Result<(), CepError> {
-    let (_full_path, parent) = resolve_create_target(project_root, relative_path)?;
-
-    tokio::fs::create_dir_all(&parent).await.map_err(|err| {
-        CepError::new(
-            CepErrorCode::ExecutionFailed,
-            format!(
-                "failed to create parent directories for '{}': {err}",
-                relative_path
-            ),
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "create_parents".into(),
-                exit_code: None,
-                stderr: Some(err.to_string()),
-            }),
-            Retriability::Transient,
-        )
-    })?;
-
-    ensure_existing_parent_chain_safe(project_root, relative_path)
-}
-
-/// Create a file securely using native containment checks.
-async fn create_file_secure(
-    project_root: &str,
-    relative_path: &str,
-    content: &str,
-) -> Result<(), CepError> {
-    let (full_path, _parent) = resolve_create_target(project_root, relative_path)?;
-    ensure_existing_parent_chain_safe(project_root, relative_path)?;
-
-    use tokio::io::AsyncWriteExt;
-
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&full_path)
-        .await
-        .map_err(|e| {
-            CepError::new(
-                CepErrorCode::ExecutionFailed,
-                format!("failed to create '{}': {e}", relative_path),
-                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                    command: "create".into(),
-                    exit_code: None,
-                    stderr: Some(e.to_string()),
-                }),
-                Retriability::Transient,
-            )
-        })?;
-
-    file.write_all(content.as_bytes()).await.map_err(|e| {
-        CepError::new(
-            CepErrorCode::ExecutionFailed,
-            format!("failed to write '{}': {e}", relative_path),
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "create".into(),
-                exit_code: None,
-                stderr: Some(e.to_string()),
-            }),
-            Retriability::Transient,
-        )
-    })?;
-    file.sync_all().await.map_err(|e| {
-        CepError::new(
-            CepErrorCode::ExecutionFailed,
-            format!("failed to sync '{}': {e}", relative_path),
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "create".into(),
-                exit_code: None,
-                stderr: Some(e.to_string()),
-            }),
-            Retriability::Transient,
-        )
-    })
 }
 
 async fn emit_verify_failed(
@@ -1667,8 +1195,8 @@ mod create_tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: None,
-                direct_verify: None,
+                execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
+                verify_config: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
@@ -1836,10 +1364,10 @@ mod create_tests {
         }
     }
 
-    fn direct_ctx_with_write_paths(
+    fn direct_ctx_with_denied_patterns(
         root: &str,
         backend: Arc<CreateSpyBackend>,
-        allowed_patterns: &[&str],
+        denied_patterns: &[&str],
     ) -> HandlerContext {
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -1848,7 +1376,7 @@ mod create_tests {
                 std::path::PathBuf::from(root),
             );
         policy_cfg.workspace = WorkspacePolicy {
-            allowed_write_paths: allowed_patterns.iter().map(|s| (*s).into()).collect(),
+            denied_write_patterns: denied_patterns.iter().map(|s| (*s).into()).collect(),
         };
         let cep_context = Arc::new(CepTurnContext::from_policy(
             lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root),
@@ -1875,20 +1403,20 @@ mod create_tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: Some(ExecutionRouting {
+            execution: ExecutionRouting {
                 backend,
                 upper: UpperContext {
                     execution_backend: "create-spy".into(),
                     upper_workspace_id: "upper-1".into(),
                 },
-            }),
-            direct_verify: None,
+            },
+            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         }
     }
 
     #[tokio::test]
-    async fn create_without_execution_backend_returns_execution_failed() {
+    async fn create_with_null_backend_returns_execution_failed() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
@@ -1903,9 +1431,9 @@ mod create_tests {
             .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        // Without an execution backend, the handler returns ReplanRequired
-        // to signal that an Upper workspace is needed.
-        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        // With a NullExecutionBackend, the backend returns an error during
+        // preflight path resolution.
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
     }
 
     #[tokio::test]
@@ -1914,7 +1442,7 @@ mod create_tests {
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
         let backend = Arc::new(CreateSpyBackend::default());
-        let ctx = direct_ctx_with_write_paths(root, Arc::clone(&backend), &["."]);
+        let ctx = direct_ctx_with_denied_patterns(root, Arc::clone(&backend), &[]);
 
         let params = CreateParams {
             path: "test.txt".into(),
@@ -1943,7 +1471,7 @@ mod create_tests {
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
         let backend = Arc::new(CreateSpyBackend::default());
-        let ctx = direct_ctx_with_write_paths(root, backend, &["src/**"]);
+        let ctx = direct_ctx_with_denied_patterns(root, backend, &["README.md"]);
 
         let params = CreateParams {
             path: "README.md".into(),
@@ -1954,7 +1482,7 @@ mod create_tests {
             .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        // In Direct mode, out-of-scope paths are rejected by the guard.
+        // Blacklist semantics: explicitly denied paths are rejected by the guard.
         assert_eq!(err.code, CepErrorCode::GuardDenied);
     }
 
@@ -2171,7 +1699,7 @@ mod edit_tests {
                 std::path::PathBuf::from(root),
             );
         policy_cfg.workspace = WorkspacePolicy {
-            allowed_write_paths: vec![".".into()],
+            denied_write_patterns: Vec::new(),
         };
         let cep_context = Arc::new(CepTurnContext::from_policy(
             lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root),
@@ -2198,14 +1726,14 @@ mod edit_tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: Some(ExecutionRouting {
+            execution: ExecutionRouting {
                 backend,
                 upper: UpperContext {
                     execution_backend: "mut-spy".into(),
                     upper_workspace_id: "upper-1".into(),
                 },
-            }),
-            direct_verify: None,
+            },
+            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         }
     }

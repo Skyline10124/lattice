@@ -251,9 +251,10 @@ async fn build_production_config(
 
     let mut policy_cfg =
         PolicyConfig::defaults_for_project_root(std::path::Path::new(canonical_root).to_path_buf());
-    // Direct mode: allow writes under the project root and echo as a diagnostic command.
+    // Direct mode: allow all writes under the project root (empty deny list)
+    // and echo as a diagnostic command.
     policy_cfg.workspace = WorkspacePolicy {
-        allowed_write_paths: vec![".".into()],
+        denied_write_patterns: vec![],
     };
     policy_cfg.command.allowed_diagnostic_commands.push(vec!["echo".into()]);
     if allow_localhost {
@@ -267,13 +268,13 @@ async fn build_production_config(
     config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
     config.policy_hook = hook.clone();
     config.default_policy_hook = Some(hook);
-    config.execution = Some(ExecutionRouting {
+    config.execution = ExecutionRouting {
         backend: Arc::new(TestFsBackend::new(canonical_root)),
         upper: UpperContext {
             execution_backend: "test-fs".into(),
             upper_workspace_id: "test-upper".into(),
         },
-    });
+    };
     {
         let mut ctx = config.audit_context.write().await;
         ctx.turn_id = FIXED_TURN_ID.to_string();
@@ -512,13 +513,13 @@ async fn dogfood_impact_matrix_five_production_classes() {
     replay_config.audit_context = replay_audit_ctx;
     replay_config.policy_hook = hook2.clone();
     replay_config.default_policy_hook = Some(hook2);
-    replay_config.execution = Some(ExecutionRouting {
+    replay_config.execution = ExecutionRouting {
         backend: Arc::new(TestFsBackend::new(canonical_str)),
         upper: UpperContext {
             execution_backend: "test-fs".into(),
             upper_workspace_id: "test-upper".into(),
         },
-    });
+    };
 
     let (replay_client, replay_server) = CepTransport::pair(16);
     let replay_task = tokio::spawn(async move {

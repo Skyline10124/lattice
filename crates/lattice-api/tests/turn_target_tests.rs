@@ -305,7 +305,7 @@ fn profile_with_workspace(image: &str) -> LoadedAgentProfile {
             },
             llm: LlmSection::default(),
             lancet: LancetSection::default(),
-            workspace: Some(WorkspaceSection {
+            workspace: WorkspaceSection {
                 egress: None,
                 credentials: vec![],
                 image: Some(image.into()),
@@ -314,7 +314,7 @@ fn profile_with_workspace(image: &str) -> LoadedAgentProfile {
                 allowed_egress_targets: vec![],
                 cleanup_rounds: 3,
                 max_pending_snapshots: 5,
-            }),
+            },
         },
         system_prompt: "sys".into(),
     }
@@ -338,13 +338,11 @@ fn exact_baseline_uses_injected_oid_not_head() {
     );
 
     let profile = profile_with_workspace("docker.io/library/python:3.12-slim");
-    let enabled = vec!["observe.workspace".to_string()];
 
     // Inject the original (older) baseline OID.
-    let config = lattice_api::resolve_upper_config(&profile, &dir, &enabled, Some(&head_oid))
+    let config = lattice_api::resolve_upper_config(&profile, &dir, Some(&head_oid))
         .expect("resolve_upper_config");
 
-    assert!(config.requires_upper);
     assert_eq!(
         config.spec.baseline_oid, head_oid,
         "Upper baseline must equal injected OID, not HEAD ({new_head})"
@@ -360,20 +358,17 @@ fn exact_baseline_none_falls_back_to_head() {
     let head_oid = init_repo(&dir, "main");
 
     let profile = profile_with_workspace("docker.io/library/python:3.12-slim");
-    let enabled = vec!["observe.workspace".to_string()];
 
-    let config = lattice_api::resolve_upper_config(&profile, &dir, &enabled, None)
+    let config = lattice_api::resolve_upper_config(&profile, &dir, None)
         .expect("resolve_upper_config");
 
-    assert!(config.requires_upper);
     assert_eq!(config.spec.baseline_oid, head_oid);
 }
 
 #[test]
-fn exact_baseline_workspace_less_returns_not_applicable() {
-    // A profile without [workspace] returns requires_upper=false regardless
-    // of the baseline parameter. Session project metadata remains explicit.
-    let dir = temp_dir("exact_baseline_no_ws_repo");
+fn exact_baseline_missing_image_fails() {
+    // A profile with [workspace] but no image fails with MissingWorkspaceSource.
+    let dir = temp_dir("exact_baseline_no_image_repo");
     std::fs::create_dir_all(&dir).unwrap();
     let _head = init_repo(&dir, "main");
 
@@ -396,14 +391,24 @@ fn exact_baseline_workspace_less_returns_not_applicable() {
             },
             llm: LlmSection::default(),
             lancet: LancetSection::default(),
-            workspace: None,
+            workspace: WorkspaceSection {
+                egress: None,
+                credentials: vec![],
+                image: None,
+                cpus: None,
+                memory_mb: None,
+                allowed_egress_targets: vec![],
+                cleanup_rounds: 3,
+                max_pending_snapshots: 5,
+            },
         },
         system_prompt: "sys".into(),
     };
-    let enabled = vec!["session.todo_write".to_string()];
 
-    let config = lattice_api::resolve_upper_config(&profile, &dir, &enabled, Some("abc123"))
-        .expect("resolve_upper_config");
-
-    assert!(!config.requires_upper);
+    let err = lattice_api::resolve_upper_config(&profile, &dir, Some("abc123"))
+        .expect_err("should fail without image");
+    assert!(matches!(
+        err,
+        lattice_api::UpperPrepareError::MissingWorkspaceSource
+    ));
 }

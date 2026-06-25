@@ -516,7 +516,7 @@ fn resource_matrix_pending_conflict_no_snapshot() {
         LifecycleFailureKind::BaselineMovement,
     );
     assert_eq!(outcome.disposition, WorkspaceDisposition::PendingConflict);
-    assert_eq!(outcome.resource_action, ResourceAction::None);
+    assert_eq!(outcome.resource_action, ResourceAction::Destroy);
 
     let cid = finalize_turn(
         &outcome,
@@ -665,14 +665,14 @@ fn resource_matrix_aborted_destroys() {
 }
 
 #[test]
-fn resource_matrix_workspace_less_no_action() {
+fn resource_matrix_workspace_less_destroy() {
     let dir = test_dir("rm_workspace_less");
     let mut journal = SnapshotJournal::create_new(&dir).unwrap();
     let mut reconciler = TestReconciler::new();
 
     let outcome = outcome_workspace_less();
     assert_eq!(outcome.disposition, WorkspaceDisposition::NotApplicable);
-    assert_eq!(outcome.resource_action, ResourceAction::None);
+    assert_eq!(outcome.resource_action, ResourceAction::Destroy);
 
     let cid = finalize_turn(
         &outcome,

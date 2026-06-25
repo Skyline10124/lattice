@@ -31,7 +31,7 @@ pub fn normalize_region_path(pattern: &str, project_root: &Path) -> PathBuf {
     }
 }
 
-/// Normalize a WritePath pattern while preserving Guard L1's exact-file vs
+/// Normalize a denied write pattern while preserving Guard L1's exact-file vs
 /// directory-prefix semantics.
 pub fn normalize_write_region_path(pattern: &str, project_root: &Path) -> Option<(PathBuf, bool)> {
     match normalize_write_path_pattern(pattern).ok()? {
@@ -108,8 +108,12 @@ impl EffectiveEffect {
 /// Assembled from the matched capability and the policy configuration.
 /// The final check is `observed ⊆ authorized_effect_region`.
 ///
-/// An empty region contains nothing — any HandlerBackend effect checked
-/// against it produces an EffectViolation (fail-closed, review concern 5).
+/// Write paths use **blacklist** semantics: a path is authorized unless it
+/// matches a denied pattern. An empty `denied_write_paths` and
+/// `denied_write_path_prefixes` means all workspace paths are authorized.
+///
+/// An empty region (no kinds) contains nothing — any HandlerBackend effect
+/// checked against it produces an EffectViolation (fail-closed, review concern 5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedEffectRegion {
     /// Authorized impact kinds.
@@ -118,10 +122,12 @@ pub struct AuthorizedEffectRegion {
     pub read_paths: Vec<PathBuf>,
     /// Authorized observation roots (from Inspect policy roots).
     pub observation_roots: Vec<PathBuf>,
-    /// Authorized exact write paths (from exact-file WritePath capability patterns).
-    pub write_paths: Vec<PathBuf>,
-    /// Authorized write path prefixes (from directory-glob WritePath capability patterns).
-    pub write_path_prefixes: Vec<PathBuf>,
+    /// Denied exact write paths (from exact-file deny patterns). A path matching
+    /// any of these is NOT authorized.
+    pub denied_write_paths: Vec<PathBuf>,
+    /// Denied write path prefixes (from directory-glob deny patterns). A path
+    /// under any of these prefixes is NOT authorized.
+    pub denied_write_path_prefixes: Vec<PathBuf>,
     /// Authorized external hosts (from FetchUrl capability pattern).
     pub hosts: Vec<String>,
     /// Whether session state mutation is authorized.
@@ -141,8 +147,8 @@ impl AuthorizedEffectRegion {
             kinds: BTreeSet::new(),
             read_paths: Vec::new(),
             observation_roots: Vec::new(),
-            write_paths: Vec::new(),
-            write_path_prefixes: Vec::new(),
+            denied_write_paths: Vec::new(),
+            denied_write_path_prefixes: Vec::new(),
             hosts: Vec::new(),
             session_state_allowed: false,
             command_allowed: false,
@@ -155,9 +161,10 @@ impl AuthorizedEffectRegion {
         self.read_paths.extend(other.read_paths.iter().cloned());
         self.observation_roots
             .extend(other.observation_roots.iter().cloned());
-        self.write_paths.extend(other.write_paths.iter().cloned());
-        self.write_path_prefixes
-            .extend(other.write_path_prefixes.iter().cloned());
+        self.denied_write_paths
+            .extend(other.denied_write_paths.iter().cloned());
+        self.denied_write_path_prefixes
+            .extend(other.denied_write_path_prefixes.iter().cloned());
         self.hosts.extend(other.hosts.iter().cloned());
         self.session_state_allowed |= other.session_state_allowed;
         self.command_allowed |= other.command_allowed;
@@ -187,16 +194,17 @@ impl AuthorizedEffectRegion {
                     .any(|r| relative_observation_root_within(root_path, r))
             }
             (ImpactKind::WorkspaceMutation, ObservedScope::Path(path)) => {
-                self.write_paths.iter().any(|wp| path == wp)
-                    || self
-                        .write_path_prefixes
+                // Blacklist semantics: authorized unless path matches a denied pattern.
+                !self.denied_write_paths.iter().any(|wp| path == wp)
+                    && !self
+                        .denied_write_path_prefixes
                         .iter()
                         .any(|wp| relative_path_within_prefix(path, wp))
             }
             (ImpactKind::WorkspaceMutation, ObservedScope::Lines { path, .. }) => {
-                self.write_paths.iter().any(|wp| path == wp)
-                    || self
-                        .write_path_prefixes
+                !self.denied_write_paths.iter().any(|wp| path == wp)
+                    && !self
+                        .denied_write_path_prefixes
                         .iter()
                         .any(|wp| relative_path_within_prefix(path, wp))
             }

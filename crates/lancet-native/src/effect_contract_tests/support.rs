@@ -404,7 +404,8 @@ pub fn build_test_context(
 
     let root_path = std::path::Path::new(root);
     let mut policy_cfg = PolicyConfig::defaults_for_project_root(root_path.to_path_buf());
-    policy_cfg.workspace.allowed_write_paths = vec![".".into()];
+    // Blacklist semantics: empty deny list → all workspace paths allowed
+    policy_cfg.workspace.denied_write_patterns = Vec::new();
     let canonical_root = policy_cfg.project_root.to_string_lossy().to_string();
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
     let mut cep_policy = CepPolicyConfig::defaults_for_project_root(root_path);
@@ -430,14 +431,14 @@ pub fn build_test_context(
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::policy::CepMode::Off,
 
-        execution: Some(ExecutionRouting {
+        execution: ExecutionRouting {
             backend: Arc::new(SupportFsBackend::new(root)),
             upper: UpperContext {
                 execution_backend: "support-fs".into(),
                 upper_workspace_id: "test-upper".into(),
             },
-        }),
-        direct_verify: None,
+        },
+        verify_config: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
     (ctx, event_rx, canonical_root)

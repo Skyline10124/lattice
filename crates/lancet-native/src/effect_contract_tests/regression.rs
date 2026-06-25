@@ -103,8 +103,9 @@ fn create_glob_pattern_within_region() {
             kinds,
             read_paths: Vec::new(),
             observation_roots: Vec::new(),
-            write_paths: Vec::new(),
-            write_path_prefixes: vec![PathBuf::from("src")],
+            denied_write_paths: Vec::new(),
+            // Blacklist semantics: no denied patterns → all paths allowed
+            denied_write_path_prefixes: Vec::new(),
             hosts: Vec::new(),
             session_state_allowed: false,
             command_allowed: false,
@@ -125,7 +126,7 @@ fn create_glob_pattern_within_region() {
     outcome
         .dispatch_result
         .as_ref()
-        .expect("write to src/a.rs with WritePath('src/**') must succeed");
+        .expect("write to src/a.rs with no denied patterns must succeed");
     assert_positive(&outcome, &authority);
 }
 
@@ -157,8 +158,9 @@ fn command_run_composite_mutation_success() {
         kinds,
         read_paths: Vec::new(),
         observation_roots: Vec::new(),
-        write_paths: Vec::new(),
-        write_path_prefixes: vec![PathBuf::from(".")],
+        denied_write_paths: Vec::new(),
+        // Blacklist semantics: empty deny list → all workspace paths allowed
+        denied_write_path_prefixes: Vec::new(),
         hosts: Vec::new(),
         session_state_allowed: false,
         command_allowed: true,

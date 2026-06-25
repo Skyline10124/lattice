@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::execution_backend::{
-    DirectVerifyConfig, DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend,
+    VerifyConfig, DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend,
     ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest, PathFacts,
     PathIntent, UpperContext, WorkspacePath,
 };
@@ -61,8 +61,8 @@ fn test_ctx(
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: None,
-            direct_verify: None,
+            execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
+            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         },
         event_rx,
@@ -245,7 +245,8 @@ fn direct_policy_config(root: &std::path::Path) -> lancet_authority::policy::def
     let mut config = lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
         root.to_path_buf(),
     );
-    config.workspace.allowed_write_paths.push("src/**".into());
+    config.workspace.denied_write_patterns.push("src/**".into());
+    config.workspace.denied_write_patterns.push(".git".into());
     config
         .command
         .allowed_diagnostic_commands
@@ -263,7 +264,7 @@ fn direct_ctx_with_policy_mode(
     cep_mode: lancet_protocol::policy::CepMode,
 ) -> HandlerContext {
     let (mut ctx, _, _) = test_ctx(root);
-    ctx.execution = Some(routing);
+    ctx.execution = routing;
     ctx.cep_mode = cep_mode;
     let config = direct_policy_config(std::path::Path::new(root));
     let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
@@ -417,7 +418,7 @@ async fn direct_command_cwd_denial_preflight_only() {
             cwd: Some(".git".into()),
             env: BTreeMap::new(),
             timeout_ms: None,
-            declared_impact: Some(ImpactKind::CommandExecution),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
         },
     )
     .await
@@ -503,7 +504,7 @@ async fn direct_command_cwd_outside_write_region_denied() {
         ctx,
         RunParams {
             argv: vec!["echo".into(), "outside-scope".into()],
-            cwd: Some("tests".into()),
+            cwd: Some(".git".into()),
             env: BTreeMap::new(),
             timeout_ms: None,
             declared_impact: Some(ImpactKind::WorkspaceMutation),
@@ -521,7 +522,7 @@ async fn direct_command_cwd_outside_write_region_denied() {
 }
 
 #[tokio::test]
-async fn direct_verify_root_cwd_passes_write_scope_preflight() {
+async fn verify_config_root_cwd_passes_write_scope_preflight() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
@@ -535,7 +536,7 @@ async fn direct_verify_root_cwd_passes_write_scope_preflight() {
     ctx.policy_hook = hook.clone();
     ctx.default_policy_hook = Some(hook);
     ctx.cep_context = Arc::new(CepTurnContext::from_policy(config.to_cep_policy_config()));
-    ctx.direct_verify = Some(DirectVerifyConfig {
+    ctx.verify_config = Some(VerifyConfig {
         argv: vec!["echo".into(), "verify-root".into()],
         cwd: WorkspacePath::project_root(),
         timeout_ms: None,
@@ -563,7 +564,7 @@ async fn direct_verify_root_cwd_passes_write_scope_preflight() {
 }
 
 #[tokio::test]
-async fn direct_verify_uses_same_backend() {
+async fn verify_config_uses_same_backend() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
@@ -577,7 +578,7 @@ async fn direct_verify_uses_same_backend() {
     ctx.policy_hook = hook.clone();
     ctx.default_policy_hook = Some(hook);
     ctx.cep_context = Arc::new(CepTurnContext::from_policy(config.to_cep_policy_config()));
-    ctx.direct_verify = Some(DirectVerifyConfig {
+    ctx.verify_config = Some(VerifyConfig {
         argv: vec!["echo".into(), "verify-ok".into()],
         cwd: WorkspacePath::project_root(),
         timeout_ms: None,
@@ -604,10 +605,10 @@ async fn direct_command_out_of_scope_denied() {
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    set_spy_changed_paths(&spy, vec!["tests/out.rs"]);
+    set_spy_changed_paths(&spy, vec!["src/out.rs"]);
     let mut ctx =
         direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
-    ctx.direct_verify = Some(DirectVerifyConfig {
+    ctx.verify_config = Some(VerifyConfig {
         argv: vec!["echo".into(), "verify-should-not-run".into()],
         cwd: WorkspacePath::project_root(),
         timeout_ms: None,
@@ -634,7 +635,7 @@ async fn direct_command_out_of_scope_denied() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|v| v.as_str() == Some("tests/out.rs"))
+            .any(|v| v.as_str() == Some("src/out.rs"))
     );
 }
 
@@ -644,10 +645,10 @@ async fn direct_command_in_scope_proceeds() {
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    set_spy_changed_paths(&spy, vec!["src/lib.rs"]);
+    set_spy_changed_paths(&spy, vec!["lib.rs"]);
     let mut ctx =
         direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
-    ctx.direct_verify = Some(DirectVerifyConfig {
+    ctx.verify_config = Some(VerifyConfig {
         argv: vec!["echo".into(), "verify-ok".into()],
         cwd: WorkspacePath::project_root(),
         timeout_ms: None,
@@ -674,7 +675,7 @@ async fn direct_command_enforce_per_path_effects_pass() {
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    set_spy_changed_paths(&spy, vec!["src/lib.rs"]);
+    set_spy_changed_paths(&spy, vec!["lib.rs"]);
     let ctx = direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
     let ledger = ctx.effect_ledger.clone();
     let authorized = ctx.authorized_region.clone();
@@ -700,7 +701,7 @@ async fn direct_command_enforce_per_path_effects_pass() {
     assert!(matches!(
         &mutation_effects[0].scope,
         lancet_authority::effect::ledger::ObservedScope::Path(path)
-            if path.to_string_lossy() == "src/lib.rs"
+            if path.to_string_lossy() == "lib.rs"
     ));
     for effect in &observed {
         assert!(
@@ -866,7 +867,7 @@ async fn direct_command_cwd_denial_records_guard_l1_rejection() {
             cwd: Some(".git".into()),
             env: BTreeMap::new(),
             timeout_ms: None,
-            declared_impact: Some(ImpactKind::CommandExecution),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
         },
     )
     .await
@@ -879,14 +880,14 @@ async fn direct_command_cwd_denial_records_guard_l1_rejection() {
 }
 
 #[tokio::test]
-async fn direct_verify_failure_records_verification_rejection() {
+async fn verify_config_failure_records_verification_rejection() {
     // When the verify command exits non-zero, the handler must record a
     // VerificationFailure rejection stage and return a verify-failed error.
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    set_spy_changed_paths(&spy, vec!["src/lib.rs"]);
+    set_spy_changed_paths(&spy, vec!["lib.rs"]);
 
     // Configure the spy to return exit_code=1 for the verify call (second exec).
     // We use a single exec_result that returns exit 1 for all calls; the
@@ -900,7 +901,7 @@ async fn direct_verify_failure_records_verification_rejection() {
 
     let mut ctx =
         direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
-    ctx.direct_verify = Some(DirectVerifyConfig {
+    ctx.verify_config = Some(VerifyConfig {
         argv: vec!["echo".into(), "verify-fail".into()],
         cwd: WorkspacePath::project_root(),
         timeout_ms: None,
@@ -919,7 +920,7 @@ async fn direct_verify_failure_records_verification_rejection() {
     assert_eq!(err.code, CepErrorCode::VerifyFailed);
     let meta = routing_metadata(&durable);
     assert_eq!(meta["rejection_stage"], "verification_failure");
-    assert_eq!(meta["denial_source"], "direct_verify");
+    assert_eq!(meta["denial_source"], "verify_config");
 }
 
 #[tokio::test]
@@ -1063,7 +1064,7 @@ async fn direct_command_cancellation_aborts_before_backend() {
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
     let (mut ctx, _, cancel_tx) = test_ctx(root);
-    ctx.execution = Some(routing);
+    ctx.execution = routing;
     ctx.cep_mode = lancet_protocol::policy::CepMode::Off;
     let config = direct_policy_config(std::path::Path::new(root));
     let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(

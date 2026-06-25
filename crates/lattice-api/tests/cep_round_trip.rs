@@ -512,9 +512,10 @@ async fn production_adapter(
     if allow_localhost {
         policy_config.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
     }
-    // Direct mode: allow writes under the project root and echo as a diagnostic command.
+    // Direct mode: allow all writes under the project root (empty deny list)
+    // and echo as a diagnostic command.
     policy_config.workspace = WorkspacePolicy {
-        allowed_write_paths: vec![".".into()],
+        denied_write_patterns: vec![],
     };
     policy_config.command.allowed_diagnostic_commands.push(vec!["echo".into()]);
 
@@ -526,13 +527,13 @@ async fn production_adapter(
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
     config.policy_hook = default_hook.clone();
     config.default_policy_hook = Some(default_hook);
-    config.execution = Some(ExecutionRouting {
+    config.execution = ExecutionRouting {
         backend: Arc::new(TestFsBackend::new(root)),
         upper: UpperContext {
             execution_backend: "test-fs".into(),
             upper_workspace_id: "test-upper".into(),
         },
-    });
+    };
 
     let server_task = tokio::spawn(async move {
         let _ = server.run(registry, config).await;
