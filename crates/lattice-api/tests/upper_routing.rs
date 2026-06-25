@@ -172,7 +172,7 @@ fn create_unattached_target_branch(root: &Path, name: &str) -> String {
     name.to_string()
 }
 
-async fn direct_runtime_fixture(
+async fn runtime_fixture(
     lower: &Path,
     upper_seed: &str,
 ) -> (
@@ -252,7 +252,7 @@ fn tool_call(method: &str, arguments: Value) -> ToolCall {
 async fn observation_uses_upper_relative_paths() {
     let lower = TempDir::new().expect("lower");
     let (adapter, _ws, _handle, _audit, _runtime) =
-        direct_runtime_fixture(lower.path(), "UPPER_SENTINEL").await;
+        runtime_fixture(lower.path(), "UPPER_SENTINEL").await;
     let before = LowerTreeSnapshot::capture(lower.path(), None);
 
     let result = adapter
@@ -288,7 +288,7 @@ async fn observation_uses_upper_relative_paths() {
 async fn mutations_preserve_lower_sentinel() {
     let lower = TempDir::new().expect("lower");
     let (adapter, workspace, handle, _audit, _runtime) =
-        direct_runtime_fixture(lower.path(), "UPPER_BASE").await;
+        runtime_fixture(lower.path(), "UPPER_BASE").await;
     let before = LowerTreeSnapshot::capture(lower.path(), None);
 
     adapter
@@ -318,7 +318,7 @@ async fn mutations_preserve_lower_sentinel() {
 async fn path_denial_records_preflight_only() {
     let lower = TempDir::new().expect("lower");
     let (adapter, _ws, _handle, _audit, _runtime) =
-        direct_runtime_fixture(lower.path(), "UPPER").await;
+        runtime_fixture(lower.path(), "UPPER").await;
 
     let err = adapter
         .execute(&tool_call(

@@ -6,7 +6,7 @@
 use crate::edit::content_hash;
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::execution_backend::{
-    DirectoryEntry as BackendDirectoryEntry, ExecutionBackendError, ExecutionRouting, FindRequest,
+    DirectoryEntry as BackendDirectoryEntry, ExecutionBackendError, FindRequest,
     GrepRequest, PathFacts as BackendPathFacts, PathIntent, WorkspacePath,
 };
 use crate::executor::render::render_file_slice;
@@ -84,7 +84,7 @@ async fn handle_read_file_as(
 ) -> Result<ReadFileResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
 
-    handle_direct_read_file(params, ctx, method).await
+    handle_read_file(params, ctx, method).await
 }
 
 async fn handle_grep_as(
@@ -95,7 +95,7 @@ async fn handle_grep_as(
 ) -> Result<GrepResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
     let path = params.path.clone().unwrap_or_else(|| ".".into());
-    handle_direct_grep(params, ctx, &path, method).await
+    handle_grep(params, ctx, &path, method).await
 }
 
 async fn handle_list_directory_as(
@@ -106,7 +106,7 @@ async fn handle_list_directory_as(
 ) -> Result<ListDirectoryResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
 
-    handle_direct_list_directory(params, ctx, method).await
+    handle_list_directory(params, ctx, method).await
 }
 
 async fn handle_find_files_as(
@@ -118,7 +118,7 @@ async fn handle_find_files_as(
     let path = params.path.clone().unwrap_or_else(|| ".".into());
     let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
 
-    handle_direct_find_files(params, ctx, &path, method).await
+    handle_find_files(params, ctx, &path, method).await
 }
 
 fn charge_observation_bytes(ctx: &HandlerContext, bytes: usize) -> Result<(), CepError> {
@@ -155,9 +155,6 @@ fn path_not_found(path: &str) -> CepError {
 }
 
 
-fn direct_execution(ctx: &HandlerContext) -> &ExecutionRouting {
-    &ctx.execution
-}
 
 fn parse_observation_path(raw: &str, field: &str) -> Result<WorkspacePath, CepError> {
     WorkspacePath::parse(raw).map_err(|err| {
@@ -192,7 +189,7 @@ fn path_kind(kind: crate::execution_backend::PathKind) -> PathKind {
     }
 }
 
-fn validate_direct_observation_facts(path: &str, facts: &BackendPathFacts) -> Result<(), CepError> {
+fn validate_observation_facts(path: &str, facts: &BackendPathFacts) -> Result<(), CepError> {
     validate_path_facts(
         path,
         &path_facts_to_guard(facts),
@@ -242,7 +239,7 @@ fn convert_directory_entry(entry: &BackendDirectoryEntry) -> DirectoryEntry {
     }
 }
 
-async fn record_direct_observation_denial(
+async fn record_observation_denial(
     ctx: &HandlerContext,
     method: &str,
     stage: RejectionStage,
@@ -256,7 +253,7 @@ async fn record_direct_observation_denial(
     emit_denial_metadata(ctx, method, denial_source, backend_invoked).await;
 }
 
-async fn emit_direct_success_metadata(
+async fn emit_success_metadata(
     ctx: &HandlerContext,
     method: &str,
     request_path: &str,
@@ -274,13 +271,13 @@ async fn emit_direct_success_metadata(
         .await;
 }
 
-async fn handle_direct_read_file(
+async fn handle_read_file(
     params: ReadFileParams,
     ctx: HandlerContext,
     method: &str,
 ) -> Result<ReadFileResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = direct_execution(&ctx);
+    let execution = &ctx.execution;
     let ws_path = parse_observation_path(&params.path, "path")?;
     ws_path.require_file_path().map_err(|err| {
         CepError::new(
@@ -302,7 +299,7 @@ async fn handle_direct_read_file(
     {
         Ok(facts) => facts,
         Err(err) => {
-            record_direct_observation_denial(
+            record_observation_denial(
                 &ctx,
                 method,
                 RejectionStage::AdapterPreflight,
@@ -313,8 +310,8 @@ async fn handle_direct_read_file(
             return Err(observation_backend_error(&params.path, err));
         }
     };
-    if let Err(err) = validate_direct_observation_facts(ws_path.as_str(), &facts) {
-        record_direct_observation_denial(
+    if let Err(err) = validate_observation_facts(ws_path.as_str(), &facts) {
+        record_observation_denial(
             &ctx,
             method,
             RejectionStage::AdapterPreflight,
@@ -378,7 +375,7 @@ async fn handle_direct_read_file(
         source: EffectSource::HandlerBackend,
     });
 
-    emit_direct_success_metadata(
+    emit_success_metadata(
         &ctx,
         method,
         &params.path,
@@ -400,13 +397,13 @@ async fn handle_direct_read_file(
     })
 }
 
-async fn handle_direct_list_directory(
+async fn handle_list_directory(
     params: ListDirectoryParams,
     ctx: HandlerContext,
     method: &str,
 ) -> Result<ListDirectoryResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = direct_execution(&ctx);
+    let execution = &ctx.execution;
     let raw_path = if params.path.is_empty() {
         ".".to_string()
     } else {
@@ -422,7 +419,7 @@ async fn handle_direct_list_directory(
     {
         Ok(facts) => facts,
         Err(err) => {
-            record_direct_observation_denial(
+            record_observation_denial(
                 &ctx,
                 method,
                 RejectionStage::AdapterPreflight,
@@ -433,8 +430,8 @@ async fn handle_direct_list_directory(
             return Err(observation_backend_error(&raw_path, err));
         }
     };
-    if let Err(err) = validate_direct_observation_facts(ws_path.as_str(), &facts) {
-        record_direct_observation_denial(
+    if let Err(err) = validate_observation_facts(ws_path.as_str(), &facts) {
+        record_observation_denial(
             &ctx,
             method,
             RejectionStage::AdapterPreflight,
@@ -488,7 +485,7 @@ async fn handle_direct_list_directory(
         source: EffectSource::HandlerBackend,
     });
 
-    emit_direct_success_metadata(
+    emit_success_metadata(
         &ctx,
         method,
         &raw_path,
@@ -509,14 +506,14 @@ async fn handle_direct_list_directory(
     })
 }
 
-async fn handle_direct_grep(
+async fn handle_grep(
     params: GrepParams,
     ctx: HandlerContext,
     path: &str,
     method: &str,
 ) -> Result<GrepResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = direct_execution(&ctx);
+    let execution = &ctx.execution;
     let ws_path = parse_observation_path(path, "path")?;
     let _re = Regex::new(&params.pattern).map_err(|e| {
         CepError::new(
@@ -538,7 +535,7 @@ async fn handle_direct_grep(
     {
         Ok(facts) => facts,
         Err(err) => {
-            record_direct_observation_denial(
+            record_observation_denial(
                 &ctx,
                 method,
                 RejectionStage::AdapterPreflight,
@@ -549,8 +546,8 @@ async fn handle_direct_grep(
             return Err(observation_backend_error(path, err));
         }
     };
-    if let Err(err) = validate_direct_observation_facts(ws_path.as_str(), &facts) {
-        record_direct_observation_denial(
+    if let Err(err) = validate_observation_facts(ws_path.as_str(), &facts) {
+        record_observation_denial(
             &ctx,
             method,
             RejectionStage::AdapterPreflight,
@@ -615,7 +612,7 @@ async fn handle_direct_grep(
         source: EffectSource::HandlerBackend,
     });
 
-    emit_direct_success_metadata(
+    emit_success_metadata(
         &ctx,
         method,
         path,
@@ -636,14 +633,14 @@ async fn handle_direct_grep(
     })
 }
 
-async fn handle_direct_find_files(
+async fn handle_find_files(
     params: FindFilesParams,
     ctx: HandlerContext,
     path: &str,
     method: &str,
 ) -> Result<FindFilesResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = direct_execution(&ctx);
+    let execution = &ctx.execution;
     let ws_path = parse_observation_path(path, "path")?;
 
     ctx.mark_adapter_preflight_invoked();
@@ -654,7 +651,7 @@ async fn handle_direct_find_files(
     {
         Ok(facts) => facts,
         Err(err) => {
-            record_direct_observation_denial(
+            record_observation_denial(
                 &ctx,
                 method,
                 RejectionStage::AdapterPreflight,
@@ -665,8 +662,8 @@ async fn handle_direct_find_files(
             return Err(observation_backend_error(path, err));
         }
     };
-    if let Err(err) = validate_direct_observation_facts(ws_path.as_str(), &facts) {
-        record_direct_observation_denial(
+    if let Err(err) = validate_observation_facts(ws_path.as_str(), &facts) {
+        record_observation_denial(
             &ctx,
             method,
             RejectionStage::AdapterPreflight,
@@ -722,7 +719,7 @@ async fn handle_direct_find_files(
         source: EffectSource::HandlerBackend,
     });
 
-    emit_direct_success_metadata(
+    emit_success_metadata(
         &ctx,
         method,
         path,
@@ -1802,7 +1799,7 @@ mod tests {
             }
         }
 
-        fn direct_obs_ctx(root: &str, backend: Arc<ObsSpyBackend>) -> HandlerContext {
+        fn obs_ctx(root: &str, backend: Arc<ObsSpyBackend>) -> HandlerContext {
             let (event_tx, _rx) = mpsc::channel(8);
             let (_cancel_tx, cancel_rx) = watch::channel(false);
             let policy = CepPolicyConfig::defaults_for_project_root(root);
@@ -1845,14 +1842,14 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn direct_observation_returns_upper_not_lower() {
+        async fn observation_returns_upper_not_lower() {
             let dir = TempDir::new().unwrap();
             fs::write(dir.path().join("conflict.txt"), "LOWER_CONTENT").unwrap();
             let root = dir.path().to_str().unwrap();
             let registry = native_registry(root);
             let backend = Arc::new(ObsSpyBackend::default());
             *backend.read_content.lock().unwrap() = b"UPPER_CONTENT".to_vec();
-            let ctx = direct_obs_ctx(root, backend);
+            let ctx = obs_ctx(root, backend);
             let result = dispatch_read_file(
                 &registry,
                 ReadFileParams {
@@ -1872,12 +1869,12 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn direct_observation_policy_denial_before_preflight() {
+        async fn observation_policy_denial_before_preflight() {
             let dir = TempDir::new().unwrap();
             let root = dir.path().to_str().unwrap();
             let registry = native_registry(root);
             let backend = Arc::new(ObsSpyBackend::default());
-            let ctx = direct_obs_ctx(root, backend);
+            let ctx = obs_ctx(root, backend);
             let routing = ctx.routing_invocation.clone();
             let err = dispatch_read_file(
                 &registry,

@@ -18,20 +18,6 @@ use tokio::sync::RwLock;
 /// Method registry specialized to native CEP handler context.
 pub type MethodRegistry = lancet_dispatch::MethodRegistry<HandlerContext>;
 
-/// Default routing-related [`HandlerContext`] fields for construction sites.
-#[allow(dead_code)]
-pub fn handler_routing_defaults() -> (
-    Option<ExecutionRouting>,
-    Option<VerifyConfig>,
-    RoutingInvocationState,
-) {
-    (
-        None,
-        None,
-        RoutingInvocationState::default(),
-    )
-}
-
 /// Per-call context passed to native registered handlers.
 #[derive(Clone)]
 pub struct HandlerContext {

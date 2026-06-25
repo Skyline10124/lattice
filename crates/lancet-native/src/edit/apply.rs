@@ -58,7 +58,7 @@ async fn apply_patch(
 fn test_storage(project_root: &Path) -> EditStorage {
     use crate::execution_backend::{ExecutionRouting, UpperContext};
     use std::sync::Arc;
-    EditStorage::direct(
+    EditStorage::new(
         ExecutionRouting {
             backend: Arc::new(HostFsBackend::new(project_root)),
             upper: UpperContext {

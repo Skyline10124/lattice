@@ -53,7 +53,7 @@ async fn handle_run_as(
 
     let policy = ctx.cep_context.policy.command.clone();
 
-    execute_direct_command(params, ctx, method, &policy).await
+    execute_command(params, ctx, method, &policy).await
 }
 
 fn out_of_scope_changed_paths_error(out_of_scope_paths: Vec<String>, method: &str) -> CepError {
@@ -74,18 +74,18 @@ fn out_of_scope_changed_paths_error(out_of_scope_paths: Vec<String>, method: &st
     )
 }
 
-async fn execute_direct_command(
+async fn execute_command(
     params: RunParams,
     ctx: HandlerContext,
     method: &'static str,
     policy: &lancet_authority::policy::command::CommandPolicy,
 ) -> Result<RunResult, CepError> {
-    let outcome = execute_direct_command_inner(params, &ctx, method, policy).await;
+    let outcome = execute_command_inner(params, &ctx, method, policy).await;
     ctx.record_routing_metadata();
     outcome
 }
 
-async fn execute_direct_command_inner(
+async fn execute_command_inner(
     params: RunParams,
     ctx: &HandlerContext,
     method: &'static str,
@@ -129,13 +129,13 @@ async fn execute_direct_command_inner(
     );
 
     if ctx.cancellation.is_cancelled() {
-        return Err(direct_command_cancelled_error(method, &params.argv));
+        return Err(command_cancelled_error(method, &params.argv));
     }
 
     let requested_timeout = params.timeout_ms.unwrap_or(policy.default_timeout_ms);
     let effective_timeout = std::cmp::min(requested_timeout, policy.max_timeout_ms);
     let effective_env = build_allowed_params_env(&params.env, policy)?;
-    let cwd = resolve_direct_command_cwd(params.cwd.as_deref())?;
+    let cwd = resolve_command_cwd(params.cwd.as_deref())?;
 
     let execution = &ctx.execution;
 
@@ -145,15 +145,15 @@ async fn execute_direct_command_inner(
         .resolve_path(&cwd, PathIntent::ExecCwd)
         .await
         .map_err(|err| {
-            record_direct_backend_rejection(ctx, execution);
-            direct_command_backend_error(method, &params.argv, err)
+            record_backend_rejection(ctx, execution);
+            command_backend_error(method, &params.argv, err)
         })?;
 
     let authorized_region = ctx
         .authorized_region
         .get()
         .unwrap_or_else(lancet_authority::effect::region::AuthorizedEffectRegion::empty);
-    if let Err(err) = validate_direct_command_cwd(cwd.as_str(), &path_facts, &authorized_region) {
+    if let Err(err) = validate_command_cwd(cwd.as_str(), &path_facts, &authorized_region) {
         ctx.record_rejection(RejectionRecord {
             rejection_stage: RejectionStage::AdapterPreflight,
             denial_source: "guard_l1".into(),
@@ -163,7 +163,7 @@ async fn execute_direct_command_inner(
     }
 
     if ctx.cancellation.is_cancelled() {
-        return Err(direct_command_cancelled_error(method, &params.argv));
+        return Err(command_cancelled_error(method, &params.argv));
     }
 
     let request = ExecRequest::new(params.argv.clone(), effective_env, effective_timeout, cwd)
@@ -181,16 +181,16 @@ async fn execute_direct_command_inner(
 
     ctx.mark_backend_invoked();
     let output = execution.backend.exec(&request).await.map_err(|err| {
-        record_direct_backend_rejection(ctx, execution);
-        direct_command_backend_error(method, &params.argv, err)
+        record_backend_rejection(ctx, execution);
+        command_backend_error(method, &params.argv, err)
     })?;
 
-    record_direct_command_effects(ctx, &effective_impact, &authorized_region);
+    record_command_effects(ctx, &effective_impact, &authorized_region);
 
     if effective_impact == EffectiveImpact::WorkspaceMutation {
         let changed = execution.backend.changed_paths().await.map_err(|err| {
-            record_direct_backend_rejection(ctx, execution);
-            direct_command_backend_error(method, &params.argv, err)
+            record_backend_rejection(ctx, execution);
+            command_backend_error(method, &params.argv, err)
         })?;
 
         let has_write_region = !authorized_region.denied_write_paths.is_empty()
@@ -242,19 +242,19 @@ async fn execute_direct_command_inner(
                     rejection_stage: RejectionStage::VerificationFailure,
                     denial_source: "verify_config".into(),
                 });
-                let spec = verify_spec_from_direct(verify_config);
+                let spec = verify_spec_from_config(verify_config);
                 return Err(verify_failed_error(&spec, &outcome));
             }
             Ok(_) => {
                 ctx.record_effect(ObservedEffect {
                     kind: ImpactKind::CommandExecution,
-                    scope: direct_command_scope(&authorized_region),
+                    scope: command_scope(&authorized_region),
                     required_capability: RequiredCapability::RunCommand,
                     source: EffectSource::Verify,
                 });
             }
             Err(err) => {
-                record_direct_backend_rejection(ctx, execution);
+                record_backend_rejection(ctx, execution);
                 return Err(err);
             }
         }
@@ -307,7 +307,7 @@ async fn execute_direct_command_inner(
     })
 }
 
-fn resolve_direct_command_cwd(raw: Option<&str>) -> Result<WorkspacePath, CepError> {
+fn resolve_command_cwd(raw: Option<&str>) -> Result<WorkspacePath, CepError> {
     match raw {
         Some(path) => WorkspacePath::parse(path).map_err(|err| {
             CepError::new(
@@ -324,7 +324,7 @@ fn resolve_direct_command_cwd(raw: Option<&str>) -> Result<WorkspacePath, CepErr
     }
 }
 
-fn validate_direct_command_cwd(
+fn validate_command_cwd(
     path: &str,
     facts: &BackendPathFacts,
     authorized_region: &lancet_authority::effect::region::AuthorizedEffectRegion,
@@ -355,12 +355,12 @@ fn path_kind_from_backend(kind: crate::execution_backend::PathKind) -> PathKind 
     }
 }
 
-fn record_direct_command_effects(
+fn record_command_effects(
     ctx: &HandlerContext,
     _effective_impact: &EffectiveImpact,
     authorized_region: &lancet_authority::effect::region::AuthorizedEffectRegion,
 ) {
-    let scope = direct_command_scope(authorized_region);
+    let scope = command_scope(authorized_region);
     ctx.record_effect(ObservedEffect {
         kind: ImpactKind::CommandExecution,
         scope,
@@ -369,7 +369,7 @@ fn record_direct_command_effects(
     });
 }
 
-fn direct_command_scope(
+fn command_scope(
     authorized_region: &lancet_authority::effect::region::AuthorizedEffectRegion,
 ) -> ObservedScope {
     if let Some(prefix) = authorized_region.denied_write_path_prefixes.first() {
@@ -381,7 +381,7 @@ fn direct_command_scope(
     ObservedScope::Root(".".into())
 }
 
-fn verify_spec_from_direct(
+fn verify_spec_from_config(
     config: &crate::execution_backend::VerifyConfig,
 ) -> VerifyCommandSpec {
     VerifyCommandSpec {
@@ -392,7 +392,7 @@ fn verify_spec_from_direct(
     }
 }
 
-fn record_direct_backend_rejection(
+fn record_backend_rejection(
     ctx: &HandlerContext,
     execution: &crate::execution_backend::ExecutionRouting,
 ) {
@@ -403,7 +403,7 @@ fn record_direct_backend_rejection(
 }
 
 #[allow(dead_code)]
-fn direct_backend_unavailable_error(method: &str) -> CepError {
+fn backend_unavailable_error(method: &str) -> CepError {
     CepError::new(
         CepErrorCode::ExecutionFailed,
         "command execution requires an Upper execution backend",
@@ -416,7 +416,7 @@ fn direct_backend_unavailable_error(method: &str) -> CepError {
     )
 }
 
-fn direct_command_cancelled_error(method: &str, argv: &[String]) -> CepError {
+fn command_cancelled_error(method: &str, argv: &[String]) -> CepError {
     CepError::new(
         CepErrorCode::ExecutionFailed,
         "command cancelled before backend execution",
@@ -429,7 +429,7 @@ fn direct_command_cancelled_error(method: &str, argv: &[String]) -> CepError {
     )
 }
 
-fn direct_command_backend_error(
+fn command_backend_error(
     _method: &str,
     argv: &[String],
     err: ExecutionBackendError,
@@ -491,17 +491,7 @@ fn direct_command_backend_error(
 fn bounded_stream_meta(content: &str, max_bytes: usize) -> BoundedStreamOutput {
     let total_bytes = content.len();
     let truncated = total_bytes > max_bytes;
-    let tail_bytes = if truncated {
-        content
-            .chars()
-            .take(max_bytes)
-            .collect::<String>()
-            .into_bytes()
-    } else {
-        content.as_bytes().to_vec()
-    };
     BoundedStreamOutput {
-        tail_bytes,
         total_bytes,
         truncated,
     }

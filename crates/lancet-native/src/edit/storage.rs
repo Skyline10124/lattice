@@ -24,7 +24,7 @@ pub(crate) struct EditStorage {
 }
 
 impl EditStorage {
-    pub(crate) fn direct(
+    pub(crate) fn new(
         execution: ExecutionRouting,
         authorized_region: AuthorizedEffectRegion,
     ) -> Self {

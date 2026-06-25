@@ -267,7 +267,7 @@ fn workspace_policy_from_profile(lancet: &LancetSection) -> Result<WorkspacePoli
 }
 
 /// Lower `[lancet.verify]` into immutable verify configuration.
-pub(crate) fn direct_verify_from_profile(
+pub(crate) fn verify_config_from_profile(
     lancet: &LancetSection,
     _runtime_project_root: &Path,
 ) -> Result<Option<VerifyConfig>, ApiError> {
@@ -608,7 +608,7 @@ pub(crate) async fn build_production_turn_deps(
         runtime_version: runtime_version.to_string(),
         execution,
         verify_config: lancet
-            .map(|section| direct_verify_from_profile(section, Path::new(project_root)))
+            .map(|section| verify_config_from_profile(section, Path::new(project_root)))
             .transpose()?
             .flatten(),
     })
@@ -1053,7 +1053,7 @@ mod cep_context_profile_policy {
             }),
             ..Default::default()
         };
-        let verify = direct_verify_from_profile(&cep, dir.path())
+        let verify = verify_config_from_profile(&cep, dir.path())
             .expect("verify")
             .expect("present");
         assert_eq!(verify.argv, vec!["cargo", "test"]);

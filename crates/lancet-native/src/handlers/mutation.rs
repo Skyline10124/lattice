@@ -49,25 +49,17 @@ pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), Ce
     Ok(())
 }
 
-struct MutationAuthorization {
-    direct: MutationAuth,
-}
-
 struct MutationAuth {
     execution: ExecutionRouting,
     authorized_region: AuthorizedEffectRegion,
 }
 
-impl MutationAuthorization {
+impl MutationAuth {
     fn edit_storage(&self) -> EditStorage {
-        EditStorage::direct(
-            self.direct.execution.clone(),
-            self.direct.authorized_region.clone(),
+        EditStorage::new(
+            self.execution.clone(),
+            self.authorized_region.clone(),
         )
-    }
-
-    fn direct(&self) -> &MutationAuth {
-        &self.direct
     }
 }
 
@@ -96,12 +88,12 @@ async fn handle_create_as(
         authorize_workspace_mutation(&ctx, method, &params, std::slice::from_ref(&params.path))
             .await?;
 
-    let create = preflight_direct_create(&auth, &params, method).await?;
+    let create = preflight_create(&auth, &params, method).await?;
 
-    write_direct_create(&ctx, &auth, &create).await?;
+    write_create(&ctx, &auth, &create).await?;
 
-    record_direct_created_dir_effects(&ctx, &create);
-    ctx.record_effect(direct_mutation_path_effect(
+    record_created_dir_effects(&ctx, &create);
+    ctx.record_effect(mutation_path_effect(
         &auth,
         &create.path,
         &create.full_path,
@@ -187,7 +179,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
                     content: content.clone(),
                     create_parents: *create_parents,
                 };
-                create_inputs.push(preflight_direct_create(&auth, &params, Batch::NAME).await?);
+                create_inputs.push(preflight_create(&auth, &params, Batch::NAME).await?);
             }
             BatchOperation::EditFile {
                 path,
@@ -235,14 +227,14 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
     let mut created_dirs = Vec::new();
     let mut seen_created_dirs = HashSet::new();
     for create in &create_inputs {
-        write_direct_create(&ctx, &auth, create).await?;
-        record_direct_created_dir_effects(&ctx, create);
+        write_create(&ctx, &auth, create).await?;
+        record_created_dir_effects(&ctx, create);
         for dir in &create.created_dirs {
             if seen_created_dirs.insert(dir.clone()) {
                 created_dirs.push(dir.clone());
             }
         }
-        ctx.record_effect(direct_mutation_path_effect(
+        ctx.record_effect(mutation_path_effect(
             &auth,
             &create.path,
             &create.full_path,
@@ -291,17 +283,17 @@ async fn authorize_workspace_mutation(
     method: &str,
     params: &impl serde::Serialize,
     changed_paths: &[String],
-) -> Result<MutationAuthorization, CepError> {
+) -> Result<MutationAuth, CepError> {
     let _evaluation = evaluate_and_enforce_policy(ctx, method, params).await?;
 
-    authorize_direct_mutation(ctx, method, changed_paths).await
+    authorize_mutation(ctx, method, changed_paths).await
 }
 
-async fn authorize_direct_mutation(
+async fn authorize_mutation(
     ctx: &HandlerContext,
     method: &str,
     changed_paths: &[String],
-) -> Result<MutationAuthorization, CepError> {
+) -> Result<MutationAuth, CepError> {
     let execution = ctx.execution.clone();
     let authorized_region = ctx
         .authorized_region
@@ -339,7 +331,7 @@ async fn authorize_direct_mutation(
                     rejection_stage: RejectionStage::AdapterPreflight,
                     denial_source: "adapter_preflight".into(),
                 });
-                direct_mutation_backend_error(method)(err)
+                mutation_backend_error(method)(err)
             })?;
         let guard_path = if ws_path.is_project_root() {
             ""
@@ -364,11 +356,9 @@ async fn authorize_direct_mutation(
         }
     }
 
-    Ok(MutationAuthorization {
-        direct: MutationAuth {
-            execution,
-            authorized_region,
-        },
+    Ok(MutationAuth {
+        execution,
+        authorized_region,
     })
 }
 
@@ -380,7 +370,7 @@ fn path_kind(kind: crate::execution_backend::PathKind) -> PathKind {
     }
 }
 
-fn direct_mutation_backend_error(
+fn mutation_backend_error(
     method: &str,
 ) -> impl FnOnce(crate::execution_backend::ExecutionBackendError) -> CepError {
     move |err| {
@@ -424,7 +414,7 @@ fn record_mutation_preflight(
 fn record_mutation_replan_metadata(
     ctx: &HandlerContext,
     method: &str,
-    _auth: &MutationAuthorization,
+    _auth: &MutationAuth,
     changed_paths: &[String],
     expected_hash_status: Option<&str>,
     replan_reason: Option<&str>,
@@ -464,7 +454,7 @@ fn replan_reason_for_error(err: &CepError) -> Option<&'static str> {
 async fn run_mutation_verify_if_configured(
     ctx: &HandlerContext,
     method: &str,
-    _auth: &MutationAuthorization,
+    _auth: &MutationAuth,
 ) -> Result<(), CepError> {
     let Some(verify_config) = ctx.verify_config.as_ref() else {
         return Ok(());
@@ -512,8 +502,8 @@ async fn run_mutation_verify_if_configured(
     }
 }
 
-async fn preflight_direct_create(
-    auth: &MutationAuthorization,
+async fn preflight_create(
+    auth: &MutationAuth,
     params: &CreateParams,
     method: &str,
 ) -> Result<PreflightCreate, CepError> {
@@ -533,14 +523,14 @@ async fn preflight_direct_create(
             )
         })?;
     let created_dirs = if params.create_parents {
-        missing_parent_dirs_direct(auth, &params.path).await?
+        missing_parent_dirs(auth, &params.path).await?
     } else {
         let parent = Path::new(&params.path)
             .parent()
             .and_then(|p| p.to_str())
             .filter(|p| !p.is_empty());
         if let Some(parent_path) = parent
-            && !parent_exists_direct(auth, parent_path).await?
+            && !parent_exists(auth, parent_path).await?
         {
             return Err(CepError::new(
                 CepErrorCode::ExecutionFailed,
@@ -566,24 +556,23 @@ async fn preflight_direct_create(
     })
 }
 
-async fn parent_exists_direct(auth: &MutationAuthorization, path: &str) -> Result<bool, CepError> {
+async fn parent_exists(auth: &MutationAuth, path: &str) -> Result<bool, CepError> {
     let ws_path =
         WorkspacePath::parse(path).map_err(|err| validation_error("path", err.to_string()))?;
-    let direct = auth.direct();
-    let facts = direct
+    let facts = auth
         .execution
         .backend
         .resolve_path(&ws_path, PathIntent::ListDirectory)
         .await
-        .map_err(direct_mutation_backend_error("mutate.create"))?;
+        .map_err(mutation_backend_error("mutate.create"))?;
     Ok(facts.exists)
 }
 
 /// Walk ancestor directories of `relative_path` via the Upper backend, returning
 /// the list of missing ancestors.  All filesystem probing goes through
 /// `ExecutionBackend::resolve_path` — never the host filesystem.
-async fn missing_parent_dirs_direct(
-    auth: &MutationAuthorization,
+async fn missing_parent_dirs(
+    auth: &MutationAuth,
     relative_path: &str,
 ) -> Result<Vec<String>, CepError> {
     let ws_path = WorkspacePath::parse(relative_path)
@@ -597,7 +586,6 @@ async fn missing_parent_dirs_direct(
 
     // Walk ancestor directories from root to the file's parent.
     let components: Vec<&str> = normalized.split('/').collect();
-    let direct = auth.direct();
     let mut missing = Vec::new();
     let mut current = String::new();
 
@@ -616,12 +604,12 @@ async fn missing_parent_dirs_direct(
 
         let ancestor = WorkspacePath::parse(&current)
             .map_err(|err| validation_error("path", err.to_string()))?;
-        let facts = direct
+        let facts = auth
             .execution
             .backend
             .resolve_path(&ancestor, PathIntent::ListDirectory)
             .await
-            .map_err(direct_mutation_backend_error("mutate.create"))?;
+            .map_err(mutation_backend_error("mutate.create"))?;
 
         if !facts.exists {
             missing.push(current.clone());
@@ -662,9 +650,9 @@ async fn missing_parent_dirs_direct(
     Ok(missing)
 }
 
-async fn write_direct_create(
+async fn write_create(
     ctx: &HandlerContext,
-    auth: &MutationAuthorization,
+    auth: &MutationAuth,
     create: &PreflightCreate,
 ) -> Result<(), CepError> {
     let storage = auth.edit_storage();
@@ -690,8 +678,8 @@ fn patch_diag_to_cep(diag: crate::edit::types::PatchDiagnostic) -> CepError {
     )
 }
 
-fn direct_mutation_path_effect(
-    _auth: &MutationAuthorization,
+fn mutation_path_effect(
+    _auth: &MutationAuth,
     path: &str,
     _full_path: &Path,
 ) -> ObservedEffect {
@@ -704,7 +692,7 @@ fn direct_mutation_path_effect(
     }
 }
 
-fn record_direct_created_dir_effects(ctx: &HandlerContext, create: &PreflightCreate) {
+fn record_created_dir_effects(ctx: &HandlerContext, create: &PreflightCreate) {
     for dir in &create.created_dirs {
         ctx.record_effect(ObservedEffect {
             kind: ImpactKind::WorkspaceMutation,
@@ -755,27 +743,27 @@ fn reject_duplicate_batch_path(seen: &mut HashSet<String>, path: &str) -> Result
 }
 
 async fn compile_edit_patch(
-    auth: &MutationAuthorization,
+    auth: &MutationAuth,
     params: &EditParams,
 ) -> Result<String, CepError> {
-    let fragment = compile_edit_operation_fragment_direct(&auth.edit_storage(), params).await?;
+    let fragment = compile_edit_operation_fragment(&auth.edit_storage(), params).await?;
     Ok(format!("*** Begin Patch\n{fragment}*** End Patch\n"))
 }
 
 async fn compile_batch_edit_patch(
-    auth: &MutationAuthorization,
+    auth: &MutationAuth,
     edits: &[EditParams],
 ) -> Result<String, CepError> {
     let mut patch = String::from("*** Begin Patch\n");
     for edit in edits {
-        let fragment = compile_edit_operation_fragment_direct(&auth.edit_storage(), edit).await?;
+        let fragment = compile_edit_operation_fragment(&auth.edit_storage(), edit).await?;
         patch.push_str(&fragment);
     }
     patch.push_str("*** End Patch\n");
     Ok(patch)
 }
 
-async fn compile_edit_operation_fragment_direct(
+async fn compile_edit_operation_fragment(
     storage: &EditStorage,
     params: &EditParams,
 ) -> Result<String, CepError> {
@@ -1021,7 +1009,7 @@ fn patch_lines(content: &str) -> (Vec<String>, bool) {
 
 async fn apply_compiled_patch(
     ctx: &HandlerContext,
-    auth: &MutationAuthorization,
+    auth: &MutationAuth,
     patch: &str,
 ) -> Result<CompiledPatchApply, CepError> {
     let document = parse_patch_document(patch).map_err(|parse_err| {
@@ -1364,7 +1352,7 @@ mod create_tests {
         }
     }
 
-    fn direct_ctx_with_denied_patterns(
+    fn ctx_with_denied_patterns(
         root: &str,
         backend: Arc<CreateSpyBackend>,
         denied_patterns: &[&str],
@@ -1442,7 +1430,7 @@ mod create_tests {
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
         let backend = Arc::new(CreateSpyBackend::default());
-        let ctx = direct_ctx_with_denied_patterns(root, Arc::clone(&backend), &[]);
+        let ctx = ctx_with_denied_patterns(root, Arc::clone(&backend), &[]);
 
         let params = CreateParams {
             path: "test.txt".into(),
@@ -1471,7 +1459,7 @@ mod create_tests {
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
         let backend = Arc::new(CreateSpyBackend::default());
-        let ctx = direct_ctx_with_denied_patterns(root, backend, &["README.md"]);
+        let ctx = ctx_with_denied_patterns(root, backend, &["README.md"]);
 
         let params = CreateParams {
             path: "README.md".into(),
@@ -1691,7 +1679,7 @@ mod edit_tests {
         }
     }
 
-    fn direct_mut_ctx(root: &str, backend: Arc<MutSpyBackend>) -> HandlerContext {
+    fn mut_ctx(root: &str, backend: Arc<MutSpyBackend>) -> HandlerContext {
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut policy_cfg =
@@ -1750,7 +1738,7 @@ mod edit_tests {
             .lock()
             .unwrap()
             .insert("target.txt".into(), before.as_bytes().to_vec());
-        let ctx = direct_mut_ctx(root, Arc::clone(&backend));
+        let ctx = mut_ctx(root, Arc::clone(&backend));
 
         let params = EditParams {
             path: "target.txt".into(),
@@ -1793,7 +1781,7 @@ mod edit_tests {
             .lock()
             .unwrap()
             .insert("target.txt".into(), before.as_bytes().to_vec());
-        let ctx = direct_mut_ctx(root, Arc::clone(&backend));
+        let ctx = mut_ctx(root, Arc::clone(&backend));
 
         let params = EditParams {
             path: "target.txt".into(),
@@ -1824,7 +1812,7 @@ mod edit_tests {
             .lock()
             .unwrap()
             .insert("target.txt".into(), before.as_bytes().to_vec());
-        let ctx = direct_mut_ctx(root, Arc::clone(&backend));
+        let ctx = mut_ctx(root, Arc::clone(&backend));
         let durable = ctx.durable_metadata.clone();
 
         let params = EditParams {
@@ -1868,7 +1856,7 @@ mod edit_tests {
             .lock()
             .unwrap()
             .insert("Cargo.toml".into(), before.as_bytes().to_vec());
-        let ctx = direct_mut_ctx(root, Arc::clone(&backend));
+        let ctx = mut_ctx(root, Arc::clone(&backend));
 
         let params = BatchParams {
             operations: vec![
@@ -1915,7 +1903,7 @@ mod edit_tests {
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
         let backend = Arc::new(MutSpyBackend::default());
-        let ctx = direct_mut_ctx(root, Arc::clone(&backend));
+        let ctx = mut_ctx(root, Arc::clone(&backend));
 
         let params = BatchParams {
             operations: vec![
@@ -1947,12 +1935,12 @@ mod edit_tests {
     }
 
     #[tokio::test]
-    async fn direct_mutation_create_uses_backend_only() {
+    async fn mutation_create_uses_backend_only() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
         let backend = Arc::new(MutSpyBackend::default());
-        let ctx = direct_mut_ctx(root, Arc::clone(&backend));
+        let ctx = mut_ctx(root, Arc::clone(&backend));
         let params = CreateParams {
             path: "new.txt".into(),
             content: "created-on-upper".into(),

@@ -12,7 +12,6 @@ use crate::execution_backend::{
     PathFacts as BackendPathFacts, PathIntent, PathKind as BackendPathKind,
     RoutingInvocationState,
 };
-use crate::executor::process::{ExecuteConfig, execute_argv};
 use crate::server::registry::Cancellation;
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::{PathFacts, PathKind, validate_path_facts};
@@ -183,21 +182,6 @@ pub fn validate_verify_command(
     }
 
     Ok(())
-}
-
-/// Run a verify command after a successful mutation.
-///
-/// Uses command-runner safety machinery (timeout, kill/reap, output cap).
-/// Does NOT require a second active envelope.
-/// Does NOT route as normal LLM-issued exec.command_run.
-/// Does NOT recursively trigger verify.
-pub async fn run_verify(
-    spec: &VerifyCommandSpec,
-    project_root: &str,
-    policy: &CommandPolicy,
-    cancellation: &mut Cancellation,
-) -> Result<VerifyOutcome, CepError> {
-    run_verify_at_project_root(spec, project_root, policy, cancellation).await
 }
 
 /// Normalize a Direct verify profile config into one Upper [`ExecRequest`].
@@ -436,45 +420,6 @@ fn bounded_summary(output: &str, max_bytes: usize) -> Option<String> {
     Some(truncated)
 }
 
-async fn run_verify_at_project_root(
-    spec: &VerifyCommandSpec,
-    project_root: &str,
-    policy: &CommandPolicy,
-    cancellation: &mut Cancellation,
-) -> Result<VerifyOutcome, CepError> {
-    let effective_timeout = spec
-        .timeout_ms
-        .unwrap_or(std::cmp::min(policy.default_timeout_ms, 60_000));
-
-    // Build effective env: minimal, just PATH from inherited
-    let mut env = BTreeMap::new();
-    if let Ok(path) = std::env::var("PATH") {
-        env.insert("PATH".to_string(), path);
-    }
-
-    let (output, _stdout_meta, _stderr_meta) = execute_argv(ExecuteConfig {
-        project_root,
-        argv: &spec.argv,
-        cwd: spec.cwd.as_deref(),
-        env: &env,
-        timeout_ms: effective_timeout,
-        cancellation,
-        max_output_bytes: policy.max_output_bytes,
-    })
-    .await?;
-
-    let exit_code = output.status.code().unwrap_or(-1);
-    let expected = spec.expected_exit_code.unwrap_or(0);
-    let success = exit_code == expected;
-
-    Ok(VerifyOutcome {
-        success,
-        exit_code,
-        stdout_summary: Some(String::from_utf8_lossy(&output.stdout).to_string()),
-        stderr_summary: Some(String::from_utf8_lossy(&output.stderr).to_string()),
-    })
-}
-
 #[cfg(test)]
 mod verify_tests {
     use super::*;
@@ -534,38 +479,6 @@ mod verify_tests {
         };
         let err = validate_verify_command(&spec, &policy, ".").unwrap_err();
         assert_eq!(err.code, CepErrorCode::SchemaMismatch);
-    }
-
-    #[tokio::test]
-    async fn run_verify_echo_succeeds() {
-        let policy = default_policy();
-        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        let mut cancel = Cancellation::new(cancel_rx);
-        let spec = VerifyCommandSpec {
-            argv: vec!["echo".into(), "ok".into()],
-            cwd: None,
-            timeout_ms: None,
-            expected_exit_code: Some(0),
-        };
-        let outcome = run_verify(&spec, ".", &policy, &mut cancel).await.unwrap();
-        assert!(outcome.success);
-        assert_eq!(outcome.exit_code, 0);
-    }
-
-    #[tokio::test]
-    async fn run_verify_wrong_exit_code_is_failure() {
-        let policy = default_policy();
-        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        let mut cancel = Cancellation::new(cancel_rx);
-        let spec = VerifyCommandSpec {
-            argv: vec!["false".into()],
-            cwd: None,
-            timeout_ms: None,
-            expected_exit_code: Some(0),
-        };
-        let outcome = run_verify(&spec, ".", &policy, &mut cancel).await.unwrap();
-        assert!(!outcome.success);
-        assert_eq!(outcome.exit_code, 1);
     }
 
     mod verify_config {
@@ -755,7 +668,7 @@ use lancet_protocol::ImpactKind;
             (execution, spy)
         }
 
-        fn direct_config() -> VerifyConfig {
+        fn test_config() -> VerifyConfig {
             VerifyConfig {
                 argv: vec!["echo".into(), "ok".into()],
                 cwd: WorkspacePath::project_root(),
@@ -774,7 +687,7 @@ use lancet_protocol::ImpactKind;
             let region = AuthorizedEffectRegion::empty();
 
             let outcome = run_verify_with_backend(
-                &direct_config(),
+                &test_config(),
                 &execution,
                 &policy,
                 &mut cancel,
@@ -892,7 +805,7 @@ use lancet_protocol::ImpactKind;
             let routing_state = RoutingInvocationState::default();
 
             let err = run_verify_with_backend(
-                &direct_config(),
+                &test_config(),
                 &execution,
                 &policy,
                 &mut cancel,
@@ -953,7 +866,7 @@ use lancet_protocol::ImpactKind;
             let routing_state = RoutingInvocationState::default();
 
             let err = run_verify_with_backend(
-                &direct_config(),
+                &test_config(),
                 &execution,
                 &policy,
                 &mut cancel,
@@ -967,41 +880,6 @@ use lancet_protocol::ImpactKind;
             assert_ne!(err.code, CepErrorCode::VerifyFailed);
             assert!(routing_state.backend_invoked());
             assert_eq!(spy.exec_calls.lock().unwrap().len(), 1);
-        }
-
-        static HOST_VERIFY_SENTINEL: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-
-        #[tokio::test]
-        async fn verify_config_never_invokes_host_run_verify() {
-            HOST_VERIFY_SENTINEL.store(false, std::sync::atomic::Ordering::SeqCst);
-            struct HostVerifyGuard;
-            impl Drop for HostVerifyGuard {
-                fn drop(&mut self) {
-                    if HOST_VERIFY_SENTINEL.load(std::sync::atomic::Ordering::SeqCst) {
-                        panic!("host run_verify path must not be used in Direct verify");
-                    }
-                }
-            }
-            let _guard = HostVerifyGuard;
-            let policy = default_policy();
-            let (execution, _spy) = routing_with_spy();
-            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-            let mut cancel = Cancellation::new(cancel_rx);
-            let routing_state = RoutingInvocationState::default();
-
-            let outcome = run_verify_with_backend(
-                &direct_config(),
-                &execution,
-                &policy,
-                &mut cancel,
-                &routing_state,
-                &AuthorizedEffectRegion::empty(),
-            )
-            .await
-            .unwrap();
-
-            assert!(outcome.success);
         }
     }
 }
