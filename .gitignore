@@ -3,6 +3,7 @@ target/
 *.swo
 *~
 .env
+.envrc
 .agents/
 .claude/
 .codex/
