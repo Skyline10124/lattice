@@ -46,9 +46,9 @@ microsandbox adapter. It also provides a deterministic test adapter for CI.
   and support baseline delivery under blocked egress.
 - WATCH: production microsandbox tests require KVM, libkrun firmware, and a
   reachable image registry; normal CI must remain deterministic and KVM-free.
-- WATCH: Direct-mode changed-path detection currently relies on Git porcelain,
-  so ignored files are an accepted defense-in-depth gap documented in
-  `FINDINGS.md`.
+- WATCH: changed-path detection (Upper→Lower write-back) currently relies on
+  Git porcelain, so ignored files are an accepted defense-in-depth gap
+  documented in `FINDINGS.md`.
 - WATCH: the microsandbox SDK is pinned; SDK shape changes must update the
   adapter and the probe coverage together.
 

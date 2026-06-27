@@ -16,7 +16,7 @@ The workspace dependency graph is layered. Keep dependencies pointing from
 higher layers to lower layers; do not introduce reverse dependencies.
 
 ```text
-Layer 0 (leaf):  lancet-protocol   lattice-llm   lattice-session
+Layer 0 (leaf):  lancet-protocol   lattice-llm   lattice-session   lattice-workspace
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
                  lattice-agent(->llm,session)
@@ -28,7 +28,7 @@ Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
                                authority,llm)
 Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,
                             authority,native)
-Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
+Layer 4:         lattice-api(-> lancet-api + lattice runtime crates incl. lattice-workspace)
 Layer 5:         lattice-tui(-> api + presentation dependencies)
                  lattice-cli(-> api,tui + presentation dependencies)
 ```
@@ -46,11 +46,12 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
 | `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers, audit integration, and effect-contract enforcement. |
 | `lancet-api` | Unified LANCET public API. Composes the CEP runtime (`LancetRuntime`/`LancetServer`: server lifecycle, `CepClient`, audit, attestation, catalog-derived tool exposure) from the native crates, taking LANCET-native policy types. Independent of LATTICE session/agent/profile layers. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, URL/DNS security, and logging. |
-| `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and SQLite graph store. |
+| `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`). |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
+| `lattice-workspace` | Backend-neutral Upper workspace boundary: sandbox lifecycle, typed workspace-relative filesystem/command primitives, baseline delivery, egress/credential config, warm templates, and the production microsandbox (libkrun) adapter. |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
-| `lattice-tui` | Ratatui/crossterm terminal UI shell over `lattice-api` sessions and `stream_turn`. Owns terminal lifecycle, input handling, transcript/status rendering, and in-band TUI errors. |
+| `lattice-tui` | Inline CLI chat REPL over `lattice-api` sessions and `stream_turn` via `rustyline` (no alternate screen, no ratatui/crossterm). Owns readline state, turn execution, and token/status rendering to stdout/stderr. |
 | `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
 
 ## CEP And LANCET Contracts
@@ -71,13 +72,17 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
   `lancet-cep::project_tool_definitions`; do not reintroduce native/API shim
   projection functions or parallel hard-coded tool definitions.
 - Mutating methods must pass authority policy, Guard L1, effect checks, audit
-  recording, and optional verification. Direct-mode policy enforces the write
-  scope; there is no envelope to declare.
+  recording, and optional verification. The production execution path is the
+  MSB/Upper workspace boundary (`lattice-workspace`); Direct-mode naming was
+  retired and host-verify was deleted. Write-scope is enforced as a blacklist
+  (deny list), not an allowlist envelope; there is no envelope to declare.
 - LANCET policy is configured through profile `[lancet]` sections: mode,
-  project root, observation, network, command, isolation, and external policy
-  file pointers.
-- SQLite for CEP audit records belongs in `lancet-audit`; SQLite for
-  conversation graph state belongs in `lattice-session`.
+  project root, observation, network, command, effects, workspace policy,
+  verify, and external policy file pointers. The `[lancet.isolation]` section
+  and landlock/netns command isolation were removed; do not reintroduce them.
+- SQLite for CEP audit records belongs in `lancet-audit`; the conversation
+  graph is git-backed (git refs under `refs/lattice/sessions/<id>/**`) and
+  lives in `lattice-session`. SQLite session graph storage was retired.
 
 ## Turn Execution
 

@@ -21,7 +21,7 @@ in-toto attestation construction, and attestation persistence.
 
 ## Boundaries
 
-- Session graph SQLite belongs in `lattice-session`, not here.
+- Session graph state belongs in `lattice-session` (git-backed, not SQLite), not here.
 - Do not make live authority, policy, or effect decisions in this crate.
 - Do not perform native execution or inspect workspace contents directly.
 - Keep canonicalization deterministic; attestation hashes depend on it.

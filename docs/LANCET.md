@@ -1,5 +1,23 @@
 # LANCET runtime-enforced surface
 
+> **DRIFT NOTICE — 2026-06-27:** This document was written against the
+> v1.4-alpha boundary and contains several claims that no longer match the
+> production code. Known drift corrected elsewhere in this pass:
+> - The canonical CEP catalog has **9 methods**, not 10. `session.envelope`
+>   was removed (the catalog and tests assert its absence).
+> - The production execution path is the **MSB/Upper workspace boundary**
+>   (`lattice-workspace`); Direct-mode naming was retired and host-verify was
+>   deleted. Write-scope is enforced as a blacklist, not an allowlist envelope.
+> - The `[lancet.isolation]` profile section and landlock/netns command
+>   isolation were **removed** (commit a29072e2). The
+>   "Command physical-boundary configuration", overlay/artifact commit, and
+>   live-canary sections below describe that **removed** system and are
+>   retained as historical design context only — do not treat them as current
+>   behavior. Current configuration is documented in `docs/CONFIGURATION.md`
+>   and current architecture in `docs/ARCHITECTURE.md`.
+> - The session graph is **git-backed**, not SQLite. SQLite remains only for
+>   CEP audit (`lancet-audit`).
+
 LATTICE agents execute tools through **LANCET**, the controlled execution and failure-learning subsystem. LANCET uses **CEP** (Controlled Execution Protocol) internally: JSON-RPC methods with capability envelopes, policy gating, path guards, and a flat append-only audit store.
 
 ## Public surface (v1.4-alpha boundary contract)
@@ -12,7 +30,7 @@ plus base-authority planning. The underlying contract remains split across
 | Component | Description |
 |-----------|-------------|
 | `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
-| `lancet-catalog::CATALOG` | The 10-method canonical CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`, `exec.command_run`, `fetch.web`, `session.todo_write`, `session.envelope`, `observe.audit`, `observe.audit_replay` |
+| `lancet-catalog::CATALOG` | The 9-method canonical CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`, `exec.command_run`, `fetch.web`, `session.todo_write`, `observe.audit`, `observe.audit_replay`. (`session.envelope` was removed; the catalog and tests assert its absence.) |
 | Method params/results | Typed `*Params` / `*Result` structs per catalog method in `lancet-catalog` |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
@@ -24,7 +42,7 @@ Internal implementation is split across `lancet-authority` (default policy, Guar
 **Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
 
 Pre-v1.3.1 method names are removed. They are not accepted by the adapter or
-native registry, and LLM-facing tool definitions are projected only from the 10
+native registry, and LLM-facing tool definitions are projected only from the 9
 canonical catalog methods. Tool exposure is separate from base authority:
 enabled methods filter the model-visible catalog projection, while
 catalog descriptors declare method-local base authority requirements.

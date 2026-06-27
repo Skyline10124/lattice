@@ -842,3 +842,77 @@ Severity: MAJOR (TUI target branch and CLI disposition visibility) / MINOR
 `crates/lattice-api/tests/phase36_resume.rs`,
 `.planning/phases/36-turn-lifecycle-and-disposition/36-UAT.md`, and this
 changelog.
+
+---
+
+## Doc-sync: documentation drift correction — 2026-06-27
+
+Severity: INFO (documentation-only; no behavior change).
+
+**Problem:** Several living-reference docs had drifted from the codebase after
+recent refactors:
+- Root `AGENTS.md` and `README.md` claimed a 10-method CEP catalog including
+  `session.envelope` (actual: 9 methods; `session.envelope` removed).
+- Root `AGENTS.md` and `crates/lattice-session/AGENTS.md` described the session
+  graph as SQLite-backed (actual: git-backed `GitSessionGraphStore`;
+  `sqlite_graph/` retired by commit `687dd5c5`).
+- Root `AGENTS.md` `lattice-tui` role said "Ratatui/crossterm terminal UI shell"
+  (actual: rustyline inline REPL; no alternate screen, no ratatui).
+- Root `AGENTS.md` crate table and layer graph omitted `lattice-workspace`
+  (Layer 0 leaf; production MSB/Upper workspace adapter).
+- Root `AGENTS.md` CEP/LANCET contracts described Direct-mode write-scope
+  enforcement and `[lancet.isolation]` (actual: Direct-mode retired by commits
+  `c160d3eb`/`e939ae02`/`dc507d15`; landlock/netns isolation removed by
+  `a29072e2`; `[lancet.isolation]` removed from the profile schema).
+- `docs/LANCET.md` claimed a 10-method catalog and documented the removed
+  landlock/netns/isolation system as current behavior.
+- `docs/lancet-warn-report.md` (v1.3.1-alpha point-in-time baseline) listed
+  `session.envelope` as current.
+- `FINDINGS.md` carried OPEN entries (L-20, L-29-01/02/03/04, L-31-02, L-34-01)
+  referencing removed files (`sqlite_graph/`, `executor/supervisor/`).
+- `crates/lancet-audit/AGENTS.md` and `crates/lattice-workspace/AGENTS.md`
+  carried stale "SQLite session" / "Direct-mode" wording.
+
+**Fix:**
+- Regenerated canonical docs from the live codebase (each grounded by a
+  doc-writer subagent that verified facts against source):
+  `README.md` (144 lines), `docs/ARCHITECTURE.md` (332 lines),
+  `docs/CONFIGURATION.md` (511 lines), `docs/GETTING-STARTED.md` (255 lines),
+  `docs/DEVELOPMENT.md` (206 lines), `docs/TESTING.md` (308 lines),
+  `CONTRIBUTING.md` (238 lines). All carry the GSD marker and use
+  `<!-- VERIFY: ... -->` markers for claims not discoverable from the repo.
+- Surgically corrected living refs:
+  - `AGENTS.md`: added `lattice-workspace` to Layer 0 and the crate table;
+    fixed `lattice-session` (git-backed) and `lattice-tui` (rustyline REPL)
+    roles; replaced Direct-mode/isolation/SQLite claims with MSB-Upper,
+    removed-isolation, and git-backed statements.
+  - `crates/lattice-session/AGENTS.md`: rewrote Role/Sub-Architecture/Boundaries
+    for the git-backed store (`git_graph/`, `migrate/`, `promotion.rs`);
+    closed L-20 as moot.
+  - `crates/lancet-audit/AGENTS.md`: session graph is git-backed, not SQLite.
+  - `crates/lattice-workspace/AGENTS.md`: dropped retired "Direct-mode" naming
+    from the changed-path WATCH.
+  - `docs/LANCET.md`: added a drift notice; corrected the catalog to 9 methods
+    (no `session.envelope`); marked the removed isolation/overlay/canary
+    sections as historical design context.
+  - `docs/lancet-warn-report.md`: added a point-in-time notice that
+    `session.envelope` was removed.
+- `FINDINGS.md`: moved L-20, L-29-01/02/03/04, L-31-02, L-34-01 from OPEN to
+  OBSOLETE/CLOSED with dated close notes; re-scoped L-34-02 (changed-path
+  porcelain gap) to the MSB/Upper boundary.
+
+**Verification:**
+- All 7 canonical docs confirmed on disk with GSD markers and line counts.
+- Spot-checked generated docs for stale claims — every `session.envelope` /
+  `sqlite_graph` / `ratatui` / `landlock` / `isolation.command` hit is a
+  deliberate corrective statement ("no `session.envelope`", "sqlite_graph was
+  removed", "no ratatui/alternate screen", "landlock/netns removed"), not a
+  stale assertion.
+- `FINDINGS.md` OPEN section no longer references removed `sqlite_graph/` or
+  `executor/supervisor/` paths.
+
+Files: `README.md`, `docs/ARCHITECTURE.md`, `docs/CONFIGURATION.md`,
+`docs/GETTING-STARTED.md`, `docs/DEVELOPMENT.md`, `docs/TESTING.md`,
+`CONTRIBUTING.md`, `AGENTS.md`, `crates/lattice-session/AGENTS.md`,
+`crates/lancet-audit/AGENTS.md`, `crates/lattice-workspace/AGENTS.md`,
+`docs/LANCET.md`, `docs/lancet-warn-report.md`, `FINDINGS.md`, `FIX.md`.
