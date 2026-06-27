@@ -86,6 +86,9 @@ base64 = "0.22"
 dotenvy = "0.15"
 toml_edit = "0.25"
 ratatui = "0.30"
+# Exact-pinned: 18.0.1 is <7 days old at adoption time; bump only after
+# re-reviewing the readline behavior surface.
+rustyline = "=18.0.0"
 
 # Dev dependencies
 tempfile = "3"
