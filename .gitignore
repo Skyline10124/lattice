@@ -11,6 +11,7 @@ target/
 .sisyphus/
 .codegraph/
 .devin/
+.omo/
 .mcp.json
 opencode.jsonc
 .pytest_cache/
