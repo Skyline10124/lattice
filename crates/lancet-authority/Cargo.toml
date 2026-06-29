@@ -9,7 +9,7 @@ description = "LANCET authority, policy, guard, envelope, and effect-region sema
 [dependencies]
 lancet-protocol = { workspace = true }
 lancet-catalog = { workspace = true }
-lattice-llm = { workspace = true }
+net-guard = { workspace = true }
 blake3 = { workspace = true }
 brush-parser = { workspace = true }
 serde = { workspace = true }

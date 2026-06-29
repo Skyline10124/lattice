@@ -16,16 +16,16 @@ The workspace dependency graph is layered. Keep dependencies pointing from
 higher layers to lower layers; do not introduce reverse dependencies.
 
 ```text
-Layer 0 (leaf):  lancet-protocol   lattice-llm   lattice-session   lattice-workspace
+Layer 0 (leaf):  lancet-protocol   net-guard   lattice-llm   lattice-session   lattice-workspace
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
                  lattice-agent(->llm,session)
 Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
-                 lancet-authority(->protocol,catalog,llm)
+                 lancet-authority(->protocol,catalog,net-guard)
 Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
 Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
-                               authority,llm)
+                               authority,net-guard)
 Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,
                             authority,native)
 Layer 4:         lattice-api(-> lancet-api + lattice runtime crates incl. lattice-workspace)
@@ -45,7 +45,8 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger, and effect-region checks. |
 | `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers, audit integration, and effect-contract enforcement. |
 | `lancet-api` | Unified LANCET public API. Composes the CEP runtime (`LancetRuntime`/`LancetServer`: server lifecycle, `CepClient`, audit, attestation, catalog-derived tool exposure) from the native crates, taking LANCET-native policy types. Independent of LATTICE session/agent/profile layers. |
-| `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, URL/DNS security, and logging. |
+| `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, public-address resolution, private/reserved IP checks, and rebinding-domain checks. Depends only on `url` and `std`. |
+| `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, HTTP request pinning, and logging. |
 | `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`). |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
@@ -138,6 +139,8 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
   catalog-derived tool projection.
 - Keep provider protocol details in `lattice-llm`; higher layers should consume
   typed events and errors.
+- Keep shared URL/DNS safety primitives and neutral errors in `net-guard`;
+  policy and HTTP client construction stay in their owning crates.
 - Keep native filesystem, shell, web, mutation, verify, and transport lifecycle
   implementation in `lancet-native`.
 - Keep LANCET runtime composition and its public surface in `lancet-api`; it

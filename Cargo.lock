@@ -2333,7 +2333,7 @@ dependencies = [
  "brush-parser",
  "lancet-catalog",
  "lancet-protocol",
- "lattice-llm",
+ "net-guard",
  "proptest",
  "serde",
  "serde_json",
@@ -2388,8 +2388,8 @@ dependencies = [
  "lancet-catalog",
  "lancet-dispatch",
  "lancet-protocol",
- "lattice-llm",
  "libc",
+ "net-guard",
  "proptest",
  "regex",
  "reqwest",
@@ -2494,6 +2494,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures",
+ "net-guard",
  "reqwest",
  "serde",
  "serde_json",
@@ -3189,6 +3190,13 @@ dependencies = [
  "vm-memory 0.16.2",
  "vmm-sys-util",
  "zstd",
+]
+
+[[package]]
+name = "net-guard"
+version = "0.1.0"
+dependencies = [
+ "url",
 ]
 
 [[package]]

@@ -7,10 +7,10 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
+use net_guard::NetGuardError;
 
 use crate::providers;
 use crate::router::{ProviderKind, ResolvedModel};
-use crate::security;
 use crate::sse;
 use crate::stub::{LlmError, LlmStream};
 use crate::types::{ChatRequest, LlmEvent};
@@ -26,7 +26,7 @@ const MAX_ERROR_BODY_SIZE: usize = 64 * 1024;
 
 /// Validate base URL and read the API key from the environment.
 pub fn validate_and_read_key(resolved: &ResolvedModel) -> Result<String, LlmError> {
-    security::validate_base_url(&resolved.base_url)?;
+    net_guard::validate_base_url(&resolved.base_url).map_err(llm_error_from_net_guard)?;
 
     let key = std::env::var(&resolved.api_key_env).map_err(|_| LlmError::Credential {
         message: format!(
@@ -357,7 +357,7 @@ fn build_http_client_for_url(url: &str) -> Result<reqwest::Client, LlmError> {
         });
     };
 
-    if security::host_is_dns_rebinding_domain(&host) {
+    if net_guard::host_is_dns_rebinding_domain(&host) {
         return Err(LlmError::Config {
             message: format!(
                 "hostname '{}' is a known DNS rebinding domain and is not allowed",
@@ -372,13 +372,21 @@ fn build_http_client_for_url(url: &str) -> Result<reqwest::Client, LlmError> {
         });
     }
 
-    let pinned = security::resolve_public_socket_addrs(&host, port)?;
+    let pinned =
+        net_guard::resolve_public_socket_addrs(&host, port).map_err(llm_error_from_net_guard)?;
     http_client_builder()
         .resolve_to_addrs(host.as_str(), &pinned)
         .build()
         .map_err(|e| LlmError::Config {
             message: format!("failed to build HTTP client: {}", e),
         })
+}
+
+fn llm_error_from_net_guard(error: NetGuardError) -> LlmError {
+    match error {
+        NetGuardError::Config { message } => LlmError::Config { message },
+        NetGuardError::Dns { message } => LlmError::Dns { message },
+    }
 }
 
 fn llm_error_from_request(err: reqwest::Error) -> LlmError {

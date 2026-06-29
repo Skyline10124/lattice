@@ -74,10 +74,9 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
         let r = reference.expect("read reference");
         if let Some(name) = r.name()
             && name.starts_with(&candidate_prefix)
+            && let Some(oid) = r.target()
         {
-            if let Some(oid) = r.target() {
-                candidate_refs.push((name.to_string(), oid));
-            }
+            candidate_refs.push((name.to_string(), oid));
         }
     }
     assert_eq!(
@@ -146,10 +145,9 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
         let r = reference.expect("read reference");
         if let Some(name) = r.name()
             && name.starts_with(&candidate_prefix)
+            && let Some(oid) = r.target()
         {
-            if let Some(oid) = r.target() {
-                candidate_refs_after.push((name.to_string(), oid));
-            }
+            candidate_refs_after.push((name.to_string(), oid));
         }
     }
     assert_eq!(

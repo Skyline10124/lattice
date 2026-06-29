@@ -5,7 +5,7 @@
 
 use lancet_protocol::error::{PermissionErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
-use lattice_llm::security;
+use net_guard as security;
 use std::net::IpAddr;
 use url::Url;
 

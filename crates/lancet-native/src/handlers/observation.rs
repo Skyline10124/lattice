@@ -839,7 +839,7 @@ mod tests {
                 .parent()
                 .and_then(|p| if p.is_dir() { Some(crate::execution_backend::PathKind::Directory) } else { None });
             let byte_size = if full.is_file() {
-                Some(full.metadata().map(|m| m.len() as u64).unwrap_or(0))
+                Some(full.metadata().map(|m| m.len()).unwrap_or(0))
             } else {
                 None
             };
@@ -908,20 +908,19 @@ mod tests {
             Box::pin(async move {
                 let mut entries = Vec::new();
                 if full.is_dir() {
-                    for e in std::fs::read_dir(&full).map_err(|e| {
-                        ExecutionBackendError::Unavailable {
+                    for entry in std::fs::read_dir(&full)
+                        .map_err(|e| ExecutionBackendError::Unavailable {
                             message: e.to_string(),
-                        }
-                    })? {
-                        if let Ok(entry) = e {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            let kind = if entry.path().is_dir() {
-                                crate::execution_backend::PathKind::Directory
-                            } else {
-                                crate::execution_backend::PathKind::File
-                            };
-                            entries.push(DirectoryEntry { name, kind });
-                        }
+                        })?
+                        .flatten()
+                    {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let kind = if entry.path().is_dir() {
+                            crate::execution_backend::PathKind::Directory
+                        } else {
+                            crate::execution_backend::PathKind::File
+                        };
+                        entries.push(DirectoryEntry { name, kind });
                     }
                 }
                 Ok(entries)
@@ -964,22 +963,24 @@ mod tests {
                                     continue;
                                 }
                                 walk_dir(&path, search_root, regex, matches);
-                            } else if path.is_file() && !path.is_symlink() {
-                                if let Ok(content) = std::fs::read_to_string(&path) {
-                                    for (line_num, line) in content.lines().enumerate() {
-                                        if regex.is_match(line) {
-                                            let rel = path.strip_prefix(search_root)
-                                                .unwrap_or(&path)
-                                                .to_string_lossy()
-                                                .to_string();
-                                            matches.push(GrepMatch {
-                                                path: WorkspacePath::parse(&rel).unwrap_or_else(|_| {
-                                                    WorkspacePath::parse(".").unwrap()
-                                                }),
-                                                line_number: (line_num + 1) as u64,
-                                                line: line.to_string(),
-                                            });
-                                        }
+                            } else if path.is_file()
+                                && !path.is_symlink()
+                                && let Ok(content) = std::fs::read_to_string(&path)
+                            {
+                                for (line_num, line) in content.lines().enumerate() {
+                                    if regex.is_match(line) {
+                                        let rel = path
+                                            .strip_prefix(search_root)
+                                            .unwrap_or(&path)
+                                            .to_string_lossy()
+                                            .to_string();
+                                        matches.push(GrepMatch {
+                                            path: WorkspacePath::parse(&rel).unwrap_or_else(|_| {
+                                                WorkspacePath::parse(".").unwrap()
+                                            }),
+                                            line_number: (line_num + 1) as u64,
+                                            line: line.to_string(),
+                                        });
                                     }
                                 }
                             }

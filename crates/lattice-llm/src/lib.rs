@@ -8,7 +8,6 @@ mod endpoints;
 mod logging;
 mod providers;
 mod router;
-pub mod security;
 pub mod sse;
 mod stub;
 mod types;

@@ -36,8 +36,8 @@ and base authority planning helpers.
 - FIXED M-24-04: this crate separates `ToolExposure` from
   `BaseAuthorityPlan`; enabled method exposure now carries catalog-declared
   requirements instead of acting as the authority interface itself.
-- PARTIAL L-llm-coupling: LANCET-facing tool definitions live here. URL/DNS
-  security remains outside this crate.
+- FIXED L-llm-coupling: LANCET-facing tool definitions stay here while shared
+  URL/DNS safety primitives live in the neutral `net-guard` leaf.
 
 ## Verification
 

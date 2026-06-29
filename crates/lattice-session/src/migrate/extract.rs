@@ -74,6 +74,23 @@ pub(crate) struct ExtractedCommit {
     pub snapshot_lost: bool,
 }
 
+type CommitRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+);
+
 /// Persistent legacy SHA-256 `commit_id` → new Git OID map.
 ///
 /// Checkpointed at `<target_repo>/.lattice/migration/idmap.json` so a restart
@@ -249,16 +266,18 @@ fn collect_tips(session: &SessionRow, refs: &[ExtractedRef]) -> Vec<String> {
     let mut tips: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for r in refs {
-        if let Some(cid) = &r.commit_id {
-            if !cid.is_empty() && seen.insert(cid.clone()) {
-                tips.push(cid.clone());
-            }
-        }
-    }
-    if let Some(cid) = &session.head_commit_id {
-        if !cid.is_empty() && seen.insert(cid.clone()) {
+        if let Some(cid) = &r.commit_id
+            && !cid.is_empty()
+            && seen.insert(cid.clone())
+        {
             tips.push(cid.clone());
         }
+    }
+    if let Some(cid) = &session.head_commit_id
+        && !cid.is_empty()
+        && seen.insert(cid.clone())
+    {
+        tips.push(cid.clone());
     }
     tips
 }
@@ -363,22 +382,7 @@ fn read_commit(conn: &Connection, session_id: &str, commit_id: &str) -> Result<E
         disposition,
         lifecycle_json,
         created_at,
-    ): (
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        String,
-        String,
-    ) = conn
+    ): CommitRow = conn
         .query_row(
             "SELECT parents_json, message_ids_json, agent_name, profile_snapshot_hash,
                     profile_snapshot_json, model, provider, status, commit_message,

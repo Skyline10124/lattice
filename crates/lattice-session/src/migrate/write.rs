@@ -59,15 +59,14 @@ pub(crate) fn write_migration(
             // membership alone would later build refs pointing at a missing
             // object. Confirm with find_commit; if the entry is stale, fall
             // through and re-derive deterministically (cheap, same OID).
-            if let Some(oid_str) = idmap.get(&commit.commit_id) {
-                if let Ok(oid) = git2::Oid::from_str(oid_str) {
-                    if repo.find_commit(oid).is_ok() {
-                        stats.commits_migrated += 1;
-                        continue;
-                    }
-                }
-                // idmap entry is stale/corrupt — re-derive below.
+            if let Some(oid_str) = idmap.get(&commit.commit_id)
+                && let Ok(oid) = git2::Oid::from_str(oid_str)
+                && repo.find_commit(oid).is_ok()
+            {
+                stats.commits_migrated += 1;
+                continue;
             }
+            // Missing, stale, or corrupt idmap entries are re-derived below.
             let oid = write_commit_object(repo, session, commit, idmap)?;
             idmap.insert(commit.commit_id.clone(), oid.to_string());
             stats.commits_migrated += 1;

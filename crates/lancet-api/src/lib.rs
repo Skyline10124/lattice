@@ -24,9 +24,9 @@
 //! schema; translating an application profile into policy is the host's
 //! responsibility.
 //!
-//! The remaining LATTICE coupling in the LANCET stack is URL/DNS security
-//! helpers reused from `lattice-llm`; CEP tool definitions are owned by
-//! `lancet-cep`.
+//! Shared URL/DNS safety primitives come from the neutral `net-guard` leaf
+//! through the lower runtime crates; CEP tool definitions are owned by
+//! `lancet-cep`, so this crate remains independent of LATTICE runtime crates.
 //!
 //! # Entry points
 //!

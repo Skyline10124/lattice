@@ -66,20 +66,20 @@ impl SupportFsBackend {
                     if let Ok(rel) = path.strip_prefix(root) {
                         files.insert(rel.to_string_lossy().to_string());
                     }
-                } else if path.is_dir() {
-                    if let Ok(rel) = path.strip_prefix(root) {
-                        let prefix = rel.to_string_lossy().to_string();
-                        if let Ok(sub) = std::fs::read_dir(&path) {
-                            for se in sub.flatten() {
-                                let sp = se.path();
-                                if sp.is_file() {
-                                    let srel = sp.strip_prefix(root).unwrap_or(&sp);
-                                    files.insert(srel.to_string_lossy().to_string());
-                                }
+                } else if path.is_dir()
+                    && let Ok(rel) = path.strip_prefix(root)
+                {
+                    let prefix = rel.to_string_lossy().to_string();
+                    if let Ok(sub) = std::fs::read_dir(&path) {
+                        for se in sub.flatten() {
+                            let sp = se.path();
+                            if sp.is_file() {
+                                let srel = sp.strip_prefix(root).unwrap_or(&sp);
+                                files.insert(srel.to_string_lossy().to_string());
                             }
                         }
-                        let _ = prefix;
                     }
+                    let _ = prefix;
                 }
             }
         }

@@ -164,7 +164,7 @@ impl crate::execution_backend::ExecutionBackend for HostFsBackend {
         >,
     > {
         let full = self.resolve(path);
-        Box::pin(async move { std::fs::read(&full).map_err(|e| io_err(e)) })
+        Box::pin(async move { std::fs::read(&full).map_err(io_err) })
     }
 
     fn write_file(

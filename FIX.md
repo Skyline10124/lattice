@@ -4,6 +4,49 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #3 / L-llm-coupling: extract neutral `net-guard` leaf — 2026-06-29
+
+Severity: LOW (`architecture` / `crate-boundary`).
+
+**Problem:** LANCET authority and native web execution reused
+`lattice_llm::security`, leaving the otherwise independent LANCET stack with a
+dependency on the LATTICE provider crate.
+
+**Fix:**
+
+- Added the Layer-0 `net-guard` crate with a five-item public interface:
+  `NetGuardError`, `host_is_dns_rebinding_domain`,
+  `is_private_or_reserved_ip`, `resolve_public_socket_addrs`, and
+  `validate_base_url`. Its only non-`std` dependency is `url`.
+- Moved the existing URL, private/reserved-address, rebinding-domain, and DNS
+  guard implementation plus all 15 security regression tests into `net-guard`.
+- Updated `lattice-llm` to map neutral config/DNS errors back to `LlmError`;
+  updated `lancet-authority` and `lancet-native` to depend directly on
+  `net-guard`; deleted `lattice-llm/src/security.rs`.
+- Removed the open `L-llm-coupling` finding and updated workspace/crate
+  architecture guidance.
+- The required workspace clippy gate exposed pre-existing lint failures in
+  SQLite-to-Git migration helpers, native test backends, and a candidate-ref
+  integration test. Applied only clippy's behavior-preserving control-flow and
+  type-alias rewrites so the mandated gate is green.
+
+**Verification:**
+
+- `cargo test -p net-guard -p lattice-llm -p lancet-authority -p lancet-native`
+  — pass.
+- `cargo test --workspace` — pass.
+- `cargo clippy --workspace --all-targets -- -D warnings` — pass.
+- `cargo tree -p net-guard --depth 1` — only `url`.
+- `rg lattice_llm crates/lancet-*` — no matches.
+- `rg 'lattice-llm' crates/lancet-*/Cargo.toml` — no matches.
+
+**Changed files:** workspace manifests/lockfile; `crates/net-guard/**`;
+`lattice-llm` client/security ownership; LANCET authority/native imports and
+manifests; root and crate-local architecture/review records; clippy-only
+migration/native/API test helpers.
+
+---
+
 ## Phase 38 code review fixes: git session backend hardening — 2026-06-23
 
 Severity: 1 CRITICAL, 8 WARNING, 3 INFO (all fixed via `--fix --all`).

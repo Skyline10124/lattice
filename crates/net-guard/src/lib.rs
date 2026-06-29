@@ -1,22 +1,33 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Base URL validation and SSRF safety floor.
-//!
-//! Validates that provider base URLs are safe before HTTP clients connect:
-//! HTTPS-only for public hosts, plain HTTP allowed only for localhost
-//! development endpoints, no userinfo, and no private/reserved IP targets.
-//!
-//! DNS rebinding: hostnames are resolved at request time and pinned with
-//! `reqwest::RequestBuilder::resolve` so a second lookup cannot redirect to
-//! a private address after validation.
+//! Neutral URL and DNS safety guards.
 
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
-use crate::stub::LlmError;
+/// Errors produced by URL configuration checks and DNS resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetGuardError {
+    /// The URL or hostname violates the network safety configuration.
+    Config { message: String },
+    /// DNS resolution failed or returned no addresses.
+    Dns { message: String },
+}
+
+impl fmt::Display for NetGuardError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Config { message } => write!(formatter, "configuration error: {message}"),
+            Self::Dns { message } => write!(formatter, "DNS error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for NetGuardError {}
 
 /// Public DNS services that map arbitrary labels to attacker-chosen IPs.
-pub const DNS_REBINDING_DOMAIN_SUFFIXES: &[&str] = &[
+const DNS_REBINDING_DOMAIN_SUFFIXES: &[&str] = &[
     "nip.io",
     "xip.io",
     "sslip.io",
@@ -91,23 +102,23 @@ fn is_ipv4_mapped_private(v6: &Ipv6Addr) -> bool {
 
 /// Resolve `host:port` and return socket addresses that are all on the public internet.
 ///
-/// Used immediately before HTTP requests; callers should pin these addresses with
-/// `reqwest::RequestBuilder::resolve` to close DNS rebinding TOCTOU.
-pub fn resolve_public_socket_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, LlmError> {
+/// Callers should pin these addresses on the HTTP request to close DNS-rebinding TOCTOU.
+pub fn resolve_public_socket_addrs(
+    host: &str,
+    port: u16,
+) -> Result<Vec<SocketAddr>, NetGuardError> {
     if host_is_dns_rebinding_domain(host) {
-        return Err(LlmError::Config {
+        return Err(NetGuardError::Config {
             message: format!(
-                "hostname '{}' is a known DNS rebinding domain and is not allowed",
-                host
+                "hostname '{host}' is a known DNS rebinding domain and is not allowed"
             ),
         });
     }
 
     if is_localhost_host(host) {
-        return Err(LlmError::Config {
+        return Err(NetGuardError::Config {
             message: format!(
-                "hostname '{}' is localhost and cannot be resolved for remote pinning",
-                host
+                "hostname '{host}' is localhost and cannot be resolved for remote pinning"
             ),
         });
     }
@@ -118,8 +129,8 @@ pub fn resolve_public_socket_addrs(host: &str, port: u16) -> Result<Vec<SocketAd
         .parse::<IpAddr>()
     {
         if is_private_or_reserved(ip) {
-            return Err(LlmError::Config {
-                message: format!("hostname targets private/reserved IP {}", ip),
+            return Err(NetGuardError::Config {
+                message: format!("hostname targets private/reserved IP {ip}"),
             });
         }
         return Ok(vec![SocketAddr::new(ip, port)]);
@@ -127,23 +138,22 @@ pub fn resolve_public_socket_addrs(host: &str, port: u16) -> Result<Vec<SocketAd
 
     let addrs: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
-        .map_err(|e| LlmError::Dns {
-            message: format!("DNS resolution failed for '{}': {}", host, e),
+        .map_err(|error| NetGuardError::Dns {
+            message: format!("DNS resolution failed for '{host}': {error}"),
         })?
         .collect();
 
     if addrs.is_empty() {
-        return Err(LlmError::Dns {
-            message: format!("hostname '{}' did not resolve to any address", host),
+        return Err(NetGuardError::Dns {
+            message: format!("hostname '{host}' did not resolve to any address"),
         });
     }
 
     for addr in &addrs {
         if is_private_or_reserved(addr.ip()) {
-            return Err(LlmError::Config {
+            return Err(NetGuardError::Config {
                 message: format!(
-                    "hostname '{}' resolves to private/reserved IP {}",
-                    host,
+                    "hostname '{host}' resolves to private/reserved IP {}",
                     addr.ip()
                 ),
             });
@@ -154,80 +164,74 @@ pub fn resolve_public_socket_addrs(host: &str, port: u16) -> Result<Vec<SocketAd
 }
 
 /// Validate a provider base URL.
-pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
+pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
     if url.is_empty() {
-        return Err(LlmError::Config {
+        return Err(NetGuardError::Config {
             message: "base_url must not be empty".to_string(),
         });
     }
 
-    let parsed = url::Url::parse(url).map_err(|e| LlmError::Config {
-        message: format!("invalid base_url: {}", e),
+    let parsed = url::Url::parse(url).map_err(|error| NetGuardError::Config {
+        message: format!("invalid base_url: {error}"),
     })?;
 
-    let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
-        return Err(LlmError::Config {
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(NetGuardError::Config {
             message: format!(
                 "scheme '{}' not allowed — only http:// and https:// are permitted",
-                scheme
+                parsed.scheme()
             ),
         });
     }
 
-    let host_str = match parsed.host_str() {
-        Some(h) if !h.is_empty() => h,
-        _ => {
-            return Err(LlmError::Config {
-                message: "base_url has scheme but no host".to_string(),
-            });
-        }
-    };
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| NetGuardError::Config {
+            message: "base_url has scheme but no host".to_string(),
+        })?;
 
-    if scheme == "http" && host_str != "localhost" && host_str != "127.0.0.1" && host_str != "::1" {
-        return Err(LlmError::Config {
+    if parsed.scheme() == "http" && !matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return Err(NetGuardError::Config {
             message: "HTTP is only allowed for localhost — use HTTPS for remote hosts".to_string(),
         });
     }
 
     if parsed.username() != "" || parsed.password().is_some() {
-        return Err(LlmError::Config {
+        return Err(NetGuardError::Config {
             message: "base_url contains userinfo which is not allowed".to_string(),
         });
     }
 
-    // Reject IP literals that are private/reserved regardless of scheme.
-    let host_clean = host_str.trim_start_matches('[').trim_end_matches(']');
+    let host_clean = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_clean.parse::<IpAddr>()
         && is_private_or_reserved(ip)
     {
-        return Err(LlmError::Config {
-            message: format!("base_url targets private/reserved IP {}", ip),
+        return Err(NetGuardError::Config {
+            message: format!("base_url targets private/reserved IP {ip}"),
         });
     }
 
-    if host_is_dns_rebinding_domain(host_str) {
-        return Err(LlmError::Config {
+    if host_is_dns_rebinding_domain(host) {
+        return Err(NetGuardError::Config {
             message: format!(
-                "base_url hostname '{}' is a known DNS rebinding domain and is not allowed",
-                host_str
+                "base_url hostname '{host}' is a known DNS rebinding domain and is not allowed"
             ),
         });
     }
 
-    // Best-effort DNS check when resolution is available (offline CI may not resolve).
-    // Request-time pinning in `client::build_http_client_for_url` is authoritative.
-    if !host_str.ends_with(".local") && !is_localhost_host(host_str) {
+    // Best-effort DNS check when resolution is available. Request-time pinning
+    // by callers remains authoritative.
+    if !host.ends_with(".local") && !is_localhost_host(host) {
         let port = parsed
             .port()
-            .unwrap_or(if scheme == "https" { 443 } else { 80 });
-        if let Ok(addrs) = (host_str, port).to_socket_addrs() {
+            .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+        if let Ok(addrs) = (host, port).to_socket_addrs() {
             for addr in addrs {
                 if is_private_or_reserved(addr.ip()) {
-                    return Err(LlmError::Config {
+                    return Err(NetGuardError::Config {
                         message: format!(
-                            "hostname '{}' resolves to private/reserved IP {}",
-                            host_str,
+                            "hostname '{host}' resolves to private/reserved IP {}",
                             addr.ip()
                         ),
                     });
@@ -242,7 +246,6 @@ pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoints::{ANTHROPIC_BASE_URL, OPENAI_BASE_URL};
 
     #[test]
     fn reject_file_scheme() {
@@ -288,17 +291,8 @@ mod tests {
 
     #[test]
     fn allow_https_public() {
-        assert!(validate_base_url(OPENAI_BASE_URL).is_ok());
-        assert!(validate_base_url(ANTHROPIC_BASE_URL).is_ok());
-    }
-
-    #[test]
-    fn reject_empty_url() {
-        let err = validate_base_url("").expect_err("empty base_url must be rejected");
-        assert!(
-            err.to_string().contains("must not be empty"),
-            "error should explain empty url, got: {err}"
-        );
+        assert!(validate_base_url("https://api.openai.com/v1").is_ok());
+        assert!(validate_base_url("https://api.anthropic.com").is_ok());
     }
 
     #[test]
@@ -308,8 +302,6 @@ mod tests {
 
     #[test]
     fn reject_empty_host_after_scheme() {
-        // url crate parses "https:///v1" as host="v1" path="/" — valid.
-        // Use a non-parseable URL to exercise the "no host" path.
         assert!(validate_base_url("https://").is_err());
     }
 
@@ -346,5 +338,14 @@ mod tests {
         let err = resolve_public_socket_addrs("evil.nip.io", 443)
             .expect_err("rebinding domain must be rejected");
         assert!(err.to_string().contains("rebinding"));
+    }
+
+    #[test]
+    fn reject_empty_url() {
+        let err = validate_base_url("").expect_err("empty base_url must be rejected");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "error should explain empty url, got: {err}"
+        );
     }
 }

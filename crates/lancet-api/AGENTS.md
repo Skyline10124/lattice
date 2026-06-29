@@ -44,8 +44,8 @@ embedded without pulling in the LATTICE session/agent/profile layers.
   `lancet-cep` facade. `MethodDescriptor::base_authority` supplies method-local
   requirements, this crate no longer maps method names directly to base envelope
   grants, and projection wrapper shims were removed.
-- PARTIAL L-llm-coupling: CEP tool definitions moved to `lancet-cep`; URL/DNS
-  security still reuses `lattice_llm::security`. Tracked in `FINDINGS.md`.
+- FIXED L-llm-coupling: shared URL/DNS safety primitives moved to the neutral
+  `net-guard` leaf; the LANCET dependency graph has no LATTICE runtime crates.
 
 ## Next Actions
 
@@ -53,7 +53,6 @@ embedded without pulling in the LATTICE session/agent/profile layers.
   `LancetRuntimeConfig` with a LANCET-native type — never accept `LancetSection`.
 - When adding a public entry point, re-export only the types in its signature
   from `lib.rs`; do not add pass-through functions for lower-crate APIs.
-- Pursue the remaining L-llm-coupling once a home for URL/DNS security is chosen.
 
 ## Record Maintenance
 

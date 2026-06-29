@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use futures::StreamExt;
-use lattice_llm::security;
+use net_guard as security;
 
 use crate::executor::error::ToolError;
 

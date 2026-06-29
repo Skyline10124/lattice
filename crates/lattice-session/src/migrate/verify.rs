@@ -201,35 +201,34 @@ fn verify_session_transcripts(
             .refs
             .iter()
             .any(|r| r.commit_id.as_deref() == Some(head_legacy.as_str()));
-        if !already_covered {
-            if let Some(git_oid_str) = idmap.get(head_legacy) {
-                let git_oid = git2::Oid::from_str(git_oid_str).map_err(|e| {
-                    SessionError::Git(format!("parse head tip oid: {e}"))
-                })?;
-                let sqlite_msgs = collect_sqlite_transcript_from_tip(session, head_legacy);
-                let git_msgs = read_transcript_from_tip(repo, git_oid)?;
-                if sqlite_msgs.len() != git_msgs.len() {
+        if !already_covered
+            && let Some(git_oid_str) = idmap.get(head_legacy)
+        {
+            let git_oid = git2::Oid::from_str(git_oid_str)
+                .map_err(|e| SessionError::Git(format!("parse head tip oid: {e}")))?;
+            let sqlite_msgs = collect_sqlite_transcript_from_tip(session, head_legacy);
+            let git_msgs = read_transcript_from_tip(repo, git_oid)?;
+            if sqlite_msgs.len() != git_msgs.len() {
+                eprintln!(
+                    "verify: session {} detached-HEAD transcript length mismatch: sqlite {} git {}",
+                    session.session_id,
+                    sqlite_msgs.len(),
+                    git_msgs.len()
+                );
+                return Ok(false);
+            }
+            for (i, (s, g)) in sqlite_msgs.iter().zip(git_msgs.iter()).enumerate() {
+                if !messages_equal(s, g) {
                     eprintln!(
-                        "verify: session {} detached-HEAD transcript length mismatch: sqlite {} git {}",
+                        "verify: session {} detached-HEAD message {} mismatch: sqlite role={} content_len={} git role={} content_len={}",
                         session.session_id,
-                        sqlite_msgs.len(),
-                        git_msgs.len()
+                        i,
+                        s.role,
+                        s.content.len(),
+                        g.role,
+                        g.content.len()
                     );
                     return Ok(false);
-                }
-                for (i, (s, g)) in sqlite_msgs.iter().zip(git_msgs.iter()).enumerate() {
-                    if !messages_equal(s, g) {
-                        eprintln!(
-                            "verify: session {} detached-HEAD message {} mismatch: sqlite role={} content_len={} git role={} content_len={}",
-                            session.session_id,
-                            i,
-                            s.role,
-                            s.content.len(),
-                            g.role,
-                            g.content.len()
-                        );
-                        return Ok(false);
-                    }
                 }
             }
         }
@@ -320,5 +319,4 @@ fn messages_equal(a: &GraphMessage, b: &GraphMessage) -> bool {
         && a.tool_call_id == b.tool_call_id
         && a.name == b.name
 }
-
 

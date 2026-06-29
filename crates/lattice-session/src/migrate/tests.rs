@@ -414,10 +414,10 @@ fn count_all_commit_objects(repo: &git2::Repository) -> usize {
     let odb = repo.odb().expect("odb");
     let mut count = 0usize;
     odb.foreach(|oid| {
-        if let Ok((_len, kind)) = odb.read_header(*oid) {
-            if kind == git2::ObjectType::Commit {
-                count += 1;
-            }
+        if let Ok((_len, kind)) = odb.read_header(*oid)
+            && kind == git2::ObjectType::Commit
+        {
+            count += 1;
         }
         true
     })

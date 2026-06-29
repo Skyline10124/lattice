@@ -7,7 +7,7 @@ authors.workspace = true
 description = "LANCET native production handlers, transport integration, verify, edit, shell, and web"
 
 [dependencies]
-lattice-llm = { workspace = true }
+net-guard = { workspace = true }
 lancet-protocol = { workspace = true }
 lancet-catalog = { workspace = true }
 lancet-dispatch = { workspace = true }

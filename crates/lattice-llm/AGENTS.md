@@ -6,7 +6,7 @@ Crate-local guidance for `lattice-llm`.
 
 This crate owns LLM vocabulary and provider interaction: chat/stream request and
 response types, tool-call types, provider adapters, SSE parsing, model routing,
-endpoint metadata, URL/DNS security, request-time pinning, and logging setup.
+endpoint metadata, request-time DNS pinning, and logging setup.
 
 ## Sub-Architecture
 
@@ -16,8 +16,9 @@ endpoint metadata, URL/DNS security, request-time pinning, and logging setup.
 - `src/providers/` owns provider-specific protocol adapters.
 - `src/sse.rs` owns streaming parser behavior.
 - `src/router.rs` and `src/endpoints.rs` own model alias/provider resolution.
-- `src/security.rs` owns URL validation, DNS checks, SSRF defenses, and
-  rebinding suffix checks.
+- `net-guard` owns shared URL validation, DNS checks, private-address
+  rejection, and rebinding suffix checks; `client.rs` maps its neutral errors
+  into `LlmError`.
 - `src/stub.rs` owns local stub client behavior used by tests.
 - `src/logging.rs` owns tracing/log initialization.
 
@@ -34,7 +35,7 @@ endpoint metadata, URL/DNS security, request-time pinning, and logging setup.
 - PARTIAL M-04: `validate_base_url` DNS checks are best-effort; authoritative
   protection is request-time resolved IP pinning in `client.rs`.
 - PARTIAL M-05: `web_fetch`/external fetch rebinding defense relies on pinned IP
-  plus a maintained denylist shared with native web behavior.
+  plus the maintained `net-guard` denylist shared with native web behavior.
 - FIXED L-02: provider JSON parsing no longer uses a sentinel error value for
   normal control flow.
 - WATCH P22.5: strict OpenAI-compatible gateways may reject dotted tool names;

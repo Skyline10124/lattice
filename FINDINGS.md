@@ -75,12 +75,6 @@
   4. **分步落地**：先做纯函数抽取（结构不变、行为不变，过现有测试），再单独做 clone/ownership 收敛，避免一次大 diff 同时改结构与所有权。
 - **排期**: 与 L-22 合并到一次 agent-loop 重构窗口；非 v1.3-alpha 开场项。
 
-### L-llm-coupling: LANCET 栈仍依赖 `lattice-llm` 叶子 crate — `architecture` / `crate-boundary`
-- **位置**: `crates/lancet-native/src/executor/web.rs` 与 `crates/lancet-authority/src/policy/network.rs`(`lattice_llm::security`)、`crates/lancet-api`(经 native/authority 传递)
-- **问题**: M-24-04 把 CEP-facing `ToolDefinition`、`ToolExposure`、`BaseAuthorityPlan` 抽到 `lancet-cep`，catalog→tool 投影不再依赖 `lattice_llm::ToolDefinition`；但 LANCET 栈仍未 100% 脱离 LATTICE，因为 URL/DNS 守卫复用 `lattice_llm::security`。
-- **当前状态**: 非 bug。`lattice-llm` 是 Layer 0 叶子，不构成依赖环；LANCET 已摆脱 provider tool spec 耦合，但仍依赖一枚 LATTICE 网络安全 helper。
-- **计划**: 选定 URL/DNS security 共享类型的归属后再做：把 `security` 的 URL/DNS 守卫抽到 LANCET 自有或中立共享 crate（如 `net-guard`），让 `lattice-llm` 与 LANCET 同时依赖它，从而让 `lancet-api` 彻底无 `lattice-*` 传递依赖。
-
 ## P22.5 supervision verification (2026-05-28)
 
 Live-scenario harness: `scripts/p22-real-scenarios.sh` (disposable workspaces under `build/tmp/p22-real-scenarios/`).
@@ -170,9 +164,9 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 ## PARTIAL
 
 ### M-04: `validate_base_url` DNS 检查与 HTTP 请求之间存在 TOCTOU — `security`
-- **已做**: 请求前 `resolve_public_socket_addrs`，`ClientBuilder::resolve_to_addrs` 钉住解析结果（`lattice-llm/src/client.rs`）。
+- **已做**: 请求前通过 `net-guard::resolve_public_socket_addrs` 解析公网地址，`ClientBuilder::resolve_to_addrs` 钉住结果（`lattice-llm/src/client.rs`）。
 - **残留**: `validate_base_url` 阶段的 DNS 仍为 best-effort（离线 CI 可能不解析）；权威防护在 request-time pinning，配置时校验不能单独当作闭环。
 
 ### M-05: `web_fetch` DNS rebinding / 黑名单 — `security`
-- **已做**: 与 M-04 共享 request-time 钉 IP；已知 rebinding 后缀硬拒绝（`DNS_REBINDING_DOMAIN_SUFFIXES`，`security.rs` + `web.rs`）。
+- **已做**: 与 M-04 共享 request-time 钉 IP；已知 rebinding 后缀由 `net-guard` 的统一 denylist 硬拒绝，native `web.rs` 复用同一守卫。
 - **残留**: 黑名单不可穷尽（新 wildcard→IP 服务、非列表域名）；需持续维护或改为启发式（主机名编码 IP 模式）+ 仍依赖钉 IP 作为主防线。
