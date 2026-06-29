@@ -218,10 +218,4 @@ pub enum AgentTurnEvent {
         guard_stage: String,
         error_code: Option<String>,
     },
-    /// A verify command failed after a successful mutation (CEP).
-    CepVerifyFailed {
-        call_id: u64,
-        verify_exit_code: Option<i32>,
-        diff_retained: bool,
-    },
 }

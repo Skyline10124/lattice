@@ -16,7 +16,6 @@ handlers and tool projection.
 - `src/catalog.rs` builds the production `CATALOG` and optional scaffold
   catalog behind `inspect-scaffold`.
 - `src/methods/workspace.rs` owns observe and mutate workspace contracts.
-- `src/methods/command.rs` owns command execution contracts.
 - `src/methods/external.rs` owns `fetch.web` contracts.
 - `src/methods/session.rs` owns session state helper contracts.
 - `src/methods/audit.rs` owns audit query/replay contracts.
@@ -26,7 +25,7 @@ handlers and tool projection.
 
 - Depend only on protocol plus serialization/schema support.
 - `CATALOG` is the authoritative production method set.
-- Keep the production catalog aligned with the root 9-method CEP contract.
+- Keep the production catalog aligned with the root 8-method CEP contract.
 - Do not define LLM-facing tool schemas here; `lancet-cep` projects them from
   descriptors and `lancet-native` exposes the native path.
 - Keep method params/results, descriptors, and capabilities in sync.
@@ -43,7 +42,7 @@ handlers and tool projection.
 - WATCH: dotted method names stay canonical in CEP catalog; provider-specific
   name encoding belongs in `lattice-llm` wire adapters.
 - WATCH: optional scaffold methods must remain feature-gated and outside the
-  production 9-method catalog.
+  production 8-method catalog.
 
 ## Next Actions
 

@@ -13,5 +13,4 @@ pub mod policy;
 
 pub use policy::{
     BudgetLimits, CepPolicyConfig, CepTurnContext, NetworkPolicyConfig, ObservationPolicyConfig,
-    command::CommandPolicy,
 };

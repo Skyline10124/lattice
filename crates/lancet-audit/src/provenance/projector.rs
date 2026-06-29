@@ -340,7 +340,7 @@ mod tests {
     fn boundary_observed_projection() {
         let rows = vec![fixture_row(
             1,
-            "exec.command_run",
+            "observe.workspace",
             r#"{
                 "effective_boundary": {
                     "network": {

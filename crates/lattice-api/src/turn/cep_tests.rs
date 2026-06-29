@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::methods::command::Run;
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
 use lancet_catalog::methods::workspace::{
     ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileResult,
@@ -80,26 +79,6 @@ async fn cep_executor_adapter_parse_error_maps_to_32700() {
         .expect_err("malformed JSON must fail");
 
     assert_cep_payload(&err, jsonrpc::PARSE_ERROR);
-}
-
-#[tokio::test]
-async fn cep_executor_adapter_rejects_profile_disabled_command_run() {
-    let adapter = CepExecutorAdapter::new(
-        CepTransport::pair(8).0,
-        [ObserveWorkspace::NAME.to_string()],
-    );
-    let err = adapter
-        .execute(&ToolCall {
-            id: "call_1".to_string(),
-            function: FunctionCall {
-                name: Run::NAME.to_string(),
-                arguments: r#"{"argv":["echo","blocked"]}"#.to_string(),
-            },
-        })
-        .await
-        .expect_err("disabled catalog method must fail before server dispatch");
-
-    assert_cep_payload(&err, jsonrpc::METHOD_NOT_FOUND);
 }
 
 #[tokio::test]

@@ -196,9 +196,7 @@ fn is_tool_call_finished(event: &TurnEvent) -> bool {
 fn is_cep_event(event: &TurnEvent) -> bool {
     matches!(
         event,
-        TurnEvent::CepCallStarted { .. }
-            | TurnEvent::CepCallFinished { .. }
-            | TurnEvent::CepVerifyFailed { .. }
+        TurnEvent::CepCallStarted { .. } | TurnEvent::CepCallFinished { .. }
     )
 }
 

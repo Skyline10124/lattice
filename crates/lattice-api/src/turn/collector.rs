@@ -118,8 +118,7 @@ impl RunTurnCollector {
             | TurnEvent::ReasoningDelta { .. }
             | TurnEvent::ToolCallStarted { .. }
             | TurnEvent::CepCallStarted { .. }
-            | TurnEvent::CepCallFinished { .. }
-            | TurnEvent::CepVerifyFailed { .. } => {}
+            | TurnEvent::CepCallFinished { .. } => {}
         }
         Ok(())
     }

@@ -5,8 +5,6 @@
 
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::PolicyEvaluation;
-use lancet_authority::policy::command::EffectiveImpact;
-use lancet_protocol::effect_types::ImpactKind;
 
 use lancet_protocol::policy::{PolicyDecision, PolicyInput, PolicyReasonCode};
 use serde_json::{Value, json};
@@ -28,9 +26,6 @@ pub(crate) fn policy_metadata(
             "budget_remaining": evidence.and_then(|e| e.budget_remaining),
             "network_host": evidence.and_then(|e| e.network_host.as_deref()),
             "resolved_paths": evidence.map(|e| e.resolved_paths.clone()).unwrap_or_default(),
-            "command_classification": evidence
-                .and_then(|e| e.command_classification.as_ref())
-                .map(effective_impact_label),
             "declared_effect": declared_effect_metadata(method),
             "authorized_region": authorized_region.map(authorized_region_metadata),
         }
@@ -103,7 +98,6 @@ pub(crate) fn policy_denial_preflight_metadata(
             "write_patterns": [],
             "out_of_scope_paths": paths,
             "expected_hash_status": null,
-            "verify_configured": null,
             "replan_reason": "out_of_scope_paths",
             "backend_invoked": false,
         },
@@ -113,45 +107,6 @@ pub(crate) fn policy_denial_preflight_metadata(
         "backend_invoked": false,
         "policy_enforced": true,
     }))
-}
-
-/// Build command-specific preflight metadata after effective classification.
-pub(crate) fn command_preflight_metadata(input: CommandPreflight<'_>) -> Value {
-    json!({
-        "cep_preflight": {
-            "method": input.method,
-            "kind": "command",
-            "declared_impact": input.declared_impact.map(crate::audit::impact_kind_label),
-            "effective_impact": effective_impact_label(input.effective_impact),
-            "effective_effect": command_effective_effect_labels(input.effective_impact),
-            "argv0": input.argv.first().map(String::as_str),
-            "argv_len": input.argv.len(),
-            "requires_active_envelope": matches!(
-                input.effective_impact,
-                EffectiveImpact::WorkspaceMutation
-            ),
-            "run_command_capability_present": input.run_command_capability_present,
-            "argv_allowlist_matched": input.argv_allowlist_matched,
-            "write_region": input.authorized_region.map(authorized_region_metadata),
-            "backend_invoked": input.backend_invoked,
-        },
-        "declared_impact": input.declared_impact.map(crate::audit::impact_kind_label),
-        "classification": effective_impact_label(input.effective_impact),
-        "effective_effect": command_effective_effect_labels(input.effective_impact),
-        "backend_invoked": input.backend_invoked,
-        "policy_enforced": true,
-    })
-}
-
-pub(crate) struct CommandPreflight<'a> {
-    pub(crate) method: &'a str,
-    pub(crate) argv: &'a [String],
-    pub(crate) declared_impact: Option<&'a ImpactKind>,
-    pub(crate) effective_impact: &'a EffectiveImpact,
-    pub(crate) run_command_capability_present: bool,
-    pub(crate) argv_allowlist_matched: bool,
-    pub(crate) authorized_region: Option<&'a AuthorizedEffectRegion>,
-    pub(crate) backend_invoked: bool,
 }
 
 /// Build mutation-specific preflight metadata after scope checks.
@@ -165,14 +120,12 @@ pub(crate) fn mutation_preflight_metadata(input: MutationPreflight<'_>) -> Value
             "write_patterns": input.write_patterns,
             "out_of_scope_paths": input.out_of_scope_paths,
             "expected_hash_status": input.expected_hash_status,
-            "verify_configured": input.verify_configured,
             "replan_reason": input.replan_reason,
             "backend_invoked": input.backend_invoked,
         },
         "changed_paths": input.changed_paths,
         "out_of_scope_paths": input.out_of_scope_paths,
         "expected_hash_status": input.expected_hash_status,
-        "verify_configured": input.verify_configured,
         "replan_reason": input.replan_reason,
         "backend_invoked": input.backend_invoked,
         "policy_enforced": true,
@@ -185,7 +138,6 @@ pub(crate) struct MutationPreflight<'a> {
     pub(crate) write_patterns: &'a [String],
     pub(crate) out_of_scope_paths: &'a [String],
     pub(crate) expected_hash_status: Option<&'a str>,
-    pub(crate) verify_configured: bool,
     pub(crate) replan_reason: Option<&'a str>,
     pub(crate) backend_invoked: bool,
 }
@@ -287,22 +239,6 @@ fn policy_decision_detail(decision: &PolicyDecision) -> Option<(String, String, 
             message.clone(),
             Some("ask_human".into()),
         )),
-    }
-}
-
-fn command_effective_effect_labels(effective_impact: &EffectiveImpact) -> Vec<&'static str> {
-    match effective_impact {
-        EffectiveImpact::Diagnostic => vec!["command_execution"],
-        EffectiveImpact::WorkspaceMutation => vec!["command_execution", "workspace_mutation"],
-        EffectiveImpact::HardDenied => Vec::new(),
-    }
-}
-
-fn effective_impact_label(effective_impact: &EffectiveImpact) -> &'static str {
-    match effective_impact {
-        EffectiveImpact::Diagnostic => "diagnostic",
-        EffectiveImpact::WorkspaceMutation => "workspace_mutation",
-        EffectiveImpact::HardDenied => "hard_denied",
     }
 }
 

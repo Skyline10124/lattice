@@ -207,8 +207,8 @@ mod tests {
         let fragment: ProvGraphFragment = serde_json::from_value(json!({
             "activities": [{
                 "id": "act-legacy",
-                "method": "exec.command_run",
-                "impact_kind": "workspace_mutation",
+                "method": "observe.workspace",
+                "impact_kind": "workspace_observation",
                 "outcome_summary": "success"
             }]
         }))

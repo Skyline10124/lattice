@@ -1,7 +1,6 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::fixtures::*;
@@ -9,8 +8,6 @@ use super::support::{assert_positive, build_test_context, effect_contract_harnes
 use lancet_authority::NetworkPolicyConfig;
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::effect::region::AuthorizedEffectRegion;
-use lancet_catalog::CepMethod;
-use lancet_catalog::methods::command::RunParams;
 use lancet_catalog::methods::workspace::{
     CreateParams, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileParams,
 };
@@ -128,81 +125,4 @@ fn create_glob_pattern_within_region() {
         .as_ref()
         .expect("write to src/a.rs with no denied patterns must succeed");
     assert_positive(&outcome, &authority);
-}
-
-// ── Composite mutation regression ──────────────────────────────────────
-
-#[test]
-fn command_run_composite_mutation_success() {
-    let dir = setup_tempdir_with_files();
-    let root = std::fs::canonicalize(dir.path())
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    std::fs::create_dir_all(std::path::Path::new(&root).join("src")).unwrap();
-
-    let registry = test_registry();
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
-    declare_active_envelope(&ctx, &root);
-
-    let ledger = ctx.effect_ledger.clone();
-    let mut kinds = std::collections::BTreeSet::new();
-    kinds.insert(ImpactKind::CommandExecution);
-    kinds.insert(ImpactKind::WorkspaceMutation);
-    let authority = AuthorizedEffectRegion {
-        kinds,
-        read_paths: Vec::new(),
-        observation_roots: Vec::new(),
-        denied_write_paths: Vec::new(),
-        // Blacklist semantics: empty deny list → all workspace paths allowed
-        denied_write_path_prefixes: Vec::new(),
-        hosts: Vec::new(),
-        session_state_allowed: false,
-        command_allowed: true,
-    };
-    ctx.authorized_region.set(authority.clone());
-
-    let params = RunParams {
-        argv: vec!["touch".into(), "src/composite.txt".into()],
-        cwd: Some(".".into()),
-        env: BTreeMap::new(),
-        timeout_ms: Some(5000),
-        declared_impact: Some(ImpactKind::WorkspaceMutation),
-    };
-    let params_value = serde_json::to_value(&params).unwrap();
-    let result = rt().block_on(registry.dispatch(Run::NAME, params_value, ctx));
-    result
-        .as_ref()
-        .expect("composite mutation exec.command_run must succeed");
-
-    let observed = ledger.snapshot();
-    let backend: Vec<_> = observed
-        .iter()
-        .filter(|e| e.source == EffectSource::HandlerBackend)
-        .collect();
-    assert!(
-        backend
-            .iter()
-            .any(|e| e.kind == ImpactKind::CommandExecution),
-        "must record CommandExecution"
-    );
-    assert!(
-        backend
-            .iter()
-            .any(|e| e.kind == ImpactKind::WorkspaceMutation),
-        "must record WorkspaceMutation for changed src/composite.txt"
-    );
-    for effect in &backend {
-        assert!(
-            authority.contains(effect),
-            "observed {:?}@{:?} must be within authorized region",
-            effect.kind,
-            effect.scope
-        );
-    }
 }

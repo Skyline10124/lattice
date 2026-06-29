@@ -255,21 +255,6 @@ pub fn classify_lifecycle_failure(
             ResourceAction::Retain,
             vec!["cleanup rounds exhausted".to_string()],
         ),
-        LifecycleFailureKind::MissingVerifyConfig => (
-            WorkspaceDisposition::PendingVerification,
-            ResourceAction::Retain,
-            vec!["no verification configuration found".to_string()],
-        ),
-        LifecycleFailureKind::VerifyFailed => (
-            WorkspaceDisposition::PendingVerification,
-            ResourceAction::Retain,
-            vec!["verification failed".to_string()],
-        ),
-        LifecycleFailureKind::VerifyTimeout => (
-            WorkspaceDisposition::PendingVerification,
-            ResourceAction::Retain,
-            vec!["verification timed out".to_string()],
-        ),
         LifecycleFailureKind::PostExportHeadChange => (
             WorkspaceDisposition::PendingVerification,
             ResourceAction::Retain,
@@ -330,12 +315,6 @@ pub enum LifecycleFailureKind {
     WorkspaceLess,
     /// Cleanup rounds exhausted (completed + pending_worktree).
     CleanupExhaustion,
-    /// No verify configuration (completed + pending_verification).
-    MissingVerifyConfig,
-    /// Verification failed (completed + pending_verification).
-    VerifyFailed,
-    /// Verification timed out (completed + pending_verification).
-    VerifyTimeout,
     /// Post-export HEAD change (completed + pending_verification).
     PostExportHeadChange,
     /// Promotion temporarily blocked, candidate pinned (completed + pending_promotion).

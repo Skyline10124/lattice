@@ -228,15 +228,6 @@ pub(super) fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
             guard_stage,
             error_code,
         },
-        AgentTurnEvent::CepVerifyFailed {
-            call_id,
-            verify_exit_code,
-            diff_retained,
-        } => TurnEvent::CepVerifyFailed {
-            call_id,
-            verify_exit_code,
-            diff_retained,
-        },
     }
 }
 

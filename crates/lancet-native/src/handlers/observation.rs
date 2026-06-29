@@ -1062,29 +1062,6 @@ mod tests {
             })
         }
 
-        fn exec(
-            &self,
-            _request: &crate::execution_backend::ExecRequest,
-        ) -> Pin<
-            Box<
-                dyn Future<
-                        Output = Result<
-                            crate::execution_backend::ExecOutput,
-                            ExecutionBackendError,
-                        >,
-                    > + Send
-                    + '_,
-            >,
-        > {
-            Box::pin(async {
-                Ok(crate::execution_backend::ExecOutput {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                })
-            })
-        }
-
         fn changed_paths(
             &self,
         ) -> Pin<
@@ -1119,7 +1096,6 @@ mod tests {
         let policy_cfg = lancet_authority::policy::default::PolicyConfig {
             capability_sources: Default::default(),
             methods: Default::default(),
-            command: cep_context.policy.command.clone(),
             network: cep_context.policy.network.clone(),
             budget: cep_context.policy.budget.clone(),
             observation: cep_context.policy.observation.clone(),
@@ -1157,7 +1133,6 @@ mod tests {
                         upper_workspace_id: "test-upper".into(),
                     },
                 },
-                verify_config: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
@@ -1325,7 +1300,6 @@ mod tests {
                     upper_workspace_id: "test-upper".into(),
                 },
             },
-            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
         let params = ReadFileParams {
@@ -1379,7 +1353,6 @@ mod tests {
                     upper_workspace_id: "test-upper".into(),
                 },
             },
-            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
         let params = ReadFileParams {
@@ -1626,7 +1599,6 @@ mod tests {
                     upper_workspace_id: "test-upper".into(),
                 },
             },
-            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
         let params = GrepParams {
@@ -1766,26 +1738,6 @@ mod tests {
                 })
             }
 
-            fn exec(
-                &self,
-                _request: &crate::execution_backend::ExecRequest,
-            ) -> Pin<
-                Box<
-                    dyn Future<
-                            Output = Result<
-                                crate::execution_backend::ExecOutput,
-                                ExecutionBackendError,
-                            >,
-                        > + Send
-                        + '_,
-                >,
-            > {
-                Box::pin(async {
-                    Err(ExecutionBackendError::Unavailable {
-                        message: "not used".into(),
-                    })
-                })
-            }
 
             fn changed_paths(
                 &self,
@@ -1837,7 +1789,6 @@ mod tests {
                         upper_workspace_id: "upper-1".into(),
                     },
                 },
-                verify_config: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             }
         }

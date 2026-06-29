@@ -421,7 +421,7 @@ fn cep_audit_effective_boundary_metadata_round_trips_compactly() {
         .start_call(
             &test_context(),
             11,
-            "exec.command_run",
+            "observe.workspace",
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -439,7 +439,7 @@ fn cep_audit_effective_boundary_metadata_round_trips_compactly() {
 
     let rows = store
         .query_rows(&AuditQueryFilters {
-            method: Some("exec.command_run".into()),
+            method: Some("observe.workspace".into()),
             ..Default::default()
         })
         .unwrap();

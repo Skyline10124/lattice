@@ -5,12 +5,10 @@
 
 pub mod budget;
 pub mod capability;
-pub mod command;
 pub mod default;
 pub mod network;
 pub mod observation;
 pub mod resolved;
-pub mod shell_ast;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -19,14 +17,9 @@ use std::sync::Arc;
 pub use budget::{
     BudgetExhausted, BudgetLimits, ObservationBudgetSnapshot, ObservationBudgetTracker,
 };
-pub use command::{
-    CommandPolicy, EffectiveImpact, build_effective_env, classify_command, classify_command_line,
-    validate_timeout,
-};
 use lancet_protocol::effect_types::ImpactKind;
 pub use network::NetworkPolicyConfig;
 pub use observation::ObservationPolicyConfig;
-pub use shell_ast::{CommandLine, ShellExpansion, resolve_command_line};
 
 /// Immutable CEP policy limits and roots assembled once per turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,7 +28,6 @@ pub struct CepPolicyConfig {
     pub observation: ObservationPolicyConfig,
     pub network: NetworkPolicyConfig,
     pub budget: BudgetLimits,
-    pub command: CommandPolicy,
     pub denied_effect_kinds: BTreeSet<ImpactKind>,
 }
 
@@ -57,7 +49,6 @@ impl CepPolicyConfig {
             observation,
             network: NetworkPolicyConfig::safe_defaults(),
             budget,
-            command: CommandPolicy::defaults(),
             denied_effect_kinds: BTreeSet::new(),
         }
     }

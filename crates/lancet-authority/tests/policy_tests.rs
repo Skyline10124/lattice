@@ -75,7 +75,9 @@ fn allows_mutation_not_in_deny_list() {
 }
 
 #[test]
-fn denies_diagnostic_command_argv() {
+fn denies_retired_command_run_as_unknown_method() {
+    // Regression for issue #4: exec.command_run is retired from the catalog,
+    // so the resolver rejects it as NonDeterminable before any policy check.
     let hook = DefaultPolicyHook::new(project_config());
     let input = policy_input(
         "exec.command_run",
@@ -84,33 +86,10 @@ fn denies_diagnostic_command_argv() {
     assert!(matches!(
         hook.decide(&input),
         PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::CommandDenied,
+            reason_code: PolicyReasonCode::NonDeterminable,
             ..
         }
     ));
-}
-
-#[test]
-fn allows_diagnostic_command() {
-    let hook = DefaultPolicyHook::new(project_config());
-    let input = policy_input(
-        "exec.command_run",
-        json!({"argv": ["echo", "ok"], "declared_impact": "diagnostic"}),
-    );
-    assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
-}
-
-#[test]
-fn allows_workspace_mutating_command_with_blacklist() {
-    // Blacklist semantics: no denied patterns → workspace-mutating command allowed
-    let mut config = project_config();
-    config.workspace.denied_write_patterns.clear();
-    let hook = DefaultPolicyHook::new(config);
-    let input = policy_input(
-        "exec.command_run",
-        json!({"argv": ["cargo", "build"], "declared_impact": "workspace_mutation"}),
-    );
-    assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
 }
 
 #[test]
@@ -186,20 +165,11 @@ fn workspace_policy_validates_denied_patterns() {
 }
 
 #[test]
-fn workspace_policy_shared_by_mutate_and_command_regions() {
+fn workspace_policy_applies_denied_patterns_to_mutate_region() {
     let policy = WorkspacePolicy {
         denied_write_patterns: vec!["crates/**".into()],
     };
     let cep = lancet_authority::CepPolicyConfig::defaults_for_project_root("/tmp/project");
-    let mutate_region = policy.authorized_region_for("mutate.create", None, &cep);
-    let command_region = policy.authorized_region_for(
-        "exec.command_run",
-        Some(&lancet_authority::policy::command::EffectiveImpact::WorkspaceMutation),
-        &cep,
-    );
+    let mutate_region = policy.authorized_region_for("mutate.create", &cep);
     assert!(!mutate_region.denied_write_path_prefixes.is_empty());
-    assert_eq!(
-        mutate_region.denied_write_path_prefixes,
-        command_region.denied_write_path_prefixes
-    );
 }

@@ -20,10 +20,9 @@ pub mod provenance {
 mod server;
 
 pub use execution_backend::{
-    DirectoryEntry, ExecOutput, ExecRequest, ExecRequestError, ExecutionBackend,
-    ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest,
-    NullExecutionBackend, PathFacts, PathIntent, PathKind, RoutingInvocationState, UpperContext,
-    VerifyConfig, VerifyConfigError, WorkspacePath, WorkspacePathError,
+    DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
+    GrepMatch, GrepRequest, NullExecutionBackend, PathFacts, PathIntent, PathKind,
+    RoutingInvocationState, UpperContext, WorkspacePath, WorkspacePathError,
 };
 #[cfg(feature = "inspect-scaffold")]
 pub use handlers::register_inspect_scaffold_methods;

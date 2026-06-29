@@ -129,7 +129,6 @@ impl LancetRuntime {
             model_id,
             runtime_version,
             execution,
-            verify_config,
         } = config;
 
         let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools)?;
@@ -140,7 +139,6 @@ impl LancetRuntime {
             observation: policy.observation.clone(),
             network: policy.network.clone(),
             budget: policy.budget.clone(),
-            command: policy.command.clone(),
             denied_effect_kinds: policy.denied_effect_kinds.clone(),
         };
 
@@ -180,7 +178,6 @@ impl LancetRuntime {
             default_policy_hook: Some(default_hook),
             cep_mode,
             execution,
-            verify_config,
         };
 
         let (client, lifecycle) = LancetServer::spawn(server_config, DEFAULT_CHANNEL_CAPACITY)?;
@@ -253,6 +250,5 @@ mod tests {
     fn runtime_config_defaults_have_null_execution() {
         let config = LancetRuntimeConfig::new(".");
         assert_eq!(config.execution.upper.execution_backend, "null");
-        assert!(config.verify_config.is_none());
     }
 }

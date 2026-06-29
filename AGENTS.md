@@ -63,10 +63,11 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
   depend on native runtime, authority policy implementation, audit persistence,
   or any `lattice-*` crate.
 - `lancet-catalog::CATALOG` is the authoritative production method catalog.
-  It contains exactly these 9 CEP methods: `observe.workspace`,
-  `mutate.create`, `mutate.edit`, `mutate.batch`, `exec.command_run`,
-  `fetch.web`, `session.todo_write`, `observe.audit`, and
-  `observe.audit_replay`.
+  It contains exactly these 8 CEP methods: `observe.workspace`,
+  `mutate.create`, `mutate.edit`, `mutate.batch`, `fetch.web`,
+  `session.todo_write`, `observe.audit`, and `observe.audit_replay`.
+  `exec.command_run` and post-mutation verify are permanently retired from
+  the CEP layer; command execution is not an agent-visible capability.
   Descriptors also declare method-local base-authority requirements; hosts and
   policy decisions are supplied later by LANCET runtime policy, not by catalog.
 - LLM-facing CEP tool schemas are generated only from the catalog through

@@ -10,12 +10,11 @@ use std::sync::Arc;
 
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::methods::command::Run;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace};
 use lancet_native::{
-    CepAuditStore, CepTransport, DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend,
+    CepAuditStore, CepTransport, DirectoryEntry, ExecutionBackend,
     ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry,
     PathFacts, PathIntent, PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext,
     WorkspacePath, register_production_method_registry,
@@ -157,38 +156,6 @@ impl ExecutionBackend for TestFsBackend {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn exec(
-        &self,
-        request: &ExecRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>>
-    {
-        let cwd = if request.cwd.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(request.cwd.as_str())
-        };
-        let argv = request.argv.clone();
-        let env = request.env.clone();
-        Box::pin(async move {
-            let mut cmd = std::process::Command::new(&argv[0]);
-            cmd.args(&argv[1..]);
-            cmd.current_dir(&cwd);
-            for (k, v) in &env {
-                cmd.env(k, v);
-            }
-            let output = cmd
-                .output()
-                .map_err(|e| ExecutionBackendError::Unavailable {
-                    message: e.to_string(),
-                })?;
-            Ok(ExecOutput {
-                exit_code: output.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            })
-        })
-    }
-
     fn changed_paths(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
@@ -273,7 +240,6 @@ async fn cep_round_trip_impact_matrix() {
         &[
             ObserveWorkspace::NAME,
             Create::NAME,
-            Run::NAME,
             TodoWrite::NAME,
         ],
         false,
@@ -306,22 +272,6 @@ async fn cep_round_trip_impact_matrix() {
             assert_result: |value| {
                 assert_eq!(value["path"].as_str(), Some("created.txt"));
                 assert!(value["bytes_written"].as_u64().unwrap_or(0) > 0);
-            },
-        },
-        ImpactRow {
-            impact: ImpactKind::CommandExecution,
-            method: Run::NAME,
-            arguments: serde_json::json!({
-                "argv": ["echo", "cep-round-trip"]
-            }),
-            assert_result: |value| {
-                assert_eq!(value["exit_code"].as_i64(), Some(0));
-                assert!(
-                    value["stdout"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .contains("cep-round-trip")
-                );
             },
         },
         ImpactRow {
@@ -512,12 +462,10 @@ async fn production_adapter(
     if allow_localhost {
         policy_config.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
     }
-    // Allow all writes under the project root (empty deny list)
-    // and echo as a diagnostic command.
+    // Allow all writes under the project root (empty deny list).
     policy_config.workspace = WorkspacePolicy {
         denied_write_patterns: vec![],
     };
-    policy_config.command.allowed_diagnostic_commands.push(vec!["echo".into()]);
 
     let (client, server) = CepTransport::pair(16);
     let audit = Arc::new(CepAuditStore::in_memory().expect("audit"));

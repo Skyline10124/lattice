@@ -3,8 +3,7 @@
 
 //! Native CEP workspace mutation handlers.
 //!
-//! Implements workspace mutation methods with Guard L1 scope
-//! enforcement and verify flow.
+//! Implements workspace mutation methods with Guard L1 scope enforcement.
 //! All methods require an active `ExecutionEnvelope`; multi-file mutations
 //! perform all-or-nothing scope preflight before applying changes.
 
@@ -15,9 +14,6 @@ use crate::edit::parser::parse_patch_document;
 use crate::edit::storage::EditStorage;
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::enforcement::preflight::{MutationPreflight, mutation_preflight_metadata};
-use crate::enforcement::verify::{
-    VerifyCommandSpec, run_verify_with_backend, verify_failed_error,
-};
 use crate::execution_backend::{ExecutionRouting, PathIntent, WorkspacePath};
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_audit::{RejectionRecord, RejectionStage};
@@ -70,15 +66,14 @@ async fn handle_create(
     handle_create_as(params, ctx, Create::NAME).await
 }
 
-/// Handle `mutate.create` with Guard L1 scope enforcement and verify flow.
+/// Handle `mutate.create` with Guard L1 scope enforcement.
 ///
 /// Flow:
 /// 1. Check WritePath scope via check_write_scope -> else ReplanRequired
 /// 2. Check parent directory exists and target file does not exist
 /// 3. Create file using secure containment
-/// 4. If verify configured -> run verify
-/// 5. If verify fails -> VerifyFailed, retain diff
-/// 6. Return CreateResult
+/// 4. Record effects and durable metadata
+/// 5. Return CreateResult
 async fn handle_create_as(
     params: CreateParams,
     ctx: HandlerContext,
@@ -98,8 +93,6 @@ async fn handle_create_as(
         &create.path,
         &create.full_path,
     ));
-
-    run_mutation_verify_if_configured(&ctx, method, &auth).await?;
 
     let written_hash = content_hash(params.content.as_bytes());
     ctx.record_durable_metadata(json!({
@@ -142,7 +135,6 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
         }
     };
     let result = apply_compiled_patch(&ctx, &auth, &patch).await?;
-    run_mutation_verify_if_configured(&ctx, Edit::NAME, &auth).await?;
 
     ctx.record_durable_metadata(json!({
         "method": Edit::NAME,
@@ -241,8 +233,6 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
         ));
         created_files.push(create.path.clone());
     }
-
-    run_mutation_verify_if_configured(&ctx, Batch::NAME, &auth).await?;
 
     let mut changed_files = edited_files.clone();
     changed_files.extend(created_files.iter().cloned());
@@ -395,7 +385,6 @@ fn record_mutation_preflight(
     write_patterns: &[String],
     out_of_scope_paths: &[String],
     expected_hash_status: Option<&str>,
-    verify_configured: bool,
     replan_reason: Option<&str>,
     backend_invoked: bool,
 ) {
@@ -405,7 +394,6 @@ fn record_mutation_preflight(
         write_patterns,
         out_of_scope_paths,
         expected_hash_status,
-        verify_configured,
         replan_reason,
         backend_invoked,
     }));
@@ -426,7 +414,6 @@ fn record_mutation_replan_metadata(
         &[],
         &[],
         expected_hash_status,
-        ctx.verify_config.is_some(),
         replan_reason,
         false,
     );
@@ -448,57 +435,6 @@ fn replan_reason_for_error(err: &CepError) -> Option<&'static str> {
         Some("expected_hash_stale")
     } else {
         Some("semantic_replan")
-    }
-}
-
-async fn run_mutation_verify_if_configured(
-    ctx: &HandlerContext,
-    method: &str,
-    _auth: &MutationAuth,
-) -> Result<(), CepError> {
-    let Some(verify_config) = ctx.verify_config.as_ref() else {
-        return Ok(());
-    };
-    let policy = &ctx.cep_context.policy.command;
-    let mut cancellation = ctx.cancellation.clone();
-    ctx.mark_backend_invoked();
-    let execution = &ctx.execution;
-    let authorized_region = ctx
-        .authorized_region
-        .get()
-        .unwrap_or_else(AuthorizedEffectRegion::empty);
-    match run_verify_with_backend(
-        verify_config,
-        execution,
-        policy,
-        &mut cancellation,
-        &ctx.routing_invocation,
-        &authorized_region,
-    )
-    .await
-    {
-        Ok(outcome) if !outcome.success => {
-            ctx.record_rejection(RejectionRecord {
-                rejection_stage: RejectionStage::VerificationFailure,
-                denial_source: "verify_config".into(),
-            });
-            emit_verify_failed(ctx, method, outcome.exit_code).await;
-            let spec = verify_config_spec(verify_config);
-            Err(verify_failed_error(&spec, &outcome))
-        }
-        Ok(_) => {
-            ctx.record_effect(ObservedEffect {
-                kind: ImpactKind::CommandExecution,
-                scope: ObservedScope::Root(String::new()),
-                required_capability: RequiredCapability::RunCommand,
-                source: EffectSource::Verify,
-            });
-            Ok(())
-        }
-        Err(err) => {
-            emit_verify_failed(ctx, method, -1).await;
-            Err(err)
-        }
     }
 }
 
@@ -700,15 +636,6 @@ fn record_created_dir_effects(ctx: &HandlerContext, create: &PreflightCreate) {
             required_capability: RequiredCapability::WritePath,
             source: EffectSource::HandlerBackend,
         });
-    }
-}
-
-fn verify_config_spec(config: &crate::execution_backend::VerifyConfig) -> VerifyCommandSpec {
-    VerifyCommandSpec {
-        argv: config.argv.clone(),
-        cwd: Some(config.cwd.as_str().to_string()),
-        timeout_ms: config.timeout_ms,
-        expected_exit_code: Some(config.expected_exit_code),
     }
 }
 
@@ -1118,23 +1045,6 @@ fn semantic_replan_error(reason: impl Into<String>) -> CepError {
     )
 }
 
-async fn emit_verify_failed(
-    ctx: &HandlerContext,
-    method: &str,
-    verify_exit_code: i32,
-) {
-    ctx.events
-        .emit(
-            "cep.verify_failed",
-            json!({
-                "method": method,
-                "verify_exit_code": verify_exit_code,
-                "diff_retained": true,
-            }),
-        )
-        .await;
-}
-
 #[cfg(test)]
 mod create_tests {
     use super::*;
@@ -1184,7 +1094,6 @@ mod create_tests {
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
-                verify_config: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
@@ -1316,28 +1225,6 @@ mod create_tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn exec(
-            &self,
-            _request: &crate::execution_backend::ExecRequest,
-        ) -> Pin<
-            Box<
-                dyn Future<
-                        Output = Result<
-                            crate::execution_backend::ExecOutput,
-                            ExecutionBackendError,
-                        >,
-                    > + Send
-                    + '_,
-            >,
-        > {
-            Box::pin(async {
-                Ok(crate::execution_backend::ExecOutput {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                })
-            })
-        }
 
         fn changed_paths(
             &self,
@@ -1398,7 +1285,6 @@ mod create_tests {
                     upper_workspace_id: "upper-1".into(),
                 },
             },
-            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         }
     }
@@ -1638,28 +1524,6 @@ mod edit_tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn exec(
-            &self,
-            _request: &crate::execution_backend::ExecRequest,
-        ) -> Pin<
-            Box<
-                dyn Future<
-                        Output = Result<
-                            crate::execution_backend::ExecOutput,
-                            ExecutionBackendError,
-                        >,
-                    > + Send
-                    + '_,
-            >,
-        > {
-            Box::pin(async {
-                Ok(crate::execution_backend::ExecOutput {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                })
-            })
-        }
 
         fn changed_paths(
             &self,
@@ -1721,7 +1585,6 @@ mod edit_tests {
                     upper_workspace_id: "upper-1".into(),
                 },
             },
-            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         }
     }

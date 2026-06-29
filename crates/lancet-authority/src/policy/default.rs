@@ -3,8 +3,8 @@
 
 //! Default in-process policy hook implementation.
 //!
-//! Combines capability matching, command policy, network policy, and budget
-//! enforcement into a single data-driven pure decision function.
+//! Combines capability matching, network policy, and budget enforcement into a
+//! single data-driven pure decision function.
 //!
 //! **Design constraints:**
 //! - `PolicyHook::decide` is synchronous, deterministic, and performs no I/O.
@@ -19,7 +19,6 @@ use lancet_protocol::policy::{
 };
 
 use super::BudgetLimits;
-use super::command::{CommandPolicy, EffectiveImpact};
 use super::network::NetworkPolicyConfig;
 use super::observation::ObservationPolicyConfig;
 use super::resolved::PolicyResolver;
@@ -45,7 +44,6 @@ pub enum CapabilitySourceClass {
 pub struct CapabilitySourcePolicy {
     pub observation: Vec<CapabilitySourceClass>,
     pub mutation: Vec<CapabilitySourceClass>,
-    pub command: Vec<CapabilitySourceClass>,
     pub external: Vec<CapabilitySourceClass>,
     pub session_state: Vec<CapabilitySourceClass>,
 }
@@ -56,7 +54,6 @@ impl Default for CapabilitySourcePolicy {
         Self {
             observation: vec![Base, Declared],
             mutation: vec![Declared],
-            command: vec![Declared],
             external: vec![Base, Declared],
             session_state: vec![Base, Declared],
         }
@@ -82,8 +79,8 @@ pub struct MethodPolicy {
 /// Immutable workspace write-deny policy (blacklist).
 ///
 /// A path is allowed unless it matches any denied pattern. Shared by
-/// `mutate.*` and workspace-mutating `exec.command_run` decisions.
-/// No system-level denies are hardcoded — the deny list is user-controlled.
+/// `mutate.*` decisions. No system-level denies are hardcoded — the deny
+/// list is user-controlled.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct WorkspacePolicy {
     pub denied_write_patterns: Vec<String>,
@@ -115,7 +112,6 @@ impl WorkspacePolicy {
     pub fn authorized_region_for(
         &self,
         method: &str,
-        command_impact: Option<&EffectiveImpact>,
         policy: &super::CepPolicyConfig,
     ) -> crate::effect::region::AuthorizedEffectRegion {
         use crate::effect::region::AuthorizedEffectRegion;
@@ -139,18 +135,6 @@ impl WorkspacePolicy {
                     &self.denied_write_patterns,
                     &policy.project_root,
                 );
-            }
-            "exec.command_run" => {
-                region.kinds.insert(ImpactKind::CommandExecution);
-                region.command_allowed = true;
-                if matches!(command_impact, Some(EffectiveImpact::WorkspaceMutation)) {
-                    region.kinds.insert(ImpactKind::WorkspaceMutation);
-                    apply_denied_write_patterns(
-                        &mut region,
-                        &self.denied_write_patterns,
-                        &policy.project_root,
-                    );
-                }
             }
             "session.todo_write" => {
                 region.kinds.insert(ImpactKind::SessionStateMutation);
@@ -194,7 +178,6 @@ fn apply_denied_write_patterns(
 pub struct PolicyConfig {
     pub capability_sources: CapabilitySourcePolicy,
     pub methods: BTreeMap<String, MethodPolicy>,
-    pub command: CommandPolicy,
     pub network: NetworkPolicyConfig,
     pub budget: BudgetLimits,
     pub observation: ObservationPolicyConfig,
@@ -218,7 +201,6 @@ impl PolicyConfig {
         Self {
             capability_sources: CapabilitySourcePolicy::default(),
             methods: BTreeMap::new(),
-            command: CommandPolicy::defaults(),
             network: NetworkPolicyConfig::safe_defaults(),
             budget,
             observation,
@@ -236,9 +218,6 @@ impl PolicyConfig {
             }
             if let Some(mut_) = &cap_src.mutation {
                 self.capability_sources.mutation = parse_source_classes(mut_)?;
-            }
-            if let Some(cmd) = &cap_src.command {
-                self.capability_sources.command = parse_source_classes(cmd)?;
             }
             if let Some(ext) = &cap_src.external {
                 self.capability_sources.external = parse_source_classes(ext)?;
@@ -265,41 +244,6 @@ impl PolicyConfig {
                     max_todo_ops: ext_method.max_todo_ops,
                 };
                 self.methods.insert(name.clone(), policy);
-            }
-        }
-        if let Some(cmd) = &external.command {
-            if let Some(v) = cmd.default_timeout_ms {
-                self.command.default_timeout_ms = v;
-            }
-            if let Some(v) = cmd.max_timeout_ms {
-                self.command.max_timeout_ms = v;
-            }
-            if let Some(v) = cmd.max_output_bytes {
-                self.command.max_output_bytes = v;
-            }
-            if let Some(v) = cmd.allow_inline_shell {
-                self.command.allow_inline_shell = v;
-            }
-            if let Some(v) = cmd.inline_shell_max_script_bytes {
-                self.command.inline_shell_max_script_bytes = v;
-            }
-            if let Some(v) = cmd.inline_shell_max_commands {
-                self.command.inline_shell_max_commands = v;
-            }
-            if let Some(v) = cmd.inline_shell_max_words_per_command {
-                self.command.inline_shell_max_words_per_command = v;
-            }
-            if let Some(v) = &cmd.allowed_diagnostic_commands {
-                self.command.allowed_diagnostic_commands = v.clone();
-            }
-            if let Some(v) = &cmd.denied_commands {
-                self.command.denied_commands = v.clone();
-            }
-            if let Some(v) = &cmd.allowed_env {
-                self.command.allowed_env = v.clone();
-            }
-            if let Some(v) = &cmd.inherited_env {
-                self.command.inherited_env = v.clone();
             }
         }
         if let Some(net) = &external.network {
@@ -376,21 +320,19 @@ impl PolicyConfig {
             project_root: self.project_root.clone(),
             observation: self.observation.clone(),
             network: self.network.clone(),
-            command: self.command.clone(),
             budget: self.budget.clone(),
             workspace: self.workspace.clone(),
         }
     }
 
     /// Construct a `CepPolicyConfig` for backward compatibility with
-    /// existing CEP handlers during the wrapper-first migration.
+    /// existing CEP handlers.
     pub fn to_cep_policy_config(&self) -> super::CepPolicyConfig {
         super::CepPolicyConfig {
             project_root: self.project_root.clone(),
             observation: self.observation.clone(),
             network: self.network.clone(),
             budget: self.budget.clone(),
-            command: self.command.clone(),
             denied_effect_kinds: self.denied_effect_kinds.clone(),
         }
     }
@@ -404,7 +346,6 @@ impl PolicyConfig {
 pub struct ExternalPolicyFile {
     pub capability_sources: Option<ExternalCapabilitySourcePolicy>,
     pub methods: Option<BTreeMap<String, ExternalMethodPolicy>>,
-    pub command: Option<ExternalCommandPolicy>,
     pub network: Option<ExternalNetworkPolicy>,
     pub budget: Option<ExternalBudgetPolicy>,
     pub observation: Option<ExternalObservationPolicy>,
@@ -423,7 +364,6 @@ pub struct ExternalWorkspacePolicy {
 pub struct ExternalCapabilitySourcePolicy {
     pub observation: Option<Vec<String>>,
     pub mutation: Option<Vec<String>>,
-    pub command: Option<Vec<String>>,
     pub external: Option<Vec<String>>,
     pub session_state: Option<Vec<String>>,
 }
@@ -436,22 +376,6 @@ pub struct ExternalMethodPolicy {
     pub required_capability: Option<String>,
     pub max_single_read_bytes: Option<usize>,
     pub max_todo_ops: Option<usize>,
-}
-
-#[derive(Clone, Debug, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExternalCommandPolicy {
-    pub default_timeout_ms: Option<u64>,
-    pub max_timeout_ms: Option<u64>,
-    pub max_output_bytes: Option<usize>,
-    pub allow_inline_shell: Option<bool>,
-    pub inline_shell_max_script_bytes: Option<usize>,
-    pub inline_shell_max_commands: Option<usize>,
-    pub inline_shell_max_words_per_command: Option<usize>,
-    pub allowed_diagnostic_commands: Option<Vec<Vec<String>>>,
-    pub denied_commands: Option<Vec<Vec<String>>>,
-    pub allowed_env: Option<Vec<String>>,
-    pub inherited_env: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -517,12 +441,11 @@ fn parse_required_capability(
         "Inspect" => Ok(RequiredCapability::Inspect),
         "ReadPath" => Ok(RequiredCapability::ReadPath),
         "WritePath" => Ok(RequiredCapability::WritePath),
-        "RunCommand" => Ok(RequiredCapability::RunCommand),
         "FetchUrl" => Ok(RequiredCapability::FetchUrl),
         "MutateSessionState" => Ok(RequiredCapability::MutateSessionState),
         "ReadAudit" => Ok(RequiredCapability::ReadAudit),
         other => Err(format!(
-            "unknown required_capability '{}'; expected Inspect, ReadPath, WritePath, RunCommand, FetchUrl, MutateSessionState, or ReadAudit",
+            "unknown required_capability '{}'; expected Inspect, ReadPath, WritePath, FetchUrl, MutateSessionState, or ReadAudit",
             other
         )),
     }
@@ -542,21 +465,17 @@ pub struct RichPolicyOutcome {
 /// Contains rich facts that the public `PolicyDecision` does not expose.
 #[derive(Clone, Debug, Default)]
 pub struct PolicyEvidence {
-    pub command_classification: Option<EffectiveImpact>,
     pub network_host: Option<String>,
     pub budget_remaining: Option<u64>,
     pub resolved_paths: Vec<String>,
-    /// Sub-command argvs of a validated inline-shell expansion, when the
-    /// invocation was an `exec.command_run` shell carrier.
-    pub shell_expansion: Option<Vec<Vec<String>>>,
 }
 
 // ── Default policy hook ────────────────────────────────────────────────
 
 /// Default in-process policy hook.
 ///
-/// Combines capability matching, command policy, network policy, and budget
-/// enforcement into a single data-driven pure decision function.
+/// Combines capability matching, network policy, and budget enforcement into a
+/// single data-driven pure decision function.
 ///
 /// **Invariant:** `decide()` performs no I/O, no time reads, no mutable
 /// budget access, and no filesystem/network/clock/environment reads.
@@ -597,7 +516,7 @@ impl DefaultPolicyHook {
 
     /// Pure decision function on resolved facts.
     ///
-    /// Policy: enabled-method → command → network → budget → workspace write region.
+    /// Policy: enabled-method → denied-effect → network → budget → workspace write region.
     fn decide_resolved(
         &self,
         resolved: &super::resolved::ResolvedPolicyInput,
@@ -639,48 +558,6 @@ impl DefaultPolicyHook {
                 },
                 evidence: PolicyEvidence::default(),
             };
-        }
-
-        if resolved.method == "exec.command_run" {
-            if let Some(cmd_err) = &resolved.command_error {
-                return RichPolicyOutcome {
-                    decision: PolicyDecision::Denied {
-                        reason_code: PolicyReasonCode::CommandDenied,
-                        message: cmd_err.message.clone(),
-                        action_required: Some(PolicyActionRequired::ChangeCommand),
-                    },
-                    evidence: PolicyEvidence {
-                        command_classification: resolved
-                            .resolved_command
-                            .as_ref()
-                            .map(|c| c.effective_impact.clone()),
-                        ..Default::default()
-                    },
-                };
-            }
-            if let Some(cmd) = &resolved.resolved_command
-                && cmd.effective_impact == EffectiveImpact::HardDenied
-            {
-                return RichPolicyOutcome {
-                    decision: PolicyDecision::Denied {
-                        reason_code: PolicyReasonCode::CommandDenied,
-                        message: format!("command denied by policy: {:?}", cmd.argv),
-                        action_required: Some(PolicyActionRequired::ChangeCommand),
-                    },
-                    evidence: PolicyEvidence {
-                        command_classification: Some(cmd.effective_impact.clone()),
-                        ..Default::default()
-                    },
-                };
-            }
-            if let Some(cmd) = &resolved.resolved_command
-                && cmd.effective_impact == EffectiveImpact::WorkspaceMutation
-            {
-                // Blacklist semantics: an empty denied_write_patterns means all
-                // workspace paths are allowed. No deny-at-policy-time here;
-                // per-path deny enforcement happens in Guard L1 / validate_path_facts.
-                let _ = cmd;
-            }
         }
 
         // No allowlist gate for mutate.* — blacklist semantics mean an empty
@@ -785,10 +662,6 @@ impl DefaultPolicyHook {
         RichPolicyOutcome {
             decision: PolicyDecision::Allowed,
             evidence: PolicyEvidence {
-                command_classification: resolved
-                    .resolved_command
-                    .as_ref()
-                    .map(|c| c.effective_impact.clone()),
                 network_host: resolved.resolved_network.as_ref().map(|n| n.host.clone()),
                 budget_remaining: Some(
                     budget
@@ -796,11 +669,6 @@ impl DefaultPolicyHook {
                         .saturating_sub(budget.turn_observation_bytes_used),
                 ),
                 resolved_paths,
-                shell_expansion: resolved
-                    .resolved_command
-                    .as_ref()
-                    .filter(|c| !c.sub_argvs.is_empty())
-                    .map(|c| c.sub_argvs.clone()),
             },
         }
     }
@@ -874,25 +742,26 @@ mod tests {
         assert_eq!(outcome.decision, PolicyDecision::Allowed);
     }
 
-    // ── Test 3: exec.command_run with denied argv ───────────────────────────
+    // ── Test 3: exec.command_run is retired and rejected as unknown method ──
 
     #[test]
-    fn default_hook_denies_command_run_with_denied_argv() {
+    fn default_hook_denies_command_run_as_unknown_method() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
             method: "exec.command_run".into(),
             params: json!({
                 "argv": ["sh", "-c", "rm -rf /"],
-                "declared_impact": "workspace_mutation"
             }),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
+        // exec.command_run is retired from the catalog, so the resolver
+        // rejects it as NonDeterminable before any command policy check.
         assert!(matches!(
             outcome.decision,
             PolicyDecision::Denied {
-                reason_code: PolicyReasonCode::CommandDenied,
+                reason_code: PolicyReasonCode::NonDeterminable,
                 ..
             }
         ));
@@ -975,8 +844,6 @@ mod tests {
     #[test]
     fn policy_config_defaults_produces_valid_config() {
         let config = PolicyConfig::defaults_for_project_root(PathBuf::from("/tmp/test"));
-        assert!(!config.command.allowed_diagnostic_commands.is_empty());
-        assert!(!config.command.denied_commands.is_empty());
         assert!(config.network.allow_public_https);
         assert!(config.budget.max_single_read_bytes > 0);
         assert!(config.observation.max_single_read_bytes > 0);
@@ -991,20 +858,14 @@ mod tests {
     #[test]
     fn policy_config_merge_precedence_external_overrides_defaults() {
         let mut config = PolicyConfig::defaults_for_project_root(PathBuf::from("/tmp/test"));
-        let original_timeout = config.command.default_timeout_ms;
 
         let toml_str = r#"
-[command]
-default_timeout_ms = 99999
-
 [network]
 allow_public_https = false
 "#;
         let external: ExternalPolicyFile = toml::from_str(toml_str).unwrap();
         config.merge_external(&external).unwrap();
 
-        assert_eq!(config.command.default_timeout_ms, 99999);
-        assert_ne!(config.command.default_timeout_ms, original_timeout);
         assert!(!config.network.allow_public_https);
     }
 
@@ -1085,9 +946,6 @@ mutation = ["declared"]
 [methods."observe.workspace"]
 enabled = true
 
-[command]
-default_timeout_ms = 60000
-
 [network]
 allow_public_https = true
 allowed_hosts = ["example.com"]
@@ -1101,7 +959,6 @@ max_grep_matches = 500
         let external: ExternalPolicyFile = toml::from_str(toml_str).unwrap();
         assert!(external.capability_sources.is_some());
         assert!(external.methods.is_some());
-        assert!(external.command.is_some());
         assert!(external.network.is_some());
         assert!(external.budget.is_some());
         assert!(external.observation.is_some());

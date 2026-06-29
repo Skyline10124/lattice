@@ -17,18 +17,17 @@ use async_trait::async_trait;
 use lancet_api::{AuditBacking, LancetError, LancetRuntime, LancetRuntimeConfig};
 use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{
-    BudgetLimits, CepPolicyConfig, CommandPolicy, NetworkPolicyConfig, ObservationPolicyConfig,
+    BudgetLimits, CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig,
 };
 use lancet_catalog::catalog;
 use lancet_catalog::methods::audit::{AuditObserve, AuditReplay};
-use lancet_catalog::methods::command::Run;
 use lancet_catalog::methods::external::Fetch;
 use lancet_catalog::methods::session::TodoWrite;
 use lancet_catalog::methods::workspace::{Batch, Create, Edit, ObserveWorkspace};
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
-    CepAuditContext, CepAuditStore, CepClient, ExecutionRouting, VerifyConfig, WorkspacePath,
-    impact_kind_for_method, impact_kind_label, wire_code_for_error,
+    CepAuditContext, CepAuditStore, CepClient, ExecutionRouting, impact_kind_for_method,
+    impact_kind_label, wire_code_for_error,
 };
 use lancet_protocol::error::{
     CepErrorData, invalid_params, jsonrpc, method_not_found, parse_error,
@@ -42,7 +41,7 @@ use lattice_profile::{
     LancetNetworkSection, LancetObservationSection, LancetSection, LoadedAgentProfile,
 };
 #[cfg(test)]
-use lattice_profile::{LancetVerifySection, LancetWorkspacePolicySection};
+use lattice_profile::LancetWorkspacePolicySection;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -116,7 +115,6 @@ impl CepExecutorAdapter {
             Batch::NAME => self.call_typed::<Batch>(params).await,
             Fetch::NAME => self.call_typed::<Fetch>(params).await,
             TodoWrite::NAME => self.call_typed::<TodoWrite>(params).await,
-            Run::NAME => self.call_typed::<Run>(params).await,
             AuditObserve::NAME => self.call_typed::<AuditObserve>(params).await,
             AuditReplay::NAME => self.call_typed::<AuditReplay>(params).await,
             other => Err(method_not_found(other)),
@@ -246,7 +244,6 @@ pub(crate) fn cep_policy_from_profile(
         observation,
         network,
         budget,
-        command: command_policy_from_profile(lancet),
         denied_effect_kinds: lancet
             .effects
             .as_ref()
@@ -264,38 +261,6 @@ fn workspace_policy_from_profile(lancet: &LancetSection) -> Result<WorkspacePoli
         ApiError::BadRequest(format!("lancet.workspace.denied_write_patterns: {err}"))
     })?;
     Ok(workspace)
-}
-
-/// Lower `[lancet.verify]` into immutable verify configuration.
-pub(crate) fn verify_config_from_profile(
-    lancet: &LancetSection,
-    _runtime_project_root: &Path,
-) -> Result<Option<VerifyConfig>, ApiError> {
-    let Some(section) = lancet.verify.as_ref() else {
-        return Ok(None);
-    };
-    if section.argv.is_empty() {
-        return Err(ApiError::BadRequest(
-            "lancet.verify.argv must not be empty when the section is present".into(),
-        ));
-    }
-    if section.timeout_ms == Some(0) {
-        return Err(ApiError::BadRequest(
-            "lancet.verify.timeout_ms must be positive when set".into(),
-        ));
-    }
-    let cwd = match section.cwd.as_deref() {
-        Some(path) => WorkspacePath::parse(path).map_err(|_| {
-            ApiError::BadRequest(format!("lancet.verify.cwd: invalid relative path '{path}'"))
-        })?,
-        None => WorkspacePath::project_root(),
-    };
-    Ok(Some(VerifyConfig {
-        argv: section.argv.clone(),
-        cwd,
-        timeout_ms: section.timeout_ms,
-        expected_exit_code: section.expected_exit_code.unwrap_or(0),
-    }))
 }
 
 fn apply_observation_profile(
@@ -358,51 +323,6 @@ fn to_llm_tool_definition(tool: lancet_api::ToolDefinition) -> lattice_llm::Tool
     lattice_llm::ToolDefinition::new(tool.name, tool.description, tool.parameters)
 }
 
-/// Build `CommandPolicy` from the profile `[lancet.command]` section.
-///
-/// Missing `[lancet.command]` falls back to `CommandPolicy::defaults()`.
-/// Partial fields use defaults for the unspecified ones.
-fn command_policy_from_profile(lancet: &LancetSection) -> CommandPolicy {
-    let defaults = CommandPolicy::defaults();
-    match lancet.command.as_ref() {
-        Some(section) => CommandPolicy {
-            default_timeout_ms: section
-                .default_timeout_ms
-                .unwrap_or(defaults.default_timeout_ms),
-            max_timeout_ms: section.max_timeout_ms.unwrap_or(defaults.max_timeout_ms),
-            max_output_bytes: section
-                .max_output_bytes
-                .unwrap_or(defaults.max_output_bytes),
-            allow_inline_shell: section
-                .allow_inline_shell
-                .unwrap_or(defaults.allow_inline_shell),
-            inline_shell_max_script_bytes: section
-                .inline_shell_max_script_bytes
-                .unwrap_or(defaults.inline_shell_max_script_bytes),
-            inline_shell_max_commands: section
-                .inline_shell_max_commands
-                .unwrap_or(defaults.inline_shell_max_commands),
-            inline_shell_max_words_per_command: section
-                .inline_shell_max_words_per_command
-                .unwrap_or(defaults.inline_shell_max_words_per_command),
-            allowed_diagnostic_commands: section
-                .allowed_diagnostic_commands
-                .clone()
-                .unwrap_or(defaults.allowed_diagnostic_commands),
-            denied_commands: section
-                .denied_commands
-                .clone()
-                .unwrap_or(defaults.denied_commands),
-            allowed_env: section.allowed_env.clone().unwrap_or(defaults.allowed_env),
-            inherited_env: section
-                .inherited_env
-                .clone()
-                .unwrap_or(defaults.inherited_env),
-        },
-        None => defaults,
-    }
-}
-
 pub(crate) fn load_policy_config(
     lancet: &LancetSection,
     runtime_project_root: &Path,
@@ -433,7 +353,6 @@ pub(crate) fn load_policy_config(
     let mut config = PolicyConfig {
         capability_sources: Default::default(),
         methods: Default::default(),
-        command: cep_context.command,
         network: cep_context.network,
         budget: cep_context.budget,
         observation: cep_context.observation,
@@ -607,10 +526,6 @@ pub(crate) async fn build_production_turn_deps(
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
         execution,
-        verify_config: lancet
-            .map(|section| verify_config_from_profile(section, Path::new(project_root)))
-            .transpose()?
-            .flatten(),
     })
     .map_err(map_lancet_err);
 
@@ -694,7 +609,6 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
                 upper_workspace_id: "null".into(),
             },
         },
-        verify_config: None,
     })
     .map_err(map_lancet_err)?;
     let parts = runtime.into_parts();
@@ -735,53 +649,38 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
 /// Map a CEP transport notification into an internal agent turn event.
 pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<AgentTurnEvent> {
     let params = event.params;
+    let call_id = params.get("call_id").and_then(|v| v.as_u64())?;
     match event.method.as_str() {
-        "cep.verify_failed" => Some(AgentTurnEvent::CepVerifyFailed {
-            call_id: params.get("call_id").and_then(|v| v.as_u64())?,
-            verify_exit_code: params
-                .get("verify_exit_code")
-                .and_then(|v| v.as_i64())
-                .map(|v| v as i32),
-            diff_retained: params
-                .get("diff_retained")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
+        "cep.call_started" => Some(AgentTurnEvent::CepCallStarted {
+            call_id,
+            method: string_param(&params, "method")?,
+            impact_kind: string_param(&params, "impact_kind")
+                .unwrap_or_else(|| "unknown".into()),
+            audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
+            semantic_stage: string_param(&params, "semantic_stage")?,
+            guard_stage: string_param(&params, "guard_stage")?,
         }),
-        _ => {
-            let call_id = params.get("call_id").and_then(|v| v.as_u64())?;
-            match event.method.as_str() {
-                "cep.call_started" => Some(AgentTurnEvent::CepCallStarted {
-                    call_id,
-                    method: string_param(&params, "method")?,
-                    impact_kind: string_param(&params, "impact_kind")
-                        .unwrap_or_else(|| "unknown".into()),
-                    audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
-                    semantic_stage: string_param(&params, "semantic_stage")?,
-                    guard_stage: string_param(&params, "guard_stage")?,
-                }),
-                "cep.call_finished" => {
-                    let method = string_param(&params, "method")?;
-                    Some(AgentTurnEvent::CepCallFinished {
-                        call_id,
-                        method: method.clone(),
-                        impact_kind: impact_kind_for_method(&method)
-                            .as_ref()
-                            .map(impact_kind_label)
-                            .unwrap_or("unknown")
-                            .to_string(),
-                        audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
-                        ok: params.get("ok").and_then(|v| v.as_bool())?,
-                        semantic_stage: string_param(&params, "semantic_stage")?,
-                        guard_stage: string_param(&params, "guard_stage")?,
-                        error_code: params
-                            .get("error_code")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                    })
-                }
-                _ => None,
-            }
+        "cep.call_finished" => {
+            let method = string_param(&params, "method")?;
+            Some(AgentTurnEvent::CepCallFinished {
+                call_id,
+                method: method.clone(),
+                impact_kind: impact_kind_for_method(&method)
+                    .as_ref()
+                    .map(impact_kind_label)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
+                ok: params.get("ok").and_then(|v| v.as_bool())?,
+                semantic_stage: string_param(&params, "semantic_stage")?,
+                guard_stage: string_param(&params, "guard_stage")?,
+                error_code: params
+                    .get("error_code")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            })
         }
+        _ => None,
     }
 }
 
@@ -907,111 +806,6 @@ mod cep_context_profile_policy {
     }
 
     #[test]
-    fn command_policy_from_profile_defaults_when_absent() {
-        let cep = LancetSection::default();
-        let policy = command_policy_from_profile(&cep);
-        let defaults = CommandPolicy::defaults();
-        assert_eq!(policy.default_timeout_ms, defaults.default_timeout_ms);
-        assert_eq!(policy.max_timeout_ms, defaults.max_timeout_ms);
-        assert_eq!(policy.allow_inline_shell, defaults.allow_inline_shell);
-    }
-
-    #[test]
-    fn command_policy_from_profile_applies_custom_values() {
-        let cep = LancetSection {
-            command: Some(lattice_profile::LancetCommandSection {
-                default_timeout_ms: Some(30_000),
-                max_timeout_ms: Some(60_000),
-                max_output_bytes: Some(50_000),
-                allow_inline_shell: Some(true),
-                inline_shell_max_script_bytes: Some(2_048),
-                inline_shell_max_commands: Some(8),
-                inline_shell_max_words_per_command: Some(32),
-                allowed_diagnostic_commands: Some(vec![vec!["mytool".into(), "info".into()]]),
-                denied_commands: Some(vec![vec!["rm".into(), "-rf".into()]]),
-                allowed_env: Some(vec!["MY_VAR".into()]),
-                inherited_env: Some(vec!["PATH".into(), "HOME".into()]),
-            }),
-            ..Default::default()
-        };
-        let policy = command_policy_from_profile(&cep);
-        assert_eq!(policy.default_timeout_ms, 30_000);
-        assert_eq!(policy.max_timeout_ms, 60_000);
-        assert_eq!(policy.max_output_bytes, 50_000);
-        assert!(policy.allow_inline_shell);
-        assert_eq!(policy.inline_shell_max_script_bytes, 2_048);
-        assert_eq!(policy.inline_shell_max_commands, 8);
-        assert_eq!(policy.inline_shell_max_words_per_command, 32);
-        assert_eq!(
-            policy.allowed_diagnostic_commands,
-            vec![vec!["mytool".to_string(), "info".to_string()]]
-        );
-        assert_eq!(
-            policy.denied_commands,
-            vec![vec!["rm".to_string(), "-rf".to_string()]]
-        );
-        assert_eq!(policy.allowed_env, vec!["MY_VAR".to_string()]);
-        assert_eq!(
-            policy.inherited_env,
-            vec!["PATH".to_string(), "HOME".to_string()]
-        );
-    }
-
-    #[test]
-    fn command_policy_from_profile_partial_uses_defaults_for_missing() {
-        let cep = LancetSection {
-            command: Some(lattice_profile::LancetCommandSection {
-                default_timeout_ms: Some(10_000),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let policy = command_policy_from_profile(&cep);
-        let defaults = CommandPolicy::defaults();
-        assert_eq!(policy.default_timeout_ms, 10_000);
-        assert_eq!(policy.max_timeout_ms, defaults.max_timeout_ms);
-        assert_eq!(policy.allow_inline_shell, defaults.allow_inline_shell);
-        assert_eq!(
-            policy.inline_shell_max_script_bytes,
-            defaults.inline_shell_max_script_bytes
-        );
-        assert_eq!(
-            policy.inline_shell_max_commands,
-            defaults.inline_shell_max_commands
-        );
-        assert_eq!(
-            policy.inline_shell_max_words_per_command,
-            defaults.inline_shell_max_words_per_command
-        );
-        assert_eq!(
-            policy.allowed_diagnostic_commands,
-            defaults.allowed_diagnostic_commands
-        );
-    }
-
-    #[test]
-    fn cep_policy_from_profile_uses_command_policy_from_profile() {
-        let dir = TempDir::new().unwrap();
-        let cep = LancetSection {
-            command: Some(lattice_profile::LancetCommandSection {
-                default_timeout_ms: Some(45_000),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
-        assert_eq!(policy.command.default_timeout_ms, 45_000);
-    }
-
-    #[test]
-    fn cep_policy_from_profile_older_profile_uses_command_defaults() {
-        let dir = TempDir::new().unwrap();
-        let cep = LancetSection::default();
-        let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
-        assert_eq!(policy.command, CommandPolicy::defaults());
-    }
-
-    #[test]
     fn workspace_policy_from_profile_lowers_denied_write_patterns() {
         let dir = TempDir::new().unwrap();
         let cep = LancetSection {
@@ -1042,26 +836,6 @@ mod cep_context_profile_policy {
     }
 
     #[test]
-    fn verify_config_from_profile_lowers_typed_argv() {
-        let dir = TempDir::new().unwrap();
-        let cep = LancetSection {
-            verify: Some(LancetVerifySection {
-                argv: vec!["cargo".into(), "test".into()],
-                cwd: Some("crates/foo".into()),
-                timeout_ms: Some(30_000),
-                expected_exit_code: Some(0),
-            }),
-            ..Default::default()
-        };
-        let verify = verify_config_from_profile(&cep, dir.path())
-            .expect("verify")
-            .expect("present");
-        assert_eq!(verify.argv, vec!["cargo", "test"]);
-        assert_eq!(verify.cwd.as_str(), "crates/foo");
-        assert!(verify.validate().is_ok());
-    }
-
-    #[test]
     fn workspace_policy_from_profile_absent_defaults_empty() {
         let dir = TempDir::new().unwrap();
         let config = load_policy_config(&LancetSection::default(), dir.path()).expect("policy");
@@ -1069,7 +843,7 @@ mod cep_context_profile_policy {
     }
 
     #[test]
-    fn workspace_policy_shared_by_mutate_and_command_in_policy_config() {
+    fn workspace_policy_applies_denied_patterns_to_mutate_region_in_policy_config() {
         let dir = TempDir::new().unwrap();
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
@@ -1096,20 +870,11 @@ mod cep_context_profile_policy {
             },
         };
         assert_eq!(hook.decide(&mutate), PolicyDecision::Allowed);
-        let region = hook.config().workspace.authorized_region_for(
-            "mutate.create",
-            None,
-            &hook.config().to_cep_policy_config(),
-        );
-        let command_region = hook.config().workspace.authorized_region_for(
-            "exec.command_run",
-            Some(&lancet_authority::policy::command::EffectiveImpact::WorkspaceMutation),
-            &hook.config().to_cep_policy_config(),
-        );
-        assert_eq!(
-            region.denied_write_path_prefixes,
-            command_region.denied_write_path_prefixes
-        );
+        let region = hook
+            .config()
+            .workspace
+            .authorized_region_for("mutate.create", &hook.config().to_cep_policy_config());
+        assert!(!region.denied_write_path_prefixes.is_empty());
     }
 }
 

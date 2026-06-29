@@ -357,8 +357,7 @@ async fn execute_turn(
             | TurnEvent::TurnStarted { .. }
             | TurnEvent::TurnCommitting
             | TurnEvent::CepCallStarted { .. }
-            | TurnEvent::CepCallFinished { .. }
-            | TurnEvent::CepVerifyFailed { .. } => {}
+            | TurnEvent::CepCallFinished { .. } => {}
         }
     }
 

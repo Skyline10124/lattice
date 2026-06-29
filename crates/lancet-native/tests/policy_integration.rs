@@ -65,28 +65,6 @@ fn integration_read_file_allowed() {
     );
 }
 
-// ── End-to-end: exec.command_run denied by command policy ───────────────────
-
-#[test]
-fn integration_command_run_denied_by_policy() {
-    let hook = DefaultPolicyHook::new(test_config());
-    let input = policy_input(
-        "exec.command_run",
-        json!({
-            "argv": ["sh", "-c", "echo hello"],
-            "declared_impact": "workspace_mutation"
-        }),
-    );
-    let decision = hook.decide(&input);
-    assert!(matches!(
-        decision,
-        PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::CommandDenied,
-            ..
-        }
-    ));
-}
-
 // ── End-to-end: fetch.web denied by network policy ─────────────────────
 
 #[test]

@@ -26,7 +26,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lancet_catalog::methods::command::{Run, RunParams, RunResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
 use lancet_native::{
     CepAuditStore, CepTransport, MethodRegistry, ServerRunConfig,
@@ -93,48 +92,6 @@ fn overreach_server_config_with_denied_effect(
     policy.denied_effect_kinds.insert(denied_effect);
     config.cep_context = Arc::new(lancet_authority::CepTurnContext::from_policy(policy));
     (config, audit)
-}
-
-fn command_composite_handler() -> MethodRegistry {
-    use lancet_authority::effect::{
-        ledger::{EffectSource, ObservedEffect, ObservedScope},
-        region::AuthorizedEffectRegion,
-    };
-    use lancet_catalog::method::RequiredCapability;
-
-    let mut registry = MethodRegistry::new();
-    registry
-        .register_method::<Run, _, _>(|_params: RunParams, ctx| async move {
-            let mut region = AuthorizedEffectRegion::empty();
-            region.kinds.insert(ImpactKind::CommandExecution);
-            region.kinds.insert(ImpactKind::WorkspaceMutation);
-            region.command_allowed = true;
-            region.denied_write_path_prefixes.push(PathBuf::from("/project"));
-            ctx.authorized_region.set(region);
-            ctx.record_effect(ObservedEffect {
-                kind: ImpactKind::CommandExecution,
-                scope: ObservedScope::Root("/project".to_string()),
-                required_capability: RequiredCapability::RunCommand,
-                source: EffectSource::HandlerBackend,
-            });
-            ctx.record_effect(ObservedEffect {
-                kind: ImpactKind::WorkspaceMutation,
-                scope: ObservedScope::Path(PathBuf::from("/project/generated.txt")),
-                required_capability: RequiredCapability::WritePath,
-                source: EffectSource::HandlerBackend,
-            });
-            Ok(RunResult {
-                exit_code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-                stdout_truncated: None,
-                stderr_truncated: None,
-                stdout_bytes: Some(0),
-                stderr_bytes: Some(0),
-            })
-        })
-        .expect("command composite handler registration");
-    registry
 }
 
 // ── Enforce test ───────────────────────────────────────────────────────
@@ -266,36 +223,6 @@ async fn effect_deny_rejects_in_off_mode() {
         .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
         .await
         .expect_err("effect-kind deny must hard reject even in Off mode");
-
-    assert_eq!(err.code, CepErrorCode::EffectViolation);
-    assert!(
-        err.message.contains("denied by effect-kind policy"),
-        "deny error must identify effect-kind policy: {}",
-        err.message
-    );
-
-    drop(client);
-    server_task.abort();
-}
-
-#[tokio::test]
-async fn effect_deny_catches_command_composite_workspace_mutation() {
-    let (config, _audit) =
-        overreach_server_config_with_denied_effect(CepMode::Enforce, ImpactKind::WorkspaceMutation);
-    let (client, server) = CepTransport::pair(8);
-    let registry = command_composite_handler();
-    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
-
-    let err = client
-        .call::<Run>(RunParams {
-            argv: vec!["touch".into(), "generated.txt".into()],
-            cwd: None,
-            env: Default::default(),
-            timeout_ms: None,
-            declared_impact: Some(ImpactKind::WorkspaceMutation),
-        })
-        .await
-        .expect_err("deny WorkspaceMutation must catch exec.command_run composite mutation");
 
     assert_eq!(err.code, CepErrorCode::EffectViolation);
     assert!(

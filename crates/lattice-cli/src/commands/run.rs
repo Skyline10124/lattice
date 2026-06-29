@@ -309,19 +309,6 @@ fn render_human_event<WOut: Write, WErr: Write>(
                 }
             }
         }
-        TurnEvent::CepVerifyFailed {
-            verify_exit_code,
-            ..
-        } => {
-            if verbose {
-                flush_before_status(out, err, state)?;
-                if let Some(code) = verify_exit_code {
-                    writeln!(err, "{} cep verify failed exit {code}", "✗".red())?;
-                } else {
-                    writeln!(err, "{} cep verify failed", "✗".red())?;
-                }
-            }
-        }
     }
     Ok(())
 }

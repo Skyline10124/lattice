@@ -13,11 +13,10 @@ application, shell/web helpers, and effect-contract enforcement.
 - `src/handlers/` owns production CEP method handlers.
 - `src/server/` owns registry setup, transport lifecycle, and durable call
   metadata.
-- `src/enforcement/` owns Guard L1 bridging, isolation probing, and verify
-  command support.
+- `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   patch write limits.
-- `src/executor/` owns crate-private shell/web/render helpers and output limits.
+- `src/executor/` owns crate-private web/render helpers and output limits.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 
 ## Boundaries
@@ -25,8 +24,8 @@ application, shell/web helpers, and effect-contract enforcement.
 - Keep low-level executor helpers crate-private behind native handlers.
 - Tool projection belongs in `lancet-cep`; do not add native compatibility
   projection shims.
-- Mutations must pass active envelope, Guard L1, effect checks, audit recording,
-  and optional verify.
+- Mutations must pass active envelope, Guard L1, effect checks, and audit
+  recording. Post-mutation verify is retired; do not reintroduce it.
 - Do not expose direct native executors to `lattice-agent`.
 
 ## Recent Issues

@@ -3,7 +3,7 @@
 
 //! Native handler context and registry type binding.
 
-use crate::execution_backend::{VerifyConfig, ExecutionRouting, RoutingInvocationState};
+use crate::execution_backend::{ExecutionRouting, RoutingInvocationState};
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use lancet_audit::{CepAuditContext, CepAuditStore, RejectionRecord};
 use lancet_authority::policy::CepTurnContext;
@@ -37,8 +37,6 @@ pub struct HandlerContext {
     /// Upper (MSB) execution routing — always present since MSB is the sole
     /// execution path.
     pub execution: ExecutionRouting,
-    /// Immutable verify configuration from runtime setup.
-    pub verify_config: Option<VerifyConfig>,
     /// Monotonic per-call adapter/backend invocation flags.
     pub routing_invocation: RoutingInvocationState,
 }
@@ -58,7 +56,6 @@ impl std::fmt::Debug for HandlerContext {
             .field("audit_context", &self.audit_context)
             .field("cep_mode", &self.cep_mode)
             .field("execution", &"<ExecutionRouting>")
-            .field("verify_config", &self.verify_config)
             .field("routing_invocation", &self.routing_invocation)
             .finish()
     }
@@ -144,9 +141,9 @@ mod tests {
     mod routing_metadata {
         use super::*;
         use crate::execution_backend::{
-            DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend, ExecutionBackendError,
-            ExecutionRouting, FindRequest, GrepMatch, GrepRequest, PathFacts, PathIntent,
-            UpperContext, WorkspacePath,
+            DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting,
+            FindRequest, GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext,
+            WorkspacePath,
         };
         use lancet_audit::{RejectionRecord, RejectionStage};
         use serde_json::Value;
@@ -258,18 +255,6 @@ mod tests {
                 })
             }
 
-            fn exec(
-                &self,
-                _request: &ExecRequest,
-            ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>>
-            {
-                Box::pin(async {
-                    Err(ExecutionBackendError::Unavailable {
-                        message: "spy backend".into(),
-                    })
-                })
-            }
-
             fn changed_paths(
                 &self,
             ) -> Pin<
@@ -306,7 +291,6 @@ mod tests {
                 audit: Arc::new(CepAuditStore::in_memory().expect("audit")),
                 cep_mode: CepMode::Off,
                 execution,
-                verify_config: None,
                 routing_invocation: RoutingInvocationState::default(),
             }
         }
@@ -377,7 +361,7 @@ mod tests {
             ctx.mark_backend_invoked();
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::VerificationFailure,
-                denial_source: "verify_config".into(),
+                denial_source: "post_backend_check".into(),
             });
             let meta = metadata(&ctx);
             assert_eq!(meta["adapter_preflight_invoked"], true);

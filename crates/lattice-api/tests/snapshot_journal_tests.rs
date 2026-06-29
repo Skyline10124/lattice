@@ -478,7 +478,7 @@ fn resource_matrix_pending_verification_retains_snapshot() {
         TurnCommitStatus::Completed,
         true,
         false,
-        LifecycleFailureKind::MissingVerifyConfig,
+        LifecycleFailureKind::PostExportHeadChange,
     );
     assert_eq!(
         outcome.disposition,
@@ -765,9 +765,6 @@ fn resource_matrix_d14_retained_count_matches() {
     // Verify classify_lifecycle_failure produces Retain for the right dispositions
     let retain_failures = [
         LifecycleFailureKind::CleanupExhaustion,
-        LifecycleFailureKind::MissingVerifyConfig,
-        LifecycleFailureKind::VerifyFailed,
-        LifecycleFailureKind::VerifyTimeout,
         LifecycleFailureKind::PostExportHeadChange,
     ];
     for kind in &retain_failures {

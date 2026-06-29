@@ -5,16 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::runtime_fixtures::{
     RuntimeEffectFixture, audit_observe_runtime_effects, audit_replay_runtime_effects,
-    batch_runtime_effects, command_run_runtime_effects, create_runtime_effects,
-    edit_runtime_effects, fetch_runtime_effects,
-    observe_workspace_runtime_effects, todo_write_runtime_effects,
+    batch_runtime_effects, create_runtime_effects, edit_runtime_effects,
+    fetch_runtime_effects, observe_workspace_runtime_effects, todo_write_runtime_effects,
 };
 use lancet_authority::effect::ledger::EffectSource;
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::*;
-use lancet_protocol::effect_types::ImpactKind;
 
 fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
     let mut fixtures = BTreeMap::new();
@@ -25,10 +22,6 @@ fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
     fixtures.insert(Create::NAME, create_runtime_effects as RuntimeEffectFixture);
     fixtures.insert(Edit::NAME, edit_runtime_effects as RuntimeEffectFixture);
     fixtures.insert(Batch::NAME, batch_runtime_effects as RuntimeEffectFixture);
-    fixtures.insert(
-        Run::NAME,
-        command_run_runtime_effects as RuntimeEffectFixture,
-    );
     fixtures.insert(Fetch::NAME, fetch_runtime_effects as RuntimeEffectFixture);
     fixtures.insert(
         TodoWrite::NAME,
@@ -68,9 +61,6 @@ fn runtime_backend_effects_are_declared_for_every_catalog_method() {
         );
 
         let mut method_recorded_backend_effect = false;
-        let mut run_saw_command_execution = false;
-        let mut run_saw_workspace_mutation = false;
-        let mut run_saw_write_path = false;
         for scenario in scenarios {
             let backend_effects: Vec<_> = scenario
                 .effects
@@ -79,28 +69,7 @@ fn runtime_backend_effects_are_declared_for_every_catalog_method() {
                 .collect();
             method_recorded_backend_effect |= !backend_effects.is_empty();
 
-            if scenario
-                .name
-                .contains("verify_success_filters_verify_source")
-            {
-                assert!(
-                    scenario
-                        .effects
-                        .iter()
-                        .any(|effect| effect.source == EffectSource::Verify),
-                    "{} scenario {} must record a Verify-source effect so the source filter is exercised",
-                    descriptor.name,
-                    scenario.name
-                );
-            }
-
             for effect in &backend_effects {
-                if descriptor.name == Run::NAME {
-                    run_saw_command_execution |= effect.kind == ImpactKind::CommandExecution;
-                    run_saw_workspace_mutation |= effect.kind == ImpactKind::WorkspaceMutation;
-                    run_saw_write_path |=
-                        effect.required_capability == RequiredCapability::RunCommand;
-                }
                 assert!(
                     descriptor.effect.kinds.contains(&effect.kind),
                     "{} scenario {} runtime produced undeclared effect kind {:?}; declared={:?}",
@@ -128,21 +97,6 @@ fn runtime_backend_effects_are_declared_for_every_catalog_method() {
             "{} fixture scenarios did not record any HandlerBackend effects",
             descriptor.name
         );
-
-        if descriptor.name == Run::NAME {
-            assert!(
-                run_saw_command_execution,
-                "exec.command_run fixtures must record CommandExecution"
-            );
-            assert!(
-                run_saw_workspace_mutation,
-                "exec.command_run fixtures must record WorkspaceMutation"
-            );
-            assert!(
-                run_saw_write_path,
-                "exec.command_run mutation fixtures must exercise RunCommand capability"
-            );
-        }
     }
 }
 

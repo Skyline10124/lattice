@@ -3,7 +3,7 @@
 
 //! Fake-LLM end-to-end release scenario.
 //!
-//! Validates the full exec.command_run → edit → edit cycle in a **single `run_turn`**
+//! Validates the full edit → edit cycle in a **single `run_turn`**
 //! with a multi-round `FakeStreamingLlmClient` under Direct Upper routing.
 //! Uses a persisted on-disk audit DB so the attestation can be inspected after
 //! the turn completes.
@@ -76,8 +76,8 @@ struct ReleaseE2eWorkspace {
 
 /// Build a temp workspace with a src/lib.rs seed and a custom profile.
 ///
-/// The `[lancet.command]` section adds `grep` to `allowed_diagnostic_commands`
-/// so the `grep -q RELEASE_E2E_OK src/lib.rs` verify command passes policy validation.
+/// The profile enables `mutate.edit` with an empty workspace deny list
+/// (except `.git/**`) so edits apply cleanly.
 fn setup_release_e2e_workspace(src_content: &str) -> ReleaseE2eWorkspace {
     let state = tempfile::tempdir().unwrap();
     unsafe {
@@ -93,8 +93,6 @@ fn setup_release_e2e_workspace(src_content: &str) -> ReleaseE2eWorkspace {
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
 
-    // The [lancet.command] section overrides allowed_diagnostic_commands so that
-    // "grep" is classified as Diagnostic — required by validate_verify_command.
     let toml_content = r#"schema_version = 1
 [agent]
 name = "default"
@@ -102,13 +100,11 @@ model = "sonnet"
 [prompt]
 system = "You are a test agent."
 [tools]
-enabled = ["exec.command_run", "mutate.edit"]
+enabled = ["mutate.edit"]
 [workspace]
 image = "test-template"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
-[lancet.command]
-allowed_diagnostic_commands = [["echo"], ["grep"]]
 "#;
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
 
@@ -151,13 +147,13 @@ fn make_release_e2e_request(
             test_persist_audit: Some(false),
             workspace_override: None,
         },
-        &["exec.command_run", "mutate.edit"],
+        &["mutate.edit"],
     )
 }
 
 // ── Release criterion-8 test ──────────────────────────────────────────────────
 
-// Single `run_turn` driving exec.command_run → mutate.edit → mutate.edit → Done(stop)
+// Single `run_turn` driving mutate.edit → mutate.edit → Done(stop)
 // without envelope declaration.
 //
 // Asserts:
@@ -165,7 +161,7 @@ fn make_release_e2e_request(
 // 2. Upper-backed edits are verified via tool outcomes (section 6).
 // 3. Session has exactly one commit in the graph.
 // 4. On-disk attestation has correct in-toto subject / predicate / materials.
-// 5. Audit rows are in exec.command_run → edit → edit order.
+// 5. Audit rows are in edit → edit order.
 // 6. Both mutate.edit tool results succeed without profile verify configured.
 
 /// Create an unattached branch at the current HEAD without checking it out.
@@ -215,36 +211,24 @@ async fn release_e2e_criterion_8() {
         }]
     });
 
-    let run_args = serde_json::json!({
-        "argv": ["echo", "release-command-run-ok"],
-        "timeout_ms": 5000,
-        "declared_impact": "command_execution"
-    });
-
-    // ── Build FakeStreamingLlmClient with 4 rounds ─────
+    // ── Build FakeStreamingLlmClient with 3 rounds ─────
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
-            // Round 1: exec.command_run
+            // Round 1: mutate.edit (intermediate content)
             .push_events(tool_call_events(
                 "call_1",
-                "exec.command_run",
-                &run_args.to_string(),
-            ))
-            // Round 2: mutate.edit (intermediate content)
-            .push_events(tool_call_events(
-                "call_2",
                 "mutate.edit",
                 &bad_edit_args.to_string(),
             ))
-            // Round 3: mutate.edit (final content with sentinel)
+            // Round 2: mutate.edit (final content with sentinel)
             .push_events(tool_call_events(
-                "call_3",
+                "call_2",
                 "mutate.edit",
                 &good_edit_args.to_string(),
             ))
-            // Round 4: final assistant response after both edits
+            // Round 3: final assistant response after both edits
             .push_events(final_response_events(
-                "Criterion-8 verified: run → edit(fail) → edit(ok).",
+                "Criterion-8 verified: edit(fail) → edit(ok).",
             ))
             .build(),
     );
@@ -336,7 +320,7 @@ async fn release_e2e_criterion_8() {
         "predicate_type must be CEP_TURN_ATTESTATION_PREDICATE_TYPE"
     );
 
-    // predicate.materials: must include all three methods in the sequence
+    // predicate.materials: must include mutate.edit in the sequence
     let materials = stmt["predicate"]["materials"]
         .as_array()
         .expect("predicate.materials must be a JSON array");
@@ -349,15 +333,11 @@ async fn release_e2e_criterion_8() {
         .filter_map(|m| m["method"].as_str())
         .collect();
     assert!(
-        method_names.contains(&"exec.command_run"),
-        "materials must include exec.command_run; got: {method_names:?}"
-    );
-    assert!(
         method_names.contains(&"mutate.edit"),
         "materials must include mutate.edit; got: {method_names:?}"
     );
 
-    // ── 5. Audit PROV ordering: exec.command_run → mutate.edit → mutate.edit ─
+    // ── 5. Audit PROV ordering: mutate.edit → mutate.edit ─
     let rows = audit
         .query_rows(&AuditQueryFilters {
             turn_id: Some(turn_id.clone()),
@@ -366,17 +346,13 @@ async fn release_e2e_criterion_8() {
         .expect("query audit rows");
 
     assert!(
-        rows.len() >= 3,
-        "must have at least 3 audit rows (exec.command_run, 2x edit); got: {}",
+        rows.len() >= 2,
+        "must have at least 2 audit rows (2x edit); got: {}",
         rows.len()
     );
 
     // Audit rows are returned in audit_id order (insertion order).
     let methods: Vec<&str> = rows.iter().map(|r| r.method.as_str()).collect();
-    let run_pos = methods
-        .iter()
-        .position(|&m| m == "exec.command_run")
-        .expect("exec.command_run must appear in audit rows");
     let edit_positions: Vec<usize> = methods
         .iter()
         .enumerate()
@@ -389,10 +365,6 @@ async fn release_e2e_criterion_8() {
         2,
         "must have exactly 2 mutate.edit audit rows; got {}: {methods:?}",
         edit_positions.len()
-    );
-    assert!(
-        run_pos < edit_positions[0],
-        "exec.command_run must precede first edit in audit; order: {methods:?}"
     );
     assert!(
         edit_positions[0] < edit_positions[1],

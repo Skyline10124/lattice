@@ -4,9 +4,8 @@
 //! CEP/22 native catalog method registration.
 
 use crate::handlers::{
-    register_audit_methods, register_command_methods, register_external_methods,
-    register_mutation_methods, register_session_state_methods,
-    register_workspace_observation_methods,
+    register_audit_methods, register_external_methods, register_mutation_methods,
+    register_session_state_methods, register_workspace_observation_methods,
 };
 use crate::server::registry::MethodRegistry;
 use lancet_protocol::CepError;
@@ -36,11 +35,6 @@ pub fn register_native_session_state(registry: &mut MethodRegistry) -> Result<()
     register_session_state_methods(registry)
 }
 
-/// Register native CEP `exec.command_run` handler.
-pub fn register_native_command(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    register_command_methods(registry)
-}
-
 /// Register native CEP workspace mutation handlers.
 pub fn register_native_mutation(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_mutation_methods(registry)
@@ -48,7 +42,6 @@ pub fn register_native_mutation(registry: &mut MethodRegistry) -> Result<(), Cep
 
 pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_cep_native_methods(registry)?;
-    register_native_command(registry)?;
     register_native_mutation(registry)?;
     register_audit_methods(registry)
 }
@@ -66,7 +59,6 @@ mod cep_native_registry_tests {
     use lancet_authority::policy::CepTurnContext;
     use lancet_catalog::CepMethod;
     use lancet_catalog::catalog;
-    use lancet_catalog::methods::command::Run;
     use lancet_catalog::methods::workspace::{
         ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
     };
@@ -192,20 +184,6 @@ mod cep_native_registry_tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn exec(
-            &self,
-            _request: &crate::execution_backend::ExecRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<crate::execution_backend::ExecOutput, ExecutionBackendError>> + Send + '_>>
-        {
-            Box::pin(async {
-                Ok(crate::execution_backend::ExecOutput {
-                    exit_code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                })
-            })
-        }
-
         fn changed_paths(
             &self,
         ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
@@ -282,7 +260,6 @@ mod cep_native_registry_tests {
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
             execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
-            verify_config: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
 
@@ -342,41 +319,6 @@ mod cep_native_registry_tests {
         assert_eq!(read_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
         assert_eq!(read_row.guard_stage, GUARD_STAGE_NATIVE);
         assert!(read_row.policy_enforced);
-
-        drop(client);
-        server_task.abort();
-    }
-
-    #[tokio::test]
-    async fn cep_native_registry_command_run_audited_as_native() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = production_registry();
-        let mut config = ServerRunConfig::in_memory_for_tests();
-        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-
-        let (client, server) = CepTransport::pair(8);
-        let audit = Arc::clone(&config.audit);
-        let server_task = tokio::spawn(async move {
-            server.run(registry, config).await.unwrap();
-        });
-
-        let _ = client
-            .call::<Run>(lancet_catalog::methods::command::RunParams {
-                argv: vec!["echo".into(), "native".into()],
-                cwd: None,
-                env: Default::default(),
-                timeout_ms: None,
-                declared_impact: None,
-            })
-            .await;
-
-        assert_eq!(audit.row_count().unwrap(), 1);
-        let run_row = audit.row_by_audit_id(1).unwrap();
-        assert_eq!(run_row.method, Run::NAME);
-        assert_eq!(run_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
-        assert_eq!(run_row.guard_stage, GUARD_STAGE_NATIVE);
-        assert!(run_row.policy_enforced);
 
         drop(client);
         server_task.abort();

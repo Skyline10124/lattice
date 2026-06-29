@@ -4,6 +4,89 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #4: permanently retire command execution + post-mutation verify — 2026-06-30
+
+Severity: HIGH (security surface reduction; permanent retirement of agent-visible command execution).
+
+**Problem:** The CEP layer exposed `exec.command_run` as an agent-visible tool
+and ran a post-mutation verify step after writes. This kept 1646 lines of shell
+AST parsing and command classification in `lancet-authority`, tied verify to
+command policy, and left an any-command-execution capability on the agent face.
+
+**Fix:**
+
+- Removed `exec.command_run` from `lancet-catalog::CATALOG` (9→8 methods);
+  deleted `crates/lancet-catalog/src/methods/command.rs` and its registration.
+- Deleted `crates/lancet-authority/src/policy/command.rs` (822 lines) and
+  `policy/shell_ast.rs` (824 lines); removed `CommandPolicy`, `EffectiveImpact`,
+  `classify_command`, `classify_command_line`, `build_effective_env`,
+  `validate_timeout`, `CommandLine`, `ShellExpansion`, `resolve_command_line`
+  and all re-exports from `lancet-authority`.
+- Removed the `command` field from `CepPolicyConfig`, `PolicyConfig`,
+  `CapabilitySourcePolicy`, `ExternalPolicyFile`, `ExternalCapabilitySourcePolicy`;
+  removed the `exec.command_run` branch from `authorized_region_for` (now 2 args);
+  removed `ResolvedCommand`, `resolved_command`, `command_error`,
+  `PolicyEvidence.command_classification`, `PolicyEvidence.shell_expansion`,
+  `PolicyResolver.command`.
+- Deleted `crates/lancet-native/src/handlers/command.rs` (717 lines),
+  `handlers/command_tests.rs` (1093 lines), `enforcement/verify.rs` (885 lines),
+  and `executor/process.rs`; removed `register_native_command`.
+- Removed `ExecutionBackend::exec` from the trait (10→9 methods); deleted
+  `ExecRequest`, `ExecOutput`, `ExecRequestError`, `VerifyConfig`,
+  `VerifyConfigError`, and `PathIntent::ExecCwd` from
+  `lancet-native::execution_backend`; removed all `exec` impls from
+  Null/Test/support backends.
+- Removed `verify_config` from `HandlerContext`, `ServerRunConfig`,
+  `LancetRuntimeConfig`; removed `verify_config_from_profile` and
+  `command_policy_from_profile` from `lattice-api`; removed the `cep.verify_failed`
+  event mapping and `AgentTurnEvent::CepVerifyFailed` / `TurnEvent::CepVerifyFailed`;
+  removed `LifecycleFailureKind::{MissingVerifyConfig, VerifyFailed, VerifyTimeout}`.
+- Removed `CepErrorCode::VerifyFailed` from `lancet-protocol`.
+- Removed `LancetCommandSection` and `LancetVerifySection` from `lattice-profile`;
+  removed `[lancet.command]` / `[lancet.verify]` from the profile schema
+  (old profiles with these sections are now rejected by `deny_unknown_fields`).
+- Removed `exec.command_run` from `lattice-profile::defaults::is_catalog_method`.
+- Removed `CepVerifyFailed` rendering from `lattice-tui` and `lattice-cli`.
+- Cleaned provenance projector + audit test fixtures that referenced
+  `exec.command_run` as a method name.
+- Removed the `exec` impl and `convert_intent` ExecCwd branch from
+  `lattice-api/src/turn/workspace_backend.rs` (CEP-side bridge); the
+  `lattice-workspace` `Backend::exec_upper`, `Workspace::exec`, and
+  `PathIntent::ExecCwd` (workspace-side) were preserved as trusted-host plugin.
+- Added regression tests: `catalog_retires_exec_command_run`,
+  `resolve_command_run_errors_as_unknown_method`,
+  `default_hook_denies_command_run_as_unknown_method`,
+  `denies_retired_command_run_as_unknown_method`.
+
+**Retention boundary (preserved, not deleted):**
+`crates/lattice-workspace/src/promotion/**`, `git.rs`,
+`Backend::exec_upper`, `Workspace::exec`, and the workspace-side
+`PathIntent::ExecCwd`/`ExecRequest`/`ExecOutput` are trusted-host plugin
+command capabilities below the CEP layer and were explicitly preserved.
+
+**Verification:**
+
+- `cargo check --workspace --all-targets` — pass (0 errors, 0 warnings).
+- `cargo clippy --workspace --all-targets -- -D warnings` — pass.
+- `cargo test -p lancet-catalog -p lancet-authority -p lancet-native -p lancet-api -p lattice-api -p lattice-profile` — pass.
+- `rg "command_run|CommandPolicy|EffectiveImpact|classify_command|shell_ast|VerifyConfig|VerifyFailed|verify_config|emit_verify_failed|Run::NAME|PathIntent::ExecCwd|ExecRequest|ExecOutput|ExecRequestError" crates/lancet-* crates/lattice-api crates/lattice-tui crates/lattice-cli crates/lattice-profile crates/lattice-agent --type rust` — only intentional regression-test string references and `lattice_workspace::Exec*` (retention boundary) remain.
+- `lattice-workspace::Backend::exec_upper` and `promotion/**` compile unaffected.
+
+**Changed files:** `crates/lancet-catalog/` (catalog, methods, AGENTS.md),
+`crates/lancet-authority/` (policy/command.rs, shell_ast.rs, default.rs,
+resolved.rs, mod.rs, lib.rs, region.rs, tests), `crates/lancet-native/`
+(execution_backend.rs, handlers/{mutation,mod}.rs, enforcement/{mod,preflight}.rs,
+executor/mod.rs, server/{native_registry,registry,transport}.rs, lib.rs,
+effect_contract_tests/*, tests/*), `crates/lancet-protocol/` (error.rs,
+provenance.rs), `crates/lancet-audit/` (provenance/projector.rs, audit_tests.rs),
+`crates/lancet-api/` (config.rs, runtime.rs, lib.rs), `crates/lattice-api/`
+(turn/{cep,workspace_backend,types,lifecycle,live,collector,execute,cep_tests}.rs,
+tests/*), `crates/lattice-profile/` (schema.rs, defaults.rs, lib.rs),
+`crates/lattice-agent/` (agent_loop/types.rs), `crates/lattice-tui/` (runtime.rs),
+`crates/lattice-cli/` (commands/run.rs), `AGENTS.md`, `FIX.md`.
+
+---
+
 ## Codeberg #3 / L-llm-coupling: extract neutral `net-guard` leaf — 2026-06-29
 
 Severity: LOW (`architecture` / `crate-boundary`).

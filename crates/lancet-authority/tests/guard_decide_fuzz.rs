@@ -103,7 +103,8 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(4, default_budget()),
         },
-        // CommandExecution: diagnostic echo
+        // Retired method: exec.command_run is no longer in the catalog,
+        // so it is rejected as NonDeterminable (a Denied variant).
         PolicyInput {
             method: "exec.command_run".into(),
             params: json!({ "argv": ["echo", "guard-fuzz"] }),
@@ -143,7 +144,7 @@ fn deny_path_inputs() -> Vec<PolicyInput> {
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(12, default_budget()),
         },
-        // RunCommand with denied argv
+        // Retired method: exec.command_run is rejected as NonDeterminable
         PolicyInput {
             method: "exec.command_run".into(),
             params: json!({ "argv": ["sh", "-c", "rm -rf /"] }),

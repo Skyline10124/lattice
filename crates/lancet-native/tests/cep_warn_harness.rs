@@ -10,7 +10,7 @@
 //!
 //! ## Update path (`LATTICE_UPDATE_WARN_REPORT=1`)
 //!
-//! Runs each of the 9 CATALOG methods through `CepMode::Warn`, collects
+//! Runs each of the 8 CATALOG methods through `CepMode::Warn`, collects
 //! `effect_warning` from the `CepAuditStore`, and
 //! writes a fresh `docs/lancet-warn-report.md` at the repo root.
 //!
@@ -36,7 +36,6 @@ use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditQueryParams, AuditReplay, AuditReplayParams,
 };
-use lancet_catalog::methods::command::{Run, RunParams, RunResult};
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
@@ -195,30 +194,6 @@ fn overreach_registry_fetch() -> MethodRegistry {
     r
 }
 
-fn overreach_registry_run() -> MethodRegistry {
-    let mut r = MethodRegistry::new();
-    r.register_method::<Run, _, _>(|_params: RunParams, ctx| async move {
-        ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::CommandExecution,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/run")),
-            required_capability: RequiredCapability::RunCommand,
-            source: EffectSource::HandlerBackend,
-        });
-        Ok(RunResult {
-            exit_code: 0,
-            stdout: "ok".into(),
-            stderr: "".into(),
-            stdout_truncated: None,
-            stderr_truncated: None,
-            stdout_bytes: None,
-            stderr_bytes: None,
-        })
-    })
-    .expect("overreach Run");
-    r
-}
-
 // ── Overreach sample runner ──────────────────────────────────────────────────
 
 struct OverreachResult {
@@ -344,18 +319,6 @@ async fn generate_warn_report() -> String {
                 FetchParams {
                     url: "http://localhost/mock".into(),
                     headers: Default::default(),
-                },
-            )
-            .await,
-            run_overreach::<Run>(
-                "exec.command_run",
-                overreach_registry_run(),
-                RunParams {
-                    argv: vec!["echo".into(), "overreach-test".into()],
-                    cwd: None,
-                    env: Default::default(),
-                    timeout_ms: None,
-                    declared_impact: None,
                 },
             )
             .await,
@@ -509,7 +472,7 @@ async fn generate_warn_report() -> String {
 /// **Default CI path:** reads `docs/lancet-warn-report.md` and asserts no
 /// `fix-now` entries are present.
 ///
-/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs all 9 CATALOG methods
+/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs all 8 CATALOG methods
 /// in `CepMode::Warn`, checks audit metadata, and rewrites the committed report.
 #[tokio::test]
 async fn cep_warn_harness() {

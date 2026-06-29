@@ -227,7 +227,6 @@ mod tests {
         let policy_cfg = lancet_authority::policy::default::PolicyConfig {
             capability_sources: Default::default(),
             methods: Default::default(),
-            command: cep_context.policy.command.clone(),
             network: cep_context.policy.network.clone(),
             budget: cep_context.policy.budget.clone(),
             observation: cep_context.policy.observation.clone(),
@@ -258,7 +257,6 @@ mod tests {
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
-                verify_config: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,

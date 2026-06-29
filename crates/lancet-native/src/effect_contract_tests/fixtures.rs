@@ -55,44 +55,6 @@ pub(super) fn mutation_region(_root: &str) -> AuthorizedEffectRegion {
     }
 }
 
-pub(super) fn command_region() -> AuthorizedEffectRegion {
-    let mut kinds = std::collections::BTreeSet::new();
-    kinds.insert(ImpactKind::CommandExecution);
-    AuthorizedEffectRegion {
-        kinds,
-        read_paths: Vec::new(),
-        observation_roots: Vec::new(),
-        denied_write_paths: Vec::new(),
-        denied_write_path_prefixes: Vec::new(),
-        hosts: Vec::new(),
-        session_state_allowed: false,
-        command_allowed: true,
-    }
-}
-
-pub(super) fn command_mutation_region(root: &str) -> AuthorizedEffectRegion {
-    command_mutation_region_with_write_prefixes(root, vec![PathBuf::from(".")])
-}
-
-pub(super) fn command_mutation_region_with_write_prefixes(
-    _root: &str,
-    denied_write_path_prefixes: Vec<PathBuf>,
-) -> AuthorizedEffectRegion {
-    let mut kinds = BTreeSet::new();
-    kinds.insert(ImpactKind::CommandExecution);
-    kinds.insert(ImpactKind::WorkspaceMutation);
-    AuthorizedEffectRegion {
-        kinds,
-        read_paths: Vec::new(),
-        observation_roots: Vec::new(),
-        denied_write_paths: Vec::new(),
-        denied_write_path_prefixes,
-        hosts: Vec::new(),
-        session_state_allowed: false,
-        command_allowed: true,
-    }
-}
-
 pub(super) fn session_region() -> AuthorizedEffectRegion {
     let mut kinds = BTreeSet::new();
     kinds.insert(ImpactKind::SessionStateMutation);

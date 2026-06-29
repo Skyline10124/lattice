@@ -199,7 +199,6 @@ mod tests {
                 | "mutate.create"
                 | "mutate.edit"
                 | "mutate.batch"
-                | "exec.command_run"
                 | "fetch.web"
                 | "session.todo_write"
                 | "observe.audit"

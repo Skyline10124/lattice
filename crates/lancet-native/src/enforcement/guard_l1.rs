@@ -85,16 +85,14 @@ pub async fn evaluate_and_enforce_policy(
     match &evaluation.decision {
         PolicyDecision::Allowed => {
             let mut authorized_region = None;
-            if let Some(evidence) = &evaluation.evidence {
-                let command_impact = evidence.command_classification.as_ref();
+            if let Some(_evidence) = &evaluation.evidence {
                 let hook = ctx.default_policy_hook.as_ref().ok_or_else(|| {
                     CepError::internal_error("missing default policy hook")
                 })?;
-                let region = hook.config().workspace.authorized_region_for(
-                    method,
-                    command_impact,
-                    &ctx.cep_context.policy,
-                );
+                let region = hook
+                    .config()
+                    .workspace
+                    .authorized_region_for(method, &ctx.cep_context.policy);
                 ctx.authorized_region.set(region);
                 authorized_region = ctx.authorized_region.get();
             }
@@ -189,7 +187,6 @@ mod tests {
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
-                verify_config: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,

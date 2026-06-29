@@ -35,12 +35,11 @@ pub enum CepErrorFamily {
 
 /// Closed enum of CEP error codes within `-32000..-32099`.
 ///
-/// `CommandTimeout` (`-32021`) is the default wire code emitted by
-/// `exec.command_run` whenever the configured deadline elapses, including cases
-/// where cleanup succeeds or the child has already exited. `ChildKillFailed`
-/// (`-32022`) is reserved for timeout cleanup failures, such as
-/// `Child::kill().await` returning an error or the OS reporting an unreaped
-/// child after the deadline.
+/// `CommandTimeout` (`-32021`) is reserved for execution deadline elapse
+/// scenarios, including cases where cleanup succeeds or the child has already
+/// exited. `ChildKillFailed` (`-32022`) is reserved for timeout cleanup
+/// failures, such as `Child::kill().await` returning an error or the OS
+/// reporting an unreaped child after the deadline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CepErrorCode {
@@ -56,7 +55,6 @@ pub enum CepErrorCode {
     ExecutionFailed,
     CommandTimeout,
     ChildKillFailed,
-    VerifyFailed,
     // State (-32030..-32039)
     StaleContext,
     ResourceConflict,
@@ -85,7 +83,6 @@ impl CepErrorCode {
             Self::ExecutionFailed => -32020,
             Self::CommandTimeout => -32021,
             Self::ChildKillFailed => -32022,
-            Self::VerifyFailed => -32023,
             Self::StaleContext => -32030,
             Self::ResourceConflict => -32031,
             Self::EnvelopeAlreadyActive => -32032,
@@ -109,8 +106,7 @@ impl CepErrorCode {
             | Self::AmbientAuthorityDenied => CepErrorFamily::Permission,
             Self::ExecutionFailed
             | Self::CommandTimeout
-            | Self::ChildKillFailed
-            | Self::VerifyFailed => CepErrorFamily::Execution,
+            | Self::ChildKillFailed => CepErrorFamily::Execution,
             Self::StaleContext
             | Self::ResourceConflict
             | Self::EnvelopeAlreadyActive
@@ -135,7 +131,6 @@ impl CepErrorCode {
             -32020 => Self::ExecutionFailed,
             -32021 => Self::CommandTimeout,
             -32022 => Self::ChildKillFailed,
-            -32023 => Self::VerifyFailed,
             -32030 => Self::StaleContext,
             -32031 => Self::ResourceConflict,
             -32032 => Self::EnvelopeAlreadyActive,
@@ -365,7 +360,6 @@ mod tests {
             CepErrorCode::SchemaMismatch,
             CepErrorCode::CapabilityNotGranted,
             CepErrorCode::ExecutionFailed,
-            CepErrorCode::VerifyFailed,
             CepErrorCode::StaleContext,
             CepErrorCode::EnvelopeMissing,
             CepErrorCode::EffectViolation,

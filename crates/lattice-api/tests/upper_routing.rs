@@ -228,7 +228,6 @@ async fn runtime_fixture(
         model_id: "test".into(),
         runtime_version: "test".into(),
         execution,
-        verify_config: None,
     })
     .expect("runtime");
 
@@ -378,7 +377,6 @@ fn scan_value_for_leaks(value: &Value, lower_root: &Path, secret: &str) {
 async fn upper_routing_e2e() {
     use futures::StreamExt;
     use lancet_api::audit_db_path_for_project_in;
-    use lancet_catalog::methods::command::Run;
     use lattice_agent::LlmClient;
     use lattice_agent::testing::FakeStreamingLlmClient;
 
@@ -415,7 +413,6 @@ async fn upper_routing_e2e() {
                 enabled: vec![
                     ObserveWorkspace::NAME.into(),
                     Create::NAME.into(),
-                    Run::NAME.into(),
                 ],
             },
             llm: LlmSection::default(),
@@ -453,12 +450,6 @@ async fn upper_routing_e2e() {
         "content": "upper-created",
         "create_parents": false
     });
-    let exec_args = serde_json::json!({
-        "argv": ["echo", "test-exec"],
-        "cwd": ".",
-        "timeout_ms": 5000,
-        "declared_impact": "command_execution"
-    });
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
@@ -472,7 +463,6 @@ async fn upper_routing_e2e() {
                 Create::NAME,
                 &create_args.to_string(),
             ))
-            .push_events(tool_call_events("c3", Run::NAME, &exec_args.to_string()))
             .push_events(final_response_events("upper routing complete"))
             .build(),
     );

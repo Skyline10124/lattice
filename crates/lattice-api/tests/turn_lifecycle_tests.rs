@@ -286,41 +286,6 @@ async fn cleanup_same_loop_assertion_one_hook_covers_all_rounds() {
 // ── Task 2: export_verify_promote tests ──────────────────────────────────────
 
 #[tokio::test]
-async fn export_verify_promote_missing_verify_config_yields_pending_verification() {
-    let (ws, handle, _baseline) = setup_workspace_with_repo().await;
-
-    let result = run_terminal_verification(
-        ws.as_ref() as &dyn Workspace,
-        &handle,
-        "abc123def456abc123def456abc123def456abc1",
-        "profile_hash_abc",
-        None, // No verify config.
-        0,
-    )
-    .await
-    .expect("no error");
-
-    assert!(
-        result.is_none(),
-        "missing config → None (no fabricated evidence)"
-    );
-
-    // Classify: completed + pending_verification + retain.
-    let outcome = classify_lifecycle_failure(
-        TurnCommitStatus::Completed,
-        true,
-        false,
-        LifecycleFailureKind::MissingVerifyConfig,
-    );
-    assert_eq!(
-        outcome.disposition,
-        WorkspaceDisposition::PendingVerification
-    );
-    assert_eq!(outcome.resource_action, ResourceAction::Retain);
-    assert!(!outcome.verification_acquired);
-}
-
-#[tokio::test]
 async fn export_verify_promote_verification_executes_and_records_evidence() {
     let (ws, handle, _baseline) = setup_workspace_with_repo().await;
 
@@ -377,7 +342,7 @@ async fn export_verify_promote_failed_verification_yields_pending() {
         TurnCommitStatus::Completed,
         true,
         true,
-        LifecycleFailureKind::VerifyFailed,
+        LifecycleFailureKind::PostExportHeadChange,
     );
     assert_eq!(
         outcome.disposition,
@@ -494,56 +459,6 @@ async fn outcome_matrix_cleanup_exhaustion_completed_pending_worktree() {
     );
     assert_eq!(outcome.status, TurnCommitStatus::Completed);
     assert_eq!(outcome.disposition, WorkspaceDisposition::PendingWorktree);
-    assert_eq!(outcome.resource_action, ResourceAction::Retain);
-}
-
-#[tokio::test]
-async fn outcome_matrix_missing_verify_completed_pending_verification() {
-    let outcome = classify_lifecycle_failure(
-        TurnCommitStatus::Completed,
-        true,
-        false,
-        LifecycleFailureKind::MissingVerifyConfig,
-    );
-    assert_eq!(outcome.status, TurnCommitStatus::Completed);
-    assert_eq!(
-        outcome.disposition,
-        WorkspaceDisposition::PendingVerification
-    );
-    assert_eq!(outcome.resource_action, ResourceAction::Retain);
-    assert!(!outcome.verification_acquired);
-}
-
-#[tokio::test]
-async fn outcome_matrix_verify_failed_completed_pending_verification() {
-    let outcome = classify_lifecycle_failure(
-        TurnCommitStatus::Completed,
-        true,
-        true,
-        LifecycleFailureKind::VerifyFailed,
-    );
-    assert_eq!(outcome.status, TurnCommitStatus::Completed);
-    assert_eq!(
-        outcome.disposition,
-        WorkspaceDisposition::PendingVerification
-    );
-    assert_eq!(outcome.resource_action, ResourceAction::Retain);
-    assert!(outcome.verification_acquired);
-}
-
-#[tokio::test]
-async fn outcome_matrix_verify_timeout_completed_pending_verification() {
-    let outcome = classify_lifecycle_failure(
-        TurnCommitStatus::Completed,
-        true,
-        false,
-        LifecycleFailureKind::VerifyTimeout,
-    );
-    assert_eq!(outcome.status, TurnCommitStatus::Completed);
-    assert_eq!(
-        outcome.disposition,
-        WorkspaceDisposition::PendingVerification
-    );
     assert_eq!(outcome.resource_action, ResourceAction::Retain);
 }
 
@@ -690,7 +605,7 @@ async fn outcome_matrix_independence_completed_pairs_with_all_dispositions() {
                 TurnCommitStatus::Completed,
                 true,
                 false,
-                LifecycleFailureKind::MissingVerifyConfig,
+                LifecycleFailureKind::PostExportHeadChange,
             ),
             WorkspaceDisposition::PendingVerification,
         ),
@@ -764,7 +679,7 @@ async fn outcome_matrix_retention_only_pending_worktree_and_verify_retain() {
         TurnCommitStatus::Completed,
         true,
         false,
-        LifecycleFailureKind::MissingVerifyConfig,
+        LifecycleFailureKind::PostExportHeadChange,
     );
     assert_eq!(pv.resource_action, ResourceAction::Retain);
 

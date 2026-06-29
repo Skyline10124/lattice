@@ -196,8 +196,7 @@ impl Default for WorkspaceSection {
 /// LANCET `[lancet]` profile section with typed policy sub-tables.
 ///
 /// Known sub-tables (`project_root`, `observation`, `network`) deserialize into
-/// typed fields. Other future sub-tables (e.g. `[lancet.command]`) remain in
-/// `extensions`.
+/// typed fields. Other future sub-tables remain in `extensions`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LancetSection {
     #[serde(default = "default_lancet_mode")]
@@ -209,15 +208,11 @@ pub struct LancetSection {
     #[serde(default)]
     pub network: Option<LancetNetworkSection>,
     #[serde(default)]
-    pub command: Option<LancetCommandSection>,
-    #[serde(default)]
     pub policy: Option<LancetPolicySection>,
     #[serde(default)]
     pub effects: Option<LancetEffectsSection>,
     #[serde(default)]
     pub workspace: Option<LancetWorkspacePolicySection>,
-    #[serde(default)]
-    pub verify: Option<LancetVerifySection>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, toml::Value>,
 }
@@ -255,38 +250,6 @@ pub struct LancetNetworkSection {
     pub max_web_response_bytes: Option<usize>,
 }
 
-/// `[lancet.command]` — command execution policy overrides.
-///
-/// All fields are `Option<T>` with `#[serde(default)]` so missing fields
-/// fall back to `CommandPolicy::defaults()`. Missing `[lancet.command]` entirely
-/// uses all defaults. Older profiles without `[lancet.command]` still parse.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct LancetCommandSection {
-    #[serde(default)]
-    pub default_timeout_ms: Option<u64>,
-    #[serde(default)]
-    pub max_timeout_ms: Option<u64>,
-    #[serde(default)]
-    pub max_output_bytes: Option<usize>,
-    #[serde(default)]
-    pub allow_inline_shell: Option<bool>,
-    #[serde(default)]
-    pub inline_shell_max_script_bytes: Option<usize>,
-    #[serde(default)]
-    pub inline_shell_max_commands: Option<usize>,
-    #[serde(default)]
-    pub inline_shell_max_words_per_command: Option<usize>,
-    #[serde(default)]
-    pub allowed_diagnostic_commands: Option<Vec<Vec<String>>>,
-    #[serde(default)]
-    pub denied_commands: Option<Vec<Vec<String>>>,
-    #[serde(default)]
-    pub allowed_env: Option<Vec<String>>,
-    #[serde(default)]
-    pub inherited_env: Option<Vec<String>>,
-}
-
 /// `[lancet.policy]` — pointer to an external structured TOML policy file.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
@@ -308,19 +271,6 @@ pub struct LancetWorkspacePolicySection {
     pub denied_write_patterns: Vec<String>,
 }
 
-/// `[lancet.verify]` — immutable Direct post-mutation verify command.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LancetVerifySection {
-    pub argv: Vec<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
-    #[serde(default)]
-    pub expected_exit_code: Option<i32>,
-}
-
 /// `[lancet.effects]` — runtime effect-kind deny switch.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
@@ -340,11 +290,9 @@ impl Default for LancetSection {
             project_root: None,
             observation: None,
             network: None,
-            command: None,
             policy: None,
             effects: None,
             workspace: None,
-            verify: None,
             extensions: BTreeMap::new(),
         }
     }
@@ -381,10 +329,6 @@ impl<'de> Deserialize<'de> for LancetSection {
             .remove("network")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
-        let command = raw
-            .remove("command")
-            .map(|value| value.try_into().map_err(de::Error::custom))
-            .transpose()?;
         let policy = raw
             .remove("policy")
             .map(|value| value.try_into().map_err(de::Error::custom))
@@ -397,21 +341,15 @@ impl<'de> Deserialize<'de> for LancetSection {
             .remove("workspace")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
-        let verify = raw
-            .remove("verify")
-            .map(|value| value.try_into().map_err(de::Error::custom))
-            .transpose()?;
 
         Ok(Self {
             mode,
             project_root,
             observation,
             network,
-            command,
             policy,
             effects,
             workspace,
-            verify,
             extensions: raw,
         })
     }
@@ -535,7 +473,7 @@ description = "A full-featured agent"
 system_path = "prompt.md"
 
 [tools]
-enabled = ["observe.workspace", "exec.command_run"]
+enabled = ["observe.workspace", "mutate.create"]
 
 [llm.retry]
 max_retries = 2
@@ -551,7 +489,7 @@ max_delay_ms = 1000
         );
         assert_eq!(profile.prompt.system_path.as_deref(), Some("prompt.md"));
         let tools = &profile.tools;
-        assert_eq!(tools.enabled, vec!["observe.workspace", "exec.command_run"]);
+        assert_eq!(tools.enabled, vec!["observe.workspace", "mutate.create"]);
         assert_eq!(profile.llm.retry.max_retries, 2);
         assert_eq!(profile.llm.retry.initial_delay_ms, 250);
         assert_eq!(profile.llm.retry.max_delay_ms, 1000);
@@ -975,7 +913,6 @@ some_field = true
         assert!(profile.lancet.project_root.is_none());
         assert!(profile.lancet.observation.is_none());
         assert!(profile.lancet.network.is_none());
-        assert!(profile.lancet.command.is_none());
     }
 
     #[test]
@@ -1016,155 +953,6 @@ max_web_response_bytes = 1024
         );
     }
 
-    // ── LancetCommandSection ────────────────────────────────────────────
-
-    #[test]
-    fn cep_command_section_parses_all_fields() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-
-[lancet]
-mode = "enforce"
-
-[lancet.command]
-default_timeout_ms = 60000
-max_timeout_ms = 180000
-max_output_bytes = 100000
-allow_inline_shell = true
-inline_shell_max_script_bytes = 2048
-inline_shell_max_commands = 8
-inline_shell_max_words_per_command = 32
-allowed_diagnostic_commands = [["cargo", "test"], ["git", "diff"]]
-denied_commands = [["rm", "-rf"]]
-allowed_env = ["RUST_LOG"]
-inherited_env = ["PATH", "HOME"]
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let cmd = profile.lancet.command.as_ref().unwrap();
-        assert_eq!(cmd.default_timeout_ms, Some(60000));
-        assert_eq!(cmd.max_timeout_ms, Some(180000));
-        assert_eq!(cmd.max_output_bytes, Some(100000));
-        assert_eq!(cmd.allow_inline_shell, Some(true));
-        assert_eq!(cmd.inline_shell_max_script_bytes, Some(2048));
-        assert_eq!(cmd.inline_shell_max_commands, Some(8));
-        assert_eq!(cmd.inline_shell_max_words_per_command, Some(32));
-        assert_eq!(
-            cmd.allowed_diagnostic_commands.as_ref().unwrap(),
-            &vec![
-                vec!["cargo".to_string(), "test".to_string()],
-                vec!["git".to_string(), "diff".to_string()]
-            ]
-        );
-        assert_eq!(
-            cmd.denied_commands.as_ref().unwrap(),
-            &vec![vec!["rm".to_string(), "-rf".to_string()]]
-        );
-        assert_eq!(
-            cmd.allowed_env.as_ref().unwrap(),
-            &vec!["RUST_LOG".to_string()]
-        );
-        assert_eq!(
-            cmd.inherited_env.as_ref().unwrap(),
-            &vec!["PATH".to_string(), "HOME".to_string()]
-        );
-    }
-
-    #[test]
-    fn cep_command_section_defaults_when_absent() {
-        let profile = parse(&minimal_profile_with_workspace()).unwrap();
-        assert!(profile.lancet.command.is_none());
-    }
-
-    #[test]
-    fn cep_command_section_partial_fields_use_defaults() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-
-[lancet]
-mode = "enforce"
-
-[lancet.command]
-default_timeout_ms = 30000
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let cmd = profile.lancet.command.as_ref().unwrap();
-        assert_eq!(cmd.default_timeout_ms, Some(30000));
-        assert!(cmd.max_timeout_ms.is_none());
-        assert!(cmd.allow_inline_shell.is_none());
-        assert!(cmd.allowed_diagnostic_commands.is_none());
-    }
-
-    #[test]
-    fn cep_command_section_rejects_unknown_fields() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-
-[lancet]
-mode = "enforce"
-
-[lancet.command]
-unknown_field = true
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown_field"),
-            "should reject unknown field, got: {err}"
-        );
-    }
-
-    #[test]
-    fn cep_command_section_old_profile_without_command_still_parses() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-
-[lancet]
-mode = "enforce"
-
-[lancet.observation]
-allowed_roots = ["."]
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        assert!(profile.lancet.command.is_none());
-        assert!(profile.lancet.observation.is_some());
-    }
-
-    #[test]
-    fn cep_command_section_moved_from_extensions_to_typed() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-
-[lancet]
-mode = "enforce"
-
-[lancet.command]
-default_timeout_ms = 60000
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        // Should be in typed field, NOT in extensions
-        assert!(profile.lancet.command.is_some());
-        assert!(!profile.lancet.extensions.contains_key("command"));
-    }
-
     #[test]
     fn cep_serializes_extensions_flattened() {
         let mut future = toml::map::Map::new();
@@ -1178,11 +966,9 @@ default_timeout_ms = 60000
             project_root: None,
             observation: None,
             network: None,
-            command: None,
             policy: None,
             effects: None,
             workspace: None,
-            verify: None,
             extensions,
         };
         let serialized = toml::to_string(&section).unwrap();
@@ -1386,26 +1172,21 @@ unexpected = true
     }
 
     #[test]
-    fn lancet_verify_roundtrip() {
+    fn lancet_verify_section_is_not_a_typed_field() {
+        // [lancet.verify] was retired; it must no longer deserialize into a
+        // typed field. It falls through into extensions as an untyped table.
         let toml = format!(
             r#"{prefix}
 
 [workspace]
 
 [lancet.verify]
-argv = ["cargo", "test", "-p", "lattice-api"]
-cwd = "."
-expected_exit_code = 0
-timeout_ms = 120000
+argv = ["cargo", "test"]
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile: AgentProfile = parse(&toml).unwrap();
-        let verify = profile.lancet.verify.as_ref().unwrap();
-        assert_eq!(verify.argv, vec!["cargo", "test", "-p", "lattice-api"]);
-        assert_eq!(verify.cwd.as_deref(), Some("."));
-        assert_eq!(verify.expected_exit_code, Some(0));
-        assert_eq!(verify.timeout_ms, Some(120_000));
+        assert!(profile.lancet.extensions.contains_key("verify"));
     }
 
     #[test]

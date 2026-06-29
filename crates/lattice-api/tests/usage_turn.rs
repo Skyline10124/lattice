@@ -269,58 +269,6 @@ async fn usage_stream_turn_model_started_includes_routed_provider() {
     assert_eq!(model_started.1, "sonnet");
 }
 
-// ── Test: profile-disabled exec.command_run is rejected before CEP dispatch ─────
-
-#[tokio::test]
-async fn rejects_profile_disabled_command_run() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["observe.workspace"]);
-
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(tool_call_events(
-                "call_1",
-                "exec.command_run",
-                r#"{"argv":["echo","blocked"]}"#,
-            ))
-            .push_events(final_response_events(
-                "Should not execute exec.command_run.",
-            ))
-            .build(),
-    );
-
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_default_session(&sessions_path);
-
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::git(&sessions_path),
-        make_request(&ws, "Try exec.command_run", &session_id, fake_llm),
-    )
-    .await
-    .expect("stream_turn must start")
-    .collect()
-    .await;
-
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            TurnEvent::ToolCallFinished {
-                name,
-                ok: false,
-                ..
-            } if name == "exec.command_run"
-        )),
-        "disabled exec.command_run must surface as a failed ToolCallFinished"
-    );
-    assert!(
-        !events.iter().any(|event| matches!(
-            event,
-            TurnEvent::CepCallStarted { method, .. } if method == "exec.command_run"
-        )),
-        "disabled exec.command_run must not emit CepCallStarted"
-    );
-}
-
 // ── Test 2: edit workspace file and commit ──────────────────────────────────
 
 #[tokio::test]

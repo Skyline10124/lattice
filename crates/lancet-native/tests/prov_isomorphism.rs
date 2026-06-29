@@ -9,7 +9,6 @@
 //! in-toto statements after a live turn.
 
 use lancet_catalog::CepMethod;
-use lancet_catalog::methods::command::Run;
 use lancet_catalog::methods::workspace::{Create, Edit, ObserveWorkspace};
 use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
 use lancet_native::provenance::{canonicalize_prov_fragment, project_rows};
@@ -85,27 +84,6 @@ fn read_only_turn_projection_is_isomorphic() {
 }
 
 #[test]
-fn command_only_turn_projection_is_isomorphic() {
-    let audit = CepAuditStore::in_memory().expect("audit");
-    let ctx = base_ctx("sess-prov", "turn-cmd");
-    store_row(
-        &audit,
-        &ctx,
-        1,
-        Run::NAME,
-        r#"{"required_capability":"run_command","exit_code":0,"child_pid":4242}"#,
-    );
-    let rows = audit
-        .query_rows(&lancet_native::AuditQueryFilters {
-            session_id: Some(ctx.session_id.clone()),
-            turn_id: Some(ctx.turn_id.clone()),
-            ..Default::default()
-        })
-        .expect("query");
-    assert_projection_idempotent(&rows);
-}
-
-#[test]
 fn mutation_turn_projection_is_isomorphic() {
     let audit = CepAuditStore::in_memory().expect("audit");
     let ctx = base_ctx("sess-prov", "turn-mut");
@@ -155,13 +133,6 @@ fn mixed_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         2,
-        Run::NAME,
-        r#"{"required_capability":"run_command","exit_code":0,"pid":99}"#,
-    );
-    store_row(
-        &audit,
-        &ctx,
-        3,
         Edit::NAME,
         r#"{"required_capability":"write_path","envelope_id":"env-m","changed_files":["b.txt"]}"#,
     );

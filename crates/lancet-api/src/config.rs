@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use lancet_authority::policy::default::PolicyConfig;
-use lancet_native::{ExecutionRouting, VerifyConfig};
+use lancet_native::ExecutionRouting;
 use lancet_protocol::policy::CepMode;
 use sha2::{Digest, Sha256};
 
@@ -129,8 +129,6 @@ pub struct LancetRuntimeConfig {
     /// Upper (MSB) execution routing — always present since MSB is the sole
     /// execution path.
     pub execution: ExecutionRouting,
-    /// Immutable verify configuration from runtime setup.
-    pub verify_config: Option<VerifyConfig>,
 }
 
 impl LancetRuntimeConfig {
@@ -156,7 +154,6 @@ impl LancetRuntimeConfig {
                     upper_workspace_id: "null".into(),
                 },
             },
-            verify_config: None,
         }
     }
 }

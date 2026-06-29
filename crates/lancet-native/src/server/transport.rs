@@ -3,7 +3,7 @@
 
 //! Native CEP server lifecycle layered on dispatch transport.
 
-use crate::execution_backend::{ExecutionRouting, UpperContext, VerifyConfig};
+use crate::execution_backend::{ExecutionRouting, UpperContext};
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use crate::server::registry::{HandlerContext, MethodRegistry, build_routing_metadata};
 use lancet_audit::{
@@ -40,8 +40,6 @@ pub struct ServerRunConfig {
     /// Upper (MSB) execution routing — always present since MSB is the sole
     /// execution path.
     pub execution: ExecutionRouting,
-    /// Immutable verify configuration from runtime setup.
-    pub verify_config: Option<VerifyConfig>,
 }
 
 impl ServerRunConfig {
@@ -69,7 +67,6 @@ impl ServerRunConfig {
                     upper_workspace_id: "test-upper".into(),
                 },
             },
-            verify_config: None,
         }
     }
 }
@@ -122,7 +119,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         default_policy_hook,
         cep_mode,
         execution,
-        verify_config,
     } = config;
 
     let id = call.id();
@@ -170,7 +166,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         audit: Arc::clone(&audit),
         cep_mode: cep_mode.clone(),
         execution: execution.clone(),
-        verify_config: verify_config.clone(),
         routing_invocation: routing_invocation.clone(),
     };
 

@@ -22,7 +22,6 @@ use std::sync::Arc;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
 use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
-use lancet_catalog::methods::command::{Run, RunParams};
 use lancet_catalog::methods::external::{Fetch, FetchParams};
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
@@ -31,7 +30,7 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_native::audit::CepAuditContext;
 use lancet_native::{
-    CepAuditStore, CepTransport, DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend,
+    CepAuditStore, CepTransport, DirectoryEntry, ExecutionBackend,
     ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry,
     PathFacts, PathIntent, PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext,
     WorkspacePath, register_production_method_registry,
@@ -171,38 +170,6 @@ impl ExecutionBackend for TestFsBackend {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn exec(
-        &self,
-        request: &ExecRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>>
-    {
-        let cwd = if request.cwd.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(request.cwd.as_str())
-        };
-        let argv = request.argv.clone();
-        let env = request.env.clone();
-        Box::pin(async move {
-            let mut cmd = std::process::Command::new(&argv[0]);
-            cmd.args(&argv[1..]);
-            cmd.current_dir(&cwd);
-            for (k, v) in &env {
-                cmd.env(k, v);
-            }
-            let output = cmd
-                .output()
-                .map_err(|e| ExecutionBackendError::Unavailable {
-                    message: e.to_string(),
-                })?;
-            Ok(ExecOutput {
-                exit_code: output.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            })
-        })
-    }
-
     fn changed_paths(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
@@ -251,12 +218,10 @@ async fn build_production_config(
 
     let mut policy_cfg =
         PolicyConfig::defaults_for_project_root(std::path::Path::new(canonical_root).to_path_buf());
-    // Allow all writes under the project root (empty deny list)
-    // and echo as a diagnostic command.
+    // Allow all writes under the project root (empty deny list).
     policy_cfg.workspace = WorkspacePolicy {
         denied_write_patterns: vec![],
     };
-    policy_cfg.command.allowed_diagnostic_commands.push(vec!["echo".into()]);
     if allow_localhost {
         policy_cfg.network.allow_localhost = true;
         policy_cfg.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
@@ -337,24 +302,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
         read_result.content
     );
 
-    // Row 2 — CommandExecution: exec.command_run echo
-    let run_result = client1
-        .call::<Run>(RunParams {
-            argv: vec!["echo".into(), "dog-impact-matrix".into()],
-            cwd: None,
-            env: Default::default(),
-            timeout_ms: Some(5000),
-            declared_impact: Some(ImpactKind::CommandExecution),
-        })
-        .await
-        .expect("exec.command_run");
-    assert_eq!(run_result.exit_code, 0);
-    assert!(
-        run_result.stdout.contains("dog-impact-matrix"),
-        "exec.command_run stdout must contain dog-impact-matrix"
-    );
-
-    // Row 3 — WorkspaceMutation: mutate.edit
+    // Row 2 — WorkspaceMutation: mutate.edit
     let edit_result = client1
         .call::<Edit>(EditParams {
             path: "src/dog04.txt".into(),
@@ -387,7 +335,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "fetch.web body must match echo server"
     );
 
-    // Row 5 — SessionStateMutation: session.todo_write
+    // Row 4 — SessionStateMutation: session.todo_write
     let todo_result = client1
         .call::<TodoWrite>(TodoWriteParams {
             todos: vec![TodoItem {
@@ -416,7 +364,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     assert!(
         !all_rows.is_empty(),
-        "audit store must have rows after five impact classes"
+        "audit store must have rows after four impact classes"
     );
 
     for row in &all_rows {
@@ -436,18 +384,18 @@ async fn dogfood_impact_matrix_five_production_classes() {
         );
     }
 
-    // The five representative impact-class rows.
+    // The four representative impact-class rows.
     let impact_rows = &all_rows;
 
     assert_eq!(
         impact_rows.len(),
-        5,
-        "must have exactly 5 rows, got {}: {:?}",
+        4,
+        "must have exactly 4 rows, got {}: {:?}",
         impact_rows.len(),
         impact_rows.iter().map(|r| &r.method).collect::<Vec<_>>()
     );
 
-    // Verify the five impact kinds are present.
+    // Verify the four impact kinds are present.
     let methods_by_impact: std::collections::HashMap<&str, &str> = impact_rows
         .iter()
         .map(|r| (r.impact_kind.as_str(), r.method.as_str()))
@@ -455,7 +403,6 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     for (expected_impact, expected_method) in [
         ("workspace_observation", "observe.workspace"),
-        ("command_execution", "exec.command_run"),
         ("workspace_mutation", "mutate.edit"),
         ("external_observation", "fetch.web"),
         ("session_state_mutation", "session.todo_write"),
@@ -562,12 +509,11 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "replay calls must be in audit_id order"
     );
 
-    // Verify impact kinds for the five production classes appear in the trace.
+    // Verify impact kinds for the four production classes appear in the trace.
     let activity_impact_kinds: Vec<&ImpactKind> =
         activities.iter().map(|a| &a.impact_kind).collect();
     for expected in [
         ImpactKind::WorkspaceObservation,
-        ImpactKind::CommandExecution,
         ImpactKind::WorkspaceMutation,
         ImpactKind::ExternalObservation,
         ImpactKind::SessionStateMutation,

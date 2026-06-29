@@ -35,10 +35,6 @@ fn method_fixtures() -> Vec<MethodFixture> {
             required_capability: RequiredCapability::WritePath,
         },
         MethodFixture {
-            method: "exec.command_run",
-            required_capability: RequiredCapability::RunCommand,
-        },
-        MethodFixture {
             method: "fetch.web",
             required_capability: RequiredCapability::FetchUrl,
         },

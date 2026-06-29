@@ -4,9 +4,9 @@
 //! Resolved facts table and resolver for CEP policy evaluation.
 //!
 //! Transforms the public [`PolicyInput`] into an internal [`ResolvedPolicyInput`]
-//! with lexical path facts, argv/cwd/env facts, host facts, session-state facts,
-//! and immutable budget snapshots. The resolver is pure: no filesystem I/O,
-//! no time reads, no mutable counter access.
+//! with lexical path facts, host facts, session-state facts, and immutable
+//! budget snapshots. The resolver is pure: no filesystem I/O, no time reads,
+//! no mutable counter access.
 
 use std::path::{Path, PathBuf};
 
@@ -18,11 +18,9 @@ use lancet_protocol::policy::{
 
 use super::BudgetLimits;
 use super::capability::InvocationFacts;
-use super::command::{CommandPolicy, EffectiveImpact, classify_command_line};
 use super::default::WorkspacePolicy;
 use super::network::NetworkPolicyConfig;
 use super::observation::ObservationPolicyConfig;
-use super::shell_ast::{CommandLine, resolve_command_line};
 
 // ── Resolved types (executor-owned, no Serialize/Deserialize) ───────────
 
@@ -32,19 +30,6 @@ pub struct ResolvedPath {
     pub request_path: String,
     pub normalized_path: PathBuf,
     pub project_root: PathBuf,
-}
-
-/// Resolved command facts for `exec.command_run`.
-#[derive(Clone, Debug)]
-pub struct ResolvedCommand {
-    pub argv: Vec<String>,
-    pub cwd: PathBuf,
-    pub env_keys: Vec<String>,
-    pub declared_impact: Option<ImpactKind>,
-    pub effective_impact: EffectiveImpact,
-    /// Expanded sub-command argvs when the invocation is a validated
-    /// inline-shell composite; empty for direct argv execution.
-    pub sub_argvs: Vec<Vec<String>>,
 }
 
 /// Resolved network facts for `fetch.web`.
@@ -74,12 +59,10 @@ pub struct ResolvedPolicyInput {
     pub impact_kind: ImpactKind,
     pub invocation_facts: InvocationFacts,
     pub resolved_target: Option<ResolvedPath>,
-    pub resolved_command: Option<ResolvedCommand>,
     pub resolved_network: Option<ResolvedNetwork>,
     pub resolved_session_state: Option<ResolvedSessionState>,
     pub budget_snapshot: PolicyBudgetSnapshot,
     pub audit_context: PolicyAuditContext,
-    pub command_error: Option<lancet_protocol::CepError>,
 }
 
 /// Resolver that builds [`ResolvedPolicyInput`] from [`PolicyInput`].
@@ -90,7 +73,6 @@ pub struct PolicyResolver {
     pub project_root: PathBuf,
     pub observation: ObservationPolicyConfig,
     pub network: NetworkPolicyConfig,
-    pub command: CommandPolicy,
     pub budget: BudgetLimits,
     pub workspace: WorkspacePolicy,
 }
@@ -103,7 +85,6 @@ impl PolicyResolver {
             project_root,
             observation,
             network: NetworkPolicyConfig::safe_defaults(),
-            command: CommandPolicy::defaults(),
             budget: BudgetLimits::defaults(),
             workspace: WorkspacePolicy::default(),
         }
@@ -137,8 +118,6 @@ impl PolicyResolver {
 
         let mut invocation_facts = InvocationFacts::default();
         let mut resolved_target = None;
-        let mut resolved_command = None;
-        let mut command_error = None;
         let mut resolved_network = None;
         let mut resolved_session_state = None;
 
@@ -187,53 +166,6 @@ impl PolicyResolver {
                     });
                 }
             }
-            "exec.command_run" => {
-                let argv = extract_argv_from_params(&input.params);
-                let cwd_str = extract_cwd_from_params(&input.params);
-                let env_keys = extract_env_keys_from_params(&input.params);
-                let declared_impact = extract_declared_impact_from_params(&input.params);
-
-                invocation_facts.argv = Some(argv.clone());
-                invocation_facts.env_keys = env_keys.clone();
-
-                let cwd = cwd_str
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| self.project_root.clone());
-                invocation_facts.cwd = Some(cwd.clone());
-
-                // Inline-shell carriers expand to sub-commands; expansion
-                // rejections defer like classification errors so the rest of
-                // the facts table is still populated.
-                let mut sub_argvs = Vec::new();
-                let effective_impact = match resolve_command_line(&argv, &self.command) {
-                    Ok(line) => {
-                        if let CommandLine::Shell(expansion) = &line {
-                            sub_argvs = expansion.sub_argvs.clone();
-                            invocation_facts.sub_argvs = expansion.sub_argvs.clone();
-                        }
-                        match classify_command_line(&line, declared_impact.clone(), &self.command) {
-                            Ok(impact) => impact,
-                            Err(err) => {
-                                command_error = Some(err);
-                                EffectiveImpact::Diagnostic
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        command_error = Some(err);
-                        EffectiveImpact::Diagnostic
-                    }
-                };
-
-                resolved_command = Some(ResolvedCommand {
-                    argv,
-                    cwd,
-                    env_keys,
-                    declared_impact,
-                    effective_impact,
-                    sub_argvs,
-                });
-            }
             "fetch.web" => {
                 if let Some(url) = extract_url_from_params(&input.params) {
                     let (host, port, scheme, is_localhost, is_private_ip) = parse_url_facts(&url);
@@ -265,12 +197,10 @@ impl PolicyResolver {
             impact_kind,
             invocation_facts,
             resolved_target,
-            resolved_command,
             resolved_network,
             resolved_session_state,
             budget_snapshot: input.audit_context.budget_snapshot.clone(),
             audit_context: input.audit_context.clone(),
-            command_error,
         })
     }
 }
@@ -306,35 +236,6 @@ fn extract_all_batch_targets(params: &serde_json::Value) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
-}
-
-fn extract_argv_from_params(params: &serde_json::Value) -> Vec<String> {
-    params
-        .get("argv")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn extract_cwd_from_params(params: &serde_json::Value) -> Option<String> {
-    params.get("cwd")?.as_str().map(String::from)
-}
-
-fn extract_env_keys_from_params(params: &serde_json::Value) -> Vec<String> {
-    params
-        .get("env")
-        .and_then(|v| v.as_object())
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default()
-}
-
-fn extract_declared_impact_from_params(params: &serde_json::Value) -> Option<ImpactKind> {
-    let val = params.get("declared_impact")?;
-    serde_json::from_value(val.clone()).ok()
 }
 
 fn extract_url_from_params(params: &serde_json::Value) -> Option<String> {
@@ -549,25 +450,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_command_run_extracts_argv_cwd_env() {
+    fn resolve_command_run_errors_as_unknown_method() {
+        // Regression for issue #4: exec.command_run is retired from the
+        // catalog, so the resolver must reject it as an unknown method.
         let resolver = test_resolver();
         let input = PolicyInput {
             method: "exec.command_run".into(),
-            params: json!({
-                "argv": ["cargo", "test"],
-                "cwd": "/home/user/project",
-                "env": {"RUST_LOG": "debug"},
-                "declared_impact": "command_execution"
-            }),
+            params: json!({"argv": ["cargo", "test"]}),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
-        let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(resolved.impact_kind, ImpactKind::CommandExecution);
-        let cmd = resolved.resolved_command.unwrap();
-        assert_eq!(cmd.argv, vec!["cargo", "test"]);
-        assert_eq!(cmd.cwd, PathBuf::from("/home/user/project"));
-        assert_eq!(cmd.env_keys, vec!["RUST_LOG"]);
+        let err = resolver.resolve(&input).unwrap_err();
+        assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
     }
 
     #[test]

@@ -22,8 +22,8 @@ pub use load::{LoadedAgentProfile, load_agent_profile};
 pub use schema::{
     AgentProfile, AgentSection, CredentialRef, DEFAULT_CLEANUP_ROUNDS,
     DEFAULT_MAX_PENDING_SNAPSHOTS, EgressPolicyConfig,
-    LancetCommandSection, LancetNetworkSection, LancetObservationSection, LancetPolicySection,
-    LancetProjectRootSection, LancetSection, LancetVerifySection,
+    LancetNetworkSection, LancetObservationSection, LancetPolicySection,
+    LancetProjectRootSection, LancetSection,
     LancetWorkspacePolicySection, LlmRetrySection, LlmSection, PromptSection, ToolsSection,
     WorkspaceSection,
 };

@@ -207,41 +207,6 @@ impl ExecutionBackend for SupportFsBackend {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn exec(
-        &self,
-        request: &crate::execution_backend::ExecRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<crate::execution_backend::ExecOutput, ExecutionBackendError>> + Send + '_>>
-    {
-        let cwd = if request.cwd.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(request.cwd.as_str())
-        };
-        let argv = request.argv.clone();
-        let env = request.env.clone();
-        // Take a pre-execution snapshot of workspace files.
-        let snapshot = Self::snapshot_files(&self.root);
-        *self.pre_exec_snapshot.lock().unwrap() = Some(snapshot);
-        Box::pin(async move {
-            let mut cmd = std::process::Command::new(&argv[0]);
-            cmd.args(&argv[1..]);
-            cmd.current_dir(&cwd);
-            for (k, v) in &env {
-                cmd.env(k, v);
-            }
-            let output = cmd
-                .output()
-                .map_err(|e| ExecutionBackendError::Unavailable {
-                    message: e.to_string(),
-                })?;
-            Ok(crate::execution_backend::ExecOutput {
-                exit_code: output.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            })
-        })
-    }
-
     fn changed_paths(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
@@ -438,7 +403,6 @@ pub fn build_test_context(
                 upper_workspace_id: "test-upper".into(),
             },
         },
-        verify_config: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
     (ctx, event_rx, canonical_root)

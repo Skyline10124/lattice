@@ -8,16 +8,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use lancet_native::{
-    DirectoryEntry as NativeDirectoryEntry, ExecOutput as NativeExecOutput,
-    ExecRequest as NativeExecRequest, ExecutionBackend, ExecutionBackendError,
+    DirectoryEntry as NativeDirectoryEntry, ExecutionBackend, ExecutionBackendError,
     FindRequest as NativeFindRequest, GrepMatch as NativeGrepMatch,
     GrepRequest as NativeGrepRequest, PathFacts as NativePathFacts, PathIntent as NativePathIntent,
     PathKind as NativePathKind, UpperContext, WorkspacePath as NativeWorkspacePath,
 };
 use lattice_workspace::{
-    DirectoryEntry, ExecOutput, ExecRequest, FindRequest, GrepRequest, PathFacts, PathIntent,
-    PathKind, UpperHandle, Workspace, WorkspaceError, WorkspacePath,
-    WorkspacePathError as WsPathError,
+    DirectoryEntry, FindRequest, GrepRequest, PathFacts, PathIntent, PathKind, UpperHandle,
+    Workspace, WorkspaceError, WorkspacePath, WorkspacePathError as WsPathError,
 };
 
 /// Bridges one immutable [`UpperHandle`] through a [`Workspace`] adapter.
@@ -77,7 +75,6 @@ impl WorkspaceExecutionBackend {
             NativePathIntent::Overwrite => PathIntent::Overwrite,
             NativePathIntent::Delete => PathIntent::Delete,
             NativePathIntent::ListDirectory => PathIntent::ListDirectory,
-            NativePathIntent::ExecCwd => PathIntent::ExecCwd,
         }
     }
 
@@ -131,28 +128,6 @@ impl WorkspaceExecutionBackend {
             path: Self::convert_path(&request.path)?,
             max_results: lattice_workspace::DEFAULT_FIND_MAX_RESULTS,
         })
-    }
-
-    fn convert_exec_request(
-        request: &NativeExecRequest,
-    ) -> Result<ExecRequest, ExecutionBackendError> {
-        ExecRequest::new(
-            request.argv.clone(),
-            request.env.clone(),
-            request.timeout_ms,
-            Self::convert_path(&request.cwd)?,
-        )
-        .map_err(|_| ExecutionBackendError::ExecutionFailed {
-            message: "empty exec argv".into(),
-        })
-    }
-
-    fn convert_exec_output(output: ExecOutput) -> NativeExecOutput {
-        NativeExecOutput {
-            exit_code: output.exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-        }
     }
 
     fn map_error(err: WorkspaceError) -> ExecutionBackendError {
@@ -343,26 +318,6 @@ impl ExecutionBackend for WorkspaceExecutionBackend {
         })
     }
 
-    fn exec(
-        &self,
-        request: &NativeExecRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<NativeExecOutput, ExecutionBackendError>> + Send + '_>>
-    {
-        let request = match Self::convert_exec_request(request) {
-            Ok(r) => r,
-            Err(err) => return Box::pin(async move { Err(err) }),
-        };
-        let workspace = Arc::clone(&self.workspace);
-        let handle = self.handle.clone();
-        Box::pin(async move {
-            let output = workspace
-                .exec(&handle, &request)
-                .await
-                .map_err(Self::map_error)?;
-            Ok(Self::convert_exec_output(output))
-        })
-    }
-
     fn changed_paths(
         &self,
     ) -> Pin<
@@ -403,10 +358,9 @@ mod workspace_execution_backend_tests {
 
     use super::*;
     use async_trait::async_trait;
-    use std::collections::BTreeMap;
 
     use lattice_workspace::git_status::{GitStatusCode, GitStatusEntry};
-    use lattice_workspace::{Backend, UpperSpec};
+    use lattice_workspace::{Backend, ExecOutput, ExecRequest, UpperSpec};
 
     #[derive(Default)]
     struct SpyWorkspace {
@@ -523,37 +477,6 @@ mod workspace_execution_backend_tests {
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0].as_str(), "src/lib.rs");
         assert_eq!(paths[1].as_str(), "tests/new.rs");
-    }
-
-    #[tokio::test]
-    async fn workspace_execution_backend_preserves_exec_request() {
-        let spy = Arc::new(SpyWorkspace::default());
-        let handle = UpperHandle {
-            id: "upper-test".into(),
-            backend: Backend::Deterministic,
-        };
-        let backend = WorkspaceExecutionBackend::new(
-            spy.clone(),
-            handle,
-            UpperContext {
-                execution_backend: "deterministic".into(),
-                upper_workspace_id: "upper-test".into(),
-            },
-        );
-        let cwd = NativeWorkspacePath::parse("src").unwrap();
-        let mut env = BTreeMap::new();
-        env.insert("MODE".into(), "test".into());
-        let request =
-            NativeExecRequest::new(vec!["echo".into(), "hi".into()], env, 1_000, cwd).unwrap();
-        let out = backend.exec(&request).await.unwrap();
-        assert_eq!(out.stdout, "ok");
-        let record = spy.records.lock().unwrap().pop().unwrap();
-        assert!(record.contains("echo"));
-        assert!(record.contains("hi"));
-        assert!(record.contains("MODE"));
-        assert!(record.contains("src"));
-        assert!(!record.contains("/workspace"));
-        assert!(!record.contains("/home"));
     }
 
     #[tokio::test]

@@ -255,22 +255,6 @@ impl crate::execution_backend::ExecutionBackend for HostFsBackend {
         Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
     }
 
-    fn exec(
-        &self,
-        _request: &crate::execution_backend::ExecRequest,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        crate::execution_backend::ExecOutput,
-                        crate::execution_backend::ExecutionBackendError,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > {
-        Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
-    }
 
     fn changed_paths(
         &self,

@@ -76,7 +76,6 @@ fn setup_workspace() -> Workspace {
     std::fs::create_dir_all(&profile_dir).unwrap();
     let enabled = [
         "observe.workspace",
-        "exec.command_run",
         "mutate.edit",
     ];
     let toml_content = format!(
@@ -92,8 +91,6 @@ enabled = {enabled:?}
 image = "test-template"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
-[lancet.command]
-allowed_diagnostic_commands = [["echo"]]
 "#
     );
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
@@ -178,11 +175,6 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             ))
             .push_events(tool_call_events(
                 "c2",
-                "exec.command_run",
-                r#"{"argv":["echo","audit-turn"]}"#,
-            ))
-            .push_events(tool_call_events(
-                "c3",
                 "mutate.edit",
                 &edit_args.to_string(),
             ))
@@ -237,8 +229,8 @@ async fn full_turn_audit_rows_and_replay_fragment() {
         .filter(|r| !r.method.starts_with("audit."))
         .collect();
     assert!(
-        tool_rows.len() >= 3,
-        "expected read + command + mutation calls, got {}",
+        tool_rows.len() >= 2,
+        "expected read + mutation calls, got {}",
         tool_rows.len()
     );
 

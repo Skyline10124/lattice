@@ -12,7 +12,6 @@ use super::support::{
 };
 use lancet_authority::NetworkPolicyConfig;
 use lancet_authority::effect::region::AuthorizedEffectRegion;
-use lancet_catalog::methods::command::RunParams;
 use lancet_catalog::methods::external::FetchParams;
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
@@ -113,30 +112,6 @@ proptest! {
             &registry, params, ctx, authority.clone(),
         ));
         outcome.dispatch_result.as_ref().expect("legal edit must dispatch");
-        assert_positive(&outcome, &authority);
-    }
-}
-
-proptest! {
-    #[test]
-    fn run_effect_contract_positive(msg in "[a-z ]{1,32}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        declare_active_envelope(&ctx, &root);
-        let authority = command_region();
-        let params = RunParams {
-            argv: vec!["echo".into(), msg],
-            cwd: Some(".".into()),
-            env: BTreeMap::new(),
-            timeout_ms: Some(5000),
-            declared_impact: None,
-        };
-        let outcome = rt().block_on(effect_contract_harness::<Run>(
-            &registry, params, ctx, authority.clone(),
-        ));
-        outcome.dispatch_result.as_ref().expect("legal run must dispatch");
         assert_positive(&outcome, &authority);
     }
 }
@@ -303,28 +278,6 @@ proptest! {
         };
         let authority = mutation_region(&root);
         let outcome = rt().block_on(effect_contract_harness::<Edit>(
-            &registry, params, ctx, authority,
-        ));
-        assert_negative_no_backend_effects(&outcome);
-    }
-}
-
-proptest! {
-    #[test]
-    fn run_effect_contract_negative(msg in "[a-z]{1,16}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let params = RunParams {
-            argv: vec!["echo".into(), msg],
-            cwd: Some("/outside-scope".into()),
-            env: BTreeMap::new(),
-            timeout_ms: Some(5000),
-            declared_impact: None,
-        };
-        let authority = command_region();
-        let outcome = rt().block_on(effect_contract_harness::<Run>(
             &registry, params, ctx, authority,
         ));
         assert_negative_no_backend_effects(&outcome);

@@ -39,17 +39,13 @@ pub fn normalize_write_region_path(pattern: &str, project_root: &Path) -> Option
         WritePathPattern::DirectoryGlob(path) => Some((project_root.join(path), true)),
     }
 }
-use lancet_protocol::CepError;
 
 use super::ledger::{ObservedEffect, ObservedScope};
 use crate::guard::{WritePathPattern, normalize_write_path_pattern};
-use crate::policy::command::EffectiveImpact;
 
 /// Per-invocation materialized effect — the middle layer of the effect model.
 ///
-/// For most methods this is derived from the static `EffectDecl`. For
-/// `exec.command_run` it is computed from the existing `EffectiveImpact`
-/// classification (single source — no parallel classifier).
+/// For most methods this is derived from the static `EffectDecl`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectiveEffect {
     /// The set of impact kinds this invocation materializes.
@@ -64,41 +60,6 @@ impl EffectiveEffect {
     pub fn from_effect_kind_set(kinds: &EffectKindSet) -> Self {
         Self {
             kinds: BTreeSet::from(*kinds),
-        }
-    }
-
-    /// Derive exec.command_run's effective effect from the existing `EffectiveImpact`
-    /// classification.
-    ///
-    /// - `WorkspaceMutation` → Ok({CommandExecution, WorkspaceMutation})
-    /// - `Diagnostic` → Ok({CommandExecution})
-    /// - `HardDenied` → Err(internal error) — HardDenied is rejected pre-execution
-    ///   and must never reach this function; if it does, it is an invariant breach
-    ///   (review concern 6).
-    ///
-    /// The declared impact selects which kinds materialize; it never grants authority.
-    pub fn from_command_impact(impact: &EffectiveImpact) -> Result<Self, CepError> {
-        match impact {
-            EffectiveImpact::WorkspaceMutation => {
-                let mut kinds = BTreeSet::new();
-                kinds.insert(ImpactKind::CommandExecution);
-                kinds.insert(ImpactKind::WorkspaceMutation);
-                Ok(Self { kinds })
-            }
-            EffectiveImpact::Diagnostic => {
-                let mut kinds = BTreeSet::new();
-                kinds.insert(ImpactKind::CommandExecution);
-                Ok(Self { kinds })
-            }
-            EffectiveImpact::HardDenied => {
-                // Review concern 6: HardDenied is rejected pre-execution and must never
-                // reach effect materialization. If it does, it is an invariant breach,
-                // not an absence of effect — return an internal error, never a silent
-                // empty set.
-                Err(CepError::internal_error(
-                    "HardDenied must not reach effect materialization",
-                ))
-            }
         }
     }
 }
@@ -274,38 +235,6 @@ mod tests {
     use lancet_catalog::method::RequiredCapability;
     use std::path::PathBuf;
 
-    // ── EffectiveEffect::from_command_impact tests ─────────────────────
-
-    #[test]
-    fn from_command_impact_workspace_mutation_yields_both_kinds() {
-        let effect =
-            EffectiveEffect::from_command_impact(&EffectiveImpact::WorkspaceMutation).unwrap();
-        assert!(effect.kinds.contains(&ImpactKind::CommandExecution));
-        assert!(effect.kinds.contains(&ImpactKind::WorkspaceMutation));
-        assert_eq!(effect.kinds.len(), 2);
-    }
-
-    #[test]
-    fn from_command_impact_diagnostic_yields_command_execution_only() {
-        // Diagnostic command execution does not require WritePath.
-        let effect = EffectiveEffect::from_command_impact(&EffectiveImpact::Diagnostic).unwrap();
-        assert!(effect.kinds.contains(&ImpactKind::CommandExecution));
-        assert!(!effect.kinds.contains(&ImpactKind::WorkspaceMutation));
-        assert_eq!(effect.kinds.len(), 1);
-    }
-
-    #[test]
-    fn from_command_impact_hard_denied_returns_error() {
-        // Review concern 6: HardDenied → Err, never a silent empty set
-        let result = EffectiveEffect::from_command_impact(&EffectiveImpact::HardDenied);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.message
-                .contains("HardDenied must not reach effect materialization")
-        );
-    }
-
     // ── AuthorizedEffectRegion::empty tests ────────────────────────────
 
     #[test]
@@ -364,15 +293,5 @@ mod tests {
         assert_eq!(effect.kinds.len(), 2);
         assert!(effect.kinds.contains(&ImpactKind::CommandExecution));
         assert!(effect.kinds.contains(&ImpactKind::WorkspaceMutation));
-    }
-
-    // ── No parallel EffectiveImpact enum ───────────────────────────────
-
-    #[test]
-    fn effective_impact_still_exists_in_policy_command() {
-        // Verify we derive from EffectiveImpact, not duplicate it
-        let _ = EffectiveImpact::Diagnostic;
-        let _ = EffectiveImpact::WorkspaceMutation;
-        let _ = EffectiveImpact::HardDenied;
     }
 }

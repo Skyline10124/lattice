@@ -7,7 +7,6 @@
 //! backend. No host/Lower implementation lives here — a missing or failing
 //! backend is an error, never a host fallback.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::path::{Component, Path};
@@ -191,7 +190,6 @@ pub enum PathIntent {
     Overwrite,
     Delete,
     ListDirectory,
-    ExecCwd,
 }
 
 /// Kind of filesystem object observed in Upper.
@@ -242,78 +240,6 @@ pub struct GrepMatch {
 pub struct FindRequest {
     pub pattern: String,
     pub path: WorkspacePath,
-}
-
-/// Typed argv execution request — no shell command string.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecRequest {
-    pub argv: Vec<String>,
-    pub env: BTreeMap<String, String>,
-    pub timeout_ms: u64,
-    pub cwd: WorkspacePath,
-}
-
-impl ExecRequest {
-    /// Build an exec request; rejects empty argv at construction.
-    pub fn new(
-        argv: Vec<String>,
-        env: BTreeMap<String, String>,
-        timeout_ms: u64,
-        cwd: WorkspacePath,
-    ) -> Result<Self, ExecRequestError> {
-        if argv.is_empty() {
-            return Err(ExecRequestError::EmptyArgv);
-        }
-        Ok(Self {
-            argv,
-            env,
-            timeout_ms,
-            cwd,
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum ExecRequestError {
-    #[error("exec argv must not be empty")]
-    EmptyArgv,
-}
-
-/// Command output from Upper execution.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecOutput {
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-/// Immutable configuration for post-mutation verification.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VerifyConfig {
-    pub argv: Vec<String>,
-    pub cwd: WorkspacePath,
-    pub timeout_ms: Option<u64>,
-    pub expected_exit_code: i32,
-}
-
-impl VerifyConfig {
-    pub fn validate(&self) -> Result<(), VerifyConfigError> {
-        if self.argv.is_empty() {
-            return Err(VerifyConfigError::EmptyArgv);
-        }
-        self.cwd
-            .require_file_path()
-            .map_err(|_| VerifyConfigError::InvalidCwd)?;
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum VerifyConfigError {
-    #[error("direct verify argv must not be empty")]
-    EmptyArgv,
-    #[error("direct verify cwd must be a file-capable relative path")]
-    InvalidCwd,
 }
 
 /// Errors crossing the Upper execution boundary.
@@ -372,11 +298,6 @@ pub trait ExecutionBackend: Send + Sync {
         request: &FindRequest,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>;
 
-    fn exec(
-        &self,
-        request: &ExecRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>>;
-
     /// Returns Upper-relative paths changed since the baseline commit.
     ///
     /// Implementors typically derive this from `git status --porcelain` or equivalent.
@@ -388,8 +309,8 @@ pub trait ExecutionBackend: Send + Sync {
 /// Minimal no-op execution backend for test scaffolding.
 ///
 /// All operations return `ExecutionBackendError`. This is only suitable for
-/// configurations that don't exercise workspace mutation, command execution,
-/// or observation handlers — e.g. audit replay or session-state-only tests.
+/// configurations that don't exercise workspace mutation or observation
+/// handlers — e.g. audit replay or session-state-only tests.
 #[derive(Clone)]
 pub struct NullExecutionBackend;
 
@@ -450,13 +371,6 @@ impl ExecutionBackend for NullExecutionBackend {
         _request: &FindRequest,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
     {
-        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
-    }
-
-    fn exec(
-        &self,
-        _request: &ExecRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>> {
         Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
     }
 
@@ -529,26 +443,6 @@ mod tests {
             WorkspacePath::parse("/workspace/src/main.rs"),
             Err(WorkspacePathError::UpperRootAlias)
         ));
-    }
-
-    #[test]
-    fn exec_request_rejects_empty_argv() {
-        let cwd = WorkspacePath::project_root();
-        assert!(matches!(
-            ExecRequest::new(vec![], BTreeMap::new(), 1000, cwd),
-            Err(ExecRequestError::EmptyArgv)
-        ));
-    }
-
-    #[test]
-    fn verify_config_config_rejects_invalid() {
-        let bad = VerifyConfig {
-            argv: vec![],
-            cwd: WorkspacePath::project_root(),
-            timeout_ms: None,
-            expected_exit_code: 0,
-        };
-        assert!(bad.validate().is_err());
     }
 
     #[test]
