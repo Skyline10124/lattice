@@ -25,13 +25,21 @@ fn test_commit_turn_tree_structure() {
     let oid = git2::Oid::from_str(&commit.commit_id).expect("parse oid");
     let git_commit = repo.find_commit(oid).expect("find commit");
     let tree = git_commit.tree().expect("tree");
-    let turn = tree.get_path(std::path::Path::new("turn")).expect("turn entry");
+    let turn = tree
+        .get_path(std::path::Path::new("turn"))
+        .expect("turn entry");
     let turn_tree = turn
         .to_object(&repo)
         .expect("turn object")
         .peel_to_tree()
         .expect("turn tree");
-    for name in ["manifest.json", "messages.jsonl", "agent.json", "profile.json", "audit.json"] {
+    for name in [
+        "manifest.json",
+        "messages.jsonl",
+        "agent.json",
+        "profile.json",
+        "audit.json",
+    ] {
         let _ = turn_tree
             .get_name(name)
             .unwrap_or_else(|| panic!("missing {name} in turn tree"));
@@ -118,5 +126,8 @@ fn test_set_get_snapshot_lost() {
     store.set_snapshot_lost(&first_id, true).expect("set");
     assert_eq!(store.get_snapshot_lost(&first_id).expect("get"), Some(true));
     store.set_snapshot_lost(&first_id, false).expect("set");
-    assert_eq!(store.get_snapshot_lost(&first_id).expect("get"), Some(false));
+    assert_eq!(
+        store.get_snapshot_lost(&first_id).expect("get"),
+        Some(false)
+    );
 }

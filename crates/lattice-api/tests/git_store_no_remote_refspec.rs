@@ -12,11 +12,11 @@
 use std::fs;
 use std::process::Command;
 
+use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     WorkspaceDisposition,
 };
-use lattice_session::test_helpers::{assistant_msg, user_msg};
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
@@ -50,7 +50,15 @@ fn git_store_no_remote_push_refspec_for_lattice_refs() {
     // but it must not include refs/lattice/**.
     let remote_url = "/tmp/lattice-dummy-remote";
     git(dir, &["remote", "add", "origin", remote_url]);
-    git(dir, &["config", "--add", "remote.origin.push", "refs/heads/*:refs/heads/*"]);
+    git(
+        dir,
+        &[
+            "config",
+            "--add",
+            "remote.origin.push",
+            "refs/heads/*:refs/heads/*",
+        ],
+    );
 
     let store = GitSessionGraphStore::new(dir);
 

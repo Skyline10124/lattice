@@ -8,13 +8,13 @@ use std::path::Path;
 use chrono::Utc;
 
 use super::helpers::{
-    build_root_tree, build_turn_tree, candidate_ref_name, derive_turn_id, parse_manifest,
-    read_ops_state, read_session_meta, read_tree_blob, serialize_manifest, validate_turn_id,
-    write_ops_state, GitSessionManifest, LATTICE_AUTHOR_EMAIL, LATTICE_AUTHOR_NAME,
-    MANIFEST_SCHEMA_VERSION, OperationalState,
+    GitSessionManifest, LATTICE_AUTHOR_EMAIL, LATTICE_AUTHOR_NAME, MANIFEST_SCHEMA_VERSION,
+    OperationalState, build_root_tree, build_turn_tree, candidate_ref_name, derive_turn_id,
+    parse_manifest, read_ops_state, read_session_meta, read_tree_blob, serialize_manifest,
+    validate_turn_id, write_ops_state,
 };
 use super::session::resolve_head_oid;
-use super::{GitSessionGraphStore, DEFAULT_BRANCH};
+use super::{DEFAULT_BRANCH, GitSessionGraphStore};
 use crate::graph::{
     HeadTranscript, PreparedTurnCommit, TurnCommit, TurnCommitInput, TurnCommitStatus,
     TurnLifecycleEvidence, TurnLogEntry, WorkspaceDisposition,
@@ -145,15 +145,9 @@ impl GitSessionGraphStore {
                     ));
                 }
                 repo.reference(&ref_name, commit_oid, false, "lattice commit")
-                    .map_err(|e| {
-                        SessionError::Git(format!("create session branch ref: {e}"))
-                    })?;
+                    .map_err(|e| SessionError::Git(format!("create session branch ref: {e}")))?;
             }
-            Err(e) => {
-                return Err(SessionError::Git(format!(
-                    "find session branch ref: {e}"
-                )))
-            }
+            Err(e) => return Err(SessionError::Git(format!("find session branch ref: {e}"))),
         }
 
         // Candidate ref creation (SC4): keep clean-turn commit ranges reachable.
@@ -168,9 +162,7 @@ impl GitSessionGraphStore {
                 Err(e) if e.code() == git2::ErrorCode::Exists => {
                     // Idempotent: candidate ref already pinned.
                 }
-                Err(e) => {
-                    return Err(SessionError::Git(format!("create candidate ref: {e}")))
-                }
+                Err(e) => return Err(SessionError::Git(format!("create candidate ref: {e}"))),
             }
         }
 
@@ -425,7 +417,9 @@ pub(super) fn resolve_session_id_for_commit(dir: &Path, commit_id: &str) -> Resu
             }
             let mut found = false;
             for oid in revwalk {
-                if let Ok(oid) = oid && oid == target_oid {
+                if let Ok(oid) = oid
+                    && oid == target_oid
+                {
                     found = true;
                     break;
                 }
@@ -480,8 +474,8 @@ pub(super) fn turn_commit_from_manifest_and_oid(
     oid: git2::Oid,
     manifest: &GitSessionManifest,
 ) -> TurnCommit {
-    let status = TurnCommitStatus::parse(&manifest.execution_status)
-        .unwrap_or(TurnCommitStatus::Completed);
+    let status =
+        TurnCommitStatus::parse(&manifest.execution_status).unwrap_or(TurnCommitStatus::Completed);
     let disposition = WorkspaceDisposition::parse(&manifest.disposition)
         .unwrap_or(WorkspaceDisposition::NotApplicable);
     let usage = manifest

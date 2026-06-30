@@ -74,8 +74,8 @@ mod scaffold_tests {
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_catalog::methods::scaffold::InspectParams;
     use lancet_protocol::ToolEvent;
-    use lancet_protocol::policy::CepMode;
     use lancet_protocol::error::jsonrpc;
+    use lancet_protocol::policy::CepMode;
     use lancet_protocol::policy::PolicyHook;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -111,7 +111,13 @@ mod scaffold_tests {
             })),
             audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
             cep_mode: CepMode::Off,
-            execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
+            execution: crate::execution_backend::ExecutionRouting {
+                backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
+                upper: crate::execution_backend::UpperContext {
+                    execution_backend: "null".into(),
+                    upper_workspace_id: "null".into(),
+                },
+            },
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         }
     }

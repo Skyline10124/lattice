@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{
-    canonical_json_bytes, GraphMessage, PreparedTurnCommit, TurnLifecycleEvidence, TurnLogEntry,
+    GraphMessage, PreparedTurnCommit, TurnLifecycleEvidence, TurnLogEntry, canonical_json_bytes,
 };
 use crate::{Result, SessionError};
 
@@ -91,12 +91,20 @@ pub(crate) struct GitSessionManifest {
 
 pub(crate) fn session_meta_path(dir: &Path, session_id: &str) -> Result<PathBuf> {
     validate_session_id(session_id)?;
-    Ok(dir.join(".lattice").join("sessions").join(session_id).join("meta.json"))
+    Ok(dir
+        .join(".lattice")
+        .join("sessions")
+        .join(session_id)
+        .join("meta.json"))
 }
 
 pub(crate) fn session_ops_dir(dir: &Path, session_id: &str) -> Result<PathBuf> {
     validate_session_id(session_id)?;
-    Ok(dir.join(".lattice").join("sessions").join(session_id).join("ops"))
+    Ok(dir
+        .join(".lattice")
+        .join("sessions")
+        .join(session_id)
+        .join("ops"))
 }
 
 pub(crate) fn session_ops_path(dir: &Path, session_id: &str, commit_oid: &str) -> Result<PathBuf> {
@@ -105,7 +113,9 @@ pub(crate) fn session_ops_path(dir: &Path, session_id: &str, commit_oid: &str) -
     // anything that is not a plausible hex OID so `/` or `..` cannot escape the
     // ops directory.
     if commit_oid.is_empty() || !commit_oid.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(SessionError::Git(format!("invalid commit oid: {commit_oid}")));
+        return Err(SessionError::Git(format!(
+            "invalid commit oid: {commit_oid}"
+        )));
     }
     Ok(session_ops_dir(dir, session_id)?.join(format!("{commit_oid}.json")))
 }
@@ -148,12 +158,12 @@ pub(crate) fn read_ops_state(
 ) -> Result<Option<OperationalState>> {
     let path = session_ops_path(dir, session_id, commit_oid)?;
     match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| SessionError::InvalidPersistedValue {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+            SessionError::InvalidPersistedValue {
                 field: "ops state",
                 value: e.to_string(),
-            }),
+            }
+        }),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(SessionError::Io {
             operation: "reading ops state",
@@ -289,7 +299,10 @@ fn write_blob(repo: &git2::Repository, bytes: &[u8], context: &str) -> Result<gi
         .map_err(|e| SessionError::Git(format!("write {context} blob: {e}")))
 }
 
-pub(crate) fn build_root_tree(repo: &git2::Repository, turn_tree_oid: git2::Oid) -> Result<git2::Oid> {
+pub(crate) fn build_root_tree(
+    repo: &git2::Repository,
+    turn_tree_oid: git2::Oid,
+) -> Result<git2::Oid> {
     let turn_tree = repo
         .find_tree(turn_tree_oid)
         .map_err(|e| SessionError::Git(format!("find turn tree: {e}")))?;
@@ -304,8 +317,14 @@ pub(crate) fn build_root_tree(repo: &git2::Repository, turn_tree_oid: git2::Oid)
         .map_err(|e| SessionError::Git(format!("write root tree: {e}")))
 }
 
-pub(crate) fn read_tree_blob(repo: &git2::Repository, commit: &git2::Commit, path: &str) -> Result<Vec<u8>> {
-    let tree = commit.tree().map_err(|e| SessionError::Git(format!("read commit tree: {e}")))?;
+pub(crate) fn read_tree_blob(
+    repo: &git2::Repository,
+    commit: &git2::Commit,
+    path: &str,
+) -> Result<Vec<u8>> {
+    let tree = commit
+        .tree()
+        .map_err(|e| SessionError::Git(format!("read commit tree: {e}")))?;
     let entry = tree
         .get_path(Path::new(path))
         .map_err(|e| SessionError::Git(format!("find tree path {path}: {e}")))?;
@@ -346,9 +365,8 @@ pub(crate) fn parse_messages_jsonl(jsonl: &str) -> Result<Vec<GraphMessage>> {
         .lines()
         .enumerate()
         .map(|(i, line)| {
-            serde_json::from_str(line).map_err(|e| {
-                SessionError::Git(format!("parse messages.jsonl line {i}: {e}"))
-            })
+            serde_json::from_str(line)
+                .map_err(|e| SessionError::Git(format!("parse messages.jsonl line {i}: {e}")))
         })
         .collect()
 }

@@ -14,10 +14,10 @@ use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace};
 use lancet_native::{
-    CepAuditStore, CepTransport, DirectoryEntry, ExecutionBackend,
-    ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry,
-    PathFacts, PathIntent, PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext,
-    WorkspacePath, register_production_method_registry,
+    CepAuditStore, CepTransport, DirectoryEntry, ExecutionBackend, ExecutionBackendError,
+    ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry, PathFacts, PathIntent,
+    PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext, WorkspacePath,
+    register_production_method_registry,
 };
 use lancet_protocol::effect_types::ImpactKind;
 
@@ -52,8 +52,7 @@ impl ExecutionBackend for TestFsBackend {
         &self,
         path: &WorkspacePath,
         _intent: PathIntent,
-    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -82,8 +81,7 @@ impl ExecutionBackend for TestFsBackend {
     fn read_file(
         &self,
         path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -100,8 +98,7 @@ impl ExecutionBackend for TestFsBackend {
         &self,
         path: &WorkspacePath,
         content: &[u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -118,8 +115,7 @@ impl ExecutionBackend for TestFsBackend {
     fn remove_file(
         &self,
         path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -237,11 +233,7 @@ async fn cep_round_trip_impact_matrix() {
 
     let (adapter, _audit) = production_adapter(
         root.to_str().unwrap(),
-        &[
-            ObserveWorkspace::NAME,
-            Create::NAME,
-            TodoWrite::NAME,
-        ],
+        &[ObserveWorkspace::NAME, Create::NAME, TodoWrite::NAME],
         false,
     )
     .await;

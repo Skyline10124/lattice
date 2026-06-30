@@ -4,8 +4,8 @@
 //! Session metadata tests for the Git graph store.
 
 use super::*;
-use crate::git_graph::GitSessionGraphStore;
 use crate::SessionError;
+use crate::git_graph::GitSessionGraphStore;
 
 #[test]
 fn test_create_session() {

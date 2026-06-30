@@ -323,16 +323,23 @@ impl ExecutionBackend for NullExecutionBackend {
         &self,
         _path: &WorkspacePath,
         _intent: PathIntent,
-    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
-    {
-        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>> {
+        Box::pin(async {
+            Err(ExecutionBackendError::Unavailable {
+                message: "null backend".into(),
+            })
+        })
     }
 
     fn read_file(
         &self,
         _path: &WorkspacePath,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>> {
-        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+        Box::pin(async {
+            Err(ExecutionBackendError::Unavailable {
+                message: "null backend".into(),
+            })
+        })
     }
 
     fn write_file(
@@ -340,14 +347,22 @@ impl ExecutionBackend for NullExecutionBackend {
         _path: &WorkspacePath,
         _content: &[u8],
     ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+        Box::pin(async {
+            Err(ExecutionBackendError::Unavailable {
+                message: "null backend".into(),
+            })
+        })
     }
 
     fn remove_file(
         &self,
         _path: &WorkspacePath,
     ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+        Box::pin(async {
+            Err(ExecutionBackendError::Unavailable {
+                message: "null backend".into(),
+            })
+        })
     }
 
     fn list_dir(
@@ -355,7 +370,11 @@ impl ExecutionBackend for NullExecutionBackend {
         _path: &WorkspacePath,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
     {
-        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+        Box::pin(async {
+            Err(ExecutionBackendError::Unavailable {
+                message: "null backend".into(),
+            })
+        })
     }
 
     fn grep(
@@ -363,7 +382,11 @@ impl ExecutionBackend for NullExecutionBackend {
         _request: &GrepRequest,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
     {
-        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+        Box::pin(async {
+            Err(ExecutionBackendError::Unavailable {
+                message: "null backend".into(),
+            })
+        })
     }
 
     fn find_files(
@@ -371,14 +394,22 @@ impl ExecutionBackend for NullExecutionBackend {
         _request: &FindRequest,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
     {
-        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+        Box::pin(async {
+            Err(ExecutionBackendError::Unavailable {
+                message: "null backend".into(),
+            })
+        })
     }
 
     fn changed_paths(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
     {
-        Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "null backend".into() }) })
+        Box::pin(async {
+            Err(ExecutionBackendError::Unavailable {
+                message: "null backend".into(),
+            })
+        })
     }
 }
 

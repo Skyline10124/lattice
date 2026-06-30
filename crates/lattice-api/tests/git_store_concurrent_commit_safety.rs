@@ -12,11 +12,11 @@ use std::fs;
 use std::sync::Arc;
 use std::thread;
 
-use lattice_session::{
-    GitSessionGraphStore, PreparedTurnCommit, SessionError, SessionGraphStore,
-    TurnCommitInput, TurnCommitStatus, WorkspaceDisposition, prepare_turn_commit,
-};
 use lattice_session::test_helpers::{assistant_msg, user_msg};
+use lattice_session::{
+    GitSessionGraphStore, PreparedTurnCommit, SessionError, SessionGraphStore, TurnCommitInput,
+    TurnCommitStatus, WorkspaceDisposition, prepare_turn_commit,
+};
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {

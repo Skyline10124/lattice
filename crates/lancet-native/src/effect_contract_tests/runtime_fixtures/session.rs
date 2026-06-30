@@ -16,11 +16,7 @@ pub(in crate::effect_contract_tests) fn todo_write_runtime_effects() -> Vec<Runt
         .to_string();
     let mut scenarios = Vec::new();
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "happy_todo_write",
         dispatch_success_effects::<TodoWrite>(
@@ -35,11 +31,7 @@ pub(in crate::effect_contract_tests) fn todo_write_runtime_effects() -> Vec<Runt
         ),
     ));
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "failure_empty_todo_no_backend_effect",
         dispatch_failure_effects::<TodoWrite>(

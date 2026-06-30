@@ -12,9 +12,7 @@ use std::path::{Path, PathBuf};
 
 use lancet_catalog::catalog::catalog;
 use lancet_protocol::effect_types::ImpactKind;
-use lancet_protocol::policy::{
-    PolicyAuditContext, PolicyBudgetSnapshot, PolicyInput,
-};
+use lancet_protocol::policy::{PolicyAuditContext, PolicyBudgetSnapshot, PolicyInput};
 
 use super::BudgetLimits;
 use super::capability::InvocationFacts;

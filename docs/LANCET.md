@@ -1,10 +1,11 @@
 # LANCET runtime-enforced surface
 
-> **DRIFT NOTICE — 2026-06-27:** This document was written against the
+> **DRIFT NOTICE — 2026-06-30:** This document was written against the
 > v1.4-alpha boundary and contains several claims that no longer match the
 > production code. Known drift corrected elsewhere in this pass:
-> - The canonical CEP catalog has **9 methods**, not 10. `session.envelope`
->   was removed (the catalog and tests assert its absence).
+> - The canonical CEP catalog has **8 methods**. `session.envelope` was removed
+>   earlier, and `exec.command_run` plus post-mutation verify were permanently
+>   retired (commit 691c0b67); the catalog and tests assert both absences.
 > - The production execution path is the **MSB/Upper workspace boundary**
 >   (`lattice-workspace`); Direct-mode naming was retired and host-verify was
 >   deleted. Write-scope is enforced as a blacklist, not an allowlist envelope.
@@ -30,19 +31,19 @@ plus base-authority planning. The underlying contract remains split across
 | Component | Description |
 |-----------|-------------|
 | `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
-| `lancet-catalog::CATALOG` | The 9-method canonical CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`, `exec.command_run`, `fetch.web`, `session.todo_write`, `observe.audit`, `observe.audit_replay`. (`session.envelope` was removed; the catalog and tests assert its absence.) |
+| `lancet-catalog::CATALOG` | The 8-method canonical CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`, `fetch.web`, `session.todo_write`, `observe.audit`, `observe.audit_replay`. (`session.envelope` was removed earlier; `exec.command_run` and post-mutation verify were permanently retired — the catalog and tests assert both absences.) |
 | Method params/results | Typed `*Params` / `*Result` structs per catalog method in `lancet-catalog` |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
 | `PolicyHook` / `PolicyDecision` | Pluggable policy hook interface in `lancet-protocol` |
 | Audit/provenance schemas | `ProvGraphFragment` wire shapes in `lancet-protocol`; audit rows, filters, and attestation persistence in `lancet-audit` |
 
-Internal implementation is split across `lancet-authority` (default policy, Guard L1, active envelope, effect-region semantics) and `lancet-native` (production handlers, transport lifecycle, verify/edit/shell/web integration).
+Internal implementation is split across `lancet-authority` (default policy, Guard L1, active envelope, effect-region semantics) and `lancet-native` (production handlers, transport lifecycle, edit/web integration).
 
 **Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
 
 Pre-v1.3.1 method names are removed. They are not accepted by the adapter or
-native registry, and LLM-facing tool definitions are projected only from the 9
+native registry, and LLM-facing tool definitions are projected only from the 8
 canonical catalog methods. Tool exposure is separate from base authority:
 enabled methods filter the model-visible catalog projection, while
 catalog descriptors declare method-local base authority requirements.
@@ -62,10 +63,8 @@ The canonical method names are grouped by primary effect class:
 | `mutate.create` | Workspace mutation by pure file creation. Existing targets are rejected; missing parent directories are rejected. |
 | `mutate.edit` | Workspace mutation of existing files through semantic replace/insert operations. The caller provides `expected_hash`; LANCET computes hashline anchors internally. |
 | `mutate.batch` | Workspace mutation batch for create/edit operations. It intentionally has no delete operation. |
-| `exec.command_run` | Command execution, plus optional observed workspace mutation diff when `effective_impact = workspace_mutation`. |
 | `fetch.web` | External observation through URL fetch policy. |
 | `session.todo_write` | Session-state mutation for todo state. |
-| `session.envelope` | Session-state mutation for explicit envelope declaration. |
 | `observe.audit` | Audit observation for query/tail mode. |
 | `observe.audit_replay` | Audit observation for turn replay and attestation projection. |
 
@@ -85,9 +84,9 @@ The gate keeps release evidence in three separate proof categories:
   the v1.4-alpha release contract, and cleanup stress uses the same offline
   proof class; neither is relabeled as live physical proof.
 - **dogfood proof:** no-key, no-uncontrolled-network production-path scenarios,
-  including command/artifact metadata and audit replay. This is not live kernel
-  proof and does not require the overlay path to be applied on every developer
-  host. Real-provider dogfood is outside the gate.
+  including audit replay. This is not live kernel proof and does not require
+  the overlay path to be applied on every developer host. Real-provider dogfood
+  is outside the gate.
 
 - **Offline release gate:** `scripts/release-gate-v1.4.sh` — runs `cargo fmt`, `cargo clippy`, targeted crate tests, dogfood suite, LANCET boundary check, and `lattice lancet doctor`. It is offline deterministic by default and runs live Linux physical canaries only with `--live` or `LATTICE_LINUX_ISOLATION_LIVE=1`.
 - **LANCET self-check:** `cargo run -p lattice-cli -- lancet doctor` — verifies the production registry fully registers the CATALOG, in-process transport smoke-tests, base envelope constructs, and mode policy parses cleanly.

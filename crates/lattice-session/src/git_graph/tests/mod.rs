@@ -67,9 +67,17 @@ pub(crate) fn setup_session_with_commits(
         .expect("create session");
     let mut commit_ids = Vec::new();
     for i in 0..n {
-        let messages = vec![user_msg(&format!("Turn {i}")), assistant_msg(&format!("Response {i}"))];
+        let messages = vec![
+            user_msg(&format!("Turn {i}")),
+            assistant_msg(&format!("Response {i}")),
+        ];
         let parent_ids = commit_ids.last().cloned().into_iter().collect::<Vec<_>>();
-        let input = commit_input(session_id, parent_ids, messages, TurnCommitStatus::Completed);
+        let input = commit_input(
+            session_id,
+            parent_ids,
+            messages,
+            TurnCommitStatus::Completed,
+        );
         let commit = store.commit_turn(input).expect("commit turn");
         commit_ids.push(commit.commit_id);
     }

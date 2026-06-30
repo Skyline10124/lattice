@@ -6,11 +6,13 @@
 use chrono::Utc;
 
 use super::helpers::{
-    count_reachable_commits, read_session_meta, session_ref_name, validate_session_id,
-    write_session_meta, SessionMetadata,
+    SessionMetadata, count_reachable_commits, read_session_meta, session_ref_name,
+    validate_session_id, write_session_meta,
 };
 use super::{DEFAULT_BRANCH, GitSessionGraphStore, RepoHandle};
-use crate::graph::{GraphHead, GraphRef, GraphRefKind, GraphSession, SessionGraphSummary, SessionStatus};
+use crate::graph::{
+    GraphHead, GraphRef, GraphRefKind, GraphSession, SessionGraphSummary, SessionStatus,
+};
 use crate::{Result, SessionError};
 
 impl GitSessionGraphStore {

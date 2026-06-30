@@ -17,10 +17,7 @@ fn test_head_transcript_linear() {
         .head_transcript("sess-transcript")
         .expect("head_transcript");
     assert_eq!(transcript.session_id, "sess-transcript");
-    assert_eq!(
-        transcript.parent_commit_id,
-        Some(commit_ids[1].clone())
-    );
+    assert_eq!(transcript.parent_commit_id, Some(commit_ids[1].clone()));
     assert_eq!(transcript.messages.len(), 4);
     assert_eq!(transcript.messages[0].content, "Turn 0");
     assert_eq!(transcript.messages[1].content, "Response 0");

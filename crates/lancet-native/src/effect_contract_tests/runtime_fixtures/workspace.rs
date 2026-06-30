@@ -20,11 +20,7 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
         .to_string();
     let mut scenarios = Vec::new();
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "happy_read_file_read_path",
         dispatch_success_effects::<ObserveWorkspace>(
@@ -39,11 +35,8 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
         ),
     ));
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![].clone(),
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) =
+        build_test_context(&root, vec![].clone(), NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "happy_grep_inspect",
         dispatch_success_effects::<ObserveWorkspace>(
@@ -57,11 +50,8 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
         ),
     ));
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![].clone(),
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) =
+        build_test_context(&root, vec![].clone(), NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "happy_list_directory_inspect",
         dispatch_success_effects::<ObserveWorkspace>(
@@ -74,11 +64,8 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
         ),
     ));
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![].clone(),
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) =
+        build_test_context(&root, vec![].clone(), NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "happy_find_files_inspect",
         dispatch_success_effects::<ObserveWorkspace>(
@@ -92,8 +79,7 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
         ),
     ));
 
-    let (ctx, _rx, _) =
-        build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "failure_missing_file_no_backend_effect",
         dispatch_failure_effects::<ObserveWorkspace>(
@@ -120,11 +106,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
         .to_string();
     let mut scenarios = Vec::new();
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     declare_active_envelope(&ctx, &root);
     scenarios.push(scenario(
         "happy_create",
@@ -139,11 +121,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
         ),
     ));
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     declare_active_envelope(&ctx, &root);
     scenarios.push(scenario(
         "failure_target_exists_no_backend_effect",
@@ -171,11 +149,7 @@ pub(in crate::effect_contract_tests) fn edit_runtime_effects() -> Vec<RuntimeEff
     let mut scenarios = Vec::new();
 
     let before = "hello\nworld\n";
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     declare_active_envelope(&ctx, &root);
     scenarios.push(scenario(
         "happy_edit",
@@ -194,11 +168,7 @@ pub(in crate::effect_contract_tests) fn edit_runtime_effects() -> Vec<RuntimeEff
         ),
     ));
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     declare_active_envelope(&ctx, &root);
     scenarios.push(scenario(
         "failure_stale_hash_no_backend_effect",
@@ -231,11 +201,7 @@ pub(in crate::effect_contract_tests) fn batch_runtime_effects() -> Vec<RuntimeEf
     let mut scenarios = Vec::new();
 
     let before = "some data content\n";
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     declare_active_envelope(&ctx, &root);
     scenarios.push(scenario(
         "happy_batch_create_and_edit",

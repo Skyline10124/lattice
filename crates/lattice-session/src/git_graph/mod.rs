@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::graph::{
-    GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript, PreparedTurnCommit,
-    ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit,
-    TurnCommitInput, TurnLogEntry,
+    GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript, PreparedTurnCommit, ResetResult,
+    SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput,
+    TurnLogEntry,
 };
 use crate::{Result, SessionError};
 
@@ -91,9 +91,7 @@ impl GitSessionGraphStore {
                     match git2::Repository::init_bare(&self.dir) {
                         Ok(r) => r,
                         Err(_) => {
-                            return Err(SessionError::Git(format!(
-                                "open repository: {open_err}"
-                            )))
+                            return Err(SessionError::Git(format!("open repository: {open_err}")));
                         }
                     }
                 }
@@ -163,11 +161,7 @@ impl SessionGraphStore for GitSessionGraphStore {
         self.commit_prepared_turn_impl(prepared)
     }
 
-    fn get_turn_commit(
-        &self,
-        session_id: &str,
-        commit_id: &str,
-    ) -> Result<Option<TurnCommit>> {
+    fn get_turn_commit(&self, session_id: &str, commit_id: &str) -> Result<Option<TurnCommit>> {
         self.get_turn_commit_impl(session_id, commit_id)
     }
 

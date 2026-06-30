@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use lattice_api::{ResumeError, ResumeMode, resolve_resume_mode};
 use lattice_session::{
-    SessionGraphStore, GitSessionGraphStore, TurnCommit, TurnCommitInput, TurnCommitStatus,
+    GitSessionGraphStore, SessionGraphStore, TurnCommit, TurnCommitInput, TurnCommitStatus,
     TurnLifecycleEvidence, TurnSnapshotIdentity, TurnSnapshotRef, TurnVerificationEvidence,
     WorkspaceDisposition,
 };

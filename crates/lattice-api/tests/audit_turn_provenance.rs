@@ -74,10 +74,7 @@ fn setup_workspace() -> Workspace {
 
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
-    let enabled = [
-        "observe.workspace",
-        "mutate.edit",
-    ];
+    let enabled = ["observe.workspace", "mutate.edit"];
     let toml_content = format!(
         r#"schema_version = 1
 [agent]

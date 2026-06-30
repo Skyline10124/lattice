@@ -19,7 +19,7 @@ use lattice_api::{
 };
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{SessionGraphStore, GitSessionGraphStore, WorkspaceDisposition};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore, WorkspaceDisposition};
 
 #[derive(Debug, PartialEq)]
 struct DurableTurnObservation {
@@ -30,10 +30,7 @@ struct DurableTurnObservation {
     terminal_reason: Option<String>,
 }
 
-fn last_terminal_reason(
-    session_store: &GitSessionGraphStore,
-    session_id: &str,
-) -> Option<String> {
+fn last_terminal_reason(session_store: &GitSessionGraphStore, session_id: &str) -> Option<String> {
     session_store
         .log(session_id)
         .expect("log after commit")
@@ -41,10 +38,7 @@ fn last_terminal_reason(
         .and_then(|entry| entry.terminal_reason.clone())
 }
 
-fn last_usage(
-    session_store: &GitSessionGraphStore,
-    session_id: &str,
-) -> Option<TurnUsageSummary> {
+fn last_usage(session_store: &GitSessionGraphStore, session_id: &str) -> Option<TurnUsageSummary> {
     session_store
         .log(session_id)
         .expect("log after commit")

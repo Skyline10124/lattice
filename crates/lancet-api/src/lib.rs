@@ -53,16 +53,12 @@ pub use config::{
     AuditBacking, ExternalAuditPathError, LancetRuntimeConfig, audit_db_path_for_project,
     audit_db_path_for_project_in, audit_state_root, project_storage_key,
 };
-pub use doctor::{
-    LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks,
-};
+pub use doctor::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 pub use error::{LancetError, LancetResult};
 pub use runtime::{
     DEFAULT_CHANNEL_CAPACITY, LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle,
 };
-pub use status::{
-    LancetRecentCallEntry, LancetStatusOutput, collect_status,
-};
+pub use status::{LancetRecentCallEntry, LancetStatusOutput, collect_status};
 
 // --- Curated re-exports: types that appear in this crate's public signatures,
 // so consumers can name them without taking direct dependencies on the
@@ -73,9 +69,7 @@ pub use lancet_authority::{CepPolicyConfig, CepTurnContext};
 pub use lancet_cep::ToolDefinition;
 pub use lancet_dispatch::{CepClient, CepTransport};
 pub use lancet_native::{
-    AuditQueryFilters, CepAuditContext, CepAuditStore, ExecutionRouting, NullExecutionBackend, UpperContext,
-    MethodRegistry, ServerRunConfig, register_production_method_registry,
+    AuditQueryFilters, CepAuditContext, CepAuditStore, ExecutionRouting, MethodRegistry,
+    NullExecutionBackend, ServerRunConfig, UpperContext, register_production_method_registry,
 };
-pub use lancet_protocol::{
-    CepError,
-};
+pub use lancet_protocol::CepError;

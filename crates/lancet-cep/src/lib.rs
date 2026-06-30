@@ -17,8 +17,8 @@ pub use tool::{
 };
 
 pub use lancet_catalog::{
-    BaseAuthorityRequirement, CATALOG, CatalogMethod,
-    CepMethod, MethodDescriptor, RequiredCapability, catalog,
+    BaseAuthorityRequirement, CATALOG, CatalogMethod, CepMethod, MethodDescriptor,
+    RequiredCapability, catalog,
 };
 #[cfg(feature = "inspect-scaffold")]
 pub use lancet_catalog::{SCAFFOLD_CATALOG, scaffold_catalog};
@@ -27,17 +27,14 @@ pub use lancet_dispatch::{
     ServerCall, ServerRuntime, call_cancelled, duplicate_registration, wire_code_for_error,
 };
 pub use lancet_protocol::{
-    CEP_TURN_ATTESTATION_PREDICATE_TYPE,
-    CepError, CepErrorCode, CepErrorData, CepErrorFamily, CepMode,
-    EffectDecl, EffectKindSet, EffectScopeKind,
-    ErrorObject,
-    FailureSemantics, GuardVerdict, Id,
-    ImpactKind, InTotoStatement, InTotoSubjectDescriptor, Notification,
+    CEP_TURN_ATTESTATION_PREDICATE_TYPE, CepError, CepErrorCode, CepErrorData, CepErrorFamily,
+    CepMode, EffectDecl, EffectKindSet, EffectScopeKind, ErrorObject, FailureSemantics,
+    GuardVerdict, Id, ImpactKind, InTotoStatement, InTotoSubjectDescriptor, Notification,
     OverlayBehavior, PolicyActionRequired, PolicyAuditContext, PolicyBudgetSnapshot,
     PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, ProvActivity, ProvAgent, ProvEntity,
     ProvGraphFragment, ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy,
-    Request, Response, Retriability, ToolCall, ToolError, ToolEvent,
-    ToolResult, TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace,
+    Request, Response, Retriability, ToolCall, ToolError, ToolEvent, ToolResult,
+    TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace,
 };
 
 pub mod methods {

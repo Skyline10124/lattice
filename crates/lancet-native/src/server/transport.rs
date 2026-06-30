@@ -15,10 +15,7 @@ use lancet_authority::policy::CepTurnContext;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_dispatch::{CepServer, ServerCall, ServerRuntime};
 use lancet_protocol::policy::PolicyHook;
-use lancet_protocol::{
-    CepError, CepErrorCode, CepErrorData, Retriability,
-    policy::CepMode,
-};
+use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, policy::CepMode};
 use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;

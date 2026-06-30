@@ -30,10 +30,10 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_native::audit::CepAuditContext;
 use lancet_native::{
-    CepAuditStore, CepTransport, DirectoryEntry, ExecutionBackend,
-    ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry,
-    PathFacts, PathIntent, PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext,
-    WorkspacePath, register_production_method_registry,
+    CepAuditStore, CepTransport, DirectoryEntry, ExecutionBackend, ExecutionBackendError,
+    ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry, PathFacts, PathIntent,
+    PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext, WorkspacePath,
+    register_production_method_registry,
 };
 use lancet_protocol::effect_types::ImpactKind;
 
@@ -66,8 +66,7 @@ impl ExecutionBackend for TestFsBackend {
         &self,
         path: &WorkspacePath,
         _intent: PathIntent,
-    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -96,8 +95,7 @@ impl ExecutionBackend for TestFsBackend {
     fn read_file(
         &self,
         path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -114,8 +112,7 @@ impl ExecutionBackend for TestFsBackend {
         &self,
         path: &WorkspacePath,
         content: &[u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -132,8 +129,7 @@ impl ExecutionBackend for TestFsBackend {
     fn remove_file(
         &self,
         path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -275,8 +271,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     let fetch_url = spawn_echo_server("200 OK", "dog04-fetch-body").await;
 
-    let config =
-        build_production_config(canonical_str, Arc::clone(&audit), true).await;
+    let config = build_production_config(canonical_str, Arc::clone(&audit), true).await;
     let (client1, server1) = CepTransport::pair(32);
     let server_task1 = tokio::spawn(async move {
         let _ = server1.run(registry, config).await;

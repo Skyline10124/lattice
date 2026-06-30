@@ -73,8 +73,7 @@ pub(in crate::effect_contract_tests) fn fetch_runtime_effects() -> Vec<RuntimeEf
     });
     scenarios.push(scenario("happy_fetch_localhost", happy_effects));
 
-    let (ctx, _rx, _) =
-        build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     let mut kinds = BTreeSet::new();
     kinds.insert(ImpactKind::ExternalObservation);
     scenarios.push(scenario(

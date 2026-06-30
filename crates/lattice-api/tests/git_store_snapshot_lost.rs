@@ -9,11 +9,11 @@
 
 use std::fs;
 
+use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     WorkspaceDisposition,
 };
-use lattice_session::test_helpers::{assistant_msg, user_msg};
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
@@ -64,9 +64,7 @@ fn git_store_snapshot_lost_flag_round_trips() {
     );
 
     // 2. Set to true, then get returns Some(true).
-    store
-        .set_snapshot_lost(&commit_id, true)
-        .expect("set true");
+    store.set_snapshot_lost(&commit_id, true).expect("set true");
     assert_eq!(
         store.get_snapshot_lost(&commit_id).expect("get true"),
         Some(true),

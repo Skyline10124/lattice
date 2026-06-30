@@ -7,7 +7,9 @@ use std::process::Command;
 
 use super::*;
 use crate::git_graph::GitSessionGraphStore;
-use crate::graph::{SessionGraphStore, TurnCommitStatus, TurnLifecycleEvidence, WorkspaceDisposition};
+use crate::graph::{
+    SessionGraphStore, TurnCommitStatus, TurnLifecycleEvidence, WorkspaceDisposition,
+};
 
 #[test]
 fn test_no_remote_push_refspec() {
@@ -28,12 +30,7 @@ fn test_no_remote_push_refspec() {
         resumes_turn_oid: None,
     };
     let messages = vec![user_msg("Candidate turn")];
-    let mut input = commit_input(
-        "sess-remote",
-        vec![],
-        messages,
-        TurnCommitStatus::Completed,
-    );
+    let mut input = commit_input("sess-remote", vec![], messages, TurnCommitStatus::Completed);
     input.lifecycle = Some(lifecycle);
     input.disposition = WorkspaceDisposition::PendingPromotion;
     store.commit_turn(input).expect("commit");

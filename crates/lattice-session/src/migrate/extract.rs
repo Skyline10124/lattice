@@ -115,9 +115,8 @@ impl Idmap {
     pub fn load(target_repo: &Path) -> Result<Self> {
         let path = idmap_path(target_repo);
         match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-                SessionError::Git(format!("parse idmap.json: {e}"))
-            }),
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| SessionError::Git(format!("parse idmap.json: {e}"))),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(source) => Err(SessionError::Io {
                 operation: "reading idmap",
@@ -351,18 +350,16 @@ fn read_parents_json(conn: &Connection, session_id: &str, commit_id: &str) -> Re
 }
 
 fn parse_json_array(column: &str, raw: &str) -> Result<Vec<String>> {
-    serde_json::from_str::<Vec<String>>(raw).map_err(|err| {
-        SessionError::Database {
-            path: Path::new("").to_path_buf(),
-            source: rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("malformed JSON in column '{column}': {err}"),
-                )),
-            ),
-        }
+    serde_json::from_str::<Vec<String>>(raw).map_err(|err| SessionError::Database {
+        path: Path::new("").to_path_buf(),
+        source: rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("malformed JSON in column '{column}': {err}"),
+            )),
+        ),
     })
 }
 
@@ -501,8 +498,9 @@ fn load_messages(
                     path: Path::new("").to_path_buf(),
                     source,
                 })?;
-            let tool_calls: Option<Vec<GraphToolCall>> =
-                serde_json::from_str(&tool_calls_json).ok().filter(|v: &Vec<GraphToolCall>| !v.is_empty());
+            let tool_calls: Option<Vec<GraphToolCall>> = serde_json::from_str(&tool_calls_json)
+                .ok()
+                .filter(|v: &Vec<GraphToolCall>| !v.is_empty());
             by_id.insert(
                 message_id,
                 GraphMessage {

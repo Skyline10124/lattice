@@ -37,11 +37,11 @@ use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
 };
 use lattice_llm::ToolCall;
+#[cfg(test)]
+use lattice_profile::LancetWorkspacePolicySection;
 use lattice_profile::{
     LancetNetworkSection, LancetObservationSection, LancetSection, LoadedAgentProfile,
 };
-#[cfg(test)]
-use lattice_profile::LancetWorkspacePolicySection;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -453,7 +453,9 @@ fn resolve_lancet_policy(
 ) -> Result<PolicyConfig, ApiError> {
     match lancet {
         Some(section) => load_policy_config(section, Path::new(project_root)),
-        None => Ok(PolicyConfig::defaults_for_project_root(PathBuf::from(project_root))),
+        None => Ok(PolicyConfig::defaults_for_project_root(PathBuf::from(
+            project_root,
+        ))),
     }
 }
 
@@ -654,8 +656,7 @@ pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<AgentTurnEvent> {
         "cep.call_started" => Some(AgentTurnEvent::CepCallStarted {
             call_id,
             method: string_param(&params, "method")?,
-            impact_kind: string_param(&params, "impact_kind")
-                .unwrap_or_else(|| "unknown".into()),
+            impact_kind: string_param(&params, "impact_kind").unwrap_or_else(|| "unknown".into()),
             audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
             semantic_stage: string_param(&params, "semantic_stage")?,
             guard_stage: string_param(&params, "guard_stage")?,

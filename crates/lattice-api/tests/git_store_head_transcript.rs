@@ -9,11 +9,11 @@
 
 use std::fs;
 
+use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     WorkspaceDisposition,
 };
-use lattice_session::test_helpers::{assistant_msg, user_msg};
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
@@ -77,9 +77,7 @@ fn git_store_head_transcript_reads_ordered_messages() {
         parent_ids = vec![commit.commit_id];
     }
 
-    let transcript = store
-        .head_transcript(&session_id)
-        .expect("head_transcript");
+    let transcript = store.head_transcript(&session_id).expect("head_transcript");
 
     assert_eq!(transcript.session_id, session_id);
     assert!(
@@ -115,7 +113,14 @@ fn git_store_head_transcript_reads_ordered_messages() {
     let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
     assert_eq!(
         roles,
-        vec!["user", "assistant", "user", "assistant", "user", "assistant"],
+        vec![
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user",
+            "assistant"
+        ],
         "roles must alternate per message in commit order, got: {:?}",
         roles,
     );

@@ -18,10 +18,10 @@
 use std::path::Path;
 
 use crate::git_graph::helpers::{
-    LATTICE_AUTHOR_EMAIL, LATTICE_AUTHOR_NAME, MANIFEST_SCHEMA_VERSION, GitSessionManifest,
-    build_agent_json, build_audit_json, build_root_tree, build_turn_tree, candidate_ref_name,
-    messages_to_jsonl, serialize_manifest, session_ref_name, write_ops_state, write_session_meta,
-    OperationalState, SessionMetadata,
+    GitSessionManifest, LATTICE_AUTHOR_EMAIL, LATTICE_AUTHOR_NAME, MANIFEST_SCHEMA_VERSION,
+    OperationalState, SessionMetadata, build_agent_json, build_audit_json, build_root_tree,
+    build_turn_tree, candidate_ref_name, messages_to_jsonl, serialize_manifest, session_ref_name,
+    write_ops_state, write_session_meta,
 };
 use crate::{Result, SessionError};
 
@@ -106,12 +106,12 @@ fn write_commit_object(
         .parent_ids
         .iter()
         .map(|pid| {
-            idmap.get(pid)
-                .map(|s| s.to_string())
-                .ok_or_else(|| SessionError::Git(format!(
+            idmap.get(pid).map(|s| s.to_string()).ok_or_else(|| {
+                SessionError::Git(format!(
                     "parent {pid} not in idmap for commit {} (topological order violated?)",
                     commit.commit_id
-                )))
+                ))
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -213,7 +213,14 @@ fn write_commit_object(
 
     // repo.commit(None, ...) — update_ref=None; refs written separately.
     let commit_oid = repo
-        .commit(None, &sig, &sig, &commit.commit_message, &root_tree, &parent_refs)
+        .commit(
+            None,
+            &sig,
+            &sig,
+            &commit.commit_message,
+            &root_tree,
+            &parent_refs,
+        )
         .map_err(|e| SessionError::Git(format!("create migrated commit: {e}")))?;
     Ok(commit_oid)
 }
@@ -233,11 +240,16 @@ fn write_session_refs(
     // pin a candidate ref at the migrated OID.
     for commit in &session.commits {
         let lifecycle = super::extract::decode_lifecycle_json(&commit.lifecycle_json)?;
-        if lifecycle.as_ref().and_then(|lc| lc.candidate_oid.clone()).is_some() {
+        if lifecycle
+            .as_ref()
+            .and_then(|lc| lc.candidate_oid.clone())
+            .is_some()
+        {
             let turn_id: String = commit.commit_id.chars().take(16).collect();
             let Some(new_oid_str) = idmap.get(&commit.commit_id) else {
                 return Err(SessionError::Git(format!(
-                    "commit {} not in idmap for candidate ref", commit.commit_id
+                    "commit {} not in idmap for candidate ref",
+                    commit.commit_id
                 )));
             };
             let oid = git2::Oid::from_str(new_oid_str)
@@ -355,7 +367,8 @@ fn write_session_sidecars(
         if commit.snapshot_lost {
             let Some(new_oid_str) = idmap.get(&commit.commit_id) else {
                 return Err(SessionError::Git(format!(
-                    "commit {} not in idmap for ops sidecar", commit.commit_id
+                    "commit {} not in idmap for ops sidecar",
+                    commit.commit_id
                 )));
             };
             let state = OperationalState {

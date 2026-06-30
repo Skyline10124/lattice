@@ -911,7 +911,7 @@ mod microsandbox_composition {
     #[test]
     fn microsandbox_workspace_type_checks_with_public_promotion_api() {
         use lattice_api::{PromotionSessionMetadata, PromotionTurnTarget, VerificationResult};
-        use lattice_workspace::MicrosandboxWorkspace;
+        use lattice_workspace::microsandbox::MicrosandboxWorkspace;
         fn _accepts(
             _ws: &MicrosandboxWorkspace,
             _target: &PromotionTurnTarget,

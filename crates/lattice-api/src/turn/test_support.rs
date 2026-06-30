@@ -51,8 +51,7 @@ pub(super) async fn build_test_production_deps(
         std::fs::write(root.join("README.md"), "init\n").expect("write README");
         init_test_git_repo(root);
     }
-    let workspace_override =
-        workspace_override.or_else(|| Some(test_workspace_override()));
+    let workspace_override = workspace_override.or_else(|| Some(test_workspace_override()));
     let request = make_test_run_turn_request(
         llm.clone(),
         in_memory_audit,
@@ -112,7 +111,8 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     let sessions_path = root.join("sessions.git");
     std::fs::create_dir_all(&sessions_path).unwrap();
     let session_api = SessionApi::git(&sessions_path);
-    let store: Box<dyn SessionGraphStore> = Box::new(lattice_session::GitSessionGraphStore::new(&sessions_path));
+    let store: Box<dyn SessionGraphStore> =
+        Box::new(lattice_session::GitSessionGraphStore::new(&sessions_path));
     store
         .create_session(TEST_SESSION_ID, None, "test", "main")
         .expect("create default test session");

@@ -141,9 +141,8 @@ mod tests {
     mod routing_metadata {
         use super::*;
         use crate::execution_backend::{
-            DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting,
-            FindRequest, GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext,
-            WorkspacePath,
+            DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
+            GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
         };
         use lancet_audit::{RejectionRecord, RejectionStage};
         use serde_json::Value;
@@ -268,9 +267,7 @@ mod tests {
             }
         }
 
-        fn test_ctx(
-            execution: ExecutionRouting,
-        ) -> HandlerContext {
+        fn test_ctx(execution: ExecutionRouting) -> HandlerContext {
             let default_hook = Arc::new(DefaultPolicyHook::new(
                 lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from("."),

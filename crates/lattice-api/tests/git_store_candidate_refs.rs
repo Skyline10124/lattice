@@ -9,11 +9,11 @@
 
 use std::fs;
 
+use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     TurnLifecycleEvidence, WorkspaceDisposition,
 };
-use lattice_session::test_helpers::{assistant_msg, user_msg};
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
@@ -84,7 +84,10 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
         1,
         "expected exactly 1 candidate ref under {candidate_prefix}, got {}: {:?}",
         candidate_refs.len(),
-        candidate_refs.iter().map(|(n, o)| (n, o.to_string())).collect::<Vec<_>>(),
+        candidate_refs
+            .iter()
+            .map(|(n, o)| (n, o.to_string()))
+            .collect::<Vec<_>>(),
     );
 
     let (ref_name, ref_oid) = &candidate_refs[0];
@@ -100,12 +103,12 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
 
     // 2. The turn_id component (suffix after the session_id) is non-empty and
     //    matches the derive_turn_id format (16 chars, alphanumeric).
-    let turn_id = ref_name
-        .strip_prefix(&candidate_prefix)
-        .unwrap_or(ref_name);
+    let turn_id = ref_name.strip_prefix(&candidate_prefix).unwrap_or(ref_name);
     assert!(!turn_id.is_empty(), "turn_id component must be non-empty");
     assert!(
-        turn_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+        turn_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
         "turn_id must be a valid ref component: {turn_id}",
     );
 
@@ -154,6 +157,9 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
         candidate_refs_after.len(),
         1,
         "plain turn (no lifecycle) must not create a candidate ref; count should stay 1, got: {:?}",
-        candidate_refs_after.iter().map(|(n, o)| (n, o.to_string())).collect::<Vec<_>>(),
+        candidate_refs_after
+            .iter()
+            .map(|(n, o)| (n, o.to_string()))
+            .collect::<Vec<_>>(),
     );
 }

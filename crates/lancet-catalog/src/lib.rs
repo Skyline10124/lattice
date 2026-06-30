@@ -11,7 +11,7 @@ pub mod catalog;
 pub mod method;
 pub mod methods;
 
-pub use catalog::{CATALOG, catalog};
+pub use catalog::{CATALOG, CATALOG_LEN, catalog};
 #[cfg(feature = "inspect-scaffold")]
 pub use catalog::{SCAFFOLD_CATALOG, scaffold_catalog};
 pub use lancet_protocol::RequiredCapability;

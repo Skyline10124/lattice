@@ -111,12 +111,11 @@ pub fn run_migration(opts: &MigrateOptions) -> Result<MigrationResult> {
     // verification, then explicitly dropped before archiving so the SQLite
     // file handle is released (Linux allows rename of open files, but dropping
     // first is the correct hygiene).
-    let conn = rusqlite::Connection::open(&opts.source_db).map_err(|source| {
-        SessionError::Database {
+    let conn =
+        rusqlite::Connection::open(&opts.source_db).map_err(|source| SessionError::Database {
             path: opts.source_db.clone(),
             source,
-        }
-    })?;
+        })?;
 
     let sessions = extract::extract_all_with_conn(&conn)?;
 

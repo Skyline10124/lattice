@@ -444,9 +444,8 @@ fn release_smoke_release_gate_v1_4_includes_lancet_boundary_check() {
         "v1.4 release gate must cover lancet-authority"
     );
     assert!(
-        gate.contains("dogfood proof: no-key command artifact metadata")
-            && gate.contains("v1_4_command_artifact_dogfood"),
-        "v1.4 release gate must include the no-key command artifact metadata dogfood lane"
+        !gate.contains("v1_4_command_artifact_dogfood"),
+        "v1.4 release gate must not reference the retired command artifact dogfood lane"
     );
     assert!(
         gate.contains("docs/v1.4-alpha-release-record.md")

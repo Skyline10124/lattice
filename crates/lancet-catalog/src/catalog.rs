@@ -23,6 +23,12 @@ pub static CATALOG: LazyLock<[MethodDescriptor; 8]> = LazyLock::new(|| {
     ]
 });
 
+/// Compile-time-known length of [`CATALOG`]. Mirrors the array bound in
+/// [`CATALOG`]'s type (`[MethodDescriptor; 8]`); keep these in sync when the
+/// root CEP method contract changes. Callers (e.g. the LANCET doctor) read
+/// this instead of hard-coding a method count.
+pub const CATALOG_LEN: usize = 8;
+
 /// Borrow the catalog as a slice.
 pub fn catalog() -> &'static [MethodDescriptor] {
     &*CATALOG
@@ -228,11 +234,10 @@ mod scaffold_tests {
     #[test]
     fn scaffold_result_schema_includes_status_semantic_stage_and_routed() {
         let schema = schema_for!(ScaffoldStubResult);
-        let props = schema
-            .schema
-            .object
-            .expect("object schema")
-            .properties
+        let value = serde_json::to_value(schema).expect("serialize schema");
+        let props = value["properties"]
+            .as_object()
+            .expect("object schema with properties")
             .keys()
             .cloned()
             .collect::<Vec<_>>();
@@ -277,11 +282,18 @@ mod catalog_default_snapshot {
     /// must NOT include `exec.command_run`.
     #[test]
     fn catalog_retires_exec_command_run() {
-        assert_eq!(catalog().len(), 8);
+        assert_eq!(catalog().len(), CATALOG_LEN);
         assert!(
             !catalog().iter().any(|d| d.name == "exec.command_run"),
             "exec.command_run must not appear in the production catalog"
         );
+    }
+
+    /// `CATALOG_LEN` must stay in sync with the runtime catalog length so the
+    /// LANCET doctor's expected-count check cannot silently drift.
+    #[test]
+    fn catalog_len_matches_runtime_catalog() {
+        assert_eq!(CATALOG_LEN, catalog().len());
     }
 
     #[cfg(feature = "inspect-scaffold")]

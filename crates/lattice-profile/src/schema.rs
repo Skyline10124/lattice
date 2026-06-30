@@ -1033,8 +1033,7 @@ max_delay_ms = 2
         let toml = minimal_profile_prefix();
         let err = parse(toml).unwrap_err();
         assert!(
-            err.to_string().contains("workspace")
-                || err.to_string().contains("missing field"),
+            err.to_string().contains("workspace") || err.to_string().contains("missing field"),
             "missing [workspace] must be a parse error, got: {err}"
         );
     }
@@ -1149,10 +1148,7 @@ denied_write_patterns = [".git/**", ".env"]
             .as_ref()
             .unwrap()
             .denied_write_patterns;
-        assert_eq!(
-            patterns,
-            &vec![".git/**".to_string(), ".env".to_string()]
-        );
+        assert_eq!(patterns, &vec![".git/**".to_string(), ".env".to_string()]);
     }
 
     #[test]

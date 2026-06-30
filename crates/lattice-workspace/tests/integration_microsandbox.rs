@@ -189,10 +189,7 @@ async fn test_template_create_and_restore() {
         .exec_upper(&restored_handle, "echo", &["restored-ok"])
         .await
         .expect("exec_upper on restored Upper must succeed");
-    assert_eq!(
-        echo_out.exit_code, 0,
-        "echo in restored Upper must exit 0"
-    );
+    assert_eq!(echo_out.exit_code, 0, "echo in restored Upper must exit 0");
     assert!(
         echo_out.stdout.contains("restored-ok"),
         "stdout must contain 'restored-ok'; got: {:?}",

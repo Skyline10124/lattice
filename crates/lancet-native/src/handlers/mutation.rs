@@ -52,10 +52,7 @@ struct MutationAuth {
 
 impl MutationAuth {
     fn edit_storage(&self) -> EditStorage {
-        EditStorage::new(
-            self.execution.clone(),
-            self.authorized_region.clone(),
-        )
+        EditStorage::new(self.execution.clone(), self.authorized_region.clone())
     }
 }
 
@@ -88,11 +85,7 @@ async fn handle_create_as(
     write_create(&ctx, &auth, &create).await?;
 
     record_created_dir_effects(&ctx, &create);
-    ctx.record_effect(mutation_path_effect(
-        &auth,
-        &create.path,
-        &create.full_path,
-    ));
+    ctx.record_effect(mutation_path_effect(&auth, &create.path, &create.full_path));
 
     let written_hash = content_hash(params.content.as_bytes());
     ctx.record_durable_metadata(json!({
@@ -226,11 +219,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
                 created_dirs.push(dir.clone());
             }
         }
-        ctx.record_effect(mutation_path_effect(
-            &auth,
-            &create.path,
-            &create.full_path,
-        ));
+        ctx.record_effect(mutation_path_effect(&auth, &create.path, &create.full_path));
         created_files.push(create.path.clone());
     }
 
@@ -336,8 +325,7 @@ async fn authorize_mutation(
             parent_kind: facts.parent_kind.map(path_kind),
             canonical_under_workspace: facts.canonical_under_workspace,
         };
-        if let Err(err) = validate_path_facts(guard_path, &path_facts, &authorized_region)
-        {
+        if let Err(err) = validate_path_facts(guard_path, &path_facts, &authorized_region) {
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::AdapterPreflight,
                 denial_source: "guard_l1".into(),
@@ -614,11 +602,7 @@ fn patch_diag_to_cep(diag: crate::edit::types::PatchDiagnostic) -> CepError {
     )
 }
 
-fn mutation_path_effect(
-    _auth: &MutationAuth,
-    path: &str,
-    _full_path: &Path,
-) -> ObservedEffect {
+fn mutation_path_effect(_auth: &MutationAuth, path: &str, _full_path: &Path) -> ObservedEffect {
     let scope = ObservedScope::Path(PathBuf::from(path));
     ObservedEffect {
         kind: ImpactKind::WorkspaceMutation,
@@ -669,10 +653,7 @@ fn reject_duplicate_batch_path(seen: &mut HashSet<String>, path: &str) -> Result
     }
 }
 
-async fn compile_edit_patch(
-    auth: &MutationAuth,
-    params: &EditParams,
-) -> Result<String, CepError> {
+async fn compile_edit_patch(auth: &MutationAuth, params: &EditParams) -> Result<String, CepError> {
     let fragment = compile_edit_operation_fragment(&auth.edit_storage(), params).await?;
     Ok(format!("*** Begin Patch\n{fragment}*** End Patch\n"))
 }
@@ -1093,7 +1074,13 @@ mod create_tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
+                execution: crate::execution_backend::ExecutionRouting {
+                    backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
+                    upper: crate::execution_backend::UpperContext {
+                        execution_backend: "null".into(),
+                        upper_workspace_id: "null".into(),
+                    },
+                },
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
@@ -1172,8 +1159,7 @@ mod create_tests {
             &self,
             path: &WorkspacePath,
             content: &[u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
             self.writes.lock().unwrap().push(path.as_str().to_string());
             self.files
                 .lock()
@@ -1185,8 +1171,7 @@ mod create_tests {
         fn remove_file(
             &self,
             _path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 
@@ -1195,9 +1180,7 @@ mod create_tests {
             _path: &WorkspacePath,
         ) -> Pin<
             Box<
-                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>>
-                    + Send
-                    + '_,
+                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_,
             >,
         > {
             Box::pin(async { Ok(Vec::new()) })
@@ -1206,9 +1189,8 @@ mod create_tests {
         fn grep(
             &self,
             _request: &GrepRequest,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>,
-        > {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
+        {
             Box::pin(async { Ok(Vec::new()) })
         }
 
@@ -1216,24 +1198,15 @@ mod create_tests {
             &self,
             _request: &FindRequest,
         ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
-                    + Send
-                    + '_,
-            >,
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
         > {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-
         fn changed_paths(
             &self,
         ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
-                    + Send
-                    + '_,
-            >,
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
         > {
             Box::pin(async { Ok(Vec::new()) })
         }
@@ -1265,8 +1238,7 @@ mod create_tests {
             cancellation: Cancellation::new(cancel_rx),
             cep_context,
             turn_id: "test-turn".into(),
-            durable_metadata:
-                crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
             authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -1471,8 +1443,7 @@ mod edit_tests {
             &self,
             path: &WorkspacePath,
             content: &[u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
             self.writes.lock().unwrap().push(path.as_str().to_string());
             self.files
                 .lock()
@@ -1484,8 +1455,7 @@ mod edit_tests {
         fn remove_file(
             &self,
             _path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 
@@ -1494,9 +1464,7 @@ mod edit_tests {
             _path: &WorkspacePath,
         ) -> Pin<
             Box<
-                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>>
-                    + Send
-                    + '_,
+                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_,
             >,
         > {
             Box::pin(async { Ok(Vec::new()) })
@@ -1505,9 +1473,8 @@ mod edit_tests {
         fn grep(
             &self,
             _request: &GrepRequest,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>,
-        > {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
+        {
             Box::pin(async { Ok(Vec::new()) })
         }
 
@@ -1515,24 +1482,15 @@ mod edit_tests {
             &self,
             _request: &FindRequest,
         ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
-                    + Send
-                    + '_,
-            >,
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
         > {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-
         fn changed_paths(
             &self,
         ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
-                    + Send
-                    + '_,
-            >,
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
         > {
             let writes = self.writes.lock().unwrap();
             let paths: Vec<WorkspacePath> = writes
@@ -1565,8 +1523,7 @@ mod edit_tests {
             cancellation: Cancellation::new(cancel_rx),
             cep_context,
             turn_id: "test-turn".into(),
-            durable_metadata:
-                crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
             authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,

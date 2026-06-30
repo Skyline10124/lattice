@@ -40,11 +40,7 @@ fn malicious_handler_caught() {
         .to_str()
         .unwrap()
         .to_string();
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     let authority = observation_region(&root);
 
     let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
@@ -89,8 +85,7 @@ fn create_glob_pattern_within_region() {
     std::fs::create_dir_all(std::path::Path::new(&root).join("src")).unwrap();
 
     let registry = test_registry();
-    let (ctx, _rx, _) =
-        build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     declare_active_envelope(&ctx, &root);
 
     let authority = {

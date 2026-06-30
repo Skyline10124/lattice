@@ -12,8 +12,8 @@ use futures::StreamExt;
 use lattice_api::{
     CreateSessionRequest, OpenSessionRequest, RunTurnRequest, SessionApi, TurnEvent,
 };
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,8 +70,7 @@ pub async fn run(options: TuiOptions) -> Result<std::process::ExitCode> {
 
     // ---------- rustyline editor + persisted history ----------
     let history_path = options.session_dir.join("repl_history.txt");
-    let mut rl: DefaultEditor =
-        DefaultEditor::with_config(rustyline::Config::builder().build())?;
+    let mut rl: DefaultEditor = DefaultEditor::with_config(rustyline::Config::builder().build())?;
     let _ = rl.load_history(&history_path);
 
     print_banner(&session_id, &active_agent, project_branch);
@@ -192,7 +191,10 @@ fn print_help() {
     println!("  {}  exit (also Ctrl-D on empty line)", "/quit".cyan());
     println!("{rule}");
     println!("  {}  cancel the running turn", "Ctrl-C".dimmed());
-    println!("  {}  anything else is sent as a prompt to the agent", "·".dimmed());
+    println!(
+        "  {}  anything else is sent as a prompt to the agent",
+        "·".dimmed()
+    );
     println!("{rule}");
 }
 

@@ -167,7 +167,9 @@ mod tests {
     use crate::effect::ledger::{EffectSource, ObservedScope};
     use crate::effect::region::AuthorizedEffectRegion;
     use lancet_catalog::method::RequiredCapability;
-    use lancet_protocol::effect_types::{EffectKindSet, EffectScopeKind, FailureSemantics, OverlayBehavior};
+    use lancet_protocol::effect_types::{
+        EffectKindSet, EffectScopeKind, FailureSemantics, OverlayBehavior,
+    };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 

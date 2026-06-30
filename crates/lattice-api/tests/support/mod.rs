@@ -42,7 +42,10 @@ pub fn deterministic_workspace() -> Arc<dyn Workspace> {
     Arc::new(DeterministicWorkspace::new().expect("deterministic workspace for integration tests"))
 }
 
-pub fn attach_upper_fixture(mut request: RunTurnRequest, _enabled_tools: &[&str]) -> RunTurnRequest {
+pub fn attach_upper_fixture(
+    mut request: RunTurnRequest,
+    _enabled_tools: &[&str],
+) -> RunTurnRequest {
     if request.workspace_override.is_none() {
         request.workspace_override = Some(deterministic_workspace());
     }

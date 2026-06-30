@@ -127,7 +127,7 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
 // - Mutation without configured write paths (PathOutsideScope)
 // - Read over observation budget (BudgetExceeded)
 // - Unknown method (NonDeterminable)
-// - Denied command argv (CommandDenied)
+// - Retired method exec.command_run (NonDeterminable)
 
 fn deny_path_inputs() -> Vec<PolicyInput> {
     vec![

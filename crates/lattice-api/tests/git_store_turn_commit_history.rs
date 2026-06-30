@@ -10,11 +10,11 @@
 
 use std::fs;
 
+use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     WorkspaceDisposition,
 };
-use lattice_session::test_helpers::{assistant_msg, user_msg};
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
@@ -37,10 +37,7 @@ fn git_store_turn_commit_creates_git_history() {
         .expect("create_session");
 
     // Build a minimal first turn (no parents).
-    let messages = vec![
-        user_msg("Hello, git history!"),
-        assistant_msg("Hi there."),
-    ];
+    let messages = vec![user_msg("Hello, git history!"), assistant_msg("Hi there.")];
     let input = TurnCommitInput {
         session_id: session_id.clone(),
         parent_ids: vec![],

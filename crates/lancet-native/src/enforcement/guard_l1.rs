@@ -8,8 +8,8 @@
 //! emits native events, records durable metadata, and enforces the decision.
 
 pub use lancet_authority::guard::{
-    PolicyEvaluation, WritePathPattern, check_write_scope,
-    decision_to_guard_verdict, evaluate_policy, map_decision_to_cep_error, normalize_write_path_pattern,
+    PolicyEvaluation, WritePathPattern, check_write_scope, decision_to_guard_verdict,
+    evaluate_policy, map_decision_to_cep_error, normalize_write_path_pattern,
 };
 
 use crate::enforcement::preflight::{
@@ -86,9 +86,10 @@ pub async fn evaluate_and_enforce_policy(
         PolicyDecision::Allowed => {
             let mut authorized_region = None;
             if let Some(_evidence) = &evaluation.evidence {
-                let hook = ctx.default_policy_hook.as_ref().ok_or_else(|| {
-                    CepError::internal_error("missing default policy hook")
-                })?;
+                let hook = ctx
+                    .default_policy_hook
+                    .as_ref()
+                    .ok_or_else(|| CepError::internal_error("missing default policy hook"))?;
                 let region = hook
                     .config()
                     .workspace
@@ -174,7 +175,8 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
                 effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
                 authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -186,7 +188,13 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
+                execution: crate::execution_backend::ExecutionRouting {
+                    backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
+                    upper: crate::execution_backend::UpperContext {
+                        execution_backend: "null".into(),
+                        upper_workspace_id: "null".into(),
+                    },
+                },
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,

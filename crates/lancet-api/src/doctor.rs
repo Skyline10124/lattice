@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use lancet_catalog::CATALOG_LEN;
 use lancet_catalog::catalog::catalog;
 use lancet_native::{MethodRegistry, register_production_method_registry};
 
@@ -40,10 +41,14 @@ pub fn run_doctor_checks(request: LancetDoctorRequest) -> LancetDoctorOutput {
     ok_items.push("doctor mode: informational (exit 0)".to_string());
 
     let catalog_len = catalog().len();
-    if catalog_len == 9 {
-        ok_items.push(format!("catalog: {catalog_len} methods (expected 9)"));
+    if catalog_len == CATALOG_LEN {
+        ok_items.push(format!(
+            "catalog: {catalog_len} methods (expected {CATALOG_LEN})"
+        ));
     } else {
-        issues.push(format!("catalog: expected 9 methods, got {catalog_len}"));
+        issues.push(format!(
+            "catalog: expected {CATALOG_LEN} methods, got {catalog_len}"
+        ));
     }
 
     {

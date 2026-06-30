@@ -17,7 +17,7 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{SessionGraphStore, GitSessionGraphStore};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore};
 
 // ── Streaming event helpers ─────────────────────────────────────────────────
 

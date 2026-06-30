@@ -5,12 +5,12 @@
 
 use chrono::Utc;
 
+use super::GitSessionGraphStore;
 use super::helpers::{
     parse_manifest, read_session_meta, read_tree_blob, session_ref_name,
     turn_log_entry_from_manifest, validate_session_id, write_session_meta,
 };
 use super::session::resolve_head_oid;
-use super::GitSessionGraphStore;
 use crate::graph::{GraphDiff, GraphHead, GraphRef, GraphRefKind, ResetResult, TurnLogEntry};
 use crate::{Result, SessionError};
 
@@ -28,8 +28,9 @@ impl GitSessionGraphStore {
 
         let target_oid = match from {
             Some(target) => resolve_target_to_oid(&repo, session_id, target)?,
-            None => resolve_head_oid(&repo, &meta, session_id)?
-                .ok_or_else(|| SessionError::Conflict("cannot create branch: no commits on HEAD".to_string()))?,
+            None => resolve_head_oid(&repo, &meta, session_id)?.ok_or_else(|| {
+                SessionError::Conflict("cannot create branch: no commits on HEAD".to_string())
+            })?,
         };
 
         let ref_name = session_ref_name(session_id, name)?;
@@ -64,9 +65,9 @@ impl GitSessionGraphStore {
         if let Ok(ref_name) = session_ref_name(session_id, target)
             && let Ok(reference) = repo.find_reference(&ref_name)
         {
-            let oid = reference.target().ok_or_else(|| {
-                SessionError::Git(format!("branch ref '{target}' has no target"))
-            })?;
+            let oid = reference
+                .target()
+                .ok_or_else(|| SessionError::Git(format!("branch ref '{target}' has no target")))?;
             meta.head_branch = Some(target.to_string());
             meta.head_commit_id = Some(oid.to_string());
             meta.updated_at = Utc::now().to_rfc3339();
@@ -95,7 +96,9 @@ impl GitSessionGraphStore {
         validate_session_id(session_id)?;
         let mut meta = read_session_meta(&self.dir, session_id)?;
         let branch_name = meta.head_branch.clone().ok_or_else(|| {
-            SessionError::Conflict("cannot reset while HEAD is detached; checkout a branch first".to_string())
+            SessionError::Conflict(
+                "cannot reset while HEAD is detached; checkout a branch first".to_string(),
+            )
         })?;
         let repo = self.repo()?;
 
@@ -170,8 +173,8 @@ fn resolve_target_to_oid(
     }
 
     // Try as commit OID.
-    let oid = git2::Oid::from_str(target)
-        .map_err(|_| SessionError::MissingCommit(target.to_string()))?;
+    let oid =
+        git2::Oid::from_str(target).map_err(|_| SessionError::MissingCommit(target.to_string()))?;
     if repo.find_commit(oid).is_err() {
         return Err(SessionError::MissingCommit(target.to_string()));
     }
@@ -221,7 +224,12 @@ fn collect_unique_commits(
                 }
             })
             .count();
-        entries.push(turn_log_entry_from_manifest(&manifest, &oid.to_string(), total, tools));
+        entries.push(turn_log_entry_from_manifest(
+            &manifest,
+            &oid.to_string(),
+            total,
+            tools,
+        ));
     }
     Ok(entries)
 }

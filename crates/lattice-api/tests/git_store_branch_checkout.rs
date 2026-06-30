@@ -9,11 +9,11 @@
 
 use std::fs;
 
+use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, GraphHead, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     WorkspaceDisposition,
 };
-use lattice_session::test_helpers::{assistant_msg, user_msg};
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
@@ -98,9 +98,7 @@ fn git_store_branch_and_checkout_moves_head() {
     );
 
     // 3. Checkout back to main. HEAD should return to the main branch.
-    let head = store
-        .checkout(&session_id, "main")
-        .expect("checkout main");
+    let head = store.checkout(&session_id, "main").expect("checkout main");
     assert!(
         matches!(&head, GraphHead::Branch { name } if name == "main"),
         "HEAD should be on main branch after checkout, got: {:?}",

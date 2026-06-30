@@ -110,7 +110,8 @@ fn verify_session_topology(
             .parent_ids
             .iter()
             .map(|pid| {
-                idmap.get(pid)
+                idmap
+                    .get(pid)
                     .ok_or_else(|| {
                         SessionError::Git(format!(
                             "parent {pid} not in idmap for commit {}",
@@ -201,9 +202,7 @@ fn verify_session_transcripts(
             .refs
             .iter()
             .any(|r| r.commit_id.as_deref() == Some(head_legacy.as_str()));
-        if !already_covered
-            && let Some(git_oid_str) = idmap.get(head_legacy)
-        {
+        if !already_covered && let Some(git_oid_str) = idmap.get(head_legacy) {
             let git_oid = git2::Oid::from_str(git_oid_str)
                 .map_err(|e| SessionError::Git(format!("parse head tip oid: {e}")))?;
             let sqlite_msgs = collect_sqlite_transcript_from_tip(session, head_legacy);
@@ -319,4 +318,3 @@ fn messages_equal(a: &GraphMessage, b: &GraphMessage) -> bool {
         && a.tool_call_id == b.tool_call_id
         && a.name == b.name
 }
-

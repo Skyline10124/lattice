@@ -157,10 +157,6 @@ echo "  --> release_e2e_criterion_8 (fake-LLM e2e)"
 cargo test -p lattice-api release_e2e_criterion_8
 echo ""
 
-echo "  --> dogfood proof: no-key command artifact metadata"
-cargo test -p lattice-api v1_4_command_artifact_dogfood
-echo ""
-
 echo "  --> lattice-api: remaining tests"
 cargo test -p lattice-api
 echo ""

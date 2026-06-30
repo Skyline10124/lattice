@@ -255,7 +255,6 @@ impl crate::execution_backend::ExecutionBackend for HostFsBackend {
         Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
     }
 
-
     fn changed_paths(
         &self,
     ) -> std::pin::Pin<

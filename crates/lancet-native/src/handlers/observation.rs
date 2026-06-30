@@ -6,8 +6,8 @@
 use crate::edit::content_hash;
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::execution_backend::{
-    DirectoryEntry as BackendDirectoryEntry, ExecutionBackendError, FindRequest,
-    GrepRequest, PathFacts as BackendPathFacts, PathIntent, WorkspacePath,
+    DirectoryEntry as BackendDirectoryEntry, ExecutionBackendError, FindRequest, GrepRequest,
+    PathFacts as BackendPathFacts, PathIntent, WorkspacePath,
 };
 use crate::executor::render::render_file_slice;
 use crate::server::registry::{HandlerContext, MethodRegistry};
@@ -128,7 +128,6 @@ fn charge_observation_bytes(ctx: &HandlerContext, bytes: usize) -> Result<(), Ce
         .map_err(|e: BudgetExhausted| e.to_cep_error())
 }
 
-
 fn single_read_budget_exceeded(actual: usize, policy: &CepPolicyConfig) -> CepError {
     BudgetExhausted {
         limit: "observation.max_single_read_bytes",
@@ -141,7 +140,6 @@ fn single_read_budget_exceeded(actual: usize, policy: &CepPolicyConfig) -> CepEr
     .to_cep_error()
 }
 
-
 fn path_not_found(path: &str) -> CepError {
     CepError::new(
         CepErrorCode::TypeError,
@@ -153,8 +151,6 @@ fn path_not_found(path: &str) -> CepError {
         Retriability::Permanent,
     )
 }
-
-
 
 fn parse_observation_path(raw: &str, field: &str) -> Result<WorkspacePath, CepError> {
     WorkspacePath::parse(raw).map_err(|err| {
@@ -740,7 +736,6 @@ async fn handle_find_files(
     })
 }
 
-
 async fn emit_denial_metadata(
     ctx: &HandlerContext,
     method: &str,
@@ -767,7 +762,8 @@ mod tests {
     use super::*;
     use crate::execution_backend::{
         DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-        GrepMatch, GrepRequest, PathFacts as BackendPathFacts, PathIntent, UpperContext, WorkspacePath,
+        GrepMatch, GrepRequest, PathFacts as BackendPathFacts, PathIntent, UpperContext,
+        WorkspacePath,
     };
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
@@ -812,8 +808,9 @@ mod tests {
             &self,
             path: &WorkspacePath,
             _intent: PathIntent,
-        ) -> Pin<Box<dyn Future<Output = Result<BackendPathFacts, ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<
+            Box<dyn Future<Output = Result<BackendPathFacts, ExecutionBackendError>> + Send + '_>,
+        > {
             let full = self.resolve(path);
             let path_str = path.as_str().to_string();
             let exists = full.exists();
@@ -835,9 +832,13 @@ mod tests {
                 true
             };
             let parent_exists = full.parent().map(|p| p.exists()).unwrap_or(false);
-            let parent_kind = full
-                .parent()
-                .and_then(|p| if p.is_dir() { Some(crate::execution_backend::PathKind::Directory) } else { None });
+            let parent_kind = full.parent().and_then(|p| {
+                if p.is_dir() {
+                    Some(crate::execution_backend::PathKind::Directory)
+                } else {
+                    None
+                }
+            });
             let byte_size = if full.is_file() {
                 Some(full.metadata().map(|m| m.len()).unwrap_or(0))
             } else {
@@ -873,8 +874,7 @@ mod tests {
             &self,
             _path: &WorkspacePath,
             _content: &[u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
             Box::pin(async {
                 Err(ExecutionBackendError::Unavailable {
                     message: "write not supported".into(),
@@ -885,8 +885,7 @@ mod tests {
         fn remove_file(
             &self,
             _path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
             Box::pin(async {
                 Err(ExecutionBackendError::Unavailable {
                     message: "remove not supported".into(),
@@ -899,9 +898,7 @@ mod tests {
             path: &WorkspacePath,
         ) -> Pin<
             Box<
-                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>>
-                    + Send
-                    + '_,
+                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_,
             >,
         > {
             let full = self.resolve(path);
@@ -930,9 +927,8 @@ mod tests {
         fn grep(
             &self,
             request: &GrepRequest,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>,
-        > {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
+        {
             let root = self.root.clone();
             let pattern = request.pattern.clone();
             let search_path = request.path.as_str().to_string();
@@ -996,11 +992,7 @@ mod tests {
             &self,
             request: &FindRequest,
         ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
-                    + Send
-                    + '_,
-            >,
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
         > {
             let root = self.root.clone();
             let pattern = request.pattern.clone();
@@ -1045,7 +1037,8 @@ mod tests {
                             } else if path.is_file() && !path.is_symlink() {
                                 let name = entry.file_name().to_string_lossy().to_string();
                                 if regex.is_match(&name) {
-                                    let rel = path.strip_prefix(root)
+                                    let rel = path
+                                        .strip_prefix(root)
                                         .unwrap_or(&path)
                                         .to_string_lossy()
                                         .to_string();
@@ -1065,11 +1058,7 @@ mod tests {
         fn changed_paths(
             &self,
         ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
-                    + Send
-                    + '_,
-            >,
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
         > {
             Box::pin(async { Ok(Vec::new()) })
         }
@@ -1114,7 +1103,8 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 cep_context,
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
                 effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
                 authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -1621,7 +1611,8 @@ mod tests {
         use super::*;
         use crate::execution_backend::{
             DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-            GrepMatch, GrepRequest, PathFacts as BackendPathFacts, PathIntent, UpperContext, WorkspacePath,
+            GrepMatch, GrepRequest, PathFacts as BackendPathFacts, PathIntent, UpperContext,
+            WorkspacePath,
         };
         use std::future::Future;
         use std::pin::Pin;
@@ -1641,8 +1632,13 @@ mod tests {
                 &self,
                 path: &WorkspacePath,
                 _intent: PathIntent,
-            ) -> Pin<Box<dyn Future<Output = Result<BackendPathFacts, ExecutionBackendError>> + Send + '_>>
-            {
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<BackendPathFacts, ExecutionBackendError>>
+                        + Send
+                        + '_,
+                >,
+            > {
                 let path_str = path.as_str().to_string();
                 Box::pin(async move {
                     Ok(BackendPathFacts {
@@ -1738,7 +1734,6 @@ mod tests {
                 })
             }
 
-
             fn changed_paths(
                 &self,
             ) -> Pin<
@@ -1770,7 +1765,8 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 cep_context,
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
                 effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
                 authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,

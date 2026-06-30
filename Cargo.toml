@@ -50,9 +50,6 @@ lattice-workspace = { path = "crates/lattice-workspace" }
 # External dependencies — shared versions
 async-trait = "0.1"
 blake3 = "1"
-# Exact-pinned: the shell_ast whitelist walker in lancet-authority must be
-# re-reviewed against the AST surface before any version bump.
-brush-parser = "=0.4.0"
 chrono = "0.4"
 futures = "0.3"
 indexmap = "2"

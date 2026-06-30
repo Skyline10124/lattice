@@ -20,11 +20,7 @@ pub(in crate::effect_contract_tests) fn audit_observe_runtime_effects() -> Vec<R
         .to_string();
     let mut scenarios = Vec::new();
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "happy_query",
         dispatch_success_effects::<AuditObserve>(
@@ -37,11 +33,7 @@ pub(in crate::effect_contract_tests) fn audit_observe_runtime_effects() -> Vec<R
         ),
     ));
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "happy_tail",
         dispatch_success_effects::<AuditObserve>(
@@ -105,11 +97,7 @@ pub(in crate::effect_contract_tests) fn audit_replay_runtime_effects() -> Vec<Ru
         .to_string();
     let mut scenarios = Vec::new();
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     seed_audit_replay_row(&ctx);
     scenarios.push(scenario(
         "happy_replay_seeded_turn",
@@ -122,11 +110,7 @@ pub(in crate::effect_contract_tests) fn audit_replay_runtime_effects() -> Vec<Ru
         ),
     ));
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "failure_missing_turn_no_backend_effect",
         dispatch_failure_effects::<AuditReplay>(

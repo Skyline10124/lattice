@@ -61,12 +61,11 @@ async fn stream_turn_live_with_agent(
     tool_definitions: Vec<lattice_llm::ToolDefinition>,
 ) -> crate::session::Result<TurnEventStream> {
     let (cep_client, _server) = lancet_native::CepTransport::pair(1);
-    let upper_lease = super::upper::UpperLease::without_handle(
-        Arc::new(
-            lattice_workspace::testing::DeterministicWorkspace::new()
-                .expect("deterministic workspace for test"),
-        ) as Arc<dyn lattice_workspace::Workspace>,
-    );
+    let upper_lease = super::upper::UpperLease::without_handle(Arc::new(
+        lattice_workspace::testing::DeterministicWorkspace::new()
+            .expect("deterministic workspace for test"),
+    )
+        as Arc<dyn lattice_workspace::Workspace>);
     let deps = super::cep::ProductionTurnDeps {
         agent_loop,
         tool_definitions,

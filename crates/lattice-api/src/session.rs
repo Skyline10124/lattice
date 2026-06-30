@@ -8,9 +8,9 @@
 //! diff/reset operations. Both SQLite and Git-backed stores are supported.
 
 use lattice_session::{
-    migrate::find_legacy_session_db, GitSessionGraphStore, GraphDiff, GraphHead, GraphRef,
-    GraphSession, HeadTranscript, PreparedTurnCommit, ResetResult, SessionGraphStore,
-    SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput, TurnLogEntry,
+    GitSessionGraphStore, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
+    PreparedTurnCommit, ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus,
+    TurnCommit, TurnCommitInput, TurnLogEntry, migrate::find_legacy_session_db,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -273,9 +273,7 @@ pub fn check_migration_guard(git_repo_dir: &Path) -> std::result::Result<(), Str
     // probe for the real legacy DB filename instead of hardcoding
     // sessions.db. The session DB lives in the parent of the git repo dir
     // (e.g. .../lattice/sessions/sessions.git → .../lattice/sessions/).
-    let session_dir = git_repo_dir
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let session_dir = git_repo_dir.parent().unwrap_or_else(|| Path::new("."));
     let legacy_db = match find_legacy_session_db(session_dir) {
         Some(path) => path,
         None => return Ok(()), // no legacy DB — fresh install or already migrated

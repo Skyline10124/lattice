@@ -119,8 +119,6 @@ pub enum PolicyReasonCode {
     CapabilitySourceNotAllowed,
     /// Path target is outside the allowed scope pattern.
     PathOutsideScope,
-    /// Command execution denied by policy.
-    CommandDenied,
     /// Network request denied by policy.
     NetworkDenied,
     /// Budget limit exceeded.
@@ -344,14 +342,13 @@ mod tests {
             PolicyReasonCode::MissingCapability,
             PolicyReasonCode::CapabilitySourceNotAllowed,
             PolicyReasonCode::PathOutsideScope,
-            PolicyReasonCode::CommandDenied,
             PolicyReasonCode::NetworkDenied,
             PolicyReasonCode::BudgetExceeded,
             PolicyReasonCode::ReplanRequired,
             PolicyReasonCode::PolicyConfigInvalid,
             PolicyReasonCode::NonDeterminable,
         ];
-        assert_eq!(variants.len(), 9);
+        assert_eq!(variants.len(), 8);
         for v in &variants {
             let s = serde_json::to_string(v).unwrap();
             let d: PolicyReasonCode = serde_json::from_str(&s).unwrap();

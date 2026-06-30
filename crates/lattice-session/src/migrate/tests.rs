@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use crate::git_graph::helpers::{parse_manifest, read_tree_blob};
 use crate::git_graph::GitSessionGraphStore;
-use crate::graph::{GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus, WorkspaceDisposition};
+use crate::git_graph::helpers::{parse_manifest, read_tree_blob};
+use crate::graph::{
+    GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus, WorkspaceDisposition,
+};
 use crate::migrate::{MigrateOptions, run_migration};
 
 // ─── DDL (from RESEARCH.md §Source Read) ───────────────────────────────────
@@ -128,8 +130,14 @@ fn insert_commit(
          VALUES (?1, ?2, ?3, ?4, 'test', 'test-hash', '{}', 'test-model',
                  'test-provider', 'completed', ?5, NULL, NULL, 'not_applicable',
                  '{}', ?6)",
-        rusqlite::params![commit_id, session_id, parents_json, message_ids_json,
-                          format!("Turn {commit_id}"), created_at],
+        rusqlite::params![
+            commit_id,
+            session_id,
+            parents_json,
+            message_ids_json,
+            format!("Turn {commit_id}"),
+            created_at
+        ],
     )
     .expect("insert commit");
 }
@@ -154,7 +162,14 @@ fn insert_message(
 
 /// Seed a linear session with N commits, each having a user+assistant message pair.
 fn seed_linear(conn: &Connection, session_id: &str, n: usize) -> Vec<String> {
-    insert_session(conn, session_id, Some("Linear test"), Some("main"), None, "main");
+    insert_session(
+        conn,
+        session_id,
+        Some("Linear test"),
+        Some("main"),
+        None,
+        "main",
+    );
     let mut commit_ids: Vec<String> = Vec::new();
     for i in 0..n {
         let cid = format!("{session_id}-c{}", i + 1);
@@ -173,8 +188,22 @@ fn seed_linear(conn: &Connection, session_id: &str, n: usize) -> Vec<String> {
             &[&mid_user, &mid_asst],
             &format!("2026-01-01T00:{:02}:00Z", i),
         );
-        insert_message(conn, &mid_user, session_id, "user", &format!("prompt {}", i + 1), 0);
-        insert_message(conn, &mid_asst, session_id, "assistant", &format!("response {}", i + 1), 1);
+        insert_message(
+            conn,
+            &mid_user,
+            session_id,
+            "user",
+            &format!("prompt {}", i + 1),
+            0,
+        );
+        insert_message(
+            conn,
+            &mid_asst,
+            session_id,
+            "assistant",
+            &format!("response {}", i + 1),
+            1,
+        );
         commit_ids.push(cid);
     }
     let head = commit_ids.last().unwrap();
@@ -189,7 +218,14 @@ fn seed_linear(conn: &Connection, session_id: &str, n: usize) -> Vec<String> {
 
 /// Seed a branched session: main (b1→b2) + feature (b1→b3).
 fn seed_branched(conn: &Connection, session_id: &str) -> Vec<String> {
-    insert_session(conn, session_id, Some("Branched test"), Some("main"), None, "main");
+    insert_session(
+        conn,
+        session_id,
+        Some("Branched test"),
+        Some("main"),
+        None,
+        "main",
+    );
     let b1 = format!("{session_id}-b1");
     let b2 = format!("{session_id}-b2");
     let b3 = format!("{session_id}-b3");
@@ -201,9 +237,30 @@ fn seed_branched(conn: &Connection, session_id: &str) -> Vec<String> {
         let mid_u = format!("{cid}-mu");
         let mid_a = format!("{cid}-ma");
         let parent_refs: Vec<&str> = parents.clone();
-        insert_commit(conn, cid, session_id, &parent_refs, &[&mid_u, &mid_a], &format!("2026-01-01T00:{ts}:00Z"));
-        insert_message(conn, &mid_u, session_id, "user", &format!("prompt {cid}"), 0);
-        insert_message(conn, &mid_a, session_id, "assistant", &format!("response {cid}"), 1);
+        insert_commit(
+            conn,
+            cid,
+            session_id,
+            &parent_refs,
+            &[&mid_u, &mid_a],
+            &format!("2026-01-01T00:{ts}:00Z"),
+        );
+        insert_message(
+            conn,
+            &mid_u,
+            session_id,
+            "user",
+            &format!("prompt {cid}"),
+            0,
+        );
+        insert_message(
+            conn,
+            &mid_a,
+            session_id,
+            "assistant",
+            &format!("response {cid}"),
+            1,
+        );
     }
     insert_ref(conn, session_id, "main", &b2);
     insert_ref(conn, session_id, "feature", &b3);
@@ -218,7 +275,14 @@ fn seed_branched(conn: &Connection, session_id: &str) -> Vec<String> {
 /// Seed a reset session: 3 commits on main, then reset main ref to c1.
 /// c2 and c3 become unreachable.
 fn seed_reset(conn: &Connection, session_id: &str) -> Vec<String> {
-    insert_session(conn, session_id, Some("Reset test"), Some("main"), None, "main");
+    insert_session(
+        conn,
+        session_id,
+        Some("Reset test"),
+        Some("main"),
+        None,
+        "main",
+    );
     let c1 = format!("{session_id}-c1");
     let c2 = format!("{session_id}-c2");
     let c3 = format!("{session_id}-c3");
@@ -230,9 +294,30 @@ fn seed_reset(conn: &Connection, session_id: &str) -> Vec<String> {
         let mid_u = format!("{cid}-mu");
         let mid_a = format!("{cid}-ma");
         let parent_refs: Vec<&str> = parents.clone();
-        insert_commit(conn, cid, session_id, &parent_refs, &[&mid_u, &mid_a], &format!("2026-01-01T00:{ts}:00Z"));
-        insert_message(conn, &mid_u, session_id, "user", &format!("prompt {cid}"), 0);
-        insert_message(conn, &mid_a, session_id, "assistant", &format!("response {cid}"), 1);
+        insert_commit(
+            conn,
+            cid,
+            session_id,
+            &parent_refs,
+            &[&mid_u, &mid_a],
+            &format!("2026-01-01T00:{ts}:00Z"),
+        );
+        insert_message(
+            conn,
+            &mid_u,
+            session_id,
+            "user",
+            &format!("prompt {cid}"),
+            0,
+        );
+        insert_message(
+            conn,
+            &mid_a,
+            session_id,
+            "assistant",
+            &format!("response {cid}"),
+            1,
+        );
     }
     // Reset: main ref points to c1 (not c3). c2/c3 unreachable.
     insert_ref(conn, session_id, "main", &c1);
@@ -280,7 +365,11 @@ fn topology_equivalence_linear() {
 
     let repo = git2::Repository::open(&target).unwrap();
     let ref_name = "refs/lattice/sessions/A/main";
-    assert_eq!(count_commits_from_ref(&repo, ref_name), 3, "should have 3 commits");
+    assert_eq!(
+        count_commits_from_ref(&repo, ref_name),
+        3,
+        "should have 3 commits"
+    );
 }
 
 #[test]
@@ -298,8 +387,16 @@ fn topology_equivalence_branched() {
     let repo = git2::Repository::open(&target).unwrap();
     let main_ref = "refs/lattice/sessions/B/main";
     let feature_ref = "refs/lattice/sessions/B/feature";
-    assert_eq!(count_commits_from_ref(&repo, main_ref), 2, "main should have 2 commits");
-    assert_eq!(count_commits_from_ref(&repo, feature_ref), 2, "feature should have 2 commits (b1+b3)");
+    assert_eq!(
+        count_commits_from_ref(&repo, main_ref),
+        2,
+        "main should have 2 commits"
+    );
+    assert_eq!(
+        count_commits_from_ref(&repo, feature_ref),
+        2,
+        "feature should have 2 commits (b1+b3)"
+    );
 }
 
 #[test]
@@ -317,7 +414,11 @@ fn topology_equivalence_reset() {
     let repo = git2::Repository::open(&target).unwrap();
     let main_ref = "refs/lattice/sessions/C/main";
     // only c1 is reachable after reset; c2/c3 are orphans, not migrated.
-    assert_eq!(count_commits_from_ref(&repo, main_ref), 1, "reset should leave only 1 reachable commit");
+    assert_eq!(
+        count_commits_from_ref(&repo, main_ref),
+        1,
+        "reset should leave only 1 reachable commit"
+    );
 }
 
 // ─── Transcript equivalence ───────────────────────────────────────────
@@ -342,7 +443,8 @@ fn transcript_equivalence_linear() {
     // Walk the Git DAG and collect messages (topological order).
     let mut walk = repo.revwalk().expect("revwalk");
     walk.push(tip).expect("push");
-    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE).expect("sort");
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)
+        .expect("sort");
 
     let mut all_messages = Vec::new();
     for oid in walk {
@@ -361,9 +463,19 @@ fn transcript_equivalence_linear() {
         let u = &all_messages[i * 2];
         let a = &all_messages[i * 2 + 1];
         assert_eq!(u.role, "user", "message {} role", i * 2);
-        assert_eq!(u.content, format!("prompt {}", i + 1), "message {} content", i * 2);
+        assert_eq!(
+            u.content,
+            format!("prompt {}", i + 1),
+            "message {} content",
+            i * 2
+        );
         assert_eq!(a.role, "assistant", "message {} role", i * 2 + 1);
-        assert_eq!(a.content, format!("response {}", i + 1), "message {} content", i * 2 + 1);
+        assert_eq!(
+            a.content,
+            format!("response {}", i + 1),
+            "message {} content",
+            i * 2 + 1
+        );
     }
 }
 
@@ -380,13 +492,18 @@ fn restart_idempotent() {
     let target = dir.path().join("sessions.git");
 
     // First run.
-    let result1 = run_migration(&migrate_opts(db_path.clone(), target.clone())).expect("migration 1");
+    let result1 =
+        run_migration(&migrate_opts(db_path.clone(), target.clone())).expect("migration 1");
     assert!(result1.verification_passed);
     assert_eq!(result1.commits_migrated, 5);
 
     let repo = git2::Repository::open(&target).unwrap();
     let ref_name = "refs/lattice/sessions/R/main";
-    assert_eq!(count_commits_from_ref(&repo, ref_name), 5, "first run: 5 commits");
+    assert_eq!(
+        count_commits_from_ref(&repo, ref_name),
+        5,
+        "first run: 5 commits"
+    );
 
     // Second run (restart) — source was archived by first run, so we need to
     // re-seed for the restart test. Actually, the first run archives the source.
@@ -404,7 +521,11 @@ fn restart_idempotent() {
     assert_eq!(result2.commits_migrated, 5, "restart should not duplicate");
 
     let repo2 = git2::Repository::open(&target).unwrap();
-    assert_eq!(count_commits_from_ref(&repo2, ref_name), 5, "restart: still 5 commits, no duplicates");
+    assert_eq!(
+        count_commits_from_ref(&repo2, ref_name),
+        5,
+        "restart: still 5 commits, no duplicates"
+    );
 }
 
 /// Count every commit object in the repository's object database, regardless
@@ -456,17 +577,29 @@ fn restart_recovers_from_partial_write() {
     partial.head_ref = None;
 
     let mut idmap = crate::migrate::extract::Idmap::default();
-    crate::migrate::write::write_migration(&repo, std::slice::from_ref(&partial), &mut idmap, &target)
-        .expect("partial write");
+    crate::migrate::write::write_migration(
+        &repo,
+        std::slice::from_ref(&partial),
+        &mut idmap,
+        &target,
+    )
+    .expect("partial write");
     idmap.save(&target).expect("save partial idmap");
-    assert_eq!(count_all_commit_objects(&repo), 2, "partial run wrote 2 commit objects");
+    assert_eq!(
+        count_all_commit_objects(&repo),
+        2,
+        "partial run wrote 2 commit objects"
+    );
 
     drop(conn);
 
     // Full run against the same source. Must converge to 5 reachable commits
     // with no duplicate objects (the 2 pre-written commits are reused).
     let result = run_migration(&migrate_opts(db_path, target.clone())).expect("full migration");
-    assert!(result.verification_passed, "verification should pass after recovery");
+    assert!(
+        result.verification_passed,
+        "verification should pass after recovery"
+    );
     assert_eq!(result.commits_migrated, 5);
 
     let repo2 = git2::Repository::open(&target).unwrap();
@@ -536,12 +669,19 @@ fn native_manifest_oid_stable() {
     let repo = git2::Repository::open(&repo_dir).expect("open repo");
     let oid = git2::Oid::from_str(&turn_commit.commit_id).expect("parse oid");
     let commit = repo.find_commit(oid).expect("find commit");
-    let manifest_bytes = read_tree_blob(&repo, &commit, "turn/manifest.json").expect("read manifest");
+    let manifest_bytes =
+        read_tree_blob(&repo, &commit, "turn/manifest.json").expect("read manifest");
     let manifest = parse_manifest(&manifest_bytes).expect("parse manifest");
 
     // native commits have no legacy fields.
-    assert!(manifest.legacy_session_id.is_none(), "native commit should have no legacy_session_id");
-    assert!(manifest.legacy_commit_id.is_none(), "native commit should have no legacy_commit_id");
+    assert!(
+        manifest.legacy_session_id.is_none(),
+        "native commit should have no legacy_session_id"
+    );
+    assert!(
+        manifest.legacy_commit_id.is_none(),
+        "native commit should have no legacy_commit_id"
+    );
 
     // The raw JSON should NOT contain the legacy keys (skip_serializing_if = Option::is_none).
     let raw_json = String::from_utf8(manifest_bytes).expect("utf8");
@@ -566,8 +706,9 @@ fn no_sqlite_write_path_in_production() {
         .unwrap();
 
     // lattice-api/src/session.rs: no pub fn sqlite, no SqliteSessionGraphStore.
-    let session_rs = std::fs::read_to_string(workspace_root.join("crates/lattice-api/src/session.rs"))
-        .expect("read session.rs");
+    let session_rs =
+        std::fs::read_to_string(workspace_root.join("crates/lattice-api/src/session.rs"))
+            .expect("read session.rs");
     let sqlite_fn = format!("pub fn {}", "sqlite");
     let sqlite_store = format!("{}GraphStore", "SqliteSession");
     assert!(
@@ -594,7 +735,9 @@ fn no_sqlite_write_path_in_production() {
 
     // sqlite_graph/ directory should not exist.
     assert!(
-        !workspace_root.join("crates/lattice-session/src/sqlite_graph").exists(),
+        !workspace_root
+            .join("crates/lattice-session/src/sqlite_graph")
+            .exists(),
         "sqlite_graph/ directory should be deleted"
     );
 }
@@ -651,12 +794,19 @@ fn migration_works_with_session_v12_db_filename() {
 
     let target = dir.path().join("sessions.git");
     let result = run_migration(&migrate_opts(db_path, target.clone())).expect("migration");
-    assert!(result.verification_passed, "verification should pass for session_v12.db");
+    assert!(
+        result.verification_passed,
+        "verification should pass for session_v12.db"
+    );
     assert_eq!(result.commits_migrated, 3);
 
     let repo = git2::Repository::open(&target).unwrap();
     let ref_name = "refs/lattice/sessions/V12/main";
-    assert_eq!(count_commits_from_ref(&repo, ref_name), 3, "session_v12.db migration: 3 commits");
+    assert_eq!(
+        count_commits_from_ref(&repo, ref_name),
+        3,
+        "session_v12.db migration: 3 commits"
+    );
 
     // The archive name should derive from the actual filename, not sessions.db.
     assert!(
@@ -665,7 +815,9 @@ fn migration_works_with_session_v12_db_filename() {
     );
     let archived = result.source_archived.unwrap();
     assert!(
-        archived.to_string_lossy().contains("session_v12.db.migrated-"),
+        archived
+            .to_string_lossy()
+            .contains("session_v12.db.migrated-"),
         "archive name should derive from session_v12.db, got: {}",
         archived.display()
     );
@@ -699,7 +851,10 @@ fn dry_run_creates_no_target_skeleton() {
     assert_eq!(result.sessions_migrated, 1);
     assert_eq!(result.commits_migrated, 2);
     assert!(!result.verification_passed, "dry-run should not verify");
-    assert!(result.source_archived.is_none(), "dry-run should not archive");
+    assert!(
+        result.source_archived.is_none(),
+        "dry-run should not archive"
+    );
 
     // GAP 2 core assertion: the target directory/repo was NOT created.
     assert!(

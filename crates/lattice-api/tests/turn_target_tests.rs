@@ -359,8 +359,8 @@ fn exact_baseline_none_falls_back_to_head() {
 
     let profile = profile_with_workspace("docker.io/library/python:3.12-slim");
 
-    let config = lattice_api::resolve_upper_config(&profile, &dir, None)
-        .expect("resolve_upper_config");
+    let config =
+        lattice_api::resolve_upper_config(&profile, &dir, None).expect("resolve_upper_config");
 
     assert_eq!(config.spec.baseline_oid, head_oid);
 }

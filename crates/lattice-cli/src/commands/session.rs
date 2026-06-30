@@ -13,9 +13,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
 use lattice_api::{CreateSessionRequest, GraphHead, OpenSessionRequest, SessionApi};
-use lattice_session::{
-    migrate::find_legacy_session_db, MigrateOptions, migrate,
-};
+use lattice_session::{MigrateOptions, migrate, migrate::find_legacy_session_db};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
@@ -291,8 +289,7 @@ fn cmd_migrate(
     // sessions.db. If no legacy DB is found, fall back to the session_v12.db
     // path so the downstream "source not found" error names a real filename.
     let source_db = source.unwrap_or_else(|| {
-        find_legacy_session_db(&session_dir)
-            .unwrap_or_else(|| session_dir.join("session_v12.db"))
+        find_legacy_session_db(&session_dir).unwrap_or_else(|| session_dir.join("session_v12.db"))
     });
     let target_repo = target.unwrap_or_else(|| session_dir.join("sessions.git"));
 
@@ -326,7 +323,14 @@ fn cmd_migrate(
         println!("sessions migrated: {}", result.sessions_migrated);
         println!("commits migrated:  {}", result.commits_migrated);
         println!("refs migrated:     {}", result.refs_migrated);
-        println!("verification:      {}", if result.verification_passed { "passed" } else { "failed" });
+        println!(
+            "verification:      {}",
+            if result.verification_passed {
+                "passed"
+            } else {
+                "failed"
+            }
+        );
         match &result.source_archived {
             Some(path) => println!("source archived:   {}", path.display()),
             None if purge_source => println!("source purged"),
@@ -1431,7 +1435,7 @@ mod d25_scoped_session {
     use super::*;
     use lattice_api::SessionApi;
     use lattice_session::{
-        GraphMessage, GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
+        GitSessionGraphStore, GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     };
 
     /// Seed a session with N committed turns using the graph store directly.
@@ -1697,9 +1701,7 @@ mod d25_scoped_session {
                     "legacy import found: {}",
                     trimmed
                 );
-                if trimmed.contains("SessionStore")
-                    && !trimmed.contains("SessionGraphStore")
-                {
+                if trimmed.contains("SessionStore") && !trimmed.contains("SessionGraphStore") {
                     panic!("legacy SessionStore trait import found: {}", trimmed);
                 }
             }

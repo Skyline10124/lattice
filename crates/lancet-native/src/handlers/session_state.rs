@@ -153,7 +153,8 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 cep_context,
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
                 effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
                 authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -165,7 +166,13 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
+                execution: crate::execution_backend::ExecutionRouting {
+                    backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
+                    upper: crate::execution_backend::UpperContext {
+                        execution_backend: "null".into(),
+                        upper_workspace_id: "null".into(),
+                    },
+                },
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,

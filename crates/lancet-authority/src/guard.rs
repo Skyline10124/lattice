@@ -9,13 +9,11 @@
 //! - `GuardDenied`: target escapes project root or violates hard security boundary
 
 use crate::policy::default::{DefaultPolicyHook, PolicyEvidence};
-use lancet_protocol::policy::GuardVerdict;
 use lancet_protocol::error::{
     CepErrorData, GuardErrorData, PermissionErrorData, ReservedErrorData, ValidationErrorData,
 };
-use lancet_protocol::policy::{
-    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
-};
+use lancet_protocol::policy::GuardVerdict;
+use lancet_protocol::policy::{PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use std::path::{Component, Path, PathBuf};
 
@@ -539,9 +537,7 @@ pub fn validate_path_facts(
                 crate::effect::region::relative_path_within_prefix(normalized_path, prefix)
             });
     if denied {
-        return Err(permission_denied(
-            "path matches a denied write pattern",
-        ));
+        return Err(permission_denied("path matches a denied write pattern"));
     }
 
     let _ = facts.exists;
@@ -621,7 +617,7 @@ pub fn map_decision_to_cep_error(decision: &PolicyDecision, method: &str) -> Res
                     }),
                     Retriability::RequiresReplan,
                 ),
-                PolicyReasonCode::CommandDenied | PolicyReasonCode::NetworkDenied => (
+                PolicyReasonCode::NetworkDenied => (
                     CepErrorCode::GuardDenied,
                     CepErrorData::Guard(GuardErrorData {
                         method: method.into(),
@@ -1035,18 +1031,6 @@ mod policy_tests {
     }
 
     #[test]
-    fn map_command_denied_to_guard_denied() {
-        let decision = PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::CommandDenied,
-            message: "denied".into(),
-            action_required: None,
-        };
-        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
-        assert_eq!(err.code, CepErrorCode::GuardDenied);
-        assert_eq!(err.retriability, Retriability::Permanent);
-    }
-
-    #[test]
     fn map_budget_exceeded_to_reserved_with_replan() {
         let decision = PolicyDecision::Denied {
             reason_code: PolicyReasonCode::BudgetExceeded,
@@ -1181,7 +1165,9 @@ mod policy_tests {
         use crate::effect::region::AuthorizedEffectRegion;
         use std::path::PathBuf;
         let mut region = AuthorizedEffectRegion::empty();
-        region.denied_write_path_prefixes.push(PathBuf::from(".git"));
+        region
+            .denied_write_path_prefixes
+            .push(PathBuf::from(".git"));
         let facts = PathFacts {
             normalized_path: ".git/config".into(),
             exists: true,

@@ -96,8 +96,7 @@ impl ExecutionBackend for SupportFsBackend {
         &self,
         path: &WorkspacePath,
         _intent: PathIntent,
-    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -133,8 +132,7 @@ impl ExecutionBackend for SupportFsBackend {
     fn read_file(
         &self,
         path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -151,8 +149,7 @@ impl ExecutionBackend for SupportFsBackend {
         &self,
         path: &WorkspacePath,
         content: &[u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -169,8 +166,7 @@ impl ExecutionBackend for SupportFsBackend {
     fn remove_file(
         &self,
         path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
         let full = if path.is_project_root() {
             self.root.clone()
         } else {
@@ -215,12 +211,11 @@ impl ExecutionBackend for SupportFsBackend {
         let post = Self::snapshot_files(&self.root);
         Box::pin(async move {
             let changed: Vec<WorkspacePath> = match pre {
-                Some(pre_set) => {
-                    post.iter()
-                        .filter(|p| !pre_set.contains(*p))
-                        .filter_map(|p| WorkspacePath::parse(p).ok())
-                        .collect()
-                }
+                Some(pre_set) => post
+                    .iter()
+                    .filter(|p| !pre_set.contains(*p))
+                    .filter_map(|p| WorkspacePath::parse(p).ok())
+                    .collect(),
                 None => Vec::new(),
             };
             Ok(changed)

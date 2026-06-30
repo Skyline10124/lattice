@@ -55,14 +55,15 @@ Layer 5:         lattice-tui(-> api + presentation deps)
 ### CEP method catalog
 
 `lancet-catalog::CATALOG` is the authoritative production catalog with exactly
-**9 methods**:
+**8 methods**:
 
 `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`,
-`exec.command_run`, `fetch.web`, `session.todo_write`, `observe.audit`,
-`observe.audit_replay`.
+`fetch.web`, `session.todo_write`, `observe.audit`, `observe.audit_replay`.
 
 There is no `session.envelope` method (it was removed; the catalog and tests
-assert its absence).
+assert its absence). There is no `exec.command_run` method — it and
+post-mutation verify were permanently retired from the CEP layer (issue #4);
+command execution is not an agent-visible capability.
 
 ## Installation
 

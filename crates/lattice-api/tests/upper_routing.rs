@@ -316,8 +316,7 @@ async fn mutations_preserve_lower_sentinel() {
 #[tokio::test]
 async fn path_denial_records_preflight_only() {
     let lower = TempDir::new().expect("lower");
-    let (adapter, _ws, _handle, _audit, _runtime) =
-        runtime_fixture(lower.path(), "UPPER").await;
+    let (adapter, _ws, _handle, _audit, _runtime) = runtime_fixture(lower.path(), "UPPER").await;
 
     let err = adapter
         .execute(&tool_call(
@@ -410,10 +409,7 @@ async fn upper_routing_e2e() {
                 system_path: None,
             },
             tools: ToolsSection {
-                enabled: vec![
-                    ObserveWorkspace::NAME.into(),
-                    Create::NAME.into(),
-                ],
+                enabled: vec![ObserveWorkspace::NAME.into(), Create::NAME.into()],
             },
             llm: LlmSection::default(),
             lancet: LancetSection {
@@ -788,8 +784,6 @@ async fn generated_profiles_are_executable_host_only() {
 
 #[cfg(feature = "integration_tests")]
 mod microsandbox_lane {
-    use super::*;
-
     #[tokio::test]
     #[ignore = "requires KVM/libkrun and configured image/template"]
     async fn microsandbox_upper_routing() {

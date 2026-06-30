@@ -685,9 +685,7 @@ impl PolicyHook for DefaultPolicyHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_protocol::policy::{
-        PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot,
-    };
+    use lancet_protocol::policy::{PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot};
     use serde_json::json;
 
     fn test_config() -> PolicyConfig {

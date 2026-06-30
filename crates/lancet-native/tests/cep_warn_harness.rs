@@ -260,7 +260,6 @@ fn find_repo_root() -> PathBuf {
 // ── Report generator ─────────────────────────────────────────────────────────
 
 async fn generate_warn_report() -> String {
-
     // ── Overreach-capable canonical methods ──────────────────────────────
 
     let overreach_results = vec![

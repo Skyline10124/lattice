@@ -228,11 +228,8 @@ impl LancetRuntime {
     }
 }
 
-fn resolve_catalog_tool_exposure(
-    enabled: &[String],
-) -> Result<ToolExposure, LancetError> {
-    ToolExposure::from_catalog_enabled(enabled)
-        .map_err(map_tool_exposure_err)
+fn resolve_catalog_tool_exposure(enabled: &[String]) -> Result<ToolExposure, LancetError> {
+    ToolExposure::from_catalog_enabled(enabled).map_err(map_tool_exposure_err)
 }
 
 fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
@@ -250,5 +247,64 @@ mod tests {
     fn runtime_config_defaults_have_null_execution() {
         let config = LancetRuntimeConfig::new(".");
         assert_eq!(config.execution.upper.execution_backend, "null");
+    }
+
+    // Issue #4 behavior acceptance: a raw CEP call to the permanently retired
+    // `exec.command_run` method must reach the production dispatch layer (not be
+    // rejected by a pre-dispatch policy/tool-exposure filter) and return a stable
+    // JSON-RPC `Method not found` (-32601) error — never a policy-denied, verify
+    // failed, or execution result. This exercises the full production path:
+    // `LancetRuntime::build` -> `LancetServer::spawn` -> production registry ->
+    // transport server loop -> `handle_request` -> `registry.dispatch` -> client.
+    #[tokio::test]
+    async fn production_runtime_rejects_retired_exec_command_run_as_method_not_found() {
+        use lancet_catalog::CATALOG;
+        use lancet_protocol::Retriability;
+        use lancet_protocol::error::jsonrpc;
+
+        // Sanity: the method is genuinely absent from the production catalog.
+        assert!(
+            !CATALOG.iter().any(|d| d.name == "exec.command_run"),
+            "exec.command_run must not appear in CATALOG"
+        );
+
+        // Build a production runtime exposing every catalog method, so the call
+        // is not filtered out by enabled-tools exposure before reaching dispatch.
+        let enabled_tools: Vec<String> = CATALOG.iter().map(|d| d.name.to_string()).collect();
+        let config = LancetRuntimeConfig {
+            enabled_tools,
+            ..LancetRuntimeConfig::new(".")
+        };
+        let mut runtime = LancetRuntime::build(config).expect("production runtime builds");
+
+        // Send a raw CEP JSON-RPC call for the retired method. `call_raw` bypasses
+        // the typed CatalogMethod trait and lets an arbitrary method string reach
+        // the production registry dispatch path.
+        let client = runtime.client();
+        let err = client
+            .call_raw("exec.command_run", serde_json::json!({}))
+            .await
+            .expect_err("retired method must error, not execute");
+
+        // JSON-RPC wire code must be -32601 (Method not found), not a policy /
+        // verify / execution error.
+        assert_eq!(
+            err.wire_code(),
+            jsonrpc::METHOD_NOT_FOUND,
+            "retired exec.command_run must map to JSON-RPC -32601, got {:?}",
+            err
+        );
+        assert!(
+            err.message.starts_with("Method not found:"),
+            "expected Method not found message, got: {}",
+            err.message
+        );
+        assert_eq!(
+            err.retriability,
+            Retriability::Permanent,
+            "method_not_found must be permanent"
+        );
+
+        runtime.shutdown().await;
     }
 }

@@ -260,7 +260,9 @@ async fn cep_mode_off_policy_deny_still_enforced() {
         use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
         use lancet_protocol::ImpactKind;
         let mut policy_cfg = PolicyConfig::defaults_for_project_root(canonical.clone());
-        policy_cfg.denied_effect_kinds.insert(ImpactKind::WorkspaceMutation);
+        policy_cfg
+            .denied_effect_kinds
+            .insert(ImpactKind::WorkspaceMutation);
         let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
         config.policy_hook = hook.clone();
         config.default_policy_hook = Some(hook);
@@ -290,8 +292,7 @@ async fn cep_mode_off_policy_deny_still_enforced() {
         err.message
     );
     assert!(
-        err.message.contains("impact kind")
-            || err.message.contains("denied by policy config"),
+        err.message.contains("impact kind") || err.message.contains("denied by policy config"),
         "denial message must reference denied impact kind: {}",
         err.message
     );

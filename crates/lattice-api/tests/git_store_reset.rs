@@ -9,11 +9,11 @@
 
 use std::fs;
 
+use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, GraphHead, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     WorkspaceDisposition,
 };
-use lattice_session::test_helpers::{assistant_msg, user_msg};
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
@@ -84,11 +84,12 @@ fn git_store_reset_moves_branch_pointer() {
     assert_eq!(status_before.commit_count, 3);
 
     // Reset main to the first commit.
-    let reset_result = store
-        .reset(&session_id, &first_oid)
-        .expect("reset");
+    let reset_result = store.reset(&session_id, &first_oid).expect("reset");
     assert_eq!(reset_result.branch, "main");
-    assert_eq!(reset_result.old_commit_id.as_deref(), Some(third_oid.as_str()));
+    assert_eq!(
+        reset_result.old_commit_id.as_deref(),
+        Some(third_oid.as_str())
+    );
     assert_eq!(reset_result.new_commit_id, first_oid);
 
     // 1. The branch ref now points to the first commit.

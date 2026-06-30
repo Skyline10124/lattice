@@ -104,9 +104,9 @@ impl CepErrorCode {
             Self::CapabilityNotGranted
             | Self::ProjectRootViolation
             | Self::AmbientAuthorityDenied => CepErrorFamily::Permission,
-            Self::ExecutionFailed
-            | Self::CommandTimeout
-            | Self::ChildKillFailed => CepErrorFamily::Execution,
+            Self::ExecutionFailed | Self::CommandTimeout | Self::ChildKillFailed => {
+                CepErrorFamily::Execution
+            }
             Self::StaleContext
             | Self::ResourceConflict
             | Self::EnvelopeAlreadyActive

@@ -4,9 +4,11 @@
 //! Branch, checkout, reset, diff, and candidate ref tests for the Git graph store.
 
 use super::*;
-use crate::git_graph::GitSessionGraphStore;
-use crate::graph::{GraphHead, SessionGraphStore, TurnCommitStatus, TurnLifecycleEvidence, WorkspaceDisposition};
 use crate::SessionError;
+use crate::git_graph::GitSessionGraphStore;
+use crate::graph::{
+    GraphHead, SessionGraphStore, TurnCommitStatus, TurnLifecycleEvidence, WorkspaceDisposition,
+};
 
 #[test]
 fn test_branch_create() {
@@ -16,7 +18,9 @@ fn test_branch_create() {
     let ids = setup_session_with_commits(&store, "sess-branch", 1, None);
     let head = ids[0].clone();
 
-    let graph_ref = store.branch("sess-branch", "feature", None).expect("branch");
+    let graph_ref = store
+        .branch("sess-branch", "feature", None)
+        .expect("branch");
     assert_eq!(graph_ref.name, "feature");
     assert_eq!(graph_ref.commit_id, Some(head.clone()));
 
@@ -47,7 +51,9 @@ fn test_branch_duplicate_rejected() {
     setup_git_repo(&dir);
     let store = GitSessionGraphStore::new(&dir);
     setup_session_with_commits(&store, "sess-dup", 1, None);
-    store.branch("sess-dup", "feature", None).expect("branch once");
+    store
+        .branch("sess-dup", "feature", None)
+        .expect("branch once");
 
     let err = store.branch("sess-dup", "feature", None).unwrap_err();
     assert!(matches!(err, SessionError::Conflict(_)));
@@ -59,9 +65,13 @@ fn test_checkout_branch() {
     setup_git_repo(&dir);
     let store = GitSessionGraphStore::new(&dir);
     setup_session_with_commits(&store, "sess-checkout", 1, None);
-    store.branch("sess-checkout", "feature", None).expect("branch");
+    store
+        .branch("sess-checkout", "feature", None)
+        .expect("branch");
 
-    let head = store.checkout("sess-checkout", "feature").expect("checkout");
+    let head = store
+        .checkout("sess-checkout", "feature")
+        .expect("checkout");
     assert!(matches!(head, GraphHead::Branch { name } if name == "feature"));
 
     let status = store.status("sess-checkout").expect("status");
@@ -76,7 +86,9 @@ fn test_checkout_detached() {
     let ids = setup_session_with_commits(&store, "sess-detached", 1, None);
     let oid = ids[0].clone();
 
-    let head = store.checkout("sess-detached", &oid).expect("checkout detached");
+    let head = store
+        .checkout("sess-detached", &oid)
+        .expect("checkout detached");
     assert!(matches!(head, GraphHead::Detached { commit_id } if commit_id == oid));
 }
 
@@ -111,7 +123,9 @@ fn test_reset_detached_conflict() {
     let store = GitSessionGraphStore::new(&dir);
     let ids = setup_session_with_commits(&store, "sess-reset-detached", 1, None);
     let oid = ids[0].clone();
-    store.checkout("sess-reset-detached", &oid).expect("checkout detached");
+    store
+        .checkout("sess-reset-detached", &oid)
+        .expect("checkout detached");
 
     let err = store.reset("sess-reset-detached", &oid).unwrap_err();
     assert!(matches!(err, SessionError::Conflict(_)));
@@ -126,7 +140,9 @@ fn test_diff_linear() {
     let first = ids[0].clone();
     let third = ids[2].clone();
 
-    let diff = store.diff("sess-diff-linear", &first, &third).expect("diff");
+    let diff = store
+        .diff("sess-diff-linear", &first, &third)
+        .expect("diff");
     assert_eq!(diff.from_commit_id, first);
     assert_eq!(diff.to_commit_id, third);
     assert_eq!(diff.only_in_from.len(), 0);
@@ -141,8 +157,12 @@ fn test_diff_merge_base() {
     let ids = setup_session_with_commits(&store, "sess-diff-merge", 2, None);
     let second = ids[1].clone();
 
-    store.branch("sess-diff-merge", "feature", None).expect("branch");
-    store.checkout("sess-diff-merge", "feature").expect("checkout feature");
+    store
+        .branch("sess-diff-merge", "feature", None)
+        .expect("branch");
+    store
+        .checkout("sess-diff-merge", "feature")
+        .expect("checkout feature");
 
     let feature_messages = vec![user_msg("Feature work")];
     let feature_input = commit_input(
@@ -153,7 +173,9 @@ fn test_diff_merge_base() {
     );
     let feature_commit = store.commit_turn(feature_input).expect("commit feature");
 
-    store.checkout("sess-diff-merge", "main").expect("checkout main");
+    store
+        .checkout("sess-diff-merge", "main")
+        .expect("checkout main");
     let main_messages = vec![user_msg("Main work")];
     let main_input = commit_input(
         "sess-diff-merge",
@@ -164,7 +186,11 @@ fn test_diff_merge_base() {
     let main_commit = store.commit_turn(main_input).expect("commit main");
 
     let diff = store
-        .diff("sess-diff-merge", &main_commit.commit_id, &feature_commit.commit_id)
+        .diff(
+            "sess-diff-merge",
+            &main_commit.commit_id,
+            &feature_commit.commit_id,
+        )
         .expect("diff");
     assert!(diff.common_ancestor_id.is_some());
     assert_eq!(diff.only_in_from.len(), 1);
@@ -177,12 +203,16 @@ fn test_diff_no_common_ancestor() {
     setup_git_repo(&dir);
     let store = GitSessionGraphStore::new(&dir);
 
-    store.create_session("sess-a", None, "coder", "main").expect("create a");
+    store
+        .create_session("sess-a", None, "coder", "main")
+        .expect("create a");
     let a_messages = vec![user_msg("A")];
     let a_input = commit_input("sess-a", vec![], a_messages, TurnCommitStatus::Completed);
     let a_commit = store.commit_turn(a_input).expect("commit a");
 
-    store.create_session("sess-b", None, "coder", "main").expect("create b");
+    store
+        .create_session("sess-b", None, "coder", "main")
+        .expect("create b");
     let b_messages = vec![user_msg("B")];
     let b_input = commit_input("sess-b", vec![], b_messages, TurnCommitStatus::Completed);
     let b_commit = store.commit_turn(b_input).expect("commit b");
@@ -200,7 +230,9 @@ fn test_candidate_ref_created() {
     let dir = temp_dir("candidate_ref");
     setup_git_repo(&dir);
     let store = GitSessionGraphStore::new(&dir);
-    store.create_session("sess-cand", None, "coder", "main").expect("create");
+    store
+        .create_session("sess-cand", None, "coder", "main")
+        .expect("create");
 
     let lifecycle = TurnLifecycleEvidence {
         target_project_ref: "refs/heads/main".to_string(),
@@ -212,12 +244,7 @@ fn test_candidate_ref_created() {
         resumes_turn_oid: None,
     };
     let messages = vec![user_msg("Candidate turn")];
-    let mut input = commit_input(
-        "sess-cand",
-        vec![],
-        messages,
-        TurnCommitStatus::Completed,
-    );
+    let mut input = commit_input("sess-cand", vec![], messages, TurnCommitStatus::Completed);
     input.lifecycle = Some(lifecycle);
     input.disposition = WorkspaceDisposition::PendingPromotion;
     let commit = store.commit_turn(input).expect("commit");
@@ -226,14 +253,18 @@ fn test_candidate_ref_created() {
     let git_commit = repo
         .find_commit(git2::Oid::from_str(&commit.commit_id).expect("parse"))
         .expect("find commit");
-    let manifest_bytes = crate::git_graph::helpers::read_tree_blob(&repo, &git_commit, "turn/manifest.json")
-        .expect("read manifest");
+    let manifest_bytes =
+        crate::git_graph::helpers::read_tree_blob(&repo, &git_commit, "turn/manifest.json")
+            .expect("read manifest");
     let manifest: crate::git_graph::helpers::GitSessionManifest =
         serde_json::from_slice(&manifest_bytes).expect("parse manifest");
     let turn_id = manifest.turn_id;
     let cand_ref = format!("refs/lattice/candidates/sess-cand/{turn_id}");
     let reference = repo.find_reference(&cand_ref).expect("find candidate ref");
-    assert_eq!(reference.target().map(|o| o.to_string()), Some(commit.commit_id));
+    assert_eq!(
+        reference.target().map(|o| o.to_string()),
+        Some(commit.commit_id)
+    );
 }
 
 #[test]
@@ -244,8 +275,12 @@ fn test_head_transcript_branched() {
     let ids = setup_session_with_commits(&store, "sess-trans-branch", 2, None);
     let second = ids[1].clone();
 
-    store.branch("sess-trans-branch", "feature", None).expect("branch");
-    store.checkout("sess-trans-branch", "feature").expect("checkout feature");
+    store
+        .branch("sess-trans-branch", "feature", None)
+        .expect("branch");
+    store
+        .checkout("sess-trans-branch", "feature")
+        .expect("checkout feature");
 
     let feature_messages = vec![user_msg("Feature only")];
     let feature_input = commit_input(
@@ -285,8 +320,12 @@ fn test_branch_reset_checkout_diff() {
     let ids = setup_session_with_commits(&store, "sess-combined", 2, None);
     let second = ids[1].clone();
 
-    let _branch_ref = store.branch("sess-combined", "feature", None).expect("branch");
-    store.checkout("sess-combined", "feature").expect("checkout");
+    let _branch_ref = store
+        .branch("sess-combined", "feature", None)
+        .expect("branch");
+    store
+        .checkout("sess-combined", "feature")
+        .expect("checkout");
     let feature_messages = vec![user_msg("Feature")];
     let feature_input = commit_input(
         "sess-combined",
@@ -296,7 +335,9 @@ fn test_branch_reset_checkout_diff() {
     );
     let feature_commit = store.commit_turn(feature_input).expect("commit feature");
 
-    store.checkout("sess-combined", "main").expect("checkout main");
+    store
+        .checkout("sess-combined", "main")
+        .expect("checkout main");
     let diff = store
         .diff("sess-combined", &second, &feature_commit.commit_id)
         .expect("diff");

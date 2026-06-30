@@ -147,24 +147,33 @@ mod cep_native_registry_tests {
             &self,
             _path: &WorkspacePath,
             _content: &[u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-        {
-            Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "ro".into() }) })
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "ro".into(),
+                })
+            })
         }
 
         fn remove_file(
             &self,
             _path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-        {
-            Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "ro".into() }) })
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "ro".into(),
+                })
+            })
         }
 
         fn list_dir(
             &self,
             _path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_,
+            >,
+        > {
             Box::pin(async { Ok(Vec::new()) })
         }
 
@@ -179,15 +188,17 @@ mod cep_native_registry_tests {
         fn find_files(
             &self,
             _request: &FindRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
+        > {
             Box::pin(async { Ok(Vec::new()) })
         }
 
         fn changed_paths(
             &self,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
-        {
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
+        > {
             Box::pin(async { Ok(Vec::new()) })
         }
     }
@@ -259,7 +270,13 @@ mod cep_native_registry_tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: crate::execution_backend::ExecutionRouting { backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend), upper: crate::execution_backend::UpperContext { execution_backend: "null".into(), upper_workspace_id: "null".into() } },
+            execution: crate::execution_backend::ExecutionRouting {
+                backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
+                upper: crate::execution_backend::UpperContext {
+                    execution_backend: "null".into(),
+                    upper_workspace_id: "null".into(),
+                },
+            },
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
 

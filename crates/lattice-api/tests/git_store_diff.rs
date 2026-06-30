@@ -10,11 +10,11 @@
 
 use std::fs;
 
+use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     WorkspaceDisposition,
 };
-use lattice_session::test_helpers::{assistant_msg, user_msg};
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
@@ -65,11 +65,7 @@ fn git_store_diff_reports_unique_commits_per_side() {
 
     // 2. One more commit on main (main-only).
     let main_only = store
-        .commit_turn(turn_input(
-            &session_id,
-            vec![base_oid.clone()],
-            "main-only",
-        ))
+        .commit_turn(turn_input(&session_id, vec![base_oid.clone()], "main-only"))
         .expect("main-only commit");
     let main_only_oid = main_only.commit_id.clone();
 
@@ -92,9 +88,7 @@ fn git_store_diff_reports_unique_commits_per_side() {
     let feature_only_oid = feature_only.commit_id.clone();
 
     // 5. Diff main vs feature.
-    let diff = store
-        .diff(&session_id, "main", "feature")
-        .expect("diff");
+    let diff = store.diff(&session_id, "main", "feature").expect("diff");
 
     // common_ancestor_id is the base commit.
     assert_eq!(
@@ -109,7 +103,10 @@ fn git_store_diff_reports_unique_commits_per_side() {
         1,
         "only_in_from should have exactly 1 commit, got {}: {:?}",
         diff.only_in_from.len(),
-        diff.only_in_from.iter().map(|e| &e.commit_id).collect::<Vec<_>>(),
+        diff.only_in_from
+            .iter()
+            .map(|e| &e.commit_id)
+            .collect::<Vec<_>>(),
     );
     assert_eq!(
         diff.only_in_from[0].commit_id, main_only_oid,
@@ -122,7 +119,10 @@ fn git_store_diff_reports_unique_commits_per_side() {
         1,
         "only_in_to should have exactly 1 commit, got {}: {:?}",
         diff.only_in_to.len(),
-        diff.only_in_to.iter().map(|e| &e.commit_id).collect::<Vec<_>>(),
+        diff.only_in_to
+            .iter()
+            .map(|e| &e.commit_id)
+            .collect::<Vec<_>>(),
     );
     assert_eq!(
         diff.only_in_to[0].commit_id, feature_only_oid,
@@ -131,8 +131,16 @@ fn git_store_diff_reports_unique_commits_per_side() {
 
     // The base commit must not appear on either side (it is the common
     // ancestor and is hidden from both revwalks).
-    let from_ids: Vec<&str> = diff.only_in_from.iter().map(|e| e.commit_id.as_str()).collect();
-    let to_ids: Vec<&str> = diff.only_in_to.iter().map(|e| e.commit_id.as_str()).collect();
+    let from_ids: Vec<&str> = diff
+        .only_in_from
+        .iter()
+        .map(|e| e.commit_id.as_str())
+        .collect();
+    let to_ids: Vec<&str> = diff
+        .only_in_to
+        .iter()
+        .map(|e| e.commit_id.as_str())
+        .collect();
     assert!(
         !from_ids.contains(&base_oid.as_str()),
         "base commit must not appear in only_in_from",
@@ -143,6 +151,12 @@ fn git_store_diff_reports_unique_commits_per_side() {
     );
 
     // from/to commit ids are the resolved OIDs of the requested refs.
-    assert_eq!(diff.from_commit_id, main_only_oid, "from should be main tip OID");
-    assert_eq!(diff.to_commit_id, feature_only_oid, "to should be feature tip OID");
+    assert_eq!(
+        diff.from_commit_id, main_only_oid,
+        "from should be main tip OID"
+    );
+    assert_eq!(
+        diff.to_commit_id, feature_only_oid,
+        "to should be feature tip OID"
+    );
 }

@@ -87,6 +87,118 @@ tests/*), `crates/lattice-profile/` (schema.rs, defaults.rs, lib.rs),
 
 ---
 
+## Codeberg #4 (follow-up): review cleanup — release-gate false-green, dead `brush-parser` dep, raw CEP -32601 regression, `PolicyReasonCode::CommandDenied` — 2026-06-30
+
+Severity: MEDIUM (closes the open review items blocking issue #4; no behavior
+change to retired methods — these are cleanup, regression-proof, and
+dead-code removal).
+
+**Problem:** The 2026-06-30 post-implementation review of issue #4 left three
+P2 items plus one residual dead-code variant open before #4 could be closed:
+
+1. **Release-gate false-green.** `scripts/release-gate-v1.4.sh` still ran the
+   deleted `v1_4_command_artifact_dogfood` lane; Cargo exits 0 when a filter
+   matches zero tests, so the gate falsely reported the dogfood proof as
+   executed.
+2. **Dead `brush-parser` dependency.** `shell_ast.rs` was the only consumer;
+   after its deletion the dependency remained in the workspace and
+   `lancet-authority` manifests, still compiling a retired shell parser and
+   its transitive tree.
+3. **Missing raw CEP `-32601` regression.** Existing tests proved
+   `exec.command_run` is absent from the catalog and that the policy resolver
+   returns `NonDeterminable`, but no test proved the *production* CEP registry
+   rejects a raw `exec.command_run` call with JSON-RPC `Method not found`
+   (-32601) rather than a policy/verify/execution result.
+4. **`PolicyReasonCode::CommandDenied` dead code.** No production policy
+   constructs it; it survived only via exhaustive `match` arms and tests. The
+   review decided to delete it with **no wire-value compatibility** (the goal
+   of #4 is permanent contraction of the CEP command interface; the
+   `"command_denied"` wire value has no legitimate producer).
+
+**Fix:**
+
+- **Release gate (P2-1):** removed the `v1_4_command_artifact_dogfood` lane
+  from `scripts/release-gate-v1.4.sh` (the following `cargo test -p lattice-api`
+  lane already covers all remaining tests); changed
+  `crates/lattice-cli/tests/release_smoke.rs` to assert the gate no longer
+  references the retired lane; updated `docs/LANCET.md` drift notice, catalog
+  table (9→8 methods, removed `exec.command_run` row), effect-contract table,
+  and dogfood description.
+- **`brush-parser` (P2-2):** removed the dependency from workspace `Cargo.toml`
+  and `crates/lancet-authority/Cargo.toml`; `Cargo.lock` updated (dropped
+  `brush-parser` plus its transitive `bon`/`cached`/`insta`/`pest`/`similar`
+  tree — confirmed no other workspace member uses them via
+  `cargo check --workspace --all-targets`).
+- **Raw CEP -32601 regression (P2-3):** added
+  `production_runtime_rejects_retired_exec_command_run_as_method_not_found` in
+  `crates/lancet-api/src/runtime.rs`. It builds a production `LancetRuntime`
+  (all 8 catalog methods enabled, so the call is not filtered before
+  dispatch), sends a raw `exec.command_run` call via `CepClient::call_raw`,
+  and asserts `wire_code() == -32601`, message starts with
+  `Method not found:`, and `Retriability::Permanent`. This exercises the full
+  production path: `LancetRuntime::build` → `LancetServer::spawn` → production
+  registry → transport server loop → `handle_request` → `registry.dispatch`
+  → client.
+- **`PolicyReasonCode::CommandDenied` (P2-4, no compat):** deleted the variant
+  from `lancet-protocol/src/policy.rs`; the variant-count test now asserts 8;
+  the `guard.rs` CEP-error mapping branch now matches only `NetworkDenied`;
+  deleted the `map_command_denied_to_guard_denied` unit test; corrected the
+  stale `CommandDenied` comment in `guard_decide_fuzz.rs` (the
+  `exec.command_run` deny input now exercises `NonDeterminable`, which is
+  already listed). The old `"command_denied"` wire value is no longer
+  deserializable, consistent with the permanent retirement goal.
+- **Doctor hardening:** the LANCET doctor (`lancet-api/src/doctor.rs`) had a
+  hard-coded `expected 9 methods` check, which now failed (catalog is 8). Added
+  `lancet_catalog::CATALOG_LEN` (a `pub const` mirroring the static
+  `[MethodDescriptor; 8]` array bound) and made the doctor read it, so the
+  check cannot drift from the catalog again. Added
+  `catalog_len_matches_runtime_catalog` regression test in
+  `lancet-catalog/src/catalog.rs` to assert `CATALOG_LEN == catalog().len()`.
+- **Docs drift:** updated `docs/ARCHITECTURE.md` (catalog table 9→8, removed
+  `exec.command_run` from the method list, added a note about its retirement
+  and the production-path -32601 regression test), `README.md` (8 methods,
+  retirement note), and `crates/lancet-authority/AGENTS.md` (removed the
+  deleted `src/policy/command.rs` reference; added a do-not-reintroduce note).
+
+**Pre-existing gate blockers fixed in the same pass (out of #4 scope, but
+required to run `scripts/release-gate-v1.4.sh` per the review):**
+
+- `cargo fmt --all --check` had 287 diff lines at commit `691c0b67`; ran
+  `cargo fmt --all` so the gate's step 1 passes (formatting-only changes
+  across many pre-existing files).
+- `crates/lattice-api/tests/upper_routing.rs` `microsandbox_lane` had an
+  unused `use super::*;` (clippy `--all-features` failure); removed it.
+- `crates/lattice-api/tests/promotion_wiring.rs` imported
+  `lattice_workspace::MicrosandboxWorkspace` from the crate root, but the type
+  lives at `lattice_workspace::microsandbox::MicrosandboxWorkspace`
+  (compile failure under `--all-features`); corrected the path.
+- `crates/lancet-catalog/src/catalog.rs`
+  `scaffold_result_schema_includes_status_semantic_stage_and_routed` used the
+  pre-1.0 `schemars` `schema.schema.object` API; migrated to the
+  `serde_json::to_value(schema)` access pattern used by the other schema tests.
+
+**Verification:**
+
+- `cargo test -p lancet-catalog -p lancet-authority -p lancet-native -p lancet-api -p lattice-api -p lattice-profile -p lattice-cli` — pass (all targeted crate suites green, including the new production-path regression and the doctor test now reporting `catalog: 8 methods (expected 8)`).
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — pass.
+- `scripts/release-gate-v1.4.sh` — **PASSED** (all 10 steps: fmt, clippy `--all-features`, LANCET crate tests, lattice-agent, lattice-api dogfood suite, lattice-cli, leaf regressions, boundary check + LOC advisory, doctor, live-canary lane skipped).
+- `rg "CommandDenied|command_denied"` — no matches (variant fully removed).
+- `rg "brush-parser|brush_parser"` — no matches in source or manifests; only historical `FIX.md` mentions remain.
+
+**Changed files:** `scripts/release-gate-v1.4.sh`,
+`crates/lattice-cli/tests/release_smoke.rs`, `docs/LANCET.md`,
+`docs/ARCHITECTURE.md`, `README.md`, `Cargo.toml`,
+`crates/lancet-authority/Cargo.toml`, `Cargo.lock`,
+`crates/lancet-api/src/runtime.rs`, `crates/lancet-api/src/doctor.rs`,
+`crates/lancet-catalog/src/catalog.rs`, `crates/lancet-catalog/src/lib.rs`,
+`crates/lancet-protocol/src/policy.rs`, `crates/lancet-authority/src/guard.rs`,
+`crates/lancet-authority/tests/guard_decide_fuzz.rs`,
+`crates/lancet-authority/AGENTS.md`, `crates/lattice-api/tests/upper_routing.rs`,
+`crates/lattice-api/tests/promotion_wiring.rs`, `FIX.md`, plus
+`cargo fmt --all` formatting-only changes across pre-existing files.
+
+---
+
 ## Codeberg #3 / L-llm-coupling: extract neutral `net-guard` leaf — 2026-06-29
 
 Severity: LOW (`architecture` / `crate-boundary`).

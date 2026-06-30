@@ -14,8 +14,10 @@ boundary-credit validation.
 - `src/policy/mod.rs` ties policy modules and exported config together.
 - `src/policy/default.rs` resolves default policy decisions.
 - `src/policy/capability.rs` checks required capabilities.
-- `src/policy/command.rs`, `network.rs`, `observation.rs`, and `budget.rs`
-  own domain-specific policy decisions.
+- `src/policy/network.rs`, `observation.rs`, and `budget.rs` own
+  domain-specific policy decisions. Command policy was permanently retired with
+  `exec.command_run` (issue #4); do not reintroduce `policy/command.rs` or
+  `shell_ast.rs`.
 - `src/policy/resolved.rs` owns merged/resolved policy state.
 - `src/guard.rs` owns Guard L1 path and scope verdicts.
 - `src/effect/region.rs`, `checker.rs`, and `ledger.rs` own effect regions and
