@@ -2140,6 +2140,7 @@ dependencies = [
  "lancet-dispatch",
  "lancet-native",
  "lancet-protocol",
+ "rusqlite",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",

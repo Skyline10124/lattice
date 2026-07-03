@@ -10,7 +10,7 @@
 //!
 //! ## Update path (`LATTICE_UPDATE_WARN_REPORT=1`)
 //!
-//! Runs each of the 8 CATALOG methods through `CepMode::Warn`, collects
+//! Runs each of the 6 CATALOG methods through `CepMode::Warn`, collects
 //! `effect_warning` from the `CepAuditStore`, and
 //! writes a fresh `docs/lancet-warn-report.md` at the repo root.
 //!
@@ -18,8 +18,7 @@
 //! - **Overreach-capable:** use a custom handler that deliberately sets an
 //!   empty `AuthorizedEffectRegion` and records an out-of-scope effect so
 //!   `effect_warning` appears in the audit metadata.
-//! - **Success-only:** `session.todo_write`, `observe.audit`, `observe.audit_replay` —
-//!   no meaningful effect-region
+//! - **Success-only:** `session.todo_write` — no meaningful effect-region
 //!   warn surface; run via the production registry with valid params only.
 //!
 //! Filter: `cep_warn_harness`
@@ -33,9 +32,6 @@ use lancet_authority::effect::{
     region::AuthorizedEffectRegion,
 };
 use lancet_catalog::method::RequiredCapability;
-use lancet_catalog::methods::audit::{
-    AuditObserve, AuditObserveParams, AuditQueryParams, AuditReplay, AuditReplayParams,
-};
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
@@ -357,35 +353,6 @@ async fn generate_warn_report() -> String {
         .await
         .is_ok();
 
-    // observe.audit query
-    let aq_ok = success_client
-        .call::<AuditObserve>(AuditObserveParams {
-            stream: false,
-            query: AuditQueryParams::default(),
-        })
-        .await
-        .is_ok();
-
-    // observe.audit tail
-    let at_ok = success_client
-        .call::<AuditObserve>(AuditObserveParams {
-            stream: true,
-            query: AuditQueryParams {
-                since_audit_id: Some(0),
-                ..Default::default()
-            },
-        })
-        .await
-        .is_ok();
-
-    // observe.audit_replay — replaying an empty turn returns an empty trace
-    let ar_ok = success_client
-        .call::<AuditReplay>(AuditReplayParams {
-            turn_id: "test-turn".into(),
-        })
-        .await
-        .is_ok();
-
     drop(success_client);
     server_task2.abort();
     // Keep ws_dir alive until after server task
@@ -393,9 +360,6 @@ async fn generate_warn_report() -> String {
 
     let success_results = [
         ("session.todo_write", todo_ok),
-        ("observe.audit query", aq_ok),
-        ("observe.audit tail", at_ok),
-        ("observe.audit_replay", ar_ok),
     ];
 
     // ── Count leaks ──────────────────────────────────────────────────────

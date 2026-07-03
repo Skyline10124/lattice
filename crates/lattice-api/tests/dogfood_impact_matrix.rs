@@ -12,7 +12,7 @@
 //! 1. Execute the representative method via [`CepClient`] typed calls.
 //! 2. Assert the audit row: `impact_kind`, `semantic_stage = "cep_native"`,
 //!    `policy_enforced = true`, redacted metadata (no secret bodies).
-//! 3. Verify that all rows share one `turn_id` before calling `observe.audit_replay`.
+//! 3. Verify that all rows share one `turn_id` before calling operator `replay_audit`.
 //! 4. Assert PROV `activities` order and `wasInformedBy` chain from replay.
 
 use std::future::Future;
@@ -21,14 +21,14 @@ use std::sync::Arc;
 
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
-use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
+use lancet_api::audit_db_path_for_project;
+use lancet_api::{AuditReplayRequest, replay_audit};
 use lancet_catalog::methods::external::{Fetch, FetchParams};
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
     Edit, EditOperation, EditParams, ObserveWorkspace, ObserveWorkspaceParams,
     ObserveWorkspaceResult, ReadFileParams,
 };
-use lancet_native::audit::CepAuditContext;
 use lancet_native::{
     CepAuditStore, CepTransport, DirectoryEntry, ExecutionBackend, ExecutionBackendError,
     ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry, PathFacts, PathIntent,
@@ -38,7 +38,6 @@ use lancet_native::{
 use lancet_protocol::effect_types::ImpactKind;
 
 use tempfile::TempDir;
-use tokio::sync::RwLock;
 
 const FIXED_TURN_ID: &str = "impact-matrix-turn-001";
 const FIXED_SESSION_ID: &str = "impact-matrix-session-001";
@@ -262,7 +261,14 @@ async fn dogfood_impact_matrix_five_production_classes() {
     // Content hash used by mutate.edit; line anchors are computed by LANCET.
     let file_hash = format!("blake3:{}", blake3::hash(seed_content.as_bytes()).to_hex());
 
-    let audit = Arc::new(CepAuditStore::in_memory().expect("audit store"));
+    let state = TempDir::new().expect("xdg state");
+    // SAFETY: test-only env for external audit path resolution.
+    unsafe {
+        std::env::set_var("XDG_STATE_HOME", state.path());
+    }
+    let audit_path = audit_db_path_for_project(&canonical).expect("audit path");
+    std::fs::create_dir_all(audit_path.parent().unwrap()).expect("audit parent");
+    let audit = Arc::new(CepAuditStore::open(&audit_path).expect("audit store"));
 
     // ── Step 1: execute the five impact classes ────────────────────────
 
@@ -434,50 +440,15 @@ async fn dogfood_impact_matrix_five_production_classes() {
         );
     }
 
-    // ── Step 3: observe.audit_replay PROV assertions ───────────────────
+    // ── Step 3: operator replay_audit PROV assertions ───────────────────
 
-    // Build a fresh server on the same audit store with ReadAudit cap for replay.
-    let mut replay_registry = MethodRegistry::new();
-    register_production_method_registry(&mut replay_registry).expect("replay registry");
-
-    let replay_audit_ctx = Arc::new(RwLock::new(CepAuditContext {
-        turn_id: "dog04-replay-turn".into(),
-        session_id: FIXED_SESSION_ID.to_string(),
-        ..Default::default()
-    }));
-
-    let policy_cfg2 = PolicyConfig::defaults_for_project_root(canonical.clone());
-    let hook2 = Arc::new(DefaultPolicyHook::new(policy_cfg2));
-
-    let mut replay_config = ServerRunConfig::in_memory_for_tests();
-    replay_config.audit = Arc::clone(&audit);
-    replay_config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(canonical_str));
-    replay_config.audit_context = replay_audit_ctx;
-    replay_config.policy_hook = hook2.clone();
-    replay_config.default_policy_hook = Some(hook2);
-    replay_config.execution = ExecutionRouting {
-        backend: Arc::new(TestFsBackend::new(canonical_str)),
-        upper: UpperContext {
-            execution_backend: "test-fs".into(),
-            upper_workspace_id: "test-upper".into(),
-        },
-    };
-
-    let (replay_client, replay_server) = CepTransport::pair(16);
-    let replay_task = tokio::spawn(async move {
-        let _ = replay_server.run(replay_registry, replay_config).await;
-    });
-    tokio::task::yield_now().await;
-
-    let replay_result = replay_client
-        .call::<AuditReplay>(AuditReplayParams {
-            turn_id: FIXED_TURN_ID.to_string(),
-        })
-        .await
-        .expect("observe.audit_replay");
-
-    drop(replay_client);
-    replay_task.abort();
+    let replay_result = replay_audit(AuditReplayRequest::new(
+        canonical.as_path(),
+        FIXED_SESSION_ID.to_string(),
+        FIXED_TURN_ID.to_string(),
+    ))
+    .await
+    .expect("replay_audit");
 
     // The trace covers all 5 impact rows.
     let trace = &replay_result.trace;

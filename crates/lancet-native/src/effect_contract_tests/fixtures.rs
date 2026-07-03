@@ -70,21 +70,6 @@ pub(super) fn session_region() -> AuthorizedEffectRegion {
     }
 }
 
-pub(super) fn audit_region() -> AuthorizedEffectRegion {
-    let mut kinds = BTreeSet::new();
-    kinds.insert(ImpactKind::AuditObservation);
-    AuthorizedEffectRegion {
-        kinds,
-        read_paths: Vec::new(),
-        observation_roots: Vec::new(),
-        denied_write_paths: Vec::new(),
-        denied_write_path_prefixes: Vec::new(),
-        hosts: Vec::new(),
-        session_state_allowed: true,
-        command_allowed: false,
-    }
-}
-
 pub(super) fn setup_tempdir_with_files() -> TempDir {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("hello.txt"), "hello\nworld\n").unwrap();

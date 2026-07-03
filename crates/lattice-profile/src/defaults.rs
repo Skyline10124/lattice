@@ -62,8 +62,7 @@ max_delay_ms = 3000
 
 /// Generate a strict v1 `agent.toml` template for a read-only agent.
 ///
-/// Host-only read surfaces: audit query/replay. No command execution, file
-/// modification, or workspace mutation without an explicit `[workspace]` section.
+/// Host-only audit inspection uses `lattice audit`; agent catalog has no audit tools.
 pub fn default_reader_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
     let model = toml_string(model);
@@ -83,7 +82,7 @@ description = "Read-only agent for code understanding and review"
 system = "You are a code reader and reviewer. Read and analyze code carefully. Do not suggest edits or run commands. Explain your reasoning clearly."
 
 [tools]
-enabled = ["observe.audit", "observe.audit_replay"]
+enabled = ["observe.workspace"]
 
 [llm.retry]
 max_retries = 3
@@ -201,8 +200,6 @@ mod tests {
                 | "mutate.batch"
                 | "fetch.web"
                 | "session.todo_write"
-                | "observe.audit"
-                | "observe.audit_replay"
         )
     }
 
@@ -386,7 +383,7 @@ mod tests {
         let toml_str = default_reader_template("r", "sonnet");
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("reader template must parse");
-        let expected = ["observe.audit", "observe.audit_replay"];
+        let expected = ["observe.workspace"];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();
         let mut expected_sorted: Vec<String> = expected.iter().map(|s| s.to_string()).collect();

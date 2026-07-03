@@ -20,7 +20,6 @@ use lancet_authority::{
     BudgetLimits, CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig,
 };
 use lancet_catalog::catalog;
-use lancet_catalog::methods::audit::{AuditObserve, AuditReplay};
 use lancet_catalog::methods::external::Fetch;
 use lancet_catalog::methods::session::TodoWrite;
 use lancet_catalog::methods::workspace::{Batch, Create, Edit, ObserveWorkspace};
@@ -115,8 +114,6 @@ impl CepExecutorAdapter {
             Batch::NAME => self.call_typed::<Batch>(params).await,
             Fetch::NAME => self.call_typed::<Fetch>(params).await,
             TodoWrite::NAME => self.call_typed::<TodoWrite>(params).await,
-            AuditObserve::NAME => self.call_typed::<AuditObserve>(params).await,
-            AuditReplay::NAME => self.call_typed::<AuditReplay>(params).await,
             other => Err(method_not_found(other)),
         }
     }
@@ -594,7 +591,8 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
     let audit = if in_memory_audit {
         AuditBacking::InMemory
     } else {
-        AuditBacking::default_under(project_root)
+        AuditBacking::external_for_project(Path::new(project_root))
+            .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?
     };
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
         project_root: PathBuf::from(project_root),
@@ -882,7 +880,6 @@ mod cep_context_profile_policy {
 #[cfg(test)]
 mod turn_wiring {
     use super::*;
-    use lancet_api::audit_db_path_for_project_in;
     use lancet_audit::{AuditOutcome, CallAuditMetadata};
     use lancet_catalog::methods::session::TodoWrite;
     use lancet_cep::ToolExposure;
@@ -964,10 +961,7 @@ mod turn_wiring {
 
     #[tokio::test]
     async fn external_audit_preserves_lower() {
-        let state = TempDir::new().unwrap();
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", state.path());
-        }
+        let _xdg = crate::ScopedXdgStateHome::new();
         let project = TempDir::new().unwrap();
         init_git_repo(project.path());
         let legacy_dir = project.path().join(".lattice");
@@ -1036,7 +1030,9 @@ mod turn_wiring {
             .await
             .expect("todo write");
 
-        let external_path = audit_db_path_for_project_in(state.path(), project.path()).unwrap();
+        deps.audit.await_pending().await;
+
+        let external_path = lancet_api::audit_db_path_for_project(project.path()).unwrap();
         let external = CepAuditStore::open(&external_path).unwrap();
         assert!(external.row_count().unwrap() >= 2);
 

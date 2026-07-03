@@ -6,12 +6,8 @@
 use std::sync::Arc;
 
 use lancet_api::audit_db_path_for_project_in;
-use lancet_authority::policy::CepTurnContext;
-use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
-use lancet_native::{
-    AuditQueryFilters, CepAuditStore, CepTransport, MethodRegistry, ServerRunConfig,
-    register_production_method_registry,
-};
+use lancet_api::{AuditReplayRequest, replay_audit};
+use lancet_native::{AuditQueryFilters, CepAuditStore};
 use lancet_protocol::effect_types::ImpactKind;
 
 use lattice_agent::LlmClient;
@@ -247,27 +243,14 @@ async fn full_turn_audit_rows_and_replay_fragment() {
         let _ = row;
     }
 
-    let mut registry = MethodRegistry::new();
-    register_production_method_registry(&mut registry).expect("registry");
-    let root = ws.root.to_str().unwrap();
-    let mut config = ServerRunConfig::in_memory_for_tests();
-    config.audit = Arc::new(audit);
-    config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-    {
-        let mut ctx = config.audit_context.write().await;
-        ctx.session_id = result.session_id.clone();
-    }
-
-    let (client, server) = CepTransport::pair(32);
-    let server_task = tokio::spawn(async move {
-        server.run(registry, config).await.unwrap();
-    });
-
     let turn_id = tool_rows[0].turn_id.clone();
-    let replay = client
-        .call::<AuditReplay>(AuditReplayParams { turn_id })
-        .await
-        .expect("observe.audit_replay");
+    let replay = replay_audit(AuditReplayRequest::new(
+        &ws.root,
+        result.session_id.clone(),
+        turn_id,
+    ))
+    .await
+    .expect("operator replay_audit");
 
     assert_eq!(
         replay.trace.fragment.activities.len(),
@@ -283,7 +266,4 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             .any(|a| { !a.method.is_empty() && a.impact_kind != ImpactKind::AuditObservation }),
         "replay fragment must include tool activities"
     );
-
-    drop(client);
-    server_task.abort();
 }

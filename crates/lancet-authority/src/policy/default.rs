@@ -139,10 +139,6 @@ impl WorkspacePolicy {
                 region.kinds.insert(ImpactKind::SessionStateMutation);
                 region.session_state_allowed = true;
             }
-            "observe.audit" | "observe.audit_replay" => {
-                region.kinds.insert(ImpactKind::AuditObservation);
-                region.session_state_allowed = true;
-            }
             _ => {}
         }
         region

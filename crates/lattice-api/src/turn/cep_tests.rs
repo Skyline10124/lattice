@@ -59,6 +59,30 @@ fn assert_cep_payload(err: &ToolExecutionError, expected_code: i32) {
 }
 
 #[tokio::test]
+async fn cep_executor_adapter_retired_audit_methods_return_method_not_found() {
+    let adapter = adapter_over_registry(todo_registry(|params, _ctx| async move {
+        Ok(TodoWriteResult {
+            todos: params.todos,
+        })
+    }))
+    .await;
+
+    for method in ["observe.audit", "observe.audit_replay"] {
+        let err = adapter
+            .execute(&ToolCall {
+                id: "call_audit".to_string(),
+                function: FunctionCall {
+                    name: method.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            })
+            .await
+            .expect_err(method);
+        assert_cep_payload(&err, jsonrpc::METHOD_NOT_FOUND);
+    }
+}
+
+#[tokio::test]
 async fn cep_executor_adapter_parse_error_maps_to_32700() {
     let adapter = adapter_over_registry(todo_registry(|params, _ctx| async move {
         Ok(TodoWriteResult {
@@ -323,7 +347,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use lancet_catalog::methods::audit::AuditReplay;
+    use lancet_catalog::methods::session::TodoWrite;
     use lancet_native::SEMANTIC_STAGE_NATIVE;
     use tempfile::TempDir;
 
@@ -333,7 +357,6 @@ mod cep_native_registry {
         use lattice_agent::testing::FakeStreamingLlmClient;
 
         use crate::turn::test_support::build_test_production_deps;
-        use lancet_catalog::methods::session::TodoWrite;
 
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "native audit").unwrap();
@@ -349,7 +372,7 @@ mod cep_native_registry {
 
         let deps = build_test_production_deps(
             dir.path().to_str().unwrap(),
-            &[TodoWrite::NAME.to_string(), AuditReplay::NAME.to_string()],
+            &[TodoWrite::NAME.to_string()],
             llm,
             true,
             None,
@@ -379,19 +402,18 @@ mod cep_native_registry {
 #[cfg(test)]
 mod attestation_and_dispatch {
     use super::*;
-    use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
+    use crate::turn::cep::build_envelope_turn_deps_for_test;
+    use lancet_api::store_turn_attestation;
+    use lancet_api::{AuditReplayRequest, replay_audit};
     use lancet_catalog::methods::session::TodoWrite;
     use lancet_native::canonicalize_in_toto_statement;
-
     use lattice_agent::LlmClient;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use tempfile::TempDir;
 
-    use crate::turn::cep::build_envelope_turn_deps_for_test;
-    use lancet_api::store_turn_attestation;
-
     #[tokio::test]
     async fn attestation_matches_replay_statement() {
+        let _xdg = crate::ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "attest").unwrap();
         let llm: Arc<dyn LlmClient> = Arc::new(
@@ -404,9 +426,9 @@ mod attestation_and_dispatch {
         );
         let deps = build_envelope_turn_deps_for_test(
             dir.path().to_str().unwrap(),
-            &[TodoWrite::NAME.to_string(), AuditReplay::NAME.to_string()],
+            &[TodoWrite::NAME.to_string()],
             llm,
-            true,
+            false,
             None,
             "sonnet-attest",
             env!("CARGO_PKG_VERSION"),
@@ -437,13 +459,13 @@ mod attestation_and_dispatch {
         let ctx = deps.audit_context.read().await;
         store_turn_attestation(&deps.audit, &ctx, &turn_id).expect("store attestation");
 
-        let replay = deps
-            .cep_client
-            .call::<AuditReplay>(AuditReplayParams {
-                turn_id: turn_id.clone(),
-            })
-            .await
-            .expect("replay");
+        let replay = replay_audit(AuditReplayRequest::new(
+            dir.path(),
+            "sess-1",
+            turn_id.clone(),
+        ))
+        .await
+        .expect("replay");
 
         let stored = deps
             .audit
@@ -462,6 +484,7 @@ mod attestation_and_dispatch {
 
     #[tokio::test]
     async fn replay_without_stored_attestation() {
+        let _xdg = crate::ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "x").unwrap();
         let llm: Arc<dyn LlmClient> = Arc::new(
@@ -474,9 +497,9 @@ mod attestation_and_dispatch {
         );
         let deps = build_envelope_turn_deps_for_test(
             dir.path().to_str().unwrap(),
-            &[TodoWrite::NAME.to_string(), AuditReplay::NAME.to_string()],
+            &[TodoWrite::NAME.to_string()],
             llm,
-            true,
+            false,
             None,
             "sonnet-attest",
             env!("CARGO_PKG_VERSION"),
@@ -509,11 +532,13 @@ mod attestation_and_dispatch {
                 .is_none()
         );
 
-        let replay = deps
-            .cep_client
-            .call::<AuditReplay>(AuditReplayParams { turn_id })
-            .await
-            .expect("replay without stored attestation");
+        let replay = replay_audit(AuditReplayRequest::new(
+            dir.path(),
+            "sess-2",
+            turn_id.clone(),
+        ))
+        .await
+        .expect("replay without stored attestation");
         assert!(replay.statement.is_some());
     }
 }

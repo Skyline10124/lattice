@@ -229,6 +229,7 @@ mod external_audit_tests {
         use lancet_audit::{AuditOutcome, CallAuditMetadata, CepAuditContext, CepAuditStore};
         use lancet_catalog::CepMethod;
         use lancet_catalog::methods::session::TodoWrite;
+        use lancet_catalog::methods::workspace::ObserveWorkspace;
 
         let state = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();
@@ -284,7 +285,7 @@ mod external_audit_tests {
             .start_call(
                 &ctx2,
                 2,
-                "observe.audit",
+                ObserveWorkspace::NAME,
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();

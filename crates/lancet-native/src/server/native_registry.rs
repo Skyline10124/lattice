@@ -4,8 +4,8 @@
 //! CEP/22 native catalog method registration.
 
 use crate::handlers::{
-    register_audit_methods, register_external_methods, register_mutation_methods,
-    register_session_state_methods, register_workspace_observation_methods,
+    register_external_methods, register_mutation_methods, register_session_state_methods,
+    register_workspace_observation_methods,
 };
 use crate::server::registry::MethodRegistry;
 use lancet_protocol::CepError;
@@ -42,8 +42,7 @@ pub fn register_native_mutation(registry: &mut MethodRegistry) -> Result<(), Cep
 
 pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_cep_native_methods(registry)?;
-    register_native_mutation(registry)?;
-    register_audit_methods(registry)
+    register_native_mutation(registry)
 }
 
 #[cfg(test)]

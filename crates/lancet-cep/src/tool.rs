@@ -238,12 +238,13 @@ mod tests {
     fn catalog_exposure_collects_base_authority_from_descriptors() {
         let exposure = ToolExposure::from_catalog_enabled(&[
             "fetch.web".to_string(),
-            "observe.audit_replay".to_string(),
+            "session.todo_write".to_string(),
         ])
         .expect("known tools resolve");
         let authority = exposure.base_authority();
         assert!(authority.fetch_hosts);
-        assert!(authority.read_audit);
+        assert!(authority.session_state);
+        assert!(!authority.read_audit);
     }
 
     #[test]

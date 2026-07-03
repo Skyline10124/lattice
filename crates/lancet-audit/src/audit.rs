@@ -162,7 +162,7 @@ pub struct RejectionRecord {
     pub denial_source: String,
 }
 
-/// Filters for [`CepAuditStore::query_rows`] — mirrors `observe.audit` query mode.
+/// Filters for [`CepAuditStore::query_rows`] (operator audit query/tail/replay).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuditQueryFilters {
     pub session_id: Option<String>,
@@ -485,13 +485,13 @@ impl CepAuditStore {
         })
     }
 
-    /// Filtered read for PROV projection and `observe.audit` query mode (parameterized SQL only).
+    /// Filtered read for PROV projection and operator audit APIs (parameterized SQL only).
     pub fn query_rows(&self, filters: &AuditQueryFilters) -> Result<Vec<AuditRow>, AuditError> {
         let mut sql = String::from(
             "SELECT audit_id, call_id, method, started_at, ended_at, result_or_error, impact_kind,
                     turn_id, session_id, semantic_stage, semantic_status, guard_stage,
                     policy_enforced, metadata_json, model_id, runtime_version
-             FROM cep_audit_entries WHERE 1=1",
+             FROM cep_audit_entries WHERE 1=1 AND ended_at IS NOT NULL AND result_or_error IS NOT NULL",
         );
         let mut bind: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 

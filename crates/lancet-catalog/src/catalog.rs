@@ -4,13 +4,11 @@
 //! Static CEP method catalog for CEP.
 
 use crate::method::MethodDescriptor;
-use crate::methods::{
-    AuditObserve, AuditReplay, Batch, Create, Edit, Fetch, ObserveWorkspace, TodoWrite,
-};
+use crate::methods::{Batch, Create, Edit, Fetch, ObserveWorkspace, TodoWrite};
 use std::sync::LazyLock;
 
 /// Exhaustive CEP method descriptor list in stable registration order.
-pub static CATALOG: LazyLock<[MethodDescriptor; 8]> = LazyLock::new(|| {
+pub static CATALOG: LazyLock<[MethodDescriptor; 6]> = LazyLock::new(|| {
     [
         MethodDescriptor::for_method::<ObserveWorkspace>(),
         MethodDescriptor::for_method::<Create>(),
@@ -18,16 +16,14 @@ pub static CATALOG: LazyLock<[MethodDescriptor; 8]> = LazyLock::new(|| {
         MethodDescriptor::for_method::<Batch>(),
         MethodDescriptor::for_method::<Fetch>(),
         MethodDescriptor::for_method::<TodoWrite>(),
-        MethodDescriptor::for_method::<AuditObserve>(),
-        MethodDescriptor::for_method::<AuditReplay>(),
     ]
 });
 
 /// Compile-time-known length of [`CATALOG`]. Mirrors the array bound in
-/// [`CATALOG`]'s type (`[MethodDescriptor; 8]`); keep these in sync when the
+/// [`CATALOG`]'s type (`[MethodDescriptor; 6]`); keep these in sync when the
 /// root CEP method contract changes. Callers (e.g. the LANCET doctor) read
 /// this instead of hard-coding a method count.
-pub const CATALOG_LEN: usize = 8;
+pub const CATALOG_LEN: usize = 6;
 
 /// Borrow the catalog as a slice.
 pub fn catalog() -> &'static [MethodDescriptor] {
@@ -58,20 +54,16 @@ pub fn scaffold_catalog() -> &'static [MethodDescriptor] {
 mod tests {
     use super::*;
     use crate::method::CepMethod;
-    use crate::methods::{
-        AuditObserve, AuditReplay, Batch, Create, Edit, Fetch, ObserveWorkspace, TodoWrite,
-    };
+    use crate::methods::{Batch, Create, Edit, Fetch, ObserveWorkspace, TodoWrite};
     use lancet_protocol::{ImpactKind, RequiredCapability};
 
-    const EXPECTED_ORDER: [&str; 8] = [
+    const EXPECTED_ORDER: [&str; 6] = [
         "observe.workspace",
         "mutate.create",
         "mutate.edit",
         "mutate.batch",
         "fetch.web",
         "session.todo_write",
-        "observe.audit",
-        "observe.audit_replay",
     ];
 
     #[test]
@@ -142,11 +134,6 @@ mod tests {
                     assert!(descriptor.base_authority.fetch_hosts);
                     assert!(!descriptor.base_authority.read_audit);
                 }
-                "observe.audit" | "observe.audit_replay" => {
-                    assert!(!descriptor.base_authority.session_state);
-                    assert!(!descriptor.base_authority.fetch_hosts);
-                    assert!(descriptor.base_authority.read_audit);
-                }
                 "observe.workspace" | "mutate.create" | "mutate.edit" | "mutate.batch" => {
                     assert_eq!(
                         descriptor.base_authority,
@@ -161,7 +148,7 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 8] = [
+        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 6] = [
             (
                 &catalog[0],
                 ObserveWorkspace::IMPACT,
@@ -172,8 +159,6 @@ mod tests {
             (&catalog[3], Batch::IMPACT, Batch::CAPABILITY),
             (&catalog[4], Fetch::IMPACT, Fetch::CAPABILITY),
             (&catalog[5], TodoWrite::IMPACT, TodoWrite::CAPABILITY),
-            (&catalog[6], AuditObserve::IMPACT, AuditObserve::CAPABILITY),
-            (&catalog[7], AuditReplay::IMPACT, AuditReplay::CAPABILITY),
         ];
 
         for (descriptor, impact, capability) in checks {
@@ -191,8 +176,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_len_is_8() {
-        assert_eq!(catalog().len(), 8);
+    fn catalog_len_is_6() {
+        assert_eq!(catalog().len(), 6);
     }
 
     #[test]
@@ -256,7 +241,7 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 8);
+        assert_eq!(catalog().len(), 6);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
@@ -267,18 +252,29 @@ mod catalog_default_snapshot {
                 "mutate.batch",
                 "fetch.web",
                 "session.todo_write",
-                "observe.audit",
-                "observe.audit_replay",
             ]
         );
         for descriptor in catalog() {
             assert_ne!(descriptor.name, "workspace.inspect");
             assert_ne!(descriptor.name, "workspace.navigate");
+            assert_ne!(descriptor.name, "observe.audit");
+            assert_ne!(descriptor.name, "observe.audit_replay");
+        }
+    }
+
+    /// Regression test for issue #11: audit methods are operator-read only.
+    #[test]
+    fn catalog_excludes_audit_agent_methods() {
+        for name in ["observe.audit", "observe.audit_replay"] {
+            assert!(
+                !catalog().iter().any(|d| d.name == name),
+                "{name} must not appear in the production agent catalog"
+            );
         }
     }
 
     /// Regression test for issue #4: `exec.command_run` is permanently retired
-    /// from the CEP catalog. The catalog must contain exactly 8 methods and
+    /// from the CEP catalog. The catalog must contain exactly 6 methods and
     /// must NOT include `exec.command_run`.
     #[test]
     fn catalog_retires_exec_command_run() {

@@ -46,9 +46,10 @@ mod status;
 
 pub use attestation::store_turn_attestation;
 pub use audit::{
-    AUDIT_TAIL_MAX_BATCHES, AuditQueryOutput, AuditRequest, AuditTailOutput, query_audit,
-    tail_audit,
+    AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput, AuditReplayRequest,
+    AuditRequest, AuditTailOutput, query_audit, replay_audit, tail_audit,
 };
+pub use lancet_catalog::methods::audit::AuditReplayResult;
 pub use config::{
     AuditBacking, ExternalAuditPathError, LancetRuntimeConfig, audit_db_path_for_project,
     audit_db_path_for_project_in, audit_state_root, project_storage_key,

@@ -3,14 +3,12 @@
 
 use super::fixtures::RuntimeEffectScenario;
 
-mod audit;
 mod external;
 mod session;
 mod workspace;
 
 pub(super) type RuntimeEffectFixture = fn() -> Vec<RuntimeEffectScenario>;
 
-pub(super) use audit::{audit_observe_runtime_effects, audit_replay_runtime_effects};
 pub(super) use external::fetch_runtime_effects;
 pub(super) use session::todo_write_runtime_effects;
 pub(super) use workspace::{

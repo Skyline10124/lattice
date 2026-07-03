@@ -42,14 +42,6 @@ fn method_fixtures() -> Vec<MethodFixture> {
             method: "session.todo_write",
             required_capability: RequiredCapability::MutateSessionState,
         },
-        MethodFixture {
-            method: "observe.audit",
-            required_capability: RequiredCapability::ReadAudit,
-        },
-        MethodFixture {
-            method: "observe.audit_replay",
-            required_capability: RequiredCapability::ReadAudit,
-        },
     ]
 }
 

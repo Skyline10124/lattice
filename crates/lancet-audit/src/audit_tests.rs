@@ -4,7 +4,7 @@
 use super::*;
 use lancet_catalog::CepMethod;
 use lancet_catalog::methods::{
-    AuditObserve, Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod,
+    Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -749,7 +749,7 @@ fn query_rows_applies_database_limit_and_excluded_method_prefix() {
     let ctx = test_context();
     for (idx, method) in [
         ObserveWorkspace::NAME,
-        AuditObserve::NAME,
+        "observe.audit",
         Create::NAME,
         Fetch::NAME,
     ]
@@ -788,6 +788,28 @@ fn query_rows_applies_database_limit_and_excluded_method_prefix() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].method, ObserveWorkspace::NAME);
     assert_eq!(rows[1].method, Create::NAME);
+}
+
+#[test]
+fn query_rows_excludes_unfinalized_rows() {
+    let store = CepAuditStore::in_memory().unwrap();
+    let ctx = test_context();
+    let start = store
+        .start_call(
+            &ctx,
+            1,
+            ObserveWorkspace::NAME,
+            &CallAuditMetadata::native_policy_enforced(None),
+        )
+        .unwrap();
+    let _ = start;
+    let rows = store
+        .query_rows(&AuditQueryFilters {
+            session_id: Some(ctx.session_id.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(rows.is_empty());
 }
 
 #[test]

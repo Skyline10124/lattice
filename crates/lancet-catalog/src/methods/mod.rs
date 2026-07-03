@@ -10,7 +10,10 @@ pub mod scaffold;
 pub mod session;
 pub mod workspace;
 
-pub use audit::{AuditObserve, AuditReplay};
+pub use audit::{
+    AuditQueryParams, AuditQueryResult, AuditReplayParams, AuditReplayResult, AuditTailParams,
+    AuditTailResult,
+};
 pub use external::Fetch;
 pub use session::TodoWrite;
 pub use workspace::{
@@ -24,7 +27,6 @@ pub use scaffold::{Inspect, Navigate, ScaffoldStubResult};
 
 mod sealed {
     use super::{
-        audit::{AuditObserve, AuditReplay},
         external::Fetch,
         session::TodoWrite,
         workspace::{Batch, Create, Edit, ObserveWorkspace},
@@ -37,8 +39,6 @@ mod sealed {
     impl Sealed for Batch {}
     impl Sealed for Fetch {}
     impl Sealed for TodoWrite {}
-    impl Sealed for AuditObserve {}
-    impl Sealed for AuditReplay {}
 }
 
 #[cfg(test)]
@@ -55,8 +55,6 @@ mod tests {
             Batch::NAME,
             Fetch::NAME,
             TodoWrite::NAME,
-            AuditObserve::NAME,
-            AuditReplay::NAME,
         ];
         for name in names {
             assert!(name.contains('.'), "expected dotted name: {name}");
@@ -73,8 +71,6 @@ mod tests {
             Batch::NAME,
             Fetch::NAME,
             TodoWrite::NAME,
-            AuditObserve::NAME,
-            AuditReplay::NAME,
         ];
         for name in names {
             assert_ne!(name, "session/create");
