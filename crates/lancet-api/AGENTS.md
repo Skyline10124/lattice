@@ -19,6 +19,7 @@ embedded without pulling in the LATTICE session/agent/profile layers.
   requirements plus runtime policy inputs.
 - `src/config.rs` — `LancetRuntimeConfig` and `AuditBacking`. Policy arrives as
   fully-resolved LANCET-native types; the host translates its own config.
+- `src/audit.rs` — `query_audit`, `tail_audit`, `replay_audit` (direct `CepAuditStore` reads; no CEP methods).
 - `src/attestation.rs` — `store_turn_attestation` (unsigned in-toto from audit rows).
 - `src/error.rs` — `LancetError` (Config / Internal / UnknownTools).
 - `src/lib.rs` — curated re-exports of the types appearing in public signatures.
@@ -38,8 +39,22 @@ embedded without pulling in the LATTICE session/agent/profile layers.
 ## Recent Issues
 
 - FIXED M-24-05: turn/LANCET runtime composition extracted out of `lattice-api`
-  into this crate; the three hand-rolled server-spawn sites (turn runtime, CLI
-  `lancet` smoke, CLI `audit`) now route through `LancetServer`/`LancetRuntime`.
+  into this crate; turn runtime and CLI `lancet` smoke route through
+  `LancetServer`/`LancetRuntime`. CLI `lattice audit` uses `query_audit` /
+  `tail_audit` against the project audit store (no CEP server).
+- FIXED issue #11: `observe.audit` / `observe.audit_replay` removed from the
+  agent catalog; operator reads live in `src/audit.rs` only.
+- DOWNGRADED L-11-01/L-11-02 (ACCEPTED RESIDUAL, neither optimally handled):
+  `tail_audit` yields between batches via `tokio::task::yield_now().await` so
+  drop-cancellation takes effect at batch boundaries, but there is no dedicated
+  `CancellationToken` plumbed from `lattice audit --tail` (worst-case bounded by
+  `AUDIT_TAIL_MAX_BATCHES * AUDIT_TAIL_MAX_ROWS`); the active-turn concurrent-read
+  invariant is covered by a **synthetic-writer** regression test
+  (`operator_audit_reads_concurrent_with_active_writer`), not a live-turn
+  integration test — accepted because the live turn writes through the same
+  `CepAuditStore` API, so the store concurrency boundary is identical. Both
+  contracts are documented in `src/audit.rs`; escalation conditions in root
+  `FINDINGS.md`.
 - FIXED M-24-04: `ToolExposure` and `BaseAuthorityPlan` now live behind the
   `lancet-cep` facade. `MethodDescriptor::base_authority` supplies method-local
   requirements, this crate no longer maps method names directly to base envelope

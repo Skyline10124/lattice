@@ -3,9 +3,11 @@
 > **DRIFT NOTICE — 2026-06-30:** This document was written against the
 > v1.4-alpha boundary and contains several claims that no longer match the
 > production code. Known drift corrected elsewhere in this pass:
-> - The canonical CEP catalog has **8 methods**. `session.envelope` was removed
->   earlier, and `exec.command_run` plus post-mutation verify were permanently
->   retired (commit 691c0b67); the catalog and tests assert both absences.
+> - The canonical **agent** CEP catalog has **6 methods**. `session.envelope`
+>   was removed earlier; `exec.command_run` and post-mutation verify were
+>   permanently retired; `observe.audit` / `observe.audit_replay` were removed
+>   from the agent catalog (issue #11) — audit reads are operator-only via
+>   `lattice audit` / `lancet-api`.
 > - The production execution path is the **MSB/Upper workspace boundary**
 >   (`lattice-workspace`); Direct-mode naming was retired and host-verify was
 >   deleted. Write-scope is enforced as a blacklist, not an allowlist envelope.
@@ -31,7 +33,8 @@ plus base-authority planning. The underlying contract remains split across
 | Component | Description |
 |-----------|-------------|
 | `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
-| `lancet-catalog::CATALOG` | The 8-method canonical CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`, `fetch.web`, `session.todo_write`, `observe.audit`, `observe.audit_replay`. (`session.envelope` was removed earlier; `exec.command_run` and post-mutation verify were permanently retired — the catalog and tests assert both absences.) |
+| `lancet-catalog::CATALOG` | The **6-method** canonical agent CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`, `fetch.web`, `session.todo_write`. (`session.envelope`, `exec.command_run`, post-mutation verify, and agent-visible audit CEP methods were removed — catalog and tests assert their absence.) |
+| `lancet-api::audit` | Operator audit query/tail/replay over the project-keyed audit store (`query_audit`, `tail_audit`, `replay_audit`); not agent CEP methods. |
 | Method params/results | Typed `*Params` / `*Result` structs per catalog method in `lancet-catalog` |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
@@ -43,8 +46,8 @@ Internal implementation is split across `lancet-authority` (default policy, Guar
 **Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
 
 Pre-v1.3.1 method names are removed. They are not accepted by the adapter or
-native registry, and LLM-facing tool definitions are projected only from the 8
-canonical catalog methods. Tool exposure is separate from base authority:
+native registry, and LLM-facing tool definitions are projected only from the 6
+canonical agent catalog methods. Tool exposure is separate from base authority:
 enabled methods filter the model-visible catalog projection, while
 catalog descriptors declare method-local base authority requirements.
 `ToolExposure::base_authority()` aggregates those requirements, and
@@ -65,8 +68,11 @@ The canonical method names are grouped by primary effect class:
 | `mutate.batch` | Workspace mutation batch for create/edit operations. It intentionally has no delete operation. |
 | `fetch.web` | External observation through URL fetch policy. |
 | `session.todo_write` | Session-state mutation for todo state. |
-| `observe.audit` | Audit observation for query/tail mode. |
-| `observe.audit_replay` | Audit observation for turn replay and attestation projection. |
+
+Audit query, tail, and turn replay are **not** catalog methods. Operators use
+`lattice audit` (default: query/tail; `lattice audit replay --turn <id>` for
+turn provenance reconstruction), backed by `lancet-api::{query_audit,
+tail_audit, replay_audit}`; see **Provenance Audit** below.
 
 ### Release gate and self-check
 
@@ -597,7 +603,13 @@ implement or claim:
 
 ### Flat Store, Projected Graph
 
-Audit rows live in SQLite (`cep_audit_entries` under `.lattice/cep_audit.db`). Each CEP call is one append-only row. **PROV-DM** structure (`Activity`, `Entity`, `Agent`, relations) is **not** stored as a graph; it is **projected** at read time into a `ProvGraphFragment` wire type (`observe.audit`, `observe.audit_replay`).
+Audit rows live in SQLite (`cep_audit_entries`). Production persistence uses the
+**external project-keyed path** under the platform state directory
+(`$XDG_STATE_HOME/lattice/projects/<sha256-canonical-root>/cep_audit.db` via
+`lancet_api::audit_db_path_for_project`). Each finalized CEP call is one
+append-only row. **PROV-DM** structure (`Activity`, `Entity`, `Agent`, relations)
+is **not** stored as a graph; it is **projected** at read time into a
+`ProvGraphFragment` wire type (operator `query_audit` / `replay_audit`).
 
 ### Agent Triple
 
@@ -625,7 +637,7 @@ Native handlers also persist compact execution evidence:
   capability, and retry hint. LANCET does not auto-approve
   or prompt interactively in the native handler.
 
-`observe.audit` and `observe.audit_replay` project `cep_policy`,
+Operator audit APIs and `replay_audit` project `cep_policy`,
 `cep_preflight`, `approval_request`, and `effective_boundary` from flat row
 metadata into PROV activity attributes. This keeps audit rows append-only while
 making preflight and approval evidence visible to replay clients.
@@ -643,9 +655,11 @@ primary time-order proxy when wall-clock `started_at` bounds are omitted.
 Optional `started_after` / `started_before` filter on the millis `started_at`
 column.
 
-### Read-only audit methods
+### Operator audit reads
 
-`observe.audit` and `observe.audit_replay` use
-`ImpactKind::AuditObservation` and `Capability::ReadAudit`, granted on the turn
-base envelope (session-scoped). They are excluded from default agent
-enabled-tools; CLI and direct CEP clients opt into them explicitly.
+Audit store reads are **host/operator only**. `lattice audit` calls
+`lancet-api::{query_audit, tail_audit}` against the project-keyed store (no CEP
+server). `replay_audit` rebuilds turn traces and optional in-toto statements from
+stored rows. `CepAuditStore::query_rows` returns only **finalized** rows
+(`ended_at` and `result_or_error` set). Agents do not receive `ReadAudit` or
+audit methods in `[tools].enabled`.

@@ -30,6 +30,8 @@ in-toto attestation construction, and attestation persistence.
 
 - FIXED M-24-05: attestation persistence wiring moved into `lancet-api`;
   `lattice-api` consumes it through the public LANCET runtime surface.
+- FIXED issue #11: agent catalog audit CEP methods removed; operator reads live in
+  `lancet-api::audit` and `lattice audit` (direct store, no CEP server).
 - WATCH: provenance isomorphism tests in `lancet-native` and audit turn tests in
   `lattice-api` are the practical consumers of this crate's contract.
 - WATCH: call stage and impact labels are shared language between native

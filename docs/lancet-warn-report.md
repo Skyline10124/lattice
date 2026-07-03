@@ -1,11 +1,11 @@
 # CEP Warn Mode Coverage Report
 
 > **POINT-IN-TIME REPORT — v1.3.1-alpha baseline.** This report was captured
-> against the v1.3.1-alpha catalog, which included `session.envelope`.
-> `session.envelope` has since been **removed**; the current canonical catalog
-> has **9 methods** (no `session.envelope`). The tables below are preserved as
+> against the v1.3.1-alpha catalog, which included `session.envelope` and
+> agent-visible `observe.audit` / `observe.audit_replay`. Those methods have
+> since been **removed**; the current agent catalog has **6 methods** (no
+> `session.envelope`, no audit CEP methods). The tables below are preserved as
 > the historical v1.3.1-alpha baseline and are **not** a current-state report.
-> Do not treat the `session.envelope` rows as current.
 
 Current v1.3.1-alpha coverage summary.
 

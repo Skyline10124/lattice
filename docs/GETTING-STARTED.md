@@ -223,6 +223,13 @@ file, and line numbers. The LANCET self-check is also useful:
 cargo run -p lattice-cli -- lancet status
 ```
 
+Operator audit reads (not agent CEP tools) use `lattice audit` after at least
+one turn has written the project-keyed audit store:
+
+```bash
+cargo run -p lattice-cli -- audit --session <session_id>
+```
+
 Two additional runtime env vars govern Upper VM resource fallbacks when
 `[workspace].cpus` / `[workspace].memory_mb` are unset
 (`crates/lattice-workspace/src/microsandbox.rs`, `from_env`):

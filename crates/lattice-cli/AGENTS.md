@@ -31,7 +31,10 @@ layers.
 - Keep JSONL output aligned with public `TurnEvent` values from `lattice-api`.
 - Command parsing belongs here; durable runtime semantics belong below the CLI.
 
-## Recent Issues
+- FIXED issue #11: `lattice audit` uses `lancet-api::{query_audit, tail_audit,
+  replay_audit}` only (no CEP server for audit reads). `lattice audit replay
+  --turn <id>` reconstructs turn provenance; `lattice audit` (no subcommand) and
+  `lattice audit query` do row query/tail.
 
 - FIXED L-18-03: turn stream rendering now has a five-minute idle timeout for
   hung providers.

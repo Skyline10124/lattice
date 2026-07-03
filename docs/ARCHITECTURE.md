@@ -229,7 +229,7 @@ All file paths verified by reading the source.
 | `LancetRuntime` | struct | `crates/lancet-api/src/runtime.rs:112` | Fully-composed LANCET runtime: spawns the native CEP server and hands back a `CepClient` + audit + tool definitions. Built via `LancetRuntime::build` from `LancetRuntimeConfig`. |
 | `CepClient` | struct | `crates/lancet-dispatch/src/transport.rs:76` | Typed CEP JSON-RPC client over an in-process transport. Re-exported by `lancet-native` (`src/lib.rs`) and `lancet-api`. |
 | `CepExecutorAdapter` | struct | `crates/lattice-api/src/turn/cep.rs:75` | Maps LLM-shape `ToolCall`s into typed CEP method invocations via `CepClient`; implements `ToolCallExecutor`. Holds catalog/enabled name sets. |
-| `CATALOG` | static | `crates/lancet-catalog/src/catalog.rs:13` | `LazyLock<[MethodDescriptor; 8]>` — the authoritative production method catalog (exactly 8 methods, see below). |
+| `CATALOG` | static | `crates/lancet-catalog/src/catalog.rs:13` | `LazyLock<[MethodDescriptor; 6]>` — the authoritative production agent catalog (exactly 6 methods, see below). |
 | `Workspace` | trait | `crates/lattice-workspace/src/lib.rs:498` | Backend-neutral Upper workspace boundary: `create_upper`, `exec_upper` (typed argv), status, snapshot, template, restore, destroy. |
 | `UpperHandle` | struct | `crates/lattice-workspace/src/lib.rs:238` | Opaque handle to a live Upper (`id` + `backend` only — no host paths, no live SDK objects). |
 | `UpperSpec` | struct | `crates/lattice-workspace/src/lib.rs:206` | Provisioning spec: image/template, baseline OID, host repo path, egress, credentials, resource limits. |
@@ -240,10 +240,10 @@ All file paths verified by reading the source.
 | `run_turn` | fn | `crates/lattice-api/src/turn/execute.rs:132` | `pub async fn run_turn(...) -> Result<RunTurnResult>` — drains `stream_turn` via `RunTurnCollector`. |
 | `RunTurnCollector` | struct | `crates/lattice-api/src/turn/collector.rs:26` | Drains the live `TurnEventStream` into a `RunTurnResult`. |
 
-### CEP catalog — exactly 8 methods
+### CEP catalog — exactly 6 agent-visible methods
 
 The `CATALOG` static declares exactly these methods (verified at
-`crates/lancet-catalog/src/catalog.rs:13-24`):
+`crates/lancet-catalog/src/catalog.rs`):
 
 1. `observe.workspace`
 2. `mutate.create`
@@ -251,8 +251,11 @@ The `CATALOG` static declares exactly these methods (verified at
 4. `mutate.batch`
 5. `fetch.web`
 6. `session.todo_write`
-7. `observe.audit`
-8. `observe.audit_replay`
+
+**Operator audit (not in `CATALOG`):** query, tail, and turn replay read the
+project-keyed CEP audit SQLite store through `lancet-api::{query_audit,
+tail_audit, replay_audit}` (`lattice audit` CLI). Agents cannot invoke audit
+reads as CEP tools.
 
 There is **no** `session.envelope` method. It was removed from the catalog;
 `crates/lattice-api/src/turn/cep.rs:1315-1323` contains a test
@@ -298,7 +301,8 @@ One sentence per crate:
   typed errors, policy hook data, effect types, provenance wire types); no I/O
   and no tokio. The bottom contract.
 - **`lancet-catalog`** — Typed CEP method contracts, params/results,
-  descriptors, and the static production `CATALOG` (8 methods); depends only
+  descriptors, and the static production `CATALOG` (6 agent-visible methods);
+  `methods/audit.rs` holds operator query/replay DTOs only; depends only
   on protocol.
 - **`lancet-dispatch`** — Generic method registry, typed CEP dispatch,
   in-process transport (`CepClient`/`CepTransport`), cancellation, and event

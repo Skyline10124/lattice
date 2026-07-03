@@ -24,6 +24,9 @@ agent loop over `lancet-api`'s CEP runtime.
 - `src/turn/mapping.rs` and `src/turn/types.rs` own public event/result mapping.
 - Integration tests cover CEP round trips, audit provenance, release flows, and
   consistency.
+- `src/test_env.rs` (`#[cfg(test)]` via `lib.rs`) serialises `XDG_STATE_HOME`
+  for audit-path tests; duplicated in `lattice-cli/src/commands/test_env.rs` for
+  CLI audit/status tests (no shared test-support crate yet).
 
 ## Boundaries
 

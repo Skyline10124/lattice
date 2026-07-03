@@ -1154,3 +1154,110 @@ Files: `README.md`, `docs/ARCHITECTURE.md`, `docs/CONFIGURATION.md`,
 `CONTRIBUTING.md`, `AGENTS.md`, `crates/lattice-session/AGENTS.md`,
 `crates/lancet-audit/AGENTS.md`, `crates/lattice-workspace/AGENTS.md`,
 `docs/LANCET.md`, `docs/lancet-warn-report.md`, `FINDINGS.md`, `FIX.md`.
+
+---
+
+## Codeberg #11: retire agent-visible audit CEP methods — 2026-07-03
+
+Severity: MEDIUM (security / agent surface reduction).
+
+**Problem:** `observe.audit` and `observe.audit_replay` were registered in the
+production CEP catalog and executed through the native server, granting agents
+`ReadAudit` capability and a policy-gated path to read the full audit store.
+
+**Fix:**
+
+- Removed `observe.audit` / `observe.audit_replay` from `lancet-catalog::CATALOG`
+  (8→6 agent methods). Kept query/tail/replay DTOs in
+  `lancet-catalog::methods::audit` for operator APIs only.
+- Deleted native audit handlers and registry wiring; no audit methods in
+  `register_production_method_registry`.
+- Implemented `lancet-api::query_audit`, `tail_audit`, `replay_audit` as direct
+  `CepAuditStore` reads (project-keyed path via `audit_db_path_for_project`).
+- `lattice-cli` `audit` command and integration tests call `lancet-api` only
+  (no CEP server for audit reads). Regression tests assert operator
+  `audit.rs` sources do not reference `LancetServer` / `CepClient` and that
+  pre-`model_id` SQLite layouts remain queryable (no versioned migration table;
+  `init_schema` uses `CREATE IF NOT EXISTS` + best-effort `ALTER TABLE`).
+- `CepAuditStore::query_rows` returns only finalized rows (`ended_at` and
+  `result_or_error` present).
+- `lattice-api` CEP adapter returns `METHOD_NOT_FOUND` for retired audit method
+  names; turn provenance tests use `replay_audit`.
+
+**Verification:**
+
+- `cargo test -p lancet-catalog -p lancet-audit -p lancet-api`
+- `cargo test -p lattice-api --test cep_tests`
+- `cargo test -p lattice-cli audit`
+
+**Files:** `crates/lancet-catalog/`, `crates/lancet-native/`, `crates/lancet-api/`,
+`crates/lancet-audit/`, `crates/lattice-api/`, `crates/lattice-cli/`, `FIX.md`,
+`crates/lancet-api/AGENTS.md`, `README.md`, `AGENTS.md`, `docs/ARCHITECTURE.md`,
+`docs/LANCET.md`, `docs/CONFIGURATION.md`, `docs/GETTING-STARTED.md`,
+`docs/v1.3-alpha-walkthrough.md`, `docs/lancet-warn-report.md`, and related
+`AGENTS.md` / design-note cross-references.
+
+---
+
+## Codeberg #11 follow-up: operator replay CLI + audit read-path verification — 2026-07-04
+
+Severity: LOW (operator surface completeness / verification).
+
+**Problem:** The #11 retirement left `replay_audit` as a `lancet-api` library
+API with no operator CLI entry point — documentation promised `replay_audit`
+for provenance reconstruction, but `lattice audit` only exposed query/tail.
+Separately, the audit read-path needed verification across four axes: direct
+store read (no CEP server), finalize-only rows + WAL snapshot, pagination, and
+concurrent-read safety.
+
+**Fix:**
+
+- Added `lattice audit replay --turn <id> [--session <s>] [--json]` subcommand
+  to `lattice-cli::commands::audit`. `AuditCmd` now takes an optional
+  `AuditAction` subcommand (`Query` / `Replay`); `lattice audit` with no
+  subcommand defaults to the existing query/tail path (flatten
+  `AuditQueryArgs`), preserving backward compatibility. `render_replay_output`
+  renders trace/statement/`stored_statement_match`/`source_audit_range_or_hash`
+  in both JSON and human-readable modes.
+- Re-exported `AuditReplayResult` from `lancet-api::lib` (was missing —
+  `replay_audit`'s return type was not nameable by consumers).
+- Added `replay_audit` doc comment documenting the wire-superset contract
+  (`stored_statement_match` / `source_audit_range_or_hash` are on the wire,
+  not just durable metadata as in the retired handler) and the no-self-audit
+  contract (operator read, not agent capability → no `record_durable_metadata`
+  / `record_effect`).
+- Added `audit.rs` module doc documenting the concurrency invariant: SQL
+  finalize-only predicate + WAL statement-level snapshot, covered by
+  `operator_audit_reads_concurrent_with_active_writer` (synthetic writer + 4
+  reader tasks + 1 tail task on multi-thread runtime).
+- Added `tail_audit` doc comment documenting the cancellation contract:
+  `tokio::task::yield_now().await` between batches (drop-cancellation at batch
+  boundaries), bounded by `AUDIT_TAIL_MAX_BATCHES * AUDIT_TAIL_MAX_ROWS`.
+- Rewrote `tail_audit_paginates_large_result_without_cep_server` to seed 1001
+  rows (`AUDIT_TAIL_MAX_ROWS + 1`), exercising real cross-batch pagination
+  (capped → `done=false` → cursor advance → second batch → `done=true`).
+  Asserts `rows.len() == 1001`, `batches == 2`, `done`, `last_audit_id == 1001`,
+  no duplicate `audit_id` across batches.
+- Added `replay_audit_matches_stored_attestation` test: seed rows +
+  `store_turn_attestation` → `replay_audit` asserts
+  `stored_statement_match == Some(true)` (previously uncovered path).
+- Added CLI tests: `audit_replay_reconstructs_turn_trace_for_seeded_db`,
+  `audit_replay_reports_stored_attestation_match`,
+  `audit_replay_errors_for_unknown_turn`,
+  `cli_surface_audit_replay_subcommand`, `cli_surface_audit_query_subcommand`.
+- Recorded L-11-01 (tail yield_now downgrade, no CancellationToken + CLI
+  wiring) and L-11-02 (concurrent-read covered by synthetic writer, no
+  live-turn integration test) as ACCEPTED RESIDUAL in `FINDINGS.md`, with
+  escalation conditions.
+
+**Verification:**
+
+- `cargo test --workspace` (TMPDIR=/tmp) — all green.
+- `cargo test -p lancet-api --lib audit` — 15 passed.
+- `cargo test -p lattice-cli audit` — 13 audit + 3 surface tests passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+
+**Files:** `crates/lancet-api/src/audit.rs`, `crates/lancet-api/src/lib.rs`,
+`crates/lattice-cli/src/commands/audit.rs`, `crates/lattice-cli/src/main.rs`,
+`crates/lancet-api/AGENTS.md`, `crates/lattice-cli/AGENTS.md`, `FINDINGS.md`,
+`FIX.md`, `docs/LANCET.md`.

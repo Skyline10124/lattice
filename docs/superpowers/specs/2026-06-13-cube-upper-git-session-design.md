@@ -277,7 +277,8 @@ Cube operation, the host may invoke a one-shot `lancet-runner` inside Upper.
 The runner exits after the operation and holds no persistent authority or audit
 state.
 
-`observe.audit` and `observe.audit_replay` remain host operations.
+Audit query, tail, and replay are host/operator operations (`lattice audit` /
+`lancet-api` direct store reads), not agent CEP catalog methods.
 
 ### 6.4 Promotion
 

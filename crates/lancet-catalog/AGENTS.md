@@ -18,14 +18,14 @@ handlers and tool projection.
 - `src/methods/workspace.rs` owns observe and mutate workspace contracts.
 - `src/methods/external.rs` owns `fetch.web` contracts.
 - `src/methods/session.rs` owns session state helper contracts.
-- `src/methods/audit.rs` owns audit query/replay contracts.
+- `src/methods/audit.rs` owns operator audit query/tail/replay DTOs (not agent catalog methods).
 - `src/methods/scaffold.rs` is feature-gated inspection scaffolding only.
 
 ## Boundaries
 
 - Depend only on protocol plus serialization/schema support.
 - `CATALOG` is the authoritative production method set.
-- Keep the production catalog aligned with the root 8-method CEP contract.
+- Keep the production catalog aligned with the root **6-method** agent CEP contract.
 - Do not define LLM-facing tool schemas here; `lancet-cep` projects them from
   descriptors and `lancet-native` exposes the native path.
 - Keep method params/results, descriptors, and capabilities in sync.
@@ -39,10 +39,12 @@ handlers and tool projection.
 - FIXED M-24-04: `MethodDescriptor::base_authority` now declares method-local
   base authority requirements consumed by `lancet-cep::ToolExposure`; policy
   inputs such as allowed hosts stay outside catalog.
+- FIXED issue #11: production `CATALOG` is 6 agent methods; audit DTOs in
+  `methods/audit.rs` are operator-only (not registered in `CATALOG`).
 - WATCH: dotted method names stay canonical in CEP catalog; provider-specific
   name encoding belongs in `lattice-llm` wire adapters.
 - WATCH: optional scaffold methods must remain feature-gated and outside the
-  production 8-method catalog.
+  production 6-method agent catalog.
 
 ## Next Actions
 

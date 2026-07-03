@@ -117,7 +117,8 @@ an `extensions` map. The real sub-sections are:
 ### CEP method catalog (tool names)
 
 `[tools].enabled` and `[lancet]` policy operate over the production CEP
-catalog (`lancet-catalog::CATALOG`), which contains exactly **9** methods:
+catalog (`lancet-catalog::CATALOG`), which contains exactly **6**
+agent-visible methods:
 
 | Method | Impact |
 |---|---|
@@ -125,11 +126,12 @@ catalog (`lancet-catalog::CATALOG`), which contains exactly **9** methods:
 | `mutate.create` | `workspace_mutation` |
 | `mutate.edit` | `workspace_mutation` |
 | `mutate.batch` | `workspace_mutation` |
-| `exec.command_run` | `command_execution` |
 | `fetch.web` | `external_observation` |
 | `session.todo_write` | `session_state_mutation` |
-| `observe.audit` | `audit_observation` |
-| `observe.audit_replay` | `audit_observation` |
+
+Audit inspection is **not** a catalog method. Use `lattice audit` (operator CLI)
+against the project-keyed audit store; do not list `observe.audit` or
+`observe.audit_replay` in `[tools].enabled`.
 
 There is no `session.envelope` method. Scaffold methods (`workspace.inspect`,
 `workspace.navigate`) are feature-gated inspection-only and are **not** part of
@@ -380,11 +382,8 @@ enabled = [
     "mutate.create",
     "mutate.edit",
     "mutate.batch",
-    "exec.command_run",
     "fetch.web",
     "session.todo_write",
-    "observe.audit",
-    "observe.audit_replay",
 ]
 
 [llm.retry]

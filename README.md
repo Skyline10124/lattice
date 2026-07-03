@@ -55,10 +55,14 @@ Layer 5:         lattice-tui(-> api + presentation deps)
 ### CEP method catalog
 
 `lancet-catalog::CATALOG` is the authoritative production catalog with exactly
-**8 methods**:
+**6 agent-visible methods**:
 
 `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`,
-`fetch.web`, `session.todo_write`, `observe.audit`, `observe.audit_replay`.
+`fetch.web`, `session.todo_write`.
+
+Audit query, tail, and replay are **operator-only** (`lattice audit` via
+`lancet-api::{query_audit, tail_audit, replay_audit}`); they are not CEP catalog
+methods and cannot be enabled in `[tools].enabled`.
 
 There is no `session.envelope` method (it was removed; the catalog and tests
 assert its absence). There is no `exec.command_run` method — it and
