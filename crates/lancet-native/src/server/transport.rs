@@ -193,7 +193,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         durable_metadata_json.as_deref(),
         &method,
         &observed_capabilities,
-        None,
     );
 
     finalize_audit_for_dispatch(

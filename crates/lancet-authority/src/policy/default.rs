@@ -28,9 +28,8 @@ use lancet_protocol::effect_types::ImpactKind;
 
 /// Config-friendly source class for capability source policy.
 ///
-/// This does not carry runtime envelope ids. A runtime
-/// `CapabilitySource::Both { envelope_id }` satisfies both classes when
-/// checking source policy.
+/// This does not carry runtime envelope ids. A runtime capability source that
+/// satisfies both base and declared classes passes when checking source policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CapabilitySourceClass {
     Base,

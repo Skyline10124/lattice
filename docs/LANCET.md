@@ -605,8 +605,8 @@ Rows carry `session_id`, `turn_id`, and nullable `model_id` / `runtime_version` 
 
 ### Metadata Seeds
 
-Handler and transport layers write compact `metadata_json` keys such as paths,
-`content_hash`, and `envelope_id`. These fields are intentionally summary-only:
+Handler and transport layers write compact `metadata_json` keys such as paths
+and `content_hash`. These fields are intentionally summary-only:
 full request and response bodies are not stored in audit metadata.
 
 Native handlers also persist compact execution evidence:
@@ -615,14 +615,14 @@ Native handlers also persist compact execution evidence:
   capability-match summary, budget/network facts when available, and the
   post-policy authorized region summary.
 - `cep_preflight` records method-local pre-execution facts. Command calls
-  include declared/effective impact, effective effect kinds, envelope id,
+  include declared/effective impact, effective effect kinds,
   RunCommand allowlist evidence, and WritePath region summaries for
   workspace-mutating commands. Mutation calls include target paths, out-of-scope
   paths, expected-hash status, verify configuration, and replan reason when
   known.
 - `approval_request` is emitted only for `PolicyDecision::HumanReview`. It is
   approval-ready evidence for a future outer loop: method, reason, required
-  capability, active envelope id, and retry hint. LANCET does not auto-approve
+  capability, and retry hint. LANCET does not auto-approve
   or prompt interactively in the native handler.
 
 `observe.audit` and `observe.audit_replay` project `cep_policy`,

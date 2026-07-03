@@ -796,7 +796,6 @@ fn merge_finalize_metadata_adds_required_capability() {
         Some(r#"{"observation_source":"workspace"}"#),
         "observe.workspace",
         &[],
-        None,
     )
     .unwrap();
     assert!(merged.contains("required_capability"));
@@ -937,7 +936,7 @@ fn write_legacy_audit_fixture(path: &std::path::Path) {
                 summary: "legacy ok".into(),
             },
             Some("native_handler"),
-            Some(r#"{"envelope_id":"env-legacy"}"#),
+            Some(r#"{"required_capability":"inspect"}"#),
         )
         .unwrap();
     legacy

@@ -107,7 +107,6 @@ mod tests {
                 call_id: "1".into(),
                 method: "observe.workspace".into(),
                 impact_kind: ImpactKind::WorkspaceObservation,
-                envelope_id: None,
                 outcome_summary: None,
             }],
             fragment: fragment.clone(),

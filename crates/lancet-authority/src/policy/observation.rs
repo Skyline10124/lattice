@@ -174,7 +174,6 @@ fn project_root_violation_message(message: String) -> CepError {
         message.clone(),
         CepErrorData::Permission(PermissionErrorData {
             required_capability: "workspace_observation".into(),
-            active_envelope_id: None,
             granted_capabilities: vec![],
         }),
         Retriability::Permanent,

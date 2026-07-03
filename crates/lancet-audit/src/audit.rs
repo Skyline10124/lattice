@@ -173,7 +173,6 @@ pub struct AuditQueryFilters {
     pub verdict: Option<String>,
     pub since_audit_id: Option<i64>,
     pub until_audit_id: Option<i64>,
-    pub envelope_id: Option<String>,
     pub started_after: Option<String>,
     pub started_before: Option<String>,
     /// Filter by `metadata_json.rejection_stage` (no schema migration).
@@ -220,7 +219,6 @@ pub fn merge_finalize_metadata(
     existing: Option<&str>,
     method: &str,
     observed_capabilities: &[RequiredCapability],
-    envelope_id: Option<&str>,
 ) -> Option<String> {
     let mut obj = existing
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -250,12 +248,6 @@ pub fn merge_finalize_metadata(
             "observed_capabilities".into(),
             serde_json::Value::Array(list),
         );
-    }
-
-    if let Some(eid) = envelope_id {
-        obj_map
-            .entry("envelope_id")
-            .or_insert_with(|| serde_json::Value::String(eid.to_string()));
     }
 
     serde_json::to_string(&obj).ok()
@@ -538,10 +530,6 @@ impl CepAuditStore {
         if let Some(capability) = &filters.capability {
             sql.push_str(" AND json_extract(metadata_json, '$.required_capability') = ?");
             bind.push(Box::new(capability.clone()));
-        }
-        if let Some(envelope_id) = &filters.envelope_id {
-            sql.push_str(" AND json_extract(metadata_json, '$.envelope_id') = ?");
-            bind.push(Box::new(envelope_id.clone()));
         }
         if let Some(stage) = filters.rejection_stage {
             sql.push_str(" AND json_extract(metadata_json, '$.rejection_stage') = ?");

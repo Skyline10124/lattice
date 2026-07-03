@@ -595,7 +595,6 @@ pub fn map_decision_to_cep_error(decision: &PolicyDecision, method: &str) -> Res
                     CepErrorCode::CapabilityNotGranted,
                     CepErrorData::Permission(PermissionErrorData {
                         required_capability: method.into(),
-                        active_envelope_id: None,
                         granted_capabilities: vec![],
                     }),
                     Retriability::Permanent,
@@ -604,7 +603,6 @@ pub fn map_decision_to_cep_error(decision: &PolicyDecision, method: &str) -> Res
                     CepErrorCode::CapabilityNotGranted,
                     CepErrorData::Permission(PermissionErrorData {
                         required_capability: method.into(),
-                        active_envelope_id: None,
                         granted_capabilities: vec![],
                     }),
                     Retriability::Permanent,

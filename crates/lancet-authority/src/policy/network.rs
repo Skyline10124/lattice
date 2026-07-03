@@ -83,7 +83,6 @@ fn network_denied(message: impl Into<String>) -> CepError {
         message.clone(),
         CepErrorData::Permission(PermissionErrorData {
             required_capability: "FetchUrl".into(),
-            active_envelope_id: None,
             granted_capabilities: Vec::new(),
         }),
         Retriability::Permanent,

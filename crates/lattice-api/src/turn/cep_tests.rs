@@ -228,7 +228,6 @@ cep_family_test!(
     CepErrorCode::CapabilityNotGranted,
     CepErrorData::Permission(PermissionErrorData {
         required_capability: "read_path".into(),
-        active_envelope_id: None,
         granted_capabilities: vec![],
     }),
     Retriability::Permanent

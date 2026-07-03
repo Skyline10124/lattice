@@ -92,21 +92,21 @@ fn mutation_turn_projection_is_isomorphic() {
         &ctx,
         1,
         "session.envelope",
-        r#"{"required_capability":"mutate_session_state","envelope_id":"env-1"}"#,
+        r#"{"required_capability":"mutate_session_state"}"#,
     );
     store_row(
         &audit,
         &ctx,
         2,
         Create::NAME,
-        r#"{"required_capability":"write_path","envelope_id":"env-1","bytes_written":12}"#,
+        r#"{"required_capability":"write_path","bytes_written":12}"#,
     );
     store_row(
         &audit,
         &ctx,
         3,
         Edit::NAME,
-        r#"{"required_capability":"write_path","envelope_id":"env-1","changed_files":["src/a.rs"]}"#,
+        r#"{"required_capability":"write_path","changed_files":["src/a.rs"]}"#,
     );
     let rows = audit
         .query_rows(&lancet_native::AuditQueryFilters {
@@ -134,7 +134,7 @@ fn mixed_turn_projection_is_isomorphic() {
         &ctx,
         2,
         Edit::NAME,
-        r#"{"required_capability":"write_path","envelope_id":"env-m","changed_files":["b.txt"]}"#,
+        r#"{"required_capability":"write_path","changed_files":["b.txt"]}"#,
     );
     let rows = audit
         .query_rows(&lancet_native::AuditQueryFilters {

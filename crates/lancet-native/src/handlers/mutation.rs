@@ -90,7 +90,6 @@ async fn handle_create_as(
     let written_hash = content_hash(params.content.as_bytes());
     ctx.record_durable_metadata(json!({
         "method": method,
-        "envelope_id": null,
         "bytes_written": create.bytes_written,
         "content_hash": written_hash,
         "created_dirs": create.created_dirs.clone(),
@@ -131,7 +130,6 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
 
     ctx.record_durable_metadata(json!({
         "method": Edit::NAME,
-        "envelope_id": null,
         "compiled_patch_backend": "hashline_patch",
         "changed_files": result.changed_files.clone(),
         "backend_invoked": true,
@@ -228,7 +226,6 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
 
     ctx.record_durable_metadata(json!({
         "method": Batch::NAME,
-        "envelope_id": null,
         "compiled_patch_backend": "hashline_patch",
         "created_files": created_files.clone(),
         "edited_files": edited_files.clone(),

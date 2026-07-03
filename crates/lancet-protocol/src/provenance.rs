@@ -78,7 +78,7 @@ pub struct ProvWasInformedBy {
     pub informing_activity_id: String,
 }
 
-/// Projected PROV graph fragment returned by `observe.audit` / embedded in replay.
+/// Projected PROV graph fragment returned by operator audit query / embedded in replay.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProvGraphFragment {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,8 +139,6 @@ pub struct TurnCallSummary {
     pub call_id: String,
     pub method: String,
     pub impact_kind: ImpactKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub envelope_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome_summary: Option<String>,
 }

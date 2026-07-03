@@ -155,7 +155,6 @@ pub struct ValidationErrorData {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PermissionErrorData {
     pub required_capability: String,
-    pub active_envelope_id: Option<String>,
     pub granted_capabilities: Vec<String>,
 }
 
@@ -390,7 +389,6 @@ mod tests {
                 CepErrorCode::CapabilityNotGranted,
                 CepErrorData::Permission(PermissionErrorData {
                     required_capability: "write_path".into(),
-                    active_envelope_id: None,
                     granted_capabilities: vec![],
                 }),
             ),

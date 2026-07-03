@@ -258,7 +258,7 @@ mod external_audit_tests {
                     summary: "legacy ok".into(),
                 },
                 None,
-                Some(r#"{"envelope_id":"env-1"}"#),
+                Some(r#"{"required_capability":"mutate_session_state"}"#),
             )
             .unwrap();
         let (legacy_size_before, legacy_mtime_before) = legacy_audit_snapshot(&legacy_path);

@@ -66,21 +66,13 @@ pub fn project_turn_trace(turn_id: &str, rows: &[AuditRow]) -> TurnExecutionTrac
 
     let calls: Vec<TurnCallSummary> = rows
         .iter()
-        .map(|row| {
-            let envelope_id = parse_metadata(row).and_then(|m| {
-                m.get("envelope_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            });
-            TurnCallSummary {
+        .map(|row| TurnCallSummary {
                 audit_id: row.audit_id,
                 call_id: row.call_id.to_string(),
                 method: row.method.clone(),
                 impact_kind: parse_impact_kind(&row.impact_kind),
-                envelope_id,
                 outcome_summary: row.result_or_error.clone(),
-            }
-        })
+            })
         .collect();
 
     let fragment = project_rows(rows);
@@ -184,14 +176,6 @@ fn project_entities_from_metadata(
                 entity_id,
             });
         }
-    }
-
-    if let Some(hash) = meta.get("envelope_hash").and_then(|v| v.as_str()) {
-        let entity_id = push_entity(fragment, "envelope", hash);
-        fragment.used.push(ProvUsed {
-            activity_id: activity_id.clone(),
-            entity_id: entity_id.clone(),
-        });
     }
 
     if let Some(url) = meta.get("request_url").and_then(|v| v.as_str()) {

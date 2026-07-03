@@ -27,8 +27,6 @@ pub struct AuditQueryParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until_audit_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub envelope_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     /// Override session scope for tests; production handlers default from turn context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
