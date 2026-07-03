@@ -2320,6 +2320,7 @@ dependencies = [
  "lattice-session",
  "lattice-tui",
  "lattice-workspace",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",

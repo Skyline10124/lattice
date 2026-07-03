@@ -34,6 +34,7 @@ lattice-workspace = { workspace = true, features = ["test-utils"] }
 lancet-catalog = { workspace = true }
 lancet-native = { workspace = true }
 async-trait = { workspace = true }
+rusqlite = { workspace = true }
 tempfile = { workspace = true }
 
 [features]

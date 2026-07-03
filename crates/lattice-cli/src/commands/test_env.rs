@@ -3,6 +3,11 @@
 
 //! Shared test helpers for environment variable isolation.
 //!
+//! **Mirror of `lattice-api::test_env`:** `ScopedXdgStateHome` is duplicated in
+//! `crates/lattice-api/src/test_env.rs` for integration tests there; this module
+//! is the CLI-local copy (`audit` / `lancet` command tests). Not exported across
+//! crates.
+//!
 //! Only compiled in test mode. Provides a serialised `with_env_var`
 //! that saves and restores the environment, so tests that manipulate
 //! env vars can run concurrently without clobbering each other.

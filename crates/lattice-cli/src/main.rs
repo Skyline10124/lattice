@@ -54,7 +54,7 @@ enum Commands {
     /// Run diagnostics.
     Doctor,
     /// Inspect CEP audit / provenance records.
-    Audit(audit::AuditCmd),
+    Audit(Box<audit::AuditCmd>),
     /// LANCET inspection and self-check subcommands.
     Lancet {
         #[command(subcommand)]
@@ -112,7 +112,7 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
             doctor::run(cli.json)?;
         }
         Some(Commands::Audit(cmd)) => {
-            audit::run(cmd, cli.json)?;
+            audit::run(*cmd, cli.json)?;
         }
         Some(Commands::Lancet { action }) => {
             lancet_cmd::run(action, cli.json)?;
@@ -325,6 +325,36 @@ mod tests {
     fn cli_surface_audit_unchanged() {
         let cli = Cli::try_parse_from(["lattice", "audit"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Audit(_))));
+    }
+
+    #[test]
+    fn cli_surface_audit_replay_subcommand() {
+        let cli = Cli::try_parse_from(["lattice", "audit", "replay", "--turn", "turn-1"]).unwrap();
+        match cli.command {
+            Some(Commands::Audit(audit_cmd)) => match audit_cmd.action {
+                Some(super::audit::AuditAction::Replay(args)) => {
+                    assert_eq!(args.turn, "turn-1");
+                    assert!(args.session.is_none());
+                }
+                _ => panic!("expected Replay action"),
+            },
+            _ => panic!("expected Audit command"),
+        }
+    }
+
+    #[test]
+    fn cli_surface_audit_query_subcommand() {
+        let cli =
+            Cli::try_parse_from(["lattice", "audit", "query", "--session", "s1"]).unwrap();
+        match cli.command {
+            Some(Commands::Audit(audit_cmd)) => match audit_cmd.action {
+                Some(super::audit::AuditAction::Query(args)) => {
+                    assert_eq!(args.session.as_deref(), Some("s1"));
+                }
+                _ => panic!("expected Query action"),
+            },
+            _ => panic!("expected Audit command"),
+        }
     }
 
     #[test]
