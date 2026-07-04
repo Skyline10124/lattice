@@ -325,9 +325,7 @@ async fn generate_warn_report() -> String {
     // Keep ws_dir alive until after server task
     drop(ws_dir);
 
-    let success_results = [
-        ("session.todo_write", todo_ok),
-    ];
+    let success_results = [("session.todo_write", todo_ok)];
 
     // ── Count leaks ──────────────────────────────────────────────────────
     let leak_count = overreach_results.iter().filter(|r| !r.leaked).count();

@@ -201,10 +201,7 @@ fn render_tail_output(output: &lancet_api::AuditTailOutput, json: bool) -> Resul
     Ok(())
 }
 
-fn render_replay_output(
-    replay: &lancet_api::AuditReplayResult,
-    json: bool,
-) -> Result<()> {
+fn render_replay_output(replay: &lancet_api::AuditReplayResult, json: bool) -> Result<()> {
     if json {
         println!(
             "{}",
@@ -377,8 +374,7 @@ mod tests {
     fn audit_query_errors_when_store_missing() {
         let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
-        let err = run_at(dir.path(), query_cmd("missing", true), false)
-            .expect_err("missing store");
+        let err = run_at(dir.path(), query_cmd("missing", true), false).expect_err("missing store");
         assert!(err.to_string().contains("audit database not found"));
     }
 
@@ -387,8 +383,7 @@ mod tests {
         let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_audit_db(dir.path(), "sess-seeded");
-        run_at(dir.path(), query_cmd("other-session", true), false)
-            .expect("empty query ok");
+        run_at(dir.path(), query_cmd("other-session", true), false).expect("empty query ok");
     }
 
     #[tokio::test]
@@ -449,8 +444,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let session = "sess-cli-replay-empty";
         seed_audit_db(dir.path(), session);
-        let err = run_at(dir.path(), replay_cmd(session, "turn-nonexistent", true), false)
-            .expect_err("unknown turn should error");
+        let err = run_at(
+            dir.path(),
+            replay_cmd(session, "turn-nonexistent", true),
+            false,
+        )
+        .expect_err("unknown turn should error");
         assert!(err.to_string().contains("no audit rows for turn_id"));
     }
 

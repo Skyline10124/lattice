@@ -44,9 +44,7 @@ use lancet_audit::{
     impact_kind_from_label, impact_kind_label, project_rows, project_turn_trace,
     source_audit_range_hash,
 };
-use lancet_catalog::methods::audit::{
-    AuditQueryParams, AuditReplayResult, AuditTailResult,
-};
+use lancet_catalog::methods::audit::{AuditQueryParams, AuditReplayResult, AuditTailResult};
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::provenance::{InTotoStatement, ProvGraphFragment};
 use serde_json::{Value, json};
@@ -115,7 +113,11 @@ pub struct AuditReplayRequest {
 }
 
 impl AuditReplayRequest {
-    pub fn new(project_root: impl Into<PathBuf>, session_id: impl Into<String>, turn_id: impl Into<String>) -> Self {
+    pub fn new(
+        project_root: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+    ) -> Self {
         Self {
             project_root: project_root.into(),
             session_id: session_id.into(),
@@ -225,10 +227,7 @@ pub async fn tail_audit(request: AuditRequest) -> LancetResult<AuditTailOutput> 
         }
 
         tail_result = AuditTailResult {
-            last_audit_id: emit_rows
-                .last()
-                .map(|r| r.audit_id)
-                .unwrap_or(since),
+            last_audit_id: emit_rows.last().map(|r| r.audit_id).unwrap_or(since),
             done: !capped,
         };
 
@@ -292,13 +291,11 @@ pub async fn replay_audit(request: AuditReplayRequest) -> LancetResult<AuditRepl
         .to_string();
 
     let trace = project_turn_trace(&request.turn_id, &rows);
-    let statement = Some(build_in_toto_statement(
-        &request.turn_id,
-        &rows,
-        &runtime,
-    ));
+    let statement = Some(build_in_toto_statement(&request.turn_id, &rows, &runtime));
     let stored_statement_match = match store.attestation_for_turn(&request.turn_id) {
-        Ok(Some(record)) => stored_statement_matches_derived(&record.statement_json, statement.as_ref()),
+        Ok(Some(record)) => {
+            stored_statement_matches_derived(&record.statement_json, statement.as_ref())
+        }
         _ => None,
     };
     let range_hash = source_audit_range_hash(&rows);
@@ -324,7 +321,10 @@ async fn open_project_audit_store(project_root: &Path) -> LancetResult<CepAuditS
         .map_err(|err| LancetError::Internal(format!("open audit store: {err}")))
 }
 
-fn audit_query_filters_from_params(params: &AuditQueryParams, session_id: &str) -> AuditQueryFilters {
+fn audit_query_filters_from_params(
+    params: &AuditQueryParams,
+    session_id: &str,
+) -> AuditQueryFilters {
     AuditQueryFilters {
         session_id: Some(session_id.to_string()),
         turn_id: params.turn_id.clone(),
@@ -373,11 +373,11 @@ fn parse_impact_kind(label: Option<&str>) -> LancetResult<Option<ImpactKind>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::audit_db_path_for_project_in;
     use crate::store_turn_attestation;
     use lancet_audit::{CallAuditMetadata, CepAuditContext};
     use lancet_catalog::CepMethod;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
-    use crate::config::audit_db_path_for_project_in;
     use rusqlite::Connection;
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -469,7 +469,12 @@ mod tests {
         // single-batch return.
         let iso = IsolatedProjectAudit::setup();
         let session = "sess-direct-tail";
-        seed_audit_db(iso.state_path(), iso.project_path(), session, AUDIT_TAIL_MAX_ROWS + 1);
+        seed_audit_db(
+            iso.state_path(),
+            iso.project_path(),
+            session,
+            AUDIT_TAIL_MAX_ROWS + 1,
+        );
         let mut request = AuditRequest::new(iso.project_path());
         request.session_id = session.to_string();
         request.since_audit_id = Some(0);
@@ -624,8 +629,8 @@ mod tests {
     /// Concurrent operator reads while another task writes the same audit DB (WAL + finalized predicate).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn operator_audit_reads_concurrent_with_active_writer() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
         let iso = IsolatedProjectAudit::setup();
@@ -888,7 +893,9 @@ mod tests {
 
         let mut request = AuditRequest::new(iso.project_path());
         request.session_id = "sess-legacy-no-att".to_string();
-        let output = query_audit(request).await.expect("query legacy db without attestation");
+        let output = query_audit(request)
+            .await
+            .expect("query legacy db without attestation");
         assert_eq!(output.row_count, 1);
         assert_eq!(output.fragment.activities.len(), 1);
 

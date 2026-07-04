@@ -49,13 +49,13 @@ pub use audit::{
     AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput, AuditReplayRequest,
     AuditRequest, AuditTailOutput, query_audit, replay_audit, tail_audit,
 };
-pub use lancet_catalog::methods::audit::AuditReplayResult;
 pub use config::{
     AuditBacking, ExternalAuditPathError, LancetRuntimeConfig, audit_db_path_for_project,
     audit_db_path_for_project_in, audit_state_root, project_storage_key,
 };
 pub use doctor::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 pub use error::{LancetError, LancetResult};
+pub use lancet_catalog::methods::audit::AuditReplayResult;
 pub use runtime::{
     DEFAULT_CHANNEL_CAPACITY, LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle,
 };

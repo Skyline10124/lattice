@@ -344,8 +344,7 @@ mod tests {
 
     #[test]
     fn cli_surface_audit_query_subcommand() {
-        let cli =
-            Cli::try_parse_from(["lattice", "audit", "query", "--session", "s1"]).unwrap();
+        let cli = Cli::try_parse_from(["lattice", "audit", "query", "--session", "s1"]).unwrap();
         match cli.command {
             Some(Commands::Audit(audit_cmd)) => match audit_cmd.action {
                 Some(super::audit::AuditAction::Query(args)) => {

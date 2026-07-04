@@ -67,12 +67,12 @@ pub fn project_turn_trace(turn_id: &str, rows: &[AuditRow]) -> TurnExecutionTrac
     let calls: Vec<TurnCallSummary> = rows
         .iter()
         .map(|row| TurnCallSummary {
-                audit_id: row.audit_id,
-                call_id: row.call_id.to_string(),
-                method: row.method.clone(),
-                impact_kind: parse_impact_kind(&row.impact_kind),
-                outcome_summary: row.result_or_error.clone(),
-            })
+            audit_id: row.audit_id,
+            call_id: row.call_id.to_string(),
+            method: row.method.clone(),
+            impact_kind: parse_impact_kind(&row.impact_kind),
+            outcome_summary: row.result_or_error.clone(),
+        })
         .collect();
 
     let fragment = project_rows(rows);

@@ -3,9 +3,7 @@
 
 use super::*;
 use lancet_catalog::CepMethod;
-use lancet_catalog::methods::{
-    Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod,
-};
+use lancet_catalog::methods::{Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod};
 use serde_json::json;
 use std::path::PathBuf;
 
