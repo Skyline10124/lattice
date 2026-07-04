@@ -114,7 +114,7 @@ model = {model}
 description = "Editing agent for refactoring and fixing code"
 
 [prompt]
-system = "You are a code editor. Read, edit, and refactor code within the project. Use observe, create, edit, and batch tools for changes. Be precise and explain your edits."
+system = "You are a code editor. Read, edit, and refactor code within the project. Use observe, create, and edit tools for changes. Be precise and explain your edits."
 
 [tools]
 enabled = ["session.todo_write"]
@@ -197,7 +197,6 @@ mod tests {
             "observe.workspace"
                 | "mutate.create"
                 | "mutate.edit"
-                | "mutate.batch"
                 | "fetch.web"
                 | "session.todo_write"
         )

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::runtime_fixtures::{
-    RuntimeEffectFixture, batch_runtime_effects, create_runtime_effects, edit_runtime_effects,
+    RuntimeEffectFixture, create_runtime_effects, edit_runtime_effects,
     fetch_runtime_effects, observe_workspace_runtime_effects, todo_write_runtime_effects,
 };
 use lancet_authority::effect::ledger::EffectSource;
@@ -20,7 +20,6 @@ fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
     );
     fixtures.insert(Create::NAME, create_runtime_effects as RuntimeEffectFixture);
     fixtures.insert(Edit::NAME, edit_runtime_effects as RuntimeEffectFixture);
-    fixtures.insert(Batch::NAME, batch_runtime_effects as RuntimeEffectFixture);
     fixtures.insert(Fetch::NAME, fetch_runtime_effects as RuntimeEffectFixture);
     fixtures.insert(
         TodoWrite::NAME,

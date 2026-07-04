@@ -22,7 +22,7 @@ use lancet_authority::{
 use lancet_catalog::catalog;
 use lancet_catalog::methods::external::Fetch;
 use lancet_catalog::methods::session::TodoWrite;
-use lancet_catalog::methods::workspace::{Batch, Create, Edit, ObserveWorkspace};
+use lancet_catalog::methods::workspace::{Create, Edit, ObserveWorkspace};
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
     CepAuditContext, CepAuditStore, CepClient, ExecutionRouting, impact_kind_for_method,
@@ -111,7 +111,6 @@ impl CepExecutorAdapter {
             ObserveWorkspace::NAME => self.call_typed::<ObserveWorkspace>(params).await,
             Create::NAME => self.call_typed::<Create>(params).await,
             Edit::NAME => self.call_typed::<Edit>(params).await,
-            Batch::NAME => self.call_typed::<Batch>(params).await,
             Fetch::NAME => self.call_typed::<Fetch>(params).await,
             TodoWrite::NAME => self.call_typed::<TodoWrite>(params).await,
             other => Err(method_not_found(other)),

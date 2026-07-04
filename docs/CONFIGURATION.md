@@ -117,7 +117,7 @@ an `extensions` map. The real sub-sections are:
 ### CEP method catalog (tool names)
 
 `[tools].enabled` and `[lancet]` policy operate over the production CEP
-catalog (`lancet-catalog::CATALOG`), which contains exactly **6**
+catalog (`lancet-catalog::CATALOG`), which contains exactly **5**
 agent-visible methods:
 
 | Method | Impact |
@@ -125,7 +125,6 @@ agent-visible methods:
 | `observe.workspace` | `workspace_observation` |
 | `mutate.create` | `workspace_mutation` |
 | `mutate.edit` | `workspace_mutation` |
-| `mutate.batch` | `workspace_mutation` |
 | `fetch.web` | `external_observation` |
 | `session.todo_write` | `session_state_mutation` |
 
@@ -381,7 +380,6 @@ enabled = [
     "observe.workspace",
     "mutate.create",
     "mutate.edit",
-    "mutate.batch",
     "fetch.web",
     "session.todo_write",
 ]

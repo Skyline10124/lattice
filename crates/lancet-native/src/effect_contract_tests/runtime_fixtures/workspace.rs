@@ -5,8 +5,8 @@ use super::super::fixtures::*;
 use super::super::support::build_test_context;
 use lancet_authority::NetworkPolicyConfig;
 use lancet_catalog::methods::workspace::{
-    BatchOperation, BatchParams, CreateParams, EditOperation, EditParams, FindFilesParams,
-    GrepParams, ListDirectoryParams, ObserveWorkspaceParams, ReadFileParams,
+    CreateParams, EditOperation, EditParams, FindFilesParams, GrepParams, ListDirectoryParams,
+    ObserveWorkspaceParams, ReadFileParams,
 };
 use lancet_catalog::methods::*;
 
@@ -182,50 +182,6 @@ pub(in crate::effect_contract_tests) fn edit_runtime_effects() -> Vec<RuntimeEff
                     new: "edited".into(),
                     occurrence: None,
                 }],
-            },
-            ctx,
-            mutation_region(&root),
-        ),
-    ));
-
-    scenarios
-}
-
-pub(in crate::effect_contract_tests) fn batch_runtime_effects() -> Vec<RuntimeEffectScenario> {
-    let dir = setup_tempdir_with_files();
-    let root = std::fs::canonicalize(dir.path())
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    let mut scenarios = Vec::new();
-
-    let before = "some data content\n";
-    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-    declare_active_envelope(&ctx, &root);
-    scenarios.push(scenario(
-        "happy_batch_create_and_edit",
-        dispatch_success_effects::<Batch>(
-            BatchParams {
-                operations: vec![
-                    BatchOperation::EditFile {
-                        path: "data.txt".into(),
-                        expected_hash: format!(
-                            "blake3:{}",
-                            blake3::hash(before.as_bytes()).to_hex()
-                        ),
-                        edits: vec![EditOperation::ReplaceText {
-                            old: "some data content".into(),
-                            new: "edited".into(),
-                            occurrence: None,
-                        }],
-                    },
-                    BatchOperation::CreateFile {
-                        path: "created.txt".into(),
-                        content: "created\n".into(),
-                        create_parents: false,
-                    },
-                ],
             },
             ctx,
             mutation_region(&root),

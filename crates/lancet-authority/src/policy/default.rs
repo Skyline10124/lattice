@@ -127,7 +127,7 @@ impl WorkspacePolicy {
                 region.kinds.insert(ImpactKind::ExternalObservation);
                 region.hosts = policy.network.allowed_hosts.clone();
             }
-            "mutate.create" | "mutate.edit" | "mutate.batch" => {
+            "mutate.create" | "mutate.edit" => {
                 region.kinds.insert(ImpactKind::WorkspaceMutation);
                 apply_denied_write_patterns(
                     &mut region,
@@ -649,9 +649,7 @@ impl DefaultPolicyHook {
     ) -> RichPolicyOutcome {
         let budget = &resolved.budget_snapshot;
         let mut resolved_paths = Vec::new();
-        if !resolved.invocation_facts.all_patch_targets.is_empty() {
-            resolved_paths.extend(resolved.invocation_facts.all_patch_targets.iter().cloned());
-        } else if let Some(target) = &resolved.resolved_target {
+        if let Some(target) = &resolved.resolved_target {
             resolved_paths.push(target.request_path.clone());
         }
         RichPolicyOutcome {

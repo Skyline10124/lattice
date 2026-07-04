@@ -17,9 +17,9 @@ pub use audit::{
 pub use external::Fetch;
 pub use session::TodoWrite;
 pub use workspace::{
-    Batch, BatchOperation, BatchParams, BatchResult, Create, Edit, EditOperation, EditParams,
-    EditResult, FindFilesParams, FindFilesResult, GrepParams, GrepResult, ListDirectoryParams,
-    ListDirectoryResult, ObserveWorkspace, ReadFileParams, ReadFileResult,
+    Create, Edit, EditOperation, EditParams, EditResult, FindFilesParams, FindFilesResult,
+    GrepParams, GrepResult, ListDirectoryParams, ListDirectoryResult, ObserveWorkspace,
+    ReadFileParams, ReadFileResult,
 };
 
 #[cfg(feature = "inspect-scaffold")]
@@ -29,14 +29,13 @@ mod sealed {
     use super::{
         external::Fetch,
         session::TodoWrite,
-        workspace::{Batch, Create, Edit, ObserveWorkspace},
+        workspace::{Create, Edit, ObserveWorkspace},
     };
     use crate::method::sealed::Sealed;
 
     impl Sealed for ObserveWorkspace {}
     impl Sealed for Create {}
     impl Sealed for Edit {}
-    impl Sealed for Batch {}
     impl Sealed for Fetch {}
     impl Sealed for TodoWrite {}
 }
@@ -52,7 +51,6 @@ mod tests {
             ObserveWorkspace::NAME,
             Create::NAME,
             Edit::NAME,
-            Batch::NAME,
             Fetch::NAME,
             TodoWrite::NAME,
         ];
@@ -68,7 +66,6 @@ mod tests {
             ObserveWorkspace::NAME,
             Create::NAME,
             Edit::NAME,
-            Batch::NAME,
             Fetch::NAME,
             TodoWrite::NAME,
         ];

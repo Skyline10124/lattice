@@ -31,10 +31,6 @@ fn method_fixtures() -> Vec<MethodFixture> {
             required_capability: RequiredCapability::WritePath,
         },
         MethodFixture {
-            method: "mutate.batch",
-            required_capability: RequiredCapability::WritePath,
-        },
-        MethodFixture {
             method: "fetch.web",
             required_capability: RequiredCapability::FetchUrl,
         },

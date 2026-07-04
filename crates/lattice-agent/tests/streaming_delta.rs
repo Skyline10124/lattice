@@ -442,11 +442,11 @@ async fn streaming_truncated_tool_call_json_reports_finish_reason_length() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "mutate.batch".to_string(),
+                    name: "mutate.create".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
-                    arguments_delta: r#"{"operations":["#.to_string(),
+                    arguments_delta: r#"{"path":"src/lib.rs","content":""#.to_string(),
                 },
                 LlmEvent::Done {
                     finish_reason: "length".to_string(),
@@ -471,7 +471,7 @@ async fn streaming_truncated_tool_call_json_reports_finish_reason_length() {
 
     let reason = result.terminal_reason.as_deref().unwrap_or_default();
     assert_eq!(result.status, AgentTurnStatus::Error);
-    assert!(reason.contains("mutate.batch"));
+    assert!(reason.contains("mutate.create"));
     assert!(reason.contains("finish_reason=length"));
     assert!(reason.contains("ended=false"));
 }

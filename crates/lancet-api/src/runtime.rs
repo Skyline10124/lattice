@@ -307,4 +307,37 @@ mod tests {
 
         runtime.shutdown().await;
     }
+
+    // Issue #15 behavior acceptance: a raw CEP call to the permanently retired
+    // `mutate.batch` method must return JSON-RPC `Method not found` (-32601).
+    #[tokio::test]
+    async fn production_runtime_rejects_retired_mutate_batch_as_method_not_found() {
+        use lancet_catalog::CATALOG;
+        use lancet_protocol::Retriability;
+        use lancet_protocol::error::jsonrpc;
+
+        assert!(
+            !CATALOG.iter().any(|d| d.name == "mutate.batch"),
+            "mutate.batch must not appear in CATALOG"
+        );
+
+        let enabled_tools: Vec<String> = CATALOG.iter().map(|d| d.name.to_string()).collect();
+        let config = LancetRuntimeConfig {
+            enabled_tools,
+            ..LancetRuntimeConfig::new(".")
+        };
+        let mut runtime = LancetRuntime::build(config).expect("production runtime builds");
+
+        let client = runtime.client();
+        let err = client
+            .call_raw("mutate.batch", serde_json::json!({ "operations": [] }))
+            .await
+            .expect_err("retired method must error, not execute");
+
+        assert_eq!(err.wire_code(), jsonrpc::METHOD_NOT_FOUND);
+        assert!(err.message.starts_with("Method not found:"));
+        assert_eq!(err.retriability, Retriability::Permanent);
+
+        runtime.shutdown().await;
+    }
 }

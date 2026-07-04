@@ -4,26 +4,25 @@
 //! Static CEP method catalog for CEP.
 
 use crate::method::MethodDescriptor;
-use crate::methods::{Batch, Create, Edit, Fetch, ObserveWorkspace, TodoWrite};
+use crate::methods::{Create, Edit, Fetch, ObserveWorkspace, TodoWrite};
 use std::sync::LazyLock;
 
 /// Exhaustive CEP method descriptor list in stable registration order.
-pub static CATALOG: LazyLock<[MethodDescriptor; 6]> = LazyLock::new(|| {
+pub static CATALOG: LazyLock<[MethodDescriptor; 5]> = LazyLock::new(|| {
     [
         MethodDescriptor::for_method::<ObserveWorkspace>(),
         MethodDescriptor::for_method::<Create>(),
         MethodDescriptor::for_method::<Edit>(),
-        MethodDescriptor::for_method::<Batch>(),
         MethodDescriptor::for_method::<Fetch>(),
         MethodDescriptor::for_method::<TodoWrite>(),
     ]
 });
 
 /// Compile-time-known length of [`CATALOG`]. Mirrors the array bound in
-/// [`CATALOG`]'s type (`[MethodDescriptor; 6]`); keep these in sync when the
+/// [`CATALOG`]'s type (`[MethodDescriptor; 5]`); keep these in sync when the
 /// root CEP method contract changes. Callers (e.g. the LANCET doctor) read
 /// this instead of hard-coding a method count.
-pub const CATALOG_LEN: usize = 6;
+pub const CATALOG_LEN: usize = 5;
 
 /// Borrow the catalog as a slice.
 pub fn catalog() -> &'static [MethodDescriptor] {
@@ -54,14 +53,13 @@ pub fn scaffold_catalog() -> &'static [MethodDescriptor] {
 mod tests {
     use super::*;
     use crate::method::CepMethod;
-    use crate::methods::{Batch, Create, Edit, Fetch, ObserveWorkspace, TodoWrite};
+    use crate::methods::{Create, Edit, Fetch, ObserveWorkspace, TodoWrite};
     use lancet_protocol::{ImpactKind, RequiredCapability};
 
-    const EXPECTED_ORDER: [&str; 6] = [
+    const EXPECTED_ORDER: [&str; 5] = [
         "observe.workspace",
         "mutate.create",
         "mutate.edit",
-        "mutate.batch",
         "fetch.web",
         "session.todo_write",
     ];
@@ -134,7 +132,7 @@ mod tests {
                     assert!(descriptor.base_authority.fetch_hosts);
                     assert!(!descriptor.base_authority.read_audit);
                 }
-                "observe.workspace" | "mutate.create" | "mutate.edit" | "mutate.batch" => {
+                "observe.workspace" | "mutate.create" | "mutate.edit" => {
                     assert_eq!(
                         descriptor.base_authority,
                         crate::method::BaseAuthorityRequirement::NONE
@@ -148,7 +146,7 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 6] = [
+        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 5] = [
             (
                 &catalog[0],
                 ObserveWorkspace::IMPACT,
@@ -156,9 +154,8 @@ mod tests {
             ),
             (&catalog[1], Create::IMPACT, Create::CAPABILITY),
             (&catalog[2], Edit::IMPACT, Edit::CAPABILITY),
-            (&catalog[3], Batch::IMPACT, Batch::CAPABILITY),
-            (&catalog[4], Fetch::IMPACT, Fetch::CAPABILITY),
-            (&catalog[5], TodoWrite::IMPACT, TodoWrite::CAPABILITY),
+            (&catalog[3], Fetch::IMPACT, Fetch::CAPABILITY),
+            (&catalog[4], TodoWrite::IMPACT, TodoWrite::CAPABILITY),
         ];
 
         for (descriptor, impact, capability) in checks {
@@ -176,8 +173,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_len_is_6() {
-        assert_eq!(catalog().len(), 6);
+    fn catalog_len_is_5() {
+        assert_eq!(catalog().len(), 5);
     }
 
     #[test]
@@ -241,7 +238,7 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 6);
+        assert_eq!(catalog().len(), 5);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
@@ -249,7 +246,6 @@ mod catalog_default_snapshot {
                 "observe.workspace",
                 "mutate.create",
                 "mutate.edit",
-                "mutate.batch",
                 "fetch.web",
                 "session.todo_write",
             ]
@@ -274,7 +270,7 @@ mod catalog_default_snapshot {
     }
 
     /// Regression test for issue #4: `exec.command_run` is permanently retired
-    /// from the CEP catalog. The catalog must contain exactly 6 methods and
+    /// from the CEP catalog. The catalog must contain exactly 5 methods and
     /// must NOT include `exec.command_run`.
     #[test]
     fn catalog_retires_exec_command_run() {
@@ -282,6 +278,17 @@ mod catalog_default_snapshot {
         assert!(
             !catalog().iter().any(|d| d.name == "exec.command_run"),
             "exec.command_run must not appear in the production catalog"
+        );
+    }
+
+    /// Regression test for issue #15: `mutate.batch` is permanently retired from
+    /// the CEP catalog.
+    #[test]
+    fn catalog_retires_mutate_batch() {
+        assert_eq!(catalog().len(), CATALOG_LEN);
+        assert!(
+            !catalog().iter().any(|d| d.name == "mutate.batch"),
+            "mutate.batch must not appear in the production catalog"
         );
     }
 

@@ -110,7 +110,6 @@ pub enum OverlayBehavior {
 pub enum FailureSemantics {
     NoBackendEffectOnFailure,
     AllOrNothing,
-    PartialEffectsAudited,
     RetainDiffOnVerifyFailure,
 }
 
@@ -137,13 +136,6 @@ impl EffectDecl {
         }
         if self.capabilities.is_empty() {
             return Err(format!("{method} has no required capability declaration"));
-        }
-        if matches!(self.failure, FailureSemantics::PartialEffectsAudited)
-            && !self.kinds.contains(&ImpactKind::CommandExecution)
-        {
-            return Err(format!(
-                "{method} declares partial-effects failure semantics without command execution"
-            ));
         }
         Ok(())
     }

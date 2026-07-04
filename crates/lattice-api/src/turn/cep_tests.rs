@@ -59,7 +59,7 @@ fn assert_cep_payload(err: &ToolExecutionError, expected_code: i32) {
 }
 
 #[tokio::test]
-async fn cep_executor_adapter_retired_audit_methods_return_method_not_found() {
+async fn cep_executor_adapter_retired_methods_return_method_not_found() {
     let adapter = adapter_over_registry(todo_registry(|params, _ctx| async move {
         Ok(TodoWriteResult {
             todos: params.todos,
@@ -67,10 +67,10 @@ async fn cep_executor_adapter_retired_audit_methods_return_method_not_found() {
     }))
     .await;
 
-    for method in ["observe.audit", "observe.audit_replay"] {
+    for method in ["observe.audit", "observe.audit_replay", "mutate.batch"] {
         let err = adapter
             .execute(&ToolCall {
-                id: "call_audit".to_string(),
+                id: format!("call_{method}"),
                 function: FunctionCall {
                     name: method.to_string(),
                     arguments: "{}".to_string(),

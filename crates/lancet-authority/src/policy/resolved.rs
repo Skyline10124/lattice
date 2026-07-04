@@ -148,22 +148,6 @@ impl PolicyResolver {
                     });
                 }
             }
-            "mutate.batch" => {
-                let all_targets = extract_all_batch_targets(&input.params);
-                invocation_facts.all_patch_targets = all_targets.clone();
-                if let Some(path) = all_targets.into_iter().next() {
-                    let normalized = normalize_lexical_pure(&path)?;
-                    let canonical = self.project_root.join(&normalized);
-                    invocation_facts.path = Some(canonical.to_string_lossy().to_string());
-                    invocation_facts.normalized_path =
-                        Some(normalized.to_string_lossy().to_string());
-                    resolved_target = Some(ResolvedPath {
-                        request_path: path,
-                        normalized_path: normalized,
-                        project_root: self.project_root.clone(),
-                    });
-                }
-            }
             "fetch.web" => {
                 if let Some(url) = extract_url_from_params(&input.params) {
                     let (host, port, scheme, is_localhost, is_private_ip) = parse_url_facts(&url);
@@ -221,19 +205,6 @@ fn extract_path_from_params(params: &serde_json::Value) -> Option<String> {
 
 fn extract_optional_path_from_params(params: &serde_json::Value) -> Option<String> {
     params.get("path")?.as_str().map(String::from)
-}
-
-fn extract_all_batch_targets(params: &serde_json::Value) -> Vec<String> {
-    params
-        .get("operations")
-        .and_then(|v| v.as_array())
-        .map(|operations| {
-            operations
-                .iter()
-                .filter_map(extract_path_from_params)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
 }
 
 fn extract_url_from_params(params: &serde_json::Value) -> Option<String> {

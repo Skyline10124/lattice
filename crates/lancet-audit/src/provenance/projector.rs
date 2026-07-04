@@ -161,7 +161,7 @@ fn project_entities_from_metadata(
     fragment: &mut ProvGraphFragment,
 ) {
     let activity_id = activity_id_for(audit_id);
-    let is_mutation = matches!(method, "mutate.create" | "mutate.edit" | "mutate.batch");
+    let is_mutation = matches!(method, "mutate.create" | "mutate.edit");
 
     if let Some(hash) = meta.get("content_hash").and_then(|v| v.as_str()) {
         let entity_id = push_entity(fragment, "file", hash);

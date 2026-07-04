@@ -55,9 +55,9 @@ Layer 5:         lattice-tui(-> api + presentation deps)
 ### CEP method catalog
 
 `lancet-catalog::CATALOG` is the authoritative production catalog with exactly
-**6 agent-visible methods**:
+**5 agent-visible methods**:
 
-`observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`,
+`observe.workspace`, `mutate.create`, `mutate.edit`,
 `fetch.web`, `session.todo_write`.
 
 Audit query, tail, and replay are **operator-only** (`lattice audit` via

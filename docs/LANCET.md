@@ -3,7 +3,7 @@
 > **DRIFT NOTICE — 2026-06-30:** This document was written against the
 > v1.4-alpha boundary and contains several claims that no longer match the
 > production code. Known drift corrected elsewhere in this pass:
-> - The canonical **agent** CEP catalog has **6 methods**. `session.envelope`
+> - The canonical **agent** CEP catalog has **5 methods**. `session.envelope`
 >   was removed earlier; `exec.command_run` and post-mutation verify were
 >   permanently retired; `observe.audit` / `observe.audit_replay` were removed
 >   from the agent catalog (issue #11) — audit reads are operator-only via
@@ -33,7 +33,7 @@ plus base-authority planning. The underlying contract remains split across
 | Component | Description |
 |-----------|-------------|
 | `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
-| `lancet-catalog::CATALOG` | The **6-method** canonical agent CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`, `fetch.web`, `session.todo_write`. (`session.envelope`, `exec.command_run`, post-mutation verify, and agent-visible audit CEP methods were removed — catalog and tests assert their absence.) |
+| `lancet-catalog::CATALOG` | The **5-method** canonical agent CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`, `session.todo_write`. (`session.envelope`, `exec.command_run`, `mutate.batch`, post-mutation verify, and agent-visible audit CEP methods were removed — catalog and tests assert their absence.) |
 | `lancet-api::audit` | Operator audit query/tail/replay over the project-keyed audit store (`query_audit`, `tail_audit`, `replay_audit`); not agent CEP methods. |
 | Method params/results | Typed `*Params` / `*Result` structs per catalog method in `lancet-catalog` |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
@@ -46,7 +46,7 @@ Internal implementation is split across `lancet-authority` (default policy, Guar
 **Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
 
 Pre-v1.3.1 method names are removed. They are not accepted by the adapter or
-native registry, and LLM-facing tool definitions are projected only from the 6
+native registry, and LLM-facing tool definitions are projected only from the 5
 canonical agent catalog methods. Tool exposure is separate from base authority:
 enabled methods filter the model-visible catalog projection, while
 catalog descriptors declare method-local base authority requirements.
@@ -65,7 +65,6 @@ The canonical method names are grouped by primary effect class:
 | `observe.workspace` | Workspace observation. `mode=read_file` has single-path scope; `mode=grep`, `mode=list_directory`, and `mode=find_files` use root/directory observation scope. |
 | `mutate.create` | Workspace mutation by pure file creation. Existing targets are rejected; missing parent directories are rejected. |
 | `mutate.edit` | Workspace mutation of existing files through semantic replace/insert operations. The caller provides `expected_hash`; LANCET computes hashline anchors internally. |
-| `mutate.batch` | Workspace mutation batch for create/edit operations. It intentionally has no delete operation. |
 | `fetch.web` | External observation through URL fetch policy. |
 | `session.todo_write` | Session-state mutation for todo state. |
 
@@ -330,14 +329,14 @@ surface does not accept hashline patch documents.
 
 The internal hashline backend still forces edits to be based on the current file
 state before commit. Audit metadata records changed files and line-level
-add/remove effects. `mutate.batch` composes create/edit operations across
-multiple files but intentionally does not expose delete.
+add/remove effects. Agent-visible workspace mutation is limited to
+`mutate.create` and `mutate.edit` (single-file methods only).
 
 ### Create-only writes
 
 `mutate.create` is create-only. It fails if the target already exists and does
 not create missing parent directories. Existing-file edits must go through
-`mutate.edit` or `mutate.batch`.
+`mutate.edit`.
 
 ### Command boundary metadata
 

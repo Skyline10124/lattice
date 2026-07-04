@@ -234,59 +234,6 @@ impl CepMethod for Edit {
 
 impl CatalogMethod for Edit {}
 
-/// `mutate.batch`
-pub struct Batch;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct BatchParams {
-    pub operations: Vec<BatchOperation>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum BatchOperation {
-    CreateFile {
-        path: String,
-        content: String,
-        /// Create missing parent directories needed for `path`. When false,
-        /// all parent directories must already exist.
-        #[serde(default)]
-        create_parents: bool,
-    },
-    EditFile {
-        path: String,
-        expected_hash: String,
-        edits: Vec<EditOperation>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct BatchResult {
-    pub changed_files: Vec<String>,
-    pub created_files: Vec<String>,
-    pub edited_files: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub created_dirs: Vec<String>,
-}
-
-impl CepMethod for Batch {
-    const NAME: &'static str = "mutate.batch";
-    const DESCRIPTION: &'static str = "Apply a small multi-file workspace mutation as one LANCET operation. Every target path must be permitted by policy: use 'dir/**' patterns to cover directories. Supported operations are create_file and edit_file only; file deletion is intentionally unavailable. Prefer mutate.create one file at a time for new source files or large content payloads. Use at most one operation per target path; put multiple edits to the same file inside one edit_file edits array. create_file supports create_parents=true for missing parent directories; otherwise parent directories must already exist. Edit operations use expected_hash and runtime-computed hashline anchors.";
-    type Params = BatchParams;
-    type Result = BatchResult;
-    const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
-    const CAPABILITY: RequiredCapability = RequiredCapability::WritePath;
-    const EFFECT: EffectDecl = EffectDecl {
-        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]),
-        scope: EffectScopeKind::WorkspaceWrite,
-        capabilities: &[RequiredCapability::WritePath],
-        overlay: OverlayBehavior::WriteWorkspace,
-        failure: FailureSemantics::RetainDiffOnVerifyFailure,
-    };
-}
-
-impl CatalogMethod for Batch {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,12 +241,7 @@ mod tests {
 
     #[test]
     fn workspace_method_names_are_full_dotted_names() {
-        for name in [
-            ObserveWorkspace::NAME,
-            Create::NAME,
-            Edit::NAME,
-            Batch::NAME,
-        ] {
+        for name in [ObserveWorkspace::NAME, Create::NAME, Edit::NAME] {
             assert!(name.contains('.'), "expected dotted name: {name}");
             assert!(!name.contains('/'), "slash names forbidden: {name}");
         }
@@ -343,30 +285,12 @@ mod tests {
     }
 
     #[test]
-    fn batch_create_file_defaults_create_parents_to_false() {
-        let params: BatchParams = serde_json::from_value(serde_json::json!({
-            "operations": [
-                {"op": "create_file", "path": "src/lib.rs", "content": ""}
-            ]
-        }))
-        .unwrap();
-        let BatchOperation::CreateFile { create_parents, .. } = &params.operations[0] else {
-            panic!("expected create_file operation");
-        };
-        assert!(!create_parents);
-        assert!(Batch::DESCRIPTION.contains("create_parents=true"));
-        assert!(Batch::DESCRIPTION.contains("new source files"));
-        assert!(Batch::DESCRIPTION.contains("at most one operation per target path"));
-        assert!(Edit::DESCRIPTION.contains("every operation object includes op"));
-    }
-
-    #[test]
     fn mutation_descriptions_point_to_write_scope_and_directory_patterns() {
         // Each mutating method must tell the agent to use 'dir/**' for
         // directories so it does not discover the requirement by trial
         // and error. Direct-mode policy enforces the write scope; there
         // is no envelope to declare.
-        for desc in [Create::DESCRIPTION, Edit::DESCRIPTION, Batch::DESCRIPTION] {
+        for desc in [Create::DESCRIPTION, Edit::DESCRIPTION] {
             assert!(
                 desc.contains("/**"),
                 "missing directory pattern guidance: {desc}"

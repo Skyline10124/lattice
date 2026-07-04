@@ -33,8 +33,6 @@ pub struct InvocationFacts {
     pub env_keys: Vec<String>,
     /// URL host (for FetchUrl).
     pub host: Option<String>,
-    /// All target file paths extracted from multi-target mutation params.
-    pub all_patch_targets: Vec<String>,
     /// Session-state operation kind (for MutateSessionState).
     pub session_state_operation: Option<SessionStateOperation>,
 }

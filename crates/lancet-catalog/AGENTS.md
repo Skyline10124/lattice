@@ -25,7 +25,7 @@ handlers and tool projection.
 
 - Depend only on protocol plus serialization/schema support.
 - `CATALOG` is the authoritative production method set.
-- Keep the production catalog aligned with the root **6-method** agent CEP contract.
+- Keep the production catalog aligned with the root **5-method** agent CEP contract.
 - Do not define LLM-facing tool schemas here; `lancet-cep` projects them from
   descriptors and `lancet-native` exposes the native path.
 - Keep method params/results, descriptors, and capabilities in sync.
@@ -39,12 +39,12 @@ handlers and tool projection.
 - FIXED M-24-04: `MethodDescriptor::base_authority` now declares method-local
   base authority requirements consumed by `lancet-cep::ToolExposure`; policy
   inputs such as allowed hosts stay outside catalog.
-- FIXED issue #11: production `CATALOG` is 6 agent methods; audit DTOs in
+- FIXED issue #11: production `CATALOG` is 5 agent methods; audit DTOs in
   `methods/audit.rs` are operator-only (not registered in `CATALOG`).
 - WATCH: dotted method names stay canonical in CEP catalog; provider-specific
   name encoding belongs in `lattice-llm` wire adapters.
 - WATCH: optional scaffold methods must remain feature-gated and outside the
-  production 6-method agent catalog.
+  production 5-method agent catalog.
 
 ## Next Actions
 

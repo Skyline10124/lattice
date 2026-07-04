@@ -84,7 +84,7 @@ pub(crate) fn policy_denial_preflight_metadata(
     ) {
         return None;
     }
-    if !matches!(method, "mutate.create" | "mutate.edit" | "mutate.batch") {
+    if !matches!(method, "mutate.create" | "mutate.edit") {
         return None;
     }
 

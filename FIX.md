@@ -4,6 +4,46 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #15: permanently retire `mutate.batch` — 2026-07-04
+
+Severity: MEDIUM (product surface reduction; removes multi-operation partial-failure API).
+
+**Problem:** `mutate.batch` applied create/edit operations in two non-transactional
+phases. Mid-batch failures could leave prior edits and creates on disk while the
+agent lost a single atomic multi-file mutation contract.
+
+**Fix:**
+
+- Removed `mutate.batch` from `lancet-catalog::CATALOG` (6→5 agent methods);
+  deleted `Batch` / `BatchParams` / `BatchOperation` / `BatchResult` from
+  `lancet-catalog::methods::workspace`.
+- Removed native `handle_batch` and batch-only helpers from
+  `lancet-native/src/handlers/mutation.rs`; `mutate.create` and `mutate.edit`
+  remain registered.
+- Removed authority/policy/audit branches for `mutate.batch` in
+  `lancet-authority` (`policy/default.rs`, `policy/resolved.rs`) and
+  `lancet-audit` provenance projector; updated native mutation preflight.
+- Removed batch from `lattice-api` `CepExecutorAdapter::dispatch_typed`,
+  profile catalog-method validation, effect-contract fixtures, warn harness, and
+  streaming-delta tests.
+- Dropped `FailureSemantics::PartialEffectsAudited` from `lancet-protocol`
+  after confirming no live `EffectDecl` still referenced it (production
+  catalog used `NoBackendEffectOnFailure` and `RetainDiffOnVerifyFailure`
+  only; `mutate.batch` had used `RetainDiffOnVerifyFailure`, not
+  `PartialEffectsAudited`).
+- Updated docs (`AGENTS.md`, `README.md`, `docs/LANCET.md`, `docs/ARCHITECTURE.md`,
+  `docs/CONFIGURATION.md`, `docs/lancet-warn-report.md`) and default agent
+  enabled lists.
+
+**Verification:**
+
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `rg 'mutate\.batch|BatchOperation' --glob '*.{rs,toml,md}'` (excluding historical
+  #5 spec notes and regression comments that assert absence)
+
+---
+
 ## Codeberg #4: permanently retire command execution + post-mutation verify — 2026-06-30
 
 Severity: HIGH (security surface reduction; permanent retirement of agent-visible command execution).

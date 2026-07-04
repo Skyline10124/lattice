@@ -26,8 +26,7 @@ use lancet_authority::guard::{PathFacts, PathKind};
 use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
-    Batch, BatchOperation, BatchParams, BatchResult, Create, CreateParams, CreateResult, Edit,
-    EditOperation, EditParams, EditResult,
+    Create, CreateParams, CreateResult, Edit, EditOperation, EditParams, EditResult,
 };
 use lancet_protocol::effect_types::ImpactKind;
 
@@ -41,7 +40,6 @@ use std::path::{Path, PathBuf};
 pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
     registry.register_method::<Create, _, _>(handle_create)?;
     registry.register_method::<Edit, _, _>(handle_edit)?;
-    registry.register_method::<Batch, _, _>(handle_batch)?;
     Ok(())
 }
 
@@ -138,107 +136,6 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
 
     Ok(EditResult {
         changed_files: result.changed_files,
-    })
-}
-
-async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchResult, CepError> {
-    let changed_paths = batch_target_paths(&params)?;
-    let auth = authorize_workspace_mutation(&ctx, Batch::NAME, &params, &changed_paths).await?;
-
-    let mut create_inputs = Vec::new();
-    let mut edit_inputs = Vec::new();
-    let mut seen_paths = HashSet::new();
-
-    for operation in &params.operations {
-        match operation {
-            BatchOperation::CreateFile {
-                path,
-                content,
-                create_parents,
-            } => {
-                reject_duplicate_batch_path(&mut seen_paths, path)?;
-                let params = CreateParams {
-                    path: path.clone(),
-                    content: content.clone(),
-                    create_parents: *create_parents,
-                };
-                create_inputs.push(preflight_create(&auth, &params, Batch::NAME).await?);
-            }
-            BatchOperation::EditFile {
-                path,
-                expected_hash,
-                edits,
-            } => {
-                reject_duplicate_batch_path(&mut seen_paths, path)?;
-                let params = EditParams {
-                    path: path.clone(),
-                    expected_hash: expected_hash.clone(),
-                    edits: edits.clone(),
-                };
-                edit_inputs.push(params);
-            }
-        }
-    }
-
-    let patch = if edit_inputs.is_empty() {
-        None
-    } else {
-        match compile_batch_edit_patch(&auth, &edit_inputs).await {
-            Ok(patch) => Some(patch),
-            Err(err) => {
-                record_mutation_replan_metadata(
-                    &ctx,
-                    Batch::NAME,
-                    &auth,
-                    &changed_paths,
-                    expected_hash_replan_status(&err),
-                    replan_reason_for_error(&err),
-                );
-                return Err(err);
-            }
-        }
-    };
-
-    let mut edited_files = Vec::new();
-    if let Some(patch) = patch.as_deref() {
-        edited_files = apply_compiled_patch(&ctx, &auth, patch)
-            .await?
-            .changed_files;
-    }
-
-    let mut created_files = Vec::new();
-    let mut created_dirs = Vec::new();
-    let mut seen_created_dirs = HashSet::new();
-    for create in &create_inputs {
-        write_create(&ctx, &auth, create).await?;
-        record_created_dir_effects(&ctx, create);
-        for dir in &create.created_dirs {
-            if seen_created_dirs.insert(dir.clone()) {
-                created_dirs.push(dir.clone());
-            }
-        }
-        ctx.record_effect(mutation_path_effect(&auth, &create.path, &create.full_path));
-        created_files.push(create.path.clone());
-    }
-
-    let mut changed_files = edited_files.clone();
-    changed_files.extend(created_files.iter().cloned());
-
-    ctx.record_durable_metadata(json!({
-        "method": Batch::NAME,
-        "compiled_patch_backend": "hashline_patch",
-        "created_files": created_files.clone(),
-        "edited_files": edited_files.clone(),
-        "created_dirs": created_dirs.clone(),
-        "backend_invoked": true,
-        "policy_enforced": true,
-    }));
-
-    Ok(BatchResult {
-        changed_files,
-        created_files,
-        edited_files,
-        created_dirs,
     })
 }
 
@@ -620,52 +517,9 @@ fn record_created_dir_effects(ctx: &HandlerContext, create: &PreflightCreate) {
     }
 }
 
-fn batch_target_paths(params: &BatchParams) -> Result<Vec<String>, CepError> {
-    if params.operations.is_empty() {
-        return Err(validation_error(
-            "operations",
-            "mutate.batch requires at least one operation",
-        ));
-    }
-
-    Ok(params
-        .operations
-        .iter()
-        .map(|operation| match operation {
-            BatchOperation::CreateFile { path, .. } | BatchOperation::EditFile { path, .. } => {
-                path.clone()
-            }
-        })
-        .collect())
-}
-
-fn reject_duplicate_batch_path(seen: &mut HashSet<String>, path: &str) -> Result<(), CepError> {
-    if seen.insert(path.to_string()) {
-        Ok(())
-    } else {
-        Err(validation_error(
-            "operations",
-            format!("mutate.batch contains duplicate target path '{path}'"),
-        ))
-    }
-}
-
 async fn compile_edit_patch(auth: &MutationAuth, params: &EditParams) -> Result<String, CepError> {
     let fragment = compile_edit_operation_fragment(&auth.edit_storage(), params).await?;
     Ok(format!("*** Begin Patch\n{fragment}*** End Patch\n"))
-}
-
-async fn compile_batch_edit_patch(
-    auth: &MutationAuth,
-    edits: &[EditParams],
-) -> Result<String, CepError> {
-    let mut patch = String::from("*** Begin Patch\n");
-    for edit in edits {
-        let fragment = compile_edit_operation_fragment(&auth.edit_storage(), edit).await?;
-        patch.push_str(&fragment);
-    }
-    patch.push_str("*** End Patch\n");
-    Ok(patch)
 }
 
 async fn compile_edit_operation_fragment(
@@ -1658,96 +1512,6 @@ mod edit_tests {
         assert_eq!(
             metadata["cep_preflight"]["changed_paths"],
             serde_json::json!(["target.txt"])
-        );
-    }
-
-    #[tokio::test]
-    async fn batch_create_and_edit_without_delete_succeeds() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        let before = "workspace\nold\n";
-        let registry = mutation_registry();
-        let backend = Arc::new(MutSpyBackend::default());
-        backend
-            .files
-            .lock()
-            .unwrap()
-            .insert("Cargo.toml".into(), before.as_bytes().to_vec());
-        let ctx = mut_ctx(root, Arc::clone(&backend));
-
-        let params = BatchParams {
-            operations: vec![
-                BatchOperation::EditFile {
-                    path: "Cargo.toml".into(),
-                    expected_hash: content_hash(before.as_bytes()),
-                    edits: vec![EditOperation::ReplaceText {
-                        old: "old".into(),
-                        new: "new".into(),
-                        occurrence: None,
-                    }],
-                },
-                BatchOperation::CreateFile {
-                    path: "new.txt".into(),
-                    content: "created\n".into(),
-                    create_parents: false,
-                },
-            ],
-        };
-        let result = registry
-            .dispatch(Batch::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap();
-        let parsed: BatchResult = serde_json::from_value(result).unwrap();
-
-        assert_eq!(parsed.created_files, vec!["new.txt"]);
-        assert_eq!(parsed.edited_files, vec!["Cargo.toml"]);
-        let updated = String::from_utf8(
-            backend
-                .files
-                .lock()
-                .unwrap()
-                .get("Cargo.toml")
-                .cloned()
-                .unwrap_or_default(),
-        )
-        .unwrap();
-        assert_eq!(updated, "workspace\nnew\n");
-    }
-
-    #[tokio::test]
-    async fn batch_create_file_with_create_parents_creates_missing_dirs() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = mutation_registry();
-        let backend = Arc::new(MutSpyBackend::default());
-        let ctx = mut_ctx(root, Arc::clone(&backend));
-
-        let params = BatchParams {
-            operations: vec![
-                BatchOperation::CreateFile {
-                    path: "crates/lattice-tui/src/lib.rs".into(),
-                    content: "pub fn run() {}\n".into(),
-                    create_parents: true,
-                },
-                BatchOperation::CreateFile {
-                    path: "crates/lattice-tui/src/main.rs".into(),
-                    content: "fn main() {}\n".into(),
-                    create_parents: true,
-                },
-            ],
-        };
-        let result = registry
-            .dispatch(Batch::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap();
-        let parsed: BatchResult = serde_json::from_value(result).unwrap();
-
-        assert_eq!(
-            parsed.created_files,
-            vec![
-                "crates/lattice-tui/src/lib.rs",
-                "crates/lattice-tui/src/main.rs"
-            ]
         );
     }
 

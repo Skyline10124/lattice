@@ -10,7 +10,7 @@
 //!
 //! ## Update path (`LATTICE_UPDATE_WARN_REPORT=1`)
 //!
-//! Runs each of the 6 CATALOG methods through `CepMode::Warn`, collects
+//! Runs each of the 5 CATALOG methods through `CepMode::Warn`, collects
 //! `effect_warning` from the `CepAuditStore`, and
 //! writes a fresh `docs/lancet-warn-report.md` at the repo root.
 //!
@@ -35,9 +35,9 @@ use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
-    Batch, BatchOperation, BatchParams, BatchResult, Create, CreateParams, CreateResult, Edit,
-    EditOperation, EditParams, EditResult, ObserveWorkspace, ObserveWorkspaceParams,
-    ObserveWorkspaceResult, ReadFileParams, ReadFileResult,
+    Create, CreateParams, CreateResult, Edit, EditOperation, EditParams, EditResult,
+    ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileParams,
+    ReadFileResult,
 };
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
@@ -145,27 +145,6 @@ fn overreach_registry_edit() -> MethodRegistry {
         })
     })
     .expect("overreach Edit");
-    r
-}
-
-fn overreach_registry_batch() -> MethodRegistry {
-    let mut r = MethodRegistry::new();
-    r.register_method::<Batch, _, _>(|_params: BatchParams, ctx| async move {
-        ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::WorkspaceMutation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/batch")),
-            required_capability: RequiredCapability::WritePath,
-            source: EffectSource::HandlerBackend,
-        });
-        Ok(BatchResult {
-            changed_files: vec![],
-            created_files: vec![],
-            edited_files: vec![],
-            created_dirs: vec![],
-        })
-    })
-    .expect("overreach Batch");
     r
 }
 
@@ -296,18 +275,6 @@ async fn generate_warn_report() -> String {
                 },
             )
             .await,
-            run_overreach::<Batch>(
-                "mutate.batch",
-                overreach_registry_batch(),
-                BatchParams {
-                    operations: vec![BatchOperation::CreateFile {
-                        path: "mock.txt".into(),
-                        content: "mock".into(),
-                        create_parents: false,
-                    }],
-                },
-            )
-            .await,
             run_overreach::<Fetch>(
                 "fetch.web",
                 overreach_registry_fetch(),
@@ -329,7 +296,7 @@ async fn generate_warn_report() -> String {
     let canonical_root = std::fs::canonicalize(ws_root).unwrap_or_else(|_| ws_root.to_path_buf());
     let canonical_str = canonical_root.to_str().unwrap().to_string();
 
-    // Single production server for all 4 success-only methods.
+    // Single production server for all success-only methods.
     let audit_success = Arc::new(CepAuditStore::in_memory().expect("audit"));
 
     let mut production_registry = MethodRegistry::new();
