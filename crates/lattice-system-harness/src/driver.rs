@@ -77,13 +77,19 @@ impl LatticeDriver {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        // Spawn in its own process group so a timeout can kill the whole tree
+        // (TUI -> microsandbox -> fake LLM sockets), not only the direct
+        // child (RFC #19 decision eight, PRD user story 20). `process_group(0)`
+        // makes the child the leader of a new session/process group.
+        set_new_process_group(&mut cmd);
         let mut child = cmd.spawn()?;
+        let pgid = child.id();
         // Drain stdout/stderr concurrently so a large output cannot fill the
         // pipe buffer and deadlock the child while we wait for the timeout.
         let stdout_handle = drain_to_thread(child.stdout.take());
         let stderr_handle = drain_to_thread(child.stderr.take());
 
-        let status = wait_with_timeout(&mut child, command.timeout)?;
+        let status = wait_with_timeout(&mut child, command.timeout, pgid)?;
         let stdout = join_drain(stdout_handle);
         let stderr = join_drain(stderr_handle);
         Ok(Output {
@@ -135,9 +141,39 @@ fn join_drain(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
     handle.join().unwrap_or_default()
 }
 
+/// Put a `Command`'s child into a new process group where it is the leader.
+/// Unix-only; on non-Unix targets this is a no-op (the repo does not commit
+/// to Windows, per #26 Out-of-Scope).
+#[cfg(unix)]
+fn set_new_process_group(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn set_new_process_group(_cmd: &mut std::process::Command) {}
+
+/// Kill an entire process group. Best-effort: errors are swallowed because
+/// the caller is already on the timeout/failure path and the priority is
+/// "no orphaned TUI / sandbox / fake-server children", not precise error
+/// reporting. Uses the external `kill` utility to avoid a `libc` dependency
+/// (the harness boundary allows general test libraries, but keeping the
+/// dependency surface minimal is the documented discipline).
+fn kill_process_group(pgid: u32) {
+    let pgid_str = format!("-{pgid}");
+    let _ = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(&pgid_str)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 fn wait_with_timeout(
     child: &mut Child,
     timeout: Option<Duration>,
+    pgid: u32,
 ) -> Result<std::process::ExitStatus, DriverError> {
     let Some(limit) = timeout else {
         return child.wait().map_err(DriverError::Io);
@@ -148,12 +184,151 @@ fn wait_with_timeout(
             return Ok(status);
         }
         if start.elapsed() >= limit {
-            // Best-effort kill; reap to avoid leaving a zombie, then surface the
-            // timeout regardless of the kill/wait outcome.
+            // Kill the process group first so grandchildren (TUI, microsandbox,
+            // fake-LLM sockets) die with the child, then reap the direct child
+            // to avoid a zombie. Surface the timeout regardless.
+            kill_process_group(pgid);
             let _ = child.kill();
             let _ = child.wait();
             return Err(DriverError::Timeout(limit));
         }
         std::thread::sleep(TIMEOUT_POLL);
+    }
+}
+
+/// Read `/proc/<pid>/stat` for every pid and return the pids whose process
+/// group id == `pgid`. Linux-only; returns empty on non-Linux Unix. Used by
+/// the process-group-kill test and the PTY smoke scenario to verify no
+/// orphan survives a `killpg`.
+#[cfg(all(unix, target_os = "linux"))]
+pub fn processes_in_pgid(pgid: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir("/proc") {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = match name.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let pid: u32 = match name.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        // /proc/<pid>/stat: pid (comm) state ppid pgrp ...
+        // pgrp is field 5. The comm field is parenthesized and may contain
+        // spaces/parens, so split on the closing paren first.
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let after_comm = match stat.rsplit_once(')') {
+            Some((_, rest)) => rest.trim_start(),
+            None => continue,
+        };
+        let mut fields = after_comm.split_whitespace();
+        let _state = fields.next();
+        let _ppid = fields.next();
+        let pgrp = fields.next();
+        if let Some(pgrp) = pgrp.and_then(|s| s.parse::<u32>().ok())
+            && pgrp == pgid
+        {
+            out.push(pid);
+        }
+    }
+    out
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn processes_in_pgid(_pgid: u32) -> Vec<u32> {
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tracer bullet: a child that finishes on its own returns its real
+    /// exit status, and the process-group setup does not break the happy
+    /// path. Uses `true` so it exits 0 immediately.
+    #[cfg(unix)]
+    #[test]
+    fn run_child_in_own_process_group_returns_exit_status() {
+        let world = ScenarioWorld::new("lattice-harness-pgrp-ok").expect("world");
+        let mut cmd = world.command("true");
+        set_new_process_group(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn true");
+        let pgid = child.id();
+        let status =
+            wait_with_timeout(&mut child, Some(Duration::from_secs(5)), pgid).expect("wait");
+        assert!(status.success());
+    }
+
+    /// The core #21 acceptance point: a timed-out child must be killed, and
+    /// the timeout must surface as `DriverError::Timeout`. Spawns `sleep 30`
+    /// in its own process group with a 1s timeout; on success the wait
+    /// returns `Timeout` quickly and the child is reaped (no zombie).
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_child_is_killed_and_timeout_surfaces() {
+        let world = ScenarioWorld::new("lattice-harness-pgrp-timeout").expect("world");
+        let mut cmd = world.command("sleep");
+        cmd.arg("30");
+        set_new_process_group(&mut cmd);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn sleep 30");
+        let pgid = child.id();
+        let start = Instant::now();
+        let err = wait_with_timeout(&mut child, Some(Duration::from_secs(1)), pgid)
+            .expect_err("should time out");
+        assert!(matches!(err, DriverError::Timeout(_)), "got {err:?}");
+        assert!(start.elapsed() < Duration::from_secs(10));
+        // try_wait after a timeout returns Some(exited): the kill+wait inside
+        // wait_with_timeout reaps the child (no zombie).
+        let reaped = child.try_wait().expect("try_wait");
+        assert!(
+            reaped.is_some(),
+            "child should be reaped, not still running"
+        );
+    }
+
+    /// A timed-out child's *grandchild* must also die when the process group
+    /// is killed — this is the actual #21 / PRD user story 20 requirement.
+    /// Spawns a shell that itself spawns `sleep 30` (the grandchild), then
+    /// waits. A 1s timeout must kill both; we verify by scanning /proc for
+    /// any survivor in the process group. This is the contract single-child
+    /// `kill()` does NOT satisfy and `killpg` does.
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_process_group_kills_grandchild() {
+        let world = ScenarioWorld::new("lattice-harness-pgrp-grandchild").expect("world");
+        // `sh -c 'sleep 30 & wait'`: both share the new process group.
+        let mut cmd = world.command("sh");
+        cmd.args(["-c", "sleep 30 & wait"]);
+        set_new_process_group(&mut cmd);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn sh");
+        let pgid = child.id();
+        std::thread::sleep(Duration::from_millis(300));
+        let err = wait_with_timeout(&mut child, Some(Duration::from_secs(1)), pgid)
+            .expect_err("should time out");
+        assert!(matches!(err, DriverError::Timeout(_)));
+
+        std::thread::sleep(Duration::from_millis(400));
+        let reaped = child.try_wait().expect("try_wait");
+        assert!(reaped.is_some(), "group leader should be reaped");
+
+        // No process in the group should survive the killpg.
+        let survivors = processes_in_pgid(pgid);
+        assert!(
+            survivors.is_empty(),
+            "process group {pgid} still has live members after killpg: {survivors:?}"
+        );
     }
 }

@@ -46,6 +46,13 @@
 - **升级条件**: 若离线/air-gapped CI 成为常态且需跑 `lancet-native` 全套件 → 升为 MEDIUM；或若 `is_private_or_reserved` 被要求覆盖更多保留段（RFC 2544 198.18.0.0/15、RFC 5737 文档 IP 203.0.113.0/24 等）作为 SSRF 防御纵深 → 升为 MEDIUM 并扩 `is_private_or_reserved`。
 - **计划**: （a）短期不改测试行为，接受正常 CI 下通过；（b）可选加固 `is_private_or_reserved` 覆盖 198.18.0.0/15（与现有 169.254/127/0 段同列拒绝），作为 SSRF 纵深而非本测试的主修复；（c）若要彻底消除离线环境对 `lancet-native` 的阻断，给 `fetch_effect_contract_negative` 加 `#[ignore]` 或 env-gated 跳过（如 `LATTICE_SKIP_NETWORK_TESTS=1`），但需权衡是否弱化正常环境下对该契约的覆盖。本 finding 不阻塞 #26 迁移收尾。
 
+### L-21-01: `tests/msb_full_turn.rs` / `tests/pty_tui_smoke.rs` 真实 MSB 实跑由 owner 在本机完整门验证 — `verification` / full-gate / owner-side
+- **位置**: `crates/lattice-system-harness/tests/msb_full_turn.rs`（`msb_plain_text_turn_commits_and_exit_zero`，`#[ignore]`）；`crates/lattice-system-harness/tests/pty_tui_smoke.rs`（`pty_tui_smoke_runs_turn_and_quits_cleanly`，`#[ignore]`）；`crates/lattice-system-harness/src/layer_guard.rs`（`require_msb_env`）。
+- **问题**: #21 的 Microsandbox 完整 turn 场景与 PTY smoke 通过 `LATTICE_HARNESS_MSB=1` + `#[ignore]` gating 归完整门。本交付环境（devin 沙箱）的 `microsandbox` daemon 未运行、`msb` CLI 不在 PATH、镜像走 daocloud 代理 → 无法在本环境实跑这两个 `#[ignore]` 场景。fast 层（编译 + `#[ignore]` 跳过 + fake_llm/session_send/driver/layer_guard/scenario/pty_tui 单测）全绿，**真实 MSB turn + PTY smoke 实跑由 owner 在本机 KVM 完整门验证**。
+- **当前状态**: ACCEPTED RESIDUAL（owner-side full-gate verification）。`require_msb_env` 已实现 RFC 不可回退边界 7（置位而 MSB 不可用 → panic，不静默跳过）；场景代码、断言、失败产物 bundle 已就位，待 owner 在 KVM 主机 `LATTICE_HARNESS_MSB=1 ... -- --include-ignored` 跑通后勾 #21 验收点 3/4/5 的实跑部分。若 owner 实跑发现产品 bug，按 #21 交付纪律另开票，不顺手修。
+- **升级条件**: 若 owner 在本机完整门实跑失败 → 升为 MEDIUM 并按实跑结果修场景或（若产品 bug）另开票；若完整门成为 CI 常态且需在无 KVM 环境也跑 → 升为 MEDIUM 并重新评估 gating 机制。
+- **计划**: owner 在本机 KVM 主机跑 `LATTICE_HARNESS_MSB=1 LATTICE_BIN=... cargo test -p lattice-system-harness -- --include-ignored`，勾 #21 验收清单，打 `ready-for-close`。本 finding 不阻塞 #21 代码交付与 fast-lane 验证。
+
 ### L-11-01: `tail_audit` 批次循环有 `yield_now` 但无专用 `CancellationToken` + CLI 接线 — `robustness` / operator-path
 - **位置**: `crates/lancet-api/src/audit.rs`（`tail_audit` 批次循环,`tokio::task::yield_now().await` 在 L235;循环体 `query_rows` 同步）
 - **问题**: 批次循环底部已加 `tokio::task::yield_now().await`,drop-future 取消可在批次边界生效。但无专用 `CancellationToken` 从 CLI 接入 `tail_audit`,`lattice audit --tail` 的 Ctrl-C 仅靠默认 future-drop,无显式信号接线。退役前的 native handler 经 `HandlerContext { cancellation: Cancellation }` 有 per-batch watch 检查;direct-store 路径用 `yield_now` 兜底但未做专用 token + CLI 接线。

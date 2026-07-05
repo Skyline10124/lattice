@@ -1,0 +1,323 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
+//! `PtyTuiDriver`: drive the prototype TUI through a PTY for smoke scenarios.
+//!
+//! RFC #19 decision three: PTY is only for one or two smoke scenarios that
+//! prove the TUI entrypoint still wires into the same `stream_turn` chain.
+//! It does **not** assert on colors, prompt shape, or layout — those are
+//! prototype presentation details that must not become long-term contract.
+//! Prompt recognition and ANSI cleanup live **inside this driver** only;
+//! scenario-level assertions never touch display details.
+//!
+//! Unix-only: the repo does not commit to Windows (see #26 Out-of-Scope).
+//! The driver is built on `portable-pty`, a general test library that
+//! satisfies the harness boundary (no product crate deps).
+
+#![cfg(unix)]
+
+use std::io::{Read, Write};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use thiserror::Error;
+
+use crate::driver::LatticeDriver;
+use crate::world::ScenarioWorld;
+
+/// Max bytes drained from the PTY before we stop reading. The TUI prints a
+/// banner + token stream + status lines; a plain-text turn is well under
+/// 64 KiB. Anything larger is either a runaway or a display bug, neither of
+/// which a smoke scenario should swallow silently.
+const READ_BUDGET: usize = 256 * 1024;
+
+#[derive(Debug, Error)]
+pub enum PtyError {
+    #[error("pty io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("pty: {0}")]
+    Pty(String),
+    #[error("tui did not produce output within {0:?}")]
+    Timeout(Duration),
+}
+
+/// A live PTY-backed TUI session. Drop kills and reaps the child so no TUI
+/// process survives the scenario (PRD user story 20: process-group cleanup).
+pub struct PtyTuiDriver {
+    master: Box<dyn MasterPty + Send>,
+    master_writer: Box<dyn Write + Send>,
+    /// Used to kill the child directly (best-effort) on drop/timeout.
+    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    /// The process-group leader pid reported by the master. Used to kill the
+    /// whole group (TUI -> microsandbox -> fake-LLM sockets) on timeout.
+    pgid: Option<i32>,
+    /// The full drained PTY output so far (raw, ANSI preserved).
+    output: Vec<u8>,
+}
+
+impl PtyTuiDriver {
+    /// Spawn `lattice tui --agent <agent> --project-branch <branch>` in a
+    /// PTY inside the scenario world. The fake LLM env must already be wired
+    /// into the world. The child runs in a new session/process group under
+    /// the PTY; `portable-pty` sets it as the controlling terminal, so
+    /// `process_group_leader()` returns its pgid and `kill -KILL -<pgid>`
+    /// cleans up the whole tree.
+    pub fn spawn(
+        driver: &LatticeDriver,
+        world: &ScenarioWorld,
+        agent: &str,
+        project_branch: &str,
+    ) -> Result<Self, PtyError> {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| PtyError::Pty(e.to_string()))?;
+
+        let mut cmd = CommandBuilder::new(driver.binary_path());
+        cmd.args(["tui", "--agent", agent, "--project-branch", project_branch]);
+        cmd.cwd(world.project_dir());
+        cmd.env_clear();
+        for (k, v) in world.env_summary() {
+            cmd.env(k, v);
+        }
+
+        let _child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| PtyError::Pty(e.to_string()))?;
+        let killer = _child.clone_killer();
+        let pgid = pair.master.process_group_leader();
+
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| PtyError::Pty(e.to_string()))?;
+
+        // Drop the slave so EOF propagates to the child when the master closes.
+        drop(pair.slave);
+
+        Ok(Self {
+            master: pair.master,
+            master_writer: writer,
+            killer,
+            pgid,
+            output: Vec::new(),
+        })
+    }
+
+    /// Send a line to the TUI's stdin (the prompt input). Appends `\n` so
+    /// rustyline's readline treats it as Enter.
+    pub fn send_line(&mut self, line: &str) -> Result<(), PtyError> {
+        self.master_writer
+            .write_all(line.as_bytes())
+            .and_then(|_| self.master_writer.write_all(b"\n"))?;
+        self.master_writer.flush()?;
+        Ok(())
+    }
+
+    /// Drain PTY output until `predicate` returns `true` on the accumulated
+    /// output (with ANSI escapes stripped for matching only), or until
+    /// `timeout` elapses. Returns the raw accumulated bytes on success.
+    ///
+    /// The predicate matches against ANSI-stripped text so a smoke scenario
+    /// can wait for a semantic marker (e.g. a token, a status word) without
+    /// depending on colors or cursor moves — keeping presentation details
+    /// out of the long-term contract (RFC #19 decision five).
+    pub fn wait_for(
+        &mut self,
+        timeout: Duration,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Result<Vec<u8>, PtyError> {
+        let start = Instant::now();
+        let mut buf = [0u8; 4096];
+        let mut reader = self
+            .master
+            .try_clone_reader()
+            .map_err(|e| PtyError::Pty(e.to_string()))?;
+        loop {
+            // portable-pty's reader is blocking; one best-effort `read` per
+            // iteration, bounded by `timeout`. A quiet PTY is a real failure
+            // surfaced by the timeout (the scenario always sends input that
+            // produces output).
+            let n = reader.read(&mut buf)?;
+            if n > 0 {
+                self.output.extend_from_slice(&buf[..n]);
+                if self.output.len() > READ_BUDGET {
+                    return Err(PtyError::Pty(format!(
+                        "PTY output exceeded {} byte budget",
+                        READ_BUDGET
+                    )));
+                }
+                let stripped = strip_ansi(&String::from_utf8_lossy(&self.output));
+                if predicate(&stripped) {
+                    return Ok(self.output.clone());
+                }
+            }
+            if start.elapsed() >= timeout {
+                return Err(PtyError::Timeout(timeout));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The accumulated raw PTY output so far.
+    pub fn output(&self) -> &[u8] {
+        &self.output
+    }
+
+    /// The child's process-group leader pid (if the PTY reports one). Use
+    /// for `kill -KILL -<pgid>` cleanup.
+    pub fn pgid(&self) -> Option<i32> {
+        self.pgid
+    }
+
+    /// Kill the whole process group and reap the child. Best-effort: errors
+    /// are swallowed because the priority is "no orphaned TUI / sandbox
+    /// children", not precise error reporting.
+    pub fn kill_and_reap(&mut self) {
+        let _ = self.killer.kill();
+        if let Some(pgid) = self.pgid {
+            let _ = std::process::Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{pgid}"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+impl Drop for PtyTuiDriver {
+    fn drop(&mut self) {
+        self.kill_and_reap();
+    }
+}
+
+/// Strip ANSI escape sequences (CSI, OSC, simple escapes) from `text`. Used
+/// only for predicate matching — the raw output is preserved separately so
+/// no display detail ever enters a long-term contract.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        // ESC consumed; what follows determines the escape kind.
+        match chars.next() {
+            Some('[') => {
+                // CSI: skip until a 0x40..0x7e terminator.
+                #[allow(clippy::while_let_on_iterator)]
+                while let Some(t) = chars.next() {
+                    if ('@'..='~').contains(&t) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC: skip until BEL (\x07) or ST (ESC \).
+                #[allow(clippy::while_let_on_iterator)]
+                while let Some(t) = chars.next() {
+                    if t == '\x07' {
+                        break;
+                    }
+                    if t == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(other) => {
+                // Simple two-char escape (e.g. ESC c reset).
+                let _ = other;
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_removes_color_and_cursor_codes() {
+        let raw = "\x1b[32m> \x1b[0mhello\x1b[1mworld\x1b[0m\x1b[?25h";
+        assert_eq!(strip_ansi(raw), "> helloworld");
+    }
+
+    #[test]
+    fn strip_ansi_handles_osc_title_sequence() {
+        let raw = "\x1b]0;some title\x07prompt: ";
+        assert_eq!(strip_ansi(raw), "prompt: ");
+    }
+
+    #[test]
+    fn strip_ansi_handles_st_terminated_osc() {
+        let raw = "\x1b]2;window title\x1b\\done";
+        assert_eq!(strip_ansi(raw), "done");
+    }
+
+    #[test]
+    fn strip_ansi_passes_plain_text_through() {
+        assert_eq!(strip_ansi("plain text"), "plain text");
+    }
+
+    /// Tracer bullet: spawn `cat` in a PTY, send a line, wait for it to be
+    /// echoed back. Proves the PTY round-trip works end-to-end without
+    /// touching the product binary or MSB. `cat` copies stdin to stdout via
+    /// the PTY, so the line we write should come back through the master
+    /// reader.
+    #[test]
+    fn pty_round_trip_with_cat() {
+        let world = ScenarioWorld::new("lattice-harness-pty-cat").expect("world");
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("cat");
+        cmd.cwd(world.project_dir());
+        cmd.env_clear();
+        for (k, v) in world.env_summary() {
+            cmd.env(k, v);
+        }
+        let _child = pair.slave.spawn_command(cmd).expect("spawn cat");
+        let mut writer = pair.master.take_writer().expect("writer");
+        drop(pair.slave);
+
+        writer.write_all(b"hello-pty\n").expect("write");
+        writer.flush().expect("flush");
+
+        let start = Instant::now();
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let mut got = String::new();
+        let mut buf = [0u8; 1024];
+        while start.elapsed() < Duration::from_secs(5) {
+            if let Ok(n) = reader.read(&mut buf)
+                && n > 0
+            {
+                got.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if got.contains("hello-pty") {
+                    break;
+                }
+            }
+        }
+        assert!(
+            strip_ansi(&got).contains("hello-pty"),
+            "expected echo of hello-pty in PTY output, got: {got:?}"
+        );
+    }
+}

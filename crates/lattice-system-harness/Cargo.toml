@@ -13,3 +13,12 @@ serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 
+# PTY support for the one or two TUI smoke scenarios (RFC #19 decision three:
+# PTY only proves the TUI entrypoint still wires into the same turn chain).
+# `portable-pty` is a general test library, not a product crate, so it
+# satisfies `cargo xtask harness-boundary`. Unix-only target gating keeps
+# the Windows PTY backend out of the dependency graph on the committed
+# platforms.
+[target.'cfg(unix)'.dependencies]
+portable-pty = "0.9"
+

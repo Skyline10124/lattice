@@ -1583,3 +1583,100 @@ concurrent-read safety.
 `crates/lattice-cli/src/commands/audit.rs`, `crates/lattice-cli/src/main.rs`,
 `crates/lancet-api/AGENTS.md`, `crates/lattice-cli/AGENTS.md`, `FINDINGS.md`,
 `FIX.md`, `docs/LANCET.md`.
+
+## Codeberg #21: harness 假 LLM、SessionSendDriver 完整 turn、PTY smoke — 2026-07-05
+
+Severity: FEATURE (测试重构 2/6).
+
+**Problem:** `lattice-system-harness` (#20) 只能驱动 `lattice --help` 等
+fast-binary 黑盒；无法驱动确定性的完整 turn，后续产品级场景 (#24/#27–#30)
+没有载体。#21 要求四块交付：localhost 假 LLM、`SessionSendDriver`、`PtyTuiDriver`、
+场景超时 + 进程组清理 + 失败产物 + 一个最小完整 turn 场景。
+
+**Fix summary:**
+
+- `src/fake_llm.rs` — localhost OpenAI-compatible HTTP/SSE 假服务（std
+  `TcpListener` 手写，零新依赖）。通过正式 `OPENAI_COMPATIBLE_*` 配置接入；
+  捕获真实请求（model / message_roles / wire tool_names / raw body）；四种
+  SSE 脚本（`PlainText` / `ToolCall` / `Disconnect` / `IllegalResponse`）按
+  `OpenAiSseParser` 期望的 chunk 形状渲染（`data: {json}\n\n` + `data: [DONE]`）。
+  7 个 fast 单测（含真实 HTTP round-trip tracer）。
+- `src/session_send.rs` — `SessionSendDriver` 驱动公开
+  `lattice --json session send`，逐行解析 JSONL；`TurnEventLine` 解析器
+  **容忍未知变体**（公开契约是增量的，未知 `type` → `Unknown{type_name, raw}`，
+  绝非解析错误）；`SendExitCode` 分类 0/1/2 契约；`derive_send_exit_code`
+  仅从公开 JSONL 信号推导退出码（镜像产品 `exit_code_from_state`，但不导入
+  产品 enum）；`assert_event_subsequence` 断言必现事件子序列（RFC 决定五：禁止
+  整段 golden）。15 个 fast 单测。
+- `src/driver.rs` — 升级：子进程在独立进程组 spawn（Unix
+  `process_group(0)`），超时 `kill -KILL -<pgid>` 杀整组（PRD user story 20）；
+  新增 `processes_in_pgid` 公开 helper（Linux /proc 扫描）供测试与 PTY smoke
+  机检“整组已死”。3 个 fast 单测，含 **grandchild-kill** 测试（`sh -c 'sleep 30
+  & wait'` + 1s 超时 → 验证 /proc 无同 pgid 幸存者），这是单 `kill()` 不满足、
+  `killpg` 满足的核心 #21 验收点。
+- `src/artifacts.rs` + `src/assert.rs` — 失败产物扩容：`write_fake_llm_log`
+  写假 LLM 请求日志；`WorkspaceSnapshot::capture` 捕获 turn 前工作区树清单，
+  `write_workspace_diff` 写 turn 前/后清单 + 统一 diff（`workspace_before.txt` /
+  `workspace_after.txt` / `workspace_diff.txt`，PRD user story 21：工作区差异），
+  均对 `secrets` 子串脱敏；`assert_with_full_artifacts` 协调完整 bundle
+  （stdout/stderr/command/world env + 假 LLM 日志 + 工作区清单）。
+  `tests/msb_full_turn.rs` 的 `write_full_bundle` 接 turn 前 snapshot，失败时写
+  workspace before/after diff。7 个 fast 单测（含 snapshot 排序、diff 增删改、
+  脱敏）。
+- `src/layer_guard.rs` — 层级 gating：`#[ignore]` + `LATTICE_HARNESS_MSB=1`
+  env guard。置位而 MSB 不可用时 `require_msb_env` 经 `lattice lancet status`
+  探测后 **panic**（RFC 不可回退边界 7：必须失败不静默）；未置位时 `#[ignore]`
+  退出普通 CI，保持 fast lane 干净。2 个 fast 单测。
+- `src/scenario.rs` — 新增可选 `total_timeout_secs` + `ScenarioBudget`
+  （PRD user story 19：步骤级 + 总量超时）。多步场景每步前 `budget.check`，
+  超时 panic。`None` 默认保留 #20 单步行为。5 个 fast 单测。
+- `src/pty_tui.rs` — `PtyTuiDriver`（`portable-pty`，Unix-only target dep，
+  harness-boundary 通过）。`wait_for` 用 ANSI 剥离后的文本做语义匹配，提示符/
+  颜色/排版只存在于 driver 内，场景零展示细节断言（RFC 决定三）。5 个 fast 单测
+  （含 `cat` PTY round-trip tracer）。
+- `tests/msb_full_turn.rs` — 最小完整 turn 场景（layer=microsandbox，
+  `#[ignore]`）：纯文本 turn → JSONL 子序列（turn_started → model_started →
+  token_delta → model_finished → turn_committed）→ exit 0 与流推导一致 →
+  `session log/status --json` 反映新 commit → 假 LLM 收到 model=msb-plain 的
+  user 请求。失败写完整 bundle（含假 LLM 日志 + 工作区清单 + cross-validation
+  输出）。
+- `tests/pty_tui_smoke.rs` — PTY smoke（layer=pty_smoke，`#[ignore]`）：启动
+  TUI → 等 `>` 提示符 → 发 ping → 等 `pong` token → `/quit` → Drop 杀进程组 →
+  Linux /proc 扫描验证无幸存者。不断言任何展示细节。
+- `crates/lattice-system-harness/AGENTS.md` — 补 Boundaries（假 LLM 正式配置
+  接入、SessionSendDriver 容忍未知变体、进程组 spawn+killpg）、Test Layers
+  （fast lane / MSB+PTY `#[ignore]` + `LATTICE_HARNESS_MSB=1`）、Verification
+  （full gate `--include-ignored` 必须 fail-not-skip）。
+
+**Design decisions (拍板，理由见上):**
+
+1. 层级 gating 用 `#[ignore]` + `LATTICE_HARNESS_MSB=1` env guard（非
+   env-gated 编译方案——后者有“意外 skip”风险）。符合 PRD user story 17 与
+   RFC 不可回退边界 7。
+2. 假 LLM 用 std `TcpListener` 手写 SSE（零新依赖）；PTY 用 `portable-pty`
+   （通用测试库，harness-boundary 通过；Unix-only target dep；依赖面从轻）。
+3. JSONL 断言粒度 = 必现事件**子序列**，非整段 golden（RFC 决定五）。
+
+**Verification:**
+
+- `cargo fmt --all --check` — clean。
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean。
+- `cargo run -q --package xtask -- harness-boundary` — PASS（3/3 groups）。
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
+  — **44 lib + 4 fast_cli_help = 48 passed, 0 failed, 2 ignored** (MSB/PTY
+  smoke, gated by `LATTICE_HARNESS_MSB=1`).
+- `cargo test --workspace --exclude lancet-native` — **1307 passed, 0 failed**.
+  - **L-26-01 已知坑**：`lancet-native` 的 `fetch_effect_contract_negative` 在
+    本 DNS 黑洞环境挂起（远早于 #21 的 ACCEPTED RESIDUAL，见 FINDINGS.md:42）；
+    正常网络无此问题。`cargo xtask ci` 的 test step 在受限环境需
+    `--exclude lancet-native` 绕过，已在 FINDINGS.md 注明，非 #21 回归。
+- **MSB 实跑约束**：本执行环境 `microsandbox` daemon 未运行、`msb` CLI 不在
+  PATH；`tests/msb_full_turn.rs` 与 `tests/pty_tui_smoke.rs` 的 fast 层
+  （编译 + `#[ignore]` 跳过 + layer_guard/parse/budget 单测）已全绿，**真实
+  MSB turn 与 PTY smoke 的实跑由 owner 在本机 KVM 完整门验证**
+  （`LATTICE_HARNESS_MSB=1 ... --include-ignored`）。
+
+**Files:** `crates/lattice-system-harness/{Cargo.toml,AGENTS.md,
+src/{lib.rs,fake_llm.rs,session_send.rs,driver.rs,artifacts.rs,assert.rs,
+layer_guard.rs,scenario.rs,pty_tui.rs},tests/{msb_full_turn.rs,pty_tui_smoke.rs}}`,
+`FIX.md`, `FINDINGS.md`。

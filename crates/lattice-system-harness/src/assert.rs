@@ -6,7 +6,11 @@ use std::process::Output;
 
 use thiserror::Error;
 
-use crate::artifacts::{capture_from_output, redact_env_pair, write_failure_artifacts};
+use crate::artifacts::{
+    capture_from_output, redact_env_pair, write_failure_artifacts, write_fake_llm_log,
+    write_workspace_listing,
+};
+use crate::fake_llm::CapturedRequest;
 use crate::world::ScenarioWorld;
 
 /// Base directory for persisted failure artifacts.
@@ -156,6 +160,53 @@ pub fn assert_with_failure_artifacts(
             ctx.push('\n');
         }
         std::fs::write(dir.join("world.txt"), ctx)?;
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Full-scenario failure bundle: writes the stdout/stderr/command/world
+/// context (as `assert_with_failure_artifacts` does) **plus** the fake LLM
+/// request log and a workspace tree listing. Use this for full-turn scenarios
+/// (RFC #19 decision eight + PRD user story 21) where the post-mortem needs
+/// to see what the product sent the model and what the project tree looks
+/// like after the turn.
+///
+/// `project_root` is the directory to list (typically
+/// `world.project_dir()`). `captures` is the fake LLM's captured request log
+/// at the moment of failure. Both are redacted against `secrets`.
+#[allow(clippy::too_many_arguments)]
+pub fn assert_with_full_artifacts(
+    world: &ScenarioWorld,
+    scenario_name: &str,
+    command_summary: &str,
+    output: &Output,
+    captures: &[CapturedRequest],
+    project_root: &std::path::Path,
+    secrets: &[&str],
+    result: Result<(), AssertError>,
+) -> Result<(), AssertError> {
+    if let Err(err) = result {
+        let dir = failure_dir(scenario_name);
+        let artifacts = capture_from_output(dir.clone(), output, command_summary, secrets);
+        write_failure_artifacts(&artifacts)?;
+        let mut ctx = format!(
+            "scenario: {scenario_name}\ncommand: {}\n",
+            artifacts.command_summary
+        );
+        ctx.push_str(&format!("project_dir: {}\n", world.project_dir().display()));
+        ctx.push_str(&format!("home: {}\n", world.home().display()));
+        ctx.push_str(&format!("port: {}\n", world.port()));
+        ctx.push_str("env:\n");
+        for (k, v) in world.env_summary() {
+            ctx.push_str(&redact_env_pair(&k, &v, secrets));
+            ctx.push('\n');
+        }
+        std::fs::write(dir.join("world.txt"), ctx)?;
+        // Best-effort: a failure to write the supplementary artifacts must
+        // not mask the original assertion error.
+        let _ = write_fake_llm_log(&dir, captures, secrets);
+        let _ = write_workspace_listing(&dir, project_root, secrets);
         return Err(err);
     }
     Ok(())
