@@ -436,7 +436,7 @@ fn release_smoke_release_gate_v1_4_includes_lancet_boundary_check() {
     let gate = std::fs::read_to_string(&gate_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", gate_path.display()));
     assert!(
-        gate.contains("scripts/lancet-boundary-check.sh"),
+        gate.contains("cargo run --package xtask -- lancet-boundary"),
         "v1.4 release gate must invoke LANCET boundary check"
     );
     assert!(
