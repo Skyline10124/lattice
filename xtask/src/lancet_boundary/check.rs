@@ -290,6 +290,70 @@ mod tests {
     }
 
     #[test]
+    fn tool_executor_reexport_clean_agent_empty() {
+        let dir = TempDir::new().unwrap();
+        let agent = dir.path().join("crates/lattice-agent/src");
+        fs::create_dir_all(&agent).unwrap();
+        fs::write(agent.join("lib.rs"), "fn foo() {}\n").unwrap();
+        let hits = tool_executor_reexport_hits(dir.path()).unwrap();
+        assert!(hits.is_empty(), "clean agent flagged re-export: {hits:?}");
+    }
+
+    #[test]
+    fn default_tool_executor_scan_flags_non_allowlisted() {
+        let dir = TempDir::new().unwrap();
+        let api = dir.path().join("crates/lattice-api/src");
+        fs::create_dir_all(&api).unwrap();
+        fs::write(api.join("lib.rs"), "fn x() { DefaultToolExecutor; }\n").unwrap();
+        let hits = scan_with_allowlist(
+            dir.path(),
+            "DefaultToolExecutor",
+            DEFAULT_TOOL_EXECUTOR_ALLOWLIST,
+        )
+        .unwrap();
+        assert!(joined(&hits).contains("lattice-api"));
+    }
+
+    #[test]
+    fn default_tool_definitions_allowlisted_fixture_dropped() {
+        let dir = TempDir::new().unwrap();
+        let tests = dir.path().join("crates/lattice-api/tests");
+        fs::create_dir_all(&tests).unwrap();
+        fs::write(
+            tests.join("usage_turn.rs"),
+            "fn x() { default_tool_definitions(); }\n",
+        )
+        .unwrap();
+        let hits = scan_with_allowlist(
+            dir.path(),
+            "default_tool_definitions",
+            DEFAULT_TOOL_DEFINITIONS_ALLOWLIST,
+        )
+        .unwrap();
+        assert!(hits.is_empty(), "allowlisted fixture not dropped: {hits:?}");
+    }
+
+    #[test]
+    fn lattice_agent_clean_manifest_no_hit() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\nmembers = [\"crates/lattice-agent\"]\n",
+        )
+        .unwrap();
+        let agent = dir.path().join("crates/lattice-agent");
+        fs::create_dir_all(agent.join("src")).unwrap();
+        fs::write(agent.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            agent.join("Cargo.toml"),
+            "[package]\nname = \"lattice-agent\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        let out = lattice_agent_forbidden_dependency_graph(dir.path()).unwrap();
+        assert!(out.is_empty(), "clean lattice-agent flagged: {out:?}");
+    }
+
+    #[test]
     fn target_directory_excluded_from_scan() {
         let dir = TempDir::new().unwrap();
         let bad = dir.path().join("crates/foo/src/target/evil.rs");

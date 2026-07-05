@@ -330,4 +330,61 @@ edition = "2024"
         let out = metadata_transitive_workspace_members(root).unwrap();
         assert!(joined(&out).contains("net-guard"));
     }
+
+    #[test]
+    fn manifest_workspace_inheritance_clean_manifest_empty() {
+        let dir = TempDir::new().unwrap();
+        let manifest = dir.path().join("Cargo.toml");
+        fs::write(
+            &manifest,
+            r#"
+[package]
+name = "harness"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+serde = "1"
+"#,
+        )
+        .unwrap();
+        let out = manifest_workspace_inheritance(&manifest).unwrap();
+        assert!(
+            out.is_empty(),
+            "clean manifest flagged workspace inheritance: {out:?}"
+        );
+    }
+
+    #[test]
+    fn transitive_workspace_members_clean_workspace_empty() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[workspace]
+resolver = "3"
+members = ["crates/lattice-system-harness"]
+"#,
+        )
+        .unwrap();
+        let harness = root.join("crates/lattice-system-harness");
+        fs::create_dir_all(harness.join("src")).unwrap();
+        fs::write(
+            harness.join("Cargo.toml"),
+            r#"
+[package]
+name = "lattice-system-harness"
+version = "0.0.0"
+edition = "2024"
+"#,
+        )
+        .unwrap();
+        fs::write(harness.join("src/lib.rs"), "").unwrap();
+        let out = metadata_transitive_workspace_members(root).unwrap();
+        assert!(
+            out.is_empty(),
+            "clean workspace flagged transitive members: {out:?}"
+        );
+    }
 }

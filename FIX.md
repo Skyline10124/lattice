@@ -4,6 +4,49 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #26 follow-up: per-group pos/neg unit tests for xtask boundary checks — 2026-07-05
+
+Severity: LOW (test coverage / regression guard).
+
+**Problem:** `cargo xtask harness-boundary` (3 groups) and `cargo xtask
+lancet-boundary` (6 groups) landed with unit tests, but the "each group has
+both a positive (flags a violation) and a negative (clean input → empty) test"
+invariant did not hold uniformly. 5 groups lacked a dedicated
+negative/clean-case test (harness G2 `manifest_workspace_inheritance`, harness
+G3 `metadata_transitive_workspace_members`, lancet G1
+`lattice_agent_forbidden_dependency_graph`, lancet G3 `default_tool_definitions`
+scan, lancet G4 `tool_executor_reexport_hits`), and lancet G2
+(`DefaultToolExecutor` scan) had only a helper-level positive
+(`filter_allowlist_drops_matching_prefix`), no direct positive through
+`scan_with_allowlist` with that needle+allowlist.
+
+**Fix:**
+
+- harness G2: `manifest_workspace_inheritance_clean_manifest_empty` — clean
+  manifest (no `workspace = true`) asserts empty.
+- harness G3: `transitive_workspace_members_clean_workspace_empty` — workspace
+  where `lattice-system-harness` has no workspace-member deps asserts empty.
+- lancet G1: `lattice_agent_clean_manifest_no_hit` — `lattice-agent` with no
+  `lancet-native` dep/string asserts empty.
+- lancet G2: `default_tool_executor_scan_flags_non_allowlisted` — direct
+  `scan_with_allowlist("DefaultToolExecutor", DEFAULT_TOOL_EXECUTOR_ALLOWLIST)`
+  retains a non-allowlisted `lattice-api/src/lib.rs` hit.
+- lancet G3: `default_tool_definitions_allowlisted_fixture_dropped` — the
+  allowlisted `crates/lattice-api/tests/usage_turn.rs` fixture is dropped
+  (asserts empty).
+- lancet G4: `tool_executor_reexport_clean_agent_empty` —
+  `lattice-agent/src/lib.rs` with no `ToolExecutor` re-export asserts empty.
+
+**Verified:** `cargo test -p xtask` — 24 passed (was 18; +6).
+`cargo clippy -p xtask --all-targets -- -D warnings` — clean.
+`cargo fmt --all --check` — clean. `cargo xtask harness-boundary` ✓,
+`cargo xtask lancet-boundary` ✓.
+
+**Changed files:** `xtask/src/harness_boundary/check.rs`,
+`xtask/src/lancet_boundary/check.rs`, `FIX.md`.
+
+---
+
 ## Codeberg #26 follow-up: track `.cargo/config.toml`, standardize `cargo xtask` — 2026-03-14
 
 Severity: LOW (developer ergonomics / clone parity).
