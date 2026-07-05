@@ -1,11 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+mod boundary_report;
 mod ci;
 mod harness_boundary;
 mod lancet_boundary;
 mod output;
 mod path_norm;
+mod repo_root;
+mod scan_rs_tree;
 
 use clap::{Parser, Subcommand};
 

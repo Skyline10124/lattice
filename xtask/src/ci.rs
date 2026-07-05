@@ -6,13 +6,13 @@ use std::process::{Command, Stdio};
 
 use clap::Args;
 
-use crate::{harness_boundary, output::repo_root};
+use crate::{harness_boundary, repo_root};
 
 #[derive(Args, Debug)]
 pub struct CiArgs {}
 
 pub fn run(_args: CiArgs) -> anyhow::Result<()> {
-    let root = repo_root()?;
+    let root = repo_root::repo_root()?;
     let lattice_bin = root.join("target/debug/lattice");
     let harness_failures = root.join("target/harness-failures");
 

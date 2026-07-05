@@ -5,7 +5,8 @@ use std::path::Path;
 
 use cargo_metadata::MetadataCommand;
 use regex::Regex;
-use walkdir::WalkDir;
+
+use crate::scan_rs_tree::{LineHit, collect_rs_line_hits};
 
 pub const DEFAULT_TOOL_EXECUTOR_ALLOWLIST: &[&str] = &[
     "crates/lancet-native/src/executor/",
@@ -25,7 +26,7 @@ pub const COMPOSITE_EXECUTOR_ALLOWLIST: &[&str] = &[
 
 const CLI_PRODUCTION_ALLOWLIST: &[&str] = &["crates/lattice-cli/src/commands/run_tests.rs"];
 
-pub fn lattice_agent_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<String> {
+pub fn lattice_agent_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
     let mut parts = Vec::new();
 
     let metadata = MetadataCommand::new()
@@ -53,84 +54,54 @@ pub fn lattice_agent_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Res
         }
     }
 
-    Ok(parts.join("\n"))
+    Ok(parts)
 }
 
 pub fn scan_with_allowlist(
     repo_root: &Path,
     needle: &str,
     allowlist: &[&str],
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Vec<LineHit>> {
     let hits = scan_crates_source_and_tests(repo_root, needle)?;
-    Ok(filter_allowlist(&hits.join("\n"), allowlist))
+    Ok(filter_allowlist(&hits, allowlist))
 }
 
-pub fn tool_executor_reexport_hits(repo_root: &Path) -> anyhow::Result<String> {
+pub fn tool_executor_reexport_hits(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
     let re = Regex::new(r"pub use .*ToolExecutor|lattice_tooling::ToolExecutor")?;
     let agent_root = repo_root.join("crates/lattice-agent");
-    let mut hits = Vec::new();
-    for entry in WalkDir::new(&agent_root)
-        .into_iter()
-        .filter_entry(|e| !is_excluded_dir(e.path()))
-    {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-            continue;
-        }
-        let content = std::fs::read_to_string(path)?;
-        for (line_no, line) in content.lines().enumerate() {
-            if re.is_match(line) {
-                let rel = path.strip_prefix(repo_root).unwrap_or(path);
-                hits.push(format!("{}:{}:{}", rel.display(), line_no + 1, line));
-            }
-        }
-    }
-    Ok(hits.join("\n"))
+    collect_rs_line_hits(
+        agent_root.as_path(),
+        repo_root,
+        |_| false,
+        |line| re.is_match(line),
+    )
 }
 
-pub fn cli_production_bypass_hits(repo_root: &Path) -> anyhow::Result<String> {
+pub fn cli_production_bypass_hits(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
     let re = Regex::new(r"DefaultToolExecutor|AgentLoop::new")?;
     let cli_src = repo_root.join("crates/lattice-cli/src");
-    let mut hits = Vec::new();
-    for entry in WalkDir::new(&cli_src)
-        .into_iter()
-        .filter_entry(|e| !is_excluded_dir(e.path()))
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|n| n.ends_with("_tests.rs"))
-        {
-            continue;
-        }
-        let rel_to_src = path.strip_prefix(&cli_src).unwrap_or(path);
-        if rel_to_src.components().any(|c| c.as_os_str() == "tests") {
-            continue;
-        }
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-            continue;
-        }
-        let content = std::fs::read_to_string(path)?;
-        for (line_no, line) in content.lines().enumerate() {
-            if re.is_match(line) {
-                let rel = path.strip_prefix(repo_root).unwrap_or(path);
-                hits.push(format!("{}:{}:{}", rel.display(), line_no + 1, line));
-            }
-        }
-    }
-    Ok(filter_allowlist(&hits.join("\n"), CLI_PRODUCTION_ALLOWLIST))
+    let hits = collect_rs_line_hits(
+        cli_src.as_path(),
+        repo_root,
+        |path| skip_cli_test_artifact(path, &cli_src),
+        |line| re.is_match(line),
+    )?;
+    Ok(filter_allowlist(&hits, CLI_PRODUCTION_ALLOWLIST))
 }
 
-fn scan_crates_source_and_tests(repo_root: &Path, needle: &str) -> anyhow::Result<Vec<String>> {
+fn skip_cli_test_artifact(path: &Path, cli_src: &Path) -> bool {
+    if path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|n| n.ends_with("_tests.rs"))
+    {
+        return true;
+    }
+    let rel_to_src = path.strip_prefix(cli_src).unwrap_or(path);
+    rel_to_src.components().any(|c| c.as_os_str() == "tests")
+}
+
+fn scan_crates_source_and_tests(repo_root: &Path, needle: &str) -> anyhow::Result<Vec<LineHit>> {
     let mut hits = Vec::new();
     for crate_dir in std::fs::read_dir(repo_root.join("crates"))? {
         let crate_dir = crate_dir?;
@@ -140,53 +111,29 @@ fn scan_crates_source_and_tests(repo_root: &Path, needle: &str) -> anyhow::Resul
             if !scan_root.is_dir() {
                 continue;
             }
-            for entry in WalkDir::new(&scan_root)
-                .into_iter()
-                .filter_entry(|e| !is_excluded_dir(e.path()))
-            {
-                let entry = entry?;
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-                    continue;
-                }
-                let content = std::fs::read_to_string(path)?;
-                for (line_no, line) in content.lines().enumerate() {
-                    if line.contains(needle) {
-                        let rel = path.strip_prefix(repo_root).unwrap_or(path);
-                        hits.push(format!("{}:{}:{}", rel.display(), line_no + 1, line));
-                    }
-                }
-            }
+            hits.extend(collect_rs_line_hits(
+                &scan_root,
+                repo_root,
+                |_| false,
+                |line| line.contains(needle),
+            )?);
         }
     }
     Ok(hits)
 }
 
-pub fn filter_allowlist(lines: &str, allowlist: &[&str]) -> String {
-    let mut out = Vec::new();
-    for line in lines.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let file = line.split(':').next().unwrap_or(line);
-        if !is_allowlisted(file, allowlist) {
-            out.push(line.to_string());
-        }
-    }
-    out.join("\n")
+pub fn filter_allowlist(hits: &[LineHit], allowlist: &[&str]) -> Vec<LineHit> {
+    hits.iter()
+        .filter(|line| {
+            let file = line.split(':').next().unwrap_or(line.as_str());
+            !is_allowlisted(file, allowlist)
+        })
+        .cloned()
+        .collect()
 }
 
 pub fn is_allowlisted(file: &str, allowlist: &[&str]) -> bool {
     allowlist.iter().any(|prefix| file.starts_with(prefix))
-}
-
-fn is_excluded_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|s| s.to_str())
-        .is_some_and(|name| name == "target" || name == ".planning")
 }
 
 #[cfg(test)]
@@ -194,6 +141,10 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn joined(hits: &[LineHit]) -> String {
+        hits.join("\n")
+    }
 
     #[test]
     fn allowlist_prefix_semantics() {
@@ -209,11 +160,14 @@ mod tests {
 
     #[test]
     fn filter_allowlist_drops_matching_prefix() {
-        let input = "crates/lancet-native/src/lib.rs:1:DefaultToolExecutor\n\
-                     crates/lattice-api/src/x.rs:2:DefaultToolExecutor";
-        let out = filter_allowlist(input, DEFAULT_TOOL_EXECUTOR_ALLOWLIST);
-        assert!(out.contains("lattice-api"));
-        assert!(!out.contains("lancet-native/src/lib.rs"));
+        let input = vec![
+            "crates/lancet-native/src/lib.rs:1:DefaultToolExecutor".to_string(),
+            "crates/lattice-api/src/x.rs:2:DefaultToolExecutor".to_string(),
+        ];
+        let out = filter_allowlist(&input, DEFAULT_TOOL_EXECUTOR_ALLOWLIST);
+        let text = joined(&out);
+        assert!(text.contains("lattice-api"));
+        assert!(!text.contains("lancet-native/src/lib.rs"));
     }
 
     #[test]
@@ -226,9 +180,10 @@ mod tests {
         fs::write(src.join("foo_tests.rs"), "fn x() { AgentLoop::new(); }\n").unwrap();
         fs::write(src.join("tests/mod.rs"), "fn x() { AgentLoop::new(); }\n").unwrap();
         let hits = cli_production_bypass_hits(dir.path()).unwrap();
-        assert!(hits.contains("main.rs"));
-        assert!(!hits.contains("foo_tests.rs"));
-        assert!(!hits.contains("tests/mod.rs"));
+        let text = joined(&hits);
+        assert!(text.contains("main.rs"));
+        assert!(!text.contains("foo_tests.rs"));
+        assert!(!text.contains("tests/mod.rs"));
     }
 
     #[test]
@@ -247,21 +202,42 @@ mod tests {
         )
         .unwrap();
         let hits = cli_production_bypass_hits(dir.path()).unwrap();
-        assert!(!hits.contains("run_tests.rs"));
-        assert!(hits.contains("other.rs"));
+        let text = joined(&hits);
+        assert!(!text.contains("run_tests.rs"));
+        assert!(text.contains("other.rs"));
     }
 
     #[test]
     fn lattice_agent_manifest_lancet_native_hit() {
         let dir = TempDir::new().unwrap();
-        fs::create_dir_all(dir.path().join("crates/lattice-agent")).unwrap();
+        // `lattice_agent_forbidden_dependency_graph` runs `cargo metadata`, which
+        // resolves path dependencies, so the referenced crate must exist. Provide
+        // a minimal virtual workspace with both lattice-agent and a placeholder
+        // lancet-native so metadata succeeds; the asserted hit comes from the
+        // lattice-agent manifest text scan branch.
         fs::write(
-            dir.path().join("crates/lattice-agent/Cargo.toml"),
-            "[dependencies]\nlancet-native = { path = \"../lancet-native\" }\n",
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\nmembers = [\"crates/lattice-agent\", \"crates/lancet-native\"]\n",
+        )
+        .unwrap();
+        let agent = dir.path().join("crates/lattice-agent");
+        fs::create_dir_all(agent.join("src")).unwrap();
+        fs::write(agent.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            agent.join("Cargo.toml"),
+            "[package]\nname = \"lattice-agent\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[dependencies]\nlancet-native = { path = \"../lancet-native\" }\n",
+        )
+        .unwrap();
+        let native = dir.path().join("crates/lancet-native");
+        fs::create_dir_all(native.join("src")).unwrap();
+        fs::write(native.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            native.join("Cargo.toml"),
+            "[package]\nname = \"lancet-native\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
         )
         .unwrap();
         let out = lattice_agent_forbidden_dependency_graph(dir.path()).unwrap();
-        assert!(out.contains("lancet-native"));
+        assert!(joined(&out).contains("lancet-native"));
     }
 
     #[test]
@@ -280,7 +256,7 @@ mod tests {
             DEFAULT_TOOL_DEFINITIONS_ALLOWLIST,
         )
         .unwrap();
-        assert!(hits.contains("lattice-api"));
+        assert!(joined(&hits).contains("lattice-api"));
     }
 
     #[test]
@@ -298,8 +274,9 @@ mod tests {
             COMPOSITE_EXECUTOR_ALLOWLIST,
         )
         .unwrap();
-        assert!(hits.contains("lattice-api"));
-        assert!(!hits.contains("registry.rs"));
+        let text = joined(&hits);
+        assert!(text.contains("lattice-api"));
+        assert!(!text.contains("registry.rs"));
     }
 
     #[test]
@@ -309,7 +286,7 @@ mod tests {
         fs::create_dir_all(&agent).unwrap();
         fs::write(agent.join("lib.rs"), "pub use foo::ToolExecutor;\n").unwrap();
         let hits = tool_executor_reexport_hits(dir.path()).unwrap();
-        assert!(hits.contains("ToolExecutor"));
+        assert!(joined(&hits).contains("ToolExecutor"));
     }
 
     #[test]

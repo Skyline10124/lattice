@@ -1,19 +1,23 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-pub fn print_group(group_name: &str, group_output: &str) -> bool {
+pub fn print_group(group_name: &str, group_output: &[String]) -> bool {
     if group_output.is_empty() {
         println!("PASS [{group_name}]");
         true
     } else {
         println!();
         println!("FAIL [{group_name}]");
-        println!("{group_output}");
+        for line in group_output {
+            println!("{line}");
+        }
         false
     }
 }
 
-pub fn finish_banner(passed_message: &str, failed_message: &str, failures: usize) {
+/// Prints the final boundary summary and **terminates the process** with code 1 when
+/// `failures > 0`.
+pub fn exit_with_status_on_failures(passed_message: &str, failed_message: &str, failures: usize) {
     if failures > 0 {
         println!();
         println!("{failed_message}: {failures} group(s)");
@@ -21,12 +25,4 @@ pub fn finish_banner(passed_message: &str, failed_message: &str, failures: usize
     }
     println!();
     println!("{passed_message}");
-}
-
-pub fn repo_root() -> anyhow::Result<std::path::PathBuf> {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    Ok(manifest_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("xtask manifest has no parent directory"))?
-        .to_path_buf())
 }

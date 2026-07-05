@@ -16,7 +16,10 @@ const HARNESS_PACKAGE: &str = "lattice-system-harness";
 static WORKSPACE_TRUE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"workspace\s*=\s*true").unwrap());
 
-pub fn manifest_forbidden_deps(manifest_path: &Path, repo_root: &Path) -> anyhow::Result<String> {
+pub fn manifest_forbidden_deps(
+    manifest_path: &Path,
+    repo_root: &Path,
+) -> anyhow::Result<Vec<String>> {
     let raw = std::fs::read_to_string(manifest_path)?;
     let data: Value = toml::from_str(&raw)?;
     let manifest_dir = manifest_path
@@ -44,10 +47,10 @@ pub fn manifest_forbidden_deps(manifest_path: &Path, repo_root: &Path) -> anyhow
             }
         }
     }
-    Ok(hits.join("\n"))
+    Ok(hits)
 }
 
-pub fn manifest_workspace_inheritance(manifest_path: &Path) -> anyhow::Result<String> {
+pub fn manifest_workspace_inheritance(manifest_path: &Path) -> anyhow::Result<Vec<String>> {
     let raw = std::fs::read_to_string(manifest_path)?;
     let mut hits = Vec::new();
     for (line_no, line) in raw.lines().enumerate() {
@@ -55,13 +58,12 @@ pub fn manifest_workspace_inheritance(manifest_path: &Path) -> anyhow::Result<St
             hits.push(format!("{}:{}", line_no + 1, line));
         }
     }
-    Ok(hits.join("\n"))
+    Ok(hits)
 }
 
-pub fn metadata_transitive_workspace_members(repo_root: &Path) -> anyhow::Result<String> {
+pub fn metadata_transitive_workspace_members(repo_root: &Path) -> anyhow::Result<Vec<String>> {
     let metadata = load_metadata(repo_root)?;
-    let hits = transitive_workspace_member_hits(&metadata)?;
-    Ok(hits.join("\n"))
+    transitive_workspace_member_hits(&metadata)
 }
 
 pub fn transitive_workspace_member_hits(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
@@ -171,6 +173,10 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn joined(hits: &[String]) -> String {
+        hits.join("\n")
+    }
+
     #[test]
     fn flags_string_form_lattice_dependency() {
         let dir = TempDir::new().unwrap();
@@ -188,7 +194,7 @@ lattice-api = "0.1"
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(out.contains("forbidden product crate name 'lattice-api'"));
+        assert!(joined(&out).contains("forbidden product crate name 'lattice-api'"));
     }
 
     #[test]
@@ -206,7 +212,7 @@ guard = { package = "lancet-protocol", path = '../crates/lancet-protocol' }
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(out.contains("forbidden product crate name 'lancet-protocol'"));
+        assert!(joined(&out).contains("forbidden product crate name 'lancet-protocol'"));
     }
 
     #[test]
@@ -224,7 +230,7 @@ foo = { path = 'crates/foo' }
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(out.contains("product path dependency"));
+        assert!(joined(&out).contains("product path dependency"));
     }
 
     #[test]
@@ -254,7 +260,7 @@ path = "src/main.rs"
         )
         .unwrap();
         let out = manifest_workspace_inheritance(&manifest).unwrap();
-        assert!(out.lines().count() >= 2);
+        assert!(out.len() >= 2);
     }
 
     #[test]
@@ -274,7 +280,7 @@ guard = { path = '../../crates/net-guard' }
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(out.contains("product path dependency"));
+        assert!(joined(&out).contains("product path dependency"));
     }
 
     #[test]
@@ -322,6 +328,6 @@ edition = "2024"
         fs::write(harness.join("src/lib.rs"), "").unwrap();
         fs::write(guard.join("src/lib.rs"), "").unwrap();
         let out = metadata_transitive_workspace_members(root).unwrap();
-        assert!(out.contains("net-guard"));
+        assert!(joined(&out).contains("net-guard"));
     }
 }
