@@ -87,9 +87,10 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     budget.check(&spec.name);
     let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke", "main").expect("spawn tui");
 
-    // Wait for the prompt via ANSI-stripped matching so colors/layout are
-    // not part of the contract.
-    tui.wait_for(Duration::from_secs(30), |s| s.contains('>'))
+    // Wait for the TUI to be ready for input. Prompt recognition lives
+    // inside the driver (`wait_for_prompt`); the scenario never matches the
+    // prompt shape itself (RFC #19 decision three).
+    tui.wait_for_prompt(Duration::from_secs(30))
         .expect("tui banner/prompt appeared");
 
     // Send a prompt and wait for the assistant token text. The fake LLM
@@ -121,7 +122,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     std::thread::sleep(Duration::from_millis(400));
     #[cfg(target_os = "linux")]
     if let Some(pgid) = pgid {
-        let survivors = processes_in_pgid(pgid as u32);
+        let survivors = processes_in_pgid(pgid);
         assert!(
             survivors.is_empty(),
             "TUI process group {pgid} still has live members after quit+drop: {survivors:?}"

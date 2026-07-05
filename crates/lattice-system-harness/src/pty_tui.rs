@@ -17,13 +17,12 @@
 #![cfg(unix)]
 
 use std::io::{Read, Write};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use thiserror::Error;
 
-use crate::driver::LatticeDriver;
+use crate::driver::{LatticeDriver, kill_process_group};
 use crate::world::ScenarioWorld;
 
 /// Max bytes drained from the PTY before we stop reading. The TUI prints a
@@ -49,9 +48,12 @@ pub struct PtyTuiDriver {
     master_writer: Box<dyn Write + Send>,
     /// Used to kill the child directly (best-effort) on drop/timeout.
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
-    /// The process-group leader pid reported by the master. Used to kill the
-    /// whole group (TUI -> microsandbox -> fake-LLM sockets) on timeout.
-    pgid: Option<i32>,
+    /// The process-group leader pid reported by the master, as a `u32` to
+    /// match `driver::kill_process_group` and `driver::processes_in_pgid`
+    /// (which both key off `std::process::Child::id()` → `u32`). Used to
+    /// kill the whole group (TUI -> microsandbox -> fake-LLM sockets) on
+    /// timeout. `None` when the PTY did not report a valid positive leader.
+    pgid: Option<u32>,
     /// The full drained PTY output so far (raw, ANSI preserved).
     output: Vec<u8>,
 }
@@ -92,7 +94,16 @@ impl PtyTuiDriver {
             .spawn_command(cmd)
             .map_err(|e| PtyError::Pty(e.to_string()))?;
         let killer = _child.clone_killer();
-        let pgid = pair.master.process_group_leader();
+        // `process_group_leader` reports an `i32` (pid_t); a real leader is
+        // positive, so non-positive values collapse to `None`. Cast to `u32`
+        // to unify with `driver::kill_process_group` / `processes_in_pgid`
+        // (which key off `Child::id()` → `u32`), removing the `as u32` casts
+        // that previously lived at every call site.
+        let pgid = pair
+            .master
+            .process_group_leader()
+            .filter(|p| *p > 0)
+            .map(|p| p as u32);
 
         let writer = pair
             .master
@@ -166,29 +177,40 @@ impl PtyTuiDriver {
         }
     }
 
+    /// Wait for the TUI prompt to appear. This is the **prompt-recognition
+    /// seam**: the prompt shape (`>`) lives inside the driver, never in a
+    /// scenario (RFC #19 decision three — "prompt recognition and ANSI
+    /// cleanup only exist inside the driver; scenarios assert no display
+    /// details"). A scenario that needs to know the TUI is ready for input
+    /// calls this, not `wait_for(..., |s| s.contains('>'))`.
+    ///
+    /// The match is intentionally loose: a smoke scenario only needs to know
+    /// the TUI produced a prompt-like marker and is accepting input, not the
+    /// prompt's exact bytes. ANSI is stripped before matching.
+    pub fn wait_for_prompt(&mut self, timeout: Duration) -> Result<Vec<u8>, PtyError> {
+        self.wait_for(timeout, |s| s.contains('>'))
+    }
+
     /// The accumulated raw PTY output so far.
     pub fn output(&self) -> &[u8] {
         &self.output
     }
 
-    /// The child's process-group leader pid (if the PTY reports one). Use
-    /// for `kill -KILL -<pgid>` cleanup.
-    pub fn pgid(&self) -> Option<i32> {
+    /// The child's process-group leader pid (if the PTY reports one), as a
+    /// `u32` matching `driver::kill_process_group` / `processes_in_pgid`.
+    pub fn pgid(&self) -> Option<u32> {
         self.pgid
     }
 
     /// Kill the whole process group and reap the child. Best-effort: errors
     /// are swallowed because the priority is "no orphaned TUI / sandbox
-    /// children", not precise error reporting.
+    /// children", not precise error reporting. Delegates to the shared
+    /// `driver::kill_process_group` so the `kill -KILL -<pgid>` shape exists
+    /// in exactly one place.
     pub fn kill_and_reap(&mut self) {
         let _ = self.killer.kill();
         if let Some(pgid) = self.pgid {
-            let _ = std::process::Command::new("kill")
-                .arg("-KILL")
-                .arg(format!("-{pgid}"))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            kill_process_group(pgid);
         }
     }
 }

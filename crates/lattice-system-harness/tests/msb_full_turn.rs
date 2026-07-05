@@ -73,11 +73,17 @@ fn failure_dir(scenario_name: &str) -> PathBuf {
 }
 
 /// Write the full failure bundle (stdout/stderr/command/world context +
-/// fake LLM request log + workspace before/after diff) and then return the
-/// original assertion error so the caller can propagate it. Mirrors
-/// `assert_with_full_artifacts` but accepts the raw `Output` from the send
-/// run plus the cross-validation outputs and the pre-turn workspace
-/// snapshot (RFC #19 decision eight, PRD user story 21: "工作区差异").
+/// fake LLM request log + workspace before/after diff + cross-validation
+/// outputs) for a full-turn scenario. The world context is built by the
+/// shared `write_world_context` helper (the same one
+/// `assert_with_failure_artifacts` uses), so the two paths cannot drift.
+///
+/// Every byte written is redacted against `secrets` **before** writing, then
+/// the whole bundle is scanned **after** writing (`scan_artifacts_for_secrets`)
+/// as defense-in-depth (RFC #19 decision eight). A leak caught by the scan
+/// is patched in place and recorded in `sentinel_scan.txt`. The cross-
+/// validation outputs (`session log/status --json`) are also redacted before
+/// writing — they come straight from the product and could echo prompt text.
 #[allow(clippy::too_many_arguments)]
 fn write_full_bundle(
     world: &ScenarioWorld,
@@ -90,8 +96,8 @@ fn write_full_bundle(
     secrets: &[&str],
 ) {
     use lattice_system_harness::artifacts::{
-        capture_from_output, redact_env_pair, write_failure_artifacts, write_fake_llm_log,
-        write_workspace_diff,
+        capture_from_output, redact, scan_artifacts_for_secrets, write_failure_artifacts,
+        write_fake_llm_log, write_workspace_diff, write_world_context,
     };
     let dir = failure_dir(scenario_name);
     let send_art = capture_from_output(
@@ -103,39 +109,46 @@ fn write_full_bundle(
     let _ = write_failure_artifacts(&send_art);
     let _ = std::fs::write(
         dir.join("session_log.stdout.txt"),
-        String::from_utf8_lossy(&log_output.stdout).as_bytes(),
+        redact(&String::from_utf8_lossy(&log_output.stdout), secrets).as_bytes(),
     );
     let _ = std::fs::write(
         dir.join("session_log.stderr.txt"),
-        String::from_utf8_lossy(&log_output.stderr).as_bytes(),
+        redact(&String::from_utf8_lossy(&log_output.stderr), secrets).as_bytes(),
     );
     let _ = std::fs::write(
         dir.join("session_status.stdout.txt"),
-        String::from_utf8_lossy(&status_output.stdout).as_bytes(),
+        redact(&String::from_utf8_lossy(&status_output.stdout), secrets).as_bytes(),
     );
     let _ = std::fs::write(
         dir.join("session_status.stderr.txt"),
-        String::from_utf8_lossy(&status_output.stderr).as_bytes(),
+        redact(&String::from_utf8_lossy(&status_output.stderr), secrets).as_bytes(),
     );
-    let mut ctx = format!(
-        "scenario: {scenario_name}\ncommand: {}\n",
-        send_art.command_summary
+    let _ = write_world_context(
+        &dir,
+        world,
+        scenario_name,
+        &send_art.command_summary,
+        secrets,
     );
-    ctx.push_str(&format!("project_dir: {}\n", world.project_dir().display()));
-    ctx.push_str(&format!("home: {}\n", world.home().display()));
-    ctx.push_str(&format!("port: {}\n", world.port()));
-    ctx.push_str("env:\n");
-    for (k, v) in world.env_summary() {
-        ctx.push_str(&redact_env_pair(&k, &v, secrets));
-        ctx.push('\n');
-    }
-    let _ = std::fs::write(dir.join("world.txt"), ctx);
     let _ = write_fake_llm_log(&dir, captures, secrets);
     let after = match lattice_system_harness::WorkspaceSnapshot::capture(world.project_dir()) {
         Ok(s) => s,
         Err(_) => before.clone(),
     };
     let _ = write_workspace_diff(&dir, before, &after, secrets);
+    // RFC #19 decision eight: scan after writing. Any leaked file is patched
+    // in place and recorded; the scan never masks the assertion failure (the
+    // caller panics with the original error after this returns).
+    let leaked = scan_artifacts_for_secrets(&dir, secrets);
+    if !leaked.is_empty() {
+        let _ = std::fs::write(
+            dir.join("sentinel_scan.txt"),
+            format!(
+                "post-write sentinel scan redacted {} file(s): {leaked:?}\n",
+                leaked.len()
+            ),
+        );
+    }
 }
 
 #[test]

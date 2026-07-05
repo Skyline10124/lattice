@@ -4,6 +4,134 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #21 review follow-up: harness probe/pgid/shutdown/sentinel-scan/dedup/dead-code — 2026-07-05
+
+Severity: MEDIUM (two implementation errors + one RFC #19 decision-eight spec gap; remainder standards).
+
+**Problem:** A two-axis (Standards + Spec) review of the #21 commit
+(`186d675d`) found no hard standards violations but several baseline smells
+and three implementation errors plus one spec gap:
+
+- **(c#2, implementation error)** `layer_guard::require_msb_env` spawned its
+  `lattice lancet status` probe WITHOUT `set_new_process_group`, so
+  `child.id()` was the child PID, not a PGID. The timeout path then ran
+  `kill -KILL -<pid>`, but the child was not a group leader → ESRCH or
+  hitting an unrelated group that happened to have that id. The driver's own
+  scenario children did set the group; only the probe had drifted.
+- **(c#1, implementation error)** `tests/pty_tui_smoke.rs` matched the prompt
+  character `>` directly in the scenario (`wait_for(..., |s| s.contains('>'))`),
+  violating RFC #19 decision three: "prompt recognition and ANSI cleanup only
+  exist inside the driver; scenarios assert no display details".
+- **(c#3 / Standards #5, implementation error + dead branch)** `FakeLlmServer`
+  set the listener back to blocking (`set_nonblocking(false)`), making the
+  `serve_loop` `WouldBlock` branch unreachable; `Drop` set a `shutdown` flag
+  the blocking `accept` could never observe, then bound a throwaway listener
+  (no wake). The serve thread and bound port survived for the whole test
+  process; `_handle` was never joined. The `set_script` method and `script`
+  field were also dead (no callers).
+- **(a#2, spec gap)** RFC #19 decision eight requires "redact failure
+  artifacts before writing, then scan after writing". Pre-write redaction was
+  implemented, but there was no post-write scan of the on-disk artifacts;
+  `assert_no_secret` only scanned the raw `Output`, not the written files.
+- **(Standards #1)** The `world.txt` context block was duplicated across
+  `assert_with_failure_artifacts`, `assert_with_full_artifacts`, and the MSB
+  test's `write_full_bundle` (already diverging in how they sourced the
+  command summary).
+- **(Standards #2)** The `kill -KILL -{pgid}` shape was duplicated across
+  `driver.rs`, `layer_guard.rs`, and `pty_tui.rs`.
+- **(Standards #6)** pgid type drift: `driver.rs` used `u32`, `pty_tui` returned
+  `i32`, and `pty_tui_smoke.rs` cast `pgid as u32`.
+- **(Standards #3/#4 + Spec b#1)** Four public APIs with no callers:
+  `assert_with_full_artifacts`, `SessionSendDriver::for_existing`,
+  `SessionSendDriver::run_json`, `FakeLlmServer::set_script` — speculative
+  generality / out-of-scope general test DSL (RFC #18).
+
+**Fix:**
+
+- `crates/lattice-system-harness/src/driver.rs`: promoted
+  `set_new_process_group` and `kill_process_group` to `pub(crate)` so the
+  layer-gate probe and PTY driver share the one implementation (documented
+  why the probe in particular needs its own group).
+- `crates/lattice-system-harness/src/layer_guard.rs`: the
+  `require_msb_env` probe now calls `set_new_process_group(&mut cmd)` before
+  spawn and `kill_process_group(pgid)` on timeout — fixing (c#2). The
+  inlined `kill -KILL` block is gone.
+- `crates/lattice-system-harness/src/pty_tui.rs`: added
+  `PtyTuiDriver::wait_for_prompt` as the prompt-recognition seam (the `>`
+  shape now lives inside the driver, never in a scenario). `pgid` is now
+  `Option<u32>` (filtered for positive leaders, cast at the portable-pty
+  boundary), `pgid()` returns `Option<u32>`, and `kill_and_reap` delegates to
+  the shared `kill_process_group` — fixing (c#1), Standards #2, and #6. The
+  now-unused `Stdio` import was removed.
+- `crates/lattice-system-harness/tests/pty_tui_smoke.rs`: the scenario calls
+  `tui.wait_for_prompt(...)` instead of matching `>`, and the `pgid as u32`
+  cast is gone (`processes_in_pgid(pgid)` takes the `u32` directly).
+- `crates/lattice-system-harness/src/fake_llm.rs`: the listener is now
+  non-blocking, so the `serve_loop` `WouldBlock` branch polls `shutdown` every
+  ~5ms and is reachable; `Drop` sets `shutdown` and joins the serve thread
+  (renamed `_handle` → `serve_handle`), so the thread exits and the bound port
+  releases before `Drop` returns. Removed the dead `set_script` method and the
+  now-unused `script` field — fixing (c#3) / Standards #5.
+- `crates/lattice-system-harness/src/artifacts.rs`: added
+  `scan_artifacts_for_secrets` (walks the failure dir, redacts any file that
+  still contains a secret sentinel in place, returns the patched paths; skips
+  non-UTF8 files) and `write_world_context` (the shared, redacted
+  scenario/command/project/home/port/env context writer). Both have unit
+  tests (no-leak, patch-in-place, skip-non-utf8, empty-list-noop, context
+  writes+redacts).
+- `crates/lattice-system-harness/src/assert.rs`: `assert_with_failure_artifacts`
+  now uses `write_world_context` and runs `scan_artifacts_for_secrets` after
+  writing, recording any catch in `sentinel_scan.txt` (the scan never masks
+  the original assertion error). Removed the dead
+  `assert_with_full_artifacts` and trimmed its now-unused imports
+  (`CapturedRequest`, `write_fake_llm_log`, `write_workspace_listing`,
+  `redact_env_pair`).
+- `crates/lattice-system-harness/src/session_send.rs`: removed the dead
+  `SessionSendDriver::for_existing` and `::run_json` (and the now-unused
+  `Output` / `Duration` imports).
+- `crates/lattice-system-harness/src/lib.rs`: updated re-exports — removed
+  `assert_with_full_artifacts`; added `scan_artifacts_for_secrets` and
+  `write_world_context`.
+- `crates/lattice-system-harness/tests/msb_full_turn.rs`: `write_full_bundle`
+  now uses the shared `write_world_context`, redacts the cross-validation
+  (`session log/status --json`) outputs **before** writing (they come
+  straight from the product and could echo prompt text), and runs the
+  post-write `scan_artifacts_for_secrets`. The duplicated world-context block
+  and `redact_env_pair` import are gone; the "Mirrors assert_with_full_artifacts"
+  doc was rewritten.
+
+**Verification:**
+
+- `cargo xtask harness-boundary` — PASS (3/3 groups; no boundary regression
+  from the `pub(crate)` promotions or new helpers).
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — clean.
+- `cargo fmt -p lattice-system-harness --check` — clean.
+- `cargo build -p lattice-cli --bin lattice` — ok.
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
+  — 50 unit tests + 4 fast black-box tests pass; the 2 MSB/PTY scenarios are
+  correctly `#[ignore]`-d. New tests included: `write_world_context_writes…`,
+  `write_world_context_redacts_secret_env_value`,
+  `scan_artifacts_for_secrets_no_leak_returns_empty`,
+  `scan_artifacts_for_secrets_patches_leaked_file_in_place`,
+  `scan_artifacts_for_secrets_skips_non_utf8_files`,
+  `scan_artifacts_for_secrets_empty_secret_list_is_noop`.
+- The `FakeLlmServer` shutdown fix is exercised by the existing
+  `server_captures_request_and_returns_plain_text_sse` test (start → request
+  → drop no longer leaks the thread/port).
+
+**Residual:** `FINDINGS.md` **L-21-01** is unchanged — the real Microsandbox
+full-turn + PTY smoke live runs remain owner-side full-gate verification
+(this environment has no KVM/MSB daemon). The fixes here harden the scenario
+code (probe process-group, prompt encapsulation, post-write sentinel scan)
+but do not change the deferral of the live run.
+
+**Changed files:** `crates/lattice-system-harness/src/{driver,layer_guard,
+pty_tui,fake_llm,artifacts,assert,session_send,lib}.rs`,
+`crates/lattice-system-harness/tests/{pty_tui_smoke,msb_full_turn}.rs`,
+`FIX.md`.
+
+---
+
 ## Codeberg #26 audit: `lancet-boundary` parity with retired shell script — 2026-07-05
 
 Severity: LOW (audit / no code change).

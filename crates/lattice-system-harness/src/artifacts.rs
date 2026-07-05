@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 use std::process::Output;
 
+use crate::world::ScenarioWorld;
+
 /// Redacted failure bundle written when a scenario fails (minimal tracer bullet).
 #[derive(Debug, Clone)]
 pub struct FailureArtifacts {
@@ -53,6 +55,58 @@ pub fn write_failure_artifacts(artifacts: &FailureArtifacts) -> std::io::Result<
         &artifacts.command_summary,
     )?;
     Ok(())
+}
+
+/// RFC #19 decision eight: failure artifacts are redacted **before** writing,
+/// then **scanned after writing** as defense-in-depth. This function walks
+/// `dir`, reads every regular file, and checks whether any `secrets` sentinel
+/// survived into the on-disk bytes. Any file that still contains a secret is
+/// best-effort redacted in place (the secret replaced with `[REDACTED]`) and
+/// its path is returned so the caller can record the catch. A read/decode
+/// error on a single file is skipped (best-effort), not fatal.
+///
+/// Returns the list of files that leaked and were patched. An empty list
+/// means the post-write scan found no secret in any written artifact.
+///
+/// Only UTF-8-decodable files are scanned/rewritten: a secret sentinel is a
+/// text substring, so a non-UTF8 file cannot carry one in a form the redactor
+/// would have produced, and rewriting it via a lossy conversion would corrupt
+/// it. Such files are skipped, not treated as leaks.
+pub fn scan_artifacts_for_secrets(dir: &std::path::Path, secrets: &[&str]) -> Vec<PathBuf> {
+    let mut leaked = Vec::new();
+    if secrets.iter().all(|s| s.is_empty()) {
+        return leaked;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return leaked,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        if !secrets.iter().any(|s| !s.is_empty() && text.contains(s)) {
+            continue;
+        }
+        // Leak found: redact and rewrite in place, then record the path so
+        // the caller can note which file the pre-write redaction missed.
+        let redacted = redact(text, secrets);
+        let _ = std::fs::write(&path, redacted);
+        leaked.push(path);
+    }
+    leaked
 }
 
 /// Persist the fake LLM's captured request log into a failure bundle.
@@ -255,10 +309,42 @@ pub fn redact_env_pair(name: &str, value: &str, secrets: &[&str]) -> String {
     format!("  {name}={}", redact(value, secrets))
 }
 
+/// Build and write the `world.txt` context — scenario name, redacted command
+/// summary, project/home/port, and the redacted env allow-list — into `dir`.
+/// Shared by every failure-artifact path so the world-context block is not
+/// duplicated per caller (it had drifted across `assert_with_failure_artifacts`
+/// and the MSB full-turn test bundle, with the two copies already diverging
+/// in how they sourced the command summary).
+///
+/// `command_summary` must already be redacted (the caller passes
+/// `artifacts.command_summary`, which `capture_from_output` redacts). Env
+/// values are redacted via [`redact_env_pair`]: secret-name vars are masked
+/// entirely, others are substring-redacted against `secrets`.
+pub fn write_world_context(
+    dir: &std::path::Path,
+    world: &ScenarioWorld,
+    scenario_name: &str,
+    command_summary: &str,
+    secrets: &[&str],
+) -> std::io::Result<()> {
+    let mut ctx = format!("scenario: {scenario_name}\ncommand: {command_summary}\n");
+    ctx.push_str(&format!("project_dir: {}\n", world.project_dir().display()));
+    ctx.push_str(&format!("home: {}\n", world.home().display()));
+    ctx.push_str(&format!("port: {}\n", world.port()));
+    ctx.push_str("env:\n");
+    for (k, v) in world.env_summary() {
+        ctx.push_str(&redact_env_pair(&k, &v, secrets));
+        ctx.push('\n');
+    }
+    std::fs::write(dir.join("world.txt"), ctx)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fake_llm::CapturedRequest;
+    use crate::world::ScenarioWorld;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -399,5 +485,91 @@ mod tests {
         let diff = std::fs::read_to_string(out_dir.path().join("workspace_diff.txt")).unwrap();
         assert!(diff.contains("[REDACTED]"));
         assert!(!diff.contains("sk-super-secret-path.txt"));
+    }
+
+    #[test]
+    fn write_world_context_writes_scenario_command_paths_and_env() {
+        let world = ScenarioWorld::new("lattice-harness-ctx").expect("world");
+        let out_dir = TempDir::new().unwrap();
+        write_world_context(
+            out_dir.path(),
+            &world,
+            "scenario-x",
+            "lattice --json session send id ping",
+            &[],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(out_dir.path().join("world.txt")).unwrap();
+        assert!(text.contains("scenario: scenario-x"));
+        assert!(text.contains("command: lattice --json session send id ping"));
+        assert!(text.contains(&format!("project_dir: {}", world.project_dir().display())));
+        assert!(text.contains(&format!("home: {}", world.home().display())));
+        assert!(text.contains(&format!("port: {}", world.port())));
+        assert!(text.contains("env:"));
+    }
+
+    #[test]
+    fn write_world_context_redacts_secret_env_value() {
+        let mut world = ScenarioWorld::new("lattice-harness-ctx-redact").expect("world");
+        world.set_env("CUSTOM_BEARER", "sk-leak-me");
+        let out_dir = TempDir::new().unwrap();
+        write_world_context(out_dir.path(), &world, "s", "c", &["sk-leak-me"]).unwrap();
+        let text = std::fs::read_to_string(out_dir.path().join("world.txt")).unwrap();
+        assert!(text.contains("CUSTOM_BEARER="));
+        assert!(text.contains("[REDACTED]"));
+        assert!(!text.contains("sk-leak-me"));
+    }
+
+    #[test]
+    fn scan_artifacts_for_secrets_no_leak_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("stdout.txt"), "clean output").unwrap();
+        std::fs::write(dir.path().join("world.txt"), "scenario: s\n").unwrap();
+        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-secret"]);
+        assert!(leaked.is_empty());
+    }
+
+    #[test]
+    fn scan_artifacts_for_secrets_patches_leaked_file_in_place() {
+        let dir = TempDir::new().unwrap();
+        // Simulate a pre-write redaction that missed an edge: a secret
+        // survives into the on-disk stdout.txt.
+        std::fs::write(dir.path().join("stdout.txt"), "ok sk-leak-survived more").unwrap();
+        std::fs::write(dir.path().join("clean.txt"), "no secret here").unwrap();
+        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-leak-survived"]);
+        assert_eq!(leaked.len(), 1);
+        assert!(leaked[0].file_name().unwrap() == "stdout.txt");
+        let after = std::fs::read_to_string(dir.path().join("stdout.txt")).unwrap();
+        assert!(after.contains("[REDACTED]"));
+        assert!(!after.contains("sk-leak-survived"));
+        // clean.txt untouched.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("clean.txt")).unwrap(),
+            "no secret here"
+        );
+    }
+
+    #[test]
+    fn scan_artifacts_for_secrets_skips_non_utf8_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("bin.dat"), b"\xff\xfe not utf8 sk-secret").unwrap();
+        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-secret"]);
+        assert!(
+            leaked.is_empty(),
+            "non-UTF8 file should be skipped, not patched"
+        );
+        // The non-UTF8 bytes are preserved unchanged.
+        assert_eq!(
+            std::fs::read(dir.path().join("bin.dat")).unwrap(),
+            b"\xff\xfe not utf8 sk-secret"
+        );
+    }
+
+    #[test]
+    fn scan_artifacts_for_secrets_empty_secret_list_is_noop() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("stdout.txt"), "anything").unwrap();
+        assert!(scan_artifacts_for_secrets(dir.path(), &[]).is_empty());
+        assert!(scan_artifacts_for_secrets(dir.path(), &[""]).is_empty());
     }
 }

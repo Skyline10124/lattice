@@ -17,11 +17,14 @@ pub mod scenario;
 pub mod session_send;
 pub mod world;
 
-pub use artifacts::{WorkspaceSnapshot, write_workspace_diff, write_workspace_listing};
+pub use artifacts::{
+    WorkspaceSnapshot, scan_artifacts_for_secrets, write_workspace_diff, write_workspace_listing,
+    write_world_context,
+};
 pub use assert::{
     AssertError, assert_exit_failure, assert_exit_success, assert_no_secret,
     assert_stderr_contains, assert_stdout_contains, assert_stdout_contains_all,
-    assert_with_failure_artifacts, assert_with_full_artifacts,
+    assert_with_failure_artifacts,
 };
 #[cfg(all(unix, target_os = "linux"))]
 pub use driver::processes_in_pgid;

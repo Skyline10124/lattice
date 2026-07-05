@@ -7,10 +7,8 @@ use std::process::Output;
 use thiserror::Error;
 
 use crate::artifacts::{
-    capture_from_output, redact_env_pair, write_failure_artifacts, write_fake_llm_log,
-    write_workspace_listing,
+    capture_from_output, scan_artifacts_for_secrets, write_failure_artifacts, write_world_context,
 };
-use crate::fake_llm::CapturedRequest;
 use crate::world::ScenarioWorld;
 
 /// Base directory for persisted failure artifacts.
@@ -146,67 +144,33 @@ pub fn assert_with_failure_artifacts(
         write_failure_artifacts(&artifacts)?;
         // Persist the scenario-world context so the post-mortem can reproduce
         // the isolated HOME/project/port/env the binary ran under. Env values
-        // are redacted (secret-name vars masked entirely; others
-        // substring-redacted against `secrets`) so a secret-bearing env var
-        // set via `ScenarioWorld::set_env` cannot leak into the artifact.
-        let redacted_command = artifacts.command_summary.as_str();
-        let mut ctx = format!("scenario: {scenario_name}\ncommand: {redacted_command}\n");
-        ctx.push_str(&format!("project_dir: {}\n", world.project_dir().display()));
-        ctx.push_str(&format!("home: {}\n", world.home().display()));
-        ctx.push_str(&format!("port: {}\n", world.port()));
-        ctx.push_str("env:\n");
-        for (k, v) in world.env_summary() {
-            ctx.push_str(&redact_env_pair(&k, &v, secrets));
-            ctx.push('\n');
+        // are redacted via `write_world_context` (secret-name vars masked
+        // entirely; others substring-redacted against `secrets`) so a
+        // secret-bearing env var set via `ScenarioWorld::set_env` cannot leak
+        // into the artifact.
+        write_world_context(
+            &dir,
+            world,
+            scenario_name,
+            &artifacts.command_summary,
+            secrets,
+        )?;
+        // RFC #19 decision eight: redact before writing (done above), then
+        // scan after writing as defense-in-depth. Any leaked file is
+        // best-effort redacted in place by `scan_artifacts_for_secrets` and
+        // recorded in `sentinel_scan.txt` so the operator can see the
+        // pre-write redaction missed it. The scan never masks the original
+        // assertion error: we still return `err` below.
+        let leaked = scan_artifacts_for_secrets(&dir, secrets);
+        if !leaked.is_empty() {
+            let _ = std::fs::write(
+                dir.join("sentinel_scan.txt"),
+                format!(
+                    "post-write sentinel scan redacted {} file(s): {leaked:?}\n",
+                    leaked.len()
+                ),
+            );
         }
-        std::fs::write(dir.join("world.txt"), ctx)?;
-        return Err(err);
-    }
-    Ok(())
-}
-
-/// Full-scenario failure bundle: writes the stdout/stderr/command/world
-/// context (as `assert_with_failure_artifacts` does) **plus** the fake LLM
-/// request log and a workspace tree listing. Use this for full-turn scenarios
-/// (RFC #19 decision eight + PRD user story 21) where the post-mortem needs
-/// to see what the product sent the model and what the project tree looks
-/// like after the turn.
-///
-/// `project_root` is the directory to list (typically
-/// `world.project_dir()`). `captures` is the fake LLM's captured request log
-/// at the moment of failure. Both are redacted against `secrets`.
-#[allow(clippy::too_many_arguments)]
-pub fn assert_with_full_artifacts(
-    world: &ScenarioWorld,
-    scenario_name: &str,
-    command_summary: &str,
-    output: &Output,
-    captures: &[CapturedRequest],
-    project_root: &std::path::Path,
-    secrets: &[&str],
-    result: Result<(), AssertError>,
-) -> Result<(), AssertError> {
-    if let Err(err) = result {
-        let dir = failure_dir(scenario_name);
-        let artifacts = capture_from_output(dir.clone(), output, command_summary, secrets);
-        write_failure_artifacts(&artifacts)?;
-        let mut ctx = format!(
-            "scenario: {scenario_name}\ncommand: {}\n",
-            artifacts.command_summary
-        );
-        ctx.push_str(&format!("project_dir: {}\n", world.project_dir().display()));
-        ctx.push_str(&format!("home: {}\n", world.home().display()));
-        ctx.push_str(&format!("port: {}\n", world.port()));
-        ctx.push_str("env:\n");
-        for (k, v) in world.env_summary() {
-            ctx.push_str(&redact_env_pair(&k, &v, secrets));
-            ctx.push('\n');
-        }
-        std::fs::write(dir.join("world.txt"), ctx)?;
-        // Best-effort: a failure to write the supplementary artifacts must
-        // not mask the original assertion error.
-        let _ = write_fake_llm_log(&dir, captures, secrets);
-        let _ = write_workspace_listing(&dir, project_root, secrets);
         return Err(err);
     }
     Ok(())

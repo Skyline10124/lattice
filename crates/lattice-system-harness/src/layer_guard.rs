@@ -29,6 +29,8 @@
 use std::process::Command;
 use std::time::Duration;
 
+use crate::driver::{kill_process_group, set_new_process_group};
+
 /// Env var the owner sets to opt into the Microsandbox / PTY-smoke suite.
 pub const MSB_ENV: &str = "LATTICE_HARNESS_MSB";
 
@@ -68,6 +70,14 @@ pub fn require_msb_env(driver: &crate::driver::LatticeDriver) {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // Spawn the probe in its own process group, exactly as the driver does
+    // for scenario children. Without this, `child.id()` is the child PID but
+    // the child is NOT a group leader, so a timeout `kill -KILL -<pid>` would
+    // target group `<pid>` (ESRCH, or an unrelated group that happens to have
+    // that id) instead of the probe's tree. `set_new_process_group` makes the
+    // child the leader of a fresh group so `kill_process_group(child.id())`
+    // reaps the whole probe.
+    set_new_process_group(&mut cmd);
     let probe = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => panic!(
@@ -85,12 +95,7 @@ pub fn require_msb_env(driver: &crate::driver::LatticeDriver) {
         }
         if start.elapsed() >= Duration::from_secs(10) {
             // Best-effort group kill, mirroring the driver's timeout path.
-            let _ = Command::new("kill")
-                .arg("-KILL")
-                .arg(format!("-{pgid}"))
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            kill_process_group(pgid);
             break None;
         }
         std::thread::sleep(Duration::from_millis(50));

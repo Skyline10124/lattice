@@ -24,9 +24,6 @@
 //! An unknown `type` becomes [`TurnEventLine::Unknown`] carrying the raw
 //! value, never a parse error.
 
-use std::process::Output;
-use std::time::Duration;
-
 use serde_json::Value;
 use thiserror::Error;
 
@@ -515,21 +512,6 @@ impl<'a> SessionSendDriver<'a> {
         })
     }
 
-    /// Wrap an existing session id (e.g. one created out-of-band).
-    pub fn for_existing(
-        driver: &'a LatticeDriver,
-        world: &'a ScenarioWorld,
-        spec: &'a ScenarioSpec,
-        session_id: String,
-    ) -> Self {
-        Self {
-            driver,
-            world,
-            spec,
-            session_id,
-        }
-    }
-
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -537,23 +519,6 @@ impl<'a> SessionSendDriver<'a> {
     /// Send one prompt and return the parsed outcome.
     pub fn send(&self, prompt: &str) -> Result<SendOutcome, DriverError> {
         send_prompt(self.driver, self.world, self.spec, &self.session_id, prompt)
-    }
-
-    /// Run a generic `lattice --json` command against this session's store,
-    /// for cross-validation (`session status/list/log --json`,
-    /// `audit --json`). The caller owns the args.
-    pub fn run_json(
-        &self,
-        args: Vec<String>,
-        timeout: Option<Duration>,
-    ) -> Result<Output, DriverError> {
-        self.driver.run(
-            self.world,
-            &LatticeCommand {
-                args,
-                timeout: timeout.or_else(|| Some(self.spec.step_timeout())),
-            },
-        )
     }
 }
 

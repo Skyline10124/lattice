@@ -110,14 +110,19 @@ pub enum ServeError {
 
 /// A running fake LLM server bound to a scenario-local port.
 ///
-/// Drop stops accepting new connections; in-flight requests run to
-/// completion. The captured requests are readable from any thread via
-/// `captured_requests` until the server is dropped.
+/// `Drop` signals the serve loop to stop accepting, joins the serve thread,
+/// and drops the listener — so the bound port actually releases before
+/// `Drop` returns (the previous implementation set a `shutdown` flag the
+/// blocking `accept` could never observe, leaving the thread and port
+/// alive for the whole test process). In-flight per-connection handler
+/// threads run to completion by design: they are short-lived (one request
+/// each) and outlive the serve-thread join. The captured requests are
+/// readable from any thread via `captured_requests` until the server is
+/// dropped.
 pub struct FakeLlmServer {
     listener: TcpListener,
-    script: Arc<Mutex<SseScript>>,
     captures: Arc<Mutex<Vec<CapturedRequest>>>,
-    _handle: Option<JoinHandle<()>>,
+    serve_handle: Option<JoinHandle<()>>,
     shutdown: Arc<Mutex<bool>>,
 }
 
@@ -125,9 +130,14 @@ impl FakeLlmServer {
     /// Bind a new server to `127.0.0.1:0` (OS-assigned port) and start
     /// serving `script`. The bind address is the value to put into
     /// `OPENAI_COMPATIBLE_BASE_URL`.
+    ///
+    /// The listener is put in **non-blocking** mode so the serve loop's
+    /// `WouldBlock` branch is reachable: the loop polls `accept` every ~5ms
+    /// and re-checks `shutdown`, so `Drop` setting the flag is observed
+    /// within that granularity and the thread can be joined promptly.
     pub fn start(script: SseScript) -> Result<Self, ServeError> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(false)?;
+        listener.set_nonblocking(true)?;
         let script = Arc::new(Mutex::new(script));
         let captures: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
         let shutdown = Arc::new(Mutex::new(false));
@@ -140,9 +150,8 @@ impl FakeLlmServer {
         };
         Ok(Self {
             listener,
-            script,
             captures,
-            _handle: Some(handle),
+            serve_handle: Some(handle),
             shutdown,
         })
     }
@@ -151,12 +160,6 @@ impl FakeLlmServer {
     /// (`OPENAI_COMPATIBLE_BASE_URL`), without a trailing slash.
     pub fn base_url(&self) -> String {
         format!("http://{}", self.local_addr())
-    }
-
-    /// Replace the active script. In-flight requests continue with the script
-    /// they started under; only subsequent requests see the new one.
-    pub fn set_script(&self, script: SseScript) {
-        *self.script.lock().unwrap() = script;
     }
 
     /// A snapshot of every request captured so far, in arrival order.
@@ -171,8 +174,18 @@ impl FakeLlmServer {
 
 impl Drop for FakeLlmServer {
     fn drop(&mut self) {
+        // Signal the serve loop to stop accepting. Because the listener is
+        // non-blocking, the loop's `WouldBlock` branch polls this flag every
+        // ~5ms, so the thread observes the signal promptly.
         *self.shutdown.lock().unwrap() = true;
-        let _ = std::net::TcpListener::bind(("127.0.0.1", 0));
+        // Join the serve thread so it has exited (and dropped its listener
+        // clone) before we drop our own listener — this is what actually
+        // closes the socket and releases the port. Join errors are swallowed:
+        // a panicked serve thread is not actionable from Drop, and the
+        // priority is releasing the port, not surfacing a thread bug.
+        if let Some(handle) = self.serve_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -194,6 +207,8 @@ fn serve_loop(
                 });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Non-blocking accept with no pending connection: poll the
+                // shutdown flag every 5ms so `Drop` is observed promptly.
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             Err(e) => {

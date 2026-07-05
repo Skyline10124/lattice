@@ -144,14 +144,20 @@ fn join_drain(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
 /// Put a `Command`'s child into a new process group where it is the leader.
 /// Unix-only; on non-Unix targets this is a no-op (the repo does not commit
 /// to Windows, per #26 Out-of-Scope).
+///
+/// `pub(crate)` so the layer-gate probe (`layer_guard::require_msb_env`) and
+/// the PTY driver reuse the same setup instead of each re-deriving it — the
+/// probe in particular must spawn its `lattice lancet status` child in its
+/// own group so a timeout `kill_process_group(child.id())` hits the right
+/// group (the child is the leader), not an unrelated group or ESRCH.
 #[cfg(unix)]
-fn set_new_process_group(cmd: &mut std::process::Command) {
+pub(crate) fn set_new_process_group(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn set_new_process_group(_cmd: &mut std::process::Command) {}
+pub(crate) fn set_new_process_group(_cmd: &mut std::process::Command) {}
 
 /// Kill an entire process group. Best-effort: errors are swallowed because
 /// the caller is already on the timeout/failure path and the priority is
@@ -159,7 +165,12 @@ fn set_new_process_group(_cmd: &mut std::process::Command) {}
 /// reporting. Uses the external `kill` utility to avoid a `libc` dependency
 /// (the harness boundary allows general test libraries, but keeping the
 /// dependency surface minimal is the documented discipline).
-fn kill_process_group(pgid: u32) {
+///
+/// `pub(crate)` so `layer_guard` and `pty_tui` share the one implementation
+/// rather than each inlining `kill -KILL -<pgid>` (the duplicated shape had
+/// drifted: `layer_guard` forgot `set_new_process_group`, and `pty_tui` used
+/// `i32` pgids while this helper used `u32`).
+pub(crate) fn kill_process_group(pgid: u32) {
     let pgid_str = format!("-{pgid}");
     let _ = std::process::Command::new("kill")
         .arg("-KILL")
