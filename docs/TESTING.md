@@ -3,7 +3,8 @@
 # LATTICE Testing
 
 This document describes how LATTICE tests are written and run. LATTICE is a
-Rust Cargo workspace (16 member crates, see root `Cargo.toml`); testing uses
+Rust Cargo workspace (18 member crates, including `lattice-system-harness`; see root
+`Cargo.toml`); testing uses
 Rust's built-in `#[test]` attribute and the `cargo test` runner. There is no
 Node/JavaScript toolchain, no `package.json`, and no external test framework
 (jest, vitest, etc.).
@@ -21,9 +22,13 @@ LATTICE uses Rust's first-party test framework:
 - Tests are functions annotated with `#[test]`, discovered and run by
   `cargo test` (the built-in `libtest` harness). No external runner is
   required.
-- There is **no separate test install step**. `cargo test` compiles test
-  targets on demand; a prior `cargo build` is not required, though the first
-  `cargo test` invocation will compile the workspace and its test targets.
+- `cargo test` compiles test targets on demand; a prior `cargo build` is not
+  required for ordinary unit/integration tests. **The `lattice-system-harness`
+  crate is the exception**: it is an external black-box harness that drives a
+  pre-built `lattice` binary located via the `LATTICE_BIN` environment
+  variable, so the binary must be built first
+  (`cargo build -p lattice-cli --bin lattice`) and `LATTICE_BIN` must point at
+  it. `scripts/ci-local.sh` and CI do this step before `cargo test --workspace`.
 - Property/fuzz tests use `proptest` (a workspace dev-dependency,
   `proptest = "1"` in `Cargo.toml`); regression seeds live alongside the
   tests, e.g. `crates/lancet-authority/tests/guard_decide_fuzz.proptest-regressions`.
@@ -39,12 +44,39 @@ but CI and the local gate use `cargo test`.
 
 ### Whole workspace
 
+CI and `scripts/ci-local.sh` run, in order:
+
+1. `cargo fmt --all --check`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. `cargo build -p lattice-cli --bin lattice`
+4. `scripts/system-harness-boundary-check.sh`
+5. `cargo test --workspace` with `LATTICE_BIN` pointing at `target/debug/lattice`
+
 ```bash
+cargo build -p lattice-cli --bin lattice
+export LATTICE_BIN="${LATTICE_BIN:-$(pwd)/target/debug/lattice}"
+scripts/system-harness-boundary-check.sh
 cargo test --workspace
 ```
 
-This is the exact command used by CI (`.github/workflows/ci.yml`) and by
-`scripts/ci-local.sh`.
+For harness-only iteration:
+
+```bash
+cargo build -p lattice-cli --bin lattice
+LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness
+```
+
+`LATTICE_BIN` is resolved by `LatticeDriver::from_env` **in the test process**
+(`is_file()` then `canonicalize`), relative to the test-process cwd, before any
+scenario child is spawned. A relative path that is a real file from that cwd
+works fine — `canonicalize` then stores an absolute path so the later child
+`current_dir` change to the scenario project dir cannot break it. The reason to
+prefer `$(pwd)/target/debug/lattice` (what `scripts/ci-local.sh` defaults to) is
+that `cargo test -p lattice-system-harness` runs with the crate dir as cwd,
+where `target/debug/lattice` does not exist (the binary is built at the
+workspace root's `target/`); an absolute path is cwd-independent and avoids
+that mismatch. It is a robustness recommendation, not a code-enforced
+"must be absolute" contract.
 
 ### Single crate
 
@@ -98,9 +130,31 @@ These two run **before** `cargo test` in both `.github/workflows/ci.yml` and
 scripts/ci-local.sh
 ```
 
-Runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-and `cargo test --workspace` in sequence with pass/fail markers — a local mirror
-of the CI `check` job.
+Runs, in order, with pass/fail markers — a local mirror of the CI `check` job:
+
+1. `cargo fmt --all --check`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. `cargo build -p lattice-cli --bin lattice`
+4. `scripts/system-harness-boundary-check.sh`
+5. `cargo test --workspace` with `LATTICE_BIN` defaulted to
+   `$(pwd)/target/debug/lattice` and `LATTICE_HARNESS_FAILURE_DIR` defaulted to
+   `$(pwd)/target/harness-failures`
+
+The build (step 3) and boundary check (step 4) run **before** `cargo test`
+because the system harness needs a built `lattice` binary and a verified
+dependency boundary.
+
+### Harness failure artifacts
+
+When a `lattice-system-harness` scenario fails an assertion wrapped in
+`assert_with_failure_artifacts`, the harness writes a redacted bundle
+(`stdout.txt`, `stderr.txt`, `command.txt`, `world.txt`) under
+`$LATTICE_HARNESS_FAILURE_DIR/<scenario>/`. The default is anchored to the
+harness crate dir (`<crate>/target/harness-failures/<scenario>/`), independent
+of the test process cwd; `scripts/ci-local.sh` redirects it to the
+workspace-level `$(pwd)/target/harness-failures/` so a full local run collects
+every scenario's bundle in one place. `target/` is gitignored, so bundles
+persist for post-mortem inspection without polluting the tree.
 
 ### LANCET self-check
 
@@ -275,10 +329,20 @@ File: `.github/workflows/ci.yml`
   3. `Swatinem/rust-cache@v2`
   4. `cargo fmt --all --check`
   5. `cargo clippy --workspace --all-targets -- -D warnings`
-  6. `cargo test --workspace`
+  6. `cargo build -p lattice-cli --bin lattice` (builds the binary the
+     `lattice-system-harness` black-box tests drive via `LATTICE_BIN`)
+  7. `scripts/system-harness-boundary-check.sh` (verifies the harness crate
+     has no product-crate dependency, direct or transitive)
+  8. `cargo test --workspace` with
+     `LATTICE_BIN=${{ github.workspace }}/target/debug/lattice`
 
 The lint and format checks run before tests and are `-D warnings`-strict, so a
-single clippy warning or formatting diff fails CI before tests execute.
+single clippy warning or formatting diff fails CI before tests execute. The
+build (step 6) and boundary check (step 7) run before `cargo test` because the
+system harness needs a built `lattice` binary and a verified dependency
+boundary; `LATTICE_BIN` is set to the workspace-relative absolute path of the
+binary built in step 6 so the harness resolves it regardless of the per-scenario
+child working directory.
 
 ### Local pre-commit hook
 
@@ -305,4 +369,4 @@ As noted in §3, `lattice-workspace` live KVM/libkrun integration tests (the
 `integration_tests` feature) are **not** part of the `CI` workflow or
 `ci-local.sh`. They run only on a provisioned KVM host. The CI `cargo test
 --workspace` invocation runs the default-feature deterministic test set
-across all 16 crates.
+across all 18 workspace member crates (including `lattice-system-harness`).

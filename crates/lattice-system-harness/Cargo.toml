@@ -1,0 +1,15 @@
+[package]
+name = "lattice-system-harness"
+version = "0.1.0"
+license = "Apache-2.0"
+edition = "2024"
+authors = ["Ast Rin"]
+description = "External system tests for the lattice binary (no product crate dependencies)"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+

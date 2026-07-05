@@ -18,6 +18,7 @@ members = [
     "crates/lattice-cli",
     "crates/lattice-profile",
     "crates/lattice-workspace",
+    "crates/lattice-system-harness",
 ]
 
 [workspace.package]

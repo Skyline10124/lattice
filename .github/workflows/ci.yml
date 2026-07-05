@@ -21,4 +21,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build -p lattice-cli --bin lattice
+      - run: scripts/system-harness-boundary-check.sh
       - run: cargo test --workspace
+        env:
+          LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice

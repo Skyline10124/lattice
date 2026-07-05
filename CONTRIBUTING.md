@@ -19,7 +19,7 @@ changes. For the workspace architecture, layering, and crate roles, read
 
 ## 1. Introduction
 
-Welcome. LATTICE is a Cargo workspace of 16 crates, layered so dependencies always
+Welcome. LATTICE is a Cargo workspace of 18 crates, layered so dependencies always
 point from higher layers down. Before making changes, please:
 
 - Read [LICENSE](LICENSE) — contributions are licensed under Apache-2.0.
@@ -185,14 +185,23 @@ for observations, context, and reminders that don't require action.
 Before opening a pull request, run the full local gate and make sure it is green:
 
 ```sh
-cargo test
-cargo clippy -- -D warnings
-cargo fmt --all --check
+scripts/ci-local.sh
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same gates across `ubuntu-latest` and
-`macos-latest` on pushes to `main` and on pull requests, so a clean local run
-avoids surprises.
+`scripts/ci-local.sh` is the canonical local CI replica. It runs, in order:
+
+1. `cargo fmt --all --check`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. `cargo build -p lattice-cli --bin lattice` (builds the binary the
+   `lattice-system-harness` black-box tests drive via `LATTICE_BIN`)
+4. `scripts/system-harness-boundary-check.sh` (verifies the harness crate has
+   no product-crate dependency, direct or transitive)
+5. `cargo test --workspace` with `LATTICE_BIN` defaulted to
+   `$(pwd)/target/debug/lattice`
+
+CI (`.github/workflows/ci.yml`) runs the fmt/clippy/test gates across
+`ubuntu-latest` and `macos-latest` on pushes to `main` and on pull requests, so
+a clean local run avoids surprises.
 
 Open a PR against **`main`**. There is currently no `.github/PULL_REQUEST_TEMPLATE.md`,
 so in your PR description please:
@@ -227,9 +236,8 @@ several small PRs over one large one.
 - [ ] Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the relevant
       `crates/<crate>/AGENTS.md`
 - [ ] Respect layering (no reverse deps) and Ownership Rules
-- [ ] `cargo fmt --all --check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [ ] `scripts/ci-local.sh` is green (fmt, clippy, build, harness boundary,
+      `cargo test --workspace`)
 - [ ] New files have the `// Copyright 2026 Ast Rin` / SPDX header
 - [ ] Conventional-commit messages, PR against `main`
 - [ ] `FIX.md` / `FINDINGS.md` / `INFO.md` updated as needed
