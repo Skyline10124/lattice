@@ -19,6 +19,7 @@ members = [
     "crates/lattice-profile",
     "crates/lattice-workspace",
     "crates/lattice-system-harness",
+    "xtask",
 ]
 
 [workspace.package]
