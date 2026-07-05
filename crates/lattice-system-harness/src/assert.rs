@@ -16,7 +16,7 @@ use crate::world::ScenarioWorld;
 /// crate's manifest dir so it is absolute and independent of whatever cwd the
 /// test process happens to run with: `<harness crate>/target/harness-failures`.
 /// `target/` is gitignored, so artifacts persist for post-mortem inspection
-/// without polluting the tree. `scripts/ci-local.sh` redirects this to the
+/// without polluting the tree. `cargo run --package xtask -- ci` redirects this to the
 /// workspace-level `$(pwd)/target/harness-failures` so a full local run
 /// collects every scenario's bundle in one place.
 const FAILURE_DIR_ENV: &str = "LATTICE_HARNESS_FAILURE_DIR";

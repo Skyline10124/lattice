@@ -10,7 +10,7 @@ integration-test target of any product crate.
 ## Boundaries
 
 - Manifest must not depend on `lattice-*`, `lancet-*`, `{ workspace = true }`,
-  or `path = "../…"` product crates. Enforced by `scripts/system-harness-boundary-check.sh`.
+  or `path = "../…"` product crates. Enforced by `cargo run --package xtask -- harness-boundary`.
 - Only obtain the product via **`LATTICE_BIN`**; never import session/agent/API crates.
 - Scenario worlds use isolated HOME/XDG, dedicated session store under scenario
   HOME, scenario-local ports, empty project `.env`, and `env_clear()` before allow-list.
@@ -21,7 +21,7 @@ integration-test target of any product crate.
 
 Run from the workspace root:
 
-- `scripts/system-harness-boundary-check.sh`
+- `cargo run --package xtask -- harness-boundary`
 - `cargo build -p lattice-cli --bin lattice`
 - `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
 
@@ -35,5 +35,5 @@ old `LATTICE_BIN=target/debug/lattice` example failed only because `cargo test
 `target/debug/lattice` does not exist (the binary is built at the workspace
 root's `target/`). So the requirement is "a real file resolvable from the
 test-process cwd"; `$(pwd)/target/debug/lattice` from the workspace root is the
-cwd-independent way to satisfy it (and is what `scripts/ci-local.sh` defaults
+cwd-independent way to satisfy it (and is what `cargo run --package xtask -- ci` defaults
 to). An absolute path is recommended but not a code-enforced contract.

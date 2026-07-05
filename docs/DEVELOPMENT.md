@@ -73,10 +73,9 @@ cargo run -p lattice-cli -- doctor             # run diagnostics
 ## Build commands
 
 The CI workflow (`.github/workflows/ci.yml`) and the local mirror
-`scripts/ci-local.sh` both run `cargo fmt --all --check`,
-`cargo clippy --workspace --all-targets -- -D warnings`, and
-`cargo test --workspace` on every push to `main` and on every pull request.
-Reproduce CI locally with `scripts/ci-local.sh`.
+`cargo run --package xtask -- ci` both run the same five-step gate on every push to `main` and
+on every pull request (fmt, clippy, build `lattice`, harness boundary,
+`cargo test --workspace`). Reproduce CI locally with `cargo run --package xtask -- ci`.
 
 | Command | Purpose |
 |---|---|
@@ -89,7 +88,7 @@ Reproduce CI locally with `scripts/ci-local.sh`.
 | `cargo fmt --all --check` | Verify rustfmt formatting across the workspace (enforced by CI). |
 | `cargo run -p lattice-cli -- <subcommand>` | Run the `lattice` binary without installing (e.g. `models --auth`, `doctor`, `session new ...`). |
 | `cargo install --path crates/lattice-cli` | Install the release binary to `$CARGO_HOME/bin`. |
-| `scripts/ci-local.sh` | Local mirror of the CI lane: `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace`. |
+| `cargo run --package xtask -- ci` | Local mirror of the CI lane (fmt, clippy, build `lattice`, harness boundary, `cargo test --workspace`). |
 | `scripts/release-gate-v1.4.sh` | v1.4-alpha release gate. Offline-deterministic by default (no API keys/network): runs fmt, clippy, targeted crate tests, dogfood suite, LANCET boundary check, and `lattice lancet doctor`. Pass `--live` (or set `LATTICE_LINUX_ISOLATION_LIVE=1`) to also run the ignored Linux physical-boundary canary suite. See [docs/LANCET.md](./LANCET.md). |
 
 Note: `.cargo/config.toml` pins `target-dir = "target"` and forces
@@ -171,7 +170,7 @@ inside the workspace rather than a sandboxed `/tmp` cache with a small quota.
   cargo fmt --all --check
   ```
 
-  `scripts/ci-local.sh` runs all three; `scripts/release-gate-v1.4.sh` is the
+  `cargo run --package xtask -- ci` runs all three; `scripts/release-gate-v1.4.sh` is the
   stronger release-gate entrypoint when preparing a release.
 - **Record landed fixes in `FIX.md`** (append-only changelog). Per the root
   AGENTS.md "Review Records", add an entry only *after* the fix has landed,
