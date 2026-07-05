@@ -4,6 +4,130 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #20: lattice-system-harness + boundary check + docs/port/artifact/path hardening — 2026-07-05
+
+Severity: MEDIUM (standards + spec review of the new `lattice-system-harness` crate).
+
+**Problem:** A standards/spec review of the new `lattice-system-harness` crate
+found multiple standards violations and spec defects across the harness, the
+boundary check script, and the docs:
+
+- Standards: boundary check did not truly traverse the dep graph (read a
+  non-existent `pkg` field), then was bypassable by valid TOML forms
+  (single-quoted `path`, inline-table `package =` renames, string-form
+  version deps like `lattice-api = "0.1"`, neutral-named product path deps
+  like `guard = { package = "net-guard", path = '../net-guard' }`).
+- Standards: `docs/TESTING.md` and `CONTRIBUTING.md` contradicted themselves
+  (claimed tests need no prior build while the harness requires a built
+  binary; described `ci-local.sh` as fmt/clippy/test only; miscounted crates
+  at 16/17; the GitHub Actions step list omitted the build and boundary
+  steps).
+- Standards: `LATTICE_BIN` docs gave the wrong failure mechanism (claimed
+  relative paths resolved from the scenario child cwd; actually resolved in
+  the test process before spawn) and called "must be absolute" a code-enforced
+  contract when it is a robustness recommendation.
+- Standards: `LatticeCommand.timeout` and `ScenarioSpec`'s
+  `step_timeout_secs`/`total_timeout_secs` were exposed but ignored at
+  execution (`let _ = command.timeout;`) — speculative generality with no
+  semantics.
+- Spec: documented relative `LATTICE_BIN=target/debug/lattice` failed because
+  `cargo test -p lattice-system-harness` runs with the crate dir as cwd,
+  where `target/debug/lattice` does not exist.
+- Spec: `world.rs` allocated ports via a process-local `AtomicU16` from
+  18000 without ever asking the OS, then swallowed the bind error and fell
+  back to 0 — parallel test processes could collide, and a port-0 world
+  violated the isolation contract.
+- Spec: `assert_with_failure_artifacts` wrote the bundle into `world.root()`
+  (a `tempfile::TempDir`), deleted the instant the world drops — nothing
+  survived for post-mortem; the semantic public-commands assertion was also
+  not wired to artifact capture, and the command/env values were written
+  raw (secret leakage).
+
+**Fix:**
+
+- Boundary check (`scripts/system-harness-boundary-check.sh`): parse the
+  manifest with `tomllib` (Python 3.11+ stdlib) instead of regex. One parse
+  runs (a) a forbidden-name check using the actual package name (resolved
+  through `package =` renames, falling back to the dep key for string-form
+  version deps like `lattice-api = "0.1"`) and (b) a location-based path
+  check that flags any `path` value (in any `*-dependencies` table) resolving
+  under `repo_root/crates/`, regardless of crate name or quote style. The
+  cargo-metadata backstop walks the full transitive closure via
+  `resolve.nodes` and flags ANY workspace-member dep (name-agnostic — catches
+  neutral-named product crates like `net-guard` and indirect deps regardless
+  of declaration form).
+- `crates/lattice-system-harness/src/world.rs`: OS-assigned ephemeral port
+  via `TcpListener::bind("127.0.0.1:0")`; bind error propagated as
+  `WorldError` (no silent port-0 fallback).
+- `crates/lattice-system-harness/src/driver.rs`: `from_env` canonicalizes the
+  binary to an absolute path (resolved in the test process); `run` enforces
+  `LatticeCommand.timeout` via `try_wait` polling with concurrent
+  stdout/stderr drain threads and `DriverError::Timeout`; `help`/`bare_invoke`
+  take `&ScenarioSpec` and use `spec.step_timeout()`.
+- `crates/lattice-system-harness/src/scenario.rs`: removed the speculative
+  `total_timeout_secs`/`total_timeout()` (no consumer); kept
+  `step_timeout_secs`/`step_timeout()`.
+- `crates/lattice-system-harness/src/artifacts.rs` + `assert.rs`: `command_summary`
+  redacted; `redact_env_pair` masks secret-name env vars as `[REDACTED-ENV]`
+  and substring-redacts others; `assert_with_failure_artifacts` persists
+  `stdout.txt`/`stderr.txt`/`command.txt`/`world.txt` under
+  `$LATTICE_HARNESS_FAILURE_DIR/<scenario>/` (default anchored to
+  `CARGO_MANIFEST_DIR`, cwd-independent). Added `assert_stdout_contains_all`
+  and `assert_exit_failure`; wired the semantic assertions in
+  `fast_cli_help.rs` to artifact capture.
+- `crates/lattice-system-harness/tests/fast_cli_help.rs`: 4 black-box tests
+  updated to the new APIs; port assertion relaxed to `!= 0` (OS-assigned).
+- `crates/lattice-system-harness/tests/scenarios/cli_help_surface.json`:
+  dropped the removed `total_timeout_secs` field.
+- `crates/lattice-system-harness/AGENTS.md`: verification section uses an
+  absolute `LATTICE_BIN` and documents the real resolution mechanism.
+- `scripts/ci-local.sh`: added `LATTICE_HARNESS_FAILURE_DIR` defaulting to
+  `$(pwd)/target/harness-failures` (workspace-level collection).
+- `docs/TESTING.md`: corrected crate count to 18; rewrote the `ci-local.sh`
+  description to the actual 5 steps; documented the build-required harness
+  exception, the `LATTICE_BIN` resolution mechanism, the GitHub Actions
+  build+boundary steps, and the failure-artifact location.
+- `CONTRIBUTING.md`: corrected crate count to 18; replaced the
+  fmt/clippy/test "full local gate" with `scripts/ci-local.sh` (5 steps);
+  updated the summary checklist.
+- `.github/workflows/ci.yml`: added the binary build, boundary check, and
+  `LATTICE_BIN` env steps.
+- `Cargo.toml` / `Cargo.lock`: registered `lattice-system-harness` as a
+  workspace member.
+
+**Verification:**
+
+- `scripts/system-harness-boundary-check.sh` — 3/3 groups PASS (tomllib
+  manifest check; workspace-true; name-agnostic transitive metadata check).
+- `cargo fmt --all --check` — clean.
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` —
+  clean.
+- `cargo build -p lattice-cli --bin lattice` — ok.
+- `LATTICE_BIN=$(pwd)/target/debug/lattice cargo test -p lattice-system-harness`
+  — 4/4 harness tests pass.
+- Synthetic probes confirmed the boundary check catches the previously
+  bypassable forms: `guard = { package = "net-guard", path = '../net-guard' }`
+  (single-quoted + neutral-name rename), `lattice-api = "0.1"` (string-form
+  version dep), and transitive `net-guard` via the metadata backstop.
+- `ci-local.sh` full run is green except for a pre-existing, unrelated
+  `lattice-api` SQLite "disk I/O error" flake
+  (`turn_runtime_constructs_one_adapter_per_turn`) that passes in isolation;
+  no `lattice-api`/audit/SQLite files were touched in this change.
+
+**Changed files:**
+
+- `scripts/system-harness-boundary-check.sh` (new)
+- `crates/lattice-system-harness/**` (new crate: AGENTS.md, Cargo.toml,
+  src/{artifacts,assert,driver,lib,scenario,world}.rs,
+  tests/fast_cli_help.rs, tests/scenarios/cli_help_surface.json)
+- `scripts/ci-local.sh`
+- `docs/TESTING.md`
+- `CONTRIBUTING.md`
+- `.github/workflows/ci.yml`
+- `Cargo.toml` / `Cargo.lock`
+
+---
+
 ## Codeberg #15: permanently retire `mutate.batch` — 2026-07-04
 
 Severity: MEDIUM (product surface reduction; removes multi-operation partial-failure API).
