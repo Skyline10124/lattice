@@ -4,6 +4,53 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #26: Rust xtask replaces shell CI and boundary scripts — 2026-07-05
+
+Severity: MEDIUM (developer workflow / CI maintainability).
+
+**Problem:** Local CI and architecture boundary enforcement lived in
+`scripts/ci-local.sh`, `scripts/system-harness-boundary-check.sh`, and
+`scripts/lancet-boundary-check.sh`. Shell + inline Python/grep duplicated
+logic, was harder to unit-test, and drifted from documented crate counts.
+GitHub Actions could not rely on a `cargo xtask` alias because `.cargo/` is
+gitignored.
+
+**Fix:**
+
+- Added root `xtask` workspace member with `ci`, `harness-boundary`, and
+  `lancet-boundary` subcommands (Rust ports of the three shell checks, with
+  per-group adversarial unit tests).
+- Documented and wired automation entrypoints as
+  `cargo run --package xtask -- <subcommand>` so fresh clones work without a
+  gitignored `.cargo/` alias (local dev may still use an optional `xtask` alias).
+- Rewired `.github/workflows/ci.yml` to
+  `cargo run --package xtask -- harness-boundary`, an explicit
+  `dtolnay/rust-toolchain` install for `1.88`, and `cargo +1.88 check -p xtask`.
+- Rewired `scripts/release-gate-v1.3.sh` / `v1.4.sh` and `release_smoke` to
+  `cargo run --package xtask -- lancet-boundary`.
+- `cargo run --package xtask -- ci` preserves `LATTICE_BIN` /
+  `LATTICE_HARNESS_FAILURE_DIR` when already set (matches former `ci-local.sh`
+  `:-` defaults).
+- Removed retired shell scripts with no wrapper.
+
+**Verified:** `cargo test -p xtask` ✓ (18 tests),
+`cargo run --package xtask -- harness-boundary` ✓,
+`cargo run --package xtask -- lancet-boundary` ✓,
+`cargo run --package xtask -- ci` ✓, restored shell scripts parity ✓ on clean
+tree, `release_smoke_release_gate_v1_4_includes_lancet_boundary_check` ✓.
+
+**Changed files:** `xtask/**`, `Cargo.toml`, `Cargo.lock`,
+`.github/workflows/ci.yml`, `CONTRIBUTING.md`, `docs/TESTING.md`,
+`docs/DEVELOPMENT.md`, `docs/v1.3-alpha-walkthrough.md`,
+`crates/lattice-system-harness/AGENTS.md`,
+`crates/lattice-system-harness/src/assert.rs`,
+`crates/lattice-cli/tests/release_smoke.rs`,
+`scripts/release-gate-v1.3.sh`, `scripts/release-gate-v1.4.sh`;
+deleted `scripts/ci-local.sh`, `scripts/lancet-boundary-check.sh`,
+`scripts/system-harness-boundary-check.sh`.
+
+---
+
 ## Codeberg #20: lattice-system-harness + boundary check + docs/port/artifact/path hardening — 2026-07-05
 
 Severity: MEDIUM (standards + spec review of the new `lattice-system-harness` crate).
