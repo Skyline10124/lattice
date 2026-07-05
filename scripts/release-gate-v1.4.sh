@@ -196,8 +196,8 @@ echo "==> [8/10] Sub-check scripts (LANCET boundary + LOC advisory)"
 
 # The boundary regression and LOC budget are offline correctness proof checks.
 # LOC stays visibly advisory: its output is printed and non-blocking.
-echo "  --> cargo run --package xtask -- lancet-boundary"
-cargo run --package xtask -- lancet-boundary
+echo "  --> cargo xtask lancet-boundary"
+cargo xtask lancet-boundary
 echo ""
 
 echo "  --> scripts/source-loc-budget.sh --max 85000 (advisory)"

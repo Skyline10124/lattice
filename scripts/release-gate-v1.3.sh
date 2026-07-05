@@ -131,8 +131,8 @@ echo ""
 # ── Step 8: Sub-check scripts ─────────────────────────────────────────────────
 echo "==> [8/9] Sub-check scripts (LANCET boundary + LOC budget)"
 
-echo "  --> cargo run --package xtask -- lancet-boundary"
-cargo run --package xtask -- lancet-boundary
+echo "  --> cargo xtask lancet-boundary"
+cargo xtask lancet-boundary
 echo ""
 
 # LOC budget: raised cap from 20k default to 60k to reflect actual alpha codebase

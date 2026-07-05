@@ -16,7 +16,8 @@ target/
 opencode.jsonc
 .pytest_cache/
 .worktrees/
-.cargo/
+.cargo/*
+!.cargo/config.toml
 benchmarks/**/benchmark.env
 __pycache__/
 *.py[cod]

@@ -11,7 +11,7 @@ Node/JavaScript toolchain, no `package.json`, and no external test framework
 
 All commands below are grounded in the workspace manifest
 (`Cargo.toml`), the CI workflow (`.github/workflows/ci.yml`),
-`cargo run --package xtask -- …`, and crate `Cargo.toml` feature definitions.
+`cargo xtask …`, and crate `Cargo.toml` feature definitions.
 
 ---
 
@@ -28,7 +28,7 @@ LATTICE uses Rust's first-party test framework:
   pre-built `lattice` binary located via the `LATTICE_BIN` environment
   variable, so the binary must be built first
   (`cargo build -p lattice-cli --bin lattice`) and `LATTICE_BIN` must point at
-  it. `cargo run --package xtask -- ci` and CI do this step before `cargo test --workspace`.
+  it. `cargo xtask ci` and CI do this step before `cargo test --workspace`.
 - Property/fuzz tests use `proptest` (a workspace dev-dependency,
   `proptest = "1"` in `Cargo.toml`); regression seeds live alongside the
   tests, e.g. `crates/lancet-authority/tests/guard_decide_fuzz.proptest-regressions`.
@@ -44,18 +44,18 @@ but CI and the local gate use `cargo test`.
 
 ### Whole workspace
 
-CI and `cargo run --package xtask -- ci` run, in order:
+CI and `cargo xtask ci` run, in order:
 
 1. `cargo fmt --all --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo build -p lattice-cli --bin lattice`
-4. `cargo run --package xtask -- harness-boundary`
+4. `cargo xtask harness-boundary`
 5. `cargo test --workspace` with `LATTICE_BIN` pointing at `target/debug/lattice`
 
 ```bash
 cargo build -p lattice-cli --bin lattice
 export LATTICE_BIN="${LATTICE_BIN:-$(pwd)/target/debug/lattice}"
-cargo run --package xtask -- harness-boundary
+cargo xtask harness-boundary
 cargo test --workspace
 ```
 
@@ -71,7 +71,7 @@ LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness
 scenario child is spawned. A relative path that is a real file from that cwd
 works fine — `canonicalize` then stores an absolute path so the later child
 `current_dir` change to the scenario project dir cannot break it. The reason to
-prefer `$(pwd)/target/debug/lattice` (what `cargo run --package xtask -- ci` defaults to) is
+prefer `$(pwd)/target/debug/lattice` (what `cargo xtask ci` defaults to) is
 that `cargo test -p lattice-system-harness` runs with the crate dir as cwd,
 where `target/debug/lattice` does not exist (the binary is built at the
 workspace root's `target/`); an absolute path is cwd-independent and avoids
@@ -121,13 +121,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 These two run **before** `cargo test` in both `.github/workflows/ci.yml` and
-`cargo run --package xtask -- ci`, and are part of the release gate
+`cargo xtask ci`, and are part of the release gate
 (`scripts/release-gate-v1.4.sh`).
 
 ### Local CI replica
 
 ```bash
-cargo run --package xtask -- ci
+cargo xtask ci
 ```
 
 Runs, in order, with pass/fail markers — a local mirror of the CI `check` job:
@@ -135,7 +135,7 @@ Runs, in order, with pass/fail markers — a local mirror of the CI `check` job:
 1. `cargo fmt --all --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo build -p lattice-cli --bin lattice`
-4. `cargo run --package xtask -- harness-boundary`
+4. `cargo xtask harness-boundary`
 5. `cargo test --workspace` with `LATTICE_BIN` defaulted to
    `$(pwd)/target/debug/lattice` and `LATTICE_HARNESS_FAILURE_DIR` defaulted to
    `$(pwd)/target/harness-failures`
@@ -151,7 +151,7 @@ When a `lattice-system-harness` scenario fails an assertion wrapped in
 (`stdout.txt`, `stderr.txt`, `command.txt`, `world.txt`) under
 `$LATTICE_HARNESS_FAILURE_DIR/<scenario>/`. The default is anchored to the
 harness crate dir (`<crate>/target/harness-failures/<scenario>/`), independent
-of the test process cwd; `cargo run --package xtask -- ci` redirects it to the
+of the test process cwd; `cargo xtask ci` redirects it to the
 workspace-level `$(pwd)/target/harness-failures/` so a full local run collects
 every scenario's bundle in one place. `target/` is gitignored, so bundles
 persist for post-mortem inspection without polluting the tree.
@@ -331,7 +331,7 @@ File: `.github/workflows/ci.yml`
   5. `cargo clippy --workspace --all-targets -- -D warnings`
   6. `cargo build -p lattice-cli --bin lattice` (builds the binary the
      `lattice-system-harness` black-box tests drive via `LATTICE_BIN`)
-  7. `cargo run --package xtask -- harness-boundary` (verifies the harness crate
+  7. `cargo xtask harness-boundary` (verifies the harness crate
      has no product-crate dependency, direct or transitive)
   8. `cargo test --workspace` with
      `LATTICE_BIN=${{ github.workspace }}/target/debug/lattice`
@@ -351,7 +351,7 @@ The repo ships `.githooks/pre-commit` (install with
 blocks commits that stage files matching the repository's Git ignore rules
 (e.g. `.env`, `.codex/`, `.agents/`, `.planning/`, build outputs). It guards
 against accidentally force-adding private/build state into history; it does
-not run `cargo test` or clippy. Use `cargo run --package xtask -- ci` for a local test
+not run `cargo test` or clippy. Use `cargo xtask ci` for a local test
 replica.
 
 ### Release gate
@@ -367,7 +367,7 @@ narrative.
 
 As noted in §3, `lattice-workspace` live KVM/libkrun integration tests (the
 `integration_tests` feature) are **not** part of the `CI` workflow or
-`cargo run --package xtask -- ci`. They run only on a provisioned KVM host. The CI `cargo test
+`cargo xtask ci`. They run only on a provisioned KVM host. The CI `cargo test
 --workspace` invocation runs the default-feature deterministic test set
 across all 18 runtime/test workspace member crates under `crates/` (including
 `lattice-system-harness`). The root `xtask` crate is not a product member.

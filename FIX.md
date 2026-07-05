@@ -4,6 +4,33 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #26 follow-up: track `.cargo/config.toml`, standardize `cargo xtask` — 2026-03-14
+
+Severity: LOW (developer ergonomics / clone parity).
+
+**Problem:** After #26, CI and docs used `cargo run --package xtask --` because the
+whole `.cargo/` tree was gitignored, so fresh clones could not rely on a tracked
+`cargo xtask` alias.
+
+**Fix:**
+
+- `.gitignore`: keep `.cargo/*`, un-ignore `!.cargo/config.toml` only.
+- Track `.cargo/config.toml` with `[alias] xtask = "run --package xtask --"`.
+- User-facing automation strings now use `cargo xtask <subcommand>` (CI, docs,
+  release gates, harness AGENTS, release_smoke).
+
+**Verified:** `cargo xtask harness-boundary` ✓,
+`release_smoke_release_gate_v1_4_includes_lancet_boundary_check` ✓.
+
+**Changed files:** `.gitignore`, `.cargo/config.toml`, `.github/workflows/ci.yml`,
+`CONTRIBUTING.md`, `docs/TESTING.md`, `docs/DEVELOPMENT.md`,
+`docs/v1.3-alpha-walkthrough.md`, `crates/lattice-system-harness/AGENTS.md`,
+`crates/lattice-system-harness/src/assert.rs`,
+`crates/lattice-cli/tests/release_smoke.rs`, `scripts/release-gate-v1.3.sh`,
+`scripts/release-gate-v1.4.sh`, `FIX.md`.
+
+---
+
 ## Codeberg #26: Rust xtask replaces shell CI and boundary scripts — 2026-07-05
 
 Severity: MEDIUM (developer workflow / CI maintainability).
