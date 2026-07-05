@@ -4,6 +4,47 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #26 audit: `lancet-boundary` parity with retired shell script — 2026-07-05
+
+Severity: LOW (audit / no code change).
+
+**Audit:** Verified `cargo xtask lancet-boundary` (6 groups, 4 allowlists, scan
+ranges and exclusion rules) is item-by-item equivalent to the retired
+`scripts/lancet-boundary-check.sh` (deleted in `bdf8204c`), with no silent loss.
+
+**Method:** Restored the retired shell script from `bdf8204c~1` and built two
+hand fixtures under `/tmp` — a dirty one with one violation per group plus
+allowlisted/excluded canaries (G3 `usage_turn.rs`, G5 `registry.rs`, G6
+`run_tests.rs`/`foo_tests.rs`/`tests/`, `target/`, `.planning/`), and a clean
+one. Ran the old script and the Rust checks (`lattice_agent_forbidden_dependency_graph`,
+`scan_with_allowlist` for G2/G3/G5, `tool_executor_reexport_hits`,
+`cli_production_bypass_hits`) against both, then diffed the hit sets.
+
+**Result:**
+
+- Dirty fixture: **8 hit lines, byte-identical** between old and new (sorted
+  diff empty). Group→hit mapping identical for all 6 groups.
+- Clean fixture: old script all-6-PASS (exit 0); Rust tooling 0 hits (exit 0).
+  No false positives.
+- All 4 allowlists identical, same prefix-string semantics
+  (`case "$file" in "$prefix"*` ⇄ `file.starts_with(prefix)`).
+- Scan ranges identical: G2/G3/G5 scan `crates/*/src` + `crates/*/tests`;
+  G4 scans `crates/lattice-agent`; G6 scans `crates/lattice-cli/src` only.
+- Exclusion rules identical: `target/` and `.planning/` pruned at any depth
+  (`--exclude-dir` ⇄ `is_excluded_walk_dir` + `filter_entry`); G6 additionally
+  skips `*_tests.rs` filenames and any `tests/` dir under `lattice-cli/src`
+  (`--exclude='*_tests.rs' --exclude-dir=tests` ⇄ `skip_cli_test_artifact`).
+- `run_tests.rs` is flagged by G2 (DefaultToolExecutor scan) on BOTH sides —
+  it lives only in `CLI_PRODUCTION_ALLOWLIST` (G6), not
+  `DEFAULT_TOOL_EXECUTOR_ALLOWLIST` (G2). This is consistent legacy behavior,
+  not a regression or silent loss.
+
+**No code change.** The throwaway parity probe used during the audit was
+removed; `cargo test -p xtask` (24), clippy `-D warnings`, and
+`cargo fmt --check` remain green.
+
+---
+
 ## Codeberg #26 follow-up: per-group pos/neg unit tests for xtask boundary checks — 2026-07-05
 
 Severity: LOW (test coverage / regression guard).
