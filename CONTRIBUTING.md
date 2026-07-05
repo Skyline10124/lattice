@@ -19,7 +19,8 @@ changes. For the workspace architecture, layering, and crate roles, read
 
 ## 1. Introduction
 
-Welcome. LATTICE is a Cargo workspace of 18 crates, layered so dependencies always
+Welcome. LATTICE is a Cargo workspace containing 18 runtime/test crates plus one
+root-level `xtask` tool crate (see root `Cargo.toml`), layered so dependencies always
 point from higher layers down. Before making changes, please:
 
 - Read [LICENSE](LICENSE) — contributions are licensed under Apache-2.0.
@@ -185,16 +186,16 @@ for observations, context, and reminders that don't require action.
 Before opening a pull request, run the full local gate and make sure it is green:
 
 ```sh
-scripts/ci-local.sh
+cargo run --package xtask -- ci
 ```
 
-`scripts/ci-local.sh` is the canonical local CI replica. It runs, in order:
+`cargo run --package xtask -- ci` is the canonical local CI replica. It runs, in order:
 
 1. `cargo fmt --all --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo build -p lattice-cli --bin lattice` (builds the binary the
    `lattice-system-harness` black-box tests drive via `LATTICE_BIN`)
-4. `scripts/system-harness-boundary-check.sh` (verifies the harness crate has
+4. `cargo run --package xtask -- harness-boundary` (verifies the harness crate has
    no product-crate dependency, direct or transitive)
 5. `cargo test --workspace` with `LATTICE_BIN` defaulted to
    `$(pwd)/target/debug/lattice`
@@ -236,7 +237,7 @@ several small PRs over one large one.
 - [ ] Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the relevant
       `crates/<crate>/AGENTS.md`
 - [ ] Respect layering (no reverse deps) and Ownership Rules
-- [ ] `scripts/ci-local.sh` is green (fmt, clippy, build, harness boundary,
+- [ ] `cargo run --package xtask -- ci` is green (fmt, clippy, build, harness boundary,
       `cargo test --workspace`)
 - [ ] New files have the `// Copyright 2026 Ast Rin` / SPDX header
 - [ ] Conventional-commit messages, PR against `main`
