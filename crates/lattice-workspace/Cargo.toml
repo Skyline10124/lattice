@@ -14,8 +14,14 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
-# microsandbox SDK (no prebuilt agentd download, no keyring/dbus)
-microsandbox = { version = "=0.5.6", default-features = false, features = ["net"] }
+# microsandbox SDK: keep `keyring` (dbus/keyring system deps) off, but enable
+# `prebuilt` so the SDK's build.rs downloads the matching `msb` binary +
+# libkrunfw into ~/.microsandbox/ at build time. Without `prebuilt`, no `msb`
+# binary is produced anywhere (the crate bin is named `microsandbox`, not `msb`,
+# and the SDK runtime looks for `msb`), so Upper creation fails with
+# "msb binary not found" at turn time. `prebuilt` only adds the download step
+# + microsandbox-utils/http-client; it does NOT pull keyring/dbus.
+microsandbox = { version = "=0.5.6", default-features = false, features = ["net", "prebuilt"] }
 # in-process git operations (baseline archive + DeterministicWorkspace)
 git2 = { workspace = true }
 # file credential exec-based injection (base64 encode on host)

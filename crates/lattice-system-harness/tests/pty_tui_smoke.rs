@@ -109,6 +109,17 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         "OPENAI_COMPATIBLE_API_KEY",
         lattice_system_harness::FAKE_API_KEY,
     );
+    // Point MSB_HOME at the real host ~/.microsandbox — the scenario world's
+    // env_clear + isolated HOME would otherwise hide it from the SDK. See
+    // msb_full_turn.rs for the full rationale.
+    let real_msb_home = std::env::var("HOME")
+        .map(|h| std::path::Path::new(&h).join(".microsandbox"))
+        .expect("test process HOME must be set to locate ~/.microsandbox");
+    assert!(
+        real_msb_home.join("bin").join("msb").is_file(),
+        "MSB_HOME={real_msb_home:?} has no bin/msb; run `cargo build -p lattice-workspace`"
+    );
+    world.set_env("MSB_HOME", real_msb_home.display().to_string());
 
     budget.check(&spec.name);
     let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke", "main").expect("spawn tui");

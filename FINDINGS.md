@@ -53,6 +53,13 @@
 - **升级条件**: 若 owner 在本机完整门实跑失败 → 升为 MEDIUM 并按实跑结果修场景或（若产品 bug）另开票；若完整门成为 CI 常态且需在无 KVM 环境也跑 → 升为 MEDIUM 并重新评估 gating 机制。
 - **计划**: owner 在本机 KVM 主机跑 `LATTICE_HARNESS_MSB=1 LATTICE_BIN=... cargo test -p lattice-system-harness -- --include-ignored`，勾 #21 验收清单，打 `ready-for-close`。本 finding 不阻塞 #21 代码交付与 fast-lane 验证。
 
+### L-21-02: `require_msb_env` 探针探的是 audit 路径，不验证 MSB stack 可用 — `verification` / harness / full-gate
+- **位置**: `crates/lattice-system-harness/src/layer_guard.rs`（`require_msb_env`，:54-106）；`crates/lattice-cli/src/commands/lancet.rs`（`run_status` → `collect_status`）；`crates/lancet-api/src/status.rs`（`collect_status`，:31-40）。
+- **问题**: `require_msb_env` 用 `lattice lancet status` 作 MSB stack 探针，但 `lancet status` 只读 project audit SQLite store（`collect_status` → `CepAuditStore::open` + `query_rows`），**完全不碰 microsandbox daemon、`msb` binary、libkrunfw 或 KVM**。audit DB 不存在时直接返回空 `Ok`（`status.rs:35-40`）。因此探针 exit 0 只证明"产品 CLI 能跑 + audit 路径可读"，不证明"MSB stack 能起 Upper"。owner 实跑时 `msb` binary 缺失（未装 / `MSB_HOME` 指向隔离 HOME 导致 SDK 找不到），探针照样过，turn 才在 Upper 创建阶段撞 `msb binary not found`——失败信号比应有的晚了一整层。
+- **当前状态**: ACCEPTED RESIDUAL（harness 验证缺口）。KVM 场景已通过 `MSB_HOME` env 注入 + `prebuilt` feature 修复了 `msb` 可达性（见 FIX.md `#21: enable microsandbox prebuilt feature` 条目），但探针本身仍探错对象——它该探的是"能起 Upper"（如尝试创建一个短命 sandbox 并立刻销毁），不是"能读 audit"。
+- **升级条件**: 若 KVM 完整门成为 CI 常态且探针误绿导致延迟失败成为痛点 → 升为 MEDIUM 并重写探针。
+- **计划**: 将 `require_msb_env` 探针改为真正验证 MSB stack（如 `lattice` 跑一个最小 Upper smoke，或直接调 microsandbox SDK 创建+销毁一个空 sandbox），而非读 audit。非 #21 交付阻塞项；当前 `msb binary not found` 已由 `MSB_HOME` 注入 + `prebuilt` feature 兜住，探针误绿的窗口收窄到"MSB_HOME 对了但 KVM/libkrunfw 坏了"这一窄场景。
+
 ### L-11-01: `tail_audit` 批次循环有 `yield_now` 但无专用 `CancellationToken` + CLI 接线 — `robustness` / operator-path
 - **位置**: `crates/lancet-api/src/audit.rs`（`tail_audit` 批次循环,`tokio::task::yield_now().await` 在 L235;循环体 `query_rows` 同步）
 - **问题**: 批次循环底部已加 `tokio::task::yield_now().await`,drop-future 取消可在批次边界生效。但无专用 `CancellationToken` 从 CLI 接入 `tail_audit`,`lattice audit --tail` 的 Ctrl-C 仅靠默认 future-drop,无显式信号接线。退役前的 native handler 经 `HandlerContext { cancellation: Cancellation }` 有 per-batch watch 检查;direct-store 路径用 `yield_now` 兜底但未做专用 token + CLI 接线。

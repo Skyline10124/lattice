@@ -217,6 +217,22 @@ fn msb_plain_text_turn_commits_and_exit_zero() {
         "OPENAI_COMPATIBLE_API_KEY",
         lattice_system_harness::FAKE_API_KEY,
     );
+    // The microsandbox SDK resolves `msb` + libkrunfw via `MSB_HOME` env →
+    // `~/.microsandbox` (resolve_home in microsandbox-utils). The scenario
+    // world env_clear()s the child and sets HOME to an isolated /tmp dir, so
+    // the SDK would look in /tmp/.../home/.microsandbox and find nothing.
+    // Point MSB_HOME at the real host ~/.microsandbox (read from the test
+    // process's HOME, which env_clear does NOT touch) so the SDK finds the
+    // `msb` binary + libkrunfw that `prebuilt` downloaded at build time.
+    let real_msb_home = std::env::var("HOME")
+        .map(|h| std::path::Path::new(&h).join(".microsandbox"))
+        .expect("test process HOME must be set to locate ~/.microsandbox");
+    assert!(
+        real_msb_home.join("bin").join("msb").is_file(),
+        "MSB_HOME={real_msb_home:?} has no bin/msb; run `cargo build -p lattice-workspace` \
+         (prebuilt feature downloads msb+libkrunfw to ~/.microsandbox)"
+    );
+    world.set_env("MSB_HOME", real_msb_home.display().to_string());
 
     // Create the session via the public CLI.
     budget.check(&spec.name);
