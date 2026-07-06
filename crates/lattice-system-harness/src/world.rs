@@ -117,6 +117,24 @@ impl ScenarioWorld {
         self.git(&["init"])?;
         self.git(&["config", "user.email", "harness@test"])?;
         self.git(&["config", "user.name", "Lattice Harness"])?;
+        // Point HEAD at refs/heads/main BEFORE the first commit so the
+        // initial commit lands on `main` (matching the project_branch the
+        // scenarios pass to `session new --project-branch main`). Without
+        // this, hosts whose git defaults to `master` create an unborn
+        // refs/heads/master HEAD, and the product's resolve_baseline_head
+        // (upper.rs) fails with UnbornBranch on repo.head(). Using
+        // symbolic-ref is portable across git versions (unlike
+        // `git init -b main` which requires git 2.28+).
+        self.git(&["symbolic-ref", "HEAD", "refs/heads/main"])?;
+        // Create an initial commit so HEAD is born — resolve_baseline_head
+        // needs repo.head() to peel to a commit; an unborn branch has none.
+        // `git add -A` picks up whatever the scenario already wrote (e.g.
+        // .lattice/agents/<name>/agent.toml) so the baseline reflects the
+        // real pre-turn project state. `--allow-empty` makes this robust
+        // against call ordering: even if no project file has been written
+        // yet, the commit succeeds and HEAD is born.
+        self.git(&["add", "-A"])?;
+        self.git(&["commit", "--allow-empty", "-m", "harness init"])?;
         Ok(())
     }
 

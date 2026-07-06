@@ -4,6 +4,59 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #21: `init_git_project` left unborn HEAD on `master` — KVM scenarios failed at baseline — 2026-07-06
+
+Severity: HIGH (both `#[ignore]` KVM scenarios failed at Upper baseline resolution on any host whose git defaults to `master`).
+
+**Problem:** `ScenarioWorld::init_git_project` (`world.rs:116-121`) ran only
+`git init` + `git config user.email/name` — it neither set the branch name
+nor created an initial commit. On hosts whose git defaults to `master`
+(the historical default; the git hint the owner saw confirmed this), the
+repo's HEAD pointed at `refs/heads/master` with no commits (unborn). The
+scenarios pass `project_branch = "main"` to `session new`, but the repo
+was on `master` with nothing committed.
+
+When `session send` ran, the product's `resolve_baseline_head`
+(`crates/lattice-api/src/turn/upper.rs:175-184`) called `repo.head()` →
+`git2::Error` `UnbornBranch (-9)` (`reference 'refs/heads/master' not
+found`). The turn never started: zero JSONL events, empty stdout, and
+`fake_llm_requests.txt` was never written (the LLM was never called). The
+failure surfaced as `required event subsequence not satisfied: missing
+'turn_started' after position 0; observed types = []`.
+
+The failure bundle (`target/harness-failures/msb-plain-text-turn/`)
+captured the root cause in `stderr.txt`:
+`error: git baseline resolution failed: reference 'refs/heads/master' not
+found; class=Reference (4); code=UnbornBranch (-9)`.
+
+**Fix:** `init_git_project` now:
+1. `git symbolic-ref HEAD refs/heads/main` — points HEAD at `main` before
+   the first commit so the initial commit lands on `main` (matching the
+   `project_branch = "main"` the scenarios pass to `session new`). Portable
+   across all git versions (unlike `git init -b main` which requires
+   git 2.28+).
+2. `git add -A` + `git commit --allow-empty -m "harness init"` — creates an
+   initial commit so HEAD is born and `repo.head()` peels to a commit.
+   `--allow-empty` makes this robust against call ordering (even if no
+   project file has been written yet, the commit succeeds); `git add -A`
+   picks up whatever the scenario already wrote (e.g. the agent profile)
+   so the baseline reflects the real pre-turn project state.
+
+**Verification:**
+
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — clean.
+- `cargo fmt -p lattice-system-harness --check` — clean.
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
+  — 50 unit + 4 fast black-box tests pass (fast lane unaffected: those tests
+  do not call `init_git_project`). The 2 KVM scenarios remain `#[ignore]`-d.
+- Live KVM re-run by owner pending (L-21-01); the failure bundle from the
+  prior run confirmed the diagnosis and is now stale (the fix prevents the
+  UnbornBranch error from recurring).
+
+**Changed files:** `crates/lattice-system-harness/src/world.rs`, `FIX.md`.
+
+---
+
 ## Codeberg #21 review follow-up: wire `LATTICE_MSB_IMAGE` into ignored scenarios — 2026-07-05
 
 Severity: HIGH (the two `#[ignore]` KVM scenarios could not run as committed).
