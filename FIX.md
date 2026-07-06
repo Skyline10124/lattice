@@ -4,6 +4,76 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #21 review follow-up: wire `LATTICE_MSB_IMAGE` into ignored scenarios — 2026-07-05
+
+Severity: HIGH (the two `#[ignore]` KVM scenarios could not run as committed).
+
+**Problem:** `tests/msb_full_turn.rs` and `tests/pty_tui_smoke.rs` both
+declared an `AGENT_TOML` with an empty `[workspace]` section (no `image`
+field). The `msb_full_turn.rs` doc comment claimed "the image is supplied
+via the `LATTICE_MSB_IMAGE` env var at run time", but a full-repo grep found
+**zero code reading `LATTICE_MSB_IMAGE`** — the env var existed only in that
+one comment. The product reads `[workspace].image` from `agent.toml` via
+`resolve_upper_config` (`crates/lattice-api/src/turn/upper.rs:225-232`),
+which returns `UpperPrepareError::MissingWorkspaceSource` ("workspace.image
+required for Upper-backed tools") when the field is absent or empty.
+
+Consequence: on a real KVM host, `--include-ignored` would fail both
+scenarios at Upper preparation, before any turn ran — so the owner-side
+full-gate verification tracked by `FINDINGS.md` **L-21-01** could not pass
+as-is. The comment was aspirational and had never been wired up.
+
+**Fix:**
+
+- `crates/lattice-system-harness/tests/msb_full_turn.rs`: replaced the
+  `AGENT_TOML` const with an `AGENT_TOML_TEMPLATE` carrying an `{image}`
+  placeholder, plus a `render_agent_toml()` helper that reads `LATTICE_MSB_IMAGE`
+  and substitutes it into `[workspace].image`. **`LATTICE_MSB_IMAGE` is
+  required** — the harness bakes no default (an earlier draft defaulted to
+  the workspace contract tests' `docker.m.daocloud.io/library/python:3.12-slim`,
+  but that was redundant with the env var and coupled a black-box harness to
+  a product-test-specific China mirror that could go stale or be unreachable
+  from the owner's host; requiring the var keeps a single source of truth and
+  is consistent with the KVM lane already being explicit opt-in). Unset or
+  empty panics with a clear message naming the env var and an example ref,
+  same precondition pattern as `LatticeDriver::from_env().expect(...)`. The
+  helper is a hand-written template render, **not** serde — the harness
+  boundary forbids `lattice-profile`, so `AgentProfile::serialize` is
+  unavailable. The test body now writes `&render_agent_toml()`.
+- `crates/lattice-system-harness/tests/pty_tui_smoke.rs`: same fix (same
+  required-var, same helper).
+- `crates/lattice-system-harness/AGENTS.md`: the full-gate verification
+  bullet now shows `LATTICE_MSB_IMAGE=<OCI ref>` in the command and states
+  it is required (no default), with an example ref.
+
+The substituted TOML is accepted by `resolve_explicit_image_or_template`
+(`upper.rs:152-154`): a fully-qualified OCI ref contains both `/` and `:`,
+classifying as `ImageOrTemplate::Image`; a bare alphanumeric template name
+classifies as `Template`. The owner can pass either.
+
+**Verification:**
+
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — clean.
+- `cargo fmt -p lattice-system-harness --check` — clean.
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
+  — 50 unit + 4 fast black-box tests pass; the 2 MSB/PTY scenarios are still
+  `#[ignore]`-d (now compiling with the required-env-var image injection)
+  and skipped on this non-KVM host. Live KVM execution remains owner-side
+  (L-21-01).
+- The `render_agent_toml()` substitution + required-var panic was reasoned
+  through against `resolve_explicit_image_or_template`'s accept rule; it
+  cannot be exercised live without KVM.
+
+**Residual:** `FINDINGS.md` **L-21-01** still stands — the real MSB/PTY live
+run is owner-side full-gate verification. This fix removes the
+`MissingWorkspaceSource` blocker that would have prevented that run from
+passing; it does not constitute the live run itself.
+
+**Changed files:** `crates/lattice-system-harness/tests/{msb_full_turn,
+pty_tui_smoke}.rs`, `crates/lattice-system-harness/AGENTS.md`, `FIX.md`.
+
+---
+
 ## Codeberg #21 review follow-up: harness probe/pgid/shutdown/sentinel-scan/dedup/dead-code — 2026-07-05
 
 Severity: MEDIUM (two implementation errors + one RFC #19 decision-eight spec gap; remainder standards).

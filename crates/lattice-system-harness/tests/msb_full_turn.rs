@@ -38,12 +38,17 @@ use lattice_system_harness::{
     assert_event_subsequence, derive_send_exit_code, require_msb_env,
 };
 
-/// Minimal project-local agent profile. `[workspace]` is mandatory; the
-/// image is supplied via the `LATTICE_MSB_IMAGE` env var at run time so the
-/// owner's local full gate can pin the image they have cached (daocloud
-/// proxy, per the handoff). The profile deliberately enables no CEP tools —
-/// this is a plain-text turn, so no `tool_calls` should appear.
-const AGENT_TOML: &str = r#"schema_version = 1
+/// Minimal project-local agent profile template. `[workspace]` is mandatory
+/// and **must carry a real `image`** — `resolve_upper_config`
+/// (`crates/lattice-api/src/turn/upper.rs`) returns `MissingWorkspaceSource`
+/// when `[workspace].image` is absent or empty, so an empty section would
+/// fail at Upper preparation before any turn runs. The image is read from
+/// `LATTICE_MSB_IMAGE` (required — see [`render_agent_toml`]); the harness
+/// intentionally bakes no default, so the owner pins exactly the OCI ref they
+/// have cached and there is a single source of truth for the Upper image.
+/// The profile deliberately enables no CEP tools — this is a plain-text
+/// turn, so no `tool_calls` should appear.
+const AGENT_TOML_TEMPLATE: &str = r#"schema_version = 1
 
 [agent]
 name = "msb-plain"
@@ -53,10 +58,43 @@ model = "compat:msb-plain"
 system = "You are a concise test agent. Reply briefly."
 
 [workspace]
+image = "{image}"
 
 [tools]
 enabled = []
 "#;
+
+/// Render the agent profile TOML with `[workspace].image` taken from
+/// `LATTICE_MSB_IMAGE`. **Required** — there is no baked default: the KVM
+/// lane is already explicit opt-in (`LATTICE_HARNESS_MSB=1`, `LATTICE_BIN`,
+/// working MSB daemon), so requiring the image too keeps a single source of
+/// truth and keeps the harness free of product-adjacent image/mirror
+/// choices (the workspace contract tests' daocloud default is product-test-
+/// specific and not appropriate to bake into a black-box harness). Panics
+/// with a clear message if unset, same precondition pattern as
+/// `LatticeDriver::from_env().expect(...)`.
+///
+/// This is a hand-written template render, **not** serde serialization: the
+/// harness boundary (`cargo xtask harness-boundary`) forbids depending on
+/// `lattice-profile`, so `AgentProfile::serialize` is unavailable here —
+/// the harness drives the product purely through the built binary and
+/// hand-written fixture TOML. Called at test-body entry so the image is
+/// read fresh per run, not baked into the binary.
+fn render_agent_toml() -> String {
+    let image = std::env::var("LATTICE_MSB_IMAGE").unwrap_or_else(|_| {
+        panic!(
+            "LATTICE_MSB_IMAGE must be set to a fully-qualified OCI ref (or warm template name) \
+             for the KVM full-gate scenarios; the harness bakes no default so the owner pins \
+             exactly what they have cached. Example: \
+             LATTICE_MSB_IMAGE=docker.m.daocloud.io/library/python:3.12-slim"
+        )
+    });
+    assert!(
+        !image.trim().is_empty(),
+        "LATTICE_MSB_IMAGE is set but empty; set it to a fully-qualified OCI ref or template name"
+    );
+    AGENT_TOML_TEMPLATE.replace("{image}", &image)
+}
 
 fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
@@ -166,7 +204,7 @@ fn msb_plain_text_turn_commits_and_exit_zero() {
     let budget = spec.start_budget();
     let mut world = ScenarioWorld::new(&spec.name).expect("world");
     world
-        .write_project_file(".lattice/agents/msb-plain/agent.toml", AGENT_TOML)
+        .write_project_file(".lattice/agents/msb-plain/agent.toml", &render_agent_toml())
         .expect("write agent.toml");
     world.init_git_project().expect("init git project");
     budget.check(&spec.name);

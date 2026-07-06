@@ -54,9 +54,13 @@ Run from the workspace root:
 - `cargo build -p lattice-cli --bin lattice`
 - Fast lane: `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
 - Full gate (real Microsandbox, owner's KVM host):
-  `LATTICE_HARNESS_MSB=1 LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness -- --include-ignored`
+  `LATTICE_HARNESS_MSB=1 LATTICE_MSB_IMAGE=<fully-qualified OCI ref> LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness -- --include-ignored`
   (or `cargo test ... -- --include-ignored` to run ignored tests too). A
-  broken MSB environment makes this fail, not skip.
+  broken MSB environment makes this fail, not skip. `LATTICE_MSB_IMAGE` is
+  **required** for the MSB/PTY scenarios — the harness bakes no default so
+  the owner pins exactly the OCI ref (or warm template name) they have
+  cached; unset/empty panics with a clear message before any turn runs.
+  Example: `LATTICE_MSB_IMAGE=docker.m.daocloud.io/library/python:3.12-slim`.
 
 `LATTICE_BIN` is resolved by `LatticeDriver::from_env` **in the test process**
 (`is_file()` then `canonicalize`), i.e. relative to the test-process cwd,

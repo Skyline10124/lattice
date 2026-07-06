@@ -34,9 +34,15 @@ use lattice_system_harness::{
     require_msb_env,
 };
 
-/// Minimal project-local agent profile for the TUI smoke. Same shape as the
-/// MSB plain-text scenario; `[workspace]` is mandatory, no tools enabled.
-const AGENT_TOML: &str = r#"schema_version = 1
+/// Minimal project-local agent profile template for the TUI smoke. Same
+/// shape as the MSB plain-text scenario. `[workspace]` is mandatory and
+/// **must carry a real `image`** — `resolve_upper_config`
+/// (`crates/lattice-api/src/turn/upper.rs`) returns `MissingWorkspaceSource`
+/// for an empty/absent `[workspace].image`, failing at Upper prep before
+/// the TUI can drive a turn. The image is read from `LATTICE_MSB_IMAGE`
+/// (required — no baked default; see `msb_full_turn.rs::render_agent_toml`
+/// for the full rationale). No tools enabled.
+const AGENT_TOML_TEMPLATE: &str = r#"schema_version = 1
 
 [agent]
 name = "tui-smoke"
@@ -46,10 +52,30 @@ model = "compat:tui-smoke"
 system = "You are a concise test agent. Reply briefly."
 
 [workspace]
+image = "{image}"
 
 [tools]
 enabled = []
 "#;
+
+/// Render the agent profile TOML with `[workspace].image` taken from
+/// `LATTICE_MSB_IMAGE` (required, no default — see
+/// `msb_full_turn.rs::render_agent_toml`). Hand-written template render,
+/// not serde — the harness boundary forbids `lattice-profile`.
+fn render_agent_toml() -> String {
+    let image = std::env::var("LATTICE_MSB_IMAGE").unwrap_or_else(|_| {
+        panic!(
+            "LATTICE_MSB_IMAGE must be set to a fully-qualified OCI ref (or warm template name) \
+             for the KVM full-gate scenarios; the harness bakes no default. Example: \
+             LATTICE_MSB_IMAGE=docker.m.daocloud.io/library/python:3.12-slim"
+        )
+    });
+    assert!(
+        !image.trim().is_empty(),
+        "LATTICE_MSB_IMAGE is set but empty; set it to a fully-qualified OCI ref or template name"
+    );
+    AGENT_TOML_TEMPLATE.replace("{image}", &image)
+}
 
 fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
@@ -70,7 +96,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     let budget = spec.start_budget();
     let mut world = ScenarioWorld::new(&spec.name).expect("world");
     world
-        .write_project_file(".lattice/agents/tui-smoke/agent.toml", AGENT_TOML)
+        .write_project_file(".lattice/agents/tui-smoke/agent.toml", &render_agent_toml())
         .expect("write agent.toml");
     world.init_git_project().expect("init git project");
     budget.check(&spec.name);
