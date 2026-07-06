@@ -315,9 +315,25 @@ fn msb_plain_text_turn_commits_and_exit_zero() {
     let exit_ok = binary_exit == SendExitCode::Committed && derived == SendExitCode::Committed;
 
     let log_stdout = String::from_utf8_lossy(&log_output.stdout).to_string();
+    // `session log --json` emits a turn *summary* (agent_name, commit_id,
+    // status, usage, ...), NOT the `session send --json` event stream — so
+    // it has no "turn_committed" string. Cross-validate that the turn was
+    // persisted by checking for the commit_id (the same one send reported)
+    // and a "completed" status, which are the durable signals log surfaces.
+    let send_commit_id = outcome
+        .events
+        .iter()
+        .find_map(|e| match e {
+            lattice_system_harness::TurnEventLine::TurnCommitted { commit_id, .. } => {
+                Some(commit_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
     let log_ok = log_output.status.success()
-        && log_stdout.contains("turn_committed")
-        && log_stdout.contains("commit_id");
+        && !send_commit_id.is_empty()
+        && log_stdout.contains(&send_commit_id)
+        && log_stdout.contains("\"status\": \"completed\"");
     let status_ok = status_output.status.success();
 
     let caps = server.captured_requests();
