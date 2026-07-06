@@ -48,6 +48,12 @@ pub struct PtyTuiDriver {
     master_writer: Box<dyn Write + Send>,
     /// Used to kill the child directly (best-effort) on drop/timeout.
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    /// The child itself, kept so `kill_and_reap` can `try_wait` to reap the
+    /// zombie after SIGKILL. Without this, the killed child becomes a zombie
+    /// whose PID still appears in `/proc/<pid>/stat` with the same pgrp,
+    /// causing `processes_in_pgid` to report it as a "live member" even
+    /// though it is dead-but-unreaped.
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// The process-group leader pid reported by the master, as a `u32` to
     /// match `driver::kill_process_group` and `driver::processes_in_pgid`
     /// (which both key off `std::process::Child::id()` → `u32`). Used to
@@ -89,11 +95,11 @@ impl PtyTuiDriver {
             cmd.env(k, v);
         }
 
-        let _child = pair
+        let child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| PtyError::Pty(e.to_string()))?;
-        let killer = _child.clone_killer();
+        let killer = child.clone_killer();
         // `process_group_leader` reports an `i32` (pid_t); a real leader is
         // positive, so non-positive values collapse to `None`. Cast to `u32`
         // to unify with `driver::kill_process_group` / `processes_in_pgid`
@@ -117,6 +123,7 @@ impl PtyTuiDriver {
             master: pair.master,
             master_writer: writer,
             killer,
+            child: Some(child),
             pgid,
             output: Vec::new(),
         })
@@ -206,11 +213,32 @@ impl PtyTuiDriver {
     /// are swallowed because the priority is "no orphaned TUI / sandbox
     /// children", not precise error reporting. Delegates to the shared
     /// `driver::kill_process_group` so the `kill -KILL -<pgid>` shape exists
-    /// in exactly one place.
+    /// in exactly one place. Reaps the direct child with a short `try_wait`
+    /// poll so it does not linger as a zombie — a zombie's PID is still in
+    /// `/proc/<pid>/stat` with the same pgrp, which would make
+    /// `processes_in_pgid` report it as a "live member".
     pub fn kill_and_reap(&mut self) {
         let _ = self.killer.kill();
         if let Some(pgid) = self.pgid {
             kill_process_group(pgid);
+        }
+        // Reap the direct child: poll try_wait for up to ~2s. The child was
+        // just SIGKILL'd (via killer + killpg), so it should exit promptly;
+        // the poll is a bound, not a blocking wait, so a wedged child does
+        // not hang Drop indefinitely.
+        if let Some(mut child) = self.child.take() {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                    Err(_) => break, // not actionable; don't hang Drop
+                }
+            }
+            // If still not reaped by the deadline, drop `child` —
+            // portable-pty's Child drop on Unix forgets (no kill/wait), so
+            // the zombie may linger, but we have done our best within a
+            // bounded window.
         }
     }
 }

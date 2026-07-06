@@ -208,9 +208,16 @@ fn wait_with_timeout(
 }
 
 /// Read `/proc/<pid>/stat` for every pid and return the pids whose process
-/// group id == `pgid`. Linux-only; returns empty on non-Linux Unix. Used by
-/// the process-group-kill test and the PTY smoke scenario to verify no
-/// orphan survives a `killpg`.
+/// group id == `pgid` and that are **not zombies**. Linux-only; returns
+/// empty on non-Linux Unix. Used by the process-group-kill test and the PTY
+/// smoke scenario to verify no orphan survives a `killpg`.
+///
+/// Zombies (state `Z`) are excluded: a killed child that has not yet been
+/// reaped still has its pgrp in `/proc/<pid>/stat`, but it is not a "live
+/// member" — it cannot run, hold sockets, or spawn children. The direct
+/// child is reaped by `PtyTuiDriver::kill_and_reap`; grandchildren are reaped
+/// by init after the child dies. Excluding zombies here avoids a false
+/// positive during the brief window between SIGKILL and reap.
 #[cfg(all(unix, target_os = "linux"))]
 pub fn processes_in_pgid(pgid: u32) -> Vec<u32> {
     let mut out = Vec::new();
@@ -240,9 +247,13 @@ pub fn processes_in_pgid(pgid: u32) -> Vec<u32> {
             None => continue,
         };
         let mut fields = after_comm.split_whitespace();
-        let _state = fields.next();
+        let state = fields.next();
         let _ppid = fields.next();
         let pgrp = fields.next();
+        // Exclude zombies (state 'Z'): they are dead-but-unreaped, not live.
+        if state == Some("Z") {
+            continue;
+        }
         if let Some(pgrp) = pgrp.and_then(|s| s.parse::<u32>().ok())
             && pgrp == pgid
         {
@@ -341,5 +352,116 @@ mod tests {
             survivors.is_empty(),
             "process group {pgid} still has live members after killpg: {survivors:?}"
         );
+    }
+
+    /// `processes_in_pgid` must exclude zombies (state `Z`): a killed child
+    /// that has not been reaped still has its pgrp in `/proc/<pid>/stat`, but
+    /// it is not a live member — it cannot run, hold sockets, or spawn
+    /// children. This is the `continue` branch at the `state == Some("Z")`
+    /// check. We spawn a shell that starts a background `sleep 0.1` and then
+    /// blocks in `sleep 3`; the background job exits and becomes a zombie the
+    /// shell never reaps. We then (a) independently confirm a zombie is
+    /// actually present in the group — so the `continue` branch is exercised,
+    /// not silently skipped — and (b) assert `processes_in_pgid` omits it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn processes_in_pgid_excludes_zombies() {
+        let world = ScenarioWorld::new("lattice-harness-pgrp-zombie").expect("world");
+        let mut cmd = world.command("sh");
+        // Start a short-lived background `sleep` and then `exec sleep N` so
+        // the shell process is *replaced* by the long `sleep`. A non-interactive
+        // shell (the default under `-c`) auto-reaps background children whenever
+        // it regains control, so if the shell kept running it would reap the
+        // background job before we sample /proc. `exec sleep 10` overwrites the
+        // shell image with a `sleep` that never calls `wait`, so the exited
+        // background `sleep 0.2` lingers as a zombie in the same process group
+        // (the shell did not create a new pgrp for it). We sample /proc while
+        // the exec'd `sleep` is still alive.
+        cmd.args(["-c", "sleep 0.2 & exec sleep 10"]);
+        set_new_process_group(&mut cmd);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn sh");
+        let pgid = child.id();
+
+        // Let the background `sleep 0.2` exit and become a zombie the exec'd
+        // `sleep` never reaps.
+        std::thread::sleep(Duration::from_millis(700));
+
+        // Independently scan /proc for the group, splitting by state. This
+        // mirrors `processes_in_pgid`'s parsing but is a separate read, so we
+        // can prove the `continue` branch is actually hit (a zombie exists).
+        let mut zombie_pids = Vec::new();
+        let mut all_members = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let name = match entry.file_name().to_str() {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                let pid = match name.parse::<u32>() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let Some((_, rest)) = stat.rsplit_once(')') else {
+                    continue;
+                };
+                let mut fields = rest.split_whitespace();
+                let state = fields.next();
+                let _ppid = fields.next();
+                let pgrp = fields.next();
+                if let Some(pgrp) = pgrp.and_then(|s| s.parse::<u32>().ok())
+                    && pgrp == pgid
+                {
+                    all_members.push((pid, state.map(str::to_string)));
+                    if state == Some("Z") {
+                        zombie_pids.push(pid);
+                    }
+                }
+            }
+        }
+        assert!(
+            !zombie_pids.is_empty(),
+            "precondition failed: no zombie in process group {pgid}; the \
+             `continue` branch would not be exercised. members: {all_members:?}"
+        );
+
+        let live = processes_in_pgid(pgid);
+        assert!(
+            !live.is_empty(),
+            "expected at least one live (non-zombie) member in group {pgid}"
+        );
+        for zpid in &zombie_pids {
+            assert!(
+                !live.contains(zpid),
+                "zombie pid {zpid} must not be reported as live; got {live:?}"
+            );
+        }
+        // Belt-and-suspenders: no reported pid may actually be a zombie.
+        for &pid in &live {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some((_, rest)) = stat.rsplit_once(')') else {
+                continue;
+            };
+            let state = rest.split_whitespace().next();
+            assert_ne!(
+                state,
+                Some("Z"),
+                "pid {pid} is a zombie but was reported as live"
+            );
+        }
+
+        // Cleanup: kill the whole group and reap the direct child so the
+        // test leaves no survivors (the zombie is reaped by init once the
+        // shell dies).
+        kill_process_group(pgid);
+        let _ = child.wait();
     }
 }
