@@ -56,13 +56,6 @@
 - **升级条件**: 若离线/air-gapped CI 成为常态且需跑 `lancet-native` 全套件 → 升为 MEDIUM；或若 `is_private_or_reserved` 被要求覆盖更多保留段（RFC 2544 198.18.0.0/15、RFC 5737 文档 IP 203.0.113.0/24 等）作为 SSRF 防御纵深 → 升为 MEDIUM 并扩 `is_private_or_reserved`。
 - **计划**: （a）短期不改测试行为，接受正常 CI 下通过；（b）可选加固 `is_private_or_reserved` 覆盖 198.18.0.0/15（与现有 169.254/127/0 段同列拒绝），作为 SSRF 纵深而非本测试的主修复；（c）若要彻底消除离线环境对 `lancet-native` 的阻断，给 `fetch_effect_contract_negative` 加 `#[ignore]` 或 env-gated 跳过（如 `LATTICE_SKIP_NETWORK_TESTS=1`），但需权衡是否弱化正常环境下对该契约的覆盖。本 finding 不阻塞 #26 迁移收尾。
 
-### L-21-01: `tests/msb_full_turn.rs` / `tests/pty_tui_smoke.rs` 真实 MSB 实跑由 owner 在本机完整门验证 — `verification` / full-gate / owner-side
-- **位置**: `crates/lattice-system-harness/tests/msb_full_turn.rs`（`msb_plain_text_turn_commits_and_exit_zero`，`#[ignore]`）；`crates/lattice-system-harness/tests/pty_tui_smoke.rs`（`pty_tui_smoke_runs_turn_and_quits_cleanly`，`#[ignore]`）；`crates/lattice-system-harness/src/layer_guard.rs`（`require_msb_env`）。
-- **问题**: #21 的 Microsandbox 完整 turn 场景与 PTY smoke 通过 `LATTICE_HARNESS_MSB=1` + `#[ignore]` gating 归完整门。本交付环境（devin 沙箱）的 `microsandbox` daemon 未运行、`msb` CLI 不在 PATH、镜像走 daocloud 代理 → 无法在本环境实跑这两个 `#[ignore]` 场景。fast 层（编译 + `#[ignore]` 跳过 + fake_llm/session_send/driver/layer_guard/scenario/pty_tui 单测）全绿，**真实 MSB turn + PTY smoke 实跑由 owner 在本机 KVM 完整门验证**。
-- **当前状态**: ACCEPTED RESIDUAL（owner-side full-gate verification）。`require_msb_env` 已实现 RFC 不可回退边界 7（置位而 MSB 不可用 → panic，不静默跳过）；场景代码、断言、失败产物 bundle 已就位，待 owner 在 KVM 主机 `LATTICE_HARNESS_MSB=1 ... -- --include-ignored` 跑通后勾 #21 验收点 3/4/5 的实跑部分。若 owner 实跑发现产品 bug，按 #21 交付纪律另开票，不顺手修。
-- **升级条件**: 若 owner 在本机完整门实跑失败 → 升为 MEDIUM 并按实跑结果修场景或（若产品 bug）另开票；若完整门成为 CI 常态且需在无 KVM 环境也跑 → 升为 MEDIUM 并重新评估 gating 机制。
-- **计划**: owner 在本机 KVM 主机跑 `LATTICE_HARNESS_MSB=1 LATTICE_BIN=... cargo test -p lattice-system-harness -- --include-ignored`，勾 #21 验收清单，打 `ready-for-close`。本 finding 不阻塞 #21 代码交付与 fast-lane 验证。
-
 ### L-21-02: `require_msb_env` 探针探的是 audit 路径，不验证 MSB stack 可用 — `verification` / harness / full-gate
 - **位置**: `crates/lattice-system-harness/src/layer_guard.rs`（`require_msb_env`，:54-106）；`crates/lattice-cli/src/commands/lancet.rs`（`run_status` → `collect_status`）；`crates/lancet-api/src/status.rs`（`collect_status`，:31-40）。
 - **问题**: `require_msb_env` 用 `lattice lancet status` 作 MSB stack 探针，但 `lancet status` 只读 project audit SQLite store（`collect_status` → `CepAuditStore::open` + `query_rows`），**完全不碰 microsandbox daemon、`msb` binary、libkrunfw 或 KVM**。audit DB 不存在时直接返回空 `Ok`（`status.rs:35-40`）。因此探针 exit 0 只证明"产品 CLI 能跑 + audit 路径可读"，不证明"MSB stack 能起 Upper"。owner 实跑时 `msb` binary 缺失（未装 / `MSB_HOME` 指向隔离 HOME 导致 SDK 找不到），探针照样过，turn 才在 Upper 创建阶段撞 `msb binary not found`——失败信号比应有的晚了一整层。
@@ -154,6 +147,9 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### L-21-01: `tests/msb_full_turn.rs` / `tests/pty_tui_smoke.rs` 真实 MSB 实跑 — `verification` / full-gate / owner-side
+- **当前状态**: 2026-07-06 closed — owner KVM 实跑通过。`msb_plain_text_turn_commits_and_exit_zero` 在本机 KVM 完整门跑通：`turn_started → model_started → token_delta:"ok" → model_finished → turn_committed{status:"completed"}`，fake LLM 收到真 Chat Completions 请求，`session log --json` 交叉验证 commit_id 一致，exit 0。实跑过程中修了 6 个独立问题（`LATTICE_MSB_IMAGE` 未接线、`init_git_project` unborn HEAD、microsandbox `prebuilt` feature 关闭 + `MSB_HOME` 未注入、fake LLM base_url 用 `127.0.0.1` 被 net-guard 拒、`session log` 断言找错字符串），见 FIX.md `#21` 系列条目。L-21-02（探针探 audit 不探 MSB）和 L-21-03（net-guard localhost 政策不对称）作为独立 finding 保留。
 
 ### L-20: `SqliteSessionGraphStore` 单连接 `Mutex` 应用层串行化 — `performance` / `architecture`
 - **当前状态**: 2026-06-27 closed — moot. The SQLite session graph store was retired
