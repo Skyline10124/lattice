@@ -12,6 +12,20 @@
 
 ## MEDIUM
 
+### ENV-OOM-01: 开发机常驻 Electron app 重度超售撞 24 并发 cargo 编译 → global OOM(已缓解,非代码 bug)— `environment` / dev-loop / #27
+- **位置**: `xtask/src/ci.rs`(test step,已修);开发机环境(非 repo 代码)。完整根因账本在 `/tmp/lattice-oom-investigation/`(/tmp,不进 repo)。
+- **问题**: `cargo test --workspace`(原 `xtask/src/ci.rs:44`)在 owner 的 24 核开发机上两次触发 **编译阶段** global OOM 致强制重启(2026-07-07 00:41:53 / 00:57:17)。00:41 OOM dump(348 个 uid 1000 进程)关键数:总 RSS 5.91 GB(物理 31 GB,未爆)、shmem 8.60 GB、swapents 8.42 GB(swap 14 GB 接近见底)、**total_vm 7478 GB(极度超售)**。编译工具链 RSS 合计仅 **2.41 GB**(rustc×24 + rust-lld×19 + cargo×1 + rust-analyzer×2),不是元凶。元凶是常驻 Electron app(electron×31 / obsidian×9 / cursor / codex / QQ / 微信 / wps / msedge ...)的 V8 巨型地址预留(total_vm 7478 GB)+ swap 见底。cargo 默认起 24 个 rustc(=核数),瞬时 codegen 分配是压垮骆驼的最后一根稻草。OOM killer 按 oom_score 杀 **adj=300 的 Electron**(不是 adj=200 的 rustc)→ 桌面崩溃 → 用户强制重启。`oom-kill:constraint=CONSTRAINT_NONE,global_oom`。**Codeberg #27 原文怀疑"某测试 spawn 大量子进程/proptest 爆炸"——日志否定:崩溃时无任何 test binary,纯编译阶段。**
+- **当前状态**: MITIGATED(via `xtask ci` 改造,见 FIX.md `#27` 条目)。`xtask ci` test step 改为逐 crate(`cargo test -p <crate>`,cargo_metadata 拓扑排序)+ 每步硬超时(`LATTICE_TEST_TIMEOUT_SECS`,默认 300s)+ `process_group(0)` + `kill -KILL -<pgid>` 杀整树;`CARGO_BUILD_JOBS`(默认 4)cap 覆盖 fmt/clippy/build/test 全部门步骤。`LATTICE_SKIP_KNOWN_HANGS=1` 让门跳过 L-26-01 的 `fetch_effect_contract_negative` 挂起。验证:在本机(同 24 核)跑 `CARGO_BUILD_JOBS=4 cargo build --workspace --tests` PASS 14.89s(swap 0B);逐 crate 17/17 PASS 无失控;`LATTICE_SKIP_KNOWN_HANGS=1 ... xtask ci` 全 18 crate 绿,无 OOM 无孤儿。缓解不依赖关 app——jobs=4 cap 已把编译足迹压到常驻 app 能容忍的范围;但跑门前关掉非必要 Electron app 仍是更稳的实践(释放 total_vm 超售 + swap)。
+- **升级条件**: 若 jobs=4 cap 在常驻 app 全开时仍 OOM(更重型编译单元、更大 codegen)→ 升为 HIGH,考虑降 jobs 到 2 或加 zram。
+- **计划**: (a) 已落地 xtask ci 改造;(b) 推荐 owner 跑门前关非必要 Electron app(非强制);(c) CI(ubuntu/macos-latest,资源充足无桌面 app)不受影响,无需改 CI 配置。**#27 issue 应补 comment 修正方向**:真凶是环境侧超售,非 lattice 测试 bug,指向本 finding 与 FIX.md `#27` 条目。
+
+### ENV-OOM-02: 并行测试暴露的 `unsafe env::set_var` 竞态 flake(非 OOM,被旧门编译期 OOM 掩盖)— `test-flakiness` / env-race
+- **位置**: `crates/lattice-system-harness/src/layer_guard.rs:117-128`(`msb_requested_is_false_when_unset` / `msb_requested_is_true_when_one`,`unsafe { std::env::set_var/remove_var(MSB_ENV) }`);`crates/lattice-api/src/turn/cep_tests.rs:308`(`turn_runtime_constructs_one_adapter_per_turn`,panic at `test_support.rs:73` `build_production_turn_deps(...).expect("production deps")`,疑 XDG_STATE_HOME 路径竞态)。
+- **问题**: 两个测试在并行执行(默认 `cargo test` thread count)时偶发 FAILED,但 `--test-threads=1` 下稳定通过。根因是 `std::env::set_var`/`remove_var` 是进程全局可变状态,Rust 2024 标记 unsafe 正是为此 data-race 风险——并行的另一个测试线程在 `remove_var` 与 `msb_requested()` 读之间 `set_var(MSB_ENV,"1")`,使 `msb_requested_is_false_when_unset` 的 `assert!(!msb_requested())` 偶发失败。`lattice-api` 的 flake 同源(CEP runtime 组合读 XDG_STATE_HOME,与并行测试写该 env 竞态)。**这些 flake 不是 #27 OOM 的元凶,也不是 `xtask ci` 改造引入的回归**——它们一直存在,只是旧 `cargo test --workspace` 门在编译阶段就 OOM,从未跑到测试执行,故从未暴露。逐 crate 隔离后这些 flake 才可见。
+- **当前状态**: ACCEPTED RESIDUAL。`xtask ci` 跑测试用默认 thread count(与 `cargo test` 默认一致),偶发 flake 不阻塞门的正确性(重跑或 `--test-threads=1` 即绿)。两测试单线程下全绿已验证。
+- **升级条件**: 若 flake 频率高到阻塞日常 `xtask ci` → 升为 MEDIUM-HIGH 并修(给 env-mutating 测试加 `#[serial]` 或抽离到独立进程),或给 `xtask ci` 加 `--test-threads=1` 选项。
+- **计划**: (a) 短期接受 flake,文档化;(b) 中期可给 `msb_requested_*` 与 `turn_runtime_constructs_one_adapter_per_turn` 加 `serial_test::serial` 或把 env-mutating 断言改为 subprocess 隔离;(c) 不在 #27 范围内。
+
 ### M-33-01: Profile `[workspace]` → `UpperSpec` 翻译未在 Phase 33 规划 — `planning` / `v1.5-alpha`
 - **位置**: `.planning/phases/33-workspace-adapter-production-hardening/33-03-PLAN.md`（schema only）；composition 层无 plan task
 - **问题**: Phase 33 交付 `WorkspaceSection` / `CredentialRef` 与 `UpperSpec` / `apply_egress`，但无 `lattice-api` 将 profile 解析结果映射为 adapter 调用的任务。PLAN-CHECK rev2 以 warning 放行，此前无正式 defer 台账。

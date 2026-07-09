@@ -1931,3 +1931,80 @@ fast-binary 黑盒；无法驱动确定性的完整 turn，后续产品级场景
 src/{lib.rs,fake_llm.rs,session_send.rs,driver.rs,artifacts.rs,assert.rs,
 layer_guard.rs,scenario.rs,pty_tui.rs},tests/{msb_full_turn.rs,pty_tui_smoke.rs}}`,
 `FIX.md`, `FINDINGS.md`。
+
+---
+
+## Codeberg #27: `xtask ci` test step ran `cargo test --workspace` and triggered dev-machine compile-phase OOM — 2026-07-07
+
+Severity: HIGH (twice forced a hard reboot of the owner's dev machine during
+`cargo test --workspace`; the local CI gate was unusable on the 24-core
+oversubscribed dev host).
+
+**Problem:** `xtask/src/ci.rs:44` ran a single `cargo test --workspace`. On
+the dev machine (`nproc`=24, 31 GB RAM + 14 GB swap, heavy desktop with many
+Electron apps over-reserving ~7478 GB of virtual address space), cargo's
+default of one rustc per core (24 parallel) plus codegen allocation spikes
+hit global OOM during the **compile phase** — before any test binary ran. The
+kernel OOM killer selected `adj=300` Electron processes (highest `oom_score`
+from the giant `total_vm`), crashing the desktop and forcing reboots. The
+compilation toolchain itself was small (~2.41 GB RSS across 24 rustc + 19
+rust-lld + 1 cargo + 2 rust-analyzer); the root cause was host oversubscription
+plus swap near-empty, not a lattice code or test bug. See FINDINGS.md
+"ENV-OOM-01" for the full root-cause ledger.
+
+A secondary failure mode: the old gate also hung indefinitely when
+`lancet-native::fetch_effect_contract_negative` hit the DNS-blackhole hang
+(L-26-01), because there was no per-crate timeout.
+
+**Fix:** Rewrote the `xtask ci` test step to run one `cargo test -p <crate>`
+per workspace member (deterministic dependency order via `cargo_metadata`,
+excluding `xtask`), each under a hard per-crate timeout. Compile parallelism
+is capped via `CARGO_BUILD_JOBS` (default 4) across **all** gate steps (fmt
+inherits the env var but is single-threaded; clippy/build/test all capped) —
+this bounds the compile footprint on oversubscribed hosts without slowing
+down resource-rich CI, where `CARGO_BUILD_JOBS` can be raised. The timeout
+uses `process_group(0)` + `kill -KILL -<pgid>` so a hung crate's whole tree
+(cargo + rustc + test binaries) is reaped, no orphans. `LATTICE_SKIP_KNOWN_HANGS=1`
+makes the gate skip `fetch_effect_contract_negative` (L-26-01) so the gate is
+usable on DNS-blackhole hosts; `LATTICE_TEST_TIMEOUT_SECS` overrides the
+300 s/crate default.
+
+This does **not** change release-gate scripts: `release-gate-v1.3.sh` and
+`release-gate-v1.4.sh` already run per-crate `cargo test -p <crate>` (the
+handoff's claim that they "depend on full test" was inaccurate). `release-gate.sh`
+is already retired (exits 1). The only `cargo test --workspace` in the repo was
+`xtask/src/ci.rs:44`.
+
+**Verification (all on the same 24-core dev host, no reboot):**
+
+- `cargo fmt -p xtask --check` — clean.
+- `cargo clippy -p xtask --all-targets -- -D warnings` — clean.
+- `cargo test -p xtask -- --test-threads=1` — **26 passed** (incl. 2 new
+  `ordered_test_crates` tests asserting determinism, `xtask` exclusion, and
+  dependency-before-dependent ordering).
+- `CARGO_BUILD_JOBS=4 cargo build --workspace --tests` — **PASS in 14.89 s**
+  (incremental; swap stayed at 0 B). Confirms the jobs=4 cap is the high-
+  leverage mitigation.
+- Per-crate `timeout 300 cargo test -p <crate> -- --test-threads=1` over all
+  17 non-`lancet-native` crates — **17/17 PASS, no timeouts, no runaways**
+  (spawn-subprocess crates clean: `lattice-workspace` 2 s, `lattice-cli` 9 s,
+  `lattice-system-harness` 4 s; biggest `lattice-api` 34 s).
+- `lancet-native` `fetch_effect_contract_negative` reproduced the L-26-01 hang
+  (90 s hard timeout, no `ok`/`FAILED`) — confirms it is environment-
+  independent and separate from the OOM (already ACCEPTED RESIDUAL).
+- `LATTICE_SKIP_KNOWN_HANGS=1 LATTICE_TEST_TIMEOUT_SECS=180 CARGO_BUILD_JOBS=4
+  ./target/debug/xtask ci` — **EXIT=0, "All checks passed"**, all 18 crates
+  pass, skip notice printed for `lancet-native`, no OOM, no orphans.
+- Timeout+kill mechanism: `LATTICE_TEST_TIMEOUT_SECS=15 ./target/debug/xtask ci`
+  (no skip flag) — gate **EXIT=1** at 24 s, `lancet-native` killed at 15 s with
+  `timed out after 15s`, **zero orphan rustc/cargo/test processes** after exit.
+
+**Residual (not introduced by this fix, surfaced by per-crate isolation):**
+running tests at default thread count (parallel) can flake two env-var races —
+`lattice-api::turn_runtime_constructs_one_adapter_per_turn` and
+`lattice-system-harness::msb_requested_is_false_when_unset` — both pass under
+`--test-threads=1`. These are pre-existing `unsafe env::set_var` test races
+that the old `cargo test --workspace` gate masked by OOM-ing in the compile
+phase. Tracked in FINDINGS.md ENV-OOM-01.
+
+**Changed files:** `xtask/src/ci.rs`, `FIX.md`, `FINDINGS.md`.
