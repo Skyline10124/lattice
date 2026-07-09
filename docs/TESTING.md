@@ -13,6 +13,12 @@ All commands below are grounded in the workspace manifest
 (`Cargo.toml`), the CI workflow (`.github/workflows/ci.yml`),
 `cargo xtask …`, and crate `Cargo.toml` feature definitions.
 
+**Test-suite rewrite (issue #18 / RFC #19):** product behavior is proven by the
+built `lattice` binary via `lattice-system-harness`. Crate tests keep local
+invariants only. The per-test keep/elevate/delete triage for the pre-rewrite
+suite lives in [`docs/TEST-TRIAGE.md`](TEST-TRIAGE.md) (issue #22); batch
+deletion and elevation happen in later tickets (4/6+), not in that document.
+
 ---
 
 ## 1. Test framework and setup

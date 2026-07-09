@@ -4,6 +4,31 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #22: full test triage inventory (keep/elevate/delete) — 2026-07-09
+
+Severity: FEATURE (测试重构 3/6).
+
+**What:** Enumerated all `#[test]` / `#[tokio::test]` under `crates/**` and
+`xtask/**` (1443 entries) and produced a reviewable triage list for issue #18
+step 3 / issue #22. Decisions follow RFC #19 decision two (layers) and decision
+six (no migration quota): keep local invariants, elevate product paths that
+are tested via internal APIs, delete source-scan / weak construction checks.
+
+**Deliverables (docs only — no test code changed):**
+
+- `docs/TEST-TRIAGE.md` — human-readable per-test table + scenario catalog +
+  4/6 batch hints
+- `docs/test-triage-decisions.json` — machine-readable copy for 4/6 scripts
+- `docs/TESTING.md` — pointer to the triage list
+
+**Snapshot counts:** keep 1292 / elevate 140 / delete 11.
+
+**Verification:**
+
+- JSON invariants: 1443 rows; every elevate/delete has `replacement` or `n/a`;
+  every row has `reason` + `target_layer`
+- `git diff --stat` shows only documentation files (no `crates/**/*.rs` test edits)
+
 ## Codeberg #21: `init_git_project` left unborn HEAD on `master` — KVM scenarios failed at baseline — 2026-07-06
 
 Severity: HIGH (both `#[ignore]` KVM scenarios failed at Upper baseline resolution on any host whose git defaults to `master`).
