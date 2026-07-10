@@ -96,90 +96,7 @@ fn seed_default_profile(project_dir: &Path) {
 }
 
 // ─── models --auth ─────────────────────────────────────────────────────────
-
-#[test]
-fn smoke_models_auth_lists_aliases_without_secrets() {
-    let home = temp_home("models-auth");
-    // Set a fake credential to ensure at least one alias appears
-    let output = lattice(&home)
-        .args(["models", "--auth"])
-        .env("ANTHROPIC_API_KEY", "sk-smoke-test-secret")
-        .output()
-        .expect("models --auth should run");
-
-    assert!(
-        output.status.success(),
-        "models --auth should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Should contain at least one alias (sonnet or haiku with Anthropic key set)
-    assert!(
-        !stdout.trim().is_empty(),
-        "models --auth should produce output"
-    );
-    // Must NOT contain the fake secret value
-    assert!(
-        !stdout.contains("sk-smoke-test-secret"),
-        "models --auth must not leak secret value"
-    );
-}
-
 // ─── resolve sonnet ─────────────────────────────────────────────────────────
-
-#[test]
-fn smoke_resolve_sonnet_json_shows_env_var_not_secret() {
-    let home = temp_home("resolve");
-    let output = lattice(&home)
-        .args(["resolve", "sonnet", "--json"])
-        .env("ANTHROPIC_API_KEY", "sk-smoke-resolve-secret")
-        .output()
-        .expect("resolve sonnet should run");
-
-    assert!(
-        output.status.success(),
-        "resolve sonnet should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Should contain the env var name
-    assert!(
-        stdout.contains("ANTHROPIC_API_KEY"),
-        "resolve --json should contain env var name, got:\n{stdout}"
-    );
-    // Must NOT contain the secret value
-    assert!(
-        !stdout.contains("sk-smoke-resolve-secret"),
-        "resolve --json must not leak secret value"
-    );
-}
-
-#[test]
-fn smoke_resolve_missing_credential_names_env_var() {
-    let home = temp_home("resolve-missing");
-    // No ANTHROPIC_API_KEY set -- resolve should still work but show Missing status
-    let output = lattice(&home)
-        .args(["resolve", "sonnet", "--json"])
-        .env_remove("ANTHROPIC_API_KEY")
-        .output()
-        .expect("resolve sonnet should run");
-
-    assert!(
-        output.status.success(),
-        "resolve sonnet without credential should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Should name the env var so missing-credential failures are actionable.
-    assert!(
-        stdout.contains("ANTHROPIC_API_KEY"),
-        "resolve should mention the env var name, got:\n{stdout}"
-    );
-}
-
 // ─── session status ─────────────────────────────────────────────────────────
 
 #[test]
@@ -265,65 +182,6 @@ fn smoke_session_log_shows_seeded_turn() {
 }
 
 // ─── doctor ──────────────────────────────────────────────────────────────────
-
-#[test]
-fn smoke_doctor_runs_without_leaking_secrets() {
-    let home = temp_home("doctor");
-    let output = lattice(&home)
-        .args(["doctor"])
-        .env("ANTHROPIC_API_KEY", "sk-smoke-doctor-secret")
-        .output()
-        .expect("doctor should run");
-
-    assert!(
-        output.status.success(),
-        "doctor should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout}{stderr}");
-    // Must NOT contain the fake secret value
-    assert!(
-        !combined.contains("sk-smoke-doctor-secret"),
-        "doctor must not leak secret value"
-    );
-    // Should mention the env var name
-    assert!(
-        combined.contains("ANTHROPIC_API_KEY"),
-        "doctor should name the env var, got:\n{combined}"
-    );
-}
-
-#[test]
-fn smoke_doctor_json_does_not_leak_secrets() {
-    let home = temp_home("doctor-json");
-    let output = lattice(&home)
-        .args(["doctor", "--json"])
-        .env("OPENAI_API_KEY", "sk-smoke-doctor-json-secret")
-        .output()
-        .expect("doctor --json should run");
-
-    assert!(
-        output.status.success(),
-        "doctor --json should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Must NOT contain the fake secret value
-    assert!(
-        !stdout.contains("sk-smoke-doctor-json-secret"),
-        "doctor --json must not leak secret value"
-    );
-    // Should contain the env var name
-    assert!(
-        stdout.contains("OPENAI_API_KEY"),
-        "doctor --json should name the env var"
-    );
-}
-
 // ─── session send ────────────────────────────────────────────────────────────
 
 #[test]
@@ -380,28 +238,6 @@ fn smoke_session_send_no_profile_fails_with_clear_message() {
 }
 
 // ─── session nonexistent ─────────────────────────────────────────────────────
-
-#[test]
-fn smoke_session_status_nonexistent_returns_error() {
-    let home = temp_home("session-nonexistent");
-
-    let output = lattice(&home)
-        .args(["session", "status", "nonexistent-smoke-id"])
-        .output()
-        .expect("session status should run");
-
-    assert!(
-        !output.status.success(),
-        "session status with nonexistent id should fail"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("nonexistent-smoke-id"),
-        "error should mention the missing session id, got:\n{stderr}"
-    );
-}
-
 // ─── release gate wiring ────────────────────────────────────────────────────
 
 #[test]

@@ -862,34 +862,6 @@ mod boundary {
             );
         }
     }
-
-    #[test]
-    fn production_code_does_not_fabricate_passing_verification() {
-        fn scan_dir(dir: &Path, errors: &mut Vec<String>) {
-            for entry in fs::read_dir(dir).expect("read dir") {
-                let entry = entry.expect("entry");
-                let path = entry.path();
-                if path.is_dir() {
-                    scan_dir(&path, errors);
-                    continue;
-                }
-                if path.extension().is_some_and(|ext| ext == "rs") {
-                    let text = fs::read_to_string(&path).expect("read");
-                    if text.contains("passed: true") {
-                        errors.push(format!(
-                            "{} must not construct passing VerificationResult",
-                            path.display()
-                        ));
-                    }
-                }
-            }
-        }
-
-        let mut errors = Vec::new();
-        scan_dir(manifest_path("src").as_path(), &mut errors);
-        assert!(errors.is_empty(), "{}", errors.join("\n"));
-    }
-
     #[test]
     fn promotion_module_documents_activation_requirement() {
         let text = fs::read_to_string(manifest_path("src/turn/promotion.rs")).expect("read");

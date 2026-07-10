@@ -147,6 +147,30 @@ impl ScenarioWorld {
         Ok(())
     }
 
+    /// Write a minimal agent profile to `.lattice/agents/<name>/agent.toml` in
+    /// the project, consolidating the agent-profile fixture that would
+    /// otherwise be hand-rolled in every scenario (issue #23 fixture
+    /// consolidation). The TOML is hand-written rather than produced via
+    /// `lattice-profile` because the harness boundary
+    /// (`cargo xtask harness-boundary`) forbids depending on any product
+    /// crate; the product reads the same file a user would write.
+    ///
+    /// `image` is baked into the mandatory `[workspace].image` field. Fast
+    /// no-turn scenarios (e.g. `session new`, which only creates the session
+    /// record and never resolves the Upper config) pass a dummy image; real
+    /// Microsandbox scenarios pass a fully-qualified OCI ref.
+    pub fn write_agent_profile(
+        &self,
+        name: &str,
+        model: &str,
+        image: &str,
+    ) -> Result<(), WorldError> {
+        let toml = format!(
+            "schema_version = 1\n\n[agent]\nname = \"{name}\"\nmodel = \"{model}\"\n\n[prompt]\nsystem = \"harness agent\"\n\n[workspace]\nimage = \"{image}\"\n\n[tools]\nenabled = []\n"
+        );
+        self.write_project_file(&format!(".lattice/agents/{name}/agent.toml"), &toml)
+    }
+
     /// Spawn a subprocess with cleared environment and only the allow-listed vars.
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
         let mut cmd = Command::new(program);

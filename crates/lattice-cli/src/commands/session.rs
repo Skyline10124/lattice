@@ -1302,16 +1302,6 @@ mod session_cli {
             "SessionAction enum must define a Resume variant"
         );
     }
-
-    #[test]
-    fn session_prune_snapshots_variant_exists_in_enum() {
-        let src = impl_source();
-        assert!(
-            src.contains("PruneSnapshots {") || src.contains("PruneSnapshots{"),
-            "SessionAction enum must define a PruneSnapshots variant"
-        );
-    }
-
     #[test]
     fn session_resume_handler_function_exists() {
         let src = impl_source();
@@ -1391,22 +1381,6 @@ mod session_cli {
             "session send must not accept --project-branch override"
         );
     }
-
-    #[test]
-    fn project_branch_send_source_has_no_branch_flag() {
-        let source = include_str!("session.rs");
-        // Find the Send variant definition and verify no project_branch field.
-        let send_start = source.find("Send {").expect("Send variant should exist");
-        let send_end = source[send_start..]
-            .find("}")
-            .expect("Send variant should close");
-        let send_block = &source[send_start..send_start + send_end + 1];
-        assert!(
-            !send_block.contains("project_branch"),
-            "Send variant must not contain project_branch field"
-        );
-    }
-
     #[test]
     fn project_branch_new_source_defines_field() {
         // Source scan: SessionAction::New variant must define project_branch field.
@@ -1685,55 +1659,6 @@ mod d25_scoped_session {
         assert_ne!(
             diff.to_commit_id, diff_b.to_commit_id,
             "same branch name should resolve to different commits in different sessions"
-        );
-    }
-
-    #[test]
-    fn boundary_no_legacy_session_store_patterns() {
-        let source = include_str!("session.rs");
-
-        // 1. No `use` import of SqliteCasSessionStore or SessionStore trait.
-        for line in source.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("use ") {
-                assert!(
-                    !trimmed.contains("SqliteCasSessionStore"),
-                    "legacy import found: {}",
-                    trimmed
-                );
-                if trimmed.contains("SessionStore") && !trimmed.contains("SessionGraphStore") {
-                    panic!("legacy SessionStore trait import found: {}", trimmed);
-                }
-            }
-        }
-
-        // 2. No legacy SQLite session store symbols in production code.
-        // Build search strings dynamically to avoid matching this very assertion.
-        let sqlite_call = format!("SessionApi::{}(", "sqlite");
-        let sqlite_store = format!("{}GraphStore", "SqliteSession");
-        assert!(
-            !source.contains(&sqlite_call),
-            "{} should not exist in production code",
-            sqlite_call
-        );
-        assert!(
-            !source.contains(&sqlite_store),
-            "{} should not exist in production code",
-            sqlite_store
-        );
-
-        // 3. The production path uses SessionApi::git (positive proof of migration).
-        assert!(
-            source.contains("SessionApi::git("),
-            "session_api() should construct SessionApi via git backend"
-        );
-        assert!(
-            source.contains("fn run_with_api(api: &SessionApi,"),
-            "run_with_api should accept &SessionApi"
-        );
-        assert!(
-            source.contains("run_with_api(&api, action, json)"),
-            "run() should delegate to run_with_api"
         );
     }
 }

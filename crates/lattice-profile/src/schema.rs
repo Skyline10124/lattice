@@ -1240,37 +1240,6 @@ env_var_name = "PYPI_TOKEN"
         let profile2: AgentProfile = toml::from_str(&serialized).unwrap();
         assert_eq!(profile, profile2, "workspace roundtrip must be lossless");
     }
-
-    /// Guard: no legacy symbols in production source.
-    #[test]
-    fn source_free_of_forbidden_symbols() {
-        let source = include_str!("schema.rs");
-        let test_start = source.find("#[cfg(test)]").unwrap_or(source.len());
-        let prod = &source[..test_start];
-        let forbidden_patterns = [
-            "preset",
-            "skippable",
-            "tags",
-            "behavior_type",
-            "confidence_threshold",
-            "enforce_sandbox",
-            "code_agent",
-            "code-agent",
-            "AgentPreset",
-            "ToolPreset",
-            "SandboxMode",
-            "SecuritySection",
-            "ContextSection",
-            "BehaviorSection",
-        ];
-        // Note: "bundles" is allowed in doc comments explaining its removal.
-        for pattern in forbidden_patterns {
-            if prod.contains(pattern) {
-                panic!("schema.rs production code must not contain '{pattern}'");
-            }
-        }
-    }
-
     // ── LancetPolicySection ────────────────────────────────────────────────
 
     #[test]

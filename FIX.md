@@ -2042,3 +2042,92 @@ that the old `cargo test --workspace` gate masked by OOM-ing in the compile
 phase. Tracked in FINDINGS.md ENV-OOM-01.
 
 **Changed files:** `xtask/src/ci.rs`, `FIX.md`, `FINDINGS.md`.
+
+---
+
+## Codeberg #23: test refactor 4/6 - batch-execute triage (fast-binary lane) - 2026-07-11
+
+Severity: FEATURE (测试重构 4/6). Parent #18; triage #22.
+
+**What:** Executed the #22 triage for the lanes verifiable without KVM:
+landed the fast-binary black-box scenarios for the no-turn CLI surface,
+deleted the source-scan/weak tests, and consolidated fixtures. Batch 3
+(turn/Upper, 39 MSB-bound elevates) and the turn-bearing CLI subset (70
+elevates) are deferred - recorded as deviations, not silently re-judged
+(see `docs/TEST-TRIAGE.md` §1.5 and FINDINGS.md `T-23-01`).
+
+**Deliverables:**
+
+- New fast-binary harness scenarios (no product-crate deps; boundary-clean):
+  - `crates/lattice-system-harness/tests/fast_config_cli.rs` (13 tests) -
+    `models` / `resolve` / `doctor` + secret redaction + HOME/XDG isolation
+    (replacement `planned_config_cli`).
+  - `crates/lattice-system-harness/tests/fast_session_cli.rs` (8 tests) -
+    `session new/list/status/log/branch` no-turn subset (replacement
+    `planned_session_cli`).
+  - `crates/lattice-system-harness/tests/fast_audit_cli.rs` (4 tests) -
+    `audit query/replay/tail` missing-store error states (replacement
+    `planned_audit_cli`, partial - empty/seeded states need MSB).
+  - `fast_cli_help.rs` gained `fast_retired_run_command_rejected`.
+  - `ScenarioWorld::write_agent_profile` consolidates the agent-profile
+    fixture (hand-written TOML; harness boundary forbids `lattice-profile`).
+- Blocking product bug fixed: `lattice-cli/src/commands/audit.rs` `audit::run`
+  nested a current-thread runtime inside `#[tokio::main]` and panicked
+  (`Cannot start a runtime from within a runtime`, exit 101) on a
+  missing/empty audit store. Made `audit::run` async (reuses the top-level
+  runtime); `run_at` kept sync under `#[cfg(test)]` for the crate-internal
+  audit unit tests. This unblocked `planned_audit_cli` and is in scope per
+  PRD #18 ("不顺手修复独立产品问题，除非直接阻塞本测试体系").
+- Deleted 11 source-scan tests (all `n/a` - no replacement; boundary covered
+  by `cargo xtask harness-boundary` / `lancet-boundary` + dependency graph):
+  `lancet-api::operator_audit_module_does_not_reference_cep_server_types`,
+  `lattice-api::production_code_does_not_fabricate_passing_verification`,
+  `lattice-cli::{audit_command_source_does_not_reference_cep_server,
+  run_source_has_no_old_crate_imports,
+  session_prune_snapshots_variant_exists_in_enum,
+  project_branch_send_source_has_no_branch_flag,
+  boundary_no_legacy_session_store_patterns,
+  focused_tests_import_no_removed_crate_names}`,
+  `lattice-profile::source_free_of_forbidden_symbols`,
+  `lattice-session::{promotion_crate_has_no_workspace_or_api_dependency,
+  promotion_module_is_object_only}`.
+- Elevated (deleted) 31 internal tests now superseded by the harness fast
+  scenarios: `lattice-cli` `models.rs` / `resolve.rs` / `doctor.rs` test
+  modules (20), `audit_query_errors_when_store_missing` (1), and the no-turn
+  `smoke_*` / `cli_cutover_*` in `release_smoke.rs` / `cli_cutover.rs` (10).
+- Removed now-dead helpers `with_env_var` / `without_env_vars` from
+  `lattice-cli/src/commands/test_env.rs` (fixture consolidation).
+
+**Counts:** deletes executed 11/11; elevates executed 31/140; elevates
+deferred 109/140 (39 MSB-bound + 70 turn-bearing CLI). Triage verdicts
+unchanged.
+
+**Verification:**
+
+- `cargo fmt --all --check` - clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` - clean.
+- `cargo xtask harness-boundary` - PASS (harness still has no product-crate
+  deps; `write_agent_profile` is hand-written TOML).
+- `cargo xtask lancet-boundary` - PASS.
+- `LATTICE_BIN=… cargo test -p lattice-system-harness` - 51 lib + 30 fast
+  binary + 2 `#[ignore]` MSB/PTY, all green.
+- Affected crates green: `lattice-cli` 148, `lancet-api` 17, `lattice-profile`
+  96, `lattice-session` 69, `lattice-api` (full).
+- `cargo xtask ci` - **EXIT=0, "All checks passed"** (fmt / clippy / build /
+  both boundary gates / all workspace tests; MSB+PTY scenarios correctly
+  `#[ignore]` without KVM).
+
+**Changed files:** `crates/lattice-cli/src/commands/audit.rs`,
+`crates/lattice-cli/src/main.rs`,
+`crates/lattice-cli/src/commands/{models,resolve,doctor,run_tests,session,test_env}.rs`,
+`crates/lattice-cli/tests/{release_smoke,cli_cutover}.rs`,
+`crates/lattice-api/tests/promotion_wiring.rs`,
+`crates/lattice-profile/src/schema.rs`,
+`crates/lattice-session/tests/promotion_commit.rs`,
+`crates/lancet-api/src/audit.rs`,
+`crates/lattice-system-harness/src/world.rs`,
+`crates/lattice-system-harness/tests/{fast_config_cli,fast_session_cli,fast_audit_cli,fast_cli_help}.rs`,
+`docs/TEST-TRIAGE.md`, `FIX.md`, `FINDINGS.md`.
+
+**Note:** Issue #23 left open and not pushed per request; 109 deferred
+elevates tracked in FINDINGS.md `T-23-01` for the MSB/KVM lane.

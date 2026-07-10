@@ -740,30 +740,6 @@ mod tests {
             final_output.row_count
         );
     }
-
-    /// Operator audit APIs must not reference the CEP server composition surface.
-    #[test]
-    fn operator_audit_module_does_not_reference_cep_server_types() {
-        let source = include_str!("audit.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production audit.rs prefix");
-        for forbidden in [
-            "LancetServer",
-            "LancetRuntime",
-            "CepClient",
-            "CepTransport",
-            "ServerLifecycle",
-            "register_production_method_registry",
-        ] {
-            assert!(
-                !production.contains(forbidden),
-                "operator audit.rs must not reference {forbidden} (direct store reads only)"
-            );
-        }
-    }
-
     /// Pre-`model_id` / `runtime_version` tables are upgraded via `init_schema` ALTERs.
     #[tokio::test]
     async fn query_audit_reads_legacy_table_missing_optional_columns() {

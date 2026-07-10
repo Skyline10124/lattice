@@ -17,7 +17,11 @@ All commands below are grounded in the workspace manifest
 built `lattice` binary via `lattice-system-harness`. Crate tests keep local
 invariants only. The per-test keep/elevate/delete triage for the pre-rewrite
 suite lives in [`docs/TEST-TRIAGE.md`](TEST-TRIAGE.md) (issue #22); batch
-deletion and elevation happen in later tickets (4/6+), not in that document.
+deletion and elevation happen in ticket #23 (4/6) onward. The fast-binary
+black-box lane (`fast_config_cli` / `fast_session_cli` / `fast_audit_cli` /
+`fast_cli_help`) is landed; the MSB lane (`planned_*_msb`) and the turn-bearing
+CLI elevates are deferred to a KVM-available environment - see
+`docs/TEST-TRIAGE.md` §1.5 and FINDINGS.md `T-23-01`.
 
 ---
 

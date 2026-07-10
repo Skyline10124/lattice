@@ -365,27 +365,6 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
         "expected successful observe.workspace via workspace-root CEP runtime"
     );
 }
-
-#[test]
-fn run_source_has_no_old_crate_imports() {
-    let source = include_str!("run.rs");
-    let test_start = source.find("#[cfg(test)]").unwrap_or(source.len());
-    let prod = &source[..test_start];
-    let forbidden = [
-        "lattice_core",
-        "lattice_runtime",
-        "lattice_prompt",
-        "lattice_sandbox",
-        "lattice_policy",
-    ];
-    for pattern in forbidden {
-        assert!(
-            !prod.contains(pattern),
-            "run.rs production code must not contain '{pattern}'"
-        );
-    }
-}
-
 // ─── JSON renderer tests (Task 2) ──────────────────────────────
 
 #[test]

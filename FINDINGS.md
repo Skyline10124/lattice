@@ -51,6 +51,15 @@
 - **残留**: Wave 0 新增 **A4**（真机快照往返探针）与修正后的 A7 尚未在 KVM 宿主执行；若 A4 实测的 save/restore 调用形状仍与上述不符，33-05 / 33-PATTERNS Pattern 4 须按 A4 记录的逐字调用再校。plan-checker 未重跑（仍 rev3 结构结论 + rev4 注记）。
 - **计划**: 执行 33-01 时跑 A4/A7 实证；A4 PASS 即闭环，FAIL 则按记录修 33-05 后闭环。根因教训：LLM/SDK 集成的 API 形状以锁定 crate 源码为准，Context7/训练记忆仅作线索。
 
+### T-23-01: #23 测试重构 4/6 - 109 条提升延期至 MSB/KVM 通道（偏差已记录）- `test-refactor` / #18 / #23
+- **位置**: `docs/TEST-TRIAGE.md` §1.5；`docs/test-triage-decisions.json`（提升 140 条中的 109 条）
+- **问题**: #23 按产品面分批执行 #22 triage。本机无 `/dev/kvm`、`LATTICE_HARNESS_MSB` 未开，无法落地或验证依赖真实完整 turn 的替代场景。两类提升被迫延期（**不删原内部测试**，否则普通 CI 即丢覆盖且无法验证替代）：
+  (1) **39 条 MSB-bound**（`lattice-api` 36 + `lattice-agent` 3）-> `msb_full_turn` / `planned_observe_msb` / `planned_mutate_msb` / `planned_policy_msb` / `planned_retired_msb` / `planned_provider_fail_msb` / `planned_resume_msb` / `planned_secret_msb` / `planned_audit_ops_msb`。每条都需完整 turn，而完整 turn 默认走 Upper/Microsandbox。
+  (2) **70 条 turn-bearing CLI**（`lattice-cli`）-> `session log` 带 committed turn、`audit query` 带 seeded 行、`session branch` 创建后、`run_integration_*`、`session resume`、`lancet cep_status` seeded 等；需经公开接口产生 committed turn 才能 black-box 覆盖，无 KVM 无法产生。
+- **当前状态**: DEFERRED（#23 本批已执行 11/11 删除 + 31/140 提升 + 夹具收口 + 阻塞 bug 修复；`cargo xtask ci` 全绿）。判决口径未改；偏差已在 `docs/TEST-TRIAGE.md` §1.5 与 `FIX.md #23` 记录。#23 issue 保持 open（按用户要求不关闭、不 push）。
+- **升级条件**: 若 5/6、6/6 或 KVM 可用环境落地 `planned_*_msb` 场景后仍有提升条目未删 -> 逐条核对并删，在本条勾销。
+- **计划**: (a) KVM 可用环境落地 `planned_observe_msb` / `planned_mutate_msb` 等 MSB 场景 + 复用 `msb_full_turn` 产生 committed turn；(b) 按 `docs/TEST-TRIAGE.md` §1.5「延期」表逐条删除对应内部测试并更新 `docs/test-triage-decisions.json` 执行状态；(c) turn-bearing CLI 子集可在 MSB 通道补 `session log/show` seeded 场景后收口。
+
 ## LOW
 
 ### L-21-03: `net_guard::validate_base_url` 拒绝 `127.0.0.1`/`::1` IP 字面量但放行 `localhost` hostname — localhost 政策不对称 — `security` / net-guard / llm

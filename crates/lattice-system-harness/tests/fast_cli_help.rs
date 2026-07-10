@@ -86,3 +86,31 @@ fn fast_unknown_command_rejected() {
     )
     .expect("unknown command fails with 'unrecognized subcommand'");
 }
+
+#[test]
+fn fast_retired_run_command_rejected() {
+    // The `run` subcommand was retired; the public CLI surface must reject it
+    // (covers the crate-internal `cli_cutover_run_command_is_removed`).
+    let spec = ScenarioSpec::fast("lattice-harness-run-retired");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let output = driver()
+        .run(
+            &world,
+            &LatticeCommand {
+                args: vec!["run".into(), "hello".into()],
+                timeout: Some(spec.step_timeout()),
+            },
+        )
+        .expect("run rejected");
+
+    let result = assert_exit_failure(&output);
+    assert_with_failure_artifacts(
+        &world,
+        "lattice-harness-run-retired",
+        "lattice run hello",
+        &output,
+        &[],
+        result,
+    )
+    .expect("retired `run` command must be rejected");
+}

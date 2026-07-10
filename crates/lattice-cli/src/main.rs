@@ -112,7 +112,7 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
             doctor::run(cli.json)?;
         }
         Some(Commands::Audit(cmd)) => {
-            audit::run(*cmd, cli.json)?;
+            audit::run(*cmd, cli.json).await?;
         }
         Some(Commands::Lancet { action }) => {
             lancet_cmd::run(action, cli.json)?;

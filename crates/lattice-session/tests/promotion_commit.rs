@@ -174,35 +174,3 @@ fn session_commit_object_links_optional_parent() {
     let manifest = read_manifest(&repo, child_oid);
     assert_eq!(manifest.parent_oid, Some(root_oid.to_string()));
 }
-
-#[test]
-fn promotion_crate_has_no_workspace_or_api_dependency() {
-    let manifest = include_str!("../Cargo.toml");
-    assert!(
-        !manifest.contains("lattice-workspace"),
-        "lattice-session must not depend on lattice-workspace"
-    );
-    assert!(
-        !manifest.contains("lattice-api"),
-        "lattice-session must not depend on lattice-api"
-    );
-}
-
-#[test]
-fn promotion_module_is_object_only() {
-    let source = include_str!("../src/promotion.rs");
-    for forbidden in [
-        "update-ref",
-        "update_ref",
-        "set_target",
-        "lattice-workspace",
-        "lattice-api",
-        "repo.reference",
-        "references(",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "promotion.rs must not contain '{forbidden}'"
-        );
-    }
-}

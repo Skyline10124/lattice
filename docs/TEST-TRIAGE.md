@@ -32,9 +32,9 @@
 | `fast_cli_help` | 已落地 `fast_cli_help`（CLI help 表面） | 已落地 |
 | `msb_full_turn` | 已落地 `msb_full_turn`（session send 完整 turn） | 已落地 |
 | `pty_tui_smoke` | 已落地 `pty_tui_smoke`（TUI 入口 smoke） | 已落地 |
-| `planned_session_cli` | planned fast-binary: `session create/list/show/branch/log --json` | planned（#18 矩阵 / 4–6/6） |
-| `planned_audit_cli` | planned fast-binary: `audit query/tail` 空态/错误态 `--json` | planned（#18 矩阵 / 4–6/6） |
-| `planned_config_cli` | planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG | planned（#18 矩阵 / 4–6/6） |
+| `planned_session_cli` | fast-binary: `session new/list/status/log/branch --json`（no-turn 子集） | **已落地** `tests/fast_session_cli.rs`（#23 批次 1/2） |
+| `planned_audit_cli` | fast-binary: `audit query/replay/tail` 缺失 store 错误态 `--json` | **已落地（部分）** `tests/fast_audit_cli.rs`（#23 批次 2；空态/seeded 态待 MSB） |
+| `planned_config_cli` | fast-binary: `models`/`resolve`/`doctor` + secret redaction + HOME/XDG | **已落地** `tests/fast_config_cli.rs`（#23 批次 1） |
 | `planned_observe_msb` | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | planned（#18 矩阵 / 4–6/6） |
 | `planned_mutate_msb` | planned MSB: `mutate.create/edit` Upper-only + effect 记账 | planned（#18 矩阵 / 4–6/6） |
 | `planned_retired_msb` | planned MSB: 已退役 agent 方法明确失败且无副作用 | planned（#18 矩阵 / 4–6/6） |
@@ -86,6 +86,40 @@
 5. **其余 crate**：仅处理清单中标记删除的源码扫描项；局部不变量批次默认跳过
 
 ---
+
+
+
+---
+
+## 1.5 #23 执行状态（4/6 批次执行，2026-07-11）
+
+> #22 的判决书在 #23 按产品面分批执行。下表是**已执行**与**延期**的账本。
+> 延期条目均为**偏差**，原因见下；未静默改判。
+
+### 已执行（本批落地，门禁全绿）
+
+| 类别 | 条数 | 说明 |
+|---|---:|---|
+| 删除（源码扫描/import/manifest 字符串检查） | 11 | 全部 `n/a` 无替代场景；架构边界由 `cargo xtask harness-boundary` / `lancet-boundary` + 依赖图接管。已删除并验证两道边界门仍绿。 |
+| 提升 -> fast-binary（已落地场景接管） | 31 | `lattice-cli` 内部 `models`/`resolve`/`doctor` 单测模块、`audit_query_errors_when_store_missing`、以及 `release_smoke.rs` / `cli_cutover.rs` 中无 turn 的 `smoke_*` / `cli_cutover_*`，由 `fast_config_cli` / `fast_session_cli` / `fast_audit_cli` 接管后删除原内部测试。 |
+| 夹具收口 | - | 新增 `ScenarioWorld::write_agent_profile` 统一 agent profile 夹具；删除随之失效的 `with_env_var` / `without_env_vars`；`audit::run_at` 标 `#[cfg(test)]`。 |
+| 顺手修阻塞 bug | - | `lattice-cli/src/commands/audit.rs` 的 `audit::run` 在 `#[tokio::main]` 内嵌套 `block_on` -> panic（`audit query` 缺失 store 时 exit 101）。改为 async 复用顶层 runtime，解锁 `planned_audit_cli`。详见 FIX.md `#23`。 |
+
+### 延期（偏差，需 KVM/MSB 通道验证）
+
+| 类别 | 条数 | 延期原因 |
+|---|---:|---|
+| 提升 -> `msb_full_turn` / `planned_*_msb`（`lattice-api` 36 + `lattice-agent` 3） | 39 | 每条都需真实完整 turn 驱动；完整 turn 默认走 Upper/Microsandbox，本机无 `/dev/kvm`、`LATTICE_HARNESS_MSB` 未开，无法落地或验证替代场景。不删原内部测试（删除即丢普通 CI 覆盖且无法验证替代）。 |
+| 提升 -> `planned_session_cli`/`planned_audit_cli` 的 **turn-bearing 子集**（`lattice-cli` 70） | 70 | `session log` 带 committed turn、`audit query` 带 seeded 行、`session branch` 创建后、`run_integration_*`、`session resume`、`lancet cep_status` seeded 等行为，需经公开接口产生 committed turn 才能 black-box 覆盖；无 KVM 无法产生。原内部测试保留，普通 CI 继续覆盖。 |
+| **合计延期** | **109** | |
+
+### 偏差结论
+
+- #22 判决本身**未被改判**：提升/删除的判决口径不变。
+- #23 本批执行了**可在无 KVM 环境验证**的全部 fast-binary 黑盒（批次 1 全量 + 批次 2/4 的 no-turn 子集）与全部 11 条删除，并通过 `cargo xtask ci`（fmt / clippy -D warnings / build / harness-boundary / lancet-boundary / 全 workspace 测试）。
+- **批次 3（turn/Upper）整体延期**：39 条 lattice-api/lattice-agent 提升依赖 MSB；无 KVM 不可验证，不删除原测试。
+- turn-bearing 子集（70 条 lattice-cli）延期：保留原内部测试，待 MSB 通道落地 `planned_observe_msb` / `planned_mutate_msb` 等 + 复用 `msb_full_turn` 产生 committed turn 后再删。
+- 后续（5/6、6/6 或 KVM 可用环境）落地 `planned_*_msb` 场景后，按本表「延期」逐条删除对应内部测试，并在本节勾销。
 
 ## 2. 逐条清单
 

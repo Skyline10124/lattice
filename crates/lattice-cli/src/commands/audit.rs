@@ -78,12 +78,20 @@ pub struct AuditCmd {
     pub query: AuditQueryArgs,
 }
 
-pub fn run(cmd: AuditCmd, global_json: bool) -> Result<()> {
+pub async fn run(cmd: AuditCmd, global_json: bool) -> Result<()> {
+    // The binary entry runs inside `#[tokio::main]` (multi-thread runtime), so
+    // it must NOT build its own runtime and `block_on` - that nests a runtime
+    // and panics with "Cannot start a runtime from within a runtime" (surfaced
+    // by the `planned_audit_cli` black-box scenario on a missing/empty store).
+    // Await `run_async` on the existing runtime instead. `run_at` (below) keeps
+    // its own runtime for the crate-internal unit tests, which call it outside
+    // any runtime context.
     let project_root = std::env::current_dir().context("current working directory")?;
-    run_at(&project_root, cmd, global_json)
+    run_async(cmd, global_json, &project_root).await
 }
 
 /// Run audit against an explicit project root (tests — avoids `set_current_dir` races).
+#[cfg(test)]
 pub fn run_at(project_root: &Path, cmd: AuditCmd, global_json: bool) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -369,15 +377,6 @@ mod tests {
             .await
             .expect("audit tail should succeed");
     }
-
-    #[test]
-    fn audit_query_errors_when_store_missing() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        let err = run_at(dir.path(), query_cmd("missing", true), false).expect_err("missing store");
-        assert!(err.to_string().contains("audit database not found"));
-    }
-
     #[test]
     fn audit_query_empty_result_for_unknown_session() {
         let _xdg = ScopedXdgStateHome::new();
@@ -452,31 +451,6 @@ mod tests {
         .expect_err("unknown turn should error");
         assert!(err.to_string().contains("no audit rows for turn_id"));
     }
-
-    /// `lattice audit` (query/tail/replay) must not compose a CEP server; it only
-    /// calls `lancet-api` store readers.
-    #[test]
-    fn audit_command_source_does_not_reference_cep_server() {
-        let source = include_str!("audit.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production audit command prefix");
-        for forbidden in [
-            "LancetServer",
-            "LancetRuntime",
-            "CepClient",
-            "CepTransport",
-            "ServerLifecycle",
-            "register_production_method_registry",
-        ] {
-            assert!(
-                !production.contains(forbidden),
-                "audit command must not reference {forbidden}"
-            );
-        }
-    }
-
     /// Legacy audit SQLite (no `model_id` / `runtime_version` columns) remains readable.
     #[tokio::test]
     async fn audit_query_reads_legacy_schema_store() {
