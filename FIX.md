@@ -9,10 +9,11 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 Severity: FEATURE (测试重构 3/6).
 
 **What:** Enumerated all `#[test]` / `#[tokio::test]` under `crates/**` and
-`xtask/**` (1443 entries) and produced a reviewable triage list for issue #18
-step 3 / issue #22. Decisions follow RFC #19 decision two (layers) and decision
-six (no migration quota): keep local invariants, elevate product paths that
-are tested via internal APIs, delete source-scan / weak construction checks.
+`xtask/**` plus the `cep_family_test!` macro expansions (1449 entries) and
+produced a reviewable triage list for issue #18 step 3 / issue #22. Decisions
+follow RFC #19 decision two (layers) and decision six (no migration quota):
+keep local invariants, elevate product paths that are tested via internal
+APIs, delete source-scan / weak construction checks.
 
 **Deliverables (docs only — no test code changed):**
 
@@ -21,12 +22,20 @@ are tested via internal APIs, delete source-scan / weak construction checks.
 - `docs/test-triage-decisions.json` — machine-readable copy for 4/6 scripts
 - `docs/TESTING.md` — pointer to the triage list
 
-**Snapshot counts:** keep 1292 / elevate 140 / delete 11.
+**Snapshot counts:** keep 1298 / elevate 140 / delete 11.
 
 **Verification:**
 
-- JSON invariants: 1443 rows; every elevate/delete has `replacement` or `n/a`;
+- JSON invariants: 1449 rows; every elevate/delete has `replacement` or `n/a`;
   every row has `reason` + `target_layer`
+- Completeness cross-check: a script enumerates every `#[test]` /
+  `#[tokio::test]` and `cep_family_test!` call in `crates/**` + `xtask/**` and
+  diffs against the JSON by `(file, name)`; result is 1449 = 1449 with zero
+  omissions / zero stale / zero line drift, and `async` / `ignored` / `line`
+  fields all match source. The initial 1443-row snapshot missed six
+  `cep_family_test!` macro expansions (validation/permission/execution/state/
+  guard/effect payload families); these were added and five `#[ignore]` MSB/KVM
+  integration tests had their `ignored` flag corrected false -> true.
 - `git diff --stat` shows only documentation files (no `crates/**/*.rs` test edits)
 
 ## Codeberg #21: `init_git_project` left unborn HEAD on `master` — KVM scenarios failed at baseline — 2026-07-06

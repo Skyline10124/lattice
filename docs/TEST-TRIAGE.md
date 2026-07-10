@@ -5,7 +5,7 @@
 >
 > **判决标准**：RFC #19 决定二（四层）、决定六（旧测试不保证迁移）；父 PRD #18。
 >
-> **枚举快照**：2026-07-09，workspace 内 `crates/**` + `xtask/**` 的 `#[test]` / `#[tokio::test]` 共 **1443** 条。
+> **枚举快照**：2026-07-09，workspace 内 `crates/**` + `xtask/**` 的 `#[test]` / `#[tokio::test]` 共 **1449** 条。
 
 ## 1. 如何读这份清单
 
@@ -48,16 +48,16 @@
 
 | 决定 | 条数 |
 |---|---:|
-| 保留 | 1292 |
+| 保留 | 1298 |
 | 提升 | 140 |
 | 删除 | 11 |
-| **合计** | **1443** |
+| **合计** | **1449** |
 
 #### 按 crate
 
 | crate | 保留 | 提升 | 删除 | 合计 |
 |---|---:|---:|---:|---:|
-| `lattice-api` | 217 | 36 | 1 | 254 |
+| `lattice-api` | 223 | 36 | 1 | 260 |
 | `lattice-cli` | 78 | 101 | 6 | 185 |
 | `lattice-workspace` | 158 | 0 | 0 | 158 |
 | `lancet-authority` | 135 | 0 | 0 | 135 |
@@ -578,7 +578,7 @@
 | `fake_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:473` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `fake_stream_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:486` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 
-### `lattice-api`（保留 217 / 提升 36 / 删除 1）
+### `lattice-api`（保留 223 / 提升 36 / 删除 1）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 |---|---|---|---|---|---|
@@ -616,6 +616,12 @@
 | `cep_executor_adapter_allows_enabled_workspace_read_file` | `crates/lattice-api/src/turn/cep_tests.rs:108` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `cep_executor_adapter_unknown_method_maps_to_32601` | `crates/lattice-api/src/turn/cep_tests.rs:145` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `cep_executor_adapter_invalid_params_maps_to_32602` | `crates/lattice-api/src/turn/cep_tests.rs:163` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
+| `cep_executor_adapter_validation_family_preserves_payload` | `crates/lattice-api/src/turn/cep_tests.rs:240` | 保留 | 局部不变量 | - | lattice-api 局部契约（CEP error family 负载保持）；保留 |
+| `cep_executor_adapter_permission_family_preserves_payload` | `crates/lattice-api/src/turn/cep_tests.rs:250` | 保留 | 局部不变量 | - | lattice-api 局部契约（CEP error family 负载保持）；保留 |
+| `cep_executor_adapter_execution_family_preserves_payload` | `crates/lattice-api/src/turn/cep_tests.rs:260` | 保留 | 局部不变量 | - | lattice-api 局部契约（CEP error family 负载保持）；保留 |
+| `cep_executor_adapter_state_family_preserves_payload` | `crates/lattice-api/src/turn/cep_tests.rs:271` | 保留 | 局部不变量 | - | lattice-api 局部契约（CEP error family 负载保持）；保留 |
+| `cep_executor_adapter_guard_family_preserves_payload` | `crates/lattice-api/src/turn/cep_tests.rs:281` | 保留 | 局部不变量 | - | lattice-api 局部契约（CEP error family 负载保持）；保留 |
+| `cep_executor_adapter_effect_family_preserves_payload` | `crates/lattice-api/src/turn/cep_tests.rs:291` | 保留 | 局部不变量 | - | lattice-api 局部契约（CEP error family 负载保持）；保留 |
 | `turn_runtime_constructs_one_adapter_per_turn` | `crates/lattice-api/src/turn/cep_tests.rs:307` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `cep_native_registry_production_runtime_uses_native_audit_stage` | `crates/lattice-api/src/turn/cep_tests.rs:354` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `attestation_matches_replay_statement` | `crates/lattice-api/src/turn/cep_tests.rs:414` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
