@@ -314,6 +314,14 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
     use super::llm::RealLlmClient;
     use super::test_support::build_test_production_deps;
 
+    // The second build below persists audit (test_persist_audit=false path),
+    // which resolves the external audit DB via dirs::state_dir() — an
+    // XDG_STATE_HOME read. Hold the shared env lock so a concurrent
+    // ScopedXdgStateHome test cannot point XDG_STATE_HOME at its tempdir and
+    // drop it under our open SQLite store (FINDINGS ENV-OOM-02 "disk I/O
+    // error" flake); the isolated state dir also keeps the audit DB out of
+    // the real platform state directory.
+    let _xdg = crate::ScopedXdgStateHome::new();
     let dir = TempDir::new().unwrap();
 
     let llm: Arc<dyn LlmClient> = Arc::new(

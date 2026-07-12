@@ -112,15 +112,25 @@ pub fn require_msb_env(driver: &crate::driver::LatticeDriver) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// Serialises MSB_ENV mutation across the tests below. `set_var` /
+    /// `remove_var` are process-global; without this lock the parallel
+    /// libtest runner can interleave one test's `remove_var` between the
+    /// other's `set_var` and its read (FINDINGS ENV-OOM-02, ~12% failure
+    /// rate under stress). Same pattern as `lattice-api/src/test_env.rs`.
+    static MSB_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn msb_requested_is_false_when_unset() {
-        // SAFETY: `remove_var` is process-global but we run it before a
-        // read of the same var in the same test; no other code in this test
-        // process reads MSB_ENV concurrently. Rust 2024 marks env mutation
-        // unsafe to flag the data-race risk, not because the call itself is
-        // unsound.
+        let _lock = MSB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: all MSB_ENV mutation in this test binary happens under
+        // MSB_ENV_LOCK, so no other thread mutates or reads it between the
+        // `remove_var` and the `msb_requested()` read. Rust 2024 marks env
+        // mutation unsafe to flag the data-race risk, not because the call
+        // itself is unsound.
         unsafe {
             std::env::remove_var(MSB_ENV);
         }
@@ -129,8 +139,9 @@ mod tests {
 
     #[test]
     fn msb_requested_is_true_when_one() {
-        // SAFETY: same single-threaded reasoning as above; we restore at the
-        // end so other tests see the unset state.
+        let _lock = MSB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: same MSB_ENV_LOCK serialisation as above; we restore at
+        // the end so other tests see the unset state.
         unsafe {
             std::env::set_var(MSB_ENV, "1");
         }

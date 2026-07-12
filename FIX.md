@@ -2131,3 +2131,75 @@ unchanged.
 
 **Note:** Issue #23 left open and not pushed per request; 109 deferred
 elevates tracked in FINDINGS.md `T-23-01` for the MSB/KVM lane.
+
+## ENV-OOM-02: fix `unsafe env::set_var` parallel-test races (harness MSB_ENV + lattice-api XDG_STATE_HOME) — 2026-07-12
+
+Severity: MEDIUM (test flakiness; both flakes reproduced under stress before
+the fix, zero after).
+
+**Problem:** FINDINGS ENV-OOM-02 documented two accepted-residual flakes that
+only became visible once `xtask ci` (#27) started actually executing tests
+per-crate (the old workspace gate OOM'd during compilation and never reached
+them):
+
+1. `lattice-system-harness` `layer_guard::tests`: `msb_requested_is_false_when_unset`
+   and `msb_requested_is_true_when_one` mutate the process-global `MSB_ENV`
+   with no synchronisation. The parallel libtest runner interleaves one
+   test's `remove_var` between the other's `set_var` and its
+   `msb_requested()` read. **Reproduced: 232/2000 stress iterations failed
+   (~12%)**, always `assertion failed: v` in `msb_requested_is_true_when_one`.
+2. `lattice-api` `turn::cep_tests::turn_runtime_constructs_one_adapter_per_turn`:
+   its second `build_test_production_deps(..., in_memory_audit=false, ...)`
+   call resolves the external audit DB via `dirs::state_dir()` — an
+   **unguarded `XDG_STATE_HOME` read** — while three sibling tests
+   (`attestation_matches_replay_statement`, `replay_without_stored_attestation`,
+   `external_audit_preserves_lower`) point `XDG_STATE_HOME` at their own
+   `TempDir` under the `test_env::ENV_MUTEX` lock the flaky test never took.
+   When the read lands in that window, the audit SQLite store opens inside
+   another test's tempdir, which is then dropped → `disk I/O error`.
+   **Reproduced: 8/500 full-lib stress iterations failed (~1.6%)**, panic at
+   `test_support.rs:73` with the DB path visibly under `/tmp/.tmpXXXXXX/…`
+   (another test's tempdir) — confirming the FINDINGS hypothesis and also
+   explaining the historical `ci-local.sh` "disk I/O error" flake noted in
+   the #20 entry.
+
+**Fix** (house pattern — hand-rolled test mutex as in
+`lattice-api/src/test_env.rs` / `lancet-api`'s `XDG_TEST_LOCK`; no new
+dependency, no `--test-threads=1` hammer):
+
+- `crates/lattice-system-harness/src/layer_guard.rs`: added a
+  `static MSB_ENV_LOCK: Mutex<()>` in the tests module; both tests take it
+  before mutating `MSB_ENV`. SAFETY comments rewritten to state the actual
+  invariant (all mutation serialised under the lock) instead of the false
+  "no other code reads MSB_ENV concurrently" claim.
+- `crates/lattice-api/src/turn/cep_tests.rs`: `turn_runtime_constructs_one_adapter_per_turn`
+  now holds `crate::ScopedXdgStateHome::new()` for its whole body — it
+  serialises against the other env-mutating tests via the shared
+  `ENV_MUTEX` *and* gives the persisted audit DB an isolated
+  `XDG_STATE_HOME` tempdir (previously, when the race did not fire, the
+  test wrote the audit DB into the real platform state directory).
+
+**Verification:**
+
+- Stress re-run, same loops as reproduction: harness `layer_guard` filter
+  **0/2000 failures** (was 232/2000); `lattice-api` full lib binary
+  **0/500 failures** (was 8/500). Default thread count both times.
+- `cargo test -p lattice-api` — 108 lib + all integration suites pass.
+- `LATTICE_BIN=… cargo test -p lattice-system-harness` — 51 unit + fast
+  lanes pass; 2 KVM scenarios stay `#[ignore]`.
+- `cargo clippy -p lattice-system-harness -p lattice-api --all-targets -- -D warnings` — clean.
+- `cargo fmt -p lattice-system-harness -p lattice-api --check` — clean.
+
+**Survey of remaining env mutators** (same sweep, no action needed):
+`lattice-llm/src/lib.rs` and `lancet-api/src/audit.rs` already serialise
+under their own mutexes; `lattice-cli/src/commands/test_env.rs` mirrors
+`lattice-api`'s guarded helper; `lattice-api/tests/{audit_turn_provenance,
+dogfood_impact_matrix,release_e2e}.rs` are single-test binaries (no
+intra-process race). `lattice-api/tests/upper_routing.rs` has one unguarded
+mutator (`upper_routing_e2e` sets `TEST_SECRET`/`XDG_STATE_HOME` raw) among
+7 tests — latent only (no sibling reads those vars; a theoretical
+glibc `setenv`-vs-`getenv` hazard remains via e.g. tempfile's `TMPDIR`
+reads), left as-is and noted in FINDINGS ENV-OOM-02's closure entry.
+
+**Changed files:** `crates/lattice-system-harness/src/layer_guard.rs`,
+`crates/lattice-api/src/turn/cep_tests.rs`, `FINDINGS.md`, `FIX.md`.

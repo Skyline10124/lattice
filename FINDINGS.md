@@ -19,13 +19,6 @@
 - **升级条件**: 若 jobs=4 cap 在常驻 app 全开时仍 OOM(更重型编译单元、更大 codegen)→ 升为 HIGH,考虑降 jobs 到 2 或加 zram。
 - **计划**: (a) 已落地 xtask ci 改造;(b) 推荐 owner 跑门前关非必要 Electron app(非强制);(c) CI(ubuntu/macos-latest,资源充足无桌面 app)不受影响,无需改 CI 配置。**#27 issue 应补 comment 修正方向**:真凶是环境侧超售,非 lattice 测试 bug,指向本 finding 与 FIX.md `#27` 条目。
 
-### ENV-OOM-02: 并行测试暴露的 `unsafe env::set_var` 竞态 flake(非 OOM,被旧门编译期 OOM 掩盖)— `test-flakiness` / env-race
-- **位置**: `crates/lattice-system-harness/src/layer_guard.rs:117-128`(`msb_requested_is_false_when_unset` / `msb_requested_is_true_when_one`,`unsafe { std::env::set_var/remove_var(MSB_ENV) }`);`crates/lattice-api/src/turn/cep_tests.rs:308`(`turn_runtime_constructs_one_adapter_per_turn`,panic at `test_support.rs:73` `build_production_turn_deps(...).expect("production deps")`,疑 XDG_STATE_HOME 路径竞态)。
-- **问题**: 两个测试在并行执行(默认 `cargo test` thread count)时偶发 FAILED,但 `--test-threads=1` 下稳定通过。根因是 `std::env::set_var`/`remove_var` 是进程全局可变状态,Rust 2024 标记 unsafe 正是为此 data-race 风险——并行的另一个测试线程在 `remove_var` 与 `msb_requested()` 读之间 `set_var(MSB_ENV,"1")`,使 `msb_requested_is_false_when_unset` 的 `assert!(!msb_requested())` 偶发失败。`lattice-api` 的 flake 同源(CEP runtime 组合读 XDG_STATE_HOME,与并行测试写该 env 竞态)。**这些 flake 不是 #27 OOM 的元凶,也不是 `xtask ci` 改造引入的回归**——它们一直存在,只是旧 `cargo test --workspace` 门在编译阶段就 OOM,从未跑到测试执行,故从未暴露。逐 crate 隔离后这些 flake 才可见。
-- **当前状态**: ACCEPTED RESIDUAL。`xtask ci` 跑测试用默认 thread count(与 `cargo test` 默认一致),偶发 flake 不阻塞门的正确性(重跑或 `--test-threads=1` 即绿)。两测试单线程下全绿已验证。
-- **升级条件**: 若 flake 频率高到阻塞日常 `xtask ci` → 升为 MEDIUM-HIGH 并修(给 env-mutating 测试加 `#[serial]` 或抽离到独立进程),或给 `xtask ci` 加 `--test-threads=1` 选项。
-- **计划**: (a) 短期接受 flake,文档化;(b) 中期可给 `msb_requested_*` 与 `turn_runtime_constructs_one_adapter_per_turn` 加 `serial_test::serial` 或把 env-mutating 断言改为 subprocess 隔离;(c) 不在 #27 范围内。
-
 ### M-33-01: Profile `[workspace]` → `UpperSpec` 翻译未在 Phase 33 规划 — `planning` / `v1.5-alpha`
 - **位置**: `.planning/phases/33-workspace-adapter-production-hardening/33-03-PLAN.md`（schema only）；composition 层无 plan task
 - **问题**: Phase 33 交付 `WorkspaceSection` / `CredentialRef` 与 `UpperSpec` / `apply_egress`，但无 `lattice-api` 将 profile 解析结果映射为 adapter 调用的任务。PLAN-CHECK rev2 以 warning 放行，此前无正式 defer 台账。
@@ -170,6 +163,10 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### ENV-OOM-02: 并行测试暴露的 `unsafe env::set_var` 竞态 flake — `test-flakiness` / env-race
+- **当前状态**: 2026-07-12 fixed。两处 flake 均压测复现后修复归零：(1) `layer_guard.rs` 两个 `MSB_ENV` 测试竞态（复现 232/2000 ≈12%）——加 `static MSB_ENV_LOCK: Mutex<()>` 串行化；(2) `lattice-api` `turn_runtime_constructs_one_adapter_per_turn` 的 `disk I/O error`（复现 8/500 ≈1.6%，错误路径落在别的测试的 `/tmp/.tmpXXXXXX` tempdir 下，坐实 XDG_STATE_HOME 竞态假设：第二次 `build_test_production_deps(persist_audit)` 经 `dirs::state_dir()` 无锁读 XDG，与持 `ENV_MUTEX` 的 `ScopedXdgStateHome` 邻居测试互踩）——给该测试加 `ScopedXdgStateHome`，同时把持久 audit DB 隔离进 tempdir（不再写真实平台 state 目录）。修复后同样压测循环 0/2000、0/500。这也解释了 FIX.md #20 条目记录的历史 `ci-local.sh` "disk I/O error" flake。完整记录见 FIX.md `ENV-OOM-02`（2026-07-12）。
+- **残留（latent，非已知 flake）**: `lattice-api/tests/upper_routing.rs` 的 `upper_routing_e2e` 仍裸 `set_var(TEST_SECRET/XDG_STATE_HOME)`（同二进制 7 个测试，无兄弟测试读这两个变量；理论上与 tempfile 的 `TMPDIR` getenv 存在 glibc setenv/getenv hazard）。若该二进制未来新增读 env 的测试或出现崩溃 flake → 按同一 mutex 模式收口。
 
 ### L-21-01: `tests/msb_full_turn.rs` / `tests/pty_tui_smoke.rs` 真实 MSB 实跑 — `verification` / full-gate / owner-side
 - **当前状态**: 2026-07-06 closed — owner KVM 实跑通过。`msb_plain_text_turn_commits_and_exit_zero` 在本机 KVM 完整门跑通：`turn_started → model_started → token_delta:"ok" → model_finished → turn_committed{status:"completed"}`，fake LLM 收到真 Chat Completions 请求，`session log --json` 交叉验证 commit_id 一致，exit 0。实跑过程中修了 6 个独立问题（`LATTICE_MSB_IMAGE` 未接线、`init_git_project` unborn HEAD、microsandbox `prebuilt` feature 关闭 + `MSB_HOME` 未注入、fake LLM base_url 用 `127.0.0.1` 被 net-guard 拒、`session log` 断言找错字符串），见 FIX.md `#21` 系列条目。L-21-02（探针探 audit 不探 MSB）和 L-21-03（net-guard localhost 政策不对称）作为独立 finding 保留。
