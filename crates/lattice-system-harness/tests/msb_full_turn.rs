@@ -48,6 +48,16 @@ use lattice_system_harness::{
 /// have cached and there is a single source of truth for the Upper image.
 /// The profile deliberately enables no CEP tools — this is a plain-text
 /// turn, so no `tool_calls` should appear.
+///
+/// `egress = "blocked"` is required for this no-tool scenario: the default
+/// (absent/`open`) path in `deliver_baseline` will `apt-get install git`
+/// inside the Upper when the image lacks git (e.g. `python:3.12-slim`). That
+/// install has a 300s SDK timeout, which exceeds the harness step budget
+/// (120s) and hangs forever on hosts whose DNS blackholes Debian mirrors
+/// (common with local transparent proxies). Blocked egress skips apt-get and
+/// still boots the Upper; plain-text turns never call tools so a workspace
+/// tree is not needed. Tool-using MSB scenarios must use a git-ready image
+/// or warm template instead.
 const AGENT_TOML_TEMPLATE: &str = r#"schema_version = 1
 
 [agent]
@@ -59,6 +69,7 @@ system = "You are a concise test agent. Reply briefly."
 
 [workspace]
 image = "{image}"
+egress = "blocked"
 
 [tools]
 enabled = []

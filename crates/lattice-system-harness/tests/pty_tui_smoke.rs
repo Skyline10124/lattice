@@ -42,6 +42,10 @@ use lattice_system_harness::{
 /// the TUI can drive a turn. The image is read from `LATTICE_MSB_IMAGE`
 /// (required — no baked default; see `msb_full_turn.rs::render_agent_toml`
 /// for the full rationale). No tools enabled.
+// `egress = "blocked"`: plain-text / no-tool smoke must not depend on
+// in-Upper `apt-get install git` (default open egress when the image lacks
+// git). That path has a 300s timeout and hangs under DNS blackholes; the
+// harness step budget is 120s. See `msb_full_turn.rs` for the full rationale.
 const AGENT_TOML_TEMPLATE: &str = r#"schema_version = 1
 
 [agent]
@@ -53,6 +57,7 @@ system = "You are a concise test agent. Reply briefly."
 
 [workspace]
 image = "{image}"
+egress = "blocked"
 
 [tools]
 enabled = []

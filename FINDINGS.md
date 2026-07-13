@@ -28,8 +28,25 @@
 ### M-33-02: WS-04 按项目 warm template 自动选择未接线 — `planning` / `v1.5-alpha`
 - **位置**: `crates/lattice-workspace/src/template.rs`（helpers）；`33-05-PLAN.md`（仅 `ImageOrTemplate::Template` 显式传入时 restore）
 - **问题**: ROADMAP SC3 要求 per-project template 支撑 Upper 创建；Phase 33 有 SDK snapshot API 与 `WarmTemplate::is_stale`，但 `create_upper` Image 路径不会自动解析 `proj-<hash>-template`。
-- **当前状态**: 已记录于 `33-DEFERRALS.md` **D-33-02**；V-05 覆盖显式 template 名路径。
+- **当前状态**: 已记录于 `33-DEFERRALS.md` **D-33-02**；V-05 覆盖显式 template 名路径。**2026-07-13 关联升级见 M-33-06**：自动 template 未接线导致生产/默认 Image 路径仍会每 Upper 在 guest 内 `apt-get install git`。
 - **计划**: **Phase 34** turn 启动编排，或 **33-05 执行期**扩展 05-T2；verify-phase 不得要求端到端自动 template 选择。
+
+### M-33-06: Image 路径每次 create_upper 仍可能在 guest 内 apt-get 装 git（慢/脆/可超时）— `production-hardening` / `performance` / full-gate
+- **位置**: `crates/lattice-workspace/src/microsandbox.rs`（`deliver_baseline` ~270-305；`APT_GET_GIT` / `APT_GET_GIT_TIMEOUT=300s` ~57-64；`create_upper` Image 分支 ~970-993）；`crates/lattice-api/src/turn/cep.rs`（`build_production_turn_deps` 无条件 `prepare_upper`，即使 `[tools] enabled = []`）；`crates/lattice-system-harness/tests/{msb_full_turn,pty_tui_smoke}.rs`（无工具 smoke）。
+- **问题**: M-33-05 已交付 **显式** git-ready warm template 路径，但 **默认 Image 路径未退役 guest 内装 git**：
+  1. 常见 OCI 镜像（`python:3.12-slim`、`rust:1.87-slim` 等）默认无 `git`。
+  2. `deliver_baseline` 在 `ImageOrTemplate::Image` + `EgressPolicy::Open|Allowlist` 且探测无 git 时，仍跑固定字面量 `apt-get update && apt-get install -y git`，SDK 超时 **300s**。
+  3. `create_upper` **不会**自动解析/复用 `proj-<hash>-git-ready-template`（M-33-02 / D-33-02 未接线），因此每次从裸镜像起 Upper 都可能重复装 git。
+  4. 生产 turn 路径无条件 `prepare_upper`——纯文本、无工具 turn 也会建 Upper，照样撞这条路径。
+  5. 本机 DNS 黑洞（如 `deb.debian.org → 198.18.0.0/15` / 本地透明代理）下 apt 无响应：300s 超时未到前，harness 120s step 先杀子进程 → `session send: Timeout(120s)`。2026-07-13 复现：`upper-5139d490` boot 成功后 guest 仅输出 `missing`（git 探测），随后 apt 挂死；直接 `msb exec ... apt-get install git` 也 60s 超时。
+- **当前状态**: OPEN（产品残留）。**harness 侧 partial mitigation（2026-07-13）**：`msb_full_turn` / `pty_tui_smoke` 的 agent.toml 写死 `egress = "blocked"`，使无工具 smoke 跳过 apt-get；KVM 复跑 `msb_full_turn` ~8.8s、`pty_tui_smoke` ~1.4s PASS。这只覆盖 no-tool harness 场景，**不**修生产 Image 路径，也不帮需要 baseline git 树的 tool-using turn。
+- **与已关闭项关系**: M-33-05（closed）解决的是"有显式 git-ready template 时可避免每 Upper apt-get"；**残留正是 Image 默认路径 + 自动 template 选择未接线**（M-33-02）。本 finding 把该残留的用户痛点（慢、DNS 脆、full-gate 超时）单独台账，避免以为 M-33-05 已消掉所有 per-create 装 git 成本。
+- **升级条件**: 若生产默认推荐镜像仍是无 git 的 slim OCI，且用户/CI 在受限 DNS 下频繁撞 120s–300s 挂起 → 维持 MEDIUM 或升 HIGH；若自动 git-ready template（M-33-02）落地且 Image 路径默认走 template → 可关闭本 finding。
+- **计划**:
+  (a) **主修**: 接线 M-33-02 / D-33-02——`create_upper(Image)` 优先解析/复用 per-project git-ready warm template，apt-get 仅作为一次性 bake 成本；
+  (b) **文档/默认**: full-gate 与产品文档推荐 `LATTICE_MSB_IMAGE=<git-ready template|自带 git 的镜像>`，明确 slim 镜像 + open egress 会装 git；
+  (c) **可选 fail-fast**: Image+Open 缺 git 时缩短 apt 超时或默认拒绝并提示用 template，避免 300s 挂死；
+  (d) **范围外/已缓解**: 无工具 harness 继续 `egress=blocked`；tool-using MSB 场景必须显式 git-ready 源，禁止依赖 per-turn apt-get。
 
 ### M-33-03: 生产 adapter 上 WS-02 contract suite 非强制 — `verification` / `v1.5-alpha`
 - **位置**: `33-05-PLAN.md` T3（`test_microsandbox_contract_suite` optional）
