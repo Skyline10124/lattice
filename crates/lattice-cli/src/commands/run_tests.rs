@@ -216,34 +216,6 @@ async fn run_integration_commits_existing_session() {
 }
 
 #[tokio::test]
-async fn run_integration_missing_session_returns_not_found() {
-    let temp = tempfile::tempdir().unwrap();
-    let session_api = lattice_api::SessionApi::git(temp.path());
-    let llm = std::sync::Arc::new(StubLlmClient);
-
-    let request = lattice_api::RunTurnRequest {
-        input: "hello".to_string(),
-        session_id: "nonexistent-session-id".to_string(),
-        loaded_profile: Some(loaded_profile("stub-model")),
-        cancel_flag: None,
-        test_llm: Some(llm),
-        test_project_root: Some(temp.path().to_string_lossy().to_string()),
-        test_persist_audit: None,
-        workspace_override: None,
-    };
-
-    let result = lattice_api::run_turn(session_api, request).await;
-
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        lattice_api::ApiError::NotFound(id) => {
-            assert_eq!(id, "nonexistent-session-id");
-        }
-        other => panic!("expected NotFound, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
     use lattice_profile::WorkspaceSection;
     use lattice_workspace::testing::DeterministicWorkspace;

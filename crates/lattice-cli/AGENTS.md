@@ -41,6 +41,9 @@ layers.
 - FIXED L-18-02: `TurnEvent` JSONL serialization no longer panics through
   `.expect()`.
 - FIXED M-18-02: dead `status_to_exit_code` logic and legacy tests were removed.
+- FIXED #23: pre-stream input/config errors (`ApiError::NotFound` and
+  `ApiError::BadRequest`) use exit 2; runtime/tool/provider/commit failures use
+  exit 1. Fast binary tests pin missing-session, profile, and credential paths.
 - WATCH H-06/M-19b: CLI turn send relies on API live streaming and backpressure
   behavior.
 - WATCH: `session send` still needs an existing session, matching agent profile,
@@ -49,6 +52,8 @@ layers.
 ## Next Actions
 
 - Keep parser/help tests updated for every command surface change.
+- Preserve the public 0/1/2 exit contract and add exact black-box assertions
+  whenever a pre-stream error classification changes.
 - If API/agent durable deadlines are introduced, align CLI idle timeout behavior
   and exit-code messaging.
 - Keep JSONL mode machine-readable: no human status lines on stdout in JSON

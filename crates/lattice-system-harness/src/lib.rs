@@ -22,7 +22,7 @@ pub use artifacts::{
     write_world_context,
 };
 pub use assert::{
-    AssertError, assert_exit_failure, assert_exit_success, assert_no_secret,
+    AssertError, assert_exit_code, assert_exit_failure, assert_exit_success, assert_no_secret,
     assert_stderr_contains, assert_stdout_contains, assert_stdout_contains_all,
     assert_with_failure_artifacts,
 };

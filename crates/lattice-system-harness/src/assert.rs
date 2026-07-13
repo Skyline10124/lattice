@@ -39,6 +39,8 @@ pub enum AssertError {
     ExitNotSuccess(i32),
     #[error("expected non-zero exit, but command exited successfully")]
     ExitNotFailure,
+    #[error("expected exit code {expected}, got {actual}")]
+    ExitCodeMismatch { expected: i32, actual: i32 },
     #[error("stdout missing expected substring(s): {expected}")]
     StdoutMissing { expected: String },
     #[error("stderr missing expected substring: {expected}")]
@@ -64,6 +66,23 @@ pub fn assert_exit_failure(output: &Output) -> Result<(), AssertError> {
         Err(AssertError::ExitNotFailure)
     } else {
         Ok(())
+    }
+}
+
+/// Assert the process exited with a specific non-zero code. Use this instead
+/// of `assert_exit_failure` when the documented public contract pins a
+/// particular exit code (e.g. `cmd_send_api` returns `ExitCode::from(2)` for
+/// session/profile lookup errors); `assert_exit_failure` only asserts nonzero
+/// and would silently pass a regression from 2 to 1.
+pub fn assert_exit_code(output: &Output, expected: i32) -> Result<(), AssertError> {
+    let got = output.status.code().unwrap_or(-1);
+    if got == expected {
+        Ok(())
+    } else {
+        Err(AssertError::ExitCodeMismatch {
+            expected,
+            actual: got,
+        })
     }
 }
 

@@ -88,13 +88,6 @@ fn seed_session(temp_home: &Path, session_id: &str) {
 }
 
 /// Create a minimal .lattice/agents/default/agent.toml in the project dir.
-fn seed_default_profile(project_dir: &Path) {
-    let agents_dir = project_dir.join(".lattice").join("agents").join("default");
-    std::fs::create_dir_all(&agents_dir).expect("create agents dir");
-    let profile = lattice_profile::default_agent_template("default", "sonnet");
-    std::fs::write(agents_dir.join("agent.toml"), profile).expect("write agent.toml");
-}
-
 // ─── models --auth ─────────────────────────────────────────────────────────
 // ─── resolve sonnet ─────────────────────────────────────────────────────────
 // ─── session status ─────────────────────────────────────────────────────────
@@ -181,63 +174,6 @@ fn smoke_session_log_shows_seeded_turn() {
     );
 }
 
-// ─── doctor ──────────────────────────────────────────────────────────────────
-// ─── session send ────────────────────────────────────────────────────────────
-
-#[test]
-fn smoke_session_send_missing_credentials_fails_without_secrets() {
-    let home = temp_home("send-missing-creds");
-    let session_id = "smoke-send-missing-creds";
-    seed_default_profile(&home);
-    seed_session(&home, session_id);
-
-    let output = lattice(&home)
-        .args(["session", "send", session_id, "hello world"])
-        .env_remove("ANTHROPIC_API_KEY")
-        .output()
-        .expect("lattice session send should execute");
-
-    assert!(
-        !output.status.success(),
-        "session send without credentials should fail"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("sk-"),
-        "session send error must not contain secret values, got:\n{stderr}"
-    );
-}
-
-#[test]
-fn smoke_session_send_no_profile_fails_with_clear_message() {
-    let home = temp_home("send-no-profile");
-    let session_id = "smoke-send-no-profile";
-    seed_session(&home, session_id);
-
-    let output = lattice(&home)
-        .args(["session", "send", session_id, "hello"])
-        .env("ANTHROPIC_API_KEY", "sk-smoke-send-noprofile")
-        .output()
-        .expect("lattice session send should execute");
-
-    assert!(
-        !output.status.success(),
-        "session send without profile should fail"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("agent.toml") || stderr.contains("profile") || stderr.contains("not found"),
-        "session send error should mention missing profile, got:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("sk-smoke-send-noprofile"),
-        "session send error must not leak secret value"
-    );
-}
-
-// ─── session nonexistent ─────────────────────────────────────────────────────
 // ─── release gate wiring ────────────────────────────────────────────────────
 
 #[test]
@@ -293,28 +229,6 @@ fn release_smoke_release_gate_v1_4_includes_lancet_boundary_check() {
 // ─── resume / prune-snapshots CLI surface (36-15 Task 3) ──────────────────
 
 #[test]
-fn smoke_session_resume_without_session_id_fails() {
-    let home = temp_home("resume-no-id");
-    let output = lattice(&home)
-        .args(["session", "resume"])
-        .output()
-        .expect("session resume should run");
-
-    assert!(
-        !output.status.success(),
-        "session resume without session_id should fail"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("session_id")
-            || stderr.contains("required")
-            || stderr.contains("USAGE")
-            || stderr.contains("Usage"),
-        "resume failure should mention missing argument, got: {stderr}"
-    );
-}
-
-#[test]
 fn smoke_session_prune_snapshots_without_session_id_fails() {
     let home = temp_home("prune-no-id");
     let output = lattice(&home)
@@ -333,24 +247,5 @@ fn smoke_session_prune_snapshots_without_session_id_fails() {
             || stderr.contains("USAGE")
             || stderr.contains("Usage"),
         "prune failure should mention missing argument, got: {stderr}"
-    );
-}
-
-#[test]
-fn smoke_session_resume_nonexistent_session_returns_error() {
-    let home = temp_home("resume-missing");
-    let output = lattice(&home)
-        .args(["session", "resume", "nonexistent-session-id"])
-        .output()
-        .expect("session resume should run");
-
-    assert!(
-        !output.status.success(),
-        "resuming a nonexistent session should fail"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("error") || stderr.contains("not found") || stderr.contains("Error"),
-        "resume error should be informative, got: {stderr}"
     );
 }

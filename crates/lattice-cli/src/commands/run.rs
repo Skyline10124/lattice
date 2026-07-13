@@ -434,7 +434,7 @@ async fn run_inner(
         }
         Err(lattice_api::ApiError::BadRequest(msg)) => {
             eprintln!("{}: {}", "error".red(), msg);
-            return Ok(std::process::ExitCode::from(1));
+            return Ok(std::process::ExitCode::from(2));
         }
         Err(lattice_api::ApiError::Conflict(msg)) => {
             eprintln!("{}: {}", "error".red(), msg);

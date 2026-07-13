@@ -8455,9 +8455,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_audit_cli",
-    "reason": "CLI audit query 产品行为（内部 seed DB）；提升到 lattice audit --json 黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_audit_ops_msb",
+    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；seed audit DB 需 committed turn，本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8467,9 +8467,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_audit_ops_msb",
+    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8480,8 +8480,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_audit_cli",
+    "reason": "已删除原内部测试，由已落地 fast_audit_cli（audit query/replay/tail 空态/错误态 --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8491,9 +8491,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_audit_cli",
-    "reason": "CLI audit 空结果产品行为；提升到 lattice audit --json 黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_audit_ops_msb",
+    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；seed audit DB 需 committed turn，本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8503,9 +8503,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_audit_ops_msb",
+    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8515,9 +8515,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_audit_ops_msb",
+    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8527,9 +8527,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_audit_ops_msb",
+    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8550,10 +8550,10 @@
     "name": "audit_query_reads_legacy_schema_store",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-3 复审判偏差：手工植入旧 SQLite schema 测向后兼容；RFC #19 harness 边界禁止直接打开/植入内部 audit DB，planned_audit_ops_msb 永远无法覆盖（真实 turn 只生成当前 schema）；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -8564,8 +8564,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8576,8 +8576,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8588,8 +8588,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8600,8 +8600,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8612,8 +8612,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8624,8 +8624,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8636,8 +8636,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8648,8 +8648,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8660,8 +8660,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8708,8 +8708,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_lancet_cli",
+    "reason": "延期到 planned_lancet_cli（lattice lancet status 空态：audit DB 不存在时返回空 recent_calls + None verdict，exit 0）；fast 测试尚未新增，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8719,9 +8719,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_audit_ops_msb",
+    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8730,10 +8730,10 @@
     "name": "cep_doctor_passes_on_repo_root",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：测试 run_doctor_inner_for_project_root（LANCET doctor catalog 方法数 + registry 注册检查）是编译期不变量检查，经 #[cfg(test)] helper 驱动，非公开黑盒行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -8744,8 +8744,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8756,8 +8756,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8768,8 +8768,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8780,8 +8780,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8792,8 +8792,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8804,8 +8804,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8816,8 +8816,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8828,8 +8828,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8840,8 +8840,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8852,8 +8852,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8864,8 +8864,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8874,10 +8874,10 @@
     "name": "stream_timeout_constant_is_5_minutes",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -8887,9 +8887,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_provider_fail_msb",
+    "reason": "延期到 planned_provider_fail_msb（provider 断流/超时清理）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8898,10 +8898,10 @@
     "name": "run_validate_agents_dir_rejects_parent_components",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -8910,10 +8910,10 @@
     "name": "run_validate_agents_dir_resolves_symlink_prefix_before_safety_check",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -8922,10 +8922,10 @@
     "name": "run_default_session_dir_under_lattice_sessions",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -8935,9 +8935,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_audit_cli|planned_config_cli|msb_full_turn",
-    "reason": "CLI 测试用内部 API 造状态；提升为纯 LATTICE_BIN 黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "msb_full_turn",
+    "reason": "已落地 msb_full_turn 已通过公开 session send 完成真实 turn 并断言 commit；原内部集成测试仍保留，记为冗余待删，不能改判 local_invariant。"
   },
   {
     "crate": "lattice-cli",
@@ -8948,8 +8948,8 @@
     "async": true,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_audit_cli|planned_config_cli|msb_full_turn",
-    "reason": "CLI 测试用内部 API 造状态；提升为纯 LATTICE_BIN 黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "已删除原内部测试，由已落地 fast_session_cli（session send <missing-id> 黑盒：open_session 在 workspace 前失败，exit 2 + stderr not found）接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -8959,9 +8959,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_audit_cli|planned_config_cli|msb_full_turn",
-    "reason": "CLI 测试用内部 API 造状态；提升为纯 LATTICE_BIN 黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_observe_msb",
+    "reason": "延期到 planned_observe_msb（需 observe.workspace tool call 才能验证 workspace-root vs profile package-dir 分离；msb_full_turn profile 只执行纯文本 turn）；本机无 /dev/kvm，原内部测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -8982,10 +8982,10 @@
     "name": "render_json_event_emits_single_line_with_trailing_newline",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -8994,10 +8994,10 @@
     "name": "render_json_event_roundtrips_every_variant",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9006,10 +9006,10 @@
     "name": "render_json_event_emits_no_ansi_escapes",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9018,10 +9018,10 @@
     "name": "render_human_token_delta_writes_only_to_stdout",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9030,10 +9030,10 @@
     "name": "render_human_status_line_after_partial_token_inserts_stderr_newline",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9054,10 +9054,10 @@
     "name": "render_human_tool_finished_ok_renders_byte_size",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9066,10 +9066,10 @@
     "name": "render_human_tool_finished_err_renders_summary",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9078,10 +9078,10 @@
     "name": "render_human_reasoning_hidden_default",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9090,10 +9090,10 @@
     "name": "render_human_reasoning_visible_verbose",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9102,10 +9102,10 @@
     "name": "render_human_turn_started_silent_default",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9114,10 +9114,10 @@
     "name": "render_human_committed_lowercases_status",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9126,10 +9126,10 @@
     "name": "verbose_epilogue_emits_all_fields_when_populated",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9138,10 +9138,10 @@
     "name": "verbose_epilogue_skips_unset_fields",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9174,10 +9174,10 @@
     "name": "seq_happy_path_human",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9186,10 +9186,10 @@
     "name": "seq_happy_path_verbose_with_epilogue",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9198,10 +9198,10 @@
     "name": "seq_trailing_token_newline_emitted",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9210,10 +9210,10 @@
     "name": "seq_token_then_status_inserts_stderr_newline",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9234,10 +9234,10 @@
     "name": "seq_tool_failure_renders_summary",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9246,10 +9246,10 @@
     "name": "seq_turn_failed_then_commit_drains_stream",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9258,10 +9258,10 @@
     "name": "seq_commit_failed_renders_reason",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9270,10 +9270,10 @@
     "name": "seq_stream_ends_without_terminal_is_protocol_violation",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9282,10 +9282,10 @@
     "name": "seq_jsonl_round_trips_every_variant",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9294,10 +9294,10 @@
     "name": "seq_reasoning_hidden_default_in_human",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9306,10 +9306,10 @@
     "name": "seq_reasoning_visible_in_verbose",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9378,10 +9378,10 @@
     "name": "human_turn_log_renders_disposition_next_to_status",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9714,10 +9714,10 @@
     "name": "not_found_error_includes_object_id",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a -- 无替代场景（#[cfg(test)] helper 行为已被 fast binary 覆盖）",
+    "reason": "测试 #[cfg(test)] only helper not_found()；missing-id 行为已被 fast_session_cli 的 nonexistent-session 黑盒覆盖（status/log/send 均 assert not found + id in stderr）；删除。"
   },
   {
     "crate": "lattice-cli",
@@ -9726,10 +9726,10 @@
     "name": "summarize_short_text_unchanged",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -9738,10 +9738,10 @@
     "name": "summarize_long_text_truncated",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -9750,10 +9750,10 @@
     "name": "summarize_cjk_short_unchanged",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -9762,10 +9762,10 @@
     "name": "summarize_cjk_truncated_at_column_boundary",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -9774,10 +9774,10 @@
     "name": "summarize_mixed_ascii_cjk_truncated",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -9786,10 +9786,10 @@
     "name": "display_id_short_unchanged",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -9798,10 +9798,10 @@
     "name": "display_id_long_truncated",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。"
   },
   {
     "crate": "lattice-cli",
@@ -9834,10 +9834,10 @@
     "name": "session_resume_handler_function_exists",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a -- 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责）",
+    "reason": "扫描源码字符串/import（impl_source() + contains fn cmd_resume_api）的架构检查；删除（RFC #19 决定六）。"
   },
   {
     "crate": "lattice-cli",
@@ -9858,10 +9858,10 @@
     "name": "session_resume_calls_typed_api",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a -- 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责）",
+    "reason": "扫描源码字符串/import（impl_source() + contains resume_turn()）的架构检查；删除（RFC #19 决定六）。"
   },
   {
     "crate": "lattice-cli",
@@ -9930,10 +9930,10 @@
     "name": "project_branch_new_source_defines_field",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a -- 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责）",
+    "reason": "扫描源码字符串/import 的架构检查（include_str! 扫描 SessionAction::New 字段）；删除（RFC #19 决定六）。"
   },
   {
     "crate": "lattice-cli",
@@ -9943,9 +9943,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_session_graph_msb",
+    "reason": "延期到 planned_session_graph_msb：需用公开 branch/list 路径验证仅读取目标 session refs；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -9955,9 +9955,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_session_graph_msb",
+    "reason": "延期到 planned_session_graph_msb：需用公开 checkout 路径验证只修改目标 session HEAD；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -9967,9 +9967,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_session_graph_msb",
+    "reason": "延期到 planned_session_graph_msb：需用公开 branch create 路径验证只影响目标 session；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -9979,9 +9979,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_session_graph_msb",
+    "reason": "延期到 planned_session_graph_msb：需用公开 reset 路径验证只移动目标 session branch pointer；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -9991,9 +9991,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_session_graph_msb",
+    "reason": "延期到 planned_session_graph_msb：需用公开 diff 路径验证 refs 在目标 session 内解析；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -10016,8 +10016,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。"
   },
   {
     "crate": "lattice-cli",
@@ -10052,8 +10052,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。"
   },
   {
     "crate": "lattice-cli",
@@ -10424,8 +10424,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10436,8 +10436,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10448,8 +10448,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "已删除原内部测试，由已落地 fast_session_cli（session new/list/status/log/branch --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10472,8 +10472,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "fast_cli_help",
+    "reason": "已删除原内部测试，由已落地 fast_cli_help（CLI help 表面） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10484,8 +10484,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10496,8 +10496,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10508,8 +10508,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10520,8 +10520,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；seed_session 的 committed turn 是测试夹具而非断言对象，实际断言（session 出现在 status 列表）已被 fast_session_new_creates_session_and_appears_in_list 覆盖；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。"
   },
   {
     "crate": "lattice-cli",
@@ -10532,8 +10532,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；seed_session 的 committed turn 是测试夹具而非断言对象，实际断言（status <id> 输出含 ID）已被 fast_session_status_new_session_shows_zero_commits_and_agent 覆盖；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。"
   },
   {
     "crate": "lattice-cli",
@@ -10543,9 +10543,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "target_layer": "real_microsandbox",
+    "replacement": "planned_session_history_msb",
+    "reason": "延期到 planned_session_history_msb：需真实 turn 后通过公开 human session log 验证 seeded turn 展示；现有 msb_full_turn 只断言 JSON log，原测试保留。"
   },
   {
     "crate": "lattice-cli",
@@ -10556,8 +10556,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10568,8 +10568,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_config_cli",
+    "reason": "已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10580,8 +10580,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "已删除原弱 smoke，由已落地 fast_session_send_missing_credential_is_redacted_input_error 接管：凭据解析早于 prepare_upper，无需 KVM；精确断言 exit 2、缺失 env-var 名与 stdout/stderr 无 secret 泄漏（#23 review-fix round-6）。"
   },
   {
     "crate": "lattice-cli",
@@ -10592,8 +10592,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "已删除原内部测试，由已落地 fast_session_send_no_profile（session send 在 load_agent_checked 失败：创建 session 后删除 .lattice/agents/ 触发 agent profile 缺失错误，exit 2 + stderr 含 profile/agent.toml，不泄 secret）黑盒接管（#23 review-fix round-3）；Upper 前失败，逐条映射。"
   },
   {
     "crate": "lattice-cli",
@@ -10604,8 +10604,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "已删除原内部测试，由已落地 fast_session_cli（session new/list/status/log/branch --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。"
   },
   {
     "crate": "lattice-cli",
@@ -10614,10 +10614,10 @@
     "name": "release_smoke_release_gate_sh_is_retired",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "fast_cli_help|planned_session_cli|planned_audit_cli|planned_config_cli",
-    "reason": "产品 CLI 二进制行为；提升到 system harness 快速黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：运行 release-gate.sh 并断言 nonzero exit + retired stderr，是脚本退役 smoke，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -10626,10 +10626,10 @@
     "name": "release_smoke_release_gate_v1_4_includes_lancet_boundary_check",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#23 复审偏差：源码扫描 release-gate-v1.4.sh 脚本文件内容（asserts contains lancet-boundary 等），是 repo tooling 局部不变量，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -10640,8 +10640,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "已删除原内部测试，由已落地 fast_session_resume_without_id（session resume 缺参数 clap 拒绝，exit 2 + stderr）黑盒接管（#23 review-fix round-3）；Upper 前失败，逐条映射。"
   },
   {
     "crate": "lattice-cli",
@@ -10664,8 +10664,8 @@
     "async": false,
     "decision": "elevate",
     "target_layer": "fast_binary",
-    "replacement": "planned_session_cli|planned_config_cli|planned_audit_cli",
-    "reason": "CLI 层产品行为默认提升到快速二进制黑盒"
+    "replacement": "planned_session_cli",
+    "reason": "已删除原内部测试，由已落地 fast_session_resume_nonexistent_session（session resume 不存在 session，调用错误 exit 2 + stderr 含 not found 与 session ID）黑盒接管（#23 review-fix round-5）；Upper 前失败，逐条映射。"
   },
   {
     "crate": "lattice-llm",

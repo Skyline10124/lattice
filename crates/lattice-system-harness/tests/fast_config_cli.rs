@@ -53,6 +53,12 @@ fn ok_or_artifacts(
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
+fn parse_json<T: serde::de::DeserializeOwned>(output: &Output) -> Result<T, AssertError> {
+    serde_json::from_slice(&output.stdout).map_err(|error| AssertError::StdoutMissing {
+        expected: format!("valid JSON output: {error}"),
+    })
+}
+
 #[test]
 fn fast_models_lists_all_aliases_one_per_line() {
     let spec = ScenarioSpec::fast("fast-models-list");
@@ -71,11 +77,9 @@ fn fast_models_json_is_valid_array_with_credential_status() {
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let out = run(&world, &spec, &["models", "--json"]);
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let parsed: Vec<Value> =
-        serde_json::from_str(stdout.trim()).expect("models --json is a JSON array");
     let result = assert_exit_success(&out)
-        .and_then(|_| {
+        .and_then(|_| parse_json::<Vec<Value>>(&out))
+        .and_then(|parsed| {
             if parsed.is_empty() {
                 return Err(AssertError::StdoutMissing {
                     expected: "non-empty alias array".into(),
@@ -133,16 +137,68 @@ fn fast_models_auth_with_no_credentials_lists_nothing() {
 
 #[test]
 fn fast_models_auth_with_anthropic_key_lists_anthropic_aliases_only() {
+    // `models --auth` prints one credentialed alias per line (renderer at
+    // `crates/lattice-cli/src/commands/models.rs:6-24`). With only the
+    // Anthropic key set, the output is exactly the Anthropic aliases - per-line
+    // parsed and set-compared so reordering, merging lines, icons, URLs, or a
+    // secret sentinel all fail this scenario. Note: the old
+    // `cli_cutover_models_auth_one_alias_per_line_without_icons_or_secrets`
+    // test (see `git show codeberg/main:crates/lattice-cli/tests/cli_cutover.rs`)
+    // asserted non-empty/no-secret/no-icon/no-URL but did NOT count alias
+    // lines; this one does, and rejects gpt-5.5 aliases whose credential is
+    // absent.
     let spec = ScenarioSpec::fast("fast-models-auth-keyed");
     let mut world = ScenarioWorld::new(&spec.name).expect("world");
     world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
     let out = run(&world, &spec, &["models", "--auth"]);
 
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<&str> = stdout
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     let result = assert_exit_success(&out)
-        .and_then(|_| assert_stdout_contains_all(&out, &["sonnet", "opus", "haiku"]))
         .and_then(|_| {
-            // OpenAI aliases must NOT appear: their credential is absent.
-            if String::from_utf8_lossy(&out.stdout).contains("gpt-5.5") {
+            // Each non-empty line must be exactly one alias token: no icon
+            // markers, no URL scheme, no secret value.
+            for line in &lines {
+                if line.contains('✓')
+                    || line.contains('✗')
+                    || line.contains("http://")
+                    || line.contains("https://")
+                    || line.contains(SECRET_SENTINEL)
+                {
+                    return Err(AssertError::StdoutMissing {
+                        expected: format!("alias-only line, got {line:?}"),
+                    });
+                }
+            }
+            // The line count must match the expected alias count exactly.
+            // Without this, a HashSet comparison would mask duplicate alias
+            // lines (e.g. "sonnet\nsonnet\nopus\nhaiku" would pass the set
+            // check but violate the one-alias-per-line contract).
+            let expected_count = 3; // opus, sonnet, haiku
+            if lines.len() != expected_count {
+                return Err(AssertError::StdoutMissing {
+                    expected: format!("{expected_count} alias lines, got {}", lines.len()),
+                });
+            }
+            // The credentialed Anthropic aliases, set-compared so output order
+            // does not matter. Current catalog: opus/sonnet/haiku.
+            let got: std::collections::HashSet<&str> = lines.iter().copied().collect();
+            let expected: std::collections::HashSet<&str> =
+                ["opus", "sonnet", "haiku"].into_iter().collect();
+            if got != expected {
+                return Err(AssertError::StdoutMissing {
+                    expected: format!("aliases == {expected:?}, got {got:?}"),
+                });
+            }
+            Ok(())
+        })
+        .and_then(|_| {
+            // gpt-5.5 (no OpenAI credential present) must not appear anywhere.
+            if stdout.contains("gpt-5.5") {
                 return Err(AssertError::StdoutMissing {
                     expected: "gpt-5.5 absent (OPENAI_API_KEY not set)".into(),
                 });
@@ -184,16 +240,31 @@ fn fast_resolve_json_includes_fields_and_excludes_secret_value() {
     world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
     let out = run(&world, &spec, &["resolve", "sonnet", "--json"]);
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let parsed: Value =
-        serde_json::from_str(stdout.trim()).expect("resolve --json is a JSON object");
     let result = assert_exit_success(&out)
-        .and_then(|_| {
+        .and_then(|_| parse_json::<Value>(&out))
+        .and_then(|parsed| {
             let status = parsed.get("credential_status").and_then(|v| v.as_str());
             let provider = parsed.get("provider").and_then(|v| v.as_str());
             if status != Some("Present") || provider != Some("Anthropic") {
                 return Err(AssertError::StdoutMissing {
                     expected: "credential_status=Present, provider=Anthropic".into(),
+                });
+            }
+            // `provider_model` is the public, actionable resolved-model field.
+            // It must exist, be a non-empty string. We do not pin the exact
+            // model version (catalog may move); only that it is named.
+            // Renderer contract: `crates/lattice-cli/src/commands/model_render.rs:6-15`.
+            let provider_model = parsed.get("provider_model").and_then(|v| v.as_str());
+            if provider_model.map(|m| m.is_empty()).unwrap_or(true) {
+                return Err(AssertError::StdoutMissing {
+                    expected: format!("provider_model non-empty string, got {provider_model:?}"),
+                });
+            }
+            // `api_key_env` is the public diagnostic field naming the env var;
+            // the missing-credential scenario also asserts this stays named.
+            if parsed.get("api_key_env").and_then(|v| v.as_str()) != Some("ANTHROPIC_API_KEY") {
+                return Err(AssertError::StdoutMissing {
+                    expected: "api_key_env == ANTHROPIC_API_KEY".into(),
                 });
             }
             Ok(())
@@ -268,19 +339,52 @@ fn fast_doctor_json_does_not_leak_secrets() {
     world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
     let out = run(&world, &spec, &["--json", "doctor"]);
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let parsed: Value =
-        serde_json::from_str(stdout.trim()).expect("doctor --json is a JSON object");
     let result = assert_exit_success(&out)
-        .and_then(|_| {
-            if parsed
-                .get("credentials")
-                .and_then(|v| v.as_array())
-                .is_none()
-                || parsed.get("alias_count").and_then(|v| v.as_i64()).is_none()
-            {
+        .and_then(|_| parse_json::<Value>(&out))
+        .and_then(|parsed| {
+            let credentials = parsed.get("credentials").and_then(|v| v.as_array());
+            let creds = match credentials {
+                Some(a) if !a.is_empty() => a,
+                _ => {
+                    return Err(AssertError::StdoutMissing {
+                        expected: "credentials non-empty array".into(),
+                    });
+                }
+            };
+            // Every credential entry is an object with `env_var`/`status`
+            // strings; status uses the public Present/Missing vocabulary
+            // (renderer at `crates/lattice-cli/src/commands/doctor.rs:67-79`).
+            for cred in creds {
+                let env_var = cred.get("env_var").and_then(|v| v.as_str());
+                let status = cred.get("status").and_then(|v| v.as_str());
+                if env_var.map(|s| s.is_empty()).unwrap_or(true) || status.is_none() {
+                    return Err(AssertError::StdoutMissing {
+                        expected: "every credential has env_var + status strings".into(),
+                    });
+                }
+                if !matches!(status, Some("Present") | Some("Missing")) {
+                    return Err(AssertError::StdoutMissing {
+                        expected: format!("status in {{Present, Missing}}, got {status:?}"),
+                    });
+                }
+            }
+            // The Anthropic credential is set (world injects the sentinel),
+            // so it must report Present.
+            let anthropic = creds
+                .iter()
+                .find(|c| c.get("env_var").and_then(|v| v.as_str()) == Some("ANTHROPIC_API_KEY"));
+            if !matches!(
+                anthropic,
+                Some(c) if c.get("status").and_then(|v| v.as_str()) == Some("Present")
+            ) {
                 return Err(AssertError::StdoutMissing {
-                    expected: "credentials[] + alias_count".into(),
+                    expected: format!("ANTHROPIC_API_KEY credential Present, got {anthropic:?}"),
+                });
+            }
+            // Keep the existing alias_count numeric gate.
+            if parsed.get("alias_count").and_then(|v| v.as_i64()).is_none() {
+                return Err(AssertError::StdoutMissing {
+                    expected: "alias_count integer".into(),
                 });
             }
             Ok(())
@@ -348,19 +452,18 @@ fn fast_resolve_json_without_credential_names_env_var_and_missing_status() {
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let out = run(&world, &spec, &["resolve", "sonnet", "--json"]);
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let parsed: Value =
-        serde_json::from_str(stdout.trim()).expect("resolve --json is a JSON object");
-    let result = assert_exit_success(&out).and_then(|_| {
-        let env = parsed.get("api_key_env").and_then(|v| v.as_str());
-        let status = parsed.get("credential_status").and_then(|v| v.as_str());
-        if env != Some("ANTHROPIC_API_KEY") || status != Some("Missing") {
-            return Err(AssertError::StdoutMissing {
-                expected: "api_key_env=ANTHROPIC_API_KEY, credential_status=Missing".into(),
-            });
-        }
-        Ok(())
-    });
+    let result = assert_exit_success(&out)
+        .and_then(|_| parse_json::<Value>(&out))
+        .and_then(|parsed| {
+            let env = parsed.get("api_key_env").and_then(|v| v.as_str());
+            let status = parsed.get("credential_status").and_then(|v| v.as_str());
+            if env != Some("ANTHROPIC_API_KEY") || status != Some("Missing") {
+                return Err(AssertError::StdoutMissing {
+                    expected: "api_key_env=ANTHROPIC_API_KEY, credential_status=Missing".into(),
+                });
+            }
+            Ok(())
+        });
     ok_or_artifacts(
         &world,
         "fast-resolve-missing",

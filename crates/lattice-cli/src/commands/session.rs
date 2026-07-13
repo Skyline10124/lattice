@@ -779,6 +779,11 @@ async fn cmd_resume_api(api: &SessionApi, session_id: &str, json: bool) -> std::
             std::process::ExitCode::SUCCESS
         }
         Err(e) => {
+            let exit_code = if matches!(&e, lattice_api::ApiError::NotFound(_)) {
+                2
+            } else {
+                1
+            };
             if json {
                 let value = serde_json::json!({
                     "type": "error",
@@ -792,7 +797,7 @@ async fn cmd_resume_api(api: &SessionApi, session_id: &str, json: bool) -> std::
             } else {
                 eprintln!("{}: {:#}", "error".red(), e);
             }
-            std::process::ExitCode::from(1)
+            std::process::ExitCode::from(exit_code)
         }
     }
 }
@@ -858,11 +863,6 @@ async fn cmd_prune_snapshots_api(
             std::process::ExitCode::from(1)
         }
     }
-}
-
-#[cfg(test)]
-fn not_found(kind: &str, id: &str) -> anyhow::Error {
-    anyhow::anyhow!("{} '{}' not found", kind, id)
 }
 
 fn display_id(id: &str) -> String {
@@ -1218,14 +1218,6 @@ mod session_cli {
     }
 
     #[test]
-    fn not_found_error_includes_object_id() {
-        let err = not_found("session", "missing-id-123");
-        let msg = format!("{}", err);
-        assert!(msg.contains("session"), "should mention object type");
-        assert!(msg.contains("missing-id-123"), "should include the id");
-    }
-
-    #[test]
     fn summarize_short_text_unchanged() {
         assert_eq!(summarize("hello world", 120), "hello world");
     }
@@ -1302,14 +1294,6 @@ mod session_cli {
             "SessionAction enum must define a Resume variant"
         );
     }
-    #[test]
-    fn session_resume_handler_function_exists() {
-        let src = impl_source();
-        assert!(
-            src.contains("fn cmd_resume_api"),
-            "session.rs must define a cmd_resume_api handler function"
-        );
-    }
 
     #[test]
     fn session_prune_handler_function_exists() {
@@ -1317,15 +1301,6 @@ mod session_cli {
         assert!(
             src.contains("fn cmd_prune_snapshots_api"),
             "session.rs must define a cmd_prune_snapshots_api handler function"
-        );
-    }
-
-    #[test]
-    fn session_resume_calls_typed_api() {
-        let src = impl_source();
-        assert!(
-            src.contains("resume_turn("),
-            "cmd_resume_api must call the typed API resume_turn()"
         );
     }
 
@@ -1379,24 +1354,6 @@ mod session_cli {
         assert!(
             action.is_err(),
             "session send must not accept --project-branch override"
-        );
-    }
-    #[test]
-    fn project_branch_new_source_defines_field() {
-        // Source scan: SessionAction::New variant must define project_branch field.
-        let source = include_str!("session.rs");
-        // Find the New variant in the enum definition
-        let enum_start = source
-            .find("pub enum SessionAction")
-            .expect("enum should exist");
-        let enum_body = &source[enum_start..];
-        // Find the New variant block (between "New {" and the next variant marker "/// ")
-        let new_start = enum_body.find("New {").expect("New variant should exist");
-        // Scan to the closing brace of the variant (next line starting with spaces + "},")
-        let new_block = &enum_body[new_start..new_start + 400.min(enum_body.len() - new_start)];
-        assert!(
-            new_block.contains("project_branch"),
-            "New variant must define project_branch field"
         );
     }
 }

@@ -2132,6 +2132,328 @@ unchanged.
 **Note:** Issue #23 left open and not pushed per request; 109 deferred
 elevates tracked in FINDINGS.md `T-23-01` for the MSB/KVM lane.
 
+## Codeberg #23 review-fix round 1+2: triage mapping precision + fast-binary JSON contracts - 2026-07-12
+
+Severity: TEST (review feedback on #23 commit `0a365c89`). Parent #18; triage #22.
+
+**What:** Closed all 6 review comments on #23's fast-binary test migration,
+making the triage replacement mapping per-row auditable and re-securing the
+public JSON / semantic text contracts. Two rounds of review-fix. No product
+behavior changed; old crate-internal tests stay deleted (plus 3 more deleted
+in round 2). Round 3 corrections are recorded in the next entry below.
+
+**Feedback closure:**
+
+1. *95 `lattice-cli` elevates used one generic 3-way replacement.* CONFIRMED.
+   All 95 rows in `docs/test-triage-decisions.json` now map to the narrowest
+   scenario by test behaviour; the generic
+   `planned_session_cli|planned_config_cli|planned_audit_cli` value is gone.
+   Round 2 corrected 9 additional imprecise mappings.
+2. *`session status/log/branch` had no JSON contract test.* CONFIRMED.
+   `fast_session_cli.rs` gained three `--json` contract scenarios asserting the
+   stable object fields (`session_id`/`active_agent`/`commit_count`/
+   `project_target_branch`/`branches`/`turns` per renderer). Text tests kept.
+3. *`resolve --json` did not assert `provider_model`.* CONFIRMED.
+   `fast_resolve_json_…` now asserts `provider_model` is a non-empty string and
+   `api_key_env == "ANTHROPIC_API_KEY"` (no version pinning); secret sentinel
+   scan kept.
+4. *`doctor --json` did not assert credential object fields.* CONFIRMED.
+   `fast_doctor_json_…` now asserts `credentials` is a non-empty array of
+   objects with string `env_var`/`status` ∈ {Present, Missing} and the
+   `ANTHROPIC_API_KEY` entry is `Present`; `alias_count` and sentinel scan kept.
+5. *`models --auth` not line-guarded.* PARTIALLY CONFIRMED (reviewer overstated
+   the old cutover test's line-counting; it only checked non-empty/secret/icon/
+   URL). New assertion parses stdout per-line, set-compares the credentialed
+   Anthropic aliases `{opus, sonnet, haiku}`, rejects `gpt-5.5`, and forbids
+   `✓`/`✗`/`http://`/`https://`/sentinel on every line. Round 2 removed a
+   redundant whole-stdout guard (per-line scan + `assert_no_secret` already
+   cover it) and added `lines.len() == expected.len()` to catch duplicate
+   alias lines that `HashSet` would mask.
+6. *Acceptance count still 1443.* CONFIRMED, doc-only. `TEST-TRIAGE.md` §4 now
+   reads 1449 (matches `jq length`); snapshot date/scope untouched.
+
+**Round 2 corrections (9 mapping fixes + 2 test deletions + 1 new fast test):**
+
+- `cep_status_missing_db_returns_empty_state`: `planned_audit_cli` ->
+  `planned_lancet_cli` (new scenario ID; tests `lattice lancet status` empty-DB
+  behavior, not `audit query`).
+- `cep_doctor_passes_on_repo_root`: elevate -> `keep`/`local_invariant`
+  (LANCET doctor catalog/registry invariant via `#[cfg(test)]` helper, not
+  public black-box).
+- `run_integration_missing_session_returns_not_found`: combo -> **takeover**;
+  new `fast_session_send_nonexistent_session_errors` test covers `session send
+  <missing-id>` (fails at `open_session` before workspace, exit 2 + stderr
+  "not found"). Original test deleted from `run_tests.rs`.
+- `smoke_session_status_list_shows_seeded_session` / `smoke_session_status_specific_session`:
+  reason clarified -- `seed_session` committed turn is test fixture, not
+  assertion; actual assertions covered by existing fast tests. Stays
+  redundant-kept.
+- `audit_query_prints_fragment_for_seeded_db` /
+  `audit_query_empty_result_for_unknown_session`: `planned_audit_cli` ->
+  `planned_audit_ops_msb` (seeded audit DB needs committed turn).
+- `release_smoke_release_gate_v1_4_includes_lancet_boundary_check` /
+  `release_smoke_release_gate_sh_is_retired`: elevate -> `keep`/`local_invariant`
+  (script-file content scan / script-deprecation smoke, not CLI help surface).
+- `project_branch_new_source_defines_field`: `keep` -> **delete** + code deleted
+  (`include_str!` source-scan; RFC #19 decision six).
+- `not_found_error_includes_object_id`: `keep` -> **delete** + code deleted
+  (`#[cfg(test)]` helper; missing-id behavior covered by fast binary).
+
+**Triage mapping detail after round 2** (JSON total/identity preserved at 1449):
+32 already-deleted rows -> the landed scenario that took them over (31 from #23
+batch + 1 `run_integration_missing_session` via new `session send` fast test);
+47 true-deferred rows -> `msb_full_turn` / `planned_audit_ops_msb` /
+`planned_resume_msb` / `planned_provider_fail_msb` / `planned_lancet_cli`;
+4 redundant-kept rows (replacement lane landed but original test not deleted);
+2 combo/precise rows; 15 rejudged `keep`/`local_invariant` with `null`
+replacement (11 round-1 + 3 round-2 + 1 pre-existing); 2 round-2 `delete`
+(source-scan + cfg-test helper).
+`lattice-cli` counts: 保留 78 / 提升 101 / 删除 6 -> 92 / 85 / 8 (still 185).
+Global: 1298 / 140 / 11 -> 1312 / 124 / 13 (still 1449).
+
+**Note:** Round 3 corrections supersede some of these numbers; see the round-3
+entry below for the final authoritative counts.
+
+## Codeberg #23 review-fix round 3: target_layer correction + Upper-prior failures + failure-artifact contracts - 2026-07-13
+
+Severity: TEST (review feedback on round-1+2). Parent #18; triage #22.
+
+**What:** Corrected 10 mapping errors from round 1+2, added 4 new fast-binary
+tests for Upper-prior failure paths, fixed `target_layer` for MSB-scenario
+records, and hardened test failure-artifact contracts.
+
+**Round 3 corrections:**
+
+1. *`target_layer` for MSB items was `fast_binary` instead of
+   `real_microsandbox`.* Fixed 43 `lattice-cli` elevate records whose
+   replacement is `msb_full_turn` / `planned_*_msb` to `target_layer =
+   "real_microsandbox"`. 39 `fast_binary` records remain (planned_*_cli +
+   fast_cli_help + planned_lancet_cli).
+
+2. *4 Upper-prior failures incorrectly deferred to MSB.* Moved to fast-binary
+   takeover with new black-box tests:
+   - `cep_status_missing_db_returns_empty_state` -> `planned_lancet_cli`
+     (takeover; `lattice lancet status` empty-DB returns empty state, exit 0).
+   - `smoke_session_resume_without_session_id_fails` -> `planned_session_cli`
+     (takeover; clap rejects missing session_id, exit 2).
+   - `smoke_session_resume_nonexistent_session_returns_error` ->
+     `planned_session_cli` (takeover; `open_session` fails before workspace,
+     exit 1).
+   - `smoke_session_send_no_profile_fails_with_clear_message` ->
+     `planned_session_cli` (takeover; `load_agent_checked` fails after deleting
+     `.lattice/agents/`, exit 2 + no secret leak).
+   Original internal tests deleted from `release_smoke.rs`.
+
+3. *`audit_query_reads_legacy_schema_store` cannot be covered by MSB.* Changed
+   elevate -> `keep`/`local_invariant`. Manually implanted old SQLite schema
+   tests backward compat; RFC #19 harness boundary forbids opening/implanting
+   internal audit DB, and real turns only generate current schema.
+
+4. *`tool_executor_uses_workspace_root` needs observe tool call.* Changed
+   `msb_full_turn` -> `planned_observe_msb` + `real_microsandbox`. The
+   `msb_full_turn` profile only executes text turns (`tools.enabled = []`),
+   cannot trigger `observe.workspace`.
+
+5. *2 resume source-scan tests should be delete.* `session_resume_handler_function_exists`
+   and `session_resume_calls_typed_api` both use `impl_source()` + string
+   search. Changed keep -> `delete` (RFC #19 decision six). Code deleted from
+   `session.rs`.
+
+6. *`session send` exit code not pinned to 2.* `assert_exit_failure` only
+   checks nonzero. Added `assert_exit_code(&out, 2)` to
+   `fast_session_send_nonexistent_session_errors` and
+   `fast_session_send_no_agent_profile_errors`. New `assert_exit_code` helper
+   added to `crates/lattice-system-harness/src/assert.rs`.
+
+7. *JSON parse panics lose failure artifacts.* All 4 `expect("... is a JSON
+   object")` calls in `fast_session_cli.rs` (list/status/log/branch `--json`)
+   replaced with `parse_json_or_artifacts` helper that routes parse errors
+   through `assert_with_failure_artifacts`.
+
+8. *`session-new` failure artifacts overwrite each other.* `assert_session_new_contract`
+   now takes `scenario_name` parameter (uses `spec.name`) instead of hardcoded
+   `"session-new"`, so parallel callers don't clobber each other's artifacts.
+
+**Final triage mapping detail** (JSON total/identity preserved at 1449):
+36 already-deleted takeover rows (31 #23 batch + 1 round-2 + 4 round-3);
+41 true-deferred rows -> `msb_full_turn`(33) / `planned_audit_ops_msb`(7) /
+`planned_provider_fail_msb`(1) / `planned_observe_msb`(1) / `planned_resume_msb`(1),
+all with `target_layer = "real_microsandbox"`;
+4 redundant-kept rows; 1 combo/precise row; 16 rejudged `keep`/`local_invariant`
+(11 round-1 + 3 round-2 + 1 round-3 + 1 pre-existing); 4 deletes (2 round-2 +
+2 round-3).
+`lattice-cli` counts: 78 / 101 / 6 -> **93 / 82 / 10** (still 185).
+Global: 1298 / 140 / 11 -> **1313 / 121 / 15** (still 1449).
+Total deferred: 80 (41 lattice-cli + 36 lattice-api + 3 lattice-agent).
+
+**Additive work:** `fast_session_cli.rs` grew from 8 to 15 tests (3 JSON
+contract + 1 send missing-id + 2 resume + 1 send no-profile);
+`fast_config_cli.rs` strengthened 3 existing scenarios; `assert.rs` gained
+`assert_exit_code` helper; `lib.rs` exports it.
+
+**Verification:**
+
+- `cargo build -p lattice-cli --bin lattice` - OK.
+- `LATTICE_BIN=… cargo test -p lattice-system-harness --test fast_session_cli
+  --test fast_config_cli -- --test-threads=1` - **28 passed; 0 failed** (15
+  session incl. 3 JSON + 4 Upper-prior, 13 config incl. 3 strengthened).
+- `cargo test -p lattice-cli` - 129 unit + 4 cli_cutover + 7 release_smoke = 140 passed.
+- Triage acceptance: `jq empty` OK; `jq length` == 1449; generic 3-way count
+  == 0.
+- `cargo fmt --all --check` - OK.
+- `cargo clippy --workspace --all-targets -- -D warnings` - OK.
+- `cargo xtask harness-boundary` - OK.
+- `cargo xtask lancet-boundary` - OK.
+- `LATTICE_SKIP_KNOWN_HANGS=1 cargo xtask ci` - **All checks passed.**
+- `git diff --check` - OK.
+
+**Changed files:**
+`crates/lattice-system-harness/src/assert.rs` (new `assert_exit_code`),
+`crates/lattice-system-harness/src/lib.rs` (export),
+`crates/lattice-system-harness/tests/fast_session_cli.rs`,
+`crates/lattice-system-harness/tests/fast_config_cli.rs`,
+`crates/lattice-cli/src/commands/session.rs` (deleted 2 source-scan tests),
+`crates/lattice-cli/src/commands/run_tests.rs` (deleted 1 test, round 2),
+`crates/lattice-cli/tests/release_smoke.rs` (deleted 3 tests),
+`docs/test-triage-decisions.json`, `docs/TEST-TRIAGE.md`, `FIX.md`,
+`FINDINGS.md`.
+
+**Note:** Residual (41 true-deferred lattice-cli + 4 redundant-kept = 45 rows
+in lattice-cli; 39 lattice-api/agent deferred) stays under FINDINGS.md
+`T-23-01`/`T-23-02` pending the MSB/KVM lane; 16 keep-deviations are rejudged,
+not deferred; 4 deletes are landed and closed. No push, no issue closure, no
+history rewrite.
+
+## Codeberg #23 review-fix round 4: msb_full_turn coverage honesty + exit-code precision + secret scan - 2026-07-13
+
+Severity: TEST (review feedback on round 1-3). Parent #18; triage #22.
+
+**What:** Corrected 33 false `msb_full_turn` mappings, fixed the lancet status
+false takeover, hardened resume/send exit-code and secret-scan assertions,
+and fixed `assert_exit_code` diagnostics.
+
+**Round 4 corrections:**
+
+1. *33 `msb_full_turn` mappings were not honestly coverable.* The
+   `msb_full_turn` scenario only executes a plain-text success turn with
+   `--json` and checks the event subsequence + exit 0 + log/status
+   cross-validation. It does NOT cover: human stdout/stderr rendering
+   (`render_human_*`, 8 tests), JSON event serialization with synthetic
+   events including failure variants (`render_json_*`, 3 tests), verbose
+   epilogue rendering (`verbose_epilogue_*`, 2 tests), renderer state machine
+   with failure paths (`seq_*`, 11 tests), human turn log rendering (1 test),
+   session-graph scoping for branch/checkout/reset/diff (5 tests), seeded
+   session log (1 test), missing-credentials path (1 test), or
+   `run_integration_commits` (1 test). All 33 rejudged from
+   elevate/`msb_full_turn` -> **keep**/`local_invariant` with `null`
+   replacement.
+
+2. *`cep_status_missing_db_returns_empty_state` false takeover.* No
+   `fast_lancet_status` test exists and the original test remains in source.
+   Reverted from takeover to **deferred** (`planned_lancet_cli`, fast test
+   not yet added).
+
+3. *Resume exit-code assertions imprecise.* `fast_session_resume_without_session_id_fails`
+   now asserts `assert_exit_code(&out, 2)` (clap convention) + stderr contains
+   `SESSION_ID`. `fast_session_resume_nonexistent_session_errors` now asserts
+   `assert_exit_failure` + stderr contains `not found` + `nope-sid`.
+
+4. *`send_no_profile` secret scan only checked stderr.* Replaced with
+   `assert_no_secret(&out, sentinel)` which scans both stdout and stderr.
+
+5. *`assert_exit_code` reused `ExitNotSuccess` error.* Added
+   `ExitCodeMismatch { expected, actual }` variant to `AssertError`.
+
+**Final counts:** lattice-cli **126 keep / 49 elevate / 10 delete** = 185.
+Global **1346 / 88 / 15** = 1449. target_layer: 40 fast_binary + 9
+real_microsandbox. Total deferred: 49 (10 lattice-cli + 36 lattice-api + 3
+lattice-agent).
+
+**Verification:** 28 fast tests pass; 140 lattice-cli tests pass; fmt/clippy/
+boundary/xtask ci all green.
+
+## Codeberg #23 review-fix round 5: restore invocation-error and honest residual contracts - 2026-07-13
+
+Severity: TEST (independent follow-up review of the round-4 claim). Parent #18;
+triage #22.
+
+**Problem:** Round 4 still accepted exit 1 for `session resume <missing-id>`,
+blanket-rejudged eight product-behavior tests as local invariants, and left the
+JSON/Markdown/FINDINGS category arithmetic inconsistent. Config JSON tests also
+parsed with `expect`, losing failure artifacts on malformed output.
+
+**Fix:**
+
+1. `cmd_resume_api` now classifies `ApiError::NotFound` as invocation error exit
+   2; the fast black-box test pins exit 2 plus `not found` and the requested ID.
+2. Split the 33 round-4 blanket keeps after source inspection: 25 genuine
+   renderer/serializer invariants remain keep; `run_integration_commits` is an
+   `msb_full_turn` redundant-kept elevate; five cross-session graph tests,
+   human seeded log, and missing-credential redaction map to precise planned MSB
+   scenarios and remain in source until those scenarios land.
+3. Added `planned_session_graph_msb` and `planned_session_history_msb`; separated
+   the one `planned_lancet_cli` fast residual from KVM-gated work.
+4. All four config JSON parsing sites now convert parse failures to
+   `AssertError` before `assert_with_failure_artifacts`, preserving stdout,
+   stderr, and world context.
+5. Resynchronised per-record Markdown with JSON and corrected the partition of
+   the original 101 CLI elevate rows: 35 takeover + 17 deferred + 5
+   redundant-kept + 40 keep rejudgments + 4 delete = 101.
+
+**Final ledger:** lattice-cli **118 keep / 57 elevate / 10 delete** = 185;
+global **1338 / 96 / 15** = 1449; elevated target layers **40 fast_binary + 17
+real_microsandbox**. Deferred total **56** (55 MSB/KVM + 1 fast-binary); CLI
+residual is 17 deferred + 5 redundant-kept = 22.
+
+**Verification:** `cargo build -p lattice-cli --bin lattice`; 28 targeted fast
+harness tests; `cargo test -p lattice-cli` (140 passed); `cargo fmt --all
+--check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo xtask
+harness-boundary`; `cargo xtask lancet-boundary`; `cargo xtask ci` (all checks
+passed); JSON/Markdown lattice-cli row check (185/185, zero decision/layer
+mismatches); `git diff --check HEAD`.
+
+**Changed files:** `crates/lattice-cli/src/commands/session.rs`,
+`crates/lattice-system-harness/tests/fast_session_cli.rs`,
+`crates/lattice-system-harness/tests/fast_config_cli.rs`,
+`docs/test-triage-decisions.json`, `docs/TEST-TRIAGE.md`, `FINDINGS.md`,
+`FIX.md`.
+
+## Codeberg #23 review-fix round 6: missing credential is fast input failure - 2026-07-13
+
+Severity: TEST (final spec-axis follow-up). Parent #18; triage #22.
+
+**Problem:** `smoke_session_send_missing_credentials_fails_without_secrets`
+was still classified as an MSB scenario, although credential resolution occurs
+inside `resolve_upper_config` before `prepare_upper`. The retained release smoke
+only asserted nonzero and scanned stderr for a generic `sk-` prefix.
+
+**Fix:** Added
+`fast_session_send_missing_credential_is_redacted_input_error`, which drives the
+public binary with a credential-requiring profile and asserts exit 2, the exact
+missing env-var name, and no sentinel in either stdout or stderr. `run_inner`
+now maps pre-stream `ApiError::BadRequest` input/config failures to exit 2. The
+weak release smoke was deleted, and its ledger row moved to
+`fast_binary/planned_session_cli` as a landed takeover.
+
+**Final ledger correction:** decisions remain lattice-cli **118/57/10** and
+global **1338/96/15**; elevated target layers are now **41 fast_binary + 16
+real_microsandbox**. The original 101 CLI elevate rows partition as 36 takeover
++ 16 deferred + 5 redundant-kept + 40 keep rejudgments + 4 delete. Deferred
+total is **55** (54 MSB/KVM + 1 fast); CLI residual is 16 deferred + 5
+redundant-kept = 21.
+
+**Verification:** 29 targeted fast harness tests pass; `cargo test -p
+lattice-cli` passes 139 tests; `cargo xtask ci` reports all checks passed;
+`cargo xtask lancet-boundary` passes; JSON/Markdown contain 185/185 CLI rows
+with zero decision/layer/reason mismatches; `git diff --check HEAD` passes.
+
+**Changed files:** `crates/lattice-cli/AGENTS.md`,
+`crates/lattice-cli/src/commands/run.rs`,
+`crates/lattice-cli/tests/release_smoke.rs`,
+`crates/lattice-system-harness/tests/fast_session_cli.rs`,
+`docs/test-triage-decisions.json`, `docs/TEST-TRIAGE.md`, `FINDINGS.md`,
+`FIX.md`.
+
 ## ENV-OOM-02: fix `unsafe env::set_var` parallel-test races (harness MSB_ENV + lattice-api XDG_STATE_HOME) — 2026-07-12
 
 Severity: MEDIUM (test flakiness; both flakes reproduced under stress before

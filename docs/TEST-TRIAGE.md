@@ -35,6 +35,7 @@
 | `planned_session_cli` | fast-binary: `session new/list/status/log/branch --json`（no-turn 子集） | **已落地** `tests/fast_session_cli.rs`（#23 批次 1/2） |
 | `planned_audit_cli` | fast-binary: `audit query/replay/tail` 缺失 store 错误态 `--json` | **已落地（部分）** `tests/fast_audit_cli.rs`（#23 批次 2；空态/seeded 态待 MSB） |
 | `planned_config_cli` | fast-binary: `models`/`resolve`/`doctor` + secret redaction + HOME/XDG | **已落地** `tests/fast_config_cli.rs`（#23 批次 1） |
+| `planned_lancet_cli` | fast-binary: `lattice lancet status/doctor` 空态/不变量 | planned（#23 review-fix 新增场景 ID；fast 测试待补） |
 | `planned_observe_msb` | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | planned（#18 矩阵 / 4–6/6） |
 | `planned_mutate_msb` | planned MSB: `mutate.create/edit` Upper-only + effect 记账 | planned（#18 矩阵 / 4–6/6） |
 | `planned_retired_msb` | planned MSB: 已退役 agent 方法明确失败且无副作用 | planned（#18 矩阵 / 4–6/6） |
@@ -43,14 +44,16 @@
 | `planned_resume_msb` | planned MSB: 跨进程 session resume | planned（#18 矩阵 / 4–6/6） |
 | `planned_secret_msb` | planned MSB: secret sentinel 跨 terminal/session/audit/provenance | planned（#18 矩阵 / 4–6/6） |
 | `planned_audit_ops_msb` | planned MSB: operator audit query/replay（真实 turn 后） | planned（#18 矩阵 / 4–6/6） |
+| `planned_session_graph_msb` | planned MSB: 跨 session 的 branch/checkout/reset/diff 隔离 | planned（#23 review-fix round-5） |
+| `planned_session_history_msb` | planned MSB: 真实 turn 后的 human session log 展示 | planned（#23 review-fix round-5） |
 
 ### 汇总
 
 | 决定 | 条数 |
 |---|---:|
-| 保留 | 1298 |
-| 提升 | 140 |
-| 删除 | 11 |
+| 保留 | 1338 |
+| 提升 | 96 |
+| 删除 | 15 |
 | **合计** | **1449** |
 
 #### 按 crate
@@ -58,7 +61,7 @@
 | crate | 保留 | 提升 | 删除 | 合计 |
 |---|---:|---:|---:|---:|
 | `lattice-api` | 223 | 36 | 1 | 260 |
-| `lattice-cli` | 78 | 101 | 6 | 185 |
+| `lattice-cli` | 118 | 57 | 10 | 185 |
 | `lattice-workspace` | 158 | 0 | 0 | 158 |
 | `lancet-authority` | 135 | 0 | 0 | 135 |
 | `lattice-llm` | 133 | 0 | 0 | 133 |
@@ -100,26 +103,68 @@
 
 | 类别 | 条数 | 说明 |
 |---|---:|---|
-| 删除（源码扫描/import/manifest 字符串检查） | 11 | 全部 `n/a` 无替代场景；架构边界由 `cargo xtask harness-boundary` / `lancet-boundary` + 依赖图接管。已删除并验证两道边界门仍绿。 |
-| 提升 -> fast-binary（已落地场景接管） | 31 | `lattice-cli` 内部 `models`/`resolve`/`doctor` 单测模块、`audit_query_errors_when_store_missing`、以及 `release_smoke.rs` / `cli_cutover.rs` 中无 turn 的 `smoke_*` / `cli_cutover_*`，由 `fast_config_cli` / `fast_session_cli` / `fast_audit_cli` 接管后删除原内部测试。 |
+| 删除（源码扫描/import/manifest 字符串检查 + cfg-test helper） | 15 | 11 条源码扫描 + 2 条 round-2（`project_branch_new_source_defines_field`、`not_found_error_includes_object_id`）+ 2 条 round-3（`session_resume_handler_function_exists`、`session_resume_calls_typed_api` 源码扫描）；全部 `n/a` 无替代场景；架构边界由 `cargo xtask harness-boundary` / `lancet-boundary` + 依赖图接管。已删除并验证两道边界门仍绿。 |
+| 提升 -> fast-binary（已落地场景接管） | 36 | 31 条 #23 批次 + 1 条 round-2（`run_integration_missing_session`）+ 3 条 round-3（resume 缺参/不存在、send 无 profile）+ 1 条 round-6（send 缺凭据）。新增/强化 fast_session 场景精确断言 exit 2、可操作错误字段与 stdout/stderr secret redaction。 |
 | 夹具收口 | - | 新增 `ScenarioWorld::write_agent_profile` 统一 agent profile 夹具；删除随之失效的 `with_env_var` / `without_env_vars`；`audit::run_at` 标 `#[cfg(test)]`。 |
 | 顺手修阻塞 bug | - | `lattice-cli/src/commands/audit.rs` 的 `audit::run` 在 `#[tokio::main]` 内嵌套 `block_on` -> panic（`audit query` 缺失 store 时 exit 101）。改为 async 复用顶层 runtime，解锁 `planned_audit_cli`。详见 FIX.md `#23`。 |
 
-### 延期（偏差，需 KVM/MSB 通道验证）
+### 延期（偏差；MSB 项需 KVM 通道，fast 项可立即补）
 
 | 类别 | 条数 | 延期原因 |
 |---|---:|---|
 | 提升 -> `msb_full_turn` / `planned_*_msb`（`lattice-api` 36 + `lattice-agent` 3） | 39 | 每条都需真实完整 turn 驱动；完整 turn 默认走 Upper/Microsandbox，本机无 `/dev/kvm`、`LATTICE_HARNESS_MSB` 未开，无法落地或验证替代场景。不删原内部测试（删除即丢普通 CI 覆盖且无法验证替代）。 |
-| 提升 -> `planned_session_cli`/`planned_audit_cli` 的 **turn-bearing 子集**（`lattice-cli` 70） | 70 | `session log` 带 committed turn、`audit query` 带 seeded 行、`session branch` 创建后、`run_integration_*`、`session resume`、`lancet cep_status` seeded 等行为，需经公开接口产生 committed turn 才能 black-box 覆盖；无 KVM 无法产生。原内部测试保留，普通 CI 继续覆盖。 |
-| **合计延期** | **109** | |
+| 提升 -> `planned_audit_ops_msb`(7) / `planned_observe_msb`(1) / `planned_provider_fail_msb`(1) / `planned_session_graph_msb`(5) / `planned_session_history_msb`(1)（`lattice-cli` MSB 子集） | 15 | audit seeded、observe workspace-root、provider timeout、跨 session graph 隔离与 human log 需真实 turn；原内部测试保留。 |
+| 提升 -> `planned_lancet_cli`（`lattice-cli` fast 子集） | 1 | `lancet status` 缺失 DB 空态不需 KVM；外部 fast-binary 场景待补，原内部测试保留。 |
+| **合计延期** | **55** | 54 条 MSB/KVM（API 36 + agent 3 + CLI 15）+ 1 条 fast-binary。 |
 
 ### 偏差结论
 
-- #22 判决本身**未被改判**：提升/删除的判决口径不变。
-- #23 本批执行了**可在无 KVM 环境验证**的全部 fast-binary 黑盒（批次 1 全量 + 批次 2/4 的 no-turn 子集）与全部 11 条删除，并通过 `cargo xtask ci`（fmt / clippy -D warnings / build / harness-boundary / lancet-boundary / 全 workspace 测试）。
+- #22 判决经六轮复审存在显式改判；所有 keep/elevate/delete 变化均在 JSON、逐条清单和本节记录，未静默处理。
+- #23 本批已落地 36 条 fast-binary 接管与全部 15 条删除；fast 层仍有 1 条 planned 场景、2 条 status 已完整接管待删，以及 2 条 project-branch 仅部分覆盖（需先补 branch create/reopen fast 场景再删），均显式列为 residual。门禁通过 `cargo xtask ci`（fmt / clippy -D warnings / build / harness-boundary / 全 workspace 测试）及单独的 `lancet-boundary`。
 - **批次 3（turn/Upper）整体延期**：39 条 lattice-api/lattice-agent 提升依赖 MSB；无 KVM 不可验证，不删除原测试。
-- turn-bearing 子集（70 条 lattice-cli）延期：保留原内部测试，待 MSB 通道落地 `planned_observe_msb` / `planned_mutate_msb` 等 + 复用 `msb_full_turn` 产生 committed turn 后再删。
+- lattice-cli 延期为 15 条 MSB + 1 条 fast：保留原内部测试；MSB 通道落地对应场景后逐条删除，`planned_lancet_cli` 不等待 KVM、应在下一 fast 批次补齐。缺凭据 send 已确认早于 `prepare_upper`，round-6 直接落地 fast 场景并删除原弱 smoke。
+- round-4 的 33 条 blanket keep 经源码复核拆分：25 条真正的渲染器/序列化器局部不变量继续 keep；`run_integration_commits_existing_session` 恢复 elevate，精确映射已落地 `msb_full_turn` 但原测试仍冗余保留；5 条 session graph 隔离与 human log 共 6 条映射专门 planned MSB 场景；missing-credential 先恢复 elevate，round-6 再按实际调用顺序落地 fast takeover。
 - 后续（5/6、6/6 或 KVM 可用环境）落地 `planned_*_msb` 场景后，按本表「延期」逐条删除对应内部测试，并在本节勾销。
+
+### #23 review-fix 映射精确化（2026-07-12/13，六轮）
+
+> 针对 #23 收到的 review 反馈：原 `docs/test-triage-decisions.json` 中 **101 条**
+> `lattice-cli` 提升项中有 **95 条**被写成泛化替代 `planned_session_cli|planned_config_cli|planned_audit_cli`
+> 三元兜底，无法逐条审计。六轮 review-fix 按测试行为精确映射，**不动 1449 条总数与测试身份**：
+>
+> - **36 条已删除接管**（31 条 #23 批次 + 1 条 round-2 `run_integration_missing_session`
+>   + 3 条 round-3 Upper 前失败：`smoke_session_resume_without_id`、
+>   `smoke_session_resume_nonexistent`、`smoke_session_send_no_profile` + 1 条 round-6
+>   `smoke_session_send_missing_credentials`）->
+>   `planned_config_cli`(27) / `planned_session_cli`(7) / `planned_audit_cli`(1) /
+>   `fast_cli_help`(1)，reason 标「已删除原内部测试，由已落地 X 黑盒接管」。
+>   新增 5 个 fast-binary 黑盒：`fast_session_send_nonexistent_session_errors`（exit 2）、
+>   `fast_session_resume_without_session_id_fails`（exit 2 + clap `SESSION_ID` 断言）、
+>   `fast_session_resume_nonexistent_session_errors`（not found + id）、
+>   `fast_session_send_no_agent_profile_errors`（exit 2 + `assert_no_secret` stdout+stderr）、
+>   `fast_session_send_missing_credential_is_redacted_input_error`（exit 2 + 缺失 env-var 名 + 双流无 secret）。
+>   `assert_exit_code` helper 使用 `ExitCodeMismatch { expected, actual }` 报告期望/实际值。
+> - **16 条真延期** -> `planned_audit_ops_msb`(7) / `planned_observe_msb`(1) /
+>   `planned_provider_fail_msb`(1) / `planned_session_graph_msb`(5) /
+>   `planned_session_history_msb`(1) / `planned_lancet_cli`(1)，target_layer =
+>   `real_microsandbox`（15 条）或 `fast_binary`（1 条 `planned_lancet_cli` 待补 fast 测试），
+>   原内部测试保留。
+> - **5 条冗余保留**（`project_branch_creation` / `project_branch_persists` /
+>   `smoke_session_status_list` / `smoke_session_status_specific` / `run_integration_commits_existing_session`），replacement 指向已落地场景但
+>   reason 明确标注冗余保留待删。
+> - **40 条复审判偏差**改记 **保留 / 局部不变量**，replacement 为 `null`：
+>   15 条 round-1/2/3（纯 CLI helper/常量/源码扫描/脚本不变量/cfg-test/旧 schema 兼容）+
+>   25 条 round-4（真正的 `render_human_*` / `render_json_*` / `seq_*` /
+>   `verbose_epilogue_*` / `human_turn_log` 等渲染器、序列化器局部不变量）。
+> - **4 条源码扫描/cfg-test helper**（`project_branch_new_source_defines_field` /
+>   `not_found_error_includes_object_id` / `session_resume_handler_function_exists` /
+>   `session_resume_calls_typed_api`）round-2/3 改判 **删除**（RFC #19 决定六 / 已被 fast binary 覆盖），
+>   并实际删除源码测试。
+>
+> 据此 `lattice-cli` 计数由 保留 78 / 提升 101 / 删除 6 调整为 保留 118 / 提升 57 / 删除 10；
+> 全局由 保留 1298 / 提升 140 / 删除 11 调整为 保留 1338 / 提升 96 / 删除 15，合计仍 1449。
+> 验收段计数由 1443 修正为 1449（纯文档错误）。target_layer 按 41 fast_binary + 16 real_microsandbox
+> 正确分层。详见 `FIX.md` `#23 review-fix`。
 
 ## 2. 逐条清单
 
@@ -877,195 +922,195 @@
 | `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 提升 | 真实 Microsandbox | planned MSB: policy/channel 拒绝且无宿主 fallback；planned MSB: 已退役 agent 方法明确失败且无副作用 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
 | `rejects_profile_disabled_web_fetch` | `crates/lattice-api/tests/usage_turn.rs:519` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
 
-### `lattice-cli`（保留 78 / 提升 101 / 删除 6）
+### `lattice-cli`（保留 118 / 提升 57 / 删除 10）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 |---|---|---|---|---|---|
-| `audit_query_prints_fragment_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:351` | 提升 | 快速二进制黑盒 | planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI audit query 产品行为（内部 seed DB）；提升到 lattice audit --json 黑盒 |
-| `audit_tail_streams_rows_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:361` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `audit_query_errors_when_store_missing` | `crates/lattice-cli/src/commands/audit.rs:373` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `audit_query_empty_result_for_unknown_session` | `crates/lattice-cli/src/commands/audit.rs:381` | 提升 | 快速二进制黑盒 | planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI audit 空结果产品行为；提升到 lattice audit --json 黑盒 |
-| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:389` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `audit_replay_reports_stored_attestation_match` | `crates/lattice-cli/src/commands/audit.rs:401` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `audit_replay_errors_for_unknown_turn` | `crates/lattice-cli/src/commands/audit.rs:441` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `audit_command_source_does_not_reference_cep_server` | `crates/lattice-cli/src/commands/audit.rs:458` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 crate 依赖/边界检查负责） | 扫描源码禁止字符串；删除（RFC #19 决定六） |
-| `audit_query_reads_legacy_schema_store` | `crates/lattice-cli/src/commands/audit.rs:481` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `doctor_report_contains_expected_keys` | `crates/lattice-cli/src/commands/doctor.rs:162` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `doctor_json_output_has_expected_structure` | `crates/lattice-cli/src/commands/doctor.rs:172` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `doctor_text_output_includes_credential_env_var_names` | `crates/lattice-cli/src/commands/doctor.rs:187` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `doctor_text_output_includes_session_dir` | `crates/lattice-cli/src/commands/doctor.rs:197` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `doctor_text_output_includes_alias_count` | `crates/lattice-cli/src/commands/doctor.rs:207` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `doctor_json_does_not_leak_secret_values` | `crates/lattice-cli/src/commands/doctor.rs:216` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `doctor_text_does_not_leak_secret_values` | `crates/lattice-cli/src/commands/doctor.rs:229` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `doctor_credentials_reflect_present_status` | `crates/lattice-cli/src/commands/doctor.rs:242` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `doctor_credentials_reflect_missing_status` | `crates/lattice-cli/src/commands/doctor.rs:256` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `lancet_status_json_flag_parses` | `crates/lattice-cli/src/commands/lancet.rs:208` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `lancet_status_no_args_parses` | `crates/lattice-cli/src/commands/lancet.rs:218` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `lancet_doctor_parses` | `crates/lattice-cli/src/commands/lancet.rs:228` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cep_status_missing_db_returns_empty_state` | `crates/lattice-cli/src/commands/lancet.rs:288` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cep_status_seeded_audit_json` | `crates/lattice-cli/src/commands/lancet.rs:297` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cep_doctor_passes_on_repo_root` | `crates/lattice-cli/src/commands/lancet.rs:345` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_models_auth_text_lists_aliases_one_per_line` | `crates/lattice-cli/src/commands/models.rs:37` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_models_auth_text_excludes_secret_values` | `crates/lattice-cli/src/commands/models.rs:45` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_models_auth_json_excludes_secrets` | `crates/lattice-cli/src/commands/models.rs:53` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_models_no_auth_lists_all_aliases` | `crates/lattice-cli/src/commands/models.rs:61` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_models_json_output_is_valid_json` | `crates/lattice-cli/src/commands/models.rs:67` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_resolve_default_text_includes_provider_and_model` | `crates/lattice-cli/src/commands/resolve.rs:59` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_resolve_verbose_includes_all_metadata` | `crates/lattice-cli/src/commands/resolve.rs:67` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_resolve_json_includes_all_fields` | `crates/lattice-cli/src/commands/resolve.rs:75` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_resolve_json_excludes_secret_values` | `crates/lattice-cli/src/commands/resolve.rs:85` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_resolve_unknown_model_returns_error` | `crates/lattice-cli/src/commands/resolve.rs:95` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_diagnostics_resolve_no_provider_override` | `crates/lattice-cli/src/commands/resolve.rs:109` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `stream_timeout_constant_is_5_minutes` | `crates/lattice-cli/src/commands/run_tests.rs:9` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `stream_timeout_fires_after_duration` | `crates/lattice-cli/src/commands/run_tests.rs:16` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `run_validate_agents_dir_rejects_parent_components` | `crates/lattice-cli/src/commands/run_tests.rs:44` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `run_validate_agents_dir_resolves_symlink_prefix_before_safety_check` | `crates/lattice-cli/src/commands/run_tests.rs:78` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `run_default_session_dir_under_lattice_sessions` | `crates/lattice-cli/src/commands/run_tests.rs:98` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `run_integration_commits_existing_session` | `crates/lattice-cli/src/commands/run_tests.rs:148` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: `audit query/tail` 空态/错误态 `--json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；已落地 `msb_full_turn`（session send 完整 turn） | CLI 测试用内部 API 造状态；提升为纯 LATTICE_BIN 黑盒 |
-| `run_integration_missing_session_returns_not_found` | `crates/lattice-cli/src/commands/run_tests.rs:218` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: `audit query/tail` 空态/错误态 `--json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；已落地 `msb_full_turn`（session send 完整 turn） | CLI 测试用内部 API 造状态；提升为纯 LATTICE_BIN 黑盒 |
-| `tool_executor_uses_workspace_root_not_profile_package_dir` | `crates/lattice-cli/src/commands/run_tests.rs:246` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: `audit query/tail` 空态/错误态 `--json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；已落地 `msb_full_turn`（session send 完整 turn） | CLI 测试用内部 API 造状态；提升为纯 LATTICE_BIN 黑盒 |
-| `run_source_has_no_old_crate_imports` | `crates/lattice-cli/src/commands/run_tests.rs:369` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
-| `render_json_event_emits_single_line_with_trailing_newline` | `crates/lattice-cli/src/commands/run_tests.rs:391` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `render_json_event_roundtrips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:402` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `render_json_event_emits_no_ansi_escapes` | `crates/lattice-cli/src/commands/run_tests.rs:479` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `render_human_token_delta_writes_only_to_stdout` | `crates/lattice-cli/src/commands/run_tests.rs:494` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `render_human_status_line_after_partial_token_inserts_stderr_newline` | `crates/lattice-cli/src/commands/run_tests.rs:507` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `flush_before_status_resets_mid_token_flag_after_first_status` | `crates/lattice-cli/src/commands/run_tests.rs:549` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `render_human_tool_finished_ok_renders_byte_size` | `crates/lattice-cli/src/commands/run_tests.rs:585` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `render_human_tool_finished_err_renders_summary` | `crates/lattice-cli/src/commands/run_tests.rs:603` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `render_human_reasoning_hidden_default` | `crates/lattice-cli/src/commands/run_tests.rs:621` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `render_human_reasoning_visible_verbose` | `crates/lattice-cli/src/commands/run_tests.rs:636` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `render_human_turn_started_silent_default` | `crates/lattice-cli/src/commands/run_tests.rs:650` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `render_human_committed_lowercases_status` | `crates/lattice-cli/src/commands/run_tests.rs:667` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `verbose_epilogue_emits_all_fields_when_populated` | `crates/lattice-cli/src/commands/run_tests.rs:692` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `verbose_epilogue_skips_unset_fields` | `crates/lattice-cli/src/commands/run_tests.rs:720` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `verbose_epilogue_usage_from_state_not_committed` | `crates/lattice-cli/src/commands/run_tests.rs:731` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `exit_code_from_state_covers_all_da4_rows` | `crates/lattice-cli/src/commands/run_tests.rs:750` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `seq_happy_path_human` | `crates/lattice-cli/src/commands/run_tests.rs:863` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_happy_path_verbose_with_epilogue` | `crates/lattice-cli/src/commands/run_tests.rs:916` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_trailing_token_newline_emitted` | `crates/lattice-cli/src/commands/run_tests.rs:966` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_token_then_status_inserts_stderr_newline` | `crates/lattice-cli/src/commands/run_tests.rs:989` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_multiround_usage_sums_into_state` | `crates/lattice-cli/src/commands/run_tests.rs:1014` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `seq_tool_failure_renders_summary` | `crates/lattice-cli/src/commands/run_tests.rs:1055` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_turn_failed_then_commit_drains_stream` | `crates/lattice-cli/src/commands/run_tests.rs:1096` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_commit_failed_renders_reason` | `crates/lattice-cli/src/commands/run_tests.rs:1139` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_stream_ends_without_terminal_is_protocol_violation` | `crates/lattice-cli/src/commands/run_tests.rs:1162` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_jsonl_round_trips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:1186` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_reasoning_hidden_default_in_human` | `crates/lattice-cli/src/commands/run_tests.rs:1297` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `seq_reasoning_visible_in_verbose` | `crates/lattice-cli/src/commands/run_tests.rs:1335` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `parse_status_no_args` | `crates/lattice-cli/src/commands/session.rs:922` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_status_with_session_id` | `crates/lattice-cli/src/commands/session.rs:932` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_list` | `crates/lattice-cli/src/commands/session.rs:944` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_log_with_session_id` | `crates/lattice-cli/src/commands/session.rs:951` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_log_without_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:963` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `human_turn_log_renders_disposition_next_to_status` | `crates/lattice-cli/src/commands/session.rs:969` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `parse_checkout_with_session_id_and_target` | `crates/lattice-cli/src/commands/session.rs:995` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_checkout_missing_target_fails` | `crates/lattice-cli/src/commands/session.rs:1008` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_checkout_missing_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:1014` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_branch_list_mode` | `crates/lattice-cli/src/commands/session.rs:1020` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_branch_create_mode` | `crates/lattice-cli/src/commands/session.rs:1038` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_branch_without_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:1056` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_diff` | `crates/lattice-cli/src/commands/session.rs:1062` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_diff_missing_args_fails` | `crates/lattice-cli/src/commands/session.rs:1080` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_diff_missing_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:1086` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_reset` | `crates/lattice-cli/src/commands/session.rs:1092` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_reset_missing_args_fails` | `crates/lattice-cli/src/commands/session.rs:1105` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `parse_reset_missing_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:1111` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_current` | `crates/lattice-cli/src/commands/session.rs:1117` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_show` | `crates/lattice-cli/src/commands/session.rs:1122` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_branches` | `crates/lattice-cli/src/commands/session.rs:1127` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_reflog` | `crates/lattice-cli/src/commands/session.rs:1132` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_tag` | `crates/lattice-cli/src/commands/session.rs:1137` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_tags` | `crates/lattice-cli/src/commands/session.rs:1142` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_cherry_pick` | `crates/lattice-cli/src/commands/session.rs:1147` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_merge` | `crates/lattice-cli/src/commands/session.rs:1152` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_rebase` | `crates/lattice-cli/src/commands/session.rs:1157` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_stash` | `crates/lattice-cli/src/commands/session.rs:1162` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_artifacts` | `crates/lattice-cli/src/commands/session.rs:1167` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_manifests` | `crates/lattice-cli/src/commands/session.rs:1172` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_gc` | `crates/lattice-cli/src/commands/session.rs:1177` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `reject_old_subcommand_rm` | `crates/lattice-cli/src/commands/session.rs:1182` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `migrate_subcommand_parses_with_flags` | `crates/lattice-cli/src/commands/session.rs:1187` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `not_found_error_includes_object_id` | `crates/lattice-cli/src/commands/session.rs:1220` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `summarize_short_text_unchanged` | `crates/lattice-cli/src/commands/session.rs:1228` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `summarize_long_text_truncated` | `crates/lattice-cli/src/commands/session.rs:1233` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `summarize_cjk_short_unchanged` | `crates/lattice-cli/src/commands/session.rs:1241` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `summarize_cjk_truncated_at_column_boundary` | `crates/lattice-cli/src/commands/session.rs:1247` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `summarize_mixed_ascii_cjk_truncated` | `crates/lattice-cli/src/commands/session.rs:1257` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `display_id_short_unchanged` | `crates/lattice-cli/src/commands/session.rs:1265` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `display_id_long_truncated` | `crates/lattice-cli/src/commands/session.rs:1270` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `session_resume_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1297` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `session_prune_snapshots_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1306` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
-| `session_resume_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1315` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `session_prune_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1324` | 保留 | 局部不变量 | — | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
-| `session_resume_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1333` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `session_prune_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1342` | 保留 | 局部不变量 | — | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
-| `project_branch_new_without_required_flag_fails` | `crates/lattice-cli/src/commands/session.rs:1353` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `project_branch_new_with_required_flag_is_accepted` | `crates/lattice-cli/src/commands/session.rs:1364` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `project_branch_send_has_no_branch_override` | `crates/lattice-cli/src/commands/session.rs:1385` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `project_branch_send_source_has_no_branch_flag` | `crates/lattice-cli/src/commands/session.rs:1395` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
-| `project_branch_new_source_defines_field` | `crates/lattice-cli/src/commands/session.rs:1410` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `branch_listing_reads_only_addressed_session_refs` | `crates/lattice-cli/src/commands/session.rs:1511` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `checkout_changes_only_addressed_session_head` | `crates/lattice-cli/src/commands/session.rs:1556` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `branch_create_affects_only_addressed_session` | `crates/lattice-cli/src/commands/session.rs:1586` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `reset_changes_only_addressed_session_branch_pointer` | `crates/lattice-cli/src/commands/session.rs:1613` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `diff_resolves_refs_inside_addressed_session_only` | `crates/lattice-cli/src/commands/session.rs:1650` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `boundary_no_legacy_session_store_patterns` | `crates/lattice-cli/src/commands/session.rs:1691` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
-| `project_branch_creation_json_output_includes_branch` | `crates/lattice-cli/src/commands/session.rs:1755` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `project_branch_status_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1775` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `project_branch_list_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1794` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `project_branch_persists_through_reopen` | `crates/lattice-cli/src/commands/session.rs:1816` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_surface_run_is_not_exposed` | `crates/lattice-cli/src/main.rs:153` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_session_new_agent` | `crates/lattice-cli/src/main.rs:158` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_session_send` | `crates/lattice-cli/src/main.rs:173` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_models_auth` | `crates/lattice-cli/src/main.rs:179` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_resolve` | `crates/lattice-cli/src/main.rs:185` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_session_status` | `crates/lattice-cli/src/main.rs:191` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_session_log` | `crates/lattice-cli/src/main.rs:197` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_session_checkout` | `crates/lattice-cli/src/main.rs:203` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_session_branch_with_from` | `crates/lattice-cli/src/main.rs:209` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_session_diff` | `crates/lattice-cli/src/main.rs:218` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_session_reset` | `crates/lattice-cli/src/main.rs:224` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_doctor` | `crates/lattice-cli/src/main.rs:230` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_rejects_unknown_command` | `crates/lattice-cli/src/main.rs:236` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_help_contains_supported_commands` | `crates/lattice-cli/src/main.rs:243` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_help_lists_exact_supported_command_count` | `crates/lattice-cli/src/main.rs:257` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_tui_requires_project_branch_for_new_session` | `crates/lattice-cli/src/main.rs:271` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_tui_parses_session_id_and_agent` | `crates/lattice-cli/src/main.rs:279` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_lancet_no_subcommand_parses` | `crates/lattice-cli/src/main.rs:296` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_lancet_status_parses` | `crates/lattice-cli/src/main.rs:306` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_lancet_doctor_parses` | `crates/lattice-cli/src/main.rs:312` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_doctor_unchanged` | `crates/lattice-cli/src/main.rs:318` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_audit_unchanged` | `crates/lattice-cli/src/main.rs:324` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_audit_replay_subcommand` | `crates/lattice-cli/src/main.rs:330` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_audit_query_subcommand` | `crates/lattice-cli/src/main.rs:345` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_tui_accepts_project_branch` | `crates/lattice-cli/src/main.rs:359` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_surface_session_new_requires_project_branch` | `crates/lattice-cli/src/main.rs:384` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_cutover_help_contains_supported_commands` | `crates/lattice-cli/tests/cli_cutover.rs:20` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_cutover_help_omits_removed_commands` | `crates/lattice-cli/tests/cli_cutover.rs:35` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_cutover_bare_lattice_prints_help_and_exits_zero` | `crates/lattice-cli/tests/cli_cutover.rs:76` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_cutover_rejects_unknown_command_with_clap_error` | `crates/lattice-cli/tests/cli_cutover.rs:94` | 保留 | 局部不变量 | — | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cli_cutover_resolve_json_excludes_secret_value` | `crates/lattice-cli/tests/cli_cutover.rs:111` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_cutover_models_auth_one_alias_per_line_without_icons_or_secrets` | `crates/lattice-cli/tests/cli_cutover.rs:148` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `cli_cutover_session_log_missing_session_fails_with_id_in_message` | `crates/lattice-cli/tests/cli_cutover.rs:197` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `focused_tests_import_no_removed_crate_names` | `crates/lattice-cli/tests/cli_cutover.rs:224` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
-| `cli_cutover_run_command_is_removed` | `crates/lattice-cli/tests/cli_cutover.rs:328` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_models_auth_lists_aliases_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:100` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_resolve_sonnet_json_shows_env_var_not_secret` | `crates/lattice-cli/tests/release_smoke.rs:131` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_resolve_missing_credential_names_env_var` | `crates/lattice-cli/tests/release_smoke.rs:159` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_session_status_list_shows_seeded_session` | `crates/lattice-cli/tests/release_smoke.rs:185` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_session_status_specific_session` | `crates/lattice-cli/tests/release_smoke.rs:210` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_session_log_shows_seeded_turn` | `crates/lattice-cli/tests/release_smoke.rs:242` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_doctor_runs_without_leaking_secrets` | `crates/lattice-cli/tests/release_smoke.rs:269` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_doctor_json_does_not_leak_secrets` | `crates/lattice-cli/tests/release_smoke.rs:299` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_session_send_missing_credentials_fails_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:329` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_session_send_no_profile_fails_with_clear_message` | `crates/lattice-cli/tests/release_smoke.rs:354` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_session_status_nonexistent_returns_error` | `crates/lattice-cli/tests/release_smoke.rs:384` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `release_smoke_release_gate_sh_is_retired` | `crates/lattice-cli/tests/release_smoke.rs:407` | 提升 | 快速二进制黑盒 | 已落地 `fast_cli_help`（CLI help 表面）；planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: `audit query/tail` 空态/错误态 `--json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG | 产品 CLI 二进制行为；提升到 system harness 快速黑盒 |
-| `release_smoke_release_gate_v1_4_includes_lancet_boundary_check` | `crates/lattice-cli/tests/release_smoke.rs:432` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_session_resume_without_session_id_fails` | `crates/lattice-cli/tests/release_smoke.rs:459` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
-| `smoke_session_prune_snapshots_without_session_id_fails` | `crates/lattice-cli/tests/release_smoke.rs:481` | 保留 | 局部不变量 | — | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
-| `smoke_session_resume_nonexistent_session_returns_error` | `crates/lattice-cli/tests/release_smoke.rs:503` | 提升 | 快速二进制黑盒 | planned fast-binary: `session create/list/show/branch/log --json`；planned fast-binary: model/auth/config 发现 + secret redaction + HOME/XDG；planned fast-binary: `audit query/tail` 空态/错误态 `--json` | CLI 层产品行为默认提升到快速二进制黑盒 |
+| `audit_query_prints_fragment_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:351` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；seed audit DB 需 committed turn，本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `audit_tail_streams_rows_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:361` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `audit_query_errors_when_store_missing` | `crates/lattice-cli/src/commands/audit.rs:373` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_audit_cli` 接管 | 已删除原内部测试，由已落地 fast_audit_cli（audit query/replay/tail 空态/错误态 --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `audit_query_empty_result_for_unknown_session` | `crates/lattice-cli/src/commands/audit.rs:381` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；seed audit DB 需 committed turn，本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:389` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `audit_replay_reports_stored_attestation_match` | `crates/lattice-cli/src/commands/audit.rs:401` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `audit_replay_errors_for_unknown_turn` | `crates/lattice-cli/src/commands/audit.rs:441` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `audit_command_source_does_not_reference_cep_server` | `crates/lattice-cli/src/commands/audit.rs:458` | 删除 | 局部不变量 | n/a | 扫描源码禁止字符串；删除（RFC #19 决定六） |
+| `audit_query_reads_legacy_schema_store` | `crates/lattice-cli/src/commands/audit.rs:481` | 保留 | 局部不变量 | - | #23 review-fix round-3 复审判偏差：手工植入旧 SQLite schema 测向后兼容；RFC #19 harness 边界禁止直接打开/植入内部 audit DB，planned_audit_ops_msb 永远无法覆盖（真实 turn 只生成当前 schema）；改记保留为局部不变量。 |
+| `doctor_report_contains_expected_keys` | `crates/lattice-cli/src/commands/doctor.rs:162` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `doctor_json_output_has_expected_structure` | `crates/lattice-cli/src/commands/doctor.rs:172` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `doctor_text_output_includes_credential_env_var_names` | `crates/lattice-cli/src/commands/doctor.rs:187` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `doctor_text_output_includes_session_dir` | `crates/lattice-cli/src/commands/doctor.rs:197` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `doctor_text_output_includes_alias_count` | `crates/lattice-cli/src/commands/doctor.rs:207` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `doctor_json_does_not_leak_secret_values` | `crates/lattice-cli/src/commands/doctor.rs:216` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `doctor_text_does_not_leak_secret_values` | `crates/lattice-cli/src/commands/doctor.rs:229` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `doctor_credentials_reflect_present_status` | `crates/lattice-cli/src/commands/doctor.rs:242` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `doctor_credentials_reflect_missing_status` | `crates/lattice-cli/src/commands/doctor.rs:256` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `lancet_status_json_flag_parses` | `crates/lattice-cli/src/commands/lancet.rs:208` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `lancet_status_no_args_parses` | `crates/lattice-cli/src/commands/lancet.rs:218` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `lancet_doctor_parses` | `crates/lattice-cli/src/commands/lancet.rs:228` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cep_status_missing_db_returns_empty_state` | `crates/lattice-cli/src/commands/lancet.rs:288` | 提升 | 快速二进制黑盒 | 延期 `planned_lancet_cli` | 延期到 planned_lancet_cli（lattice lancet status 空态：audit DB 不存在时返回空 recent_calls + None verdict，exit 0）；fast 测试尚未新增，原内部测试保留。 |
+| `cep_status_seeded_audit_json` | `crates/lattice-cli/src/commands/lancet.rs:297` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `cep_doctor_passes_on_repo_root` | `crates/lattice-cli/src/commands/lancet.rs:345` | 保留 | 局部不变量 | - | #23 复审偏差：测试 run_doctor_inner_for_project_root（LANCET doctor catalog 方法数 + registry 注册检查）是编译期不变量检查，经 #[cfg(test)] helper 驱动，非公开黑盒行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
+| `cli_diagnostics_models_auth_text_lists_aliases_one_per_line` | `crates/lattice-cli/src/commands/models.rs:37` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_models_auth_text_excludes_secret_values` | `crates/lattice-cli/src/commands/models.rs:45` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_models_auth_json_excludes_secrets` | `crates/lattice-cli/src/commands/models.rs:53` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_models_no_auth_lists_all_aliases` | `crates/lattice-cli/src/commands/models.rs:61` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_models_json_output_is_valid_json` | `crates/lattice-cli/src/commands/models.rs:67` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_resolve_default_text_includes_provider_and_model` | `crates/lattice-cli/src/commands/resolve.rs:59` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_resolve_verbose_includes_all_metadata` | `crates/lattice-cli/src/commands/resolve.rs:67` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_resolve_json_includes_all_fields` | `crates/lattice-cli/src/commands/resolve.rs:75` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_resolve_json_excludes_secret_values` | `crates/lattice-cli/src/commands/resolve.rs:85` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_resolve_unknown_model_returns_error` | `crates/lattice-cli/src/commands/resolve.rs:95` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_diagnostics_resolve_no_provider_override` | `crates/lattice-cli/src/commands/resolve.rs:109` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `stream_timeout_constant_is_5_minutes` | `crates/lattice-cli/src/commands/run_tests.rs:9` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `stream_timeout_fires_after_duration` | `crates/lattice-cli/src/commands/run_tests.rs:16` | 提升 | 真实 Microsandbox | 延期 `planned_provider_fail_msb` | 延期到 planned_provider_fail_msb（provider 断流/超时清理）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `run_validate_agents_dir_rejects_parent_components` | `crates/lattice-cli/src/commands/run_tests.rs:44` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `run_validate_agents_dir_resolves_symlink_prefix_before_safety_check` | `crates/lattice-cli/src/commands/run_tests.rs:78` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `run_default_session_dir_under_lattice_sessions` | `crates/lattice-cli/src/commands/run_tests.rs:98` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `run_integration_commits_existing_session` | `crates/lattice-cli/src/commands/run_tests.rs:148` | 提升 | 真实 Microsandbox | `msb_full_turn` | 已落地 msb_full_turn 已通过公开 session send 完成真实 turn 并断言 commit；原内部集成测试仍保留，记为冗余待删，不能改判 local_invariant。 |
+| `run_integration_missing_session_returns_not_found` | `crates/lattice-cli/src/commands/run_tests.rs:218` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session send <missing-id> 黑盒：open_session 在 workspace 前失败，exit 2 + stderr not found）接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `tool_executor_uses_workspace_root_not_profile_package_dir` | `crates/lattice-cli/src/commands/run_tests.rs:246` | 提升 | 真实 Microsandbox | 延期 `planned_observe_msb` | 延期到 planned_observe_msb（需 observe.workspace tool call 才能验证 workspace-root vs profile package-dir 分离；msb_full_turn profile 只执行纯文本 turn）；本机无 /dev/kvm，原内部测试保留。 |
+| `run_source_has_no_old_crate_imports` | `crates/lattice-cli/src/commands/run_tests.rs:369` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
+| `render_json_event_emits_single_line_with_trailing_newline` | `crates/lattice-cli/src/commands/run_tests.rs:391` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_json_event_roundtrips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:402` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_json_event_emits_no_ansi_escapes` | `crates/lattice-cli/src/commands/run_tests.rs:479` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_token_delta_writes_only_to_stdout` | `crates/lattice-cli/src/commands/run_tests.rs:494` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_status_line_after_partial_token_inserts_stderr_newline` | `crates/lattice-cli/src/commands/run_tests.rs:507` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `flush_before_status_resets_mid_token_flag_after_first_status` | `crates/lattice-cli/src/commands/run_tests.rs:549` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `render_human_tool_finished_ok_renders_byte_size` | `crates/lattice-cli/src/commands/run_tests.rs:585` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_tool_finished_err_renders_summary` | `crates/lattice-cli/src/commands/run_tests.rs:603` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_reasoning_hidden_default` | `crates/lattice-cli/src/commands/run_tests.rs:621` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_reasoning_visible_verbose` | `crates/lattice-cli/src/commands/run_tests.rs:636` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_turn_started_silent_default` | `crates/lattice-cli/src/commands/run_tests.rs:650` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_committed_lowercases_status` | `crates/lattice-cli/src/commands/run_tests.rs:667` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `verbose_epilogue_emits_all_fields_when_populated` | `crates/lattice-cli/src/commands/run_tests.rs:692` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `verbose_epilogue_skips_unset_fields` | `crates/lattice-cli/src/commands/run_tests.rs:720` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `verbose_epilogue_usage_from_state_not_committed` | `crates/lattice-cli/src/commands/run_tests.rs:731` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `exit_code_from_state_covers_all_da4_rows` | `crates/lattice-cli/src/commands/run_tests.rs:750` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `seq_happy_path_human` | `crates/lattice-cli/src/commands/run_tests.rs:863` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_happy_path_verbose_with_epilogue` | `crates/lattice-cli/src/commands/run_tests.rs:916` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_trailing_token_newline_emitted` | `crates/lattice-cli/src/commands/run_tests.rs:966` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_token_then_status_inserts_stderr_newline` | `crates/lattice-cli/src/commands/run_tests.rs:989` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_multiround_usage_sums_into_state` | `crates/lattice-cli/src/commands/run_tests.rs:1014` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `seq_tool_failure_renders_summary` | `crates/lattice-cli/src/commands/run_tests.rs:1055` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_turn_failed_then_commit_drains_stream` | `crates/lattice-cli/src/commands/run_tests.rs:1096` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_commit_failed_renders_reason` | `crates/lattice-cli/src/commands/run_tests.rs:1139` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_stream_ends_without_terminal_is_protocol_violation` | `crates/lattice-cli/src/commands/run_tests.rs:1162` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_jsonl_round_trips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:1186` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_reasoning_hidden_default_in_human` | `crates/lattice-cli/src/commands/run_tests.rs:1297` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_reasoning_visible_in_verbose` | `crates/lattice-cli/src/commands/run_tests.rs:1335` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `parse_status_no_args` | `crates/lattice-cli/src/commands/session.rs:922` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_status_with_session_id` | `crates/lattice-cli/src/commands/session.rs:932` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_list` | `crates/lattice-cli/src/commands/session.rs:944` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_log_with_session_id` | `crates/lattice-cli/src/commands/session.rs:951` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_log_without_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:963` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `human_turn_log_renders_disposition_next_to_status` | `crates/lattice-cli/src/commands/session.rs:969` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `parse_checkout_with_session_id_and_target` | `crates/lattice-cli/src/commands/session.rs:995` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_checkout_missing_target_fails` | `crates/lattice-cli/src/commands/session.rs:1008` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_checkout_missing_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:1014` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_branch_list_mode` | `crates/lattice-cli/src/commands/session.rs:1020` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_branch_create_mode` | `crates/lattice-cli/src/commands/session.rs:1038` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_branch_without_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:1056` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_diff` | `crates/lattice-cli/src/commands/session.rs:1062` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_diff_missing_args_fails` | `crates/lattice-cli/src/commands/session.rs:1080` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_diff_missing_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:1086` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_reset` | `crates/lattice-cli/src/commands/session.rs:1092` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_reset_missing_args_fails` | `crates/lattice-cli/src/commands/session.rs:1105` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `parse_reset_missing_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:1111` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_current` | `crates/lattice-cli/src/commands/session.rs:1117` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_show` | `crates/lattice-cli/src/commands/session.rs:1122` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_branches` | `crates/lattice-cli/src/commands/session.rs:1127` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_reflog` | `crates/lattice-cli/src/commands/session.rs:1132` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_tag` | `crates/lattice-cli/src/commands/session.rs:1137` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_tags` | `crates/lattice-cli/src/commands/session.rs:1142` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_cherry_pick` | `crates/lattice-cli/src/commands/session.rs:1147` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_merge` | `crates/lattice-cli/src/commands/session.rs:1152` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_rebase` | `crates/lattice-cli/src/commands/session.rs:1157` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_stash` | `crates/lattice-cli/src/commands/session.rs:1162` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_artifacts` | `crates/lattice-cli/src/commands/session.rs:1167` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_manifests` | `crates/lattice-cli/src/commands/session.rs:1172` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_gc` | `crates/lattice-cli/src/commands/session.rs:1177` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `reject_old_subcommand_rm` | `crates/lattice-cli/src/commands/session.rs:1182` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `migrate_subcommand_parses_with_flags` | `crates/lattice-cli/src/commands/session.rs:1187` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `not_found_error_includes_object_id` | `crates/lattice-cli/src/commands/session.rs:1220` | 删除 | 局部不变量 | n/a | 测试 #[cfg(test)] only helper not_found()；missing-id 行为已被 fast_session_cli 的 nonexistent-session 黑盒覆盖（status/log/send 均 assert not found + id in stderr）；删除。 |
+| `summarize_short_text_unchanged` | `crates/lattice-cli/src/commands/session.rs:1228` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `summarize_long_text_truncated` | `crates/lattice-cli/src/commands/session.rs:1233` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `summarize_cjk_short_unchanged` | `crates/lattice-cli/src/commands/session.rs:1241` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `summarize_cjk_truncated_at_column_boundary` | `crates/lattice-cli/src/commands/session.rs:1247` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `summarize_mixed_ascii_cjk_truncated` | `crates/lattice-cli/src/commands/session.rs:1257` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `display_id_short_unchanged` | `crates/lattice-cli/src/commands/session.rs:1265` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `display_id_long_truncated` | `crates/lattice-cli/src/commands/session.rs:1270` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
+| `session_resume_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1297` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `session_prune_snapshots_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1306` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
+| `session_resume_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1315` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains fn cmd_resume_api）的架构检查；删除（RFC #19 决定六）。 |
+| `session_prune_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1324` | 保留 | 局部不变量 | - | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
+| `session_resume_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1333` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains resume_turn()）的架构检查；删除（RFC #19 决定六）。 |
+| `session_prune_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1342` | 保留 | 局部不变量 | - | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
+| `project_branch_new_without_required_flag_fails` | `crates/lattice-cli/src/commands/session.rs:1353` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `project_branch_new_with_required_flag_is_accepted` | `crates/lattice-cli/src/commands/session.rs:1364` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `project_branch_send_has_no_branch_override` | `crates/lattice-cli/src/commands/session.rs:1385` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `project_branch_send_source_has_no_branch_flag` | `crates/lattice-cli/src/commands/session.rs:1395` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
+| `project_branch_new_source_defines_field` | `crates/lattice-cli/src/commands/session.rs:1410` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查（include_str! 扫描 SessionAction::New 字段）；删除（RFC #19 决定六）。 |
+| `branch_listing_reads_only_addressed_session_refs` | `crates/lattice-cli/src/commands/session.rs:1511` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 branch/list 路径验证仅读取目标 session refs；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
+| `checkout_changes_only_addressed_session_head` | `crates/lattice-cli/src/commands/session.rs:1556` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 checkout 路径验证只修改目标 session HEAD；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
+| `branch_create_affects_only_addressed_session` | `crates/lattice-cli/src/commands/session.rs:1586` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 branch create 路径验证只影响目标 session；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
+| `reset_changes_only_addressed_session_branch_pointer` | `crates/lattice-cli/src/commands/session.rs:1613` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 reset 路径验证只移动目标 session branch pointer；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
+| `diff_resolves_refs_inside_addressed_session_only` | `crates/lattice-cli/src/commands/session.rs:1650` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 diff 路径验证 refs 在目标 session 内解析；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
+| `boundary_no_legacy_session_store_patterns` | `crates/lattice-cli/src/commands/session.rs:1691` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
+| `project_branch_creation_json_output_includes_branch` | `crates/lattice-cli/src/commands/session.rs:1755` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。 |
+| `project_branch_status_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1775` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `project_branch_list_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1794` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `project_branch_persists_through_reopen` | `crates/lattice-cli/src/commands/session.rs:1816` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。 |
+| `cli_surface_run_is_not_exposed` | `crates/lattice-cli/src/main.rs:153` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_session_new_agent` | `crates/lattice-cli/src/main.rs:158` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_session_send` | `crates/lattice-cli/src/main.rs:173` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_models_auth` | `crates/lattice-cli/src/main.rs:179` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_resolve` | `crates/lattice-cli/src/main.rs:185` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_session_status` | `crates/lattice-cli/src/main.rs:191` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_session_log` | `crates/lattice-cli/src/main.rs:197` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_session_checkout` | `crates/lattice-cli/src/main.rs:203` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_session_branch_with_from` | `crates/lattice-cli/src/main.rs:209` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_session_diff` | `crates/lattice-cli/src/main.rs:218` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_session_reset` | `crates/lattice-cli/src/main.rs:224` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_doctor` | `crates/lattice-cli/src/main.rs:230` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_rejects_unknown_command` | `crates/lattice-cli/src/main.rs:236` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_help_contains_supported_commands` | `crates/lattice-cli/src/main.rs:243` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_help_lists_exact_supported_command_count` | `crates/lattice-cli/src/main.rs:257` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_tui_requires_project_branch_for_new_session` | `crates/lattice-cli/src/main.rs:271` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_tui_parses_session_id_and_agent` | `crates/lattice-cli/src/main.rs:279` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_lancet_no_subcommand_parses` | `crates/lattice-cli/src/main.rs:296` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_lancet_status_parses` | `crates/lattice-cli/src/main.rs:306` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_lancet_doctor_parses` | `crates/lattice-cli/src/main.rs:312` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_doctor_unchanged` | `crates/lattice-cli/src/main.rs:318` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_audit_unchanged` | `crates/lattice-cli/src/main.rs:324` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_audit_replay_subcommand` | `crates/lattice-cli/src/main.rs:330` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_audit_query_subcommand` | `crates/lattice-cli/src/main.rs:345` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_tui_accepts_project_branch` | `crates/lattice-cli/src/main.rs:359` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_surface_session_new_requires_project_branch` | `crates/lattice-cli/src/main.rs:384` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_cutover_help_contains_supported_commands` | `crates/lattice-cli/tests/cli_cutover.rs:20` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_cutover_help_omits_removed_commands` | `crates/lattice-cli/tests/cli_cutover.rs:35` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_cutover_bare_lattice_prints_help_and_exits_zero` | `crates/lattice-cli/tests/cli_cutover.rs:76` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_cutover_rejects_unknown_command_with_clap_error` | `crates/lattice-cli/tests/cli_cutover.rs:94` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
+| `cli_cutover_resolve_json_excludes_secret_value` | `crates/lattice-cli/tests/cli_cutover.rs:111` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_cutover_models_auth_one_alias_per_line_without_icons_or_secrets` | `crates/lattice-cli/tests/cli_cutover.rs:148` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `cli_cutover_session_log_missing_session_fails_with_id_in_message` | `crates/lattice-cli/tests/cli_cutover.rs:197` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session new/list/status/log/branch --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `focused_tests_import_no_removed_crate_names` | `crates/lattice-cli/tests/cli_cutover.rs:224` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
+| `cli_cutover_run_command_is_removed` | `crates/lattice-cli/tests/cli_cutover.rs:328` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `fast_cli_help` 接管 | 已删除原内部测试，由已落地 fast_cli_help（CLI help 表面） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `smoke_models_auth_lists_aliases_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:100` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `smoke_resolve_sonnet_json_shows_env_var_not_secret` | `crates/lattice-cli/tests/release_smoke.rs:131` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `smoke_resolve_missing_credential_names_env_var` | `crates/lattice-cli/tests/release_smoke.rs:159` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `smoke_session_status_list_shows_seeded_session` | `crates/lattice-cli/tests/release_smoke.rs:185` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；seed_session 的 committed turn 是测试夹具而非断言对象，实际断言（session 出现在 status 列表）已被 fast_session_new_creates_session_and_appears_in_list 覆盖；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。 |
+| `smoke_session_status_specific_session` | `crates/lattice-cli/tests/release_smoke.rs:210` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；seed_session 的 committed turn 是测试夹具而非断言对象，实际断言（status <id> 输出含 ID）已被 fast_session_status_new_session_shows_zero_commits_and_agent 覆盖；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。 |
+| `smoke_session_log_shows_seeded_turn` | `crates/lattice-cli/tests/release_smoke.rs:242` | 提升 | 真实 Microsandbox | 延期 `planned_session_history_msb` | 延期到 planned_session_history_msb：需真实 turn 后通过公开 human session log 验证 seeded turn 展示；现有 msb_full_turn 只断言 JSON log，原测试保留。 |
+| `smoke_doctor_runs_without_leaking_secrets` | `crates/lattice-cli/tests/release_smoke.rs:269` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `smoke_doctor_json_does_not_leak_secrets` | `crates/lattice-cli/tests/release_smoke.rs:299` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `smoke_session_send_missing_credentials_fails_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:329` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原弱 smoke，由已落地 fast_session_send_missing_credential_is_redacted_input_error 接管：凭据解析早于 prepare_upper，无需 KVM；精确断言 exit 2、缺失 env-var 名与 stdout/stderr 无 secret 泄漏（#23 review-fix round-6）。 |
+| `smoke_session_send_no_profile_fails_with_clear_message` | `crates/lattice-cli/tests/release_smoke.rs:354` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_send_no_profile（session send 在 load_agent_checked 失败：创建 session 后删除 .lattice/agents/ 触发 agent profile 缺失错误，exit 2 + stderr 含 profile/agent.toml，不泄 secret）黑盒接管（#23 review-fix round-3）；Upper 前失败，逐条映射。 |
+| `smoke_session_status_nonexistent_returns_error` | `crates/lattice-cli/tests/release_smoke.rs:384` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session new/list/status/log/branch --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
+| `release_smoke_release_gate_sh_is_retired` | `crates/lattice-cli/tests/release_smoke.rs:407` | 保留 | 局部不变量 | - | #23 复审偏差：运行 release-gate.sh 并断言 nonzero exit + retired stderr，是脚本退役 smoke，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
+| `release_smoke_release_gate_v1_4_includes_lancet_boundary_check` | `crates/lattice-cli/tests/release_smoke.rs:432` | 保留 | 局部不变量 | - | #23 复审偏差：源码扫描 release-gate-v1.4.sh 脚本文件内容（asserts contains lancet-boundary 等），是 repo tooling 局部不变量，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
+| `smoke_session_resume_without_session_id_fails` | `crates/lattice-cli/tests/release_smoke.rs:459` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_resume_without_id（session resume 缺参数 clap 拒绝，exit 2 + stderr）黑盒接管（#23 review-fix round-3）；Upper 前失败，逐条映射。 |
+| `smoke_session_prune_snapshots_without_session_id_fails` | `crates/lattice-cli/tests/release_smoke.rs:481` | 保留 | 局部不变量 | - | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
+| `smoke_session_resume_nonexistent_session_returns_error` | `crates/lattice-cli/tests/release_smoke.rs:503` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_resume_nonexistent_session（session resume 不存在 session，调用错误 exit 2 + stderr 含 not found 与 session ID）黑盒接管（#23 review-fix round-5）；Upper 前失败，逐条映射。 |
 
 ### `lattice-llm`（保留 133 / 提升 0 / 删除 0）
 
@@ -1676,8 +1721,7 @@
 
 ## 4. 验收对照（issue #22）
 
-- [x] 清单覆盖枚举到的全部现存测试，无遗漏条目（`docs/test-triage-decisions.json` 共 1443 条，与枚举键集合一致）
+- [x] 清单覆盖枚举到的全部现存测试，无遗漏条目（`docs/test-triage-decisions.json` 共 1449 条，与枚举键集合一致）
 - [x] 每条都有决定、理由、目标层；提升/删除条目标明替代场景（或显式 `n/a`）
 - [x] 以文档形式入库（本文件 + JSON）
 - [x] 本票未删除、未修改任何测试源码
-

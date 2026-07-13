@@ -44,14 +44,23 @@
 - **残留**: Wave 0 新增 **A4**（真机快照往返探针）与修正后的 A7 尚未在 KVM 宿主执行；若 A4 实测的 save/restore 调用形状仍与上述不符，33-05 / 33-PATTERNS Pattern 4 须按 A4 记录的逐字调用再校。plan-checker 未重跑（仍 rev3 结构结论 + rev4 注记）。
 - **计划**: 执行 33-01 时跑 A4/A7 实证；A4 PASS 即闭环，FAIL 则按记录修 33-05 后闭环。根因教训：LLM/SDK 集成的 API 形状以锁定 crate 源码为准，Context7/训练记忆仅作线索。
 
-### T-23-01: #23 测试重构 4/6 - 109 条提升延期至 MSB/KVM 通道（偏差已记录）- `test-refactor` / #18 / #23
-- **位置**: `docs/TEST-TRIAGE.md` §1.5；`docs/test-triage-decisions.json`（提升 140 条中的 109 条）
+### T-23-01: #23 测试重构 4/6 - 55 条提升仍待替代场景（54 MSB + 1 fast）- `test-refactor` / #18 / #23
+- **位置**: `docs/TEST-TRIAGE.md` §1.5；`docs/test-triage-decisions.json`（提升 96 条中的 55 条延期项）
 - **问题**: #23 按产品面分批执行 #22 triage。本机无 `/dev/kvm`、`LATTICE_HARNESS_MSB` 未开，无法落地或验证依赖真实完整 turn 的替代场景。两类提升被迫延期（**不删原内部测试**，否则普通 CI 即丢覆盖且无法验证替代）：
   (1) **39 条 MSB-bound**（`lattice-api` 36 + `lattice-agent` 3）-> `msb_full_turn` / `planned_observe_msb` / `planned_mutate_msb` / `planned_policy_msb` / `planned_retired_msb` / `planned_provider_fail_msb` / `planned_resume_msb` / `planned_secret_msb` / `planned_audit_ops_msb`。每条都需完整 turn，而完整 turn 默认走 Upper/Microsandbox。
-  (2) **70 条 turn-bearing CLI**（`lattice-cli`）-> `session log` 带 committed turn、`audit query` 带 seeded 行、`session branch` 创建后、`run_integration_*`、`session resume`、`lancet cep_status` seeded 等；需经公开接口产生 committed turn 才能 black-box 覆盖，无 KVM 无法产生。
-- **当前状态**: DEFERRED（#23 本批已执行 11/11 删除 + 31/140 提升 + 夹具收口 + 阻塞 bug 修复；`cargo xtask ci` 全绿）。判决口径未改；偏差已在 `docs/TEST-TRIAGE.md` §1.5 与 `FIX.md #23` 记录。#23 issue 保持 open（按用户要求不关闭、不 push）。
-- **升级条件**: 若 5/6、6/6 或 KVM 可用环境落地 `planned_*_msb` 场景后仍有提升条目未删 -> 逐条核对并删，在本条勾销。
-- **计划**: (a) KVM 可用环境落地 `planned_observe_msb` / `planned_mutate_msb` 等 MSB 场景 + 复用 `msb_full_turn` 产生 committed turn；(b) 按 `docs/TEST-TRIAGE.md` §1.5「延期」表逐条删除对应内部测试并更新 `docs/test-triage-decisions.json` 执行状态；(c) turn-bearing CLI 子集可在 MSB 通道补 `session log/show` seeded 场景后收口。
+  (2) **15 条 MSB-bound CLI**（`lattice-cli`）-> `planned_audit_ops_msb`(7) / `planned_observe_msb`(1) / `planned_provider_fail_msb`(1) / `planned_session_graph_msb`(5) / `planned_session_history_msb`(1)；audit seeded、observe workspace-root、provider timeout、跨 session graph 隔离与 human log 需真实 turn。
+  (3) **1 条 fast-binary CLI** -> `planned_lancet_cli`；`lancet status` 缺失 DB 空态不依赖 KVM，只是外部场景尚未落地。
+- **当前状态**: DEFERRED（#23 本批已执行 15 删除 + 36/140 提升 + 夹具收口 + 阻塞 bug 修复；round-5 纠正 resume/blanket keep，round-6 将 Upper 前缺凭据路径落地 fast 接管）。#23 issue 保持 open（按用户要求不关闭、不 push）。
+- **升级条件**: `planned_lancet_cli` fast 场景落地后立即删除对应内部测试；其余 54 条在 5/6、6/6 或 KVM 可用环境落地 `planned_*_msb` 后逐条核对并删。
+- **计划**: (a) 下一 fast 批次先补 `planned_lancet_cli`；(b) KVM 可用环境落地 `planned_observe_msb` / `planned_mutate_msb` / `planned_session_graph_msb` / `planned_session_history_msb` / `planned_secret_msb` 等场景；(c) 按 §1.5 延期表逐条删除对应内部测试并更新执行状态。
+
+### T-23-02: #23 review-fix - triage 映射精确化与 keep/delete 偏差（残余由 T-23-01 继续承接）- `test-refactor` / #23
+- **位置**: `docs/TEST-TRIAGE.md` §1.5 review-fix 子段、`docs/test-triage-decisions.json`、`crates/lattice-system-harness/tests/{fast_session_cli,fast_config_cli}.rs`、`crates/lattice-system-harness/src/assert.rs`。
+- **问题**: #23 首轮收到 6 条 review 反馈，后续又经 5 轮 review-fix 追加反馈。Round-1 指出原 101 条 `lattice-cli` elevate 中 95 条使用三元兜底而无法逐条审计、4 处 fast 契约缺失、验收计数错误。Round-2 指出 9 条映射不精确、2 条 keep 改判错误、账本算术错误、三重扫描、重复解析。Round-3 指出 `target_layer` 错误分层、4 条 Upper 前失败被误延期、旧审计 schema 无法被 MSB 覆盖、workspace-root 需 observe MSB、2 条 resume 源码扫描应删、退出码未精确断言、JSON 解析 panic 丢失失败产物、失败产物相互覆盖。Round-4 指出 33 条 `msb_full_turn` 映射不实、lancet status 接管不存在、resume 退出码断言不精确、secret 扫描遗漏 stdout、`assert_exit_code` 错误信息不携带期望值；round-5 再核源码后发现其中只有 25 条是真局部不变量，另外 8 条仍需行为场景或冗余删除状态；round-6 将 Upper 前缺凭据路径落地为 fast takeover。
+- **处理**: round-5 纠正“第四轮全部闭环”的误报：resume 不存在 session 的产品退出码与黑盒断言统一为 2；33 条 blanket keep 拆为 25 条真实局部不变量、1 条 `msb_full_turn` 冗余待删、7 条精确 planned MSB 场景；fast_config 的全部 JSON 解析错误改走 failure-artifact 路径。Round-6 再按调用顺序确认缺凭据早于 `prepare_upper`，补 fast harness、修正 BadRequest exit 2 并删除原弱 smoke。最终 101 条原 elevate 分为 36 已删除接管 / 16 真延期 / 5 冗余保留 / 40 复审判 keep / 4 改判删除。
+- **当前状态**: PARTIALLY_RESOLVED - round-6 代码与账本已落地；29 个定向 fast harness 测试、139 个 lattice-cli 测试及完整 `cargo xtask ci` 全绿。**残余**: 16 条真延期 + 5 条冗余保留 = 21 条 lattice-cli 待处理；fast residual 为 1 条 `planned_lancet_cli`、2 条 status 已完整接管待删、2 条 project-branch 仅部分覆盖待补场景再删；MSB residual 为 15 条 deferred + 1 条 `msb_full_turn` 冗余原测试。40 条 keep 偏差无需后续删除；4 条 delete 已闭环。#23 仍 open、未 push。
+- **升级条件**: 同 T-23-01。
+- **计划**: (a) 下一 fast 批次补 `planned_lancet_cli`，直接删除 2 条已完整接管的 status 原测试；(b) 为 `project_branch_creation_json_output_includes_branch` / `project_branch_persists_through_reopen` 补 branch create/reopen fast 场景，验证后再删；(c) MSB 通道就绪后处理 15 条 deferred，并删除 `run_integration_commits_existing_session` 这一条 `msb_full_turn` 冗余原测试；(d) 按精确 replacement 逐条勾销。
 
 ## LOW
 
