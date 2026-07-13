@@ -21,7 +21,7 @@ uuid = { workspace = true }
 # and the SDK runtime looks for `msb`), so Upper creation fails with
 # "msb binary not found" at turn time. `prebuilt` only adds the download step
 # + microsandbox-utils/http-client; it does NOT pull keyring/dbus.
-microsandbox = { version = "=0.5.6", default-features = false, features = ["net", "prebuilt"] }
+microsandbox = { version = "=0.6.6", default-features = false, features = ["net", "prebuilt"] }
 # in-process git operations (baseline archive + DeterministicWorkspace)
 git2 = { workspace = true }
 # file credential exec-based injection (base64 encode on host)
