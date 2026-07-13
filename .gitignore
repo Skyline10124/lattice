@@ -12,6 +12,7 @@ target/
 .codegraph/
 .devin/
 .omo/
+.zcode/
 .mcp.json
 opencode.jsonc
 .pytest_cache/
