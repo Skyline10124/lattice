@@ -1,5 +1,8 @@
 # uninode / Context Compiler — Prior Art & Related Work
 
+> **Archived research.** This supported an unimplemented proposal and is not a
+> current LATTICE architecture reference.
+
 Status: DRAFT
 Date: 2026-06-19
 Depends on: [uninode-spec.md](./uninode-spec.md), [context-compiler.md](./context-compiler.md)

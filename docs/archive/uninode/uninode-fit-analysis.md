@@ -1,5 +1,8 @@
 # uninode / CEP / context-compiler 适配度分析
 
+> **归档快照。** 本文依赖的 v1.5 `.planning/` 状态和 CEP 方法集已经过时，
+> 仅保留为未落地 Uninode 方案的历史分析，不代表当前架构或实施计划。
+
 Status: DRAFT
 Date: 2026-06-19
 Depends on:
@@ -20,8 +23,8 @@ Depends on:
 ## 0. TL;DR
 
 - **uninode 的"控制面/数据面两层 + Upper/Lower + host-owned promote + 保留 CEP 边界"
-  与 v1.5-alpha 的架构高度同构**——不是巧合：`docs/lattice-cep-sequence.mmd` 用的就是
-  v1.5 设计契约（`docs/superpowers/specs/2026-06-13-cube-upper-git-session-design.md`）的
+  与 v1.5-alpha 的架构高度同构**——不是巧合：`docs/archive/uninode/lattice-cep-sequence.mmd` 用的就是
+  v1.5 设计契约（`docs/archive/designs/2026-06-13-cube-upper-git-session-design.md`）的
   Upper/Lower 术语。uninode 是**把 v1.5 的执行骨架，叠加一层"图 + context 编译"语义**。
 - **但二者不是同一层的东西。** v1.5 = 执行边界 / promotion / Git session（Phase 33–39）；
   uninode 的**增量**（`.uninode/` 图、fanotify 建图、Seed-Expand-Rank-Pack 编译器、学习边权）
@@ -41,7 +44,7 @@ Depends on:
 ## 1. v1.5-alpha 是什么（从仓库挖出的现状）
 
 **来源**：`.planning/ROADMAP.md`、`.planning/STATE.md`、`.planning/PROJECT.md`、
-`.planning/REQUIREMENTS.md`、`docs/superpowers/specs/2026-06-13-cube-upper-git-session-design.md`、
+`.planning/REQUIREMENTS.md`、`docs/archive/designs/2026-06-13-cube-upper-git-session-design.md`、
 `AGENTS.md`、`FINDINGS.md`、`git log`/`git tag`。
 
 **名称**：v1.5-alpha **Upper Workspace & Git Session Backend**，Phases 33–39
@@ -348,7 +351,7 @@ promote / session**。这样它与 v1.5 完全解耦，可在 v1.5 推进的同�
 - v1.5 范围/进度：`.planning/ROADMAP.md:9,22-162`、`.planning/STATE.md:1-83`、
   `.planning/REQUIREMENTS.md:14-117`、`.planning/PROJECT.md:21-71`
 - v1.5 设计契约（含 Upper/Lower、删 envelope、Git session）：
-  `docs/superpowers/specs/2026-06-13-cube-upper-git-session-design.md`（§1/§5/§6）
+  `docs/archive/designs/2026-06-13-cube-upper-git-session-design.md`（§1/§5/§6）
 - 当前架构/分层：`AGENTS.md`（分层表、Crate Roles、Turn Execution）
 - 数据面 adapter（exec-only，无事件流）：`crates/lattice-workspace/src/lib.rs:223-389`、
   `crates/lattice-workspace/src/microsandbox.rs:524-623`
@@ -359,6 +362,6 @@ promote / session**。这样它与 v1.5 完全解耦，可在 v1.5 推进的同�
 - Phase 34 缺口台账：`FINDINGS.md:15-25`（M-33-01/02）
 - workspace 未被消费：grep `lattice_workspace` 全仓仅 `crates/lattice-profile/src/schema.rs:61`
   一处 doc 注释
-- uninode 设计：`docs/uninode-spec.md`、`docs/context-compiler.md`、`docs/uninode-prior-art.md`
-- CEP 序列图用 v1.5 术语：`docs/lattice-cep-sequence.mmd:1-6`（"lower · middleware" /
+- uninode 设计：`docs/archive/uninode/uninode-spec.md`、`docs/archive/uninode/context-compiler.md`、`docs/archive/uninode/uninode-prior-art.md`
+- CEP 序列图用 v1.5 术语：`docs/archive/uninode/lattice-cep-sequence.mmd:1-6`（"lower · middleware" /
   "upper · agent"）

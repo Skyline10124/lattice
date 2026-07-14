@@ -240,11 +240,7 @@ Two additional runtime env vars govern Upper VM resource fallbacks when
 ## 5. Next steps
 
 - **Development workflow** — see [docs/DEVELOPMENT.md](DEVELOPMENT.md).
-  <!-- VERIFY: docs/DEVELOPMENT.md does not exist in the repo at the time of
-       writing; it is referenced here as a planned companion document. -->
 - **Testing** — see [docs/TESTING.md](TESTING.md).
-  <!-- VERIFY: docs/TESTING.md does not exist in the repo at the time of
-       writing; it is referenced here as a planned companion document. -->
 - **Architecture** — for the layered workspace, CEP method catalog, turn
   execution data flow, and key abstractions, see
   [docs/ARCHITECTURE.md](ARCHITECTURE.md).

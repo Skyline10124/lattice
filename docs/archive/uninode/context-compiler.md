@@ -1,5 +1,8 @@
 # Context Compiler & the Memory-Hierarchy Model
 
+> **Archived, unimplemented draft.** Retained for research context only; do not
+> treat this document as current architecture or an active implementation plan.
+
 Status: DRAFT
 Date: 2026-06-18
 Depends on: [uninode-spec.md](./uninode-spec.md), [lattice-cep-sequence.mmd](./lattice-cep-sequence.mmd)

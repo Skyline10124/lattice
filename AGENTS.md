@@ -4,6 +4,20 @@ Workspace-level architecture guidance for coding agents. This file intentionally
 stays high level; for crate-local ownership, key files, and focused verification,
 read `crates/<crate>/AGENTS.md`.
 
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in Codeberg Issues for `AstRin/LATTICE` through the Forgejo tools; external pull requests are not a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the canonical `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix` labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a single-context domain documentation layout. See `docs/agents/domain.md`.
+
 ## Architecture
 
 LATTICE is a session-centric LLM runtime. Conversation state lives in a

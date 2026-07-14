@@ -1,8 +1,11 @@
 # uninode a1 — Context-Compiler Spike v2 (LCA-evaluated) Implementation Plan
 
+> **Archived, not for execution.** The spike was not implemented and this plan
+> is retained only as historical design material.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Supersedes** `2026-06-20-uninode-a1-compiler-spike.md` (v1). v1 was reviewed by codex (gpt-5.5) and had real bugs (size assert, leave-one-out test, **IDF using out-degree instead of in-degree**, non-deterministic rank ties) and — more importantly — a hand-rolled commit-replay benchmark whose ground truth ("changed files") is *edit-localization*, not *useful context*, forcing an endless pile of correctness patches (survival/rename/history-pollution filters). v2 keeps v1's graph + compiler core (bugs fixed) and **replaces the evaluation** with a standard IR protocol over an off-the-shelf, human-curated benchmark.
+> **Supersedes the removed v1 plan.** v1 was reviewed by codex (gpt-5.5) and had real bugs (size assert, leave-one-out test, **IDF using out-degree instead of in-degree**, non-deterministic rank ties) and — more importantly — a hand-rolled commit-replay benchmark whose ground truth ("changed files") is *edit-localization*, not *useful context*, forcing an endless pile of correctness patches (survival/rename/history-pollution filters). v2 keeps v1's graph + compiler core (bugs fixed) and **replaces the evaluation** with a standard IR protocol over an off-the-shelf, human-curated benchmark.
 
 **Goal:** Decide go/no-go on one question: does graph expansion over sibling + git-cochange edges retrieve the relevant files for a real issue better than a strong lexical baseline (BM25), measured with standard IR metrics on the Long Code Arena (LCA) bug-localization benchmark.
 

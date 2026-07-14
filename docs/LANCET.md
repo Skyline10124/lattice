@@ -95,9 +95,9 @@ The gate keeps release evidence in three separate proof categories:
 
 - **Offline release gate:** `scripts/release-gate-v1.4.sh` — runs `cargo fmt`, `cargo clippy`, targeted crate tests, dogfood suite, LANCET boundary check, and `lattice lancet doctor`. It is offline deterministic by default and runs live Linux physical canaries only with `--live` or `LATTICE_LINUX_ISOLATION_LIVE=1`.
 - **LANCET self-check:** `cargo run -p lattice-cli -- lancet doctor` — verifies the production registry fully registers the CATALOG, in-process transport smoke-tests, base envelope constructs, and mode policy parses cleanly.
-- **v1.4-alpha release record:** `docs/v1.4-alpha-release-record.md` — named evidence home for capable-host live canary output, host/kernel capability facts, failed canaries, skipped unsupported canaries, and the trust-claim decision. The local gate does not write this record and does not enforce the release-record requirement that at least one capable Linux host reports `failed=0` and `skipped_unsupported=0`; that capable-host condition is judged by the CI/release-record layer.
-- **Warn-mode report:** `docs/lancet-warn-report.md` — coverage report for the canonical effect-contract surface; the baseline is N=0 leaks and no `fix-now` triage rows.
-- **Capability boundary walkthrough:** `docs/v1.3-alpha-walkthrough.md` — explains what Layer-1 e2e proves and what is deferred to beta.
+- **v1.4-alpha release record:** `docs/archive/releases/v1.4-alpha-release-record.md` — archived, unfilled evidence template for the retired host-isolation model.
+- **Warn-mode report:** `docs/archive/releases/lancet-warn-report.md` — archived v1.3.1-alpha warn-mode baseline.
+- **Capability boundary walkthrough:** `docs/archive/releases/v1.3-alpha-walkthrough.md` — archived v1.3-alpha Layer-1 walkthrough.
 
 ### Mode semantics
 
@@ -569,7 +569,7 @@ bounds; it must include an exact reason such as `network namespace unavailable`,
 observed a violation or unexpected error.
 
 v1.4-alpha physical-bound trust is claimed only from capable-host live
-`passed` canaries captured in `docs/v1.4-alpha-release-record.md`. Unsupported,
+`passed` canaries captured in `docs/archive/releases/v1.4-alpha-release-record.md`. Unsupported,
 warn, audit, off, or fallback execution is diagnostic output and must not be
 represented as physical-bound proof. Extra rootless, container, distro, or
 non-Linux runs may be recorded as diagnostics, but the trust claim needs at

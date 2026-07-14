@@ -1,5 +1,8 @@
 # .uninode/ & NodeFile Spec
 
+> **Archived, unimplemented draft.** Retained for research context only; do not
+> treat this document as current architecture or an active implementation plan.
+
 Status: DRAFT
 Date: 2026-06-16
 Depends on: [lattice-cep-sequence.mmd](./lattice-cep-sequence.mmd)
