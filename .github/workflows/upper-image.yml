@@ -1,0 +1,123 @@
+name: Upper image
+
+on:
+  pull_request:
+    paths:
+      - "images/upper/**"
+      - ".github/workflows/upper-image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "images/upper/**"
+      - ".github/workflows/upper-image.yml"
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Full git commit SHA that must match the checked-out revision
+        required: true
+        type: string
+      version:
+        description: Explicit discovery version (never latest)
+        required: true
+        type: string
+      promote:
+        description: After anonymous verify, point the version tag at the verified manifest
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build_and_probe:
+    name: Build and probe (no push)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Static input checks
+        run: images/upper/verify-inputs.sh
+
+      - name: Build linux/amd64 and run capability probe
+        env:
+          UPPER_IMAGE_NAME: lattice-upper:ci
+          OCI_SOURCE: https://codeberg.org/AstRin/LATTICE
+          OCI_REVISION: ${{ github.sha }}
+          OCI_VERSION: dev-${{ github.sha }}
+          UPPER_IMAGE_PLATFORM: linux/amd64
+        run: images/upper/build-and-probe.sh
+
+      - name: Upload probe script as capability artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upper-image-probe
+          path: images/upper/probe.sh
+
+  publish:
+    name: Publish candidate (manual)
+    if: github.event_name == 'workflow_dispatch'
+    needs: build_and_probe
+    runs-on: ubuntu-latest
+    # Package write is only available on the explicit publish job.
+    permissions:
+      contents: read
+    env:
+      SOURCE_REVISION: ${{ inputs.source_revision }}
+      VERSION: ${{ inputs.version }}
+      PROMOTE: ${{ inputs.promote }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Require non-latest version and matching revision
+        run: |
+          set -euo pipefail
+          if [[ "${VERSION}" == "latest" ]]; then
+            echo "version must not be latest" >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_revision must be a full 40-char hex SHA" >&2
+            exit 1
+          fi
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [[ "${HEAD_SHA}" != "${SOURCE_REVISION}" ]]; then
+            echo "checked-out HEAD (${HEAD_SHA}) != source_revision (${SOURCE_REVISION})" >&2
+            exit 1
+          fi
+
+      - name: Require package credentials
+        env:
+          CODEBERG_PACKAGE_USER: ${{ secrets.CODEBERG_PACKAGE_USER }}
+          CODEBERG_PACKAGE_TOKEN: ${{ secrets.CODEBERG_PACKAGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CODEBERG_PACKAGE_USER}" || -z "${CODEBERG_PACKAGE_TOKEN}" ]]; then
+            echo "CODEBERG_PACKAGE_USER / CODEBERG_PACKAGE_TOKEN secrets are required for publish" >&2
+            exit 1
+          fi
+
+      - name: Publish candidate, verify, optional promote
+        env:
+          CODEBERG_USER: ${{ secrets.CODEBERG_PACKAGE_USER }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_PACKAGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(
+            --source-revision "${SOURCE_REVISION}"
+            --version "${VERSION}"
+          )
+          if [[ "${PROMOTE}" == "true" ]]; then
+            args+=(--promote)
+          fi
+          images/upper/publish.sh "${args[@]}"
+
+      - name: Upload publish provenance
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upper-publish-provenance
+          path: build/tmp/upper-publish-*/
+          if-no-files-found: ignore

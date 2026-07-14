@@ -373,6 +373,20 @@ Live Linux physical canaries are opt-in via `--live` or
 `LATTICE_LINUX_ISOLATION_LIVE=1`. See `docs/LANCET.md` "Release gate" for the
 narrative.
 
+### Upper OCI image workflow
+
+File: `.github/workflows/upper-image.yml`
+
+- **PR / path-filtered push:** build `linux/amd64` and run
+  `images/upper/probe.sh` with entrypoint cleared. Permissions are read-only;
+  the job never logs into or pushes the Codeberg registry.
+- **Manual `workflow_dispatch`:** publish a revision-unique candidate, inspect
+  the amd64 manifest, re-run the probe via anonymous `name@sha256:…` pull, and
+  optionally promote an explicit version tag (never `latest`).
+- **Runtime lock:** `images/upper/lock.json` is absent until a maintainer
+  checkpoint commits a real verified digest. See
+  [images/upper/README.md](../images/upper/README.md).
+
 ### Exclusions from CI
 
 As noted in §3, `lattice-workspace` live KVM/libkrun integration tests (the

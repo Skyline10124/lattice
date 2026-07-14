@@ -4,6 +4,54 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Codeberg #29: official git-ready Upper OCI image inputs + probe + publish path — 2026-07-14
+
+Severity: FEATURE (Upper rootfs 1/8; parent #28 commits 1–3, publish plumbing for 4).
+
+**Problem:** Production Upper still depends on guest git for baseline delivery,
+OID checks, dirty status, and candidate export, but the repo had no project-owned
+git-ready OCI image, no black-box capability contract, and no Codeberg publish /
+digest-lock path. Runtime still relied on caller-chosen images and per-turn
+apt-get (see M-33-06).
+
+**Fix summary:**
+- Added `images/upper/` with pinned Debian bookworm-slim digest
+  (`base-reference.txt` + matching `Containerfile` `FROM` digest), minimal
+  packages (`git`, `ca-certificates`, `dash`, `coreutils`), OCI
+  source/revision/version labels, and **no** `ENTRYPOINT`.
+- Added black-box `probe.sh` exercised via `build-and-probe.sh` with entrypoint
+  cleared: PATH tools, `/workspace` + base64 write, git pack ingest /
+  `update-ref` / `symbolic-ref` / checkout / `rev-parse`, bundle `stat` +
+  `dd|base64` binary round-trip.
+- Added `verify-inputs.sh` for pin/label/lock-shape static checks (lock optional
+  until maintainer checkpoint; when present only `schema_version` + canonical
+  `codeberg.org/astrin/lattice-upper@sha256:<64-hex>`).
+- Added `.github/workflows/upper-image.yml`: PR/push path builds+probes with
+  read-only permissions and no registry push; manual `workflow_dispatch` runs
+  `publish.sh` (candidate push → manifest digests → anonymous pull/probe →
+  optional non-`latest` version promote → provenance + suggested lock draft).
+  Publish never commits the repo lock.
+- Docs: `images/upper/README.md`, pointers in `docs/DEVELOPMENT.md` and
+  `docs/TESTING.md`.
+
+**Not done in this change (maintainer checkpoint residual):** first public
+publish of `codeberg.org/astrin/lattice-upper` and committing
+`images/upper/lock.json`. Per #29, the lock must stay **absent** until
+anonymous verify of a real manifest digest succeeds; no placeholder digest is
+committed. Runtime descriptor embedding is #30.
+
+**Verification:**
+- `images/upper/verify-inputs.sh` — PASS (lock absent)
+- lock schema negative tests (extra key / tag-only ref rejected; good lock
+  accepted) — PASS
+- `images/upper/build-and-probe.sh` — PASS (`lattice-upper:local`, linux/amd64,
+  probe PASS with entrypoint cleared)
+
+**Changed files:** `images/upper/**`, `.github/workflows/upper-image.yml`,
+`docs/DEVELOPMENT.md`, `docs/TESTING.md`, `FIX.md`.
+
+---
+
 ## Codeberg #22: full test triage inventory (keep/elevate/delete) — 2026-07-09
 
 Severity: FEATURE (测试重构 3/6).

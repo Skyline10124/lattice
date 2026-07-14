@@ -77,6 +77,10 @@ The CI workflow (`.github/workflows/ci.yml`) and the local mirror
 on every pull request (fmt, clippy, build `lattice`, harness boundary,
 `cargo test --workspace`). Reproduce CI locally with `cargo xtask ci`.
 
+Upper OCI image inputs live under `images/upper/` (Containerfile, pin, probe,
+publish helpers). Path-filtered CI is
+`.github/workflows/upper-image.yml` — see [images/upper/README.md](../images/upper/README.md).
+
 | Command | Purpose |
 |---|---|
 | `cargo build` | Dev (debug) build of the whole workspace. Fast incremental feedback. |
@@ -90,6 +94,8 @@ on every pull request (fmt, clippy, build `lattice`, harness boundary,
 | `cargo install --path crates/lattice-cli` | Install the release binary to `$CARGO_HOME/bin`. |
 | `cargo xtask ci` | Local mirror of the CI lane (fmt, clippy, build `lattice`, harness boundary, `cargo test --workspace`). |
 | `scripts/release-gate-v1.4.sh` | v1.4-alpha release gate. Offline-deterministic by default (no API keys/network): runs fmt, clippy, targeted crate tests, dogfood suite, LANCET boundary check, and `lattice lancet doctor`. Pass `--live` (or set `LATTICE_LINUX_ISOLATION_LIVE=1`) to also run the ignored Linux physical-boundary canary suite. See [docs/LANCET.md](./LANCET.md). |
+| `images/upper/build-and-probe.sh` | Build the official Upper OCI image (`linux/amd64`) and run the black-box capability probe. Never pushes. See [images/upper/README.md](../images/upper/README.md). |
+| `images/upper/verify-inputs.sh` | Static pin/lock-shape checks for Upper image inputs (no Docker required for the no-lock case). |
 
 Note: `.cargo/config.toml` pins `target-dir = "target"` and forces
 `TMPDIR = "build/tmp"` (relative) so build artifacts and assembler temps land
