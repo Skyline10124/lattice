@@ -33,7 +33,9 @@ agent loop over `lancet-api`'s CEP runtime.
 - `stream_turn` is the single live execution core; `run_turn` drains it.
 - Keep CLI rendering out of this crate.
 - Keep provider protocol details in `lattice-llm`.
-- Keep native handler implementation in `lancet-native`.
+- Keep LANCET execution implementation below this crate. It currently lives in
+  `lancet-native`; after ADR 0004 convergence it lives in `lancet-runtime`.
+  Neither path belongs in the session/turn facade.
 
 ## Recent Issues
 
@@ -61,6 +63,8 @@ agent loop over `lancet-api`'s CEP runtime.
 - Keep runtime composition in `lancet-api`; this crate should only translate
   profile policy and wire the agent loop. Do not reintroduce server/transport
   assembly here.
+- Consume Tool definitions projected by the LANCET public facade; do not add a
+  LATTICE-owned schema or native/Component dispatch switch during migration.
 - Keep `run_turn` implemented through `stream_turn` and `RunTurnCollector`.
 - Add focused tests whenever public `TurnEvent` mapping or commit semantics
   change.

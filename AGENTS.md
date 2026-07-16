@@ -26,8 +26,22 @@ and tool execution flows through LANCET. LANCET uses CEP (Controlled Execution
 Protocol) as a JSON-RPC method protocol with direct policy gating, path
 gating, path guards, effect checks, and an audit trail.
 
+ADR 0003 is the accepted workspace target: structured LANCET Tools operate
+directly on the Local Workspace. ADR 0004 is the accepted Tool target: each
+built runtime has a closed catalog of embedded WASM Components whose source
+manifests own their descriptors; the default distribution contains five Tools,
+and operators may install precompiled Tool Bundles before rebuilding a new
+closed runtime. The current MSB/Upper path, central catalog authority, native
+handlers, and native/CEP/dispatch split are migration residue. Do not add
+projection, checkpoint, ambient Tool authority, runtime code loading,
+user-process, or arbitrary-command capabilities while completing the migration.
+
 The workspace dependency graph is layered. Keep dependencies pointing from
-higher layers to lower layers; do not introduce reverse dependencies.
+higher layers to lower layers; do not introduce reverse dependencies. The graph
+below describes the current transition state. ADR 0003 removes
+`lattice-workspace` and the `lattice-api -> lattice-workspace` edge; ADR 0004
+later absorbs or retires the central catalog, CEP, dispatch, and native surfaces
+through `lancet-runtime` after Component Tool migration.
 
 ```text
 Layer 0 (leaf):  lancet-protocol   net-guard   lattice-llm   lattice-session   lattice-workspace
@@ -52,19 +66,21 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
 | Crate | Role |
 |---|---|
 | `lancet-protocol` | Pure CEP wire/data contracts: JSON-RPC frames, errors, policy hook types, effect types, provenance wire types. No I/O and no tokio. |
-| `lancet-catalog` | Typed CEP method contracts, params/results, descriptors, static production catalog, schema data, and catalog-declared base authority requirements for projections. |
-| `lancet-dispatch` | Generic method registry, typed CEP dispatch, in-process transport, cancellation, and event sinks. |
-| `lancet-cep` | Public CEP facade over protocol/catalog/dispatch, plus catalog-derived `ToolDefinition`, `ToolExposure`, catalog-declared base-authority aggregation, and explicit `BaseAuthorityPlan` construction. No native execution, policy side effects, audit persistence, or LATTICE dependencies. |
+| `lancet-catalog` | Legacy central Tool-contract authority scheduled for removal by ADR 0004 after source manifests and generated descriptors take over. |
+| `lancet-dispatch` | Current generic registry/transport surface scheduled for absorption into `lancet-runtime`. |
+| `lancet-cep` | Current CEP/catalog projection facade scheduled for absorption or retirement after descriptor-generated projection lands. |
 | `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, provenance projection, and attestation persistence. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger, and effect-region checks. |
-| `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers, audit integration, and effect-contract enforcement. |
-| `lancet-api` | Unified LANCET public API. Composes the CEP runtime (`LancetRuntime`/`LancetServer`: server lifecycle, `CepClient`, audit, attestation, catalog-derived tool exposure) from the native crates, taking LANCET-native policy types. Independent of LATTICE session/agent/profile layers. |
+| `lancet-native` | Current native handler/server surface. ADR 0004 moves built-ins to Components and absorbs the remaining concrete host responsibilities into `lancet-runtime`. |
+| `lancet-runtime` | ADR 0004 target: Component engine, generated descriptor inventory, dispatch/transport, Tool Host enforcement, concrete Local Workspace, native network/session channels, audit/effect integration, and private gix history. Not yet the production path. |
+| `lattice-tool-prelude` | ADR 0004 target guest SDK for source manifests, generated WIT bindings, descriptor helpers, and built-in Source Tools. |
+| `lancet-api` | Unified public API. During migration it composes native CEP pieces; the target composes `lancet-runtime` without depending on LATTICE session/agent/profile layers. |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, public-address resolution, private/reserved IP checks, and rebinding-domain checks. Depends only on `url` and `std`. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, HTTP request pinning, and logging. |
 | `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`). |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
-| `lattice-workspace` | Backend-neutral Upper workspace boundary: sandbox lifecycle, typed workspace-relative filesystem/command primitives, baseline delivery, egress/credential config, warm templates, and the production microsandbox (libkrun) adapter. |
+| `lattice-workspace` | Legacy Upper workspace boundary scheduled for removal by ADR 0003. Do not add capabilities or compatibility surfaces here. |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
 | `lattice-tui` | Inline CLI chat REPL over `lattice-api` sessions and `stream_turn` via `rustyline` (no alternate screen, no ratatui/crossterm). Owns readline state, turn execution, and token/status rendering to stdout/stderr. |
 | `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
@@ -72,48 +88,72 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
 ## CEP And LANCET Contracts
 
 - `lancet-protocol` is the bottom contract. Keep it data-only and runtime-free.
-- `lancet-cep` is the public CEP facade. It may frame/re-export protocol,
-  catalog, dispatch, tool exposure, and base-authority planning, but must not
-  depend on native runtime, authority policy implementation, audit persistence,
-  or any `lattice-*` crate.
-- `lancet-catalog::CATALOG` is the authoritative production method catalog.
-  It contains exactly these **5 agent-visible** CEP methods: `observe.workspace`,
-  `mutate.create`, `mutate.edit`, `fetch.web`, and
-  `session.todo_write`. Audit read/replay is operator-only (`lattice audit` /
-  `lancet-api` direct store APIs), not part of the agent catalog.
-  `exec.command_run` and post-mutation verify are permanently retired from
-  the CEP layer; command execution is not an agent-visible capability.
-  Descriptors also declare method-local base-authority requirements; hosts and
-  policy decisions are supplied later by LANCET runtime policy, not by catalog.
-- LLM-facing CEP tool schemas are generated only from the catalog through
-  `lancet-cep::project_tool_definitions`; do not reintroduce native/API shim
-  projection functions or parallel hard-coded tool definitions.
-- Mutating methods must pass authority policy, Guard L1, effect checks, audit
-  recording, and optional verification. The production execution path is the
-  MSB/Upper workspace boundary (`lattice-workspace`); Direct-mode naming was
-  retired and host-verify was deleted. Write-scope is enforced as a blacklist
-  (deny list), not an allowlist envelope; there is no envelope to declare.
+- Until ADR 0004 lands, `lancet-catalog` and `lancet-cep` remain the production
+  contract/projection path. Do not create a third parallel Tool schema during
+  migration.
+- The ADR 0004 target makes each Source Tool manifest the sole Tool Descriptor
+  authority. Build tooling generates WIT bindings, host metadata, LLM schemas,
+  embedded Component artifacts, and `inventory` registrations from it. Missing,
+  duplicate, unapproved, descriptor-drifted, or import-drifted registrations
+  fail closed.
+- The default distribution contains `observe.workspace`, `mutate.create`,
+  `mutate.edit`, `fetch.web`, and `session.todo_write`. Operators may install
+  additional precompiled Tool Bundles and automatically rebuild a new
+  versioned Linux host; a running process cannot load more code or change its
+  closed catalog. Audit read/replay remains operator-only.
+- Every Tool, including built-ins, executes as a WASM Component with no ambient
+  WASI filesystem, network, or process authority. WIT Tool Host imports are the
+  only capability surface. Native binaries, locally compiled third-party Cargo
+  source, runtime plugins, user processes, `exec.command_run`, and
+  post-mutation verify are not Tool capabilities.
+- Mutating methods must pass authority policy, Guard L1, effect checks and audit
+  recording. The concrete guarded Local Workspace is host-enforced: Components
+  cannot bypass Local Revision checks, Mutation Preconditions, atomic
+  installation, or history recording. The current MSB/Upper routing and later
+  transitional native handler path are migration residue. Write-scope is a
+  blacklist (deny list), not an allowlist envelope; there is no envelope to
+  declare. System exclusions for project Git administration, LATTICE private
+  state, and root escape are not profile-configurable.
+- Workspace observation exposes tracked and non-ignored Local files by default.
+  Explicit ignored-path inclusion and read denial live in
+  `[lancet.workspace]`; system exclusions take precedence over both and the
+  same visibility decision applies to read, list, grep, and find.
 - LANCET policy is configured through profile `[lancet]` sections: mode,
-  project root, observation, network, command, effects, workspace policy,
-  verify, and external policy file pointers. The `[lancet.isolation]` section
-  and landlock/netns command isolation were removed; do not reintroduce them.
+  project root, observation, network, effects, workspace policy, verify, and
+  external policy file pointers. Sandbox `[workspace]`, command, and isolation
+  configuration are migration residue or retired surface; do not reintroduce
+  them after removal.
 - SQLite for CEP audit records belongs in `lancet-audit`; the conversation
   graph is git-backed (git refs under `refs/lattice/sessions/<id>/**`) and
   lives in `lattice-session`. SQLite session graph storage was retired.
+- Explicit `/rewind` reverses only LATTICE mutations recorded after the target
+  Turn, preserves unrelated external changes, and conflicts on a changed
+  mutation path. Store that history in a private bare gix repository, never the
+  user's project `.git`; restore Git tree state and move workspace/session refs.
+  Keep prior object IDs reachable through internal refs without compensation
+  commits or additional user-facing command surface.
 
 ## Turn Execution
 
 1. `lattice-api::stream_turn` is the single live execution core.
 2. `run_turn` drains the same stream through `RunTurnCollector`.
 3. `turn/cep.rs` translates profile `[lancet]` policy into LANCET-native config
-   and delegates runtime composition to `lancet_api::LancetRuntime::build`
-   (server lifecycle, dispatch client, audit), then wraps the returned
-   `CepClient` in a `CepExecutorAdapter`.
+   rooted at the canonical Local Workspace and delegates runtime composition to
+   `lancet_api::LancetRuntime::build` (native Local operations, server
+   lifecycle, dispatch client, audit), then wraps the returned `CepClient` in a
+   `CepExecutorAdapter`.
 4. `AgentLoop` reads session state, assembles messages, calls the LLM through
    `LlmClient`, and sends requested tool calls through the injected executor.
-5. Native handlers execute typed CEP methods behind policy, Guard L1, effect,
-   audit, and verification checks.
+5. During migration native handlers execute typed CEP methods. The ADR 0004
+   target executes embedded Tool Components behind WIT Tool Host imports;
+   host-side policy, Guard L1, effect, audit and concrete Local Workspace checks
+   remain authoritative.
 6. Turn outcomes are persisted as commits in the session graph.
+
+Until ADR 0003's migration lands, step 3 still calls `prepare_upper` and injects
+`ExecutionRouting`. Treat that code as deletion work, not as the architecture
+to preserve. Session commits never imply a Local Workspace snapshot; only the
+explicit gix-backed `/rewind` path restores recorded LATTICE mutations.
 
 ## Review Records
 
@@ -149,16 +189,20 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
 
 ## Ownership Rules
 
-- Start protocol shape changes in `lancet-protocol`, then update catalog,
-  authority, native handlers, API mapping, and tests as needed.
-- Start CEP method changes in `lancet-catalog`, then update native handlers and
-  catalog-derived tool projection.
+- Start host wire/effect vocabulary changes in `lancet-protocol`. Start Tool
+  method/contract changes in the Source Tool manifest, then regenerate WIT,
+  host metadata, projection, and inventory artifacts; never hand-edit a
+  parallel central schema.
 - Keep provider protocol details in `lattice-llm`; higher layers should consume
   typed events and errors.
 - Keep shared URL/DNS safety primitives and neutral errors in `net-guard`;
   policy and HTTP client construction stay in their owning crates.
-- Keep native filesystem, shell, web, mutation, verify, and transport lifecycle
-  implementation in `lancet-native`.
+- During Direct-Local migration keep concrete Local filesystem, network,
+  mutation, and transport behavior in `lancet-native`. ADR 0004 then absorbs
+  those host responsibilities into `lancet-runtime`. At every stage keep secure
+  path resolution, bounded observation, Mutation Preconditions, atomic
+  installation, and history behind one concrete host module; do not preserve a
+  pluggable execution-backend seam.
 - Keep LANCET runtime composition and its public surface in `lancet-api`; it
   takes LANCET-native policy types and must not depend on LATTICE
   session/agent/profile crates. Anything that drives CEP (CLI, tests, embedders)
@@ -168,4 +212,6 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
   profile→policy translation and the agent-loop wiring over `lancet-api`. Keep
   TUI terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
   output, non-interactive rendering, and argument parsing in `lattice-cli`.
+- Do not add new production dependencies on `lattice-workspace`. Remove existing
+  Upper, snapshot, profile, and harness dependencies in the ADR 0003 migration.
 - Prefer crate-local `AGENTS.md` files for detailed navigation before editing.

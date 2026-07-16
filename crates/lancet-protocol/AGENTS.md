@@ -27,7 +27,11 @@ types.
 - No I/O, no tokio, no native execution, and no policy side effects.
 - Serialized field changes are cross-crate changes, not local refactors.
 - Keep serde and schemars behavior explicit for new or renamed fields.
-- Do not encode native handler assumptions that belong in `lancet-native`.
+- Do not encode concrete native handler, Component engine, or Tool Host
+  implementation assumptions. This crate owns only shared wire/data vocabulary.
+- ADR 0004 Cell vocabulary (`CtxOp`, `ExtImpact`, scope, trust, capability, and
+  observed effects) starts here before authority, audit, runtime, or generated
+  descriptor consumers change.
 
 ## Recent Issues
 
@@ -48,7 +52,7 @@ types.
   authority matching, native effect regions, schemas, and compatibility notes
   in the same series.
 - When adding boundary evidence fields, update authority validation and native
-  host probe projection together.
+  host/runtime projection together.
 
 ## Record Maintenance
 

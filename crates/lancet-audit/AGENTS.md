@@ -32,6 +32,9 @@ in-toto attestation construction, and attestation persistence.
   `lattice-api` consumes it through the public LANCET runtime surface.
 - FIXED issue #11: agent catalog audit CEP methods removed; operator reads live in
   `lancet-api::audit` and `lattice audit` (direct store, no CEP server).
+- OPEN #17: operator read DTOs, pagination/filter behavior, and contract tests
+  move into this crate while `lancet-api` remains a thin facade. They must not
+  become Source Tools or generated catalog entries.
 - WATCH: provenance isomorphism tests in `lancet-native` and audit turn tests in
   `lattice-api` are the practical consumers of this crate's contract.
 - WATCH: call stage and impact labels are shared language between native
@@ -47,8 +50,8 @@ in-toto attestation construction, and attestation persistence.
   attestation serialization.
 - Keep provenance projection and canonicalization changes paired with
   integration tests that compare stable statements/hashes.
-- Coordinate new stage/impact labels with `lancet-native` lifecycle and
-  `lattice-cli` audit output.
+- Coordinate new stage/impact/Cell labels with the current `lancet-native` or
+  target `lancet-runtime` lifecycle and `lattice-cli` audit output.
 
 ## Record Maintenance
 
@@ -64,6 +67,7 @@ in-toto attestation construction, and attestation persistence.
 ## Verification
 
 - Local: `cargo test -p lancet-audit`.
-- Provenance/attestation changes: also run `lancet-native` provenance tests and
-  `lattice-api` audit turn provenance tests.
+- Provenance/attestation changes: also run the active runtime provenance tests
+  (`lancet-native` during migration, then `lancet-runtime`) and `lattice-api`
+  audit turn provenance tests.
 - Schema changes should include persistence, query, and replay coverage.

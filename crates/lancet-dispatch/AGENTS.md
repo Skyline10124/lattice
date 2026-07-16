@@ -4,9 +4,10 @@ Crate-local guidance for `lancet-dispatch`.
 
 ## Role
 
-This crate owns generic CEP dispatch: typed method registration, JSON-RPC
-transport, client/server channels, event sinks, call control, cancellation, and
-server runtime plumbing.
+This crate owns the current generic CEP dispatch path: typed registration,
+JSON-RPC transport, client/server channels, event sinks, call control,
+cancellation, and server runtime plumbing. ADR 0004 absorbs this behavior into
+`lancet-runtime` in #12; the crate is migration infrastructure.
 
 ## Sub-Architecture
 
@@ -26,6 +27,9 @@ server runtime plumbing.
 - Keep method-specific behavior in catalog/native crates.
 - Preserve cancellation and event ordering when changing transport internals.
 - Avoid adding dependencies that would make this crate a runtime policy layer.
+- Do not add a runtime plugin registry, dynamic Component loader, or new public
+  abstraction intended to survive #12. Preserve current behavior while the
+  generated closed-catalog runtime replaces this crate.
 
 ## Recent Issues
 

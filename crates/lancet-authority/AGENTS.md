@@ -5,9 +5,8 @@ Crate-local guidance for `lancet-authority`.
 ## Role
 
 This crate owns CEP authority semantics: default policy, capability matching,
-command/network/observation/budget policy, Guard L1 path/scope checks,
-effect-region data, effect checking, effect ledger helpers, and
-boundary-credit validation.
+network/observation/budget policy, Guard L1 path/scope checks, effect-region
+data, effect checking, effect ledger helpers, and boundary-credit validation.
 
 ## Sub-Architecture
 
@@ -31,6 +30,9 @@ boundary-credit validation.
   `lancet-audit`.
 - Keep policy decisions deterministic and explicit about allow/warn/deny/action.
 - Do not let LLM tool exposure become the authority model.
+- ADR 0004 keeps authority host-side: admission and each Tool Host operation must
+  derive from protocol Cell/capability/scope data. Components never become the
+  policy authority.
 
 ## Recent Issues
 
@@ -54,6 +56,9 @@ boundary-credit validation.
   introduced.
 - Preserve Guard L1 path traversal and project-root escape tests for every path
   handling change.
+- Retire legacy envelope/base-authority/effect-region vocabulary only after all
+  behavior consumers use the Cell path; do not run permanent dual authority
+  models.
 
 ## Record Maintenance
 

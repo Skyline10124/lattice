@@ -4,9 +4,11 @@ Crate-local guidance for `lancet-native`.
 
 ## Role
 
-This crate owns the production native CEP implementation: method handlers,
-native server lifecycle, policy/guard/audit integration, verification, edit
-application, shell/web helpers, and effect-contract enforcement.
+This crate owns the current production native CEP implementation: method
+handlers, server lifecycle, policy/guard/audit integration, edit application,
+web helpers, and effect-contract enforcement. ADR 0004 migrates every Tool to a
+WASM Component and absorbs the remaining concrete host responsibilities into
+`lancet-runtime`; do not treat this crate as a permanent Tool extension point.
 
 ## Sub-Architecture
 
@@ -27,6 +29,12 @@ application, shell/web helpers, and effect-contract enforcement.
 - Mutations must pass active envelope, Guard L1, effect checks, and audit
   recording. Post-mutation verify is retired; do not reintroduce it.
 - Do not expose direct native executors to `lattice-agent`.
+- Do not add new native Tool implementations or a native Tool ABI. New Tool
+  contracts start in Source manifests; Components receive authority only through
+  Tool Host imports.
+- During Direct-Local migration keep one concrete guarded Local Workspace here.
+  Do not preserve `ExecutionBackend` or another pluggable host seam; #12 moves
+  the concrete host module into `lancet-runtime` after Tool migration.
 
 ## Recent Issues
 
@@ -38,8 +46,9 @@ application, shell/web helpers, and effect-contract enforcement.
   commit-baseline hunk summaries are recorded when evidence exists.
 - PARTIAL M-05: web fetch rebinding defense uses request-time pinned IP plus a
   maintained rebinding suffix denylist.
-- WATCH: tool schemas must continue to come from `lancet-cep` catalog
-  projection only.
+- WATCH: current schemas must continue to come from `lancet-cep` projection until
+  generated descriptors replace it; never hand-write a native or Component
+  compatibility schema.
 - CLOSED 31-CR-01/WR-02: artifact commit delete paths reject symlink parents,
   and commit-baseline anchor files are read from the captured lower baseline.
 
