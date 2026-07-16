@@ -334,7 +334,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
     );
 
     let deps =
-        build_test_production_deps(dir.path().to_str().unwrap(), &[], llm, true, None, None).await;
+        build_test_production_deps(dir.path().to_str().unwrap(), &[], llm, true, None).await;
 
     assert_eq!(deps.build_metrics.adapter_instances, 1);
     assert_eq!(deps.build_metrics.transport_pairs, 1);
@@ -344,7 +344,6 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
         &["session.todo_write".to_string()],
         Arc::new(RealLlmClient),
         false,
-        None,
         None,
     )
     .await;
@@ -383,7 +382,6 @@ mod cep_native_registry {
             &[TodoWrite::NAME.to_string()],
             llm,
             true,
-            None,
             None,
         )
         .await;

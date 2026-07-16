@@ -10,7 +10,6 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::WorkspaceSection;
 use lattice_session::SessionGraphStore;
-use lattice_workspace::testing::DeterministicWorkspace;
 
 use super::types::RunTurnRequest;
 use crate::session::SessionApi;
@@ -18,7 +17,6 @@ use crate::session::SessionApi;
 pub(super) fn make_test_run_turn_request(
     llm: Arc<dyn LlmClient>,
     in_memory_audit: bool,
-    workspace_override: Option<Arc<dyn lattice_workspace::Workspace>>,
     enabled_tools: &[String],
 ) -> RunTurnRequest {
     RunTurnRequest {
@@ -33,7 +31,6 @@ pub(super) fn make_test_run_turn_request(
         test_llm: Some(llm),
         test_project_root: None,
         test_persist_audit: if in_memory_audit { None } else { Some(false) },
-        workspace_override,
     }
 }
 
@@ -43,21 +40,16 @@ pub(super) async fn build_test_production_deps(
     llm: Arc<dyn LlmClient>,
     in_memory_audit: bool,
     lancet: Option<&lattice_profile::LancetSection>,
-    workspace_override: Option<Arc<dyn lattice_workspace::Workspace>>,
 ) -> super::cep::ProductionTurnDeps {
-    // Ensure a git repo exists so resolve_upper_config can resolve HEAD.
+    // Ensure a git repo exists so the canonical project root resolves; #37
+    // no longer needs HEAD for Upper baseline resolution, but keeping a git
+    // repo matches the project-shaped test fixtures used across the suite.
     let root = std::path::Path::new(project_root);
     if !root.join(".git").exists() {
         std::fs::write(root.join("README.md"), "init\n").expect("write README");
         init_test_git_repo(root);
     }
-    let workspace_override = workspace_override.or_else(|| Some(test_workspace_override()));
-    let request = make_test_run_turn_request(
-        llm.clone(),
-        in_memory_audit,
-        workspace_override,
-        enabled_tools,
-    );
+    let request = make_test_run_turn_request(llm.clone(), in_memory_audit, enabled_tools);
     let loaded = request.loaded_profile.as_ref().unwrap();
     super::cep::build_production_turn_deps(super::cep::ProductionTurnDepsInput {
         request: &request,
@@ -146,7 +138,6 @@ pub(super) fn make_request(input: &str) -> RunTurnRequest {
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
-        workspace_override: None,
     }
 }
 
@@ -159,7 +150,6 @@ pub(super) fn make_request_with_session(input: &str, session_id: &str) -> RunTur
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
-        workspace_override: None,
     }
 }
 
@@ -238,10 +228,6 @@ fn init_test_git_repo(root: &std::path::Path) {
         .expect("git commit");
 }
 
-pub(super) fn test_workspace_override() -> Arc<dyn lattice_workspace::Workspace> {
-    Arc::new(DeterministicWorkspace::new().expect("deterministic workspace for upper-backed tests"))
-}
-
 pub(super) fn with_test_llm(
     mut request: RunTurnRequest,
     llm: Arc<dyn LlmClient>,
@@ -256,9 +242,6 @@ pub(super) fn with_test_llm(
             "System from profile.",
             enabled_tools,
         ));
-    }
-    if request.workspace_override.is_none() {
-        request.workspace_override = Some(test_workspace_override());
     }
     request
 }

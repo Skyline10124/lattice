@@ -61,11 +61,6 @@ async fn stream_turn_live_with_agent(
     tool_definitions: Vec<lattice_llm::ToolDefinition>,
 ) -> crate::session::Result<TurnEventStream> {
     let (cep_client, _server) = lancet_native::CepTransport::pair(1);
-    let upper_lease = super::upper::UpperLease::without_handle(Arc::new(
-        lattice_workspace::testing::DeterministicWorkspace::new()
-            .expect("deterministic workspace for test"),
-    )
-        as Arc<dyn lattice_workspace::Workspace>);
     let deps = super::cep::ProductionTurnDeps {
         agent_loop,
         tool_definitions,
@@ -75,7 +70,6 @@ async fn stream_turn_live_with_agent(
         audit_context: Arc::new(tokio::sync::RwLock::new(
             lancet_native::CepAuditContext::default(),
         )),
-        upper_lease,
         #[cfg(test)]
         build_metrics: super::cep::CepRuntimeBuildMetrics {
             adapter_instances: 0,
@@ -95,7 +89,6 @@ fn make_request(input: &str) -> RunTurnRequest {
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
-        workspace_override: None,
     }
 }
 
@@ -108,7 +101,6 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
-        workspace_override: None,
     }
 }
 

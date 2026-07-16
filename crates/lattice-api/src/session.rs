@@ -15,8 +15,6 @@ use lattice_session::{
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use crate::turn::promotion::PromotionLifecycleError;
-
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("session '{0}' not found")]
@@ -30,15 +28,6 @@ pub enum ApiError {
 
     #[error("internal error: {0}")]
     Internal(String),
-
-    #[error("promotion recovery required before turn start")]
-    PromotionRecoveryRequired,
-
-    #[error("promotion recovery conflict: {0}")]
-    PromotionRecoveryConflict(String),
-
-    #[error("promotion lifecycle: {0}")]
-    PromotionLifecycle(#[from] PromotionLifecycleError),
 }
 
 pub type Result<T> = std::result::Result<T, ApiError>;
@@ -223,6 +212,10 @@ impl SessionApi {
     /// prefixes before constructing the `PreparedTurnCommit`. This is
     /// intentional because prepared commits are built internally after the
     /// session has already been resolved for turn execution.
+    ///
+    /// #37 removed the resume/promotion callers; this wrapper is retained
+    /// for #40's lattice-session contract cleanup.
+    #[allow(dead_code)]
     pub(crate) fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> Result<TurnCommit> {
         self.store
             .commit_prepared_turn(prepared)
@@ -230,6 +223,10 @@ impl SessionApi {
     }
 
     /// Look up a single turn commit by session and commit ID.
+    ///
+    /// #37 removed the resume/promotion callers; this wrapper is retained
+    /// for #40's lattice-session contract cleanup.
+    #[allow(dead_code)]
     pub(crate) fn get_turn_commit(
         &self,
         session_id: &str,
@@ -245,6 +242,10 @@ impl SessionApi {
     ///
     /// Returns `None` if no metadata is recorded for the commit.
     /// Never modifies immutable commit fields.
+    ///
+    /// #37 removed the resume callers; this wrapper and the underlying
+    /// `get_snapshot_lost` session-graph contract are removed in #40.
+    #[allow(dead_code)]
     pub(crate) fn get_snapshot_lost(&self, commit_id: &str) -> Result<Option<bool>> {
         self.store
             .get_snapshot_lost(commit_id)

@@ -422,7 +422,6 @@ async fn run_inner(
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
-        workspace_override: None,
     };
 
     // drive stream_turn; lattice-api owns Cep runtime construction
@@ -442,21 +441,6 @@ async fn run_inner(
         }
         Err(lattice_api::ApiError::Internal(msg)) => {
             eprintln!("{}: {}", "error".red(), msg);
-            return Ok(std::process::ExitCode::from(1));
-        }
-        Err(lattice_api::ApiError::PromotionRecoveryRequired) => {
-            eprintln!(
-                "{}: promotion recovery required before turn start",
-                "error".red()
-            );
-            return Ok(std::process::ExitCode::from(1));
-        }
-        Err(lattice_api::ApiError::PromotionRecoveryConflict(msg)) => {
-            eprintln!("{}: promotion recovery conflict: {}", "error".red(), msg);
-            return Ok(std::process::ExitCode::from(1));
-        }
-        Err(lattice_api::ApiError::PromotionLifecycle(e)) => {
-            eprintln!("{}: promotion lifecycle: {}", "error".red(), e);
             return Ok(std::process::ExitCode::from(1));
         }
     };

@@ -10,7 +10,10 @@ use lancet_authority::policy::default::DefaultPolicyHook;
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
 use lancet_cep::{ToolDefinition, ToolExposure, ToolExposureError};
 use lancet_dispatch::{CepClient, CepTransport};
-use lancet_native::{MethodRegistry, ServerRunConfig, register_production_method_registry};
+use lancet_native::{
+    ExecutionRouting, MethodRegistry, ServerRunConfig, direct_local_routing,
+    register_production_method_registry,
+};
 use tokio::sync::RwLock;
 
 use crate::config::{AuditBacking, LancetRuntimeConfig};
@@ -128,7 +131,6 @@ impl LancetRuntime {
             audit,
             model_id,
             runtime_version,
-            execution,
         } = config;
 
         let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools)?;
@@ -141,6 +143,16 @@ impl LancetRuntime {
             budget: policy.budget.clone(),
             denied_effect_kinds: policy.denied_effect_kinds.clone(),
         };
+
+        // ADR 0003: the runtime composes the one concrete Direct-Local
+        // execution routing internally from the policy project root. No
+        // caller-supplied `ExecutionRouting` or external backend injection
+        // is accepted. The `ExecutionRouting`/`UpperContext` carrier survives
+        // only until #38 retires the trait.
+        let execution: ExecutionRouting =
+            direct_local_routing(&policy.project_root).map_err(|err| {
+                LancetError::Internal(format!("direct-local routing: {err}"))
+            })?;
 
         let audit = match audit {
             AuditBacking::InMemory => Arc::new(
@@ -243,10 +255,52 @@ fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn runtime_config_defaults_have_null_execution() {
+    #[tokio::test]
+    async fn runtime_config_defaults_have_no_execution_field() {
+        // ADR 0003 / #37: LancetRuntimeConfig no longer carries an
+        // `execution` field; the runtime builds the one Direct-Local routing
+        // internally. A default-constructed config has no execution field to
+        // read, and the runtime's build() produces a `direct-local` backend.
         let config = LancetRuntimeConfig::new(".");
-        assert_eq!(config.execution.upper.execution_backend, "null");
+        let mut runtime = LancetRuntime::build(config).expect("build direct-local runtime");
+        // The retired exec.command_run path still returns Method not found,
+        // which proves the production registry + transport came up.
+        let client = runtime.client();
+        let err = client
+            .call_raw("exec.command_run", serde_json::json!({}))
+            .await
+            .expect_err("retired method must error");
+        assert_eq!(err.wire_code(), lancet_protocol::error::jsonrpc::METHOD_NOT_FOUND);
+        // Plan §3: assert the build-time routing is `direct-local`. The
+        // routing identity is observable through the audit metadata that the
+        // server records for each call.
+        use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
+        use lancet_catalog::methods::session::{TodoItem, TodoStatus};
+        let _ = client
+            .call::<TodoWrite>(TodoWriteParams {
+                todos: vec![TodoItem {
+                    content: "direct-local routing check".into(),
+                    status: TodoStatus::Pending,
+                }],
+            })
+            .await
+            .expect("todo write");
+        runtime.audit().await_pending().await;
+        let rows = runtime
+            .audit()
+            .query_rows(&lancet_native::AuditQueryFilters::default())
+            .expect("audit rows");
+        let any_direct_local = rows.iter().any(|r| {
+            r.metadata_json
+                .as_deref()
+                .unwrap_or("")
+                .contains("direct-local")
+        });
+        assert!(
+            any_direct_local,
+            "runtime build must produce a direct-local execution backend; audit rows: {rows:?}"
+        );
+        runtime.shutdown().await;
     }
 
     // Issue #4 behavior acceptance: a raw CEP call to the permanently retired

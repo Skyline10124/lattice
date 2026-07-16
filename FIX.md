@@ -2525,3 +2525,180 @@ reads), left as-is and noted in FINDINGS ENV-OOM-02's closure entry.
 
 **Changed files:** `crates/lattice-system-harness/src/layer_guard.rs`,
 `crates/lattice-api/src/turn/cep_tests.rs`, `FINDINGS.md`, `FIX.md`.
+
+## Codeberg #37: production Turn operates directly on the canonical Local Workspace — 2026-07-17
+
+Severity: FEATURE (Direct-Local migration step 1 + step 3 production cutover).
+
+**Problem:** Production Turns created an MSB Upper for every call, routed
+native handlers through `WorkspaceExecutionBackend` behind `ExecutionBackend`,
+and carried projection/baseline, guest Git, snapshot/retained-state, KVM, and
+`[workspace]` profile machinery. The closed five-method catalog did not
+operate on the canonical Local Workspace directly.
+
+**Fix summary:**
+
+- `lancet-native`: added one concrete `LocalWorkspace` module
+  (`crates/lancet-native/src/workspace/{mod,local,types}.rs`) owning secure
+  per-segment path resolution (symlink parent/leaf rejection, root-escape
+  rejection, containment for not-yet-existing create targets), bounded
+  read/list/grep/find, content hashing (Local Revision), no-replace create
+  (`O_CREAT|O_EXCL`), atomic edit install (same-dir tempfile → fsync →
+  rename → fsync-dir), remove, and filesystem error normalization. Added a
+  crate-internal `LocalExecutionBackend` + `direct_local_routing(root)`
+  factory in `execution_backend.rs` that wraps the one concrete workspace
+  behind the existing `ExecutionBackend` trait. `tempfile` promoted from
+  dev-dep to runtime dep. 14 module-level ADR-step-1 tests cover all eight
+  specified behavior classes.
+- `lancet-api`: `LancetRuntimeConfig` no longer carries an `execution` field;
+  `LancetRuntime::build` constructs the one Direct-Local routing internally
+  from `policy.project_root`. `NullExecutionBackend` has no production
+  references (left for #38).
+- `lattice-api`: deleted `turn/{upper,workspace_backend,promotion,resume,
+  snapshot_journal}.rs`; trimmed `turn/lifecycle.rs` to the terminal
+  classification + `finalize_turn` Destroy path; removed
+  `RunTurnRequest.workspace_override`, `ProductionTurnDeps.upper_lease`, the
+  Upper/lease teardown sequence in `live.rs`, and the `fold_upper_destroy_error`
+  branch. `ApiError` dropped `PromotionRecoveryRequired` /
+  `PromotionRecoveryConflict` / `PromotionLifecycle`. Public re-exports in
+  `lib.rs` + `turn/mod.rs` shrunk to the remaining lifecycle + turn types.
+- `lattice-cli`: deleted the `session resume` and `session prune-snapshots`
+  subcommands, their handler functions, and the three source-scan tests that
+  asserted their presence. Removed the `lattice-workspace` dev-dependency.
+- `lattice-tui`: removed `workspace_override: None` from the REPL turn
+  request.
+- `lattice-api` / `lattice-cli`: removed the `lattice-workspace` dependency
+  declarations (runtime + dev) and the `integration_tests` feature.
+- New acceptance test file
+  `crates/lattice-api/tests/direct_local_acceptance.rs` (7 tests) exercises
+  the real production runtime against a temp Local root: closed five-method
+  catalog, observe sees external modifications between Tool calls, create
+  rejects existing target, stale-hash edit leaves target unchanged and
+  replans, correct-hash edit atomically installs, successful mutation
+  survives a later failure, audit records the `direct-local` execution
+  backend.
+
+**Deleted test files:** `tests/{upper_routing,promotion_wiring,
+turn_lifecycle_tests,resume_tests,turn_target_tests,snapshot_journal_tests}.rs`
+(contracts no longer exist; turn_target/turn_lifecycle/resume/snapshot_journal
+were bound to `lattice-workspace::promotion::ManagedLower` / retained
+snapshots / the snapshot journal, all removed).
+
+**Residual (deferred to #40):** `SessionApi::commit_prepared_turn` /
+`get_turn_commit` / `get_snapshot_lost` are now unused (`#[allow(dead_code)]`
+with #40 pointers); `get_snapshot_lost` and the `lattice-session` snapshot /
+promotion contract are removed in #40. The `lattice-workspace` crate itself,
+its `microsandbox` dependency, and the MSB/KVM harness scenarios are removed
+in #40. `lancet-native::NullExecutionBackend` and the
+`ExecutionRouting` / `UpperContext` carrier survive until #38 retires the
+`ExecutionBackend` trait.
+
+**Verification:**
+
+- `cargo build --workspace --all-targets` — clean (0 warnings, 0 errors).
+- `cargo test -p lancet-native --lib -- --test-threads=1 --skip fetch` —
+  102 passed, 0 failed (6 network fetch tests skipped; they hit
+  `https://evil.example.com` and are pre-existing flakes unrelated to #37).
+- `cargo test -p lancet-api --lib` — 17 passed.
+- `cargo test -p lattice-api` (lib + all integration tests) — 143 passed,
+  0 failed.
+- `cargo test -p lattice-cli` — 135 passed (126 unit + 4 cli_cutover + 5
+  release_smoke).
+- `cargo test -p lattice-tui` — 3 passed.
+- Per-crate matrix (`lancet-protocol` 36, `lancet-catalog` 27, `net-guard` 15,
+  `lancet-dispatch` 5, `lancet-cep` 7, `lancet-audit` 34, `lancet-authority`
+  118, `lattice-profile` 96, `lattice-session` 67, `lattice-agent` 8,
+  `lattice-llm` 133, `lattice-workspace --features test-utils` unchanged) —
+  all green.
+- Pre-existing failure unrelated to #37: `lancet-native --test cep_warn_harness`
+  expects `docs/lancet-warn-report.md`, which was removed in `59d4c44c`
+  (docs organization commit, before this work).
+
+**Changed files:** `crates/lancet-native/Cargo.toml`,
+`crates/lancet-native/src/lib.rs`,
+`crates/lancet-native/src/execution_backend.rs`,
+`crates/lancet-native/src/workspace/{mod,local,types}.rs` (new),
+`crates/lancet-api/src/{config,runtime}.rs`,
+`crates/lattice-api/Cargo.toml`, `crates/lattice-api/src/lib.rs`,
+`crates/lattice-api/src/session.rs`,
+`crates/lattice-api/src/turn/{mod,types,cep,live,lifecycle,test_support,
+run_tests,cep_tests,live_tests}.rs`,
+`crates/lattice-api/tests/{support/mod,consistency,release_e2e,usage_turn,
+audit_turn_provenance}.rs`,
+`crates/lattice-api/tests/direct_local_acceptance.rs` (new),
+`crates/lattice-cli/Cargo.toml`,
+`crates/lattice-cli/src/commands/{session,run,run_tests}.rs`,
+`crates/lattice-cli/tests/release_smoke.rs`,
+`crates/lattice-tui/src/runtime.rs`, `FINDINGS.md`, `FIX.md`.
+Deleted: `crates/lattice-api/src/turn/{upper,workspace_backend,promotion,
+resume,snapshot_journal}.rs` and `crates/lattice-api/tests/{upper_routing,
+promotion_wiring,turn_lifecycle_tests,resume_tests,turn_target_tests,
+snapshot_journal_tests}.rs`.
+
+## Codeberg #37 review correction: no-replace create install + audit evidence — 2026-07-17
+
+Post-review fixes to the #37 commit (9a20dedf) before push.
+
+**Problem:** The /review spec sub-agent found that production `mutate.create`
+routed through `EditStorage::write_edit_target` →
+`LocalExecutionBackend::write_file` → `LocalWorkspace::install_atomic` (rename
+overwrite), not the no-replace `O_CREAT|O_EXCL` install ADR 0003 decision 8
+requires. A concurrent writer between preflight and install would be silently
+overwritten instead of surfacing as ReplanRequired. Audit criterion 8 was
+also partial: the §5 test only asserted the `"direct-local"` substring, not
+real Local path / Local Revision / install-result evidence.
+
+**Fix summary:**
+
+- `lancet-native::execution_backend::ExecutionBackend` gains a `create_file`
+  method (default impl: check-then-write fallback) that the Direct-Local
+  `LocalExecutionBackend` overrides to call `LocalWorkspace::create_excl`
+  (`O_CREAT|O_EXCL`). `EditStorage::create_edit_target` routes the create
+  install through it; `write_file` stays the atomic-replace path for edits.
+- `mutation::write_create` now calls `create_edit_target`; a "target already
+  exists" install diagnostic maps to `CepErrorCode::ReplanRequired` +
+  `Retriability::RequiresReplan` (ADR decision 7). `preflight_create`'s
+  already-exists diagnostic also maps to ReplanRequired (stale create
+  precondition), via `create_preflight_diag_to_cep`.
+- `LocalWorkspace::create_excl` `create_parents` loop fixed to walk only
+  ancestor directories (not the file leaf) — previously a root-level file
+  like "race.txt" was mkdir'd as a directory before the O_EXCL open, causing
+  a false AlreadyExists.
+- `LocalExecutionBackend::resolve_path` now delegates to
+  `LocalWorkspace::resolve_facts` (new `pub(crate)` accessor) instead of a
+  duplicated free function; the duplicated `resolve_path_facts`/`file_kind`
+  helpers are deleted. `LocalWorkspace::read_file` now uses the
+  secure-resolved `full` path instead of re-joining lexically.
+- Standards fixes: `execution_backend.rs` + `lifecycle.rs::finalize_turn`
+  stale docstrings updated; `lancet-native/AGENTS.md` Sub-Architecture lists
+  `src/workspace/`; grep/find `1000` magic numbers documented as
+  handler-overridden safety caps; `workspace/mod.rs` `#[allow(unused_imports)]`
+  annotated with the #38 pointer.
+- Acceptance tests expanded to 10: added `create_install_is_no_replace_not_overwrite`
+  (second create on existing target → ReplanRequired + original preserved),
+  `observe_list_sees_external_addition_between_tool_calls` (list_directory
+  sees an externally added file), `policy_deny_blocks_create_on_direct_local`
+  (write-deny pattern blocks create on the Direct-Local path), and
+  `audit_records_direct_local_execution_backend_with_local_evidence` now
+  asserts path + content_hash (Local Revision) + canonical-root identity.
+  `runtime_config_defaults_have_no_execution_field` now asserts the routing
+  is `direct-local` via audit metadata (plan §3).
+
+**Verification:**
+
+- `cargo build --workspace --all-targets` — clean (0 warnings, 0 errors).
+- `cargo test -p lancet-native --lib -- --test-threads=1 --skip fetch` —
+  102 passed (6 pre-existing network flakes skipped).
+- `cargo test -p lancet-api --lib` — 17 passed.
+- `cargo test -p lattice-api --test direct_local_acceptance` — 10 passed.
+- `cargo test -p lattice-api` (lib + all integration) — 143 + 10 = 153
+  passed across the crate.
+- `cargo test -p lattice-cli` — 135 passed. `cargo test -p lattice-tui` — 3.
+
+**Changed files (correction):** `crates/lancet-native/src/execution_backend.rs`,
+`crates/lancet-native/src/edit/storage.rs`,
+`crates/lancet-native/src/handlers/mutation.rs`,
+`crates/lancet-native/src/workspace/local.rs`,
+`crates/lancet-native/AGENTS.md`, `crates/lancet-api/src/runtime.rs`,
+`crates/lattice-api/src/turn/lifecycle.rs`,
+`crates/lattice-api/tests/direct_local_acceptance.rs`, `FIX.md`.

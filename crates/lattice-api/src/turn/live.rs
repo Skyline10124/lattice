@@ -33,7 +33,6 @@ use super::lifecycle::{
 };
 use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
-use super::upper::UpperPrepareError;
 use crate::session::{OpenSessionRequest, Result, SessionApi};
 
 /// Bounded channel capacity for the turn event stream.
@@ -255,11 +254,9 @@ async fn run_live_turn_task(
         cep_client,
         audit,
         audit_context,
-        upper_lease,
         ..
     } = deps;
 
-    let mut upper_lease = upper_lease;
     let mut runtime = runtime;
 
     let turn_id = format!(
@@ -317,7 +314,7 @@ async fn run_live_turn_task(
     let mut ordered_events = CepOrderedEmitter::default();
 
     // 5. Concurrent drain loop
-    let mut agent_result: AgentTurnResult = loop {
+    let agent_result: AgentTurnResult = loop {
         tokio::select! {
             maybe_event = agent_rx.recv() => {
                 if let Some(event) = maybe_event {
@@ -351,11 +348,9 @@ async fn run_live_turn_task(
     runtime.shutdown().await;
     audit.await_pending().await;
 
-    // 6b. Resource teardown: destroy the Upper (no snapshot retained in the
-    // current non-promotion flow).
-    if let Err(err) = upper_lease.destroy().await {
-        agent_result = fold_upper_destroy_error(agent_result, err);
-    }
+    // #37: the Upper teardown sequence was removed with the Upper lifecycle.
+    // Direct-Local mutations are immediate and are not rolled back by a
+    // later Tool/model/audit failure (ADR 0003 decision 8).
 
     {
         let ctx = audit_context.read().await;
@@ -416,21 +411,6 @@ async fn run_live_turn_task(
                 .await;
         }
     }
-}
-
-fn fold_upper_destroy_error(
-    mut result: AgentTurnResult,
-    err: UpperPrepareError,
-) -> AgentTurnResult {
-    if matches!(result.status, lattice_agent::AgentTurnStatus::Completed) {
-        result.status = lattice_agent::AgentTurnStatus::Error;
-        result.terminal_reason = Some(format!("Upper teardown failed: {err}"));
-    } else if let Some(reason) = result.terminal_reason.as_mut() {
-        reason.push_str(&format!("; Upper teardown failed: {err}"));
-    } else {
-        result.terminal_reason = Some(format!("Upper teardown failed: {err}"));
-    }
-    result
 }
 
 /// Execute a turn with an already-prepared session snapshot and return a live stream.

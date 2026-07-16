@@ -145,7 +145,6 @@ fn make_release_e2e_request(
             test_project_root: Some(ws.root.to_string_lossy().to_string()),
             // Persist audit to disk so we can inspect attestation after run_turn.
             test_persist_audit: Some(false),
-            workspace_override: None,
         },
         &["mutate.edit"],
     )

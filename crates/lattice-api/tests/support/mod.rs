@@ -1,14 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared helpers for lattice-api integration tests that exercise Upper routing.
+//! Shared helpers for lattice-api integration tests.
+//!
+//! #37 removed the Upper workspace override surface; these helpers now only
+//! provide the git-repo bootstrap used by Direct-Local test fixtures.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use lattice_api::RunTurnRequest;
-use lattice_workspace::Workspace;
-use lattice_workspace::testing::DeterministicWorkspace;
 
 pub fn init_git_repo(root: &Path) {
     std::process::Command::new("git")
@@ -38,16 +38,12 @@ pub fn init_git_repo(root: &Path) {
         .expect("git commit");
 }
 
-pub fn deterministic_workspace() -> Arc<dyn Workspace> {
-    Arc::new(DeterministicWorkspace::new().expect("deterministic workspace for integration tests"))
-}
-
+/// No-op request normalizer retained for callers that previously attached an
+/// Upper fixture. Direct-Local builds its own execution routing internally,
+/// so there is nothing to inject.
 pub fn attach_upper_fixture(
-    mut request: RunTurnRequest,
+    request: RunTurnRequest,
     _enabled_tools: &[&str],
 ) -> RunTurnRequest {
-    if request.workspace_override.is_none() {
-        request.workspace_override = Some(deterministic_workspace());
-    }
     request
 }

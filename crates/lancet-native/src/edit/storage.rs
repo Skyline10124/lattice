@@ -102,6 +102,25 @@ impl EditStorage {
             .map_err(|err| backend_io_error(path, operation_index, err))
     }
 
+    /// No-replace create install (ADR 0003 decision 8).
+    ///
+    /// Distinct from [`write_edit_target`]: the install must fail if the
+    /// target exists at install time, so a concurrent writer between
+    /// `preflight_create` and the install surfaces as a create error rather
+    /// than a silent overwrite.
+    pub(crate) async fn create_edit_target(
+        &self,
+        path: &str,
+        target: &WorkspacePath,
+        content: &[u8],
+    ) -> Result<(), PatchDiagnostic> {
+        self.execution
+            .backend
+            .create_file(target, content)
+            .await
+            .map_err(|err| backend_io_error(path, 0, err))
+    }
+
     pub(crate) async fn remove_edit_target(
         &self,
         path: &str,

@@ -18,6 +18,10 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   patch write limits.
+- `src/workspace/` owns the one concrete `LocalWorkspace` (#37): secure
+  per-segment path resolution, bounded read/list/grep/find, content hashing
+  (Local Revision), no-replace create, atomic edit install, and filesystem
+  error normalization. ADR 0004 moves this into `lancet-runtime`.
 - `src/executor/` owns crate-private web/render helpers and output limits.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 

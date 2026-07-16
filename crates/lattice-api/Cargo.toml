@@ -18,7 +18,6 @@ lattice-agent = { workspace = true }
 lattice-llm = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-session = { workspace = true }
-lattice-workspace = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -36,7 +35,6 @@ tokio = { workspace = true }
 tempfile = { workspace = true }
 lancet-audit = { workspace = true }
 lancet-cep = { workspace = true }
-lattice-workspace = { workspace = true, features = ["test-utils"] }
 lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-profile = { workspace = true }
 blake3 = { workspace = true }
@@ -44,4 +42,4 @@ futures = { workspace = true }
 tokio-stream = { workspace = true }
 
 [features]
-integration_tests = ["lattice-workspace/integration_tests"]
+default = []

@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 
 use lancet_authority::policy::default::PolicyConfig;
-use lancet_native::ExecutionRouting;
 use lancet_protocol::policy::CepMode;
 use sha2::{Digest, Sha256};
 
@@ -126,9 +125,6 @@ pub struct LancetRuntimeConfig {
     pub model_id: String,
     /// Runtime version string recorded in the audit context and attestations.
     pub runtime_version: String,
-    /// Upper (MSB) execution routing — always present since MSB is the sole
-    /// execution path.
-    pub execution: ExecutionRouting,
 }
 
 impl LancetRuntimeConfig {
@@ -147,13 +143,6 @@ impl LancetRuntimeConfig {
             audit: AuditBacking::InMemory,
             model_id: String::new(),
             runtime_version: String::new(),
-            execution: ExecutionRouting {
-                backend: std::sync::Arc::new(lancet_native::NullExecutionBackend),
-                upper: lancet_native::UpperContext {
-                    execution_backend: "null".into(),
-                    upper_workspace_id: "null".into(),
-                },
-            },
         }
     }
 }

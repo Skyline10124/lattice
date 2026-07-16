@@ -30,7 +30,6 @@ lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-profile = { workspace = true }
 lattice-llm = { workspace = true }
 lattice-session = { workspace = true }
-lattice-workspace = { workspace = true, features = ["test-utils"] }
 lancet-catalog = { workspace = true }
 lancet-native = { workspace = true }
 async-trait = { workspace = true }

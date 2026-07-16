@@ -25,8 +25,8 @@ use lancet_catalog::methods::session::TodoWrite;
 use lancet_catalog::methods::workspace::{Create, Edit, ObserveWorkspace};
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
-    CepAuditContext, CepAuditStore, CepClient, ExecutionRouting, impact_kind_for_method,
-    impact_kind_label, wire_code_for_error,
+    CepAuditContext, CepAuditStore, CepClient, impact_kind_for_method, impact_kind_label,
+    wire_code_for_error,
 };
 use lancet_protocol::error::{
     CepErrorData, invalid_params, jsonrpc, method_not_found, parse_error,
@@ -48,7 +48,6 @@ use tokio::sync::RwLock;
 
 use crate::session::ApiError;
 use crate::turn::types::RunTurnRequest;
-use crate::turn::upper::{UpperLease, UpperPrepareError, prepare_upper, resolve_upper_config};
 
 /// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
 fn map_lancet_err(err: LancetError) -> ApiError {
@@ -173,7 +172,6 @@ pub(crate) struct ProductionTurnDeps {
     pub cep_client: CepClient,
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
-    pub upper_lease: UpperLease,
     #[cfg(test)]
     pub build_metrics: CepRuntimeBuildMetrics,
 }
@@ -458,7 +456,11 @@ fn resolve_lancet_policy(
 /// Build a turn-scoped LANCET runtime and wrap its client in an [`AgentLoop`].
 ///
 /// Translation of the profile into policy happens here; runtime composition is
-/// delegated to [`lancet_api::LancetRuntime::build`].
+/// delegated to [`lancet_api::LancetRuntime::build`], which constructs the
+/// one concrete Direct-Local execution routing internally (ADR 0003). There is
+/// no Upper lifecycle, workspace override, or externally supplied execution
+/// backend; `loaded_profile` is retained for `[workspace]` schema validation
+/// only until #40 removes the profile section.
 pub(crate) async fn build_production_turn_deps(
     input: ProductionTurnDepsInput<'_>,
 ) -> Result<ProductionTurnDeps, ApiError> {
@@ -470,7 +472,7 @@ pub(crate) async fn build_production_turn_deps(
         lancet,
         model_id,
         runtime_version,
-        loaded_profile,
+        loaded_profile: _loaded_profile,
     } = input;
     // Canonicalize the project root up front so the profile policy and the
     // runtime share one canonical root. Falls back to the raw path on failure,
@@ -492,30 +494,7 @@ pub(crate) async fn build_production_turn_deps(
             .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?
     };
 
-    // Pass None for baseline_oid to maintain backward compatibility.
-    // Future lifecycle orchestration will inject the preflight baseline from
-    // resolve_turn_target when Upper-backed turns are activated.
-    let upper_config = resolve_upper_config(loaded_profile, Path::new(project_root), None)
-        .map_err(|err| match err {
-            UpperPrepareError::MissingWorkspaceSection
-            | UpperPrepareError::MissingWorkspaceSource => {
-                ApiError::BadRequest(
-                    "Upper-backed tools require an explicit [workspace] section with a real image or template source".into(),
-                )
-            }
-            other => ApiError::BadRequest(other.to_string()),
-        })?;
-    let prepared = prepare_upper(&upper_config, request.workspace_override.clone())
-        .await
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-    let upper_context = prepared.backend.upper_context().clone();
-    let execution = ExecutionRouting {
-        backend: Arc::new(prepared.backend),
-        upper: upper_context,
-    };
-    let mut upper_lease = prepared.lease;
-
-    let runtime_result = LancetRuntime::build(LancetRuntimeConfig {
+    let runtime = LancetRuntime::build(LancetRuntimeConfig {
         project_root: PathBuf::from(project_root),
         enabled_tools: enabled_tools.to_vec(),
         policy,
@@ -523,17 +502,8 @@ pub(crate) async fn build_production_turn_deps(
         audit,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
-        execution,
     })
-    .map_err(map_lancet_err);
-
-    let runtime = match runtime_result {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            let _ = upper_lease.destroy().await;
-            return Err(err);
-        }
-    };
+    .map_err(map_lancet_err)?;
 
     let parts = runtime.into_parts();
 
@@ -560,7 +530,6 @@ pub(crate) async fn build_production_turn_deps(
         cep_client: parts.client,
         audit: parts.audit,
         audit_context: parts.audit_context,
-        upper_lease,
         #[cfg(test)]
         build_metrics: CepRuntimeBuildMetrics {
             adapter_instances: 1,
@@ -601,13 +570,6 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         audit,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
-        execution: ExecutionRouting {
-            backend: Arc::new(lancet_native::NullExecutionBackend),
-            upper: lancet_native::UpperContext {
-                execution_backend: "null".into(),
-                upper_workspace_id: "null".into(),
-            },
-        },
     })
     .map_err(map_lancet_err)?;
     let parts = runtime.into_parts();
@@ -626,10 +588,6 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         llm,
         tool_executor: adapter,
     }));
-    let upper_lease = UpperLease::without_handle(Arc::new(
-        lattice_workspace::testing::DeterministicWorkspace::new()
-            .expect("deterministic workspace for test scaffolding"),
-    ) as Arc<dyn lattice_workspace::Workspace>);
     Ok(ProductionTurnDeps {
         agent_loop,
         tool_definitions,
@@ -637,7 +595,6 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         cep_client: parts.client,
         audit: parts.audit,
         audit_context: parts.audit_context,
-        upper_lease,
         build_metrics: CepRuntimeBuildMetrics {
             adapter_instances: 1,
             transport_pairs: 1,
@@ -922,13 +879,6 @@ mod turn_wiring {
         }
     }
 
-    fn deterministic_workspace() -> Arc<dyn lattice_workspace::Workspace> {
-        Arc::new(
-            lattice_workspace::testing::DeterministicWorkspace::new()
-                .expect("deterministic workspace for test"),
-        )
-    }
-
     fn init_git_repo(root: &std::path::Path) {
         std::fs::write(root.join("README.md"), "init\n").expect("write README");
         std::process::Command::new("git")
@@ -1003,7 +953,6 @@ mod turn_wiring {
             test_llm: Some(llm.clone()),
             test_project_root: Some(project.path().to_string_lossy().into()),
             test_persist_audit: Some(false),
-            workspace_override: Some(deterministic_workspace()),
         };
         let enabled_tools = [TodoWrite::NAME.to_string()];
         let deps = build_production_turn_deps(ProductionTurnDepsInput {
@@ -1039,38 +988,11 @@ mod turn_wiring {
         assert_eq!(before, after);
     }
 
-    #[tokio::test]
-    async fn upper_lifecycle_session_tool_creates_lease() {
-        let dir = TempDir::new().unwrap();
-        init_git_repo(dir.path());
-        let llm: Arc<dyn lattice_agent::LlmClient> =
-            Arc::new(FakeStreamingLlmClient::builder().build());
-        let profile = profile_with_workspace(vec![TodoWrite::NAME.to_string()]);
-        let request = RunTurnRequest {
-            input: "hi".into(),
-            session_id: "s".into(),
-            loaded_profile: Some(profile.clone()),
-            cancel_flag: None,
-            test_llm: Some(llm.clone()),
-            test_project_root: None,
-            test_persist_audit: None,
-            workspace_override: Some(deterministic_workspace()),
-        };
-        let enabled_tools = [TodoWrite::NAME.to_string()];
-        let deps = build_production_turn_deps(ProductionTurnDepsInput {
-            request: &request,
-            project_root: dir.path().to_str().unwrap(),
-            enabled_tools: &enabled_tools,
-            llm,
-            lancet: None,
-            model_id: "m",
-            runtime_version: "v",
-            loaded_profile: &profile,
-        })
-        .await
-        .expect("direct deps");
-        assert!(deps.upper_lease.handle().is_some());
-    }
+    // #37: `upper_lifecycle_session_tool_creates_lease` was removed — the
+    // Upper lease it asserted on no longer exists. The Direct-Local runtime
+    // builds its own execution routing internally, so an equivalent smoke
+    // test is `runtime_config_defaults_have_no_execution_field` in
+    // `lancet-api::runtime`.
 
     #[test]
     fn catalog_exposure_omits_unknown_envelope_method() {

@@ -329,17 +329,7 @@ async fn preflight_create(
     storage
         .preflight_create(&params.path)
         .await
-        .map_err(|diag| {
-            CepError::new(
-                CepErrorCode::ExecutionFailed,
-                diag.message.clone(),
-                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                    field: "path".into(),
-                    reason: diag.message,
-                }),
-                Retriability::Permanent,
-            )
-        })?;
+        .map_err(|diag| create_preflight_diag_to_cep(diag, &params.path))?;
     let created_dirs = if params.create_parents {
         missing_parent_dirs(auth, &params.path).await?
     } else {
@@ -477,10 +467,69 @@ async fn write_create(
     let ws_path = WorkspacePath::parse(&create.path)
         .map_err(|err| validation_error("path", err.to_string()))?;
     ctx.mark_backend_invoked();
+    // ADR 0003 decision 8: no-replace install. A concurrent writer between
+    // `preflight_create` and this install surfaces as a create-target-exists
+    // error, which the Agent must observe and replan rather than have
+    // silently overwritten.
     storage
-        .write_edit_target(&create.path, &ws_path, create.content.as_bytes(), 0)
+        .create_edit_target(&create.path, &ws_path, create.content.as_bytes())
         .await
-        .map_err(patch_diag_to_cep)
+        .map_err(create_diag_to_cep)
+}
+
+/// Map a create-install diagnostic to a CEP error.
+///
+/// A "target already exists" diagnostic (the no-replace precondition failed
+/// at install time) maps to `ReplanRequired`: the Agent must observe current
+/// Local state and plan again (ADR 0003 decision 7). Other install failures
+/// remain permanent execution failures.
+fn create_diag_to_cep(diag: crate::edit::types::PatchDiagnostic) -> CepError {
+    if diag.message.contains("already exists") {
+        return CepError::new(
+            CepErrorCode::ReplanRequired,
+            format!(
+                "mutate.create target '{}' already exists at install time; observe.workspace and replan",
+                diag.path.as_deref().unwrap_or("")
+            ),
+            CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
+                method: Create::NAME.into(),
+                reason: "ReplanRequired: create target exists at install".into(),
+            }),
+            Retriability::RequiresReplan,
+        );
+    }
+    patch_diag_to_cep(diag)
+}
+
+/// Map a create preflight diagnostic to a CEP error.
+///
+/// A "target already exists" preflight diagnostic is a stale create
+/// precondition (ADR 0003 decision 7) and maps to `ReplanRequired`. Other
+/// preflight failures (path validation, guard L1) remain permanent validation
+/// errors.
+fn create_preflight_diag_to_cep(diag: crate::edit::types::PatchDiagnostic, path: &str) -> CepError {
+    if diag.message.contains("already exists") {
+        return CepError::new(
+            CepErrorCode::ReplanRequired,
+            format!(
+                "mutate.create target '{path}' already exists; observe.workspace and replan"
+            ),
+            CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
+                method: Create::NAME.into(),
+                reason: "ReplanRequired: create target exists".into(),
+            }),
+            Retriability::RequiresReplan,
+        );
+    }
+    CepError::new(
+        CepErrorCode::ExecutionFailed,
+        diag.message.clone(),
+        CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+            field: "path".into(),
+            reason: diag.message,
+        }),
+        Retriability::Permanent,
+    )
 }
 
 fn patch_diag_to_cep(diag: crate::edit::types::PatchDiagnostic) -> CepError {

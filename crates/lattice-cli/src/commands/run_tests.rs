@@ -194,10 +194,6 @@ async fn run_integration_commits_existing_session() {
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
         test_persist_audit: None,
-        workspace_override: Some(std::sync::Arc::new(
-            lattice_workspace::testing::DeterministicWorkspace::new()
-                .expect("deterministic workspace"),
-        )),
     };
 
     let result = lattice_api::run_turn(session_api, request).await;
@@ -218,8 +214,6 @@ async fn run_integration_commits_existing_session() {
 #[tokio::test]
 async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
     use lattice_profile::WorkspaceSection;
-    use lattice_workspace::testing::DeterministicWorkspace;
-    use std::sync::Arc;
 
     let workspace = tempfile::tempdir().unwrap();
     let ws = workspace.path();
@@ -320,9 +314,6 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
         test_llm: Some(llm),
         test_project_root: Some(ws.to_string_lossy().to_string()),
         test_persist_audit: None,
-        workspace_override: Some(Arc::new(
-            DeterministicWorkspace::new().expect("deterministic workspace for upper-backed test"),
-        )),
     };
 
     let result = lattice_api::run_turn(session_api, request)

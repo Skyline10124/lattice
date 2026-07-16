@@ -115,16 +115,6 @@ pub enum SessionAction {
         /// Commit id to reset to.
         target: String,
     },
-    /// Resume a pending turn from a cold snapshot (cold resume).
-    Resume {
-        /// Session id containing the pending turn to resume.
-        session_id: String,
-    },
-    /// Prune retained snapshots scoped to a session (manual prune).
-    PruneSnapshots {
-        /// Session id whose snapshots should be pruned.
-        session_id: String,
-    },
     /// One-shot SQLite→Git session graph migration.
     ///
     /// Reads the legacy SQLite session DB, writes equivalent Git session commits
@@ -188,14 +178,6 @@ pub async fn run(
             let exit = cmd_send_api(&api, &session_id, prompt, json, verbose).await;
             Ok(exit)
         }
-        SessionAction::Resume { session_id } => {
-            let exit = cmd_resume_api(&api, &session_id, json).await;
-            Ok(exit)
-        }
-        SessionAction::PruneSnapshots { session_id } => {
-            let exit = cmd_prune_snapshots_api(&api, &session_id, json).await;
-            Ok(exit)
-        }
         other => {
             run_with_api(&api, other, json)?;
             Ok(std::process::ExitCode::SUCCESS)
@@ -240,11 +222,6 @@ pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) 
         } => cmd_diff_api(api, &session_id, &from, &to, json)?,
         SessionAction::Reset { session_id, target } => {
             cmd_reset_api(api, &session_id, &target, json)?
-        }
-        SessionAction::Resume { .. } | SessionAction::PruneSnapshots { .. } => {
-            return Err(anyhow::anyhow!(
-                "resume and prune-snapshots require the async dispatcher"
-            ));
         }
         SessionAction::Migrate { .. } => {
             return Err(anyhow::anyhow!(
@@ -738,133 +715,6 @@ fn cmd_reset_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -
     Ok(())
 }
 
-/// Resume a pending turn from a cold snapshot.
-///
-/// Calls the typed API (`lattice_api::resume_turn`) and renders the resulting
-/// [`TurnCommit`] in JSON or human mode. Does not implement runtime logic locally.
-async fn cmd_resume_api(api: &SessionApi, session_id: &str, json: bool) -> std::process::ExitCode {
-    let request = lattice_api::ResumeTurnRequest {
-        session_id: session_id.to_string(),
-        loaded_profile: None,
-        cancel_flag: None,
-        workspace_override: None,
-    };
-
-    match lattice_api::resume_turn(api, request).await {
-        Ok(commit) => {
-            if json {
-                let value = serde_json::json!({
-                    "type": "turn_committed",
-                    "session_id": commit.session_id,
-                    "commit_id": commit.commit_id,
-                    "status": format!("{:?}", commit.status),
-                    "disposition": format!("{:?}", commit.disposition),
-                    "agent": commit.agent_name,
-                    "source_commit_id": commit.parent_ids.first().cloned().unwrap_or_default(),
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&value).unwrap_or_default()
-                );
-            } else {
-                println!(
-                    "{} Resumed session {} \u{2192} commit {} ({} / {})",
-                    "\u{2713}".green(),
-                    display_id(session_id).cyan(),
-                    display_id(&commit.commit_id).bold(),
-                    format!("{:?}", commit.status).to_lowercase(),
-                    format!("{:?}", commit.disposition).to_lowercase(),
-                );
-            }
-            std::process::ExitCode::SUCCESS
-        }
-        Err(e) => {
-            let exit_code = if matches!(&e, lattice_api::ApiError::NotFound(_)) {
-                2
-            } else {
-                1
-            };
-            if json {
-                let value = serde_json::json!({
-                    "type": "error",
-                    "session_id": session_id,
-                    "error": format!("{e:#}"),
-                });
-                eprintln!(
-                    "{}",
-                    serde_json::to_string_pretty(&value).unwrap_or_default()
-                );
-            } else {
-                eprintln!("{}: {:#}", "error".red(), e);
-            }
-            std::process::ExitCode::from(exit_code)
-        }
-    }
-}
-
-/// Prune retained snapshots scoped to a session.
-///
-/// Calls the typed API (`lattice_api::prune_session_snapshots`) and renders
-/// the exact released/skipped/missing counts. Requires a workspace override
-/// in production; without it the API returns an error.
-async fn cmd_prune_snapshots_api(
-    api: &SessionApi,
-    session_id: &str,
-    json: bool,
-) -> std::process::ExitCode {
-    let request = lattice_api::PruneSnapshotsRequest {
-        session_id: session_id.to_string(),
-        workspace_override: None,
-    };
-
-    match lattice_api::prune_session_snapshots(api, request).await {
-        Ok(result) => {
-            let released_count = result.released.len();
-            let skipped_count = result.skipped.len();
-            let missing_count = result.already_missing.len();
-            if json {
-                let value = serde_json::json!({
-                    "type": "prune_complete",
-                    "session_id": session_id,
-                    "released": released_count,
-                    "skipped": skipped_count,
-                    "already_missing": missing_count,
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&value).unwrap_or_default()
-                );
-            } else {
-                println!(
-                    "{} Pruned session {} snapshots: {} released, {} skipped, {} already missing",
-                    "\u{2713}".green(),
-                    display_id(session_id).cyan(),
-                    released_count,
-                    skipped_count,
-                    missing_count,
-                );
-            }
-            std::process::ExitCode::SUCCESS
-        }
-        Err(e) => {
-            if json {
-                let value = serde_json::json!({
-                    "type": "error",
-                    "session_id": session_id,
-                    "error": format!("{e:#}"),
-                });
-                eprintln!(
-                    "{}",
-                    serde_json::to_string_pretty(&value).unwrap_or_default()
-                );
-            } else {
-                eprintln!("{}: {:#}", "error".red(), e);
-            }
-            std::process::ExitCode::from(1)
-        }
-    }
-}
-
 fn display_id(id: &str) -> String {
     if id.len() > 8 {
         let end = id.char_indices().nth(8).map(|(i, _)| i).unwrap_or(id.len());
@@ -1265,52 +1115,6 @@ mod session_cli {
         let result = display_id(id);
         assert!(result.len() < id.len());
         assert!(result.ends_with(".."));
-    }
-
-    // ─── resume and prune-snapshots source tests (36-15 Task 2 RED) ──────
-
-    /// Helper: return only the implementation portion of session.rs
-    /// (lines before #[cfg(test)] mod session_cli), which excludes test
-    /// assertions and avoids self-matching in source scans.
-    fn impl_source() -> String {
-        let full = include_str!("session.rs");
-        // Take only lines before the first `mod session_cli` test module
-        // to avoid matching test assertion strings in source scans.
-        let mut lines = Vec::new();
-        for line in full.lines() {
-            if line.starts_with("mod session_cli {") {
-                break;
-            }
-            lines.push(line);
-        }
-        lines.join("\n")
-    }
-
-    #[test]
-    fn session_resume_variant_exists_in_enum() {
-        let src = impl_source();
-        assert!(
-            src.contains("Resume {") || src.contains("Resume{"),
-            "SessionAction enum must define a Resume variant"
-        );
-    }
-
-    #[test]
-    fn session_prune_handler_function_exists() {
-        let src = impl_source();
-        assert!(
-            src.contains("fn cmd_prune_snapshots_api"),
-            "session.rs must define a cmd_prune_snapshots_api handler function"
-        );
-    }
-
-    #[test]
-    fn session_prune_calls_typed_api() {
-        let src = impl_source();
-        assert!(
-            src.contains("prune_session_snapshots("),
-            "cmd_prune_snapshots_api must call the typed API prune_session_snapshots()"
-        );
     }
 
     // ─── project_branch parser tests (36-15 Task 1 RED) ───────────────────

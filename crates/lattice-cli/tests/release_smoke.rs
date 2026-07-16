@@ -226,26 +226,8 @@ fn release_smoke_release_gate_v1_4_includes_lancet_boundary_check() {
     );
 }
 
-// ─── resume / prune-snapshots CLI surface (36-15 Task 3) ──────────────────
-
-#[test]
-fn smoke_session_prune_snapshots_without_session_id_fails() {
-    let home = temp_home("prune-no-id");
-    let output = lattice(&home)
-        .args(["session", "prune-snapshots"])
-        .output()
-        .expect("session prune-snapshots should run");
-
-    assert!(
-        !output.status.success(),
-        "session prune-snapshots without session_id should fail"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("session_id")
-            || stderr.contains("required")
-            || stderr.contains("USAGE")
-            || stderr.contains("Usage"),
-        "prune failure should mention missing argument, got: {stderr}"
-    );
-}
+// #37: the `session resume` and `session prune-snapshots` subcommands were
+// removed with the Upper/retained-snapshot lifecycle. The smoke test that
+// asserted `prune-snapshots` rejected a missing session_id was deleted at the
+// same time — the subcommand no longer exists, so the assertion no longer
+// reflects an intentional contract.

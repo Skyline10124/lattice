@@ -158,7 +158,6 @@ fn make_request(
             test_llm: Some(llm),
             test_project_root: Some(ws.root.to_string_lossy().to_string()),
             test_persist_audit: None,
-            workspace_override: None,
         },
         &ws.loaded
             .profile

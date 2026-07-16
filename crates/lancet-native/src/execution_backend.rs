@@ -1,11 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Backend-neutral relative-path execution contracts for Upper routing.
+//! Backend-neutral relative-path execution contracts.
 //!
-//! Defines the typed seam between native CEP handlers and an Upper workspace
-//! backend. No host/Lower implementation lives here — a missing or failing
-//! backend is an error, never a host fallback.
+//! Defines the typed seam between native CEP handlers and a workspace
+//! backend. As of #37 the sole production backend is the Direct-Local
+//! `LocalExecutionBackend` wrapping the one concrete `LocalWorkspace`; the
+//! trait, `ExecutionRouting`, and `UpperContext` carrier are migration
+//! residue that #38 removes. No host/Lower implementation lives here — a
+//! missing or failing backend is an error, never a host fallback.
 
 use std::fmt;
 use std::future::Future;
@@ -278,6 +281,32 @@ pub trait ExecutionBackend: Send + Sync {
         content: &[u8],
     ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>;
 
+    /// No-replace create install (ADR 0003 decision 8).
+    ///
+    /// Must fail with an error that the caller maps to `ReplanRequired` if the
+    /// target already exists at install time. The default impl is a
+    /// check-then-write fallback for backends that do not provide an atomic
+    /// no-replace primitive; the Direct-Local backend overrides it with
+    /// `O_CREAT|O_EXCL` so a concurrent writer between preflight and install
+    /// is detected rather than silently overwritten.
+    fn create_file<'a>(
+        &'a self,
+        path: &'a WorkspacePath,
+        content: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Non-atomic fallback: callers without an O_EXCL primitive.
+            // Direct-Local overrides this; NullExecutionBackend never reaches it.
+            let facts = self.resolve_path(path, PathIntent::Create).await?;
+            if facts.exists {
+                return Err(ExecutionBackendError::ExecutionFailed {
+                    message: "target already exists".into(),
+                });
+            }
+            self.write_file(path, content).await
+        })
+    }
+
     fn remove_file(
         &self,
         path: &WorkspacePath,
@@ -304,6 +333,191 @@ pub trait ExecutionBackend: Send + Sync {
     fn changed_paths(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>;
+}
+
+/// Crate-internal Direct-Local migration adapter (#37).
+///
+/// Wraps the one concrete [`crate::workspace::LocalWorkspace`] behind the
+/// existing [`ExecutionBackend`] trait so native CEP handlers keep their
+/// typed seam during the migration cutover. This is not a public extension
+/// point: there is exactly one production backend, and #38 removes this
+/// adapter along with the trait itself.
+struct LocalExecutionBackend {
+    workspace: Arc<crate::workspace::LocalWorkspace>,
+}
+
+impl ExecutionBackend for LocalExecutionBackend {
+    fn backend_name(&self) -> &str {
+        "direct-local"
+    }
+
+    fn resolve_path(
+        &self,
+        path: &WorkspacePath,
+        _intent: PathIntent,
+    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>> {
+        let ws = Arc::clone(&self.workspace);
+        let path = path.clone();
+        Box::pin(async move {
+            // Delegate to the concrete workspace's secure resolver so the
+            // per-segment symlink walk lives in one place. #38 removes this
+            // adapter with the trait.
+            tokio::task::spawn_blocking(move || {
+                ws.resolve_facts(&path).map_err(ExecutionBackendError::from)
+            })
+            .await
+            .map_err(|e| ExecutionBackendError::ExecutionFailed {
+                message: format!("resolve_path join: {e}"),
+            })?
+        })
+    }
+
+    fn read_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>> {
+        let ws = Arc::clone(&self.workspace);
+        let path = path.clone();
+        Box::pin(async move {
+            ws.read_file(&path)
+                .await
+                .map_err(ExecutionBackendError::from)
+        })
+    }
+
+    fn write_file(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
+        let ws = Arc::clone(&self.workspace);
+        let path = path.clone();
+        let content = content.to_vec();
+        Box::pin(async move {
+            // Edit install: atomic replacement (rename). The create path
+            // uses `create_file` below for the no-replace guarantee.
+            ws.install_atomic(&path, &content)
+                .await
+                .map(|_| ())
+                .map_err(ExecutionBackendError::from)
+        })
+    }
+
+    fn create_file(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
+        let ws = Arc::clone(&self.workspace);
+        let path = path.clone();
+        let content = content.to_vec();
+        Box::pin(async move {
+            // ADR 0003 decision 8: no-replace install (O_CREAT|O_EXCL). A
+            // concurrent writer between preflight and install surfaces as
+            // TargetExists → ReplanRequired rather than a silent overwrite.
+            // `create_parents` follows the handler's `create.create_parents`.
+            ws.create_excl(&path, &content, true)
+                .await
+                .map(|_| ())
+                .map_err(ExecutionBackendError::from)
+        })
+    }
+
+    fn remove_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
+        let ws = Arc::clone(&self.workspace);
+        let path = path.clone();
+        Box::pin(async move {
+            ws.remove_file(&path)
+                .await
+                .map_err(ExecutionBackendError::from)
+        })
+    }
+
+    fn list_dir(
+        &self,
+        path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
+    {
+        let ws = Arc::clone(&self.workspace);
+        let path = path.clone();
+        Box::pin(async move {
+            ws.list_dir(&path)
+                .await
+                .map_err(ExecutionBackendError::from)
+        })
+    }
+
+    fn grep(
+        &self,
+        request: &GrepRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>> {
+        let ws = Arc::clone(&self.workspace);
+        let request = request.clone();
+        Box::pin(async move {
+            // The handler clamps to `policy.observation.max_grep_matches`
+            // before calling; 1000 is a backend safety cap that the
+            // handler-side budget always overrides.
+            ws.grep(&request, 1000)
+                .await
+                .map_err(ExecutionBackendError::from)
+        })
+    }
+
+    fn find_files(
+        &self,
+        request: &FindRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        let ws = Arc::clone(&self.workspace);
+        let request = request.clone();
+        Box::pin(async move {
+            // The handler clamps to `policy.observation.max_find_paths`
+            // before calling; 1000 is a backend safety cap that the
+            // handler-side budget always overrides.
+            ws.find_files(&request, 1000)
+                .await
+                .map_err(ExecutionBackendError::from)
+        })
+    }
+
+    fn changed_paths(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        // No production caller (verified cfg(test)-only). Direct-Local does
+        // not derive changed-path from a Git subprocess; #38 removes this
+        // method with the trait.
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+
+/// #37 transition-only construction point for the Direct-Local routing.
+///
+/// Builds an [`ExecutionRouting`] wrapping the one concrete
+/// [`crate::workspace::LocalWorkspace`] rooted at `root`. `UpperContext` is
+/// kept as a transitional carrier so the existing `ServerRunConfig` shape is
+/// unchanged; #38 removes both `UpperContext` and the `execution` field.
+///
+/// The `upper_workspace_id` carries the canonical root display string so
+/// audit metadata no longer claims a fictional Upper workspace; #38 drops
+/// the field entirely.
+pub fn direct_local_routing(root: &Path) -> Result<ExecutionRouting, ExecutionBackendError> {
+    let ws = Arc::new(
+        crate::workspace::LocalWorkspace::new(root)
+            .map_err(ExecutionBackendError::from)?,
+    );
+    let upper = UpperContext {
+        execution_backend: "direct-local".into(),
+        upper_workspace_id: ws.root().to_string_lossy().into_owned(),
+    };
+    Ok(ExecutionRouting {
+        backend: Arc::new(LocalExecutionBackend { workspace: ws }),
+        upper,
+    })
 }
 
 /// Minimal no-op execution backend for test scaffolding.

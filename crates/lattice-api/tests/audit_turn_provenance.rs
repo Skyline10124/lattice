@@ -15,7 +15,6 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::LlmEvent;
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_workspace::testing::DeterministicWorkspace;
 use tempfile::TempDir;
 
 fn tool_call_events(id: &str, name: &str, args: &str) -> Vec<LlmEvent> {
@@ -196,9 +195,6 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             test_llm: Some(fake_llm),
             test_project_root: Some(ws.root.to_string_lossy().to_string()),
             test_persist_audit: Some(false),
-            workspace_override: Some(Arc::new(
-                DeterministicWorkspace::new().expect("deterministic workspace"),
-            )),
         },
     )
     .await
