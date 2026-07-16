@@ -20,9 +20,13 @@ release records.
   test-suite rewrite decisions.
 - [`agents/`](agents/) contains repository configuration consumed by engineering
   skills.
-- [`superpowers/`](superpowers/) contains active design contracts.
-  The issue #5 effect-model and tool-context specification remains authoritative
-  while that Codeberg issue is open.
+- [`specs/`](specs/) contains active design contracts. The issue #5
+  effect-model and tool-context specification remains authoritative while that
+  Codeberg issue is open.
+- [`plans/`](plans/) contains per-issue implementation plans for active work.
+  A document belongs in `specs/` or `plans/` only while its issue or
+  implementation remains active; completed, superseded, or abandoned documents
+  move to [`archive/`](archive/).
 
 ## Archive
 
