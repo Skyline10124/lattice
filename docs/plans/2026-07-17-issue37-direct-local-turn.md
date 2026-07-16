@@ -132,15 +132,43 @@ pub fn direct_local_routing(root: &Path) -> Result<ExecutionRouting, LancetError
 
 ## 4. `lattice-api`：切换并删除 Upper 链（no-compat 硬切）
 
-删除：
+实测删除波及面（2026-07-17 复核）比票面直觉大：`turn/mod.rs` 公开
+`promotion`/`resume`/`snapshot_journal`/`upper`/`workspace_backend` 五个模块与
+`promote_verified_candidate`；`lib.rs` 对外 re-export upper/promotion/
+lifecycle/lattice-workspace 四组符号；production 执行路径 `live.rs` 直接引用
+lifecycle 终态分类与 `UpperPrepareError`；`lattice-cli` 有两个建立在 retained
+snapshot 上的子命令。按下述清单处理，全部在本票完成（编译强制，无法推迟）。
+
+### 4.1 模块删除与裁剪
+
+整文件删除：
 
 - `turn/upper.rs`（`prepare_upper`/`UpperLease`/`resolve_upper_config`/
   credential/egress 翻译）
 - `turn/workspace_backend.rs`（`WorkspaceExecutionBackend`）
-- `turn/promotion.rs` + `lib.rs:31-33` 的 `CandidateExport`/`PinnedCandidate`/
-  `PromotionLimits`/`PromotionOutcome`/`VerificationResult` re-export
-  （guest-git promotion 已被 ADR 0001/0003 双重否决，属死路径，即刻删）
-- `RunTurnRequest.workspace_override` 字段；`ProductionTurnDeps.upper_lease` 字段
+- `turn/promotion.rs`（~553 行）+ `turn/mod.rs` 的 `promote_verified_candidate`
+  （guest-git promotion 已被 ADR 0001/0003 双重否决）
+- `turn/resume.rs`（~449 行：`ResumeMode`/`ResumeError`/`resume_turn`/
+  `resolve_resume_mode`/`prune_session_snapshots`——全部绑 retained snapshot）
+- `turn/snapshot_journal.rs`（~391 行；ADR step 3 点名 snapshot
+  journal/reconciliation）
+
+裁剪 `turn/lifecycle.rs`（~468 行，**不能整删**——`live.rs` 的终态分类在用）：
+
+- 保留：`TurnLifecycleOutcome`、`LifecycleFailureKind`、
+  `classify_lifecycle_failure`、`outcome_workspace_less`、`finalize_turn`、
+  `ResourceAction`、`UnfinalizedTurn`（Turn commit 终态证据，与 Upper 无关）
+- 删除：`run_terminal_verification`、`outcome_promoted`、
+  `commit_promoted_with_retry`、`WorkspaceDirtyHook`、
+  `PromotionLifecycleError`、`PromotionSessionMetadata`、`PromotionTurnTarget`
+
+production 代码同步修改：
+
+- `live.rs`：删 `use super::upper::UpperPrepareError` 与对应错误分支；删
+  `upper_lease` 持有与 teardown 序（约 :258-:348 的 lease
+  destroy/retain 分支）
+- `RunTurnRequest.workspace_override` 字段；`ProductionTurnDeps.upper_lease`
+  字段
 - `build_production_turn_deps` 中 `resolve_upper_config`/`prepare_upper`/lease
   destroy 分支——runtime 构建失败不再有 Upper 需要清理
 
@@ -158,15 +186,47 @@ let runtime = LancetRuntime::build(LancetRuntimeConfig {
 .map_err(map_lancet_err)?;
 ```
 
+### 4.2 公共 API 收缩（`lib.rs` + `turn/mod.rs`）
+
+- `lib.rs:31-33`：`CandidateExport`、`PinnedCandidate`、`PromotionLimits`、
+  `PromotionOutcome`、`VerificationResult`（lattice-workspace re-export）
+- `lib.rs:40/:46` 区段：`PromotionLifecycleError`、`PromotionSessionMetadata`、
+  `PromotionTurnTarget`、`prepare_promotion_target`、
+  `promote_preexported_candidate`、`retry_pinned_candidate`、
+  `outcome_promoted`、`run_terminal_verification`、`commit_promoted_with_retry`
+  （保留 `LifecycleFailureKind`、`outcome_workspace_less` 等终态分类符号）
+- `lib.rs:53`：`resolve_upper_config`、`ResolvedUpperConfig`、
+  `UpperPrepareError`
+- `turn/mod.rs`：`pub mod promotion/resume/snapshot_journal/upper/
+  workspace_backend` 五行、`pub use promotion::{..}`、`pub use resume::{..}`、
+  `pub use lifecycle::{..}` 按上述保留/删除名单裁剪
+
+### 4.3 CLI 命令面（编译强制，本票内完成）
+
+- `lattice-cli/commands/session.rs`：`resume_turn`（:753）与
+  `prune_session_snapshots`（:820）两个子命令及其渲染/参数面整删——retained
+  snapshot 实体已不存在
+- `lattice-cli/commands/run_tests.rs` 内嵌测试：删
+  `DeterministicWorkspace`/`workspace_override` 用法，改 temp root；连带删
+  `lattice-cli` 对 `lattice-workspace` 的依赖声明
+
+### 4.4 测试处置表
+
+| 文件 | 处置 |
+|---|---|
+| `tests/turn_target_tests.rs` | 裁剪：`resolve_upper_config`/`UpperPrepareError` 用例删，`resolve_turn_target` 其余用例保留 |
+| `tests/turn_lifecycle_tests.rs` | 删（全部绑 promotion/verification/`DeterministicWorkspace`） |
+| `tests/resume_tests.rs` | 删（绑 `SnapshotRef`/`UpperSpec`；direct-local session-reopen 场景由 #40 harness 骨架与 #24 重建） |
+| `tests/upper_routing.rs`、`tests/promotion_wiring.rs` | 删（契约已不存在） |
+| `tests/consistency.rs`、`tests/release_e2e.rs`、`tests/usage_turn.rs` | 机械改：删 `workspace_override: None` 字段行 |
+| `tests/support/mod.rs` | 删 `deterministic_workspace` helper 与自动注入分支 |
+| `tests/cep_round_trip.rs`、`tests/audit_turn_provenance.rs`、`tests/dogfood_impact_matrix.rs` | 改 temp Local root 直跑（不再需要 override） |
+| `src/turn/{test_support.rs, run_tests.rs, live_tests.rs, cep.rs(turn_wiring)}` | 删 override/`DeterministicWorkspace` 用法，temp root 直跑 |
+
 - `[workspace]` profile 段：schema 保持必填但 runtime 完全不读（#40 删）。
   `profile_with_workspace` 测试 helper 继续存在。
-- 测试处置：`tests/upper_routing.rs` 删除（契约已不存在）；
-  `tests/promotion_wiring.rs` 删除；`cep_round_trip.rs`/
-  `audit_turn_provenance.rs`/`dogfood_impact_matrix.rs` 改为 temp Local root
-  直跑（不再需要 override）；`turn/test_support.rs` 删 `workspace_override`
-  脚手架。
-- `lattice-api/Cargo.toml` 的 `lattice-workspace` 依赖：本票清完 production
-  引用后若测试也不再引用则直接删；有残留则 #40 删。
+- Cargo.toml：本票结束时 `lattice-api` 与 `lattice-cli` 对 `lattice-workspace`
+  的依赖应清零并删除声明；crate 本体删除仍归 #40。
 
 ## 5. 验收 → 测试映射
 

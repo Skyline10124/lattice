@@ -16,14 +16,17 @@ profile 现在**解析失败**——这是 strict schema 的预期终态（票�
 或要求"）。同步 `docs/CONFIGURATION.md`、generated profiles/examples、
 `profile_with_workspace` 类测试 helper。
 
-## 2. lattice-api 残余 Upper/snapshot 面
+## 2. lattice-api / lattice-session 残余 snapshot 面
+
+> `turn/{resume,snapshot_journal,promotion}.rs` 模块与 `resume_tests.rs`
+> 等测试已在 #37 因编译连锁一并删除（见 #37 计划 4.1/4.4）。本票剩余：
 
 - `resolve_turn_target` 的 baseline 注入注释与残留参数。
-- session `snapshot_lost` 标记链（`set_snapshot_lost`/`get_snapshot_lost`，
-  属 retained-snapshot 残留；连同 `lattice-session` graph 契约里的对应方法与
-  resume 分支一起删）。
-- `tests/{release_e2e,resume_tests,turn_target_tests,usage_turn}.rs` 中的
-  workspace fixture。
+- `lattice-session` graph 契约的 `set_snapshot_lost`/`get_snapshot_lost`
+  方法、`SessionGraphStore` trait 对应条目与 `GitSessionGraphStore` 实现
+  （retained-snapshot 标记链的存储侧残余）。
+- `tests/{release_e2e,turn_target_tests,usage_turn}.rs` 中残余的
+  `[workspace]` profile fixture（字段随第 1 步 schema 删除一并清）。
 
 ## 3. lattice-session promotion 残留
 
@@ -35,8 +38,9 @@ profile 现在**解析失败**——这是 strict schema 的预期终态（票�
 - `crates/lattice-workspace/` 整目录。
 - 根 `Cargo.toml`：members 与 `workspace.dependencies` 移除 `lattice-workspace`、
   `microsandbox`。
-- `lattice-cli` 删 `lattice-workspace` 依赖并把 `run_tests.rs` 内嵌测试改
-  temp root。
+- `lattice-api`/`lattice-cli` 对 `lattice-workspace` 的依赖与
+  `run_tests.rs` 内嵌测试已在 #37 清理（见 #37 计划 4.3），此处仅
+  `cargo tree -i lattice-workspace` 验证为零后删 crate。
 
 ## 5. harness
 
