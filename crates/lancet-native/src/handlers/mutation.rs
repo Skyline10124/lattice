@@ -460,9 +460,7 @@ fn create_preflight_diag_to_cep(diag: crate::edit::types::PatchDiagnostic, path:
     if diag.message.contains("already exists") {
         return CepError::new(
             CepErrorCode::ReplanRequired,
-            format!(
-                "mutate.create target '{path}' already exists; observe.workspace and replan"
-            ),
+            format!("mutate.create target '{path}' already exists; observe.workspace and replan"),
             CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
                 method: Create::NAME.into(),
                 reason: "ReplanRequired: create target exists".into(),
@@ -563,12 +561,10 @@ async fn compile_edit_patch(
         });
     }
 
-    let (fragment, post_install_revision) =
-        compile_edit_operation_fragment(params, &before).map_err(|error| {
-            EditCompileFailure {
-                error,
-                local_revision: None,
-            }
+    let (fragment, post_install_revision) = compile_edit_operation_fragment(params, &before)
+        .map_err(|error| EditCompileFailure {
+            error,
+            local_revision: None,
         })?;
     Ok(CompiledEditPatch {
         patch: format!("*** Begin Patch\n{fragment}*** End Patch\n"),
@@ -1335,6 +1331,9 @@ mod edit_tests {
         );
         assert!(metadata["cep_preflight"].get("backend_invoked").is_none());
         let on_disk = std::fs::read_to_string(dir.path().join("target.txt")).unwrap();
-        assert_eq!(on_disk, before, "stale-hash edit must not modify the target");
+        assert_eq!(
+            on_disk, before,
+            "stale-hash edit must not modify the target"
+        );
     }
 }

@@ -169,7 +169,6 @@ impl WorkspacePolicy {
     }
 }
 
-
 fn apply_denied_write_patterns(
     region: &mut crate::effect::region::AuthorizedEffectRegion,
     patterns: &[String],

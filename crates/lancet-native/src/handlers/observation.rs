@@ -16,13 +16,13 @@ use crate::workspace::{
     FindRequest, GrepRequest, LocalWorkspaceError, PathFacts, PathIntent, VisibilityEngine,
     WorkspacePath, join_rel,
 };
-use lancet_authority::{HiddenReason, ReadVisibility, ReadVisibilityPolicy};
 use lancet_audit::{RejectionRecord, RejectionStage};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::validate_path_facts;
 use lancet_authority::policy::CepPolicyConfig;
 use lancet_authority::policy::budget::BudgetExhausted;
+use lancet_authority::{HiddenReason, ReadVisibility, ReadVisibilityPolicy};
 use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
@@ -251,7 +251,6 @@ async fn emit_success_metadata(
         .await;
 }
 
-
 fn read_visibility_policy(ctx: &HandlerContext) -> ReadVisibilityPolicy {
     ctx.default_policy_hook
         .as_ref()
@@ -293,13 +292,8 @@ async fn resolve_and_validate(
     let facts = match ctx.workspace.resolve_facts(ws_path, intent).await {
         Ok(facts) => facts,
         Err(err) => {
-            record_observation_denial(
-                ctx,
-                method,
-                RejectionStage::PathGuard,
-                "local_workspace",
-            )
-            .await;
+            record_observation_denial(ctx, method, RejectionStage::PathGuard, "local_workspace")
+                .await;
             return Err(observation_workspace_error(request_path, err));
         }
     };
@@ -329,7 +323,8 @@ async fn handle_read_file(
         )
     })?;
 
-    let facts = resolve_and_validate(&ctx, &ws_path, PathIntent::Read, &params.path, method).await?;
+    let facts =
+        resolve_and_validate(&ctx, &ws_path, PathIntent::Read, &params.path, method).await?;
     if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::File)) {
         return Err(path_not_found(&params.path));
     }
@@ -1419,7 +1414,9 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            find.paths.iter().all(|p| p != ".env" && !p.starts_with("secret")),
+            find.paths
+                .iter()
+                .all(|p| p != ".env" && !p.starts_with("secret")),
             "find leaked hidden paths: {:?}",
             find.paths
         );
@@ -1594,5 +1591,4 @@ mod tests {
         .unwrap();
         assert!(!find.paths.iter().any(|p| p == ".env"));
     }
-
 }

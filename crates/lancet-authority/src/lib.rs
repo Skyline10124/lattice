@@ -11,10 +11,10 @@ pub mod effect;
 pub mod guard;
 pub mod policy;
 
-pub use policy::{
-    BudgetLimits, CepPolicyConfig, CepTurnContext, NetworkPolicyConfig, ObservationPolicyConfig,
-};
 pub use policy::visibility::{
     GitFileStatus, HiddenReason, ReadVisibility, ReadVisibilityPolicy, SYSTEM_PATH_EXCLUSIONS,
     under_system_exclusion,
+};
+pub use policy::{
+    BudgetLimits, CepPolicyConfig, CepTurnContext, NetworkPolicyConfig, ObservationPolicyConfig,
 };

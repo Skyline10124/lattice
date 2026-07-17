@@ -294,7 +294,10 @@ mod tests {
             .call_raw("exec.command_run", serde_json::json!({}))
             .await
             .expect_err("retired method must error");
-        assert_eq!(err.wire_code(), lancet_protocol::error::jsonrpc::METHOD_NOT_FOUND);
+        assert_eq!(
+            err.wire_code(),
+            lancet_protocol::error::jsonrpc::METHOD_NOT_FOUND
+        );
 
         // Durable audit metadata carries no routing identity: no
         // execution_backend, upper_workspace_id, or invocation flags.

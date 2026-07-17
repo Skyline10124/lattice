@@ -69,9 +69,7 @@ impl EditStorage {
             .with_path(path.to_string())
             .with_operation_index(operation_index)
         })?;
-        let facts = self
-            .preflight_path(&ws_path, PathIntent::Read)
-            .await?;
+        let facts = self.preflight_path(&ws_path, PathIntent::Read).await?;
         validate_facts(ws_path.as_str(), &facts, &self.authorized_region)?;
         if !facts.exists {
             return Err(PatchDiagnostic::new(
@@ -153,11 +151,10 @@ impl EditStorage {
     ) -> Result<(), PatchDiagnostic> {
         match (operation, previous_bytes) {
             (super::types::FileOperationKind::Update, Some(bytes))
-            | (super::types::FileOperationKind::Delete, Some(bytes)) => {
-                self.write_edit_target(path, target, bytes, operation_index)
-                    .await
-                    .map(|_| ())
-            }
+            | (super::types::FileOperationKind::Delete, Some(bytes)) => self
+                .write_edit_target(path, target, bytes, operation_index)
+                .await
+                .map(|_| ()),
             (super::types::FileOperationKind::Delete, None) => {
                 self.remove_edit_target(path, target, operation_index).await
             }
@@ -232,11 +229,7 @@ fn validate_facts(
     })
 }
 
-fn local_io_error(
-    path: &str,
-    operation_index: usize,
-    err: LocalWorkspaceError,
-) -> PatchDiagnostic {
+fn local_io_error(path: &str, operation_index: usize, err: LocalWorkspaceError) -> PatchDiagnostic {
     PatchDiagnostic::new(
         PatchErrorCode::IoError,
         format!("local workspace I/O failed: {err}"),

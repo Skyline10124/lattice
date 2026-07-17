@@ -57,8 +57,8 @@ async fn apply_patch(
 #[cfg(test)]
 fn test_storage(project_root: &Path) -> EditStorage {
     use std::sync::Arc;
-    let workspace = crate::workspace::LocalWorkspace::new(project_root)
-        .expect("test local workspace");
+    let workspace =
+        crate::workspace::LocalWorkspace::new(project_root).expect("test local workspace");
     EditStorage::new(
         Arc::new(workspace),
         lancet_authority::effect::region::AuthorizedEffectRegion::empty(),
@@ -494,17 +494,15 @@ async fn write_apply_plan(
 
     for change in &plan.changes {
         let write_result = match (&change.operation, &change.bytes_after) {
-            (FileOperationKind::Update, Some(after)) => {
-                storage
-                    .write_edit_target(
-                        &change.path,
-                        &change.target_path,
-                        after,
-                        change.operation_index,
-                    )
-                    .await
-                    .map(|_| ())
-            }
+            (FileOperationKind::Update, Some(after)) => storage
+                .write_edit_target(
+                    &change.path,
+                    &change.target_path,
+                    after,
+                    change.operation_index,
+                )
+                .await
+                .map(|_| ()),
             (FileOperationKind::Delete, None) => {
                 storage
                     .remove_edit_target(&change.path, &change.target_path, change.operation_index)

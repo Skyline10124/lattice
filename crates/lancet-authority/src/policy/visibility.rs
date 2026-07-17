@@ -162,9 +162,7 @@ fn pattern_matches(pattern: &WritePathPattern, rel: &str) -> bool {
     }
     match pattern {
         WritePathPattern::ExactFile(path) => path_eq(path, rel),
-        WritePathPattern::DirectoryGlob(base) => {
-            path_eq(base, rel) || rel_has_prefix(rel, base)
-        }
+        WritePathPattern::DirectoryGlob(base) => path_eq(base, rel) || rel_has_prefix(rel, base),
     }
 }
 
@@ -204,7 +202,10 @@ mod tests {
 
     fn policy(included: &[&str], denied: &[&str]) -> ReadVisibilityPolicy {
         ReadVisibilityPolicy::from_patterns(
-            &included.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+            &included
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<_>>(),
             &denied.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
         )
         .expect("policy")
@@ -258,7 +259,12 @@ mod tests {
     #[test]
     fn system_exclusion_beats_include() {
         let p = policy(&[".git/**", ".git/config", ".lattice/**"], &[]);
-        for path in [".git", ".git/config", "nested/.git/config", ".lattice/state"] {
+        for path in [
+            ".git",
+            ".git/config",
+            "nested/.git/config",
+            ".lattice/state",
+        ] {
             assert_eq!(
                 p.decide(path, GitFileStatus::Ignored),
                 ReadVisibility::Hidden(HiddenReason::SystemExclusion),

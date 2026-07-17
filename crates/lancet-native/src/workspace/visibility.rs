@@ -138,37 +138,43 @@ mod tests {
     fn init_repo_with_ignore() -> TempDir {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
-        assert!(Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .args(["init"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
         std::fs::write(root.join(".gitignore"), ".env\nsecret/\n").unwrap();
         std::fs::write(root.join("visible.txt"), "ok\n").unwrap();
         std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
         std::fs::create_dir(root.join("secret")).unwrap();
         std::fs::write(root.join("secret/key"), "k\n").unwrap();
-        assert!(Command::new("git")
-            .args(["add", "visible.txt", ".gitignore"])
-            .current_dir(root)
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("git")
-            .args([
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-m",
-                "init"
-            ])
-            .current_dir(root)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("git")
+                .args(["add", "visible.txt", ".gitignore"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-m",
+                    "init"
+                ])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
         dir
     }
 

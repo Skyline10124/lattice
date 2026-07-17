@@ -134,12 +134,10 @@ async fn observe_list_sees_external_addition_between_tool_calls() {
     let client = runtime.client();
 
     let first = client
-        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ListDirectory(
-            ListDirectoryParams {
-                path: ".".into(),
-                limit: None,
-            },
-        ))
+        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ListDirectory(ListDirectoryParams {
+            path: ".".into(),
+            limit: None,
+        }))
         .await
         .expect("first list");
     let ObserveWorkspaceResult::ListDirectory(first) = first else {
@@ -151,12 +149,10 @@ async fn observe_list_sees_external_addition_between_tool_calls() {
     std::fs::write(dir.path().join("added.txt"), "new\n").unwrap();
 
     let second = client
-        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ListDirectory(
-            ListDirectoryParams {
-                path: ".".into(),
-                limit: None,
-            },
-        ))
+        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ListDirectory(ListDirectoryParams {
+            path: ".".into(),
+            limit: None,
+        }))
         .await
         .expect("second list");
     let ObserveWorkspaceResult::ListDirectory(second) = second else {

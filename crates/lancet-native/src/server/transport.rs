@@ -444,9 +444,7 @@ fn compact_success_metadata(method: &str, value: &Value) -> Option<String> {
                 .and_then(|v| v.as_array())
                 .map(|a| a.len())
                 .unwrap_or(0);
-            Some(format!(
-                r#"{{"outcome":"todo_write","op_count":{count}}}"#
-            ))
+            Some(format!(r#"{{"outcome":"todo_write","op_count":{count}}}"#))
         }
         "fetch.web" => {
             let response_size = value

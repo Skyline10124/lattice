@@ -89,7 +89,11 @@ impl LocalWorkspace {
         if path.is_project_root() {
             let meta = fs::symlink_metadata(&self.root)?;
             let kind = metadata_kind(&meta);
-            let byte_size = if meta.is_file() { Some(meta.len()) } else { None };
+            let byte_size = if meta.is_file() {
+                Some(meta.len())
+            } else {
+                None
+            };
             let facts = PathFacts {
                 normalized_path: path.as_str().to_string(),
                 exists: true,
@@ -161,7 +165,11 @@ impl LocalWorkspace {
         let (kind, byte_size) = match &last_meta {
             Some(meta) if last_exists => {
                 let kind = metadata_kind(meta);
-                let byte_size = if meta.is_file() { Some(meta.len()) } else { None };
+                let byte_size = if meta.is_file() {
+                    Some(meta.len())
+                } else {
+                    None
+                };
                 (Some(kind), byte_size)
             }
             _ => (None, None),
@@ -409,11 +417,12 @@ impl LocalWorkspace {
                                 fs::create_dir_all(&cur)?;
                                 created_dirs.push(relative_under(&ws.root, &cur)?);
                             } else if let Ok(m) = fs::symlink_metadata(&cur)
-                                && m.file_type().is_symlink() {
-                                    return Err(LocalWorkspaceError::SymlinkRejected {
-                                        component: cur.clone(),
-                                    });
-                                }
+                                && m.file_type().is_symlink()
+                            {
+                                return Err(LocalWorkspaceError::SymlinkRejected {
+                                    component: cur.clone(),
+                                });
+                            }
                         }
                     }
                 }
@@ -559,7 +568,9 @@ fn cur_strip_count(root: &Path, cur: &Path) -> usize {
 }
 
 fn relative_under(root: &Path, p: &Path) -> Result<String, LocalWorkspaceError> {
-    let rel = p.strip_prefix(root).map_err(|_| LocalWorkspaceError::RootEscape)?;
+    let rel = p
+        .strip_prefix(root)
+        .map_err(|_| LocalWorkspaceError::RootEscape)?;
     let mut parts = Vec::new();
     for c in rel.components() {
         if let Component::Normal(n) = c {
@@ -574,7 +585,9 @@ fn relative_under(root: &Path, p: &Path) -> Result<String, LocalWorkspaceError> 
 fn collect_created_dirs(root: &Path, parent: &Path) -> Result<Vec<String>, LocalWorkspaceError> {
     let mut out = Vec::new();
     let mut cur = root.to_path_buf();
-    let rel = parent.strip_prefix(root).map_err(|_| LocalWorkspaceError::RootEscape)?;
+    let rel = parent
+        .strip_prefix(root)
+        .map_err(|_| LocalWorkspaceError::RootEscape)?;
     for c in rel.components() {
         if let Component::Normal(n) = c {
             cur.push(n);
@@ -686,14 +699,7 @@ fn find_walk(
             }
         }
         if is_dir && visibility.should_descend(&rel) {
-            find_walk(
-                workspace_root,
-                &path,
-                pattern,
-                max_results,
-                visibility,
-                out,
-            )?;
+            find_walk(workspace_root, &path, pattern, max_results, visibility, out)?;
         }
     }
     Ok(())
@@ -908,7 +914,10 @@ mod tests {
             path: WorkspacePath::project_root(),
             glob: None,
         };
-        let matches = ws.grep(&req, 100, ReadVisibilityPolicy::default()).await.unwrap();
+        let matches = ws
+            .grep(&req, 100, ReadVisibilityPolicy::default())
+            .await
+            .unwrap();
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].line_number, 1);
         assert_eq!(matches[1].line_number, 3);
@@ -926,7 +935,10 @@ mod tests {
             pattern: "*.rs".into(),
             path: WorkspacePath::project_root(),
         };
-        let paths = ws.find_files(&req, 100, ReadVisibilityPolicy::default()).await.unwrap();
+        let paths = ws
+            .find_files(&req, 100, ReadVisibilityPolicy::default())
+            .await
+            .unwrap();
         let strs: Vec<_> = paths.iter().map(|p| p.as_str().to_string()).collect();
         assert!(strs.contains(&"a.rs".to_string()));
         assert!(strs.contains(&"sub/c.rs".to_string()));
@@ -947,12 +959,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("a/b/c.txt").unwrap();
-        let created = ws
-            .create_excl(&path, b"hi".as_ref(), true)
-            .await
-            .unwrap();
+        let created = ws.create_excl(&path, b"hi".as_ref(), true).await.unwrap();
         assert!(dir.path().join("a/b/c.txt").exists());
-        assert_eq!(created.created_dirs, vec!["a".to_string(), "a/b".to_string()]);
+        assert_eq!(
+            created.created_dirs,
+            vec!["a".to_string(), "a/b".to_string()]
+        );
     }
 
     #[tokio::test]
