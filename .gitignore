@@ -13,6 +13,7 @@ target/
 .devin/
 .omo/
 .zcode/
+.pi-subagents/
 .mcp.json
 opencode.jsonc
 .pytest_cache/
