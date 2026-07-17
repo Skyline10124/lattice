@@ -143,7 +143,6 @@ async fn emit_success_metadata(
         "response_size_known": response_size_known,
         "truncated": truncated,
         "policy_enforced": true,
-        "backend_invoked": true,
         "budget_charged": bytes_returned,
     });
     ctx.record_durable_metadata(metadata.clone());
@@ -158,15 +157,14 @@ async fn emit_success_metadata(
 async fn emit_denial_metadata(
     ctx: &HandlerContext,
     request_url: &str,
-    backend_invoked: bool,
+    network_attempted: bool,
     method: &'static str,
 ) {
     let metadata = json!({
         "method": method,
         "request_url": request_url,
-        "denial_source": if backend_invoked { "backend" } else { "cep_policy" },
+        "denial_source": if network_attempted { "network" } else { "cep_policy" },
         "policy_enforced": true,
-        "backend_invoked": backend_invoked,
     });
     ctx.record_durable_metadata(metadata.clone());
     ctx.events
@@ -188,7 +186,6 @@ async fn emit_budget_denial_metadata(
         "request_url": request_url,
         "denial_source": "cep_budget",
         "policy_enforced": true,
-        "backend_invoked": true,
         "budget_limit": budget_err.limit,
         "budget_requested": budget_err.requested,
         "budget_remaining": budget_err.remaining,
@@ -242,7 +239,7 @@ mod tests {
                 call_id: 7,
                 events: EventSink::new(event_tx, 7),
                 cancellation: Cancellation::new(cancel_rx),
-                cep_context,
+                cep_context: Arc::clone(&cep_context),
                 turn_id: "test-turn".into(),
                 durable_metadata:
                     crate::server::call_durable_metadata::CallDurableMetadata::default(),
@@ -257,14 +254,10 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: crate::execution_backend::ExecutionRouting {
-                    backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
-                    upper: crate::execution_backend::UpperContext {
-                        execution_backend: "null".into(),
-                        upper_workspace_id: "null".into(),
-                    },
-                },
-                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+                workspace: Arc::new(
+                    crate::workspace::LocalWorkspace::new(&cep_context.policy.project_root)
+                        .expect("local workspace"),
+                ),
             },
             event_rx,
         )
@@ -393,7 +386,7 @@ mod tests {
         assert_eq!(guard_event.method, "cep.guard_verdict");
         let event = events.recv().await.unwrap();
         assert_eq!(event.params["metadata"]["denial_source"], "cep_policy");
-        assert_eq!(event.params["metadata"]["backend_invoked"], false);
+        assert!(event.params["metadata"].get("backend_invoked").is_none());
     }
 
     #[tokio::test]

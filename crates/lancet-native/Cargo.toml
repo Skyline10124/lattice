@@ -36,3 +36,6 @@ uuid = { workspace = true }
 [features]
 default = []
 inspect-scaffold = ["lancet-catalog/inspect-scaffold"]
+# Narrow LocalWorkspace install-failure injection for integration tests.
+# Enables only the one-shot `fail_next_install` boolean; not a plugin seam.
+test-fault-injection = []

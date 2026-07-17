@@ -28,6 +28,15 @@ in-toto attestation construction, and attestation persistence.
 
 ## Recent Issues
 
+- FIXED #38: `RejectionStage` vocabulary de-Uppered — `AdapterPreflight` →
+  `PathGuard`, `BackendExecution` → `LocalIo`, `VerificationFailure` removed;
+  `CallAuditMetadata.backend_invoked` and all routing metadata
+  (`execution_backend`, `upper_workspace_id`, `adapter_preflight_invoked`,
+  `backend_invoked`) are gone from durable audit rows. Mutation preflight
+  evidence renamed `expected_hash_status` → `local_revision` (carries the
+  observed Local Revision on stale-hash replans). Historical rows written
+  before #38 keep the old labels; alpha-stage no-compat means no label
+  migration — `rejection_stage` query filters match new writes only.
 - FIXED M-24-05: attestation persistence wiring moved into `lancet-api`;
   `lattice-api` consumes it through the public LANCET runtime surface.
 - FIXED issue #11: agent catalog audit CEP methods removed; operator reads live in

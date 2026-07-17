@@ -12,26 +12,33 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+#[cfg(any(test, feature = "test-fault-injection"))]
+use std::sync::Arc;
+#[cfg(any(test, feature = "test-fault-injection"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use regex::Regex;
 
 use crate::edit::content_hash;
-use crate::execution_backend::{
-    DirectoryEntry, FindRequest, GrepMatch, GrepRequest, PathFacts, PathKind, WorkspacePath,
-};
 
-use super::types::{CreatedFile, InstalledFile, LocalWorkspaceError};
+use super::types::{
+    CreatedFile, DirectoryEntry, FindRequest, GrepMatch, GrepRequest, InstalledFile,
+    LocalWorkspaceError, PathFacts, PathIntent, PathKind, WorkspacePath,
+};
 
 /// The single concrete Local Workspace (ADR 0003 decision 3).
 ///
 /// Internal deep module: secure path resolution, bounded read, atomic
 /// installation, and error normalization all live behind this type. It is
-/// `pub(crate)` because native handlers and the migration adapter
-/// ([`crate::execution_backend`]) are the only allowed callers; there is no
-/// public workspace-backend seam.
+/// `pub(crate)` because native handlers and the edit engine are the only
+/// allowed callers; there is no workspace-backend seam.
 pub(crate) struct LocalWorkspace {
     /// Canonical project root. Captured at construction time; never mutates.
     root: PathBuf,
+    /// One-shot install-failure flag for the narrow fault-injection seam
+    /// (`fail_next_install`). Not present in production builds.
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    fail_install: Arc<AtomicBool>,
 }
 
 impl LocalWorkspace {
@@ -41,12 +48,20 @@ impl LocalWorkspace {
     /// `CepPolicyConfig::defaults_for_project_root` tolerance).
     pub(crate) fn new(root: &Path) -> Result<Self, LocalWorkspaceError> {
         let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        Ok(Self { root: canonical })
+        Ok(Self {
+            root: canonical,
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            fail_install: Arc::new(AtomicBool::new(false)),
+        })
     }
 
-    /// The canonical project root captured at construction time.
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
+    /// Clone the shareable state for a `spawn_blocking` closure.
+    fn blocking_clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            fail_install: Arc::clone(&self.fail_install),
+        }
     }
 
     /// Per-segment secure path resolution.
@@ -55,9 +70,14 @@ impl LocalWorkspace {
     /// that is a symlink (parent or leaf) and any resolution that escapes
     /// the canonical root. Missing intermediate parents are recorded as
     /// `parent_exists = false`; the remaining segments are checked lexically.
+    ///
+    /// Resolution is intent-independent: the same secure walk backs read,
+    /// create, overwrite, delete, and list flows. The intent is carried as
+    /// operation vocabulary for the guard/precondition layer.
     fn resolve_secure(
         &self,
         path: &WorkspacePath,
+        _intent: PathIntent,
     ) -> Result<(PathBuf, PathFacts), LocalWorkspaceError> {
         if path.is_project_root() {
             let meta = fs::symlink_metadata(&self.root)?;
@@ -168,17 +188,24 @@ impl LocalWorkspace {
         Ok((cur, facts))
     }
 
-    /// Per-segment secure path resolution exposed for the migration adapter.
+    /// Async per-segment secure resolution returning only the observed facts.
     ///
-    /// Same contract as [`resolve_secure`] but returns only the facts (not
-    /// the resolved host path), so the adapter does not duplicate the
-    /// symlink-walk logic. #38 removes this with the trait.
-    pub(crate) fn resolve_facts(
+    /// Handlers and the edit engine use this for preflight: the facts feed
+    /// both their own flow (existence/kind/byte size) and Guard L1
+    /// validation via [`PathFacts::to_guard`]. Resolution runs in the
+    /// blocking pool.
+    pub(crate) async fn resolve_facts(
         &self,
         path: &WorkspacePath,
+        intent: PathIntent,
     ) -> Result<PathFacts, LocalWorkspaceError> {
-        let (_full, facts) = self.resolve_secure(path)?;
-        Ok(facts)
+        let ws = self.blocking_clone();
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            ws.resolve_secure(&path, intent).map(|(_, facts)| facts)
+        })
+        .await
+        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
     /// Read a file under the workspace, returning its bytes.
@@ -187,11 +214,10 @@ impl LocalWorkspace {
         path: &WorkspacePath,
     ) -> Result<Vec<u8>, LocalWorkspaceError> {
         path.require_file_path()?;
-        let root = self.root.clone();
+        let ws = self.blocking_clone();
         let path = path.clone();
         tokio::task::spawn_blocking(move || {
-            let ws = LocalWorkspace { root };
-            let (full, facts) = ws.resolve_secure(&path)?;
+            let (full, facts) = ws.resolve_secure(&path, PathIntent::Read)?;
             if !facts.exists {
                 return Err(LocalWorkspaceError::NotFound {
                     normalized: path.as_str().to_string(),
@@ -215,11 +241,10 @@ impl LocalWorkspace {
         &self,
         path: &WorkspacePath,
     ) -> Result<Vec<DirectoryEntry>, LocalWorkspaceError> {
-        let root = self.root.clone();
+        let ws = self.blocking_clone();
         let path = path.clone();
         tokio::task::spawn_blocking(move || {
-            let ws = LocalWorkspace { root };
-            let (full, facts) = ws.resolve_secure(&path)?;
+            let (full, facts) = ws.resolve_secure(&path, PathIntent::ListDirectory)?;
             if !facts.exists {
                 return Err(LocalWorkspaceError::NotFound {
                     normalized: path.as_str().to_string(),
@@ -254,11 +279,10 @@ impl LocalWorkspace {
         req: &GrepRequest,
         max_results: usize,
     ) -> Result<Vec<GrepMatch>, LocalWorkspaceError> {
-        let root = self.root.clone();
+        let ws = self.blocking_clone();
         let req = req.clone();
         tokio::task::spawn_blocking(move || {
-            let ws = LocalWorkspace { root };
-            let (full, facts) = ws.resolve_secure(&req.path)?;
+            let (full, facts) = ws.resolve_secure(&req.path, PathIntent::ListDirectory)?;
             if !facts.exists {
                 return Err(LocalWorkspaceError::NotFound {
                     normalized: req.path.as_str().to_string(),
@@ -287,11 +311,10 @@ impl LocalWorkspace {
         req: &FindRequest,
         max_results: usize,
     ) -> Result<Vec<WorkspacePath>, LocalWorkspaceError> {
-        let root = self.root.clone();
+        let ws = self.blocking_clone();
         let req = req.clone();
         tokio::task::spawn_blocking(move || {
-            let ws = LocalWorkspace { root };
-            let (full, facts) = ws.resolve_secure(&req.path)?;
+            let (full, facts) = ws.resolve_secure(&req.path, PathIntent::ListDirectory)?;
             if !facts.exists {
                 return Err(LocalWorkspaceError::NotFound {
                     normalized: req.path.as_str().to_string(),
@@ -317,14 +340,6 @@ impl LocalWorkspace {
     /// with [`LocalWorkspaceError::TargetExists`], which the caller maps to
     /// `ReplanRequired`. Missing parent directories are created when
     /// `create_parents` is true.
-    ///
-    /// Currently exercised only by the module's own ADR-step-1 tests: the
-    /// production `mutate.create` handler installs through
-    /// `EditStorage::write_edit_target` → `install_atomic` (the no-replace
-    /// precondition is enforced at the handler/preflight layer, not here).
-    /// The method is retained as the documented no-replace seam for #38's
-    /// `lancet-runtime` convergence.
-    #[allow(dead_code)]
     pub(crate) async fn create_excl(
         &self,
         path: &WorkspacePath,
@@ -332,12 +347,17 @@ impl LocalWorkspace {
         create_parents: bool,
     ) -> Result<CreatedFile, LocalWorkspaceError> {
         path.require_file_path()?;
-        let root = self.root.clone();
+        let ws = self.blocking_clone();
         let path = path.clone();
         let content = content.to_vec();
         tokio::task::spawn_blocking(move || {
-            let ws = LocalWorkspace { root };
-            let (full, facts) = ws.resolve_secure(&path)?;
+            let (full, facts) = ws.resolve_secure(&path, PathIntent::Create)?;
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            if ws.fail_install.swap(false, Ordering::SeqCst) {
+                return Err(LocalWorkspaceError::Io(std::io::Error::other(
+                    "injected install failure",
+                )));
+            }
             if facts.exists {
                 return Err(LocalWorkspaceError::TargetExists {
                     normalized: path.as_str().to_string(),
@@ -416,12 +436,17 @@ impl LocalWorkspace {
         content: &[u8],
     ) -> Result<InstalledFile, LocalWorkspaceError> {
         path.require_file_path()?;
-        let root = self.root.clone();
+        let ws = self.blocking_clone();
         let path = path.clone();
         let content = content.to_vec();
         tokio::task::spawn_blocking(move || {
-            let ws = LocalWorkspace { root };
-            let (full, _facts) = ws.resolve_secure(&path)?;
+            let (full, _facts) = ws.resolve_secure(&path, PathIntent::Overwrite)?;
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            if ws.fail_install.swap(false, Ordering::SeqCst) {
+                return Err(LocalWorkspaceError::Io(std::io::Error::other(
+                    "injected install failure",
+                )));
+            }
             let parent = full.parent().unwrap_or(&ws.root).to_path_buf();
             fs::create_dir_all(&parent)?;
             let tmp = tempfile::Builder::new()
@@ -452,11 +477,10 @@ impl LocalWorkspace {
         path: &WorkspacePath,
     ) -> Result<(), LocalWorkspaceError> {
         path.require_file_path()?;
-        let root = self.root.clone();
+        let ws = self.blocking_clone();
         let path = path.clone();
         tokio::task::spawn_blocking(move || {
-            let ws = LocalWorkspace { root };
-            let (full, facts) = ws.resolve_secure(&path)?;
+            let (full, facts) = ws.resolve_secure(&path, PathIntent::Delete)?;
             if !facts.exists {
                 return Err(LocalWorkspaceError::NotFound {
                     normalized: path.as_str().to_string(),
@@ -475,19 +499,13 @@ impl LocalWorkspace {
         .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
-    /// Read the current content hash of a file (its Local Revision).
-    ///
-    /// Convenience helper for callers that want the Local Revision without
-    /// pulling the bytes. The production edit handler computes the hash from
-    /// bytes it already read; this method is retained for #38 convergence
-    /// and direct tests.
-    #[allow(dead_code)]
-    pub(crate) async fn content_hash_of(
-        &self,
-        path: &WorkspacePath,
-    ) -> Result<String, LocalWorkspaceError> {
-        let bytes = self.read_file(path).await?;
-        Ok(content_hash(&bytes))
+    /// Flip a one-shot flag so the next install (`install_atomic` or
+    /// `create_excl`) fails before any bytes are written. Narrow test-only
+    /// fault injection proving the install failure boundary leaves the
+    /// target unchanged — a single boolean, not a composable plugin seam.
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    pub(crate) fn fail_next_install(&self) {
+        self.fail_install.store(true, Ordering::SeqCst);
     }
 }
 
@@ -522,10 +540,7 @@ fn relative_under(root: &Path, p: &Path) -> Result<String, LocalWorkspaceError> 
 }
 
 /// Helper used by `create_excl` to enumerate the ancestor directories
-/// created by `create_parents`. Currently only reached via `create_excl`,
-/// which is itself exercised by tests; kept here to avoid re-deriving the
-/// walk when #38 wires the no-replace create into the runtime.
-#[allow(dead_code)]
+/// created by `create_parents`.
 fn collect_created_dirs(root: &Path, parent: &Path) -> Result<Vec<String>, LocalWorkspaceError> {
     let mut out = Vec::new();
     let mut cur = root.to_path_buf();
@@ -640,7 +655,6 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
-    use WorkspacePath;
 
     fn ws_at(dir: &TempDir) -> LocalWorkspace {
         LocalWorkspace::new(dir.path()).expect("local workspace")
@@ -712,18 +726,18 @@ mod tests {
     }
 
     // 5. Expected-hash conflict: the caller checks the precondition; this
-    //    test pins that content_hash_of matches a known blake3 literal
-    //    computed independently, so the precondition comparison is sound.
+    //    test pins that the installed content hash matches a known blake3
+    //    literal computed independently, so the precondition comparison is
+    //    sound.
     #[tokio::test]
-    async fn content_hash_of_matches_independent_blake3() {
+    async fn installed_content_hash_matches_independent_blake3() {
         let dir = TempDir::new().unwrap();
         let body = b"lattice content hash";
-        std::fs::write(dir.path().join("h.txt"), body).unwrap();
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("h.txt").unwrap();
-        let got = ws.content_hash_of(&path).await.unwrap();
+        let created = ws.create_excl(&path, body.as_ref(), false).await.unwrap();
         let want = format!("blake3:{}", blake3::hash(body).to_hex());
-        assert_eq!(got, want);
+        assert_eq!(created.content_hash, want);
     }
 
     // 6. No-replace create: a second create on the same path returns
@@ -762,7 +776,8 @@ mod tests {
     // 8. Partial-write failure: writing into a read-only directory fails and
     //    leaves no partial target on disk (the tempfile is cleaned up by
     //    tempfile::TempDir on drop). This is the real-fault approximation
-    //    ADR step 1 prescribes; formal fault injection is #38.
+    //    ADR step 1 prescribes; the narrow fault-injection seam below covers
+    //    the deterministic boundary.
     #[tokio::test]
     async fn install_atomic_failure_leaves_no_partial_target() {
         let dir = TempDir::new().unwrap();
@@ -783,6 +798,29 @@ mod tests {
             !dir.path().join("ro/new.txt").exists(),
             "no partial target may be left on disk"
         );
+    }
+
+    // 8b. Narrow fault injection (#38): a primed install failure leaves the
+    //     existing target byte-identical, and the flag is one-shot — the
+    //     next install succeeds. This proves the atomic-install failure
+    //     boundary without a composable plugin seam.
+    #[tokio::test]
+    async fn fail_next_install_leaves_target_unchanged_and_resets() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), b"v1").unwrap();
+        let ws = ws_at(&dir);
+        let path = WorkspacePath::parse("f.txt").unwrap();
+
+        ws.fail_next_install();
+        let err = ws.install_atomic(&path, b"v2").await.unwrap_err();
+        assert!(matches!(err, LocalWorkspaceError::Io(_)), "got {err:?}");
+        let on_disk = std::fs::read(dir.path().join("f.txt")).unwrap();
+        assert_eq!(on_disk, b"v1", "failed install must not touch the target");
+
+        // One-shot: the flag was consumed by the failed install.
+        ws.install_atomic(&path, b"v2").await.unwrap();
+        let on_disk = std::fs::read(dir.path().join("f.txt")).unwrap();
+        assert_eq!(on_disk, b"v2");
     }
 
     // ── Supporting tests for observation operations ──────────────────────

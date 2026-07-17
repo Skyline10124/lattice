@@ -56,7 +56,6 @@ async fn emit_scaffold_metadata(ctx: &HandlerContext, method: &str, result: &Sca
                     "observation_payload_bytes": 0,
                     "budget_charged": 0,
                     "policy_enforced": true,
-                    "backend_invoked": false,
                 }
             }),
         )
@@ -111,14 +110,10 @@ mod scaffold_tests {
             })),
             audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
             cep_mode: CepMode::Off,
-            execution: crate::execution_backend::ExecutionRouting {
-                backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
-                upper: crate::execution_backend::UpperContext {
-                    execution_backend: "null".into(),
-                    upper_workspace_id: "null".into(),
-                },
-            },
-            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+            workspace: Arc::new(
+                crate::workspace::LocalWorkspace::new(std::path::Path::new(root))
+                    .expect("local workspace"),
+            ),
         }
     }
 

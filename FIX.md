@@ -2702,3 +2702,108 @@ real Local path / Local Revision / install-result evidence.
 `crates/lancet-native/AGENTS.md`, `crates/lancet-api/src/runtime.rs`,
 `crates/lattice-api/src/turn/lifecycle.rs`,
 `crates/lattice-api/tests/direct_local_acceptance.rs`, `FIX.md`.
+
+## Codeberg #38: Structured Workspace Operations consolidated; ExecutionBackend routing layer deleted — 2026-07-17
+
+Severity: FEATURE (Direct-Local migration step 2 + step 3 deletion half; architecture closure, no compat seams).
+
+**Problem:** After #37's production cutover, the migration scaffolding was
+still live: the `ExecutionBackend` trait, `ExecutionRouting`/`UpperContext`
+carrier, `RoutingInvocationState` flags, `NullExecutionBackend`, the
+`direct_local_routing` adapter, backend spy/null test implementations, and
+routing identity metadata (`execution_backend`, `upper_workspace_id`,
+`adapter_preflight_invoked`, `backend_invoked`) persisted in durable audit.
+LANCET embedders could in principle inject alternative workspace
+implementations, and `fetch.web`/`session.todo_write` carried workspace
+routing state through the shared call context.
+
+**Fix summary:**
+
+- `lancet-native/src/execution_backend.rs` deleted whole-file:
+  `ExecutionBackend`, `ExecutionRouting`, `UpperContext`,
+  `NullExecutionBackend`, `RoutingInvocationState`, `direct_local_routing`,
+  `changed_paths`. Neutral Local-operation vocabulary (`WorkspacePath`,
+  `WorkspacePathError`, `PathFacts`, `PathIntent`, `PathKind`,
+  `DirectoryEntry`, `GrepRequest`, `GrepMatch`, `FindRequest`) moved to
+  `workspace/types.rs`; `PathFacts::to_guard()` now produces the Guard L1
+  view directly, deleting the `path_facts_to_guard` bridge and three
+  duplicated `path_kind` converters. `lib.rs` re-exports shrink accordingly.
+- `HandlerContext` carries `workspace: Arc<LocalWorkspace>` (pub(crate));
+  `execution`/`routing_invocation` and the mark/record routing helpers are
+  gone. `ServerRunConfig` drops `execution`; the native server constructs
+  the one concrete `LocalWorkspace` once per run from
+  `cep_context.policy.project_root` inside `CepServerNativeExt::run_native`
+  (new private `NativeServerRuntime`); `server.run(registry, config)` call
+  sites migrated to `run_native`. `LocalWorkspace` gained an async
+  `resolve_facts` (blocking pool) for handler/edit preflight;
+  `resolve_secure` stays module-private; the unused `root()` accessor and
+  `content_hash_of` were deleted rather than ported.
+- Observation/mutation handlers and the edit engine (`EditStorage`,
+  `apply_parsed_patch`) call the concrete workspace directly.
+  `EditStorage::write_edit_target` returns `InstalledFile` and
+  `create_edit_target` returns `CreatedFile`, so durable mutation metadata
+  records the post-install content hash (Local Revision), the guarded
+  normalized path, and `compiled_patch_format` (was `compiled_patch_backend`).
+- Audit evidence replacement: routing metadata writes deleted from
+  transport/registry; `RejectionStage` vocabulary de-Uppered
+  (`AdapterPreflight` → `PathGuard`, `BackendExecution` → `LocalIo`,
+  `VerificationFailure` deleted); `CallAuditMetadata.backend_invoked` field
+  deleted; `mutation_preflight_metadata` drops `backend_invoked` and renames
+  `expected_hash_status` → `local_revision`, carrying the real observed
+  Local Revision on stale-hash replans via a structured
+  `EditCompileFailure`. On success the edit handler records the
+  deterministic post-install Local Revision (content hash of the compiled
+  `after` content — the hashline apply re-verifies the old hash before
+  writing, so no re-read and no race window). `backend_invoked` keys
+  removed from observation/mutation/fetch/todo/guard metadata, transport
+  compact metadata, and `CallAuditMetadata`; historical pre-#38 rows keep
+  old stage labels (alpha no-compat, no migration). Assertions updated in
+  the same commit, including the provenance projector fixture.
+- Spies deleted (`registry.rs::SpyBackend`, `observation.rs::ObsSpyBackend`
+  + `HostFsBackend`, `mutation.rs::CreateSpyBackend`/`MutSpyBackend`,
+  `edit/apply.rs::HostFsBackend`, `effect_contract_tests::SupportFsBackend`,
+  lattice-api `TestFsBackend` ×2). Tests now run tempdir + the real
+  `LocalWorkspace`. The only fault injection is
+  `LocalWorkspace::fail_next_install` (one-shot boolean, gated
+  `#[cfg(any(test, feature = "test-fault-injection"))]`, covering
+  `install_atomic` and `create_excl`) — not a composable seam.
+- Behavior fixes surfaced by running tests against the real workspace:
+  grep/find paths are workspace-root-relative (was spy-relative); the
+  write-stage rollback test now fails installs through a read-only
+  directory (atomic rename legitimately replaces read-only files).
+- `cep_warn_harness`: regenerated `docs/lancet-warn-report.md` (missing
+  since 59d4c44c — pre-existing failure); all four overreach-capable
+  methods still produce `effect_warning` after the metadata cleanup.
+
+**Verification:**
+
+- `rg -n "ExecutionBackend|ExecutionRouting|UpperContext|NullExecutionBackend|RoutingInvocationState" crates --type rust` — zero.
+- `cargo build --workspace --all-targets` — clean (0 errors, 0 new warnings).
+- `cargo test -p lancet-native --lib -- --test-threads=1 --skip fetch_effect_contract_negative` —
+  108 passed (L-26-01 pre-existing DNS-blackhole hang documented in FINDINGS.md).
+- `cargo test -p lancet-native --test cep_warn_harness --test policy_integration --test prov_isomorphism` — green.
+- `cargo test -p lancet-audit` — 34. `cargo test -p lancet-api` — 17.
+- `cargo test -p lattice-api` (lib + all integration incl. `direct_local_acceptance`
+  10/10 product smoke identical pre/post scaffold removal) — all green.
+- Serial matrix (`--test-threads=1`): lancet-protocol 36, lancet-catalog 27,
+  lancet-dispatch 5, lancet-cep 7, lancet-authority 10, lattice-profile 96,
+  lattice-session 2, lattice-agent 0, lattice-llm 133, lattice-tui 3,
+  lattice-cli 4+5, net-guard 15 — all green.
+- Agent-visible catalog remains exactly the closed five methods
+  (`direct_local_runtime_exposes_closed_five_method_catalog`).
+
+**Changed files:** `crates/lancet-native/src/{lib.rs,execution_backend.rs(deleted)}`,
+`crates/lancet-native/src/workspace/{mod.rs,types.rs,local.rs}`,
+`crates/lancet-native/src/server/{registry.rs,transport.rs,native_registry.rs,call_durable_metadata.rs}`,
+`crates/lancet-native/src/handlers/{observation.rs,mutation.rs,external.rs,session_state.rs,scaffold.rs}`,
+`crates/lancet-native/src/edit/{storage.rs,apply.rs,types.rs}`,
+`crates/lancet-native/src/enforcement/{guard_l1.rs,preflight.rs}`,
+`crates/lancet-native/src/effect_contract_tests/support.rs`,
+`crates/lancet-native/Cargo.toml`, `crates/lancet-native/tests/cep_warn_harness.rs`,
+`crates/lancet-audit/src/{audit.rs,audit_tests.rs}`,
+`crates/lancet-audit/src/provenance/projector.rs`,
+`crates/lancet-api/src/{lib.rs,runtime.rs}`,
+`crates/lattice-api/src/turn/cep_tests.rs`,
+`crates/lattice-api/tests/{cep_round_trip.rs,dogfood_impact_matrix.rs,cep_mode_integration.rs,direct_local_acceptance.rs}`,
+`docs/lancet-warn-report.md`, `FINDINGS.md`, `crates/lancet-native/AGENTS.md`,
+`crates/lancet-api/AGENTS.md`, `crates/lancet-audit/AGENTS.md`, `FIX.md`.

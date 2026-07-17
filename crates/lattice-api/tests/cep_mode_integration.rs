@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
 use lancet_native::{
-    CepAuditStore, CepTransport, MethodRegistry, ServerRunConfig,
+    CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
 };
 use lancet_protocol::CepErrorCode;
@@ -102,7 +102,8 @@ async fn cep_mode_enforce_effect_overreach_denied() {
     let (config, audit) = overreach_server_config(CepMode::Enforce);
     let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
-    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+    let server_task =
+        tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
 
     let err = client
         .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
@@ -145,7 +146,8 @@ async fn cep_mode_warn_effect_overreach_ok_with_audit_warning() {
     let (config, audit) = overreach_server_config(CepMode::Warn);
     let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
-    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+    let server_task =
+        tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
 
     // In Warn mode, the dispatch succeeds even though the effect overreached.
     let result = client
@@ -172,7 +174,8 @@ async fn effect_deny_rejects_in_warn_mode() {
         overreach_server_config_with_denied_effect(CepMode::Warn, ImpactKind::WorkspaceMutation);
     let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
-    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+    let server_task =
+        tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
 
     let err = client
         .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
@@ -198,7 +201,8 @@ async fn cep_mode_off_effect_overreach_passes() {
     let (config, _audit) = overreach_server_config(CepMode::Off);
     let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
-    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+    let server_task =
+        tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
 
     // Off skips the effect-region check — overreach handler succeeds.
     let result = client
@@ -217,7 +221,8 @@ async fn effect_deny_rejects_in_off_mode() {
         overreach_server_config_with_denied_effect(CepMode::Off, ImpactKind::WorkspaceMutation);
     let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
-    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+    let server_task =
+        tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
 
     let err = client
         .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
@@ -270,7 +275,8 @@ async fn cep_mode_off_policy_deny_still_enforced() {
     }
 
     let (client, server) = CepTransport::pair(8);
-    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+    let server_task =
+        tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
     tokio::task::yield_now().await;
 
     // mutate.create with WorkspaceMutation impact denied by policy -> denial.

@@ -41,7 +41,7 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
-    CepAuditStore, CepTransport, MethodRegistry, ServerRunConfig,
+    CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
 };
 use lancet_protocol::effect_types::ImpactKind;
@@ -189,7 +189,8 @@ where
     let audit = Arc::new(CepAuditStore::in_memory().expect("in-memory audit"));
     let config = warn_server_config(Arc::clone(&audit));
     let (client, server) = CepTransport::pair(8);
-    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+    let server_task =
+        tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
 
     let row_before = audit.row_count().unwrap_or(0) as i64;
     let _ = client.call::<M>(params).await;
@@ -309,7 +310,7 @@ async fn generate_warn_report() -> String {
     let (success_client, success_server) = CepTransport::pair(32);
     let server_task2 = tokio::spawn(async move {
         let _ = success_server
-            .run(production_registry, success_config)
+            .run_native(production_registry, success_config)
             .await;
     });
     tokio::task::yield_now().await;

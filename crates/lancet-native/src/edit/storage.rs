@@ -1,35 +1,42 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Backend-aware edit I/O via Upper (MSB) primitives.
+//! Edit I/O against the one concrete Local Workspace.
+//!
+//! All edit preflight/commit/rollback reads and writes go through
+//! [`LocalWorkspace`] Structured Workspace Operations — there is no
+//! pluggable backend. The authorized region carries the user-controlled
+//! write-deny blacklist.
 
-use crate::execution_backend::{
-    ExecutionBackendError, ExecutionRouting, PathFacts as BackendPathFacts, PathIntent,
+use std::sync::Arc;
+
+use lancet_authority::effect::region::AuthorizedEffectRegion;
+use lancet_authority::guard::validate_path_facts;
+
+use crate::workspace::{
+    CreatedFile, InstalledFile, LocalWorkspace, LocalWorkspaceError, PathFacts, PathIntent,
     WorkspacePath,
 };
-use lancet_authority::effect::region::AuthorizedEffectRegion;
-use lancet_authority::guard::{PathFacts, PathKind, validate_path_facts};
 
 use super::types::{PatchDiagnostic, PatchErrorCode};
 
 /// Where HashLine edit preflight/commit/rollback reads and writes.
 ///
-/// All edit I/O goes through the Upper (MSB) execution backend — there is no
-/// host-local envelope mode. The authorized region carries the user-controlled
-/// write-deny blacklist.
+/// Holds the one concrete [`LocalWorkspace`] plus the authorized effect
+/// region carrying the user-controlled write-deny blacklist.
 #[derive(Clone)]
 pub(crate) struct EditStorage {
-    execution: ExecutionRouting,
+    workspace: Arc<LocalWorkspace>,
     authorized_region: AuthorizedEffectRegion,
 }
 
 impl EditStorage {
     pub(crate) fn new(
-        execution: ExecutionRouting,
+        workspace: Arc<LocalWorkspace>,
         authorized_region: AuthorizedEffectRegion,
     ) -> Self {
         Self {
-            execution,
+            workspace,
             authorized_region,
         }
     }
@@ -62,7 +69,9 @@ impl EditStorage {
             .with_path(path.to_string())
             .with_operation_index(operation_index)
         })?;
-        let facts = preflight_path(&self.execution, &ws_path, PathIntent::Read).await?;
+        let facts = self
+            .preflight_path(&ws_path, PathIntent::Read)
+            .await?;
         validate_facts(ws_path.as_str(), &facts, &self.authorized_region)?;
         if !facts.exists {
             return Err(PatchDiagnostic::new(
@@ -81,25 +90,27 @@ impl EditStorage {
         target: &WorkspacePath,
         operation_index: usize,
     ) -> Result<Vec<u8>, PatchDiagnostic> {
-        self.execution
-            .backend
+        self.workspace
             .read_file(target)
             .await
-            .map_err(|err| backend_io_error(path, operation_index, err))
+            .map_err(|err| local_io_error(path, operation_index, err))
     }
 
+    /// Atomic install over an existing target.
+    ///
+    /// Returns the [`InstalledFile`] record: the post-install content hash is
+    /// the Local Revision observed immediately after the rename.
     pub(crate) async fn write_edit_target(
         &self,
         path: &str,
         target: &WorkspacePath,
         content: &[u8],
         operation_index: usize,
-    ) -> Result<(), PatchDiagnostic> {
-        self.execution
-            .backend
-            .write_file(target, content)
+    ) -> Result<InstalledFile, PatchDiagnostic> {
+        self.workspace
+            .install_atomic(target, content)
             .await
-            .map_err(|err| backend_io_error(path, operation_index, err))
+            .map_err(|err| local_io_error(path, operation_index, err))
     }
 
     /// No-replace create install (ADR 0003 decision 8).
@@ -113,12 +124,11 @@ impl EditStorage {
         path: &str,
         target: &WorkspacePath,
         content: &[u8],
-    ) -> Result<(), PatchDiagnostic> {
-        self.execution
-            .backend
-            .create_file(target, content)
+    ) -> Result<CreatedFile, PatchDiagnostic> {
+        self.workspace
+            .create_excl(target, content, true)
             .await
-            .map_err(|err| backend_io_error(path, 0, err))
+            .map_err(|err| local_io_error(path, 0, err))
     }
 
     pub(crate) async fn remove_edit_target(
@@ -127,11 +137,10 @@ impl EditStorage {
         target: &WorkspacePath,
         operation_index: usize,
     ) -> Result<(), PatchDiagnostic> {
-        self.execution
-            .backend
+        self.workspace
             .remove_file(target)
             .await
-            .map_err(|err| backend_io_error(path, operation_index, err))
+            .map_err(|err| local_io_error(path, operation_index, err))
     }
 
     pub(crate) async fn rollback_edit_target(
@@ -147,6 +156,7 @@ impl EditStorage {
             | (super::types::FileOperationKind::Delete, Some(bytes)) => {
                 self.write_edit_target(path, target, bytes, operation_index)
                     .await
+                    .map(|_| ())
             }
             (super::types::FileOperationKind::Delete, None) => {
                 self.remove_edit_target(path, target, operation_index).await
@@ -160,7 +170,7 @@ impl EditStorage {
         path: &str,
     ) -> Result<WorkspacePath, PatchDiagnostic> {
         let ws_path = Self::parse_relative_path(path)?;
-        let facts = preflight_path(&self.execution, &ws_path, PathIntent::Create).await?;
+        let facts = self.preflight_path(&ws_path, PathIntent::Create).await?;
         validate_facts(ws_path.as_str(), &facts, &self.authorized_region)?;
         if facts.exists {
             return Err(PatchDiagnostic::new(
@@ -181,7 +191,7 @@ impl EditStorage {
             )
             .with_path(path.to_string())
         })?;
-        let facts = preflight_path(&self.execution, &ws_path, PathIntent::Read).await?;
+        let facts = self.preflight_path(&ws_path, PathIntent::Read).await?;
         validate_facts(path, &facts, &self.authorized_region)?;
         let bytes = self.read_edit_target(path, &ws_path, 0).await?;
         String::from_utf8(bytes).map_err(|error| {
@@ -192,61 +202,44 @@ impl EditStorage {
             .with_path(path.to_string())
         })
     }
-}
 
-async fn preflight_path(
-    execution: &ExecutionRouting,
-    path: &WorkspacePath,
-    intent: PathIntent,
-) -> Result<BackendPathFacts, PatchDiagnostic> {
-    execution
-        .backend
-        .resolve_path(path, intent)
-        .await
-        .map_err(|err| {
-            PatchDiagnostic::new(
-                PatchErrorCode::IoError,
-                format!("adapter preflight failed: {err}"),
-            )
-            .with_path(path.as_str().to_string())
-        })
+    async fn preflight_path(
+        &self,
+        path: &WorkspacePath,
+        intent: PathIntent,
+    ) -> Result<PathFacts, PatchDiagnostic> {
+        self.workspace
+            .resolve_facts(path, intent)
+            .await
+            .map_err(|err| {
+                PatchDiagnostic::new(
+                    PatchErrorCode::IoError,
+                    format!("secure path resolution failed: {err}"),
+                )
+                .with_path(path.as_str().to_string())
+            })
+    }
 }
 
 fn validate_facts(
     path: &str,
-    facts: &BackendPathFacts,
+    facts: &PathFacts,
     authorized_region: &AuthorizedEffectRegion,
 ) -> Result<(), PatchDiagnostic> {
-    let path_facts = PathFacts {
-        normalized_path: facts.normalized_path.clone(),
-        exists: facts.exists,
-        kind: facts.kind.map(path_kind),
-        parent_exists: facts.parent_exists,
-        parent_kind: facts.parent_kind.map(path_kind),
-        canonical_under_workspace: facts.canonical_under_workspace,
-    };
-    validate_path_facts(path, &path_facts, authorized_region).map_err(|err| {
+    validate_path_facts(path, &facts.to_guard(), authorized_region).map_err(|err| {
         PatchDiagnostic::new(PatchErrorCode::BoundaryDenied, err.message.clone())
             .with_path(path.to_string())
     })
 }
 
-fn path_kind(kind: crate::execution_backend::PathKind) -> PathKind {
-    match kind {
-        crate::execution_backend::PathKind::File => PathKind::File,
-        crate::execution_backend::PathKind::Directory => PathKind::Directory,
-        crate::execution_backend::PathKind::Symlink => PathKind::Symlink,
-    }
-}
-
-fn backend_io_error(
+fn local_io_error(
     path: &str,
     operation_index: usize,
-    err: ExecutionBackendError,
+    err: LocalWorkspaceError,
 ) -> PatchDiagnostic {
     PatchDiagnostic::new(
         PatchErrorCode::IoError,
-        format!("backend I/O failed: {err}"),
+        format!("local workspace I/O failed: {err}"),
     )
     .with_path(path.to_string())
     .with_operation_index(operation_index)

@@ -15,8 +15,6 @@
 //! 3. Verify that all rows share one `turn_id` before calling operator `replay_audit`.
 //! 4. Assert PROV `activities` order and `wasInformedBy` chain from replay.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use lancet_api::audit_db_path_for_project;
@@ -30,10 +28,8 @@ use lancet_catalog::methods::workspace::{
     ObserveWorkspaceResult, ReadFileParams,
 };
 use lancet_native::{
-    CepAuditStore, CepTransport, DirectoryEntry, ExecutionBackend, ExecutionBackendError,
-    ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry, PathFacts, PathIntent,
-    PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext, WorkspacePath,
-    register_production_method_registry,
+    CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE,
+    ServerRunConfig, register_production_method_registry,
 };
 use lancet_protocol::effect_types::ImpactKind;
 
@@ -41,137 +37,6 @@ use tempfile::TempDir;
 
 const FIXED_TURN_ID: &str = "impact-matrix-turn-001";
 const FIXED_SESSION_ID: &str = "impact-matrix-session-001";
-
-/// Minimal host-filesystem backend for integration tests.
-struct TestFsBackend {
-    root: std::path::PathBuf,
-}
-
-impl TestFsBackend {
-    fn new(root: impl Into<std::path::PathBuf>) -> Self {
-        let raw = root.into();
-        Self {
-            root: std::fs::canonicalize(&raw).unwrap_or(raw),
-        }
-    }
-}
-
-impl ExecutionBackend for TestFsBackend {
-    fn backend_name(&self) -> &str {
-        "test-fs"
-    }
-
-    fn resolve_path(
-        &self,
-        path: &WorkspacePath,
-        _intent: PathIntent,
-    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>> {
-        let full = if path.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(path.as_str())
-        };
-        let path_str = path.as_str().to_string();
-        let exists = full.exists();
-        let kind = if full.is_dir() {
-            PathKind::Directory
-        } else {
-            PathKind::File
-        };
-        Box::pin(async move {
-            Ok(PathFacts {
-                normalized_path: path_str,
-                exists,
-                kind: Some(kind),
-                parent_exists: true,
-                parent_kind: Some(PathKind::Directory),
-                byte_size: None,
-                canonical_under_workspace: true,
-            })
-        })
-    }
-
-    fn read_file(
-        &self,
-        path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>> {
-        let full = if path.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(path.as_str())
-        };
-        Box::pin(async move {
-            std::fs::read(&full).map_err(|e| ExecutionBackendError::Unavailable {
-                message: e.to_string(),
-            })
-        })
-    }
-
-    fn write_file(
-        &self,
-        path: &WorkspacePath,
-        content: &[u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-        let full = if path.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(path.as_str())
-        };
-        let content = content.to_vec();
-        Box::pin(async move {
-            std::fs::write(&full, &content).map_err(|e| ExecutionBackendError::Unavailable {
-                message: e.to_string(),
-            })
-        })
-    }
-
-    fn remove_file(
-        &self,
-        path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-        let full = if path.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(path.as_str())
-        };
-        Box::pin(async move {
-            std::fs::remove_file(&full).map_err(|e| ExecutionBackendError::Unavailable {
-                message: e.to_string(),
-            })
-        })
-    }
-
-    fn list_dir(
-        &self,
-        _path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
-    {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn grep(
-        &self,
-        _request: &GrepRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
-    {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn find_files(
-        &self,
-        _request: &FindRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
-    {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn changed_paths(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
-    {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-}
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -228,13 +93,6 @@ async fn build_production_config(
     config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
     config.policy_hook = hook.clone();
     config.default_policy_hook = Some(hook);
-    config.execution = ExecutionRouting {
-        backend: Arc::new(TestFsBackend::new(canonical_root)),
-        upper: UpperContext {
-            execution_backend: "test-fs".into(),
-            upper_workspace_id: "test-upper".into(),
-        },
-    };
     {
         let mut ctx = config.audit_context.write().await;
         ctx.turn_id = FIXED_TURN_ID.to_string();
@@ -280,7 +138,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let config = build_production_config(canonical_str, Arc::clone(&audit), true).await;
     let (client1, server1) = CepTransport::pair(32);
     let server_task1 = tokio::spawn(async move {
-        let _ = server1.run(registry, config).await;
+        let _ = server1.run_native(registry, config).await;
     });
     tokio::task::yield_now().await;
 

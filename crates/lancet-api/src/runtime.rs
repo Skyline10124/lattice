@@ -11,8 +11,7 @@ use lancet_authority::{CepPolicyConfig, CepTurnContext};
 use lancet_cep::{ToolDefinition, ToolExposure, ToolExposureError};
 use lancet_dispatch::{CepClient, CepTransport};
 use lancet_native::{
-    ExecutionRouting, MethodRegistry, ServerRunConfig, direct_local_routing,
-    register_production_method_registry,
+    CepServerNativeExt, MethodRegistry, ServerRunConfig, register_production_method_registry,
 };
 use tokio::sync::RwLock;
 
@@ -79,7 +78,7 @@ impl LancetServer {
         let (client, server) = CepTransport::pair(channel_capacity);
         let shutdown = server.shutdown_handle();
         let server_task = tokio::spawn(async move {
-            let _ = server.run(registry, config).await;
+            let _ = server.run_native(registry, config).await;
         });
 
         Ok((
@@ -144,16 +143,10 @@ impl LancetRuntime {
             denied_effect_kinds: policy.denied_effect_kinds.clone(),
         };
 
-        // ADR 0003: the runtime composes the one concrete Direct-Local
-        // execution routing internally from the policy project root. No
-        // caller-supplied `ExecutionRouting` or external backend injection
-        // is accepted. The `ExecutionRouting`/`UpperContext` carrier survives
-        // only until #38 retires the trait.
-        let execution: ExecutionRouting =
-            direct_local_routing(&policy.project_root).map_err(|err| {
-                LancetError::Internal(format!("direct-local routing: {err}"))
-            })?;
-
+        // ADR 0003 / #38: the runtime carries no execution-routing field.
+        // The native server constructs the one concrete Local Workspace from
+        // the resolved policy's canonical project root when the run starts;
+        // embedders cannot inject an alternative workspace implementation.
         let audit = match audit {
             AuditBacking::InMemory => Arc::new(
                 CepAuditStore::in_memory()
@@ -189,7 +182,6 @@ impl LancetRuntime {
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode,
-            execution,
         };
 
         let (client, lifecycle) = LancetServer::spawn(server_config, DEFAULT_CHANNEL_CAPACITY)?;
@@ -256,50 +248,77 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn runtime_config_defaults_have_no_execution_field() {
-        // ADR 0003 / #37: LancetRuntimeConfig no longer carries an
-        // `execution` field; the runtime builds the one Direct-Local routing
-        // internally. A default-constructed config has no execution field to
-        // read, and the runtime's build() produces a `direct-local` backend.
-        let config = LancetRuntimeConfig::new(".");
+    async fn runtime_locates_local_workspace_from_policy_project_root() {
+        // ADR 0003 / #38: `LancetRuntimeConfig` carries no execution-routing
+        // field; the server constructs the one concrete Local Workspace from
+        // the resolved policy's canonical project root. Prove it by writing a
+        // file into a temp root and reading it back through the runtime.
+        let dir = tempfile::TempDir::new().expect("temp root");
+        std::fs::write(dir.path().join("probe.txt"), "local-evidence\n").expect("seed file");
+        let mut policy = lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+            dir.path().to_path_buf(),
+        );
+        policy.workspace.denied_write_patterns = Vec::new();
+        let config = LancetRuntimeConfig {
+            project_root: dir.path().to_path_buf(),
+            policy,
+            ..LancetRuntimeConfig::new(dir.path().to_str().expect("utf-8 root"))
+        };
         let mut runtime = LancetRuntime::build(config).expect("build direct-local runtime");
+
+        use lancet_catalog::methods::workspace::{
+            ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileParams,
+        };
+        let client = runtime.client();
+        let result = client
+            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
+                path: "probe.txt".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            }))
+            .await
+            .expect("read through runtime workspace");
+        let ObserveWorkspaceResult::ReadFile(read) = result else {
+            panic!("expected read_file result");
+        };
+        assert!(
+            read.content.contains("local-evidence"),
+            "runtime must resolve observe.workspace against the policy project root: {}",
+            read.content
+        );
+
         // The retired exec.command_run path still returns Method not found,
         // which proves the production registry + transport came up.
-        let client = runtime.client();
         let err = client
             .call_raw("exec.command_run", serde_json::json!({}))
             .await
             .expect_err("retired method must error");
         assert_eq!(err.wire_code(), lancet_protocol::error::jsonrpc::METHOD_NOT_FOUND);
-        // Plan §3: assert the build-time routing is `direct-local`. The
-        // routing identity is observable through the audit metadata that the
-        // server records for each call.
-        use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
-        use lancet_catalog::methods::session::{TodoItem, TodoStatus};
-        let _ = client
-            .call::<TodoWrite>(TodoWriteParams {
-                todos: vec![TodoItem {
-                    content: "direct-local routing check".into(),
-                    status: TodoStatus::Pending,
-                }],
-            })
-            .await
-            .expect("todo write");
+
+        // Durable audit metadata carries no routing identity: no
+        // execution_backend, upper_workspace_id, or invocation flags.
         runtime.audit().await_pending().await;
         let rows = runtime
             .audit()
             .query_rows(&lancet_native::AuditQueryFilters::default())
             .expect("audit rows");
-        let any_direct_local = rows.iter().any(|r| {
-            r.metadata_json
-                .as_deref()
-                .unwrap_or("")
-                .contains("direct-local")
-        });
-        assert!(
-            any_direct_local,
-            "runtime build must produce a direct-local execution backend; audit rows: {rows:?}"
-        );
+        assert!(!rows.is_empty(), "audit must record the calls");
+        for row in &rows {
+            let meta = row.metadata_json.as_deref().unwrap_or("");
+            assert!(
+                !meta.contains("execution_backend"),
+                "audit metadata must not carry routing identity: {meta}"
+            );
+            assert!(
+                !meta.contains("upper_workspace_id"),
+                "audit metadata must not carry Upper identity: {meta}"
+            );
+            assert!(
+                !meta.contains("adapter_preflight_invoked"),
+                "audit metadata must not carry routing invocation flags: {meta}"
+            );
+        }
         runtime.shutdown().await;
     }
 

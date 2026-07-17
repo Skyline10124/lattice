@@ -18,10 +18,7 @@ mod local;
 mod types;
 
 pub(crate) use local::LocalWorkspace;
-// `CreatedFile`/`InstalledFile` are constructed only by the no-replace create
-// and atomic-install paths, which the production `mutate.create`/`mutate.edit`
-// handlers reach through the trait adapter. They are part of the module's
-// documented surface for #38's `lancet-runtime` convergence; suppress the
-// unused-import warning until #38 wires them through.
-#[allow(unused_imports)]
-pub use types::{CreatedFile, InstalledFile, LocalWorkspaceError};
+pub(crate) use types::{CreatedFile, InstalledFile, LocalWorkspaceError};
+pub use types::{
+    DirectoryEntry, FindRequest, GrepRequest, PathFacts, PathIntent, PathKind, WorkspacePath,
+};

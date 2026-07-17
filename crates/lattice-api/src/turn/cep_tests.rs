@@ -9,7 +9,7 @@ use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResu
 use lancet_catalog::methods::workspace::{
     ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileResult,
 };
-use lancet_native::{CepTransport, MethodRegistry, ServerRunConfig};
+use lancet_native::{CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::error::{
     CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData, PermissionErrorData,
@@ -37,7 +37,7 @@ async fn adapter_over_registry(registry: MethodRegistry) -> CepExecutorAdapter {
     let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move {
         let _ = server
-            .run(registry, ServerRunConfig::in_memory_for_tests())
+            .run_native(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
@@ -122,7 +122,7 @@ async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
     let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move {
         let _ = server
-            .run(registry, ServerRunConfig::in_memory_for_tests())
+            .run_native(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
     let adapter = CepExecutorAdapter::new(client, [ObserveWorkspace::NAME.to_string()]);

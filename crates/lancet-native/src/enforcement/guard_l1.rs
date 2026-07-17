@@ -111,7 +111,6 @@ pub async fn evaluate_and_enforce_policy(
                 rejection_stage: RejectionStage::PolicyGate,
                 denial_source: "cep_policy".into(),
             });
-            ctx.record_routing_metadata();
             if let Some(metadata) = policy_denial_preflight_metadata(method, &input, &evaluation) {
                 ctx.record_durable_metadata(metadata);
             }
@@ -119,7 +118,6 @@ pub async fn evaluate_and_enforce_policy(
                 "method": method,
                 "denial_source": "cep_policy",
                 "policy_enforced": true,
-                "backend_invoked": false,
                 "reason_code": format!("{:?}", reason_code),
             }));
         }
@@ -130,7 +128,6 @@ pub async fn evaluate_and_enforce_policy(
                 "method": method,
                 "denial_source": "cep_policy",
                 "policy_enforced": true,
-                "backend_invoked": false,
                 "reason_code": format!("{:?}", reason_code),
                 "approval_request": approval_request.clone(),
             }));
@@ -188,14 +185,10 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: crate::execution_backend::ExecutionRouting {
-                    backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
-                    upper: crate::execution_backend::UpperContext {
-                        execution_backend: "null".into(),
-                        upper_workspace_id: "null".into(),
-                    },
-                },
-                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+                workspace: Arc::new(
+                    crate::workspace::LocalWorkspace::new(std::path::Path::new(root))
+                        .expect("local workspace"),
+                ),
             },
             event_rx,
         )
@@ -259,7 +252,7 @@ mod tests {
         assert_eq!(err.code, lancet_protocol::CepErrorCode::GuardDenied);
         let metadata: serde_json::Value =
             serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
-        assert_eq!(metadata["backend_invoked"], false);
+        assert!(metadata.get("backend_invoked").is_none());
         assert_eq!(metadata["cep_policy"]["decision"], "human_review");
         assert_eq!(
             metadata["approval_request"]["status"],

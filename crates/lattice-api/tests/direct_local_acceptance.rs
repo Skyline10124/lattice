@@ -401,10 +401,12 @@ async fn successful_mutation_survives_later_failure() {
     assert_eq!(on_disk, b"persisted\n");
 }
 
-/// Audit records the Direct-Local execution backend identity and real Local
-/// evidence (path + content hash), not a fictional Upper workspace id.
+/// Audit records method-local evidence (guarded path + Local Revision) and
+/// carries no routing identity: no `execution_backend`, no
+/// `upper_workspace_id`, no adapter-preflight or generic routing invocation
+/// flags (#38).
 #[tokio::test]
-async fn audit_records_direct_local_execution_backend_with_local_evidence() {
+async fn audit_records_method_local_evidence_without_routing_metadata() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("a.txt"), "audit-body\n").unwrap();
     let runtime = direct_local_runtime(dir.path());
@@ -427,27 +429,31 @@ async fn audit_records_direct_local_execution_backend_with_local_evidence() {
         .expect("rows");
     assert!(!rows.is_empty(), "audit must record the call");
     let meta = rows[0].metadata_json.as_deref().unwrap_or("{}");
-    // Execution backend identity is Direct-Local, not an Upper workspace.
-    assert!(
-        meta.contains("direct-local"),
-        "audit metadata must record the direct-local execution backend: {meta}"
-    );
-    // Real Local evidence: the request target path and the content hash
-    // (Local Revision) of the observed file.
+    // Method-local evidence: the request target, the guarded normalized
+    // path, and the content hash (Local Revision) of the observed file.
     assert!(
         meta.contains("a.txt"),
         "audit metadata must record the real Local request path: {meta}"
     );
     assert!(
+        meta.contains("\"guarded_path\":\"a.txt\""),
+        "audit metadata must record the guarded normalized path: {meta}"
+    );
+    assert!(
         meta.contains("content_hash") && meta.contains("blake3:"),
         "audit metadata must record the Local Revision (content_hash): {meta}"
     );
-    // The canonical root display string is carried as the workspace id, not
-    // a fictional Upper id.
-    let canonical = std::fs::canonicalize(dir.path()).unwrap();
-    let canonical_str = canonical.to_string_lossy();
-    assert!(
-        meta.contains(&*canonical_str),
-        "audit metadata must carry the canonical root as the workspace identity, expected {canonical_str} in: {meta}"
-    );
+    // No routing identity or invocation flags survive.
+    for retired in [
+        "execution_backend",
+        "upper_workspace_id",
+        "adapter_preflight_invoked",
+        "backend_invoked",
+        "direct-local",
+    ] {
+        assert!(
+            !meta.contains(retired),
+            "audit metadata must not carry retired routing field '{retired}': {meta}"
+        );
+    }
 }

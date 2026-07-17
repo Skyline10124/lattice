@@ -40,7 +40,6 @@ pub struct CallAuditMetadata {
     pub guard_stage: String,
     pub policy_enforced: bool,
     pub denial_source: Option<String>,
-    pub backend_invoked: Option<bool>,
     pub observation_source: Option<String>,
 }
 
@@ -53,14 +52,13 @@ impl CallAuditMetadata {
             guard_stage: GUARD_STAGE_NATIVE.to_string(),
             policy_enforced: true,
             denial_source: None,
-            backend_invoked: Some(true),
             observation_source: None,
         }
     }
 
     /// Unknown production method (not in the catalog). Dispatch will reject it with
     /// `MethodNotFound`; no handler or policy hook runs, so this must not claim
-    /// policy enforcement or backend invocation.
+    /// policy enforcement.
     pub fn unrouted() -> Self {
         Self {
             semantic_stage: SEMANTIC_STAGE_UNROUTED.to_string(),
@@ -68,7 +66,6 @@ impl CallAuditMetadata {
             guard_stage: GUARD_STAGE_NATIVE.to_string(),
             policy_enforced: false,
             denial_source: None,
-            backend_invoked: Some(false),
             observation_source: None,
         }
     }
@@ -81,14 +78,12 @@ impl CallAuditMetadata {
             guard_stage: GUARD_STAGE_NATIVE.to_string(),
             policy_enforced: true,
             denial_source: None,
-            backend_invoked: Some(false),
             observation_source: None,
         }
     }
 
     pub fn with_denial_source(mut self, source: &str) -> Self {
         self.denial_source = Some(source.to_string());
-        self.backend_invoked = Some(false);
         self
     }
 
@@ -137,9 +132,13 @@ pub struct CepAuditContext {
 pub enum RejectionStage {
     SchemaValidation,
     PolicyGate,
-    AdapterPreflight,
-    BackendExecution,
-    VerificationFailure,
+    /// Guard L1 path validation or the concrete Local Workspace's secure
+    /// path resolution rejected the call (post-#38 vocabulary; replaces the
+    /// Upper-era `adapter_preflight`).
+    PathGuard,
+    /// The concrete Local Workspace's I/O failed after policy and guard
+    /// checks passed (replaces the Upper-era `backend_execution`).
+    LocalIo,
 }
 
 impl RejectionStage {
@@ -148,9 +147,8 @@ impl RejectionStage {
         match self {
             Self::SchemaValidation => "schema_validation",
             Self::PolicyGate => "policy_gate",
-            Self::AdapterPreflight => "adapter_preflight",
-            Self::BackendExecution => "backend_execution",
-            Self::VerificationFailure => "verification_failure",
+            Self::PathGuard => "path_guard",
+            Self::LocalIo => "local_io",
         }
     }
 }

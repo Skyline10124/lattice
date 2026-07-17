@@ -18,10 +18,12 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   patch write limits.
-- `src/workspace/` owns the one concrete `LocalWorkspace` (#37): secure
+- `src/workspace/` owns the one concrete `LocalWorkspace` (#37/#38): secure
   per-segment path resolution, bounded read/list/grep/find, content hashing
-  (Local Revision), no-replace create, atomic edit install, and filesystem
-  error normalization. ADR 0004 moves this into `lancet-runtime`.
+  (Local Revision), no-replace create, atomic edit install, filesystem error
+  normalization, and the Local operation vocabulary (`WorkspacePath`,
+  `PathFacts`, `PathIntent`, requests). ADR 0004 moves this into
+  `lancet-runtime`.
 - `src/executor/` owns crate-private web/render helpers and output limits.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 
@@ -36,12 +38,21 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - Do not add new native Tool implementations or a native Tool ABI. New Tool
   contracts start in Source manifests; Components receive authority only through
   Tool Host imports.
-- During Direct-Local migration keep one concrete guarded Local Workspace here.
-  Do not preserve `ExecutionBackend` or another pluggable host seam; #12 moves
-  the concrete host module into `lancet-runtime` after Tool migration.
+- The concrete guarded Local Workspace is the single workspace path. The
+  `ExecutionBackend`/routing seam was deleted in #38 — do not reintroduce a
+  pluggable workspace implementation, routing enum, fallback, or parallel
+  path. #12 moves the concrete host module into `lancet-runtime` after Tool
+  migration.
 
 ## Recent Issues
 
+- FIXED #38: `ExecutionBackend`/`ExecutionRouting`/`UpperContext`/
+  `RoutingInvocationState`/`NullExecutionBackend` and all spy backends
+  deleted; handlers and the edit engine call the concrete `LocalWorkspace`
+  directly; audit routing metadata replaced with method-local evidence
+  (guarded path, `local_revision`, post-install content hash,
+  `PathGuard`/`LocalIo` rejection stages); narrow one-shot
+  `fail_next_install` fault injection is the only test seam.
 - FIXED M-24-02: command workspace snapshots and artifact lower rechecks run in
   the blocking pool with entry/depth limits.
 - FIXED M-24-03: `ToolLimits` was removed; shell timeouts are explicit and

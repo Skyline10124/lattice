@@ -3,9 +3,10 @@
 
 //! Native CEP workspace mutation handlers.
 //!
-//! Implements workspace mutation methods with Guard L1 scope enforcement.
-//! All methods require an active `ExecutionEnvelope`; multi-file mutations
-//! perform all-or-nothing scope preflight before applying changes.
+//! Implements workspace mutation methods with Guard L1 scope enforcement
+//! against the one concrete [`crate::workspace::LocalWorkspace`]: secure
+//! resolution, Mutation Preconditions (expected hash / no-replace), and
+//! atomic installation all live behind that module.
 
 use crate::edit::apply::{PatchApplyLimits, apply_parsed_patch};
 use crate::edit::content_hash;
@@ -14,15 +15,14 @@ use crate::edit::parser::parse_patch_document;
 use crate::edit::storage::EditStorage;
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::enforcement::preflight::{MutationPreflight, mutation_preflight_metadata};
-use crate::execution_backend::{ExecutionRouting, PathIntent, WorkspacePath};
 use crate::server::registry::{HandlerContext, MethodRegistry};
+use crate::workspace::{LocalWorkspace, LocalWorkspaceError, PathIntent, WorkspacePath};
 use lancet_audit::{RejectionRecord, RejectionStage};
 use lancet_authority::effect::ledger::{
     EffectSource, ObservedEffect, ObservedLineChange, ObservedLineChangeKind, ObservedScope,
 };
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::validate_path_facts;
-use lancet_authority::guard::{PathFacts, PathKind};
 use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
@@ -34,7 +34,8 @@ use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Register native workspace mutation methods.
 pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -44,13 +45,13 @@ pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), Ce
 }
 
 struct MutationAuth {
-    execution: ExecutionRouting,
+    workspace: Arc<LocalWorkspace>,
     authorized_region: AuthorizedEffectRegion,
 }
 
 impl MutationAuth {
     fn edit_storage(&self) -> EditStorage {
-        EditStorage::new(self.execution.clone(), self.authorized_region.clone())
+        EditStorage::new(Arc::clone(&self.workspace), self.authorized_region.clone())
     }
 }
 
@@ -80,24 +81,23 @@ async fn handle_create_as(
 
     let create = preflight_create(&auth, &params, method).await?;
 
-    write_create(&ctx, &auth, &create).await?;
+    let created = write_create(&auth, &create).await?;
 
     record_created_dir_effects(&ctx, &create);
-    ctx.record_effect(mutation_path_effect(&auth, &create.path, &create.full_path));
+    ctx.record_effect(mutation_path_effect(&create.path));
 
-    let written_hash = content_hash(params.content.as_bytes());
     ctx.record_durable_metadata(json!({
         "method": method,
-        "bytes_written": create.bytes_written,
-        "content_hash": written_hash,
+        "bytes_written": created.bytes_written,
+        "content_hash": created.content_hash,
         "created_dirs": create.created_dirs.clone(),
-        "backend_invoked": true,
+        "guarded_path": created.path.as_str(),
         "policy_enforced": true,
     }));
 
     Ok(CreateResult {
         path: params.path,
-        bytes_written: create.bytes_written,
+        bytes_written: created.bytes_written,
         created_dirs: create.created_dirs,
     })
 }
@@ -112,25 +112,33 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
     .await?;
     let patch = match compile_edit_patch(&auth, &params).await {
         Ok(patch) => patch,
-        Err(err) => {
+        Err(failure) => {
             record_mutation_replan_metadata(
                 &ctx,
                 Edit::NAME,
-                &auth,
                 std::slice::from_ref(&params.path),
-                expected_hash_replan_status(&err),
-                replan_reason_for_error(&err),
+                failure.local_revision.as_deref(),
+                replan_reason_for_error(&failure.error),
             );
-            return Err(err);
+            return Err(failure.error);
         }
     };
-    let result = apply_compiled_patch(&ctx, &auth, &patch).await?;
+    let result = apply_compiled_patch(&ctx, &auth, &patch.patch).await?;
+
+    // Installation evidence: the post-install Local Revision of the target.
+    // The hashline apply re-verifies the old hash at write time, so a
+    // successful apply installed exactly the compiled `after` content — its
+    // hash is the post-install Local Revision, with no re-read and no
+    // race window.
+    let ws_path = WorkspacePath::parse(&params.path)
+        .map_err(|err| validation_error("path", err.to_string()))?;
 
     ctx.record_durable_metadata(json!({
         "method": Edit::NAME,
-        "compiled_patch_backend": "hashline_patch",
+        "compiled_patch_format": "hashline_patch",
         "changed_files": result.changed_files.clone(),
-        "backend_invoked": true,
+        "guarded_path": ws_path.as_str(),
+        "content_hash": patch.post_install_revision,
         "policy_enforced": true,
     }));
 
@@ -146,9 +154,15 @@ struct CompiledPatchApply {
 struct PreflightCreate {
     path: String,
     content: String,
-    full_path: PathBuf,
-    bytes_written: u64,
     created_dirs: Vec<String>,
+}
+
+/// A failed edit compile. Carries the Local Revision observed at the
+/// Mutation Precondition check when the failure is a stale expected hash,
+/// so the replan evidence records the real precondition determination.
+struct EditCompileFailure {
+    error: CepError,
+    local_revision: Option<String>,
 }
 
 async fn authorize_workspace_mutation(
@@ -167,7 +181,7 @@ async fn authorize_mutation(
     method: &str,
     changed_paths: &[String],
 ) -> Result<MutationAuth, CepError> {
-    let execution = ctx.execution.clone();
+    let workspace = Arc::clone(&ctx.workspace);
     let authorized_region = ctx
         .authorized_region
         .get()
@@ -189,39 +203,29 @@ async fn authorize_mutation(
                 Retriability::Permanent,
             )
         })?;
-        ctx.mark_adapter_preflight_invoked();
         let intent = if method == Create::NAME {
             PathIntent::Create
         } else {
             PathIntent::Overwrite
         };
-        let facts = execution
-            .backend
-            .resolve_path(&ws_path, intent)
+        let facts = workspace
+            .resolve_facts(&ws_path, intent)
             .await
             .map_err(|err| {
                 ctx.record_rejection(RejectionRecord {
-                    rejection_stage: RejectionStage::AdapterPreflight,
-                    denial_source: "adapter_preflight".into(),
+                    rejection_stage: RejectionStage::PathGuard,
+                    denial_source: "local_workspace".into(),
                 });
-                mutation_backend_error(method)(err)
+                mutation_workspace_error(method)(err)
             })?;
         let guard_path = if ws_path.is_project_root() {
             ""
         } else {
             ws_path.as_str()
         };
-        let path_facts = PathFacts {
-            normalized_path: facts.normalized_path.clone(),
-            exists: facts.exists,
-            kind: facts.kind.map(path_kind),
-            parent_exists: facts.parent_exists,
-            parent_kind: facts.parent_kind.map(path_kind),
-            canonical_under_workspace: facts.canonical_under_workspace,
-        };
-        if let Err(err) = validate_path_facts(guard_path, &path_facts, &authorized_region) {
+        if let Err(err) = validate_path_facts(guard_path, &facts.to_guard(), &authorized_region) {
             ctx.record_rejection(RejectionRecord {
-                rejection_stage: RejectionStage::AdapterPreflight,
+                rejection_stage: RejectionStage::PathGuard,
                 denial_source: "guard_l1".into(),
             });
             return Err(err);
@@ -229,26 +233,16 @@ async fn authorize_mutation(
     }
 
     Ok(MutationAuth {
-        execution,
+        workspace,
         authorized_region,
     })
 }
 
-fn path_kind(kind: crate::execution_backend::PathKind) -> PathKind {
-    match kind {
-        crate::execution_backend::PathKind::File => PathKind::File,
-        crate::execution_backend::PathKind::Directory => PathKind::Directory,
-        crate::execution_backend::PathKind::Symlink => PathKind::Symlink,
-    }
-}
-
-fn mutation_backend_error(
-    method: &str,
-) -> impl FnOnce(crate::execution_backend::ExecutionBackendError) -> CepError {
+fn mutation_workspace_error(method: &str) -> impl FnOnce(LocalWorkspaceError) -> CepError {
     move |err| {
         CepError::new(
             CepErrorCode::ExecutionFailed,
-            format!("{method} backend preflight failed: {err}"),
+            format!("{method} workspace preflight failed: {err}"),
             CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
                 command: method.into(),
                 exit_code: None,
@@ -259,54 +253,21 @@ fn mutation_backend_error(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn record_mutation_preflight(
+fn record_mutation_replan_metadata(
     ctx: &HandlerContext,
     method: &str,
     changed_paths: &[String],
-    write_patterns: &[String],
-    out_of_scope_paths: &[String],
-    expected_hash_status: Option<&str>,
+    local_revision: Option<&str>,
     replan_reason: Option<&str>,
-    backend_invoked: bool,
 ) {
     ctx.record_durable_metadata(mutation_preflight_metadata(MutationPreflight {
         method,
         changed_paths,
-        write_patterns,
-        out_of_scope_paths,
-        expected_hash_status,
+        write_patterns: &[],
+        out_of_scope_paths: &[],
+        local_revision,
         replan_reason,
-        backend_invoked,
     }));
-}
-
-fn record_mutation_replan_metadata(
-    ctx: &HandlerContext,
-    method: &str,
-    _auth: &MutationAuth,
-    changed_paths: &[String],
-    expected_hash_status: Option<&str>,
-    replan_reason: Option<&str>,
-) {
-    record_mutation_preflight(
-        ctx,
-        method,
-        changed_paths,
-        &[],
-        &[],
-        expected_hash_status,
-        replan_reason,
-        false,
-    );
-}
-
-fn expected_hash_replan_status(err: &CepError) -> Option<&'static str> {
-    if err.code == CepErrorCode::ReplanRequired && err.message.contains("expected_hash") {
-        Some("stale")
-    } else {
-        None
-    }
 }
 
 fn replan_reason_for_error(err: &CepError) -> Option<&'static str> {
@@ -333,7 +294,7 @@ async fn preflight_create(
     let created_dirs = if params.create_parents {
         missing_parent_dirs(auth, &params.path).await?
     } else {
-        let parent = Path::new(&params.path)
+        let parent = std::path::Path::new(&params.path)
             .parent()
             .and_then(|p| p.to_str())
             .filter(|p| !p.is_empty());
@@ -358,8 +319,6 @@ async fn preflight_create(
     Ok(PreflightCreate {
         path: params.path.clone(),
         content: params.content.clone(),
-        full_path: PathBuf::from(&params.path),
-        bytes_written: params.content.len() as u64,
         created_dirs,
     })
 }
@@ -368,17 +327,16 @@ async fn parent_exists(auth: &MutationAuth, path: &str) -> Result<bool, CepError
     let ws_path =
         WorkspacePath::parse(path).map_err(|err| validation_error("path", err.to_string()))?;
     let facts = auth
-        .execution
-        .backend
-        .resolve_path(&ws_path, PathIntent::ListDirectory)
+        .workspace
+        .resolve_facts(&ws_path, PathIntent::ListDirectory)
         .await
-        .map_err(mutation_backend_error("mutate.create"))?;
+        .map_err(mutation_workspace_error("mutate.create"))?;
     Ok(facts.exists)
 }
 
-/// Walk ancestor directories of `relative_path` via the Upper backend, returning
-/// the list of missing ancestors.  All filesystem probing goes through
-/// `ExecutionBackend::resolve_path` — never the host filesystem.
+/// Walk ancestor directories of `relative_path` through the concrete Local
+/// Workspace, returning the list of missing ancestors. All filesystem
+/// probing goes through secure resolution — never the raw host filesystem.
 async fn missing_parent_dirs(
     auth: &MutationAuth,
     relative_path: &str,
@@ -413,21 +371,17 @@ async fn missing_parent_dirs(
         let ancestor = WorkspacePath::parse(&current)
             .map_err(|err| validation_error("path", err.to_string()))?;
         let facts = auth
-            .execution
-            .backend
-            .resolve_path(&ancestor, PathIntent::ListDirectory)
+            .workspace
+            .resolve_facts(&ancestor, PathIntent::ListDirectory)
             .await
-            .map_err(mutation_backend_error("mutate.create"))?;
+            .map_err(mutation_workspace_error("mutate.create"))?;
 
         if !facts.exists {
             missing.push(current.clone());
             continue;
         }
 
-        if matches!(
-            facts.kind,
-            Some(crate::execution_backend::PathKind::Symlink)
-        ) {
+        if matches!(facts.kind, Some(crate::workspace::PathKind::Symlink)) {
             return Err(CepError::new(
                 CepErrorCode::PathContainment,
                 format!("parent directory '{current}' is a symlink"),
@@ -439,10 +393,7 @@ async fn missing_parent_dirs(
             ));
         }
 
-        if !matches!(
-            facts.kind,
-            Some(crate::execution_backend::PathKind::Directory)
-        ) {
+        if !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
             return Err(CepError::new(
                 CepErrorCode::ExecutionFailed,
                 format!("parent path '{current}' is not a directory"),
@@ -459,14 +410,12 @@ async fn missing_parent_dirs(
 }
 
 async fn write_create(
-    ctx: &HandlerContext,
     auth: &MutationAuth,
     create: &PreflightCreate,
-) -> Result<(), CepError> {
+) -> Result<crate::workspace::CreatedFile, CepError> {
     let storage = auth.edit_storage();
     let ws_path = WorkspacePath::parse(&create.path)
         .map_err(|err| validation_error("path", err.to_string()))?;
-    ctx.mark_backend_invoked();
     // ADR 0003 decision 8: no-replace install. A concurrent writer between
     // `preflight_create` and this install surfaces as a create-target-exists
     // error, which the Agent must observe and replan rather than have
@@ -545,7 +494,7 @@ fn patch_diag_to_cep(diag: crate::edit::types::PatchDiagnostic) -> CepError {
     )
 }
 
-fn mutation_path_effect(_auth: &MutationAuth, path: &str, _full_path: &Path) -> ObservedEffect {
+fn mutation_path_effect(path: &str) -> ObservedEffect {
     let scope = ObservedScope::Path(PathBuf::from(path));
     ObservedEffect {
         kind: ImpactKind::WorkspaceMutation,
@@ -566,15 +515,68 @@ fn record_created_dir_effects(ctx: &HandlerContext, create: &PreflightCreate) {
     }
 }
 
-async fn compile_edit_patch(auth: &MutationAuth, params: &EditParams) -> Result<String, CepError> {
-    let fragment = compile_edit_operation_fragment(&auth.edit_storage(), params).await?;
-    Ok(format!("*** Begin Patch\n{fragment}*** End Patch\n"))
+/// A successfully compiled edit patch. `post_install_revision` is the
+/// content hash of the compiled `after` content — the Local Revision a
+/// successful apply installs (the hashline apply re-verifies the old hash
+/// before writing, so a success means exactly this content was installed).
+struct CompiledEditPatch {
+    patch: String,
+    post_install_revision: String,
 }
 
-async fn compile_edit_operation_fragment(
-    storage: &EditStorage,
+async fn compile_edit_patch(
+    auth: &MutationAuth,
     params: &EditParams,
-) -> Result<String, CepError> {
+) -> Result<CompiledEditPatch, EditCompileFailure> {
+    validate_edit_params(params).map_err(|error| EditCompileFailure {
+        error,
+        local_revision: None,
+    })?;
+
+    let storage = auth.edit_storage();
+    let before = read_edit_target_for_compile(&storage, params)
+        .await
+        .map_err(|error| EditCompileFailure {
+            error,
+            local_revision: None,
+        })?;
+
+    // Mutation Precondition: the expected hash must match the current Local
+    // Revision of the target. On drift the failure carries the observed
+    // Local Revision so replan evidence records the real determination.
+    let current_hash = content_hash(before.as_bytes());
+    if current_hash != params.expected_hash {
+        return Err(EditCompileFailure {
+            error: CepError::new(
+                CepErrorCode::ReplanRequired,
+                format!(
+                    "expected_hash for '{}' is stale: expected {}, current {}; observe.workspace read_file again",
+                    params.path, params.expected_hash, current_hash
+                ),
+                CepErrorData::Guard(GuardErrorData {
+                    method: Edit::NAME.into(),
+                    reason: "ReplanRequired: stale expected_hash".into(),
+                }),
+                Retriability::RequiresReplan,
+            ),
+            local_revision: Some(current_hash),
+        });
+    }
+
+    let (fragment, post_install_revision) =
+        compile_edit_operation_fragment(params, &before).map_err(|error| {
+            EditCompileFailure {
+                error,
+                local_revision: None,
+            }
+        })?;
+    Ok(CompiledEditPatch {
+        patch: format!("*** Begin Patch\n{fragment}*** End Patch\n"),
+        post_install_revision,
+    })
+}
+
+fn validate_edit_params(params: &EditParams) -> Result<(), CepError> {
     if params.edits.is_empty() {
         return Err(validation_error(
             "edits",
@@ -587,8 +589,14 @@ async fn compile_edit_operation_fragment(
             "path must not contain newline characters",
         ));
     }
+    Ok(())
+}
 
-    let before = storage
+async fn read_edit_target_for_compile(
+    storage: &EditStorage,
+    params: &EditParams,
+) -> Result<String, CepError> {
+    storage
         .read_for_compile(&params.path)
         .await
         .map_err(|diag| {
@@ -605,26 +613,17 @@ async fn compile_edit_operation_fragment(
                 }),
                 Retriability::Permanent,
             )
-        })?;
+        })
+}
 
-    let current_hash = content_hash(before.as_bytes());
-    if current_hash != params.expected_hash {
-        return Err(CepError::new(
-            CepErrorCode::ReplanRequired,
-            format!(
-                "expected_hash for '{}' is stale: expected {}, current {}; observe.workspace read_file again",
-                params.path, params.expected_hash, current_hash
-            ),
-            CepErrorData::Guard(GuardErrorData {
-                method: Edit::NAME.into(),
-                reason: "ReplanRequired: stale expected_hash".into(),
-            }),
-            Retriability::RequiresReplan,
-        ));
-    }
-
-    let after = apply_semantic_edit_operations(&before, &params.edits)?;
-    compile_update_fragment(&params.path, &params.expected_hash, &before, &after)
+fn compile_edit_operation_fragment(
+    params: &EditParams,
+    before: &str,
+) -> Result<(String, String), CepError> {
+    let after = apply_semantic_edit_operations(before, &params.edits)?;
+    let post_install_revision = content_hash(after.as_bytes());
+    let fragment = compile_update_fragment(&params.path, &params.expected_hash, before, &after)?;
+    Ok((fragment, post_install_revision))
 }
 
 fn apply_semantic_edit_operations(
@@ -929,195 +928,27 @@ fn semantic_replan_error(reason: impl Into<String>) -> CepError {
 #[cfg(test)]
 mod create_tests {
     use super::*;
-    use crate::execution_backend::{
-        DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-        GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
-    };
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::default::WorkspacePolicy;
 
-    use std::collections::BTreeMap;
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
 
     fn test_ctx(root: &str) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
-        let (event_tx, event_rx) = mpsc::channel(32);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
-            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
-                std::path::PathBuf::from(root),
-            ),
-        ));
-        (
-            HandlerContext {
-                call_id: 1,
-                events: EventSink::new(event_tx, 1),
-                cancellation: Cancellation::new(cancel_rx),
-                cep_context: Arc::new(
-                    lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
-                ),
-                turn_id: "test-turn".into(),
-                durable_metadata:
-                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
-                default_policy_hook: Some(default_hook),
-                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                    turn_id: "test-turn".into(),
-                    session_id: "test-session".into(),
-                    ..Default::default()
-                })),
-                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: crate::execution_backend::ExecutionRouting {
-                    backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
-                    upper: crate::execution_backend::UpperContext {
-                        execution_backend: "null".into(),
-                        upper_workspace_id: "null".into(),
-                    },
-                },
-                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
-            },
-            event_rx,
-        )
+        ctx_with_denied_patterns(root, &[])
     }
 
-    fn mutation_registry() -> MethodRegistry {
-        let mut registry = MethodRegistry::new();
-        register_mutation_methods(&mut registry).unwrap();
-        registry
-    }
-
-    /// A spy backend that simulates a filesystem in memory for Direct-mode
-    /// mutation tests.
-    #[derive(Default)]
-    struct CreateSpyBackend {
-        files: Mutex<BTreeMap<String, Vec<u8>>>,
-        writes: Mutex<Vec<String>>,
-    }
-
-    impl CreateSpyBackend {
-        fn file_facts(
-            path: &str,
-            exists: bool,
-            kind: crate::execution_backend::PathKind,
-        ) -> PathFacts {
-            PathFacts {
-                normalized_path: path.to_string(),
-                exists,
-                kind: Some(kind),
-                parent_exists: true,
-                parent_kind: Some(crate::execution_backend::PathKind::Directory),
-                byte_size: None,
-                canonical_under_workspace: true,
-            }
-        }
-    }
-
-    impl ExecutionBackend for CreateSpyBackend {
-        fn backend_name(&self) -> &str {
-            "create-spy"
-        }
-
-        fn resolve_path(
-            &self,
-            path: &WorkspacePath,
-            intent: PathIntent,
-        ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
-        {
-            let path_str = path.as_str().to_string();
-            let files = self.files.lock().unwrap();
-            let exists = files.contains_key(&path_str);
-            let kind = if exists {
-                crate::execution_backend::PathKind::File
-            } else {
-                crate::execution_backend::PathKind::Directory
-            };
-            let facts = match intent {
-                PathIntent::Create => Self::file_facts(&path_str, false, kind),
-                _ => Self::file_facts(&path_str, exists, kind),
-            };
-            Box::pin(async move { Ok(facts) })
-        }
-
-        fn read_file(
-            &self,
-            path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
-        {
-            let files = self.files.lock().unwrap();
-            let bytes = files.get(path.as_str()).cloned().unwrap_or_default();
-            Box::pin(async move { Ok(bytes) })
-        }
-
-        fn write_file(
-            &self,
-            path: &WorkspacePath,
-            content: &[u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-            self.writes.lock().unwrap().push(path.as_str().to_string());
-            self.files
-                .lock()
-                .unwrap()
-                .insert(path.as_str().to_string(), content.to_vec());
-            Box::pin(async { Ok(()) })
-        }
-
-        fn remove_file(
-            &self,
-            _path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn list_dir(
-            &self,
-            _path: &WorkspacePath,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_,
-            >,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn grep(
-            &self,
-            _request: &GrepRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
-        {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn find_files(
-            &self,
-            _request: &FindRequest,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn changed_paths(
-            &self,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
+    fn local_workspace(root: &str) -> Arc<LocalWorkspace> {
+        Arc::new(LocalWorkspace::new(std::path::Path::new(root)).expect("local workspace"))
     }
 
     fn ctx_with_denied_patterns(
         root: &str,
-        backend: Arc<CreateSpyBackend>,
         denied_patterns: &[&str],
-    ) -> HandlerContext {
-        let (event_tx, _rx) = mpsc::channel(8);
+    ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
+        let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut policy_cfg =
             lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
@@ -1132,54 +963,65 @@ mod create_tests {
         let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
             policy_cfg,
         ));
-        HandlerContext {
-            call_id: 1,
-            events: EventSink::new(event_tx, 1),
-            cancellation: Cancellation::new(cancel_rx),
-            cep_context,
-            turn_id: "test-turn".into(),
-            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-            authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-            policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
-            default_policy_hook: Some(default_hook),
-            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+        (
+            HandlerContext {
+                call_id: 1,
+                events: EventSink::new(event_tx, 1),
+                cancellation: Cancellation::new(cancel_rx),
+                cep_context,
                 turn_id: "test-turn".into(),
-                session_id: "test-session".into(),
-                ..Default::default()
-            })),
-            audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: ExecutionRouting {
-                backend,
-                upper: UpperContext {
-                    execution_backend: "create-spy".into(),
-                    upper_workspace_id: "upper-1".into(),
-                },
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                    ..Default::default()
+                })),
+                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
+                cep_mode: lancet_protocol::policy::CepMode::Off,
+                workspace: local_workspace(root),
             },
-            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
-        }
+            event_rx,
+        )
     }
 
+    fn mutation_registry() -> MethodRegistry {
+        let mut registry = MethodRegistry::new();
+        register_mutation_methods(&mut registry).unwrap();
+        registry
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
-    async fn create_with_null_backend_returns_execution_failed() {
+    async fn create_through_symlinked_parent_fails_path_guard() {
         let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linkdir")).unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
         let (ctx, _events) = test_ctx(root);
+        let durable = ctx.durable_metadata.clone();
 
         let params = CreateParams {
-            path: "test.txt".into(),
-            content: "hello".into(),
+            path: "linkdir/file.txt".into(),
+            content: "x".into(),
             create_parents: false,
         };
         let err = registry
             .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        // With a NullExecutionBackend, the backend returns an error during
-        // preflight path resolution.
+        // The concrete Local Workspace rejects the symlinked parent during
+        // secure resolution; the denial is recorded with the path-guard stage.
         assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        let metadata: serde_json::Value =
+            serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
+        assert_eq!(metadata["rejection_stage"], "path_guard");
+        assert_eq!(metadata["denial_source"], "local_workspace");
     }
 
     #[tokio::test]
@@ -1187,8 +1029,7 @@ mod create_tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
-        let backend = Arc::new(CreateSpyBackend::default());
-        let ctx = ctx_with_denied_patterns(root, Arc::clone(&backend), &[]);
+        let (ctx, _events) = test_ctx(root);
 
         let params = CreateParams {
             path: "test.txt".into(),
@@ -1202,22 +1043,44 @@ mod create_tests {
         let parsed: CreateResult = serde_json::from_value(result).unwrap();
         assert_eq!(parsed.path, "test.txt");
         assert_eq!(parsed.bytes_written, 11);
+        // The install lands on the real Local Workspace.
+        let on_disk = std::fs::read(dir.path().join("test.txt")).unwrap();
+        assert_eq!(on_disk, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn create_install_injected_failure_leaves_no_target() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let (ctx, _events) = test_ctx(root);
+        // Prime the narrow one-shot install failure on the workspace the
+        // handler will use, proving the install failure boundary leaves the
+        // target absent.
+        ctx.workspace.fail_next_install();
+
+        let params = CreateParams {
+            path: "fragile.txt".into(),
+            content: "partial".into(),
+            create_parents: false,
+        };
+        let err = registry
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
         assert!(
-            backend
-                .writes
-                .lock()
-                .unwrap()
-                .contains(&"test.txt".to_string())
+            !dir.path().join("fragile.txt").exists(),
+            "injected install failure must leave no target on disk"
         );
     }
 
     #[tokio::test]
-    async fn create_out_of_scope_returns_replan_required() {
+    async fn create_out_of_scope_returns_guard_denied() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
-        let backend = Arc::new(CreateSpyBackend::default());
-        let ctx = ctx_with_denied_patterns(root, backend, &["README.md"]);
+        let (ctx, _events) = ctx_with_denied_patterns(root, &["README.md"]);
 
         let params = CreateParams {
             path: "README.md".into(),
@@ -1230,6 +1093,29 @@ mod create_tests {
             .unwrap_err();
         // Blacklist semantics: explicitly denied paths are rejected by the guard.
         assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(!dir.path().join("README.md").exists());
+    }
+
+    #[tokio::test]
+    async fn create_existing_target_returns_replan_required() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("exists.txt"), "first\n").unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let (ctx, _events) = test_ctx(root);
+
+        let params = CreateParams {
+            path: "exists.txt".into(),
+            content: "second".into(),
+            create_parents: false,
+        };
+        let err = registry
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        let on_disk = std::fs::read(dir.path().join("exists.txt")).unwrap();
+        assert_eq!(on_disk, b"first\n");
     }
 
     #[tokio::test]
@@ -1256,18 +1142,11 @@ mod create_tests {
 #[cfg(test)]
 mod edit_tests {
     use super::*;
-    use crate::execution_backend::{
-        DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-        GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
-    };
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::default::WorkspacePolicy;
 
-    use std::collections::BTreeMap;
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
 
@@ -1277,131 +1156,7 @@ mod edit_tests {
         registry
     }
 
-    /// A spy backend that simulates a filesystem in memory for Direct-mode
-    /// edit/batch mutation tests.
-    #[derive(Default)]
-    struct MutSpyBackend {
-        files: Mutex<BTreeMap<String, Vec<u8>>>,
-        writes: Mutex<Vec<String>>,
-    }
-
-    impl MutSpyBackend {
-        fn file_facts(
-            path: &str,
-            exists: bool,
-            kind: crate::execution_backend::PathKind,
-        ) -> PathFacts {
-            PathFacts {
-                normalized_path: path.to_string(),
-                exists,
-                kind: Some(kind),
-                parent_exists: true,
-                parent_kind: Some(crate::execution_backend::PathKind::Directory),
-                byte_size: None,
-                canonical_under_workspace: true,
-            }
-        }
-    }
-
-    impl ExecutionBackend for MutSpyBackend {
-        fn backend_name(&self) -> &str {
-            "mut-spy"
-        }
-
-        fn resolve_path(
-            &self,
-            path: &WorkspacePath,
-            intent: PathIntent,
-        ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
-        {
-            let path_str = path.as_str().to_string();
-            let files = self.files.lock().unwrap();
-            let exists = files.contains_key(&path_str);
-            let kind = if exists {
-                crate::execution_backend::PathKind::File
-            } else {
-                crate::execution_backend::PathKind::Directory
-            };
-            let facts = match intent {
-                PathIntent::Create => Self::file_facts(&path_str, false, kind),
-                _ => Self::file_facts(&path_str, exists, kind),
-            };
-            Box::pin(async move { Ok(facts) })
-        }
-
-        fn read_file(
-            &self,
-            path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
-        {
-            let files = self.files.lock().unwrap();
-            let bytes = files.get(path.as_str()).cloned().unwrap_or_default();
-            Box::pin(async move { Ok(bytes) })
-        }
-
-        fn write_file(
-            &self,
-            path: &WorkspacePath,
-            content: &[u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-            self.writes.lock().unwrap().push(path.as_str().to_string());
-            self.files
-                .lock()
-                .unwrap()
-                .insert(path.as_str().to_string(), content.to_vec());
-            Box::pin(async { Ok(()) })
-        }
-
-        fn remove_file(
-            &self,
-            _path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn list_dir(
-            &self,
-            _path: &WorkspacePath,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_,
-            >,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn grep(
-            &self,
-            _request: &GrepRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
-        {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn find_files(
-            &self,
-            _request: &FindRequest,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn changed_paths(
-            &self,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
-        > {
-            let writes = self.writes.lock().unwrap();
-            let paths: Vec<WorkspacePath> = writes
-                .iter()
-                .filter_map(|p| WorkspacePath::parse(p).ok())
-                .collect();
-            Box::pin(async move { Ok(paths) })
-        }
-    }
-
-    fn mut_ctx(root: &str, backend: Arc<MutSpyBackend>) -> HandlerContext {
+    fn edit_ctx(root: &str) -> HandlerContext {
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut policy_cfg =
@@ -1435,30 +1190,20 @@ mod edit_tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: ExecutionRouting {
-                backend,
-                upper: UpperContext {
-                    execution_backend: "mut-spy".into(),
-                    upper_workspace_id: "upper-1".into(),
-                },
-            },
-            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+            workspace: Arc::new(
+                LocalWorkspace::new(std::path::Path::new(root)).expect("local workspace"),
+            ),
         }
     }
 
     #[tokio::test]
     async fn edit_semantic_replace_computes_hashline_in_runtime() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
         let before = "alpha\nbeta\n";
+        std::fs::write(dir.path().join("target.txt"), before).unwrap();
+        let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
-        let backend = Arc::new(MutSpyBackend::default());
-        backend
-            .files
-            .lock()
-            .unwrap()
-            .insert("target.txt".into(), before.as_bytes().to_vec());
-        let ctx = mut_ctx(root, Arc::clone(&backend));
+        let ctx = edit_ctx(root);
 
         let params = EditParams {
             path: "target.txt".into(),
@@ -1476,32 +1221,54 @@ mod edit_tests {
         let parsed: EditResult = serde_json::from_value(result).unwrap();
 
         assert_eq!(parsed.changed_files, vec!["target.txt"]);
-        let updated = String::from_utf8(
-            backend
-                .files
-                .lock()
-                .unwrap()
-                .get("target.txt")
-                .cloned()
-                .unwrap_or_default(),
-        )
-        .unwrap();
+        let updated = std::fs::read_to_string(dir.path().join("target.txt")).unwrap();
         assert_eq!(updated, "alpha\ngamma\n");
+    }
+
+    #[tokio::test]
+    async fn edit_success_records_post_install_local_revision() {
+        let dir = TempDir::new().unwrap();
+        let before = "one\ntwo\n";
+        std::fs::write(dir.path().join("f.txt"), before).unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let ctx = edit_ctx(root);
+        let durable = ctx.durable_metadata.clone();
+
+        let params = EditParams {
+            path: "f.txt".into(),
+            expected_hash: content_hash(before.as_bytes()),
+            edits: vec![EditOperation::ReplaceText {
+                old: "two".into(),
+                new: "TWO".into(),
+                occurrence: None,
+            }],
+        };
+        registry
+            .dispatch(Edit::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
+        let after = "one\nTWO\n";
+        assert_eq!(
+            metadata["content_hash"],
+            serde_json::json!(content_hash(after.as_bytes())),
+            "post-install content hash is the new Local Revision"
+        );
+        assert_eq!(metadata["guarded_path"], "f.txt");
+        assert_eq!(metadata["compiled_patch_format"], "hashline_patch");
     }
 
     #[tokio::test]
     async fn edit_ambiguous_text_requires_occurrence() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
         let before = "same\nsame\n";
+        std::fs::write(dir.path().join("target.txt"), before).unwrap();
+        let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
-        let backend = Arc::new(MutSpyBackend::default());
-        backend
-            .files
-            .lock()
-            .unwrap()
-            .insert("target.txt".into(), before.as_bytes().to_vec());
-        let ctx = mut_ctx(root, Arc::clone(&backend));
+        let ctx = edit_ctx(root);
 
         let params = EditParams {
             path: "target.txt".into(),
@@ -1518,21 +1285,18 @@ mod edit_tests {
             .unwrap_err();
 
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        let on_disk = std::fs::read_to_string(dir.path().join("target.txt")).unwrap();
+        assert_eq!(on_disk, before);
     }
 
     #[tokio::test]
     async fn edit_stale_expected_hash_records_preflight_replan_metadata() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
         let before = "alpha\nbeta\n";
+        std::fs::write(dir.path().join("target.txt"), before).unwrap();
+        let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
-        let backend = Arc::new(MutSpyBackend::default());
-        backend
-            .files
-            .lock()
-            .unwrap()
-            .insert("target.txt".into(), before.as_bytes().to_vec());
-        let ctx = mut_ctx(root, Arc::clone(&backend));
+        let ctx = edit_ctx(root);
         let durable = ctx.durable_metadata.clone();
 
         let params = EditParams {
@@ -1553,7 +1317,12 @@ mod edit_tests {
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
         let metadata: serde_json::Value =
             serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
-        assert_eq!(metadata["cep_preflight"]["expected_hash_status"], "stale");
+        // The replan evidence carries the Local Revision observed at the
+        // Mutation Precondition check (the target's current content hash).
+        assert_eq!(
+            metadata["cep_preflight"]["local_revision"],
+            serde_json::json!(content_hash(before.as_bytes()))
+        );
         assert_eq!(
             metadata["cep_preflight"]["replan_reason"],
             "expected_hash_stale"
@@ -1562,31 +1331,8 @@ mod edit_tests {
             metadata["cep_preflight"]["changed_paths"],
             serde_json::json!(["target.txt"])
         );
-    }
-
-    #[tokio::test]
-    async fn mutation_create_uses_backend_only() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = mutation_registry();
-        let backend = Arc::new(MutSpyBackend::default());
-        let ctx = mut_ctx(root, Arc::clone(&backend));
-        let params = CreateParams {
-            path: "new.txt".into(),
-            content: "created-on-upper".into(),
-            create_parents: false,
-        };
-        registry
-            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap();
-        assert!(
-            backend
-                .writes
-                .lock()
-                .unwrap()
-                .contains(&"new.txt".to_string())
-        );
-        assert!(!dir.path().join("new.txt").exists());
+        assert!(metadata["cep_preflight"].get("backend_invoked").is_none());
+        let on_disk = std::fs::read_to_string(dir.path().join("target.txt")).unwrap();
+        assert_eq!(on_disk, before, "stale-hash edit must not modify the target");
     }
 }

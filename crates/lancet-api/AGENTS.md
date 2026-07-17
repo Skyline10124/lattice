@@ -44,6 +44,12 @@ but delegates concrete composition to `lancet-runtime`.
 
 ## Recent Issues
 
+- FIXED #38: `ServerRunConfig.execution` and the `ExecutionRouting`/
+  `UpperContext`/`NullExecutionBackend` re-exports are gone. The native
+  server constructs the one concrete Local Workspace from
+  `cep_context.policy.project_root` inside `run_native`; embedders supply
+  only the canonical project root (via resolved policy). `LancetServer::spawn`
+  and direct test servers must use `CepServerNativeExt::run_native`.
 - FIXED M-24-05: turn/LANCET runtime composition extracted out of `lattice-api`
   into this crate; turn runtime and CLI `lancet` smoke route through
   `LancetServer`/`LancetRuntime`. CLI `lattice audit` uses `query_audit` /

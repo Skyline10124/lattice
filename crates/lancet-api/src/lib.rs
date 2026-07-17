@@ -70,7 +70,7 @@ pub use lancet_authority::{CepPolicyConfig, CepTurnContext};
 pub use lancet_cep::ToolDefinition;
 pub use lancet_dispatch::{CepClient, CepTransport};
 pub use lancet_native::{
-    AuditQueryFilters, CepAuditContext, CepAuditStore, ExecutionRouting, MethodRegistry,
-    NullExecutionBackend, ServerRunConfig, UpperContext, register_production_method_registry,
+    AuditQueryFilters, CepAuditContext, CepAuditStore, MethodRegistry, ServerRunConfig,
+    register_production_method_registry,
 };
 pub use lancet_protocol::CepError;

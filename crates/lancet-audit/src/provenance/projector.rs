@@ -370,7 +370,7 @@ mod tests {
                 },
                 "cep_preflight": {
                     "kind": "workspace_mutation",
-                    "expected_hash_status": "stale"
+                    "local_revision": "blake3:abc"
                 },
                 "approval_request": {
                     "status": "required"
@@ -386,8 +386,8 @@ mod tests {
             serde_json::json!("allowed")
         );
         assert_eq!(
-            attrs["cep_preflight"]["expected_hash_status"],
-            serde_json::json!("stale")
+            attrs["cep_preflight"]["local_revision"],
+            serde_json::json!("blake3:abc")
         );
         assert_eq!(
             attrs["approval_request"]["status"],

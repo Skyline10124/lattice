@@ -11,7 +11,6 @@ pub mod audit {
 }
 pub(crate) mod edit;
 pub mod enforcement;
-pub mod execution_backend;
 pub(crate) mod executor;
 mod handlers;
 pub mod provenance {
@@ -20,11 +19,6 @@ pub mod provenance {
 mod server;
 pub(crate) mod workspace;
 
-pub use execution_backend::{
-    DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-    GrepMatch, GrepRequest, NullExecutionBackend, PathFacts, PathIntent, PathKind,
-    RoutingInvocationState, UpperContext, WorkspacePath, WorkspacePathError, direct_local_routing,
-};
 #[cfg(feature = "inspect-scaffold")]
 pub use handlers::register_inspect_scaffold_methods;
 pub use lancet_audit::{

@@ -4,8 +4,6 @@
 //! Impact matrix: one representative method per `ImpactKind` round-trips
 //! from catalog-derived LLM tool shape through `CepExecutorAdapter` and back.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use lancet_catalog::CepMethod;
@@ -14,10 +12,8 @@ use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace};
 use lancet_native::{
-    CepAuditStore, CepTransport, DirectoryEntry, ExecutionBackend, ExecutionBackendError,
-    ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry, PathFacts, PathIntent,
-    PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext, WorkspacePath,
-    register_production_method_registry,
+    CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE,
+    ServerRunConfig, register_production_method_registry,
 };
 use lancet_protocol::effect_types::ImpactKind;
 
@@ -28,137 +24,6 @@ use lattice_api::CepExecutorAdapter;
 use lattice_llm::{FunctionCall, ToolCall};
 use serde_json::Value;
 use tempfile::TempDir;
-
-/// Minimal host-filesystem backend for integration tests.
-struct TestFsBackend {
-    root: std::path::PathBuf,
-}
-
-impl TestFsBackend {
-    fn new(root: impl Into<std::path::PathBuf>) -> Self {
-        let raw = root.into();
-        Self {
-            root: std::fs::canonicalize(&raw).unwrap_or(raw),
-        }
-    }
-}
-
-impl ExecutionBackend for TestFsBackend {
-    fn backend_name(&self) -> &str {
-        "test-fs"
-    }
-
-    fn resolve_path(
-        &self,
-        path: &WorkspacePath,
-        _intent: PathIntent,
-    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>> {
-        let full = if path.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(path.as_str())
-        };
-        let path_str = path.as_str().to_string();
-        let exists = full.exists();
-        let kind = if full.is_dir() {
-            PathKind::Directory
-        } else {
-            PathKind::File
-        };
-        Box::pin(async move {
-            Ok(PathFacts {
-                normalized_path: path_str,
-                exists,
-                kind: Some(kind),
-                parent_exists: true,
-                parent_kind: Some(PathKind::Directory),
-                byte_size: None,
-                canonical_under_workspace: true,
-            })
-        })
-    }
-
-    fn read_file(
-        &self,
-        path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>> {
-        let full = if path.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(path.as_str())
-        };
-        Box::pin(async move {
-            std::fs::read(&full).map_err(|e| ExecutionBackendError::Unavailable {
-                message: e.to_string(),
-            })
-        })
-    }
-
-    fn write_file(
-        &self,
-        path: &WorkspacePath,
-        content: &[u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-        let full = if path.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(path.as_str())
-        };
-        let content = content.to_vec();
-        Box::pin(async move {
-            std::fs::write(&full, &content).map_err(|e| ExecutionBackendError::Unavailable {
-                message: e.to_string(),
-            })
-        })
-    }
-
-    fn remove_file(
-        &self,
-        path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-        let full = if path.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(path.as_str())
-        };
-        Box::pin(async move {
-            std::fs::remove_file(&full).map_err(|e| ExecutionBackendError::Unavailable {
-                message: e.to_string(),
-            })
-        })
-    }
-
-    fn list_dir(
-        &self,
-        _path: &WorkspacePath,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
-    {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn grep(
-        &self,
-        _request: &GrepRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
-    {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn find_files(
-        &self,
-        _request: &FindRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
-    {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn changed_paths(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
-    {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-}
 
 struct ImpactRow {
     impact: ImpactKind,
@@ -171,7 +36,7 @@ async fn adapter_with_registry(registry: MethodRegistry) -> CepExecutorAdapter {
     let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move {
         let _ = server
-            .run(registry, ServerRunConfig::in_memory_for_tests())
+            .run_native(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
@@ -467,16 +332,9 @@ async fn production_adapter(
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
     config.policy_hook = default_hook.clone();
     config.default_policy_hook = Some(default_hook);
-    config.execution = ExecutionRouting {
-        backend: Arc::new(TestFsBackend::new(root)),
-        upper: UpperContext {
-            execution_backend: "test-fs".into(),
-            upper_workspace_id: "test-upper".into(),
-        },
-    };
 
     let server_task = tokio::spawn(async move {
-        let _ = server.run(registry, config).await;
+        let _ = server.run_native(registry, config).await;
     });
     let enabled_names: Vec<String> = enabled.iter().map(|s| (*s).to_string()).collect();
     let adapter = CepExecutorAdapter::new(client, enabled_names);
