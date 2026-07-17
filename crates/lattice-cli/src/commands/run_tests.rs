@@ -65,10 +65,6 @@ fn loaded_profile(model: &str) -> lattice_profile::LoadedAgentProfile {
             tools: lattice_profile::ToolsSection { enabled: vec![] },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
-            workspace: lattice_profile::WorkspaceSection {
-                image: Some("docker.io/library/alpine:3.19".into()),
-                ..Default::default()
-            },
         },
         system_prompt: String::new(),
     }
@@ -148,7 +144,7 @@ impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
 #[tokio::test]
 async fn run_integration_commits_existing_session() {
     let temp = tempfile::tempdir().unwrap();
-    // Wave 5: resolve_upper_config requires a git repo to resolve HEAD.
+    // The session graph store is git-backed; the fixture needs an initialized repo.
     std::fs::write(temp.path().join("README.md"), "init\n").expect("write");
     std::process::Command::new("git")
         .args(["init", "-q"])
@@ -213,8 +209,6 @@ async fn run_integration_commits_existing_session() {
 
 #[tokio::test]
 async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
-    use lattice_profile::WorkspaceSection;
-
     let workspace = tempfile::tempdir().unwrap();
     let ws = workspace.path();
     std::env::set_current_dir(ws).unwrap();
@@ -303,10 +297,6 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
                 },
                 llm: lattice_profile::LlmSection::default(),
                 lancet: lattice_profile::LancetSection::default(),
-                workspace: WorkspaceSection {
-                    image: Some("docker.io/library/alpine:3.19".into()),
-                    ..Default::default()
-                },
             },
             system_prompt: String::new(),
         }),

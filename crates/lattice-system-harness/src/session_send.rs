@@ -15,7 +15,7 @@
 //! - **Driver** (`SessionSendDriver`): creates a session via the public
 //!   `session new --json` command, runs `--json session send`, captures
 //!   stdout JSONL + exit code, and exposes the parsed event sequence. The
-//!   MSB-backed turn itself runs through the real product path.
+//!   Direct-Local turn itself runs through the real product path.
 //!
 //! The parser is **tolerant of unknown variants**: the public `TurnEvent`
 //! contract is explicitly incremental (new variants may appear), so each

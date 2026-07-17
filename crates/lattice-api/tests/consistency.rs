@@ -96,8 +96,6 @@ struct Workspace {
 
 fn workspace_toml_suffix(_enabled_tools: &[&str]) -> &'static str {
     r#"
-[workspace]
-image = "test-template"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
 "#
@@ -162,24 +160,15 @@ fn make_request(
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
-    support::attach_upper_fixture(
-        RunTurnRequest {
-            input: input.to_string(),
-            session_id: session_id.to_string(),
-            loaded_profile: Some(ws.loaded.clone()),
-            cancel_flag: None,
-            test_llm: Some(llm),
-            test_project_root: Some(ws.root.to_string_lossy().to_string()),
-            test_persist_audit: None,
-        },
-        &ws.loaded
-            .profile
-            .tools
-            .enabled
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>(),
-    )
+    RunTurnRequest {
+        input: input.to_string(),
+        session_id: session_id.to_string(),
+        loaded_profile: Some(ws.loaded.clone()),
+        cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(ws.root.to_string_lossy().to_string()),
+        test_persist_audit: None,
+    }
 }
 
 fn llm_with_events(llm_events: Vec<LlmEvent>) -> Arc<dyn LlmClient> {

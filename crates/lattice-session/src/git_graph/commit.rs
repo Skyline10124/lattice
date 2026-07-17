@@ -1,17 +1,13 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
-
-//! Commit creation, transcript reconstruction, log, and operational state.
-
-use std::path::Path;
+//! Commit creation, transcript reconstruction, and log.
 
 use chrono::Utc;
 
 use super::helpers::{
     GitSessionManifest, LATTICE_AUTHOR_EMAIL, LATTICE_AUTHOR_NAME, MANIFEST_SCHEMA_VERSION,
-    OperationalState, build_root_tree, build_turn_tree, candidate_ref_name, derive_turn_id,
-    parse_manifest, read_ops_state, read_session_meta, read_tree_blob, serialize_manifest,
-    validate_turn_id, write_ops_state,
+    build_root_tree, build_turn_tree, candidate_ref_name, derive_turn_id, parse_manifest,
+    read_session_meta, read_tree_blob, serialize_manifest, validate_turn_id,
 };
 use super::session::resolve_head_oid;
 use super::{DEFAULT_BRANCH, GitSessionGraphStore};
@@ -308,129 +304,6 @@ impl GitSessionGraphStore {
         turn.message_ids = message_ids;
         Ok(Some(turn))
     }
-
-    pub(super) fn set_snapshot_lost_impl(&self, commit_id: &str, lost: bool) -> Result<()> {
-        let session_id = match resolve_session_id_for_commit(&self.dir, commit_id)? {
-            Some(id) => id,
-            None => return Err(SessionError::MissingCommit(commit_id.to_string())),
-        };
-        let state = OperationalState {
-            snapshot_lost: lost,
-            updated_at: Utc::now().to_rfc3339(),
-        };
-        write_ops_state(&self.dir, &session_id, commit_id, &state)
-    }
-
-    pub(super) fn get_snapshot_lost_impl(&self, commit_id: &str) -> Result<Option<bool>> {
-        let session_id = match resolve_session_id_for_commit(&self.dir, commit_id)? {
-            Some(id) => id,
-            None => return Ok(None),
-        };
-        read_ops_state(&self.dir, &session_id, commit_id).map(|opt| opt.map(|s| s.snapshot_lost))
-    }
-}
-
-pub(super) fn resolve_session_id_for_commit(dir: &Path, commit_id: &str) -> Result<Option<String>> {
-    // Step 1: scan existing ops files.
-    let ops_dir = dir.join(".lattice").join("sessions");
-    if ops_dir.exists() {
-        for entry in std::fs::read_dir(&ops_dir).map_err(|source| SessionError::Io {
-            operation: "reading sessions directory",
-            path: ops_dir.clone(),
-            source,
-        })? {
-            let entry = entry.map_err(|source| SessionError::Io {
-                operation: "reading sessions directory entry",
-                path: ops_dir.clone(),
-                source,
-            })?;
-            let session_dir = entry.path();
-            let ops_path = session_dir.join("ops").join(format!("{commit_id}.json"));
-            if ops_path.is_file() {
-                let session_id = session_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !session_id.is_empty() {
-                    return Ok(Some(session_id));
-                }
-            }
-        }
-    }
-
-    // Step 2: fallback to scanning session refs.
-    let repo = git2::Repository::open(dir)
-        .map_err(|e| SessionError::Git(format!("open repository for commit resolution: {e}")))?;
-    let target_oid = git2::Oid::from_str(commit_id)
-        .map_err(|e| SessionError::Git(format!("parse commit id: {e}")))?;
-
-    if ops_dir.exists() {
-        for entry in std::fs::read_dir(&ops_dir).map_err(|source| SessionError::Io {
-            operation: "reading sessions directory",
-            path: ops_dir.clone(),
-            source,
-        })? {
-            let entry = entry.map_err(|source| SessionError::Io {
-                operation: "reading sessions directory entry",
-                path: ops_dir.clone(),
-                source,
-            })?;
-            let session_dir = entry.path();
-            let meta_path = session_dir.join("meta.json");
-            if !meta_path.is_file() {
-                continue;
-            }
-            let session_id = session_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-            if session_id.is_empty() {
-                continue;
-            }
-            let meta = match read_session_meta(dir, &session_id) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let branch = match &meta.head_branch {
-                Some(b) => b,
-                None => continue,
-            };
-            let ref_name = match super::helpers::session_ref_name(&session_id, branch) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let tip = match repo.find_reference(&ref_name) {
-                Ok(r) => match r.target() {
-                    Some(o) => o,
-                    None => continue,
-                },
-                Err(_) => continue,
-            };
-            let mut revwalk = match repo.revwalk() {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            if revwalk.push(tip).is_err() {
-                continue;
-            }
-            let mut found = false;
-            for oid in revwalk {
-                if let Ok(oid) = oid
-                    && oid == target_oid
-                {
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                return Ok(Some(session_id));
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 pub(super) fn build_manifest_from_prepared(prepared: &PreparedTurnCommit) -> GitSessionManifest {

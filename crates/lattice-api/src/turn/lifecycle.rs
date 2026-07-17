@@ -19,15 +19,18 @@ use lattice_session::{TurnCommitStatus, WorkspaceDisposition};
 
 /// Internal resource instruction consumed by durable finalization.
 ///
-/// Tells the snapshot manager what to do with the Upper after the turn outcome
-/// is determined. Not part of the public session commit.
+/// Classifies what should happen to turn-scoped resources once the outcome is
+/// determined. The Direct-Local path has no sandbox or snapshot to manage, so
+/// only `Destroy` is produced in production; the other variants remain as
+/// classification vocabulary for the disposition matrix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceAction {
-    /// Destroy the Upper (no snapshot).
+    /// Tear down turn-scoped resources immediately.
     Destroy,
-    /// Retain the Upper as a named snapshot for later resume.
+    /// Retain turn-scoped resources (legacy retained-snapshot vocabulary).
     Retain,
-    /// Release the Upper after the candidate ref is durably pinned.
+    /// Release turn-scoped resources after a candidate ref is pinned (legacy
+    /// promotion vocabulary).
     ReleaseAfterCandidatePin,
 }
 
@@ -43,20 +46,23 @@ pub struct TurnLifecycleOutcome {
     pub disposition: WorkspaceDisposition,
     /// Lifecycle evidence messages.
     pub messages: Vec<String>,
-    /// Resource action for the Upper snapshot lifecycle.
+    /// Resource action for turn-scoped resources.
     pub resource_action: ResourceAction,
-    /// Whether the candidate was exported before this outcome.
+    /// Whether a candidate was exported before this outcome (legacy lifecycle
+    /// vocabulary; always `false` on the Direct-Local path).
     pub candidate_exported: bool,
-    /// Whether verification evidence was acquired.
+    /// Whether verification evidence was acquired (legacy lifecycle
+    /// vocabulary; always `false` on the Direct-Local path).
     pub verification_acquired: bool,
-    /// The promoted ref OID, if promotion succeeded.
+    /// The promoted ref OID, if promotion succeeded (legacy promotion
+    /// vocabulary; always `None` on the Direct-Local path).
     pub promoted_ref_committed: Option<String>,
 }
 
 /// A turn whose outcome is classified but not yet durably finalized.
 ///
-/// Retains ownership of the Upper handle and audit context until the
-/// finalization step commits the session record.
+/// Holds the classified outcome until the finalization step commits the
+/// session record.
 #[derive(Debug)]
 pub struct UnfinalizedTurn {
     pub outcome: TurnLifecycleOutcome,
@@ -180,23 +186,16 @@ pub fn outcome_workspace_less() -> TurnLifecycleOutcome {
 /// function.
 ///
 /// #37 removed the Upper snapshot journal and retain/release paths; only the
-/// Direct-Local Destroy path remains in production, so this is now a thin
-/// delegate over `commit_fn`. The `session_id` / `snapshot_name` /
-/// `prepared_commit_id` parameters are retained for signature stability
-/// until #40 reworks the session lifecycle contract; they are unused on the
-/// Destroy path. Never rewrites a committed lifecycle row.
+/// Direct-Local Destroy path remains in production, so this is a thin delegate
+/// over `commit_fn`. #40 removed the unused legacy `session_id` /
+/// `prepared_commit_id` parameters. Never rewrites a committed lifecycle row.
 pub fn finalize_turn<F>(
     outcome: &TurnLifecycleOutcome,
-    session_id: &str,
     snapshot_name: &str,
-    prepared_commit_id: &str,
     commit_fn: F,
 ) -> Result<String, String>
 where
     F: FnOnce(&TurnLifecycleOutcome, &str) -> Result<String, String>,
 {
-    let _ = (session_id, snapshot_name, prepared_commit_id);
-    // The Retain/Release paths depended on the Upper snapshot journal which
-    // #37 deleted. Only the Direct-Local Destroy path remains in production.
     commit_fn(outcome, snapshot_name)
 }

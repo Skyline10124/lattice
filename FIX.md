@@ -2871,3 +2871,113 @@ runtime rule on the observation path.
 `crates/lancet-native/src/handlers/mutation.rs` (WorkspacePolicy literals),
 `crates/lattice-api/tests/{direct_local_acceptance,dogfood_impact_matrix,cep_round_trip}.rs`,
 `FINDINGS.md`, `FIX.md`.
+
+---
+
+## Codeberg #40: removed Upper configuration, Microsandbox, and lattice-workspace residue — 2026-07-17
+
+Severity: FEATURE (ADR 0003 Migration Sequence steps 4–6 / Workstream A; closes M-LOCAL-01 with #37–#39).
+
+**Problem:** After the Direct-Local runtime (#37–#39) stabilized, the repo
+still carried the retired Upper/MSB surface: the mandatory `[workspace]`
+profile section (egress/credentials/image/lifecycle limits), the
+`lattice-workspace` crate and `microsandbox` dependency, MSB/KVM harness
+scenarios behind `LATTICE_HARNESS_MSB`, the retained-snapshot ops-state
+chain (`set_snapshot_lost`/`get_snapshot_lost`, `ops/<oid>.json`), the
+`lattice-session` promoted-commit builder, dead `SessionApi` wrappers, and
+stale active documentation describing the sandbox path.
+
+**Fix summary:**
+
+- **profile**: `AgentProfile.workspace` and the `WorkspaceSection` /
+  `EgressPolicyConfig` / `CredentialRef` types and lifecycle-limit
+  constants deleted. Legacy profiles declaring `[workspace]` now fail
+  strict parsing with a named `ForbiddenSection` error (added to the
+  loader pre-scan). Generated templates emit only `[lancet.workspace]`
+  policy. The local dogfood profile `.lattice/agents/default/agent.toml`
+  was rewritten on disk to the Direct-Local shape (also dropping retired
+  `[lancet.command]` / `[lancet.verify]` / `[lancet.isolation]` dead
+  surface and the invalid allowlist write policy); it is an ignored
+  private path and is intentionally not committed. `[lancet.network]` /
+  `[lancet.workspace]` (blacklist + read visibility) unchanged.
+- **lattice-session**: `set_snapshot_lost`/`get_snapshot_lost` removed
+  from the `SessionGraphStore` contract, `GitSessionGraphStore`, the
+  `ops/<oid>.json` sidecar machinery, and the SQLite→Git migration write
+  path (extraction no longer reads `graph_snapshot_state`); the
+  consumer-less `derive_snapshot_name`/`validate_snapshot_name` retained
+  snapshot helpers deleted. `promotion.rs` + `tests/promotion_commit.rs`
+  deleted.
+- **lattice-api / lattice-cli**: dead `SessionApi::{commit_prepared_turn,
+  get_turn_commit, get_snapshot_lost}` wrappers removed (trait methods
+  stay — covered by git-store tests); `ProductionTurnDepsInput.loaded_profile`
+  residual parameter removed; `finalize_turn` sheds the unused legacy
+  `session_id`/`prepared_commit_id` params; test fixtures drop the
+  `[workspace]` section; `attach_upper_fixture` no-op helper deleted;
+  `git_store_snapshot_lost.rs` deleted.
+- **crate deletion**: `crates/lattice-workspace/` removed (adapter, guest
+  Git baseline/candidate flow, warm templates, credential injection,
+  egress planning, KVM probes, image-specific tests); root `Cargo.toml`
+  drops the member and the `microsandbox` dependency;
+  `cargo tree -i lattice-workspace` was empty before deletion.
+- **harness**: `msb_full_turn.rs`, `layer_guard.rs` (probe +
+  `LATTICE_HARNESS_MSB` gate), and the missing-credential scenario
+  deleted; `ScenarioLayer::Microsandbox` removed. `pty_tui_smoke` now
+  runs Direct-Local in the ordinary lane (no KVM, no `#[ignore]`).
+  New `tests/direct_local_turn.rs` skeletons (#24 owns the full matrix):
+  plain-text turn commits + exit 0, session reopen after an external
+  (non-LATTICE) edit+commit with transcript continuity, and
+  `mutate.create` denied by `[lancet.workspace].denied_write_patterns`
+  (stream shows failed tool event, nothing on disk, turn recovers).
+  `SseScript::Sequence` added to the fake LLM for multi-round scripts.
+- **native guard**: `WorkspacePathError::UpperRootAlias` renamed
+  `SandboxRootAlias`; the retired `/workspace` guest alias stays rejected
+  so stale agent prompts fail closed.
+- **docs**: root `AGENTS.md`, `README.md`, `docs/ARCHITECTURE.md` (layer
+  graph, data flow, abstractions, removed-subsystems), `docs/CONFIGURATION.md`
+  (schema tables, examples, env vars; also drops stale `[lancet.command]` /
+  `[lancet.verify]` sections that no longer deserialize), `docs/GETTING-STARTED.md`,
+  `docs/TESTING.md`, `docs/TEST-TRIAGE.md` (MSB lane re-targeted to #24),
+  `docs/LANCET.md` transition notice, crate `AGENTS.md` files. Historical
+  ADR/FIX records untouched.
+
+**Verification:**
+
+- `cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` — clean
+  (two pre-existing #39 breakages fixed in separate commits first: rustfmt
+  drift in 14 files, 3 clippy lints in lancet-native).
+- `cargo build --workspace --all-targets` — clean.
+- Per-crate `timeout 600 cargo test -p <c> -- --test-threads=1` for all 16
+  crates — green: lancet-protocol 36, lancet-catalog 27, lancet-dispatch 5,
+  lancet-cep 7, lancet-audit 34, lancet-authority 142, lancet-native 127,
+  lancet-api 17, lattice-profile 80, lattice-session 66, lattice-agent 24,
+  lattice-llm 133, net-guard 15, lattice-api 98 + 17 suites, lattice-tui 3,
+  lattice-cli 135.
+- `cargo xtask harness-boundary` — PASS.
+- Product smoke with no KVM/MSB daemon/OCI registry: `cargo test -p
+  lattice-system-harness -- --test-threads=1` — 88 green incl. the three
+  Direct-Local turn scenarios and the PTY smoke in the ordinary lane.
+- Network policy regression: lancet-authority policy tests, net-guard
+  URL/DNS safety tests, and fetch.web effect-contract tests all green —
+  `[lancet.network]` behavior unchanged.
+- Agent-visible catalog remains exactly the five methods
+  (`direct_local_runtime_exposes_closed_five_method_catalog`).
+- Residue scan `rg -i "microsandbox|upper|msb" crates --type rust`:
+  only historical `#37/#40` comments, negative assertions
+  (`upper_workspace_id` must not appear in audit metadata), and unrelated
+  `uppercase` matches remain.
+
+**Changed files:** `Cargo.toml`, `Cargo.lock`,
+`crates/lattice-profile/src/{schema,defaults,lib,load,discovery}.rs`,
+`crates/lattice-session/` (graph.rs, git_graph/{mod,commit,helpers}.rs, migrate/{extract,write}.rs, lib.rs, AGENTS.md; −promotion.rs, −tests/promotion_commit.rs),
+`crates/lattice-api/` (session.rs, turn/{cep,execute,lifecycle,test_support,live_tests}.rs, tests/{usage_turn,release_e2e,consistency,audit_turn_provenance,support/mod}.rs; −tests/git_store_snapshot_lost.rs),
+`crates/lattice-cli/src/commands/run_tests.rs`,
+`crates/lancet-native/src/workspace/types.rs`,
+`crates/lattice-system-harness/` (−tests/msb_full_turn.rs, −src/layer_guard.rs; +tests/direct_local_turn.rs; fake_llm/scenario/world/lib/driver/session_send/pty_tui/artifacts.rs, tests/{pty_tui_smoke,fast_session_cli,fast_audit_cli,fast_config_cli}.rs, AGENTS.md),
+−`crates/lattice-workspace/` (whole crate), `AGENTS.md`, `README.md`,
+`docs/{ARCHITECTURE,CONFIGURATION,GETTING-STARTED,TESTING,TEST-TRIAGE,LANCET}.md`,
+`FINDINGS.md`, `FIX.md`.
+
+**FINDINGS ledger:** M-LOCAL-01 closed (Workstream A complete); M-33-01/02/03/04/06,
+L-21-02, L-34-02 closed as moot with the deleted adapter/probe/porcelain;
+T-23-01 re-targeted — 54 ex-MSB elevations now owned by #24 Direct-Local
+scenarios; T-23-02 residual note updated.

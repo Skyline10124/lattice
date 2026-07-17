@@ -57,7 +57,7 @@ pub struct PtyTuiDriver {
     /// The process-group leader pid reported by the master, as a `u32` to
     /// match `driver::kill_process_group` and `driver::processes_in_pgid`
     /// (which both key off `std::process::Child::id()` → `u32`). Used to
-    /// kill the whole group (TUI -> microsandbox -> fake-LLM sockets) on
+    /// kill the whole group (TUI -> lattice -> fake-LLM sockets) on
     /// timeout. `None` when the PTY did not report a valid positive leader.
     pgid: Option<u32>,
     /// The full drained PTY output so far (raw, ANSI preserved).
@@ -323,7 +323,7 @@ mod tests {
 
     /// Tracer bullet: spawn `cat` in a PTY, send a line, wait for it to be
     /// echoed back. Proves the PTY round-trip works end-to-end without
-    /// touching the product binary or MSB. `cat` copies stdin to stdout via
+    /// touching the product binary. `cat` copies stdin to stdout via
     /// the PTY, so the line we write should come back through the master
     /// reader.
     #[test]

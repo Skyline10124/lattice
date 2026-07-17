@@ -432,16 +432,6 @@ pub trait SessionGraphStore: Send + Sync {
         session_id: &str,
         commit_id: &str,
     ) -> crate::Result<Option<TurnCommit>>;
-
-    /// Mark a commit's retained snapshot as lost (operational state only).
-    ///
-    /// Must never mutate immutable commit fields or IDs.
-    fn set_snapshot_lost(&self, commit_id: &str, lost: bool) -> crate::Result<()>;
-
-    /// Query snapshot-lost operational state for a commit.
-    ///
-    /// Returns `None` if no operational state has been recorded.
-    fn get_snapshot_lost(&self, commit_id: &str) -> crate::Result<Option<bool>>;
 }
 
 /// Derive commit message from first user message.
@@ -645,20 +635,6 @@ fn canonical_turn_commit_id_v2(
         "created_at": created_at,
     });
     hash_json("v2_turn_commit", &payload)
-}
-
-/// Derive the physical snapshot name from session ID, commit ID, and nonce.
-///
-pub fn derive_snapshot_name(session_id: &str, commit_id: &str, nonce: u32) -> String {
-    let commit_prefix: String = commit_id.chars().take(8).collect();
-    format!("lattice-{}-{}-{:08x}", session_id, commit_prefix, nonce)
-}
-
-/// Validate that a snapshot name matches the expected derivation.
-///
-/// Rejects substituted session IDs, commit prefixes, or nonces.
-pub fn validate_snapshot_name(name: &str, session_id: &str, commit_id: &str, nonce: u32) -> bool {
-    name == derive_snapshot_name(session_id, commit_id, nonce)
 }
 
 fn hash_json(kind: &str, value: &serde_json::Value) -> String {

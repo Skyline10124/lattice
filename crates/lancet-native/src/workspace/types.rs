@@ -50,8 +50,12 @@ impl WorkspacePath {
             return Err(WorkspacePathError::Empty);
         }
         let lower = trimmed.to_ascii_lowercase();
+        // `/workspace` was the retired Upper VM's guest root alias. Keep
+        // rejecting it so stale agent prompts that still emit sandbox-shaped
+        // absolute paths fail closed instead of resolving against the Local
+        // Workspace root (#40).
         if lower == "/workspace" || lower.starts_with("/workspace/") {
-            return Err(WorkspacePathError::UpperRootAlias);
+            return Err(WorkspacePathError::SandboxRootAlias);
         }
         if Path::new(trimmed).is_absolute() {
             return Err(WorkspacePathError::Absolute);
@@ -130,8 +134,8 @@ pub enum WorkspacePathError {
     ParentTraversal,
     #[error("workspace path must be project-relative, not absolute")]
     Absolute,
-    #[error("workspace path must not use the /workspace root alias")]
-    UpperRootAlias,
+    #[error("workspace path must not use the retired /workspace sandbox root alias")]
+    SandboxRootAlias,
     #[error("workspace path is not valid UTF-8")]
     InvalidUtf8,
     #[error("project root sentinel is not valid for file read/write/remove intents")]
@@ -327,14 +331,14 @@ mod tests {
     }
 
     #[test]
-    fn workspace_path_rejects_upper_root_alias() {
+    fn workspace_path_rejects_retired_sandbox_root_alias() {
         assert!(matches!(
             WorkspacePath::parse("/workspace"),
-            Err(WorkspacePathError::UpperRootAlias)
+            Err(WorkspacePathError::SandboxRootAlias)
         ));
         assert!(matches!(
             WorkspacePath::parse("/workspace/src/main.rs"),
-            Err(WorkspacePathError::UpperRootAlias)
+            Err(WorkspacePathError::SandboxRootAlias)
         ));
     }
 

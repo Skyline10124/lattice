@@ -6,16 +6,14 @@
 //!
 //! Drives the built `lattice` binary for the no-turn session surface:
 //! `session new`, `list`, `status`, `log`, and `branch`. Creating a session
-//! only writes the session graph record (it never resolves the Upper
-//! workspace config), so these scenarios need no Microsandbox. The
-//! turn-bearing behaviours (`session log` with a committed turn, branch
-//! creation after a turn) are deferred to the MSB lane - see
-//! `docs/TEST-TRIAGE.md` and `FINDINGS.md`.
+//! only writes the session graph record, so these scenarios need no turn
+//! runtime. Turn-bearing behaviours (plain-text turns, session reopen, policy
+//! denial) run Direct-Local in `tests/direct_local_turn.rs` — no KVM, no MSB
+//! daemon, no OCI image (#40).
 //!
 //! These scenarios supersede the crate-internal `session_*` and
 //! `smoke_session_*` unit tests in `lattice-cli` whose behaviour is fully
 //! covered here (see `docs/TEST-TRIAGE.md`).
-
 use std::process::Output;
 
 use lattice_system_harness::{
@@ -35,9 +33,8 @@ fn project_with_agent(prefix: &str) -> (ScenarioWorld, ScenarioSpec) {
     let spec = ScenarioSpec::fast(prefix);
     let world = ScenarioWorld::new(&spec.name).expect("world");
     world
-        .write_agent_profile("plain", "sonnet", "dummy/not-real:latest")
+        .write_agent_profile("plain", "sonnet")
         .expect("agent profile");
-    world.init_git_project().expect("git project");
     (world, spec)
 }
 
@@ -472,7 +469,7 @@ fn fast_session_log_nonexistent_session_errors() {
 #[test]
 fn fast_session_send_nonexistent_session_errors() {
     // `session send <missing-id> <prompt>` must fail at session lookup (exit 2,
-    // stderr naming the missing id) before any workspace/Upper setup. This is
+    // stderr naming the missing id) before any turn runtime setup. This is
     // the fast-binary guard for the runtime-nesting path: `cmd_send_api`
     // calls `api.open_session` first and returns `ExitCode::from(2)` on
     // `NotFound` before any profile loading or workspace setup
@@ -497,50 +494,10 @@ fn fast_session_send_nonexistent_session_errors() {
 }
 
 #[test]
-fn fast_session_resume_without_session_id_fails() {
-    // `session resume` with no session_id argument is rejected at clap parse
-    // time (the `session_id` field is a required positional `String`). Clap
-    // exits with code 2 on argument errors. Supersedes the crate-internal
-    // `smoke_session_resume_without_session_id_fails`.
-    let (world, spec) = project_with_agent("fast-session-resume-no-id");
-    let out = run(&world, &spec, &["session", "resume"]);
-
-    let result = assert_exit_code(&out, 2).and_then(|_| assert_stderr_contains(&out, "SESSION_ID"));
-    ok_or_artifacts(
-        &world,
-        "fast-session-resume-no-id",
-        "lattice session resume",
-        &out,
-        result,
-    );
-}
-
-#[test]
-fn fast_session_resume_nonexistent_session_errors() {
-    // `session resume <missing-id>` fails at session lookup before any
-    // workspace/Upper setup. Missing sessions are invocation errors and use
-    // the public exit-code-2 contract. Supersedes the crate-internal
-    // `smoke_session_resume_nonexistent_session_returns_error`.
-    let (world, spec) = project_with_agent("fast-session-resume-missing");
-    let out = run(&world, &spec, &["session", "resume", "nope-sid"]);
-
-    let result = assert_exit_code(&out, 2)
-        .and_then(|_| assert_stderr_contains(&out, "not found"))
-        .and_then(|_| assert_stderr_contains(&out, "nope-sid"));
-    ok_or_artifacts(
-        &world,
-        "fast-session-resume-missing",
-        "lattice session resume nope-sid",
-        &out,
-        result,
-    );
-}
-
-#[test]
 fn fast_session_send_no_agent_profile_errors() {
     // `session send <id> hello` when the session's agent profile has been
     // removed from the project fails at `load_agent_checked` (exit 2, stderr
-    // mentioning agent.toml/profile/not found) before any workspace/Upper
+    // mentioning agent.toml/profile/not found) before any turn runtime
     // setup. The failure path is in `cmd_send_api`
     // (`crates/lattice-cli/src/commands/session.rs:423-428`). Supersedes the
     // crate-internal `smoke_session_send_no_profile_fails_with_clear_message`.
@@ -569,43 +526,6 @@ fn fast_session_send_no_agent_profile_errors() {
         "lattice session send <id> hello (no profile)",
         &out,
         &["sk-fast-send-no-profile-sentinel"],
-        result,
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-}
-
-#[test]
-fn fast_session_send_missing_credential_is_redacted_input_error() {
-    // Credential resolution happens before `prepare_upper`, so this is a
-    // fast-binary input/config failure and must not wait for KVM. The public
-    // contract is exit 2, the missing env-var name is actionable, and neither
-    // output stream may expose an unrelated secret present in the environment.
-    const MISSING_CREDENTIAL: &str = "LATTICE_FAST_MISSING_CREDENTIAL";
-    const SECRET_SENTINEL: &str = "sk-fast-missing-credential-sentinel";
-
-    let (mut world, spec) = project_with_agent("fast-session-send-missing-credential");
-    world
-        .write_project_file(
-            ".lattice/agents/plain/agent.toml",
-            &format!(
-                "schema_version = 1\n\n[agent]\nname = \"plain\"\nmodel = \"sonnet\"\n\n[prompt]\nsystem = \"harness agent\"\n\n[workspace]\nimage = \"dummy/not-real:latest\"\n\n[[workspace.credentials]]\nenv_var_name = \"{MISSING_CREDENTIAL}\"\n\n[tools]\nenabled = []\n"
-            ),
-        )
-        .expect("credential-requiring agent profile");
-    let session_id = create_session(&world, &spec);
-
-    world.set_env("UNRELATED_SECRET", SECRET_SENTINEL);
-    let out = run(&world, &spec, &["session", "send", &session_id, "hello"]);
-
-    let result = assert_exit_code(&out, 2)
-        .and_then(|_| assert_stderr_contains(&out, MISSING_CREDENTIAL))
-        .and_then(|_| assert_no_secret(&out, SECRET_SENTINEL));
-    assert_with_failure_artifacts(
-        &world,
-        "fast-session-send-missing-credential",
-        "lattice session send <id> hello (missing credential)",
-        &out,
-        &[SECRET_SENTINEL],
         result,
     )
     .unwrap_or_else(|e| panic!("{e}"));

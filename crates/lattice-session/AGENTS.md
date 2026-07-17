@@ -23,14 +23,14 @@ one-shot SQLite→Git migration path for legacy stores.
   reconstruction via Revwalk, and manifest serialization.
 - `src/git_graph/refs.rs` owns branch, checkout, reset, and diff via git2 ref
   APIs and `merge_base`.
-- `src/git_graph/helpers.rs` owns shared git2 tree/blob/sidecar helpers and
-  operational state (`ops/<oid>.json`) I/O.
+- `src/git_graph/helpers.rs` owns shared git2 tree/blob/sidecar helpers.
 - `src/git_graph/tests/` owns Git-backed persistence and topology regression
   coverage.
 - `src/migrate/` owns the one-shot SQLite→Git session graph migration
   (invoked via `lattice session migrate`).
-- `src/promotion.rs` owns graph-diff/promotion helpers consumed by
-  `lattice-workspace` multi-ref promotion.
+- #40 removed `src/promotion.rs` (promoted-commit builder) and the
+  `set_snapshot_lost`/`get_snapshot_lost` retained-snapshot ops-state chain
+  (`ops/<oid>.json`); both only served the deleted Upper promotion path.
 
 ## Boundaries
 
@@ -44,8 +44,8 @@ one-shot SQLite→Git migration path for legacy stores.
   under `refs/lattice/candidates/<id>/<turn>`. Do not add remote push refspecs
   for `refs/lattice/**`.
 - Mutable session metadata lives in sidecar files, never in Git objects.
-- Multi-ref promotion transactions remain in `lattice-workspace`; the Git store
-  performs single-ref operations only.
+- The Git store performs single-ref operations only; the `lattice-workspace`
+  multi-ref promotion transaction surface was deleted with that crate in #40.
 
 ## Recent Issues
 

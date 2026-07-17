@@ -13,8 +13,8 @@
 //! reuses the top-level `#[tokio::main]` runtime instead of nesting one).
 //!
 //! The turn-bearing audit states (seeded store, replay of a real turn,
-//! non-empty query results) are deferred to the MSB lane: seeding the audit
-//! store requires a committed turn, which routes through Upper/Microsandbox.
+//! non-empty query results) are seeded via a committed Direct-Local turn
+//! (see `tests/direct_local_turn.rs`); no KVM/MSB lane exists anymore (#40).
 //! See `docs/TEST-TRIAGE.md` and `FINDINGS.md`.
 //!
 //! These scenarios supersede the crate-internal

@@ -113,21 +113,3 @@ fn test_get_turn_commit_not_found() {
         .expect("get");
     assert!(found.is_none());
 }
-
-#[test]
-fn test_set_get_snapshot_lost() {
-    let dir = temp_dir("snapshot_lost");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
-    let commit_ids = setup_session_with_commits(&store, "sess-snap", 1, None);
-    let first_id = commit_ids[0].clone();
-
-    assert_eq!(store.get_snapshot_lost(&first_id).expect("get"), None);
-    store.set_snapshot_lost(&first_id, true).expect("set");
-    assert_eq!(store.get_snapshot_lost(&first_id).expect("get"), Some(true));
-    store.set_snapshot_lost(&first_id, false).expect("set");
-    assert_eq!(
-        store.get_snapshot_lost(&first_id).expect("get"),
-        Some(false)
-    );
-}

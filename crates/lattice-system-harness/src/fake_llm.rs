@@ -83,6 +83,12 @@ pub enum SseScript {
     /// chunk schema (e.g. a plain string), exercising the parser's error
     /// path. The body still uses `text/event-stream` so the framer runs.
     IllegalResponse { body: String },
+    /// Serve each inner script to exactly one request, in order. Requests
+    /// beyond the sequence length repeat the last script. This is the
+    /// multi-round foundation for Direct-Local tool scenarios (#40 skeletons,
+    /// expanded in #24): first request -> tool call, second request -> plain
+    /// text, so a turn that uses a Tool still terminates cleanly.
+    Sequence { scripts: Vec<SseScript> },
 }
 
 impl SseScript {
@@ -138,15 +144,15 @@ impl FakeLlmServer {
     pub fn start(script: SseScript) -> Result<Self, ServeError> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
-        let script = Arc::new(Mutex::new(script));
+        let state = Arc::new(Mutex::new(ScriptState { script, next: 0 }));
         let captures: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
         let shutdown = Arc::new(Mutex::new(false));
         let handle = {
             let listener_clone = listener.try_clone()?;
-            let script = Arc::clone(&script);
+            let state = Arc::clone(&state);
             let captures = Arc::clone(&captures);
             let shutdown = Arc::clone(&shutdown);
-            thread::spawn(move || serve_loop(listener_clone, script, captures, shutdown))
+            thread::spawn(move || serve_loop(listener_clone, state, captures, shutdown))
         };
         Ok(Self {
             listener,
@@ -202,19 +208,26 @@ impl Drop for FakeLlmServer {
     }
 }
 
+/// Shared scripted state: the top-level script plus the index of the next
+/// sequence element to serve. Only [`SseScript::Sequence`] advances `next`.
+struct ScriptState {
+    script: SseScript,
+    next: usize,
+}
+
 fn serve_loop(
     listener: TcpListener,
-    script: Arc<Mutex<SseScript>>,
+    state: Arc<Mutex<ScriptState>>,
     captures: Arc<Mutex<Vec<CapturedRequest>>>,
     shutdown: Arc<Mutex<bool>>,
 ) {
     while !*shutdown.lock().unwrap() {
         match listener.accept() {
             Ok((stream, _)) => {
-                let script = Arc::clone(&script);
+                let state = Arc::clone(&state);
                 let captures = Arc::clone(&captures);
                 thread::spawn(move || {
-                    if let Err(e) = handle_request(stream, &script, &captures) {
+                    if let Err(e) = handle_request(stream, &state, &captures) {
                         eprintln!("fake_llm: serve error: {e}");
                     }
                 });
@@ -234,7 +247,7 @@ fn serve_loop(
 
 fn handle_request(
     mut stream: TcpStream,
-    script: &Mutex<SseScript>,
+    state: &Mutex<ScriptState>,
     captures: &Mutex<Vec<CapturedRequest>>,
 ) -> Result<(), ServeError> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -268,8 +281,28 @@ fn handle_request(
     let captured = parse_chat_completions_body(&body);
     captures.lock().unwrap().push(captured);
 
-    let script = script.lock().unwrap().clone();
-    let sse = render_script(&script);
+    // Resolve the active script for this request. A `Sequence` serves each
+    // inner script to exactly one request; out-of-range requests repeat the
+    // last one. Non-sequence scripts always serve as-is.
+    let active = {
+        let mut guard = state.lock().unwrap();
+        let state = &mut *guard;
+        match &state.script {
+            SseScript::Sequence { scripts } => {
+                if scripts.is_empty() {
+                    SseScript::IllegalResponse {
+                        body: "fake_llm: empty Sequence script".into(),
+                    }
+                } else {
+                    let idx = state.next.min(scripts.len() - 1);
+                    state.next += 1;
+                    scripts[idx].clone()
+                }
+            }
+            other => other.clone(),
+        }
+    };
+    let sse = render_script(&active);
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: text/event-stream\r\n\
@@ -438,6 +471,13 @@ fn render_script(script: &SseScript) -> String {
             out.push_str("data: ");
             out.push_str(body);
             out.push_str("\n\n");
+            out.push_str("data: [DONE]\n\n");
+        }
+        SseScript::Sequence { .. } => {
+            // Sequences are resolved per-request by `handle_request` before
+            // rendering; reaching this arm is a harness bug. Emit a malformed
+            // payload so the turn fails loudly instead of silently passing.
+            out.push_str("data: fake_llm: unresolved Sequence script\n\n");
             out.push_str("data: [DONE]\n\n");
         }
     }

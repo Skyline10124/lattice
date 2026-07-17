@@ -8,7 +8,7 @@
 //! These scenarios drive the built `lattice` binary for the no-turn config
 //! surface (`models`, `resolve`, `doctor`). They assert public stdout/JSON
 //! fields and that no credential value ever appears in output - only env-var
-//! names. No turn is executed, so no Microsandbox is required. They supersede
+//! names. No turn is executed, so these need no turn runtime at all. They supersede
 //! the crate-internal `cli_diagnostics_models_*`, `cli_diagnostics_resolve_*`,
 //! and `doctor_*` unit tests in `lattice-cli` (see `docs/TEST-TRIAGE.md`).
 

@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use crate::graph::{GraphMessage, GraphToolCall, TurnLifecycleEvidence};
 use crate::{Result, SessionError};
@@ -53,7 +53,7 @@ pub(crate) struct ExtractedRef {
 }
 
 /// A legacy `graph_commits` row with its messages loaded and ordered by
-/// `ordinal`, plus the `snapshot_lost` flag from `graph_snapshot_state`.
+/// `ordinal`.
 #[derive(Debug, Clone)]
 pub(crate) struct ExtractedCommit {
     pub commit_id: String,
@@ -71,7 +71,6 @@ pub(crate) struct ExtractedCommit {
     pub lifecycle_json: String,
     pub created_at: String,
     pub messages: Vec<GraphMessage>,
-    pub snapshot_lost: bool,
 }
 
 type CommitRow = (
@@ -410,7 +409,6 @@ fn read_commit(conn: &Connection, session_id: &str, commit_id: &str) -> Result<E
     let parent_ids = parse_json_array("parents_json", &parents_json)?;
     let message_ids = parse_json_array("message_ids_json", &message_ids_json)?;
     let messages = load_messages(conn, session_id, &message_ids)?;
-    let snapshot_lost = read_snapshot_lost(conn, commit_id)?;
 
     // strict-decode lifecycle to fail closed on malformed data (matches
     // sqlite_graph/commit.rs:decode_lifecycle_json). Propagate the error at the
@@ -437,7 +435,6 @@ fn read_commit(conn: &Connection, session_id: &str, commit_id: &str) -> Result<E
         lifecycle_json,
         created_at,
         messages,
-        snapshot_lost,
     })
 }
 
@@ -528,21 +525,6 @@ fn load_messages(
         }
     }
     Ok(ordered)
-}
-
-fn read_snapshot_lost(conn: &Connection, commit_id: &str) -> Result<bool> {
-    let lost: Option<i64> = conn
-        .query_row(
-            "SELECT snapshot_lost FROM graph_snapshot_state WHERE commit_id=?1",
-            params![commit_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|source| SessionError::Database {
-            path: Path::new("").to_path_buf(),
-            source,
-        })?;
-    Ok(lost.unwrap_or(0) != 0)
 }
 
 /// Decode lifecycle JSON, returning `None` for the empty object `{}` (matches

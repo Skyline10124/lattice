@@ -122,16 +122,6 @@ fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::Loa
             tools: lattice_profile::ToolsSection { enabled: vec![] },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
-            workspace: lattice_profile::WorkspaceSection {
-                egress: None,
-                credentials: vec![],
-                image: Some("test-template".to_string()),
-                cpus: None,
-                memory_mb: None,
-                allowed_egress_targets: vec![],
-                cleanup_rounds: 3,
-                max_pending_snapshots: 5,
-            },
         },
         system_prompt: system_prompt.to_string(),
     }

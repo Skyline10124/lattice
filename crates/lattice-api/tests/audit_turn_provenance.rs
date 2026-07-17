@@ -79,8 +79,6 @@ model = "sonnet"
 system = "test"
 [tools]
 enabled = {enabled:?}
-[workspace]
-image = "test-template"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
 "#

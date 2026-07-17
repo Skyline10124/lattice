@@ -38,9 +38,7 @@ use lattice_agent::{
 use lattice_llm::ToolCall;
 #[cfg(test)]
 use lattice_profile::LancetWorkspacePolicySection;
-use lattice_profile::{
-    LancetNetworkSection, LancetObservationSection, LancetSection, LoadedAgentProfile,
-};
+use lattice_profile::{LancetNetworkSection, LancetObservationSection, LancetSection};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -184,7 +182,6 @@ pub(crate) struct ProductionTurnDepsInput<'a> {
     pub lancet: Option<&'a LancetSection>,
     pub model_id: &'a str,
     pub runtime_version: &'a str,
-    pub loaded_profile: &'a LoadedAgentProfile,
 }
 
 /// Build executor-facing CEP policy from profile `[lancet]` and the runtime project root.
@@ -250,13 +247,12 @@ fn workspace_policy_from_profile(lancet: &LancetSection) -> Result<WorkspacePoli
     let mut workspace = WorkspacePolicy::default();
     if let Some(section) = lancet.workspace.as_ref() {
         workspace.denied_write_patterns = section.denied_write_patterns.clone();
-        workspace.included_ignored_read_patterns =
-            section.included_ignored_read_patterns.clone();
+        workspace.included_ignored_read_patterns = section.included_ignored_read_patterns.clone();
         workspace.denied_read_patterns = section.denied_read_patterns.clone();
     }
-    workspace.validate().map_err(|err| {
-        ApiError::BadRequest(format!("lancet.workspace: {err}"))
-    })?;
+    workspace
+        .validate()
+        .map_err(|err| ApiError::BadRequest(format!("lancet.workspace: {err}")))?;
     Ok(workspace)
 }
 
@@ -462,8 +458,7 @@ fn resolve_lancet_policy(
 /// delegated to [`lancet_api::LancetRuntime::build`], which constructs the
 /// one concrete Direct-Local execution routing internally (ADR 0003). There is
 /// no Upper lifecycle, workspace override, or externally supplied execution
-/// backend; `loaded_profile` is retained for `[workspace]` schema validation
-/// only until #40 removes the profile section.
+/// backend.
 pub(crate) async fn build_production_turn_deps(
     input: ProductionTurnDepsInput<'_>,
 ) -> Result<ProductionTurnDeps, ApiError> {
@@ -475,7 +470,6 @@ pub(crate) async fn build_production_turn_deps(
         lancet,
         model_id,
         runtime_version,
-        loaded_profile: _loaded_profile,
     } = input;
     // Canonicalize the project root up front so the profile policy and the
     // runtime share one canonical root. Falls back to the raw path on failure,
@@ -788,12 +782,8 @@ mod cep_context_profile_policy {
             ..Default::default()
         };
         let err = load_policy_config(&cep, dir.path()).unwrap_err();
-        assert!(
-            err.to_string().contains("lancet.workspace"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("lancet.workspace"), "{err}");
     }
-
 
     #[test]
     fn workspace_policy_from_profile_lowers_read_visibility_patterns() {
@@ -807,11 +797,14 @@ mod cep_context_profile_policy {
             ..Default::default()
         };
         let config = load_policy_config(&cep, dir.path()).expect("policy config");
-        assert_eq!(config.workspace.included_ignored_read_patterns, vec![".env"]);
+        assert_eq!(
+            config.workspace.included_ignored_read_patterns,
+            vec![".env"]
+        );
         assert_eq!(config.workspace.denied_read_patterns, vec!["secrets/**"]);
     }
 
-        #[test]
+    #[test]
     fn workspace_policy_from_profile_absent_defaults_empty() {
         let dir = TempDir::new().unwrap();
         let config = load_policy_config(&LancetSection::default(), dir.path()).expect("policy");
@@ -864,11 +857,11 @@ mod turn_wiring {
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_profile::{
         AgentProfile, AgentSection, LancetSection, LlmSection, LoadedAgentProfile, PromptSection,
-        ToolsSection, WorkspaceSection,
+        ToolsSection,
     };
     use tempfile::TempDir;
 
-    fn profile_with_workspace(enabled: Vec<String>) -> LoadedAgentProfile {
+    fn test_profile(enabled: Vec<String>) -> LoadedAgentProfile {
         LoadedAgentProfile {
             path: PathBuf::from("/tmp/agent.toml"),
             package_dir: PathBuf::from("/tmp"),
@@ -886,16 +879,6 @@ mod turn_wiring {
                 tools: ToolsSection { enabled },
                 llm: LlmSection::default(),
                 lancet: LancetSection::default(),
-                workspace: WorkspaceSection {
-                    egress: None,
-                    credentials: vec![],
-                    image: Some("test-template".into()),
-                    cpus: None,
-                    memory_mb: None,
-                    allowed_egress_targets: vec![],
-                    cleanup_rounds: 3,
-                    max_pending_snapshots: 5,
-                },
             },
             system_prompt: "sys".into(),
         }
@@ -966,7 +949,7 @@ mod turn_wiring {
 
         let llm: Arc<dyn lattice_agent::LlmClient> =
             Arc::new(FakeStreamingLlmClient::builder().build());
-        let profile = profile_with_workspace(vec![TodoWrite::NAME.to_string()]);
+        let profile = test_profile(vec![TodoWrite::NAME.to_string()]);
         let request = RunTurnRequest {
             input: "hi".into(),
             session_id: "s".into(),
@@ -985,7 +968,6 @@ mod turn_wiring {
             lancet: None,
             model_id: "m",
             runtime_version: "v",
-            loaded_profile: &profile,
         })
         .await
         .expect("direct deps");

@@ -16,6 +16,10 @@ pub struct LoadedAgentProfile {
 }
 
 /// Forbidden top-level sections that must be rejected before deserialization.
+///
+/// `workspace` is the retired Upper microVM section (#40): legacy profiles
+/// that still declare it fail here with a named, actionable error rather
+/// than a bare `deny_unknown_fields` rejection.
 const FORBIDDEN_SECTIONS: &[&str] = &[
     "capabilities",
     "handoff",
@@ -28,6 +32,7 @@ const FORBIDDEN_SECTIONS: &[&str] = &[
     "security",
     "context",
     "behavior",
+    "workspace",
 ];
 
 /// Load and validate an `agent.toml` profile at `path`.
@@ -258,7 +263,6 @@ model = "sonnet"
 [prompt]
 system = "You are a helpful assistant."
 
-[workspace]
 "#,
         );
         let loaded = load_agent_profile(&path).unwrap();
@@ -284,7 +288,6 @@ model = "sonnet"
 [prompt]
 system_path = "{}"
 
-[workspace]
 "#,
             prompt_path.file_name().unwrap().to_str().unwrap()
         );
@@ -308,7 +311,6 @@ model = "sonnet"
 system = "inline"
 system_path = "prompt.md"
 
-[workspace]
 "#,
         );
         let err = load_agent_profile(&path).unwrap_err();
@@ -327,7 +329,6 @@ model = "sonnet"
 
 [prompt]
 
-[workspace]
 "#,
         );
         let err = load_agent_profile(&path).unwrap_err();
@@ -350,7 +351,6 @@ model = "sonnet"
 [prompt]
 system_path = "nonexistent.md"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -374,7 +374,6 @@ model = "sonnet"
 [prompt]
 system_path = "/etc/passwd"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -398,7 +397,6 @@ model = "sonnet"
 [prompt]
 system_path = "../secret/prompt.md"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -429,7 +427,6 @@ model = "sonnet"
 [prompt]
 system_path = "escape/secret.md"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -456,7 +453,6 @@ model = "sonnet"
 [prompt]
 system_path = "subdir"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -480,7 +476,6 @@ model = "sonnet"
 [prompt]
 system = "hello"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -509,7 +504,6 @@ model = "sonnet"
 [prompt]
 system = "hi"
 
-[workspace]
 "#,
         );
         let err = load_agent_profile(&path).unwrap_err();
@@ -533,7 +527,6 @@ model = "sonnet"
 [prompt]
 system = "hi"
 
-[workspace]
 "#,
         );
         let err = load_agent_profile(&path).unwrap_err();
@@ -552,6 +545,7 @@ system = "hi"
             "orchestrator",
             "pipeline",
             "memory",
+            "workspace",
         ];
         for section in forbidden {
             let dir = tempfile::tempdir().unwrap();
@@ -570,7 +564,6 @@ system = "hi"
 [{section}]
 x = 1
 
-[workspace]
 "#
             );
             std::fs::write(&toml_path, toml).unwrap();
@@ -600,7 +593,6 @@ max_retries = 0
 initial_delay_ms = 1
 max_delay_ms = 1
 
-[workspace]
 "#,
         );
         let loaded = load_agent_profile(&path).unwrap();
@@ -638,7 +630,6 @@ system = "hi"
 [llm.retry]
 {retry}
 
-[workspace]
 "#
             ));
             let err = load_agent_profile(&path).unwrap_err();
@@ -663,7 +654,6 @@ model = "sonnet"
 [prompt]
 system = "hi"
 
-[workspace]
 "#,
                 version
             ));
@@ -680,7 +670,7 @@ system = "hi"
     #[test]
     fn all_forbidden_sections_rejected() {
         // Covers: capabilities, handoff, orchestrator, plugins, pipeline,
-        // subagents, micro_agents, memory
+        // subagents, micro_agents, memory, workspace (retired Upper section)
         let forbidden = [
             "capabilities",
             "handoff",
@@ -690,6 +680,7 @@ system = "hi"
             "subagents",
             "micro_agents",
             "memory",
+            "workspace",
         ];
         for section in forbidden {
             let dir = tempfile::tempdir().unwrap();
@@ -708,7 +699,6 @@ system = "hi"
 [{section}]
 x = 1
 
-[workspace]
 "#
             );
             std::fs::write(&toml_path, toml).unwrap();

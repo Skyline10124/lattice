@@ -9,8 +9,8 @@
 
 use lattice_session::{
     GitSessionGraphStore, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
-    PreparedTurnCommit, ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus,
-    TurnCommit, TurnCommitInput, TurnLogEntry, migrate::find_legacy_session_db,
+    ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit,
+    TurnCommitInput, TurnLogEntry, migrate::find_legacy_session_db,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -199,57 +199,6 @@ impl SessionApi {
         let mut input = input;
         input.session_id = resolved;
         self.store.commit_turn(input).map_err(map_session_error)
-    }
-
-    /// Persist a precomputed turn commit with prepared identity.
-    ///
-    /// Thin wrapper over the session store's prepared commit path.
-    /// Uses the prepared commit ID for idempotent retry.
-    ///
-    /// NOTE: Unlike `commit_turn`, this does not resolve abbreviated
-    /// session ID prefixes via `resolve_id`. The prepared commit must carry the
-    /// canonical (full) session ID; callers are responsible for resolving
-    /// prefixes before constructing the `PreparedTurnCommit`. This is
-    /// intentional because prepared commits are built internally after the
-    /// session has already been resolved for turn execution.
-    ///
-    /// #37 removed the resume/promotion callers; this wrapper is retained
-    /// for #40's lattice-session contract cleanup.
-    #[allow(dead_code)]
-    pub(crate) fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> Result<TurnCommit> {
-        self.store
-            .commit_prepared_turn(prepared)
-            .map_err(map_session_error)
-    }
-
-    /// Look up a single turn commit by session and commit ID.
-    ///
-    /// #37 removed the resume/promotion callers; this wrapper is retained
-    /// for #40's lattice-session contract cleanup.
-    #[allow(dead_code)]
-    pub(crate) fn get_turn_commit(
-        &self,
-        session_id: &str,
-        commit_id: &str,
-    ) -> Result<Option<TurnCommit>> {
-        let resolved = self.resolve_id(session_id)?;
-        self.store
-            .get_turn_commit(&resolved, commit_id)
-            .map_err(map_session_error)
-    }
-
-    /// Query whether a commit's retained snapshot is operationally lost.
-    ///
-    /// Returns `None` if no metadata is recorded for the commit.
-    /// Never modifies immutable commit fields.
-    ///
-    /// #37 removed the resume callers; this wrapper and the underlying
-    /// `get_snapshot_lost` session-graph contract are removed in #40.
-    #[allow(dead_code)]
-    pub(crate) fn get_snapshot_lost(&self, commit_id: &str) -> Result<Option<bool>> {
-        self.store
-            .get_snapshot_lost(commit_id)
-            .map_err(map_session_error)
     }
 }
 

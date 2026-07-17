@@ -10,13 +10,11 @@ pub mod artifacts;
 mod assert;
 pub mod driver;
 pub mod fake_llm;
-pub mod layer_guard;
 #[cfg(unix)]
 pub mod pty_tui;
 pub mod scenario;
 pub mod session_send;
 pub mod world;
-
 pub use artifacts::{
     WorkspaceSnapshot, scan_artifacts_for_secrets, write_workspace_diff, write_workspace_listing,
     write_world_context,
@@ -30,7 +28,6 @@ pub use assert::{
 pub use driver::processes_in_pgid;
 pub use driver::{DriverError, LatticeCommand, LatticeDriver};
 pub use fake_llm::{CapturedRequest, FAKE_API_KEY, FakeLlmServer, ServeError, SseScript};
-pub use layer_guard::{MSB_ENV, msb_requested, require_msb_env};
 #[cfg(unix)]
 pub use pty_tui::{PtyError, PtyTuiDriver};
 pub use scenario::{ScenarioBudget, ScenarioError, ScenarioLayer, ScenarioSpec};

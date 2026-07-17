@@ -8,11 +8,14 @@ use serde::Deserialize;
 use thiserror::Error;
 
 /// Harness test layer (see RFC #19).
+///
+/// After #40 there is no Microsandbox layer: every scenario runs Direct-Local
+/// against the canonical project root — no KVM, no MSB daemon, no OCI image.
+/// `PtySmoke` remains as the TUI-entrypoint layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScenarioLayer {
     FastBinary,
-    Microsandbox,
     PtySmoke,
 }
 
@@ -160,7 +163,7 @@ mod tests {
     fn spec_total_timeout_round_trips() {
         let spec = ScenarioSpec {
             name: "x".into(),
-            layer: ScenarioLayer::Microsandbox,
+            layer: ScenarioLayer::PtySmoke,
             step_timeout_secs: 30,
             total_timeout_secs: Some(180),
         };

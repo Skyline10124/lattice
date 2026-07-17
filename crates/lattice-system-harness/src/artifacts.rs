@@ -198,10 +198,10 @@ pub fn write_workspace_listing(
 /// two listings) into `failure_dir`, all redacted against `secrets`.
 ///
 /// The diff is over the host-side project tree listing (path + size), not a
-/// byte-level file-content diff — the workspace Upper lives inside a
-/// microsandbox, not on the host filesystem, so the host-side listing is
-/// the observable artifact. A path appearing/disappearing or a size change
-/// shows up as a `-`/`+` line.
+/// byte-level file-content diff — the Direct-Local workspace IS the host
+/// project tree, so the listing captures exactly what a turn observed and
+/// mutated. A path appearing/disappearing or a size change shows up as a
+/// `-`/`+` line.
 pub fn write_workspace_diff(
     failure_dir: &std::path::Path,
     before: &WorkspaceSnapshot,
@@ -312,9 +312,8 @@ pub fn redact_env_pair(name: &str, value: &str, secrets: &[&str]) -> String {
 /// Build and write the `world.txt` context — scenario name, redacted command
 /// summary, project/home/port, and the redacted env allow-list — into `dir`.
 /// Shared by every failure-artifact path so the world-context block is not
-/// duplicated per caller (it had drifted across `assert_with_failure_artifacts`
-/// and the MSB full-turn test bundle, with the two copies already diverging
-/// in how they sourced the command summary).
+/// duplicated per caller (the copies had drifted across
+/// `assert_with_failure_artifacts` and the retired MSB full-turn bundle).
 ///
 /// `command_summary` must already be redacted (the caller passes
 /// `artifacts.command_summary`, which `capture_from_output` redacts). Env

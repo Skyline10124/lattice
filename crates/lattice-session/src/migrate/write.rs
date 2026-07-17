@@ -19,9 +19,9 @@ use std::path::Path;
 
 use crate::git_graph::helpers::{
     GitSessionManifest, LATTICE_AUTHOR_EMAIL, LATTICE_AUTHOR_NAME, MANIFEST_SCHEMA_VERSION,
-    OperationalState, SessionMetadata, build_agent_json, build_audit_json, build_root_tree,
-    build_turn_tree, candidate_ref_name, messages_to_jsonl, serialize_manifest, session_ref_name,
-    write_ops_state, write_session_meta,
+    SessionMetadata, build_agent_json, build_audit_json, build_root_tree, build_turn_tree,
+    candidate_ref_name, messages_to_jsonl, serialize_manifest, session_ref_name,
+    write_session_meta,
 };
 use crate::{Result, SessionError};
 
@@ -80,8 +80,7 @@ pub(crate) fn write_migration(
         write_session_refs(repo, session, idmap, &mut stats)?;
     }
 
-    // Step 3 — sidecars: meta.json per session + ops/<oid>.json per
-    // commit with snapshot_lost.
+    // Step 3 — sidecars: meta.json per session.
     for session in sessions {
         write_session_sidecars(repo, target_repo_path, session, idmap)?;
     }
@@ -362,21 +361,5 @@ fn write_session_sidecars(
     };
     write_session_meta(target_repo_path, &session.session_id, &meta)?;
 
-    // ops/<oid>.json for commits with snapshot_lost.
-    for commit in &session.commits {
-        if commit.snapshot_lost {
-            let Some(new_oid_str) = idmap.get(&commit.commit_id) else {
-                return Err(SessionError::Git(format!(
-                    "commit {} not in idmap for ops sidecar",
-                    commit.commit_id
-                )));
-            };
-            let state = OperationalState {
-                snapshot_lost: true,
-                updated_at: session.updated_at.clone(),
-            };
-            write_ops_state(target_repo_path, &session.session_id, new_oid_str, &state)?;
-        }
-    }
     Ok(())
 }

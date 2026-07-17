@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
-use lattice_profile::WorkspaceSection;
 use lattice_session::SessionGraphStore;
 
 use super::types::RunTurnRequest;
@@ -41,16 +40,14 @@ pub(super) async fn build_test_production_deps(
     in_memory_audit: bool,
     lancet: Option<&lattice_profile::LancetSection>,
 ) -> super::cep::ProductionTurnDeps {
-    // Ensure a git repo exists so the canonical project root resolves; #37
-    // no longer needs HEAD for Upper baseline resolution, but keeping a git
-    // repo matches the project-shaped test fixtures used across the suite.
+    // Ensure a git repo exists so the canonical project root resolves and
+    // the project-shaped test fixtures match the suite's other fixtures.
     let root = std::path::Path::new(project_root);
     if !root.join(".git").exists() {
         std::fs::write(root.join("README.md"), "init\n").expect("write README");
         init_test_git_repo(root);
     }
     let request = make_test_run_turn_request(llm.clone(), in_memory_audit, enabled_tools);
-    let loaded = request.loaded_profile.as_ref().unwrap();
     super::cep::build_production_turn_deps(super::cep::ProductionTurnDepsInput {
         request: &request,
         project_root,
@@ -59,7 +56,6 @@ pub(super) async fn build_test_production_deps(
         lancet,
         model_id: "test-model",
         runtime_version: "0.0.0-test",
-        loaded_profile: loaded,
     })
     .await
     .expect("production deps")
@@ -165,16 +161,6 @@ pub(super) fn make_loaded_profile_with_tools(
     system_prompt: &str,
     enabled_tools: &[String],
 ) -> lattice_profile::LoadedAgentProfile {
-    let workspace = WorkspaceSection {
-        egress: None,
-        credentials: vec![],
-        image: Some("test-template".to_string()),
-        cpus: None,
-        memory_mb: None,
-        allowed_egress_targets: vec![],
-        cleanup_rounds: 3,
-        max_pending_snapshots: 5,
-    };
     lattice_profile::LoadedAgentProfile {
         path: std::path::PathBuf::from("/tmp/test/agent.toml"),
         package_dir: std::env::current_dir().unwrap_or_else(|_| "/tmp".into()),
@@ -194,7 +180,6 @@ pub(super) fn make_loaded_profile_with_tools(
             },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
-            workspace,
         },
         system_prompt: system_prompt.to_string(),
     }

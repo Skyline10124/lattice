@@ -5,10 +5,7 @@
 //!
 //! #37 removed the Upper workspace override surface; these helpers now only
 //! provide the git-repo bootstrap used by Direct-Local test fixtures.
-
 use std::path::Path;
-
-use lattice_api::RunTurnRequest;
 
 pub fn init_git_repo(root: &Path) {
     std::process::Command::new("git")
@@ -36,14 +33,4 @@ pub fn init_git_repo(root: &Path) {
         .current_dir(root)
         .status()
         .expect("git commit");
-}
-
-/// No-op request normalizer retained for callers that previously attached an
-/// Upper fixture. Direct-Local builds its own execution routing internally,
-/// so there is nothing to inject.
-pub fn attach_upper_fixture(
-    request: RunTurnRequest,
-    _enabled_tools: &[&str],
-) -> RunTurnRequest {
-    request
 }

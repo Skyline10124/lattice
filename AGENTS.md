@@ -31,20 +31,19 @@ directly on the Local Workspace. ADR 0004 is the accepted Tool target: each
 built runtime has a closed catalog of embedded WASM Components whose source
 manifests own their descriptors; the default distribution contains five Tools,
 and operators may install precompiled Tool Bundles before rebuilding a new
-closed runtime. The current MSB/Upper path, central catalog authority, native
-handlers, and native/CEP/dispatch split are migration residue. Do not add
-projection, checkpoint, ambient Tool authority, runtime code loading,
-user-process, or arbitrary-command capabilities while completing the migration.
-
+closed runtime. The MSB/Upper path and `lattice-workspace` crate were removed
+in #40; the central catalog authority, native handlers, and native/CEP/dispatch
+split remain migration residue. Do not add projection, checkpoint, ambient Tool
+authority, runtime code loading, user-process, or arbitrary-command
+capabilities while completing the migration.
 The workspace dependency graph is layered. Keep dependencies pointing from
 higher layers to lower layers; do not introduce reverse dependencies. The graph
-below describes the current transition state. ADR 0003 removes
-`lattice-workspace` and the `lattice-api -> lattice-workspace` edge; ADR 0004
-later absorbs or retires the central catalog, CEP, dispatch, and native surfaces
-through `lancet-runtime` after Component Tool migration.
+below describes the current transition state. ADR 0004 absorbs or retires the
+central catalog, CEP, dispatch, and native surfaces through `lancet-runtime`
+after Component Tool migration.
 
 ```text
-Layer 0 (leaf):  lancet-protocol   net-guard   lattice-llm   lattice-session   lattice-workspace
+Layer 0 (leaf):  lancet-protocol   net-guard   lattice-llm   lattice-session
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
                  lattice-agent(->llm,session)
@@ -56,7 +55,7 @@ Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
                                authority,net-guard)
 Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,
                             authority,native)
-Layer 4:         lattice-api(-> lancet-api + lattice runtime crates incl. lattice-workspace)
+Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
 Layer 5:         lattice-tui(-> api + presentation dependencies)
                  lattice-cli(-> api,tui + presentation dependencies)
 ```
@@ -80,7 +79,6 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
 | `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`). |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
-| `lattice-workspace` | Legacy Upper workspace boundary scheduled for removal by ADR 0003. Do not add capabilities or compatibility surfaces here. |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
 | `lattice-tui` | Inline CLI chat REPL over `lattice-api` sessions and `stream_turn` via `rustyline` (no alternate screen, no ratatui/crossterm). Owns readline state, turn execution, and token/status rendering to stdout/stderr. |
 | `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
@@ -109,20 +107,19 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
 - Mutating methods must pass authority policy, Guard L1, effect checks and audit
   recording. The concrete guarded Local Workspace is host-enforced: Components
   cannot bypass Local Revision checks, Mutation Preconditions, atomic
-  installation, or history recording. The current MSB/Upper routing and later
-  transitional native handler path are migration residue. Write-scope is a
-  blacklist (deny list), not an allowlist envelope; there is no envelope to
-  declare. System exclusions for project Git administration, LATTICE private
-  state, and root escape are not profile-configurable.
+  installation, or history recording. The transitional native handler path is
+  migration residue. Write-scope is a blacklist (deny list), not an allowlist
+  envelope; there is no envelope to declare. System exclusions for project Git
+  administration, LATTICE private state, and root escape are not
+  profile-configurable.
 - Workspace observation exposes tracked and non-ignored Local files by default.
   Explicit ignored-path inclusion and read denial live in
   `[lancet.workspace]`; system exclusions take precedence over both and the
   same visibility decision applies to read, list, grep, and find.
 - LANCET policy is configured through profile `[lancet]` sections: mode,
-  project root, observation, network, effects, workspace policy, verify, and
-  external policy file pointers. Sandbox `[workspace]`, command, and isolation
-  configuration are migration residue or retired surface; do not reintroduce
-  them after removal.
+  project root, observation, network, effects, workspace policy, and external
+  policy file pointers. Sandbox `[workspace]`, command, isolation, and verify
+  configuration are retired surface; do not reintroduce them.
 - SQLite for CEP audit records belongs in `lancet-audit`; the conversation
   graph is git-backed (git refs under `refs/lattice/sessions/<id>/**`) and
   lives in `lattice-session`. SQLite session graph storage was retired.
@@ -150,10 +147,8 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
    remain authoritative.
 6. Turn outcomes are persisted as commits in the session graph.
 
-Until ADR 0003's migration lands, step 3 still calls `prepare_upper` and injects
-`ExecutionRouting`. Treat that code as deletion work, not as the architecture
-to preserve. Session commits never imply a Local Workspace snapshot; only the
-explicit gix-backed `/rewind` path restores recorded LATTICE mutations.
+Session commits never imply a Local Workspace snapshot; only the explicit
+gix-backed `/rewind` path (#41/#42) restores recorded LATTICE mutations.
 
 ## Review Records
 
@@ -212,6 +207,7 @@ explicit gix-backed `/rewind` path restores recorded LATTICE mutations.
   profile→policy translation and the agent-loop wiring over `lancet-api`. Keep
   TUI terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
   output, non-interactive rendering, and argument parsing in `lattice-cli`.
-- Do not add new production dependencies on `lattice-workspace`. Remove existing
-  Upper, snapshot, profile, and harness dependencies in the ADR 0003 migration.
+- `lattice-workspace` was deleted in #40. Do not reintroduce an Upper/MSB
+  workspace boundary, snapshot lifecycle, or a pluggable execution-backend
+  seam in any crate.
 - Prefer crate-local `AGENTS.md` files for detailed navigation before editing.

@@ -1,19 +1,22 @@
 # LANCET runtime-enforced surface
 
-> **TRANSITION NOTICE — 2026-07-16:** This document mostly describes the current
-> v1.4-alpha migration implementation, not the accepted target architecture.
-> ADR 0003 replaces MSB/Upper with one guarded Direct-Local Workspace path. ADR
-> 0004 replaces the permanent native/central-catalog boundary with a per-build
-> closed catalog of embedded WASM Component Tools whose Source manifests own
-> their descriptors. The default distribution still has the five methods shown
-> below, but operators may add verified precompiled Tool Bundles before building
-> another closed runtime; running processes cannot load code. Components receive
-> no ambient WASI filesystem, network, or process authority and can act only
-> through Tool Host imports. Until #37-#42 and #5-#14 land, production still uses
-> the MSB/Upper, `lancet-catalog`/CEP/dispatch, and native-handler path documented
-> below. Treat those surfaces as migration residue, not extension points. Command
-> execution, post-mutation verify, agent-visible audit, and SQLite session storage
-> remain retired. Final line-by-line synchronization is tracked by #14.
+> **TRANSITION NOTICE — 2026-07-16 (updated 2026-07-17):** This document mostly
+> describes the current v1.4-alpha migration implementation, not the accepted
+> target architecture. ADR 0003 replaces MSB/Upper with one guarded Direct-Local
+> Workspace path — **landed in #37-#40**: production turns now operate directly
+> on the canonical Local Workspace, and the MSB/Upper path, `[workspace]`
+> profile section, and `lattice-workspace` crate are deleted. ADR 0004 replaces
+> the permanent native/central-catalog boundary with a per-build closed catalog
+> of embedded WASM Component Tools whose Source manifests own their descriptors.
+> The default distribution still has the five methods shown below, but operators
+> may add verified precompiled Tool Bundles before building another closed
+> runtime; running processes cannot load code. Components receive no ambient
+> WASI filesystem, network, or process authority and can act only through Tool
+> Host imports. Until #5-#14 land, production still uses the
+> `lancet-catalog`/CEP/dispatch and native-handler path documented below. Treat
+> those surfaces as migration residue, not extension points. Command execution,
+> post-mutation verify, agent-visible audit, and SQLite session storage remain
+> retired. Final line-by-line synchronization is tracked by #14.
 
 LATTICE agents execute tools through **LANCET**, the controlled execution and failure-learning subsystem. LANCET uses **CEP** (Controlled Execution Protocol) internally: JSON-RPC methods with capability envelopes, policy gating, path guards, and a flat append-only audit store.
 

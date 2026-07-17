@@ -3,7 +3,7 @@
 # LATTICE Testing
 
 This document describes how LATTICE tests are written and run. LATTICE is a
-Rust Cargo workspace (18 runtime/test member crates under `crates/`, plus a root-level
+Rust Cargo workspace (16 runtime/test member crates under `crates/`, plus a root-level
 `xtask` tool crate; see root `Cargo.toml`); testing uses
 Rust's built-in `#[test]` attribute and the `cargo test` runner. There is no
 Node/JavaScript toolchain, no `package.json`, and no external test framework
@@ -18,10 +18,12 @@ built `lattice` binary via `lattice-system-harness`. Crate tests keep local
 invariants only. The per-test keep/elevate/delete triage for the pre-rewrite
 suite lives in [`docs/TEST-TRIAGE.md`](TEST-TRIAGE.md) (issue #22); batch
 deletion and elevation happen in ticket #23 (4/6) onward. The fast-binary
-black-box lane (`fast_config_cli` / `fast_session_cli` / `fast_audit_cli` /
-`fast_cli_help`) is landed; the MSB lane (`planned_*_msb`) and the turn-bearing
-CLI elevates are deferred to a KVM-available environment - see
-`docs/TEST-TRIAGE.md` §1.5 and FINDINGS.md `T-23-01`.
+`fast_cli_help`) is landed; the Direct-Local turn scenarios
+(`direct_local_turn`: plain-text turn, session reopen, policy denial) landed
+in #40 and run in the ordinary lane — no KVM, no MSB daemon, no OCI image.
+The retired MSB lane (`planned_*_msb`) is superseded by the Direct-Local
+scenario matrix in #24 - see `docs/TEST-TRIAGE.md` §1.5 and FINDINGS.md
+`T-23-01`.
 
 ---
 
@@ -112,15 +114,11 @@ cargo test --workspace --release
 
 ### Tests behind a feature
 
-Some test targets and helpers are gated behind features (see §3). Enable them
-explicitly:
+Some test helpers are gated behind features (see §3). Enable them explicitly:
 
 ```bash
-# DeterministicWorkspace + contract helper test targets (lattice-workspace)
-cargo test -p lattice-workspace --features test-utils
-
-# Feature surface for lattice-workspace (recommended in its AGENTS.md)
-cargo test -p lattice-workspace --features test-utils
+# Agent-loop test seams (lattice-agent)
+cargo test -p lattice-agent --features test-utils
 ```
 
 ### Lint and format (part of the CI gate)
@@ -219,7 +217,6 @@ crate (files containing `#[cfg(test)]` under `crates/<crate>/src/`):
 | `lancet-api` | 2 |
 | `lancet-dispatch` | 2 |
 | `lattice-agent` | 2 |
-| `lattice-workspace` | 2 |
 | `lancet-cep` | 1 |
 | `lattice-tui` | 1 |
 
@@ -248,7 +245,6 @@ that are `mod`-included from a `src/*.rs` file (still compiled under
 - `crates/lancet-native/src/handlers/command_tests.rs`
 - `crates/lattice-api/src/turn/{cep_tests,stream_tests,run_tests,live_tests,types_tests}.rs`
 - `crates/lattice-cli/src/commands/run_tests.rs`
-- `crates/lattice-workspace/src/testing/contract_tests.rs`
 
 ### Integration tests (`tests/` directories)
 
@@ -258,53 +254,23 @@ per file). Crates with `tests/` directories:
 - `crates/lancet-authority/tests/` — `guard_decide_fuzz.rs`, `policy_coverage.rs`, `policy_tests.rs`
 - `crates/lancet-native/tests/` — `cep_warn_harness.rs`, `policy_integration.rs`, `prov_isomorphism.rs`
 - `crates/lattice-agent/tests/` — `agent_loop.rs`, `live_sink_and_cancel.rs`, `provisional_completion.rs`, `streaming_delta.rs`, `streaming_seam.rs`
-- `crates/lattice-api/tests/` — turn lifecycle, CEP round-trip, git-store, promotion, resume, snapshot journal, usage, dogfood, and release e2e suites (plus `support/` helpers)
+- `crates/lattice-api/tests/` — turn lifecycle, CEP round-trip, direct-Local acceptance, git-store, usage, dogfood, and release e2e suites (plus `support/` helpers)
 - `crates/lattice-cli/tests/` — `cli_cutover.rs`, `release_smoke.rs`
-- `crates/lattice-session/tests/` — `promotion_commit.rs`
-- `crates/lattice-workspace/tests/` — promotion, git status, credential redaction, egress, SDK probe, and workspace primitive suites
-
-Some `lattice-workspace` integration test binaries are declared explicitly in
-`crates/lattice-workspace/Cargo.toml` via `[[test]]` entries, several with
-`required-features = ["test-utils"]` (e.g. `promotion_candidate_validation`,
-`promotion_end_to_end`, `workspace_primitives`, `retained_snapshot`).
 
 ### Test helpers behind the `test-utils` feature
 
 Shared test helpers that must be usable from integration tests (outside
 `#[cfg(test)]`) are exported behind a `test-utils` Cargo feature:
 
-- **`lattice-workspace`** defines `test-utils = []`, which gates
-  `DeterministicWorkspace` and the adapter contract suite in
-  `crates/lattice-workspace/src/testing/` (see
-  `crates/lattice-workspace/AGENTS.md`). `DeterministicWorkspace` is a
-  deterministic, KVM-free test adapter for CI; it records but does not enforce
-  egress policy and must not be treated as a security sandbox.
 - **`lattice-agent`** defines `test-utils = []` for its agent-loop test seams.
 - Downstream crates pull these helpers in by depending on the crate with the
   feature enabled, e.g. `lattice-api/Cargo.toml` and `lattice-cli/Cargo.toml`
-  declare `lattice-workspace = { features = ["test-utils"] }` and
-  `lattice-agent = { features = ["test-utils"] }`.
+  declare `lattice-agent = { features = ["test-utils"] }`.
 
-When adding a new integration test that needs `DeterministicWorkspace` or the
-agent test seams, either (a) add the test under a crate that already enables
-`test-utils`, or (b) declare a `[[test]]` entry with
-`required-features = ["test-utils"]` in the relevant `Cargo.toml`.
-
-### Live KVM integration tests (NOT in normal CI)
-
-`lattice-workspace` additionally defines
-`integration_tests = ["test-utils"]`, which gates **live** KVM/libkrun
-integration tests. These require a provisioned KVM host, `libkrunfw.so`, and a
-reachable image registry. Per
-`crates/lattice-workspace/AGENTS.md` "Verification":
-
-- They are **excluded from normal CI**; CI must remain deterministic and KVM-free.
-- Compile-check them without running:
-  `cargo clippy -p lattice-workspace --features integration_tests --all-targets -- -D warnings`
-- Run them only on an explicitly provisioned KVM/libkrun host.
-
-`lattice-api` re-exports this feature as
-`integration_tests = ["lattice-workspace/integration_tests"]`.
+When adding a new integration test that needs the agent test seams, either
+(a) add the test under a crate that already enables `test-utils`, or (b)
+declare a `[[test]]` entry with `required-features = ["test-utils"]` in the
+relevant `Cargo.toml`.
 
 ---
 
@@ -375,9 +341,10 @@ narrative.
 
 ### Exclusions from CI
 
-As noted in §3, `lattice-workspace` live KVM/libkrun integration tests (the
-`integration_tests` feature) are **not** part of the `CI` workflow or
-`cargo xtask ci`. They run only on a provisioned KVM host. The CI `cargo test
+The CI `cargo test
 --workspace` invocation runs the default-feature deterministic test set
-across all 18 runtime/test workspace member crates under `crates/` (including
+across all 16 runtime/test workspace member crates under `crates/` (including
 `lattice-system-harness`). The root `xtask` crate is not a product member.
+There are no KVM/MSB-gated tests anywhere in the workspace: the live
+KVM/libkrun integration tests were deleted with `lattice-workspace` in #40,
+and the harness turn scenarios run Direct-Local in the ordinary lane.

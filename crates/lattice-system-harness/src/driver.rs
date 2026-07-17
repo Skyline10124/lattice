@@ -78,7 +78,7 @@ impl LatticeDriver {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         // Spawn in its own process group so a timeout can kill the whole tree
-        // (TUI -> microsandbox -> fake LLM sockets), not only the direct
+        // (TUI -> lattice -> fake LLM sockets), not only the direct
         // child (RFC #19 decision eight, PRD user story 20). `process_group(0)`
         // makes the child the leader of a new session/process group.
         set_new_process_group(&mut cmd);
@@ -145,11 +145,10 @@ fn join_drain(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
 /// Unix-only; on non-Unix targets this is a no-op (the repo does not commit
 /// to Windows, per #26 Out-of-Scope).
 ///
-/// `pub(crate)` so the layer-gate probe (`layer_guard::require_msb_env`) and
-/// the PTY driver reuse the same setup instead of each re-deriving it — the
-/// probe in particular must spawn its `lattice lancet status` child in its
-/// own group so a timeout `kill_process_group(child.id())` hits the right
-/// group (the child is the leader), not an unrelated group or ESRCH.
+/// `pub(crate)` so the driver and the PTY driver reuse the same setup
+/// instead of each re-deriving it — a timeout `kill_process_group(child.id())`
+/// must hit the right group (the child is the leader), not an unrelated
+/// group or ESRCH.
 #[cfg(unix)]
 pub(crate) fn set_new_process_group(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -166,10 +165,8 @@ pub(crate) fn set_new_process_group(_cmd: &mut std::process::Command) {}
 /// (the harness boundary allows general test libraries, but keeping the
 /// dependency surface minimal is the documented discipline).
 ///
-/// `pub(crate)` so `layer_guard` and `pty_tui` share the one implementation
-/// rather than each inlining `kill -KILL -<pgid>` (the duplicated shape had
-/// drifted: `layer_guard` forgot `set_new_process_group`, and `pty_tui` used
-/// `i32` pgids while this helper used `u32`).
+/// `pub(crate)` so the driver and `pty_tui` share the one implementation
+/// rather than each inlining `kill -KILL -<pgid>`.
 pub(crate) fn kill_process_group(pgid: u32) {
     let pgid_str = format!("-{pgid}");
     let _ = std::process::Command::new("kill")
@@ -195,7 +192,7 @@ fn wait_with_timeout(
             return Ok(status);
         }
         if start.elapsed() >= limit {
-            // Kill the process group first so grandchildren (TUI, microsandbox,
+            // Kill the process group first so grandchildren (TUI, lattice,
             // fake-LLM sockets) die with the child, then reap the direct child
             // to avoid a zombie. Surface the timeout regardless.
             kill_process_group(pgid);

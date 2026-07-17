@@ -5,10 +5,9 @@
 //!
 //! Implements `SessionGraphStore` over the project's Git object database.
 //! Session commits are immutable Git objects under `refs/lattice/sessions/**`;
-//! mutable session metadata and operational state live in sidecar files under
-//! `.lattice/sessions/`. Candidate refs under `refs/lattice/candidates/**`
-//! keep clean-turn commit ranges reachable.
-
+//! mutable session metadata lives in sidecar files under `.lattice/sessions/`.
+//! Candidate refs under `refs/lattice/candidates/**` keep clean-turn commit
+//! ranges reachable.
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -163,13 +162,5 @@ impl SessionGraphStore for GitSessionGraphStore {
 
     fn get_turn_commit(&self, session_id: &str, commit_id: &str) -> Result<Option<TurnCommit>> {
         self.get_turn_commit_impl(session_id, commit_id)
-    }
-
-    fn set_snapshot_lost(&self, commit_id: &str, lost: bool) -> Result<()> {
-        self.set_snapshot_lost_impl(commit_id, lost)
-    }
-
-    fn get_snapshot_lost(&self, commit_id: &str) -> Result<Option<bool>> {
-        self.get_snapshot_lost_impl(commit_id)
     }
 }

@@ -12,12 +12,6 @@
 
 ## MEDIUM
 
-### M-LOCAL-01: ADR 0003 direct Local Workspace execution is not implemented — `architecture` / `lancet-native` / `lattice-api`
-- **Location**: `docs/adr/0003-lancet-operates-directly-on-local-workspace.md`; `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-native/src/execution_backend.rs`; `crates/lattice-api/src/turn/{cep,upper,workspace_backend,snapshot_journal}.rs`; `crates/lattice-profile` `[workspace]`; `crates/lattice-workspace`.
-- **Problem**: The accepted architecture has LANCET operate directly on the canonical Local Workspace through guarded, bounded, atomic host operations. Production still creates an MSB Upper for every Turn, routes handlers through the single `WorkspaceExecutionBackend` implementation behind `ExecutionBackend`, and carries projection/baseline, guest Git, snapshot, retained-state, KVM, and sandbox profile machinery. Direct-Local access also needs an explicit security contract: non-configurable `.git`/LATTICE/root-escape exclusions; tracked-plus-non-ignored default read visibility with explicit ignored-path inclusion and read denial; safe symlink resolution; read limits; expected-revision edits; no-replace creates; atomic installation; accurate audit evidence; and honest handling of non-cooperating external-writer races.
-- **Current status**: PARTIAL (#37/#38/#39 LANDED; #40 OPEN). #37 added the concrete `LocalWorkspace` module in `lancet-native` and cut production Turns over to it; #38 deleted the `ExecutionBackend` trait, `ExecutionRouting`/`UpperContext`/`RoutingInvocationState` carriers, `NullExecutionBackend`, the `direct_local_routing` adapter, and every backend spy/null test implementation, moved the neutral path/observation vocabulary into `workspace/types.rs`, made `HandlerContext`/server run carry the one concrete `Arc<LocalWorkspace>` (constructed once per run from `cep_context.policy.project_root` inside `run_native`), and replaced routing audit metadata with method-local evidence (guarded path, `local_revision`, post-install content hash, `PathGuard`/`LocalIo` rejection stages). #39 unified Policy-Visible Workspace read visibility: profile `[lancet.workspace]` gained `included_ignored_read_patterns` / `denied_read_patterns`; pure decide order lives in `lancet-authority::policy::visibility`; host Git facts come from a per-Tool-call gix engine in `lancet-native::workspace::visibility`; read/list/grep/find share one decision (System Exclusion > denied_read > included_ignored > gitignore default), and hidden reads use the same Agent-facing not-found shape. `SessionApi::{commit_prepared_turn,get_turn_commit,get_snapshot_lost}` remain dead code with #40 pointers. See FIX.md `#37`/`#38`/`#39`.
-- **Plan**: Continue #40: remove `[workspace]` schema, `lattice-workspace` crate, `microsandbox` dependency, KVM/MSB harness scenarios, and the `lattice-session` snapshot/promotion contract. Replace MSB-bound scenarios with Direct-Local visibility, mutation, policy, race, audit, and session-reopen coverage. Keep the default five built-ins working throughout without treating that set or native handlers as the permanent Tool boundary.
-
 ### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime is not implemented — `architecture` / `lancet-runtime` / Tool migration
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; current authority/dispatch/handler surfaces in `crates/{lancet-catalog,lancet-cep,lancet-dispatch,lancet-native}`; `lancet-runtime` and `lattice-tool-prelude` do not yet exist.
 - **Problem**: Tool contracts are currently centralized in `lancet-catalog`, projected through `lancet-cep`, dispatched through `lancet-dispatch`, and implemented as trusted native handlers. That path cannot make independently maintained Tool code structurally unable to bypass host filesystem, network, or process policy. It also duplicates the future Source Tool manifest authority and leaves the runtime split across migration crates.
@@ -37,59 +31,21 @@
 - **升级条件**: 若 jobs=4 cap 在常驻 app 全开时仍 OOM(更重型编译单元、更大 codegen)→ 升为 HIGH,考虑降 jobs 到 2 或加 zram。
 - **计划**: (a) 已落地 xtask ci 改造;(b) 推荐 owner 跑门前关非必要 Electron app(非强制);(c) CI(ubuntu/macos-latest,资源充足无桌面 app)不受影响,无需改 CI 配置。**#27 issue 应补 comment 修正方向**:真凶是环境侧超售,非 lattice 测试 bug,指向本 finding 与 FIX.md `#27` 条目。
 
-### M-33-01: Profile `[workspace]` → `UpperSpec` 翻译未在 Phase 33 规划 — `planning` / `v1.5-alpha`
-- **位置**: `.planning/phases/33-workspace-adapter-production-hardening/33-03-PLAN.md`（schema only）；composition 层无 plan task
-- **问题**: Phase 33 交付 `WorkspaceSection` / `CredentialRef` 与 `UpperSpec` / `apply_egress`，但无 `lattice-api` 将 profile 解析结果映射为 adapter 调用的任务。PLAN-CHECK rev2 以 warning 放行，此前无正式 defer 台账。
-- **当前状态**: SUPERSEDED DESIGN; IMPLEMENTATION RESIDUE. ADR 0003 取消 Upper 与 sandbox `[workspace]` 配置，因此不再接线 `WorkspaceSection` → `UpperSpec`。
-- **计划**: 随 M-LOCAL-01 删除 `[workspace]` schema/defaults、`UpperSpec` 翻译缺口和 D-33-01；网络访问继续由 `[lancet.network]` 控制，不把旧 egress/credential 字段搬到 direct-Local 路径。
-
-### M-33-02: WS-04 按项目 warm template 自动选择未接线 — `planning` / `v1.5-alpha`
-- **位置**: `crates/lattice-workspace/src/template.rs`（helpers）；`33-05-PLAN.md`（仅 `ImageOrTemplate::Template` 显式传入时 restore）
-- **问题**: ROADMAP SC3 要求 per-project template 支撑 Upper 创建；Phase 33 有 SDK snapshot API 与 `WarmTemplate::is_stale`，但 `create_upper` Image 路径不会自动解析 `proj-<hash>-template`。
-- **当前状态**: SUPERSEDED DESIGN; IMPLEMENTATION RESIDUE. ADR 0003 取消整个 Upper/template 路径。当前 helper 和 Image 路径仍存在于代码中，但不得继续接线自动选择。
-- **计划**: 随 M-LOCAL-01 删除 git-ready template 选择、命名、staleness、OCI rootfs/template cache 和 D-33-02；不得先实现旧方案再删除。
-
-### M-33-06: Image 路径每次 create_upper 仍可能在 guest 内 apt-get 装 git（慢/脆/可超时）— `production-hardening` / `performance` / full-gate
-- **位置**: `crates/lattice-workspace/src/microsandbox.rs`（`deliver_baseline` ~270-305；`APT_GET_GIT` / `APT_GET_GIT_TIMEOUT=300s` ~57-64；`create_upper` Image 分支 ~970-993）；`crates/lattice-api/src/turn/cep.rs`（`build_production_turn_deps` 无条件 `prepare_upper`，即使 `[tools] enabled = []`）；`crates/lattice-system-harness/tests/{msb_full_turn,pty_tui_smoke}.rs`（无工具 smoke）。
-- **问题**: M-33-05 已交付 **显式** git-ready warm template 路径，但 **默认 Image 路径未退役 guest 内装 git**：
-  1. 常见 OCI 镜像（`python:3.12-slim`、`rust:1.87-slim` 等）默认无 `git`。
-  2. `deliver_baseline` 在 `ImageOrTemplate::Image` + `EgressPolicy::Open|Allowlist` 且探测无 git 时，仍跑固定字面量 `apt-get update && apt-get install -y git`，SDK 超时 **300s**。
-  3. `create_upper` **不会**自动解析/复用 `proj-<hash>-git-ready-template`（M-33-02 / D-33-02 未接线），因此每次从裸镜像起 Upper 都可能重复装 git。
-  4. 生产 turn 路径无条件 `prepare_upper`——纯文本、无工具 turn 也会建 Upper，照样撞这条路径。
-  5. 本机 DNS 黑洞（如 `deb.debian.org → 198.18.0.0/15` / 本地透明代理）下 apt 无响应：300s 超时未到前，harness 120s step 先杀子进程 → `session send: Timeout(120s)`。2026-07-13 复现：`upper-5139d490` boot 成功后 guest 仅输出 `missing`（git 探测），随后 apt 挂死；直接 `msb exec ... apt-get install git` 也 60s 超时。
-- **当前状态**: OPEN IMPLEMENTATION RESIDUE. **harness 侧 partial mitigation（2026-07-13）**：`msb_full_turn` / `pty_tui_smoke` 的 agent.toml 写死 `egress = "blocked"`，使无工具 smoke 跳过 apt-get；KVM 复跑 `msb_full_turn` ~8.8s、`pty_tui_smoke` ~1.4s PASS。这只绕开当前代码路径。ADR 0003 不再建立任何 OCI Turn Workspace；运行时 apt、guest Git、pack/base64/coreutils transfer 和镜像启动将在迁移中一并删除。
-- **与已关闭项关系**: M-33-05 保留为旧 guest-Git 架构下已经落地的历史修复；它不再是目标架构基础。当前痛点直到 M-LOCAL-01 删除旧 Upper 路径前仍真实存在。
-- **升级条件**: 若 M-LOCAL-01 延后而当前生产 Image 路径继续在受限 DNS 下触发 120s-300s 安装挂起，则升为 HIGH；不得继续扩展 template 或投影作为长期修复。
-- **计划**: 随 M-LOCAL-01 删除 `APT_GET_GIT`、guest Git capability probing、git-ready template helper、pack/base64 baseline delivery、guest status/bundle export 及 Microsandbox adapter 测试。
-
-### M-33-03: 生产 adapter 上 WS-02 contract suite 非强制 — `verification` / `v1.5-alpha`
-- **位置**: `33-05-PLAN.md` T3（`test_microsandbox_contract_suite` optional）
-- **问题**: WS-02 路径泄漏契约在 `DeterministicWorkspace`（33-04）上保证；`MicrosandboxWorkspace` KVM lane 仅 V-05/V-08，contract suite 可选。
-- **当前状态**: SUPERSEDED DESIGN. ADR 0003 将删除 production Microsandbox adapter，不再把其 KVM contract suite 升为 mandatory。
-- **计划**: 由 M-LOCAL-01 的 concrete Local Workspace 临时目录测试和 direct-Local system harness 取代 D-33-03；删除 adapter 后关闭本项。
-
-### M-33-04: Phase 33 计划/研究的 microsandbox SDK API 与锁定 crate 不符（已校正）— `planning` / `v1.5-alpha`
-- **位置**: `33-RESEARCH.md`、`33-PATTERNS.md`、`33-01/02/05-PLAN.md`、`33-VALIDATION.md`
-- **问题**: RESEARCH/PATTERNS 依 Context7 文档推导 SDK 面，三处 API 在 `microsandbox 0.5.6` 实际 crate 中**不存在**：`Snapshot::save(name,&sandbox)`、`Snapshot::get(name).restore_with(...)`、`NetworkPolicy::allowlist([...])`；`apply_egress` 签名按值收发 `microsandbox::SandboxBuilder`（crate root 未导出，实为 `microsandbox::sandbox::SandboxBuilder`）。`33-PLAN-CHECK` rev3 PASS 仅做结构/依赖/覆盖校验，未对 SDK 调用核对源码。按原计划执行 33-05 会编译失败。
-- **当前状态**: 已校正（2026-06-13）。六份文件改为对照 `~/.cargo/.../microsandbox-0.5.6/lib/` 源码验证的真实 API：save=`Snapshot::builder(src).destination(Name(t)).create()`、restore=`Sandbox::builder(new).from_snapshot(t).create()`、allowlist=`NetworkPolicy::none().allow_domains([...])?`、类型路径 `microsandbox::sandbox::SandboxBuilder`；`apply_egress` 拆出可测纯函数 `plan_egress→NetPlan`（让 V-06/V-07 det 层从空转变真断言）；RESEARCH 顶部加 API-CORRECTION 横幅；`33-PLAN-CHECK` 加 rev4 注记。
-- **残留**: ADR 0003 已取消 Microsandbox production target，未执行的 A4/A7 真机探针不再提供目标架构证据。
-- **计划**: 不再投入 KVM SDK 校准；保留历史教训（SDK API 以锁定源码为准），随 M-LOCAL-01 删除对应 adapter/planning residue 后关闭。
-
 ### T-23-01: #23 测试重构 4/6 - 55 条提升仍待替代场景（54 current-MSB + 1 fast）- `test-refactor` / #18 / #23
 - **位置**: `docs/TEST-TRIAGE.md` §1.5；`docs/test-triage-decisions.json`（提升 96 条中的 55 条延期项）
 - **问题**: #23 按产品面分批执行 #22 triage。本机无 `/dev/kvm`、`LATTICE_HARNESS_MSB` 未开，无法落地或验证依赖真实完整 turn 的替代场景。两类提升被迫延期（**不删原内部测试**，否则普通 CI 即丢覆盖且无法验证替代）：
   (1) **39 条 MSB-bound**（`lattice-api` 36 + `lattice-agent` 3）-> `msb_full_turn` / `planned_observe_msb` / `planned_mutate_msb` / `planned_policy_msb` / `planned_retired_msb` / `planned_provider_fail_msb` / `planned_resume_msb` / `planned_secret_msb` / `planned_audit_ops_msb`。每条都需完整 turn，而完整 turn 默认走 Upper/Microsandbox。
   (2) **15 条 MSB-bound CLI**（`lattice-cli`）-> `planned_audit_ops_msb`(7) / `planned_observe_msb`(1) / `planned_provider_fail_msb`(1) / `planned_session_graph_msb`(5) / `planned_session_history_msb`(1)；audit seeded、observe workspace-root、provider timeout、跨 session graph 隔离与 human log 需真实 turn。
   (3) **1 条 fast-binary CLI** -> `planned_lancet_cli`；`lancet status` 缺失 DB 空态不依赖 KVM，只是外部场景尚未落地。
-- **当前状态**: DEFERRED（#23 本批已执行 15 删除 + 36/140 提升 + 夹具收口 + 阻塞 bug 修复；round-5 纠正 resume/blanket keep，round-6 将 Upper 前缺凭据路径落地 fast 接管）。ADR 0003 改变后续接管通道：账本中的 `*_msb` 名称暂时描述当前实现依赖，不再要求新场景保留 KVM。#23 issue 保持 open（按用户要求不关闭、不 push）。
-- **升级条件**: `planned_lancet_cli` fast 场景落地后立即删除对应内部测试；其余 54 条在 M-LOCAL-01 提供无 KVM 的完整 direct-Local turn harness 后逐条核对并删。
-- **计划**: (a) 下一 fast 批次先补 `planned_lancet_cli`；(b) direct-Local cutover 时把 `planned_observe_msb` / `planned_mutate_msb` / `planned_policy_msb` / session/audit/secret 场景迁到普通 harness lane；(c) 更新 §1.5 和 JSON 账本的 target lane 后逐条删除对应内部测试。不得为这些 replacement 新增长期 KVM 依赖。
+- **当前状态**: DEFERRED → RE-TARGETED（2026-07-17，#40）。#23 本批已执行 15 删除 + 36/140 提升 + 夹具收口 + 阻塞 bug 修复。#40 删除了 MSB/KVM harness lane 与 `LATTICE_HARNESS_MSB` 门禁——「无 KVM 无法落地替代场景」的延期理由自此失效：54 条 current-MSB 提升改由 **#24 Direct-Local external-binary 场景**接管（普通 lane，无 KVM）。#40 已落地 `tests/direct_local_turn.rs` 骨架（plain-text turn / session reopen / policy denial）+ `SseScript::Sequence` 多轮 fake LLM 基座；`docs/TEST-TRIAGE.md` §1 场景目录与 §1.5 已同步。#23 issue 保持 open（按用户要求不关闭、不 push）。
+- **升级条件**: `planned_lancet_cli` fast 场景落地后立即删除对应内部测试；其余 54 条由 #24 在 direct-Local harness 通道逐条核对并删（通道已在 #40 就绪）。
+- **计划**: (a) 下一 fast 批次先补 `planned_lancet_cli`；(b) #24 把 `planned_observe_msb` / `planned_mutate_msb` / `planned_policy_msb` / session/audit/secret 场景以 Direct-Local 形态落到普通 harness lane（#40 已提供骨架与 `Sequence` fake LLM）；(c) 更新 §1.5 和 JSON 账本的 target lane 后逐条删除对应内部测试。不得为这些 replacement 新增长期 KVM 依赖。
 
 ### T-23-02: #23 review-fix - triage 映射精确化与 keep/delete 偏差（残余由 T-23-01 继续承接）- `test-refactor` / #23
 - **位置**: `docs/TEST-TRIAGE.md` §1.5 review-fix 子段、`docs/test-triage-decisions.json`、`crates/lattice-system-harness/tests/{fast_session_cli,fast_config_cli}.rs`、`crates/lattice-system-harness/src/assert.rs`。
 - **问题**: #23 首轮收到 6 条 review 反馈，后续又经 5 轮 review-fix 追加反馈。Round-1 指出原 101 条 `lattice-cli` elevate 中 95 条使用三元兜底而无法逐条审计、4 处 fast 契约缺失、验收计数错误。Round-2 指出 9 条映射不精确、2 条 keep 改判错误、账本算术错误、三重扫描、重复解析。Round-3 指出 `target_layer` 错误分层、4 条 Upper 前失败被误延期、旧审计 schema 无法被 MSB 覆盖、workspace-root 需 observe MSB、2 条 resume 源码扫描应删、退出码未精确断言、JSON 解析 panic 丢失失败产物、失败产物相互覆盖。Round-4 指出 33 条 `msb_full_turn` 映射不实、lancet status 接管不存在、resume 退出码断言不精确、secret 扫描遗漏 stdout、`assert_exit_code` 错误信息不携带期望值；round-5 再核源码后发现其中只有 25 条是真局部不变量，另外 8 条仍需行为场景或冗余删除状态；round-6 将 Upper 前缺凭据路径落地为 fast takeover。
 - **处理**: round-5 纠正“第四轮全部闭环”的误报：resume 不存在 session 的产品退出码与黑盒断言统一为 2；33 条 blanket keep 拆为 25 条真实局部不变量、1 条 `msb_full_turn` 冗余待删、7 条精确 planned MSB 场景；fast_config 的全部 JSON 解析错误改走 failure-artifact 路径。Round-6 再按调用顺序确认缺凭据早于 `prepare_upper`，补 fast harness、修正 BadRequest exit 2 并删除原弱 smoke。最终 101 条原 elevate 分为 36 已删除接管 / 16 真延期 / 5 冗余保留 / 40 复审判 keep / 4 改判删除。
-- **当前状态**: PARTIALLY_RESOLVED - round-6 代码与账本已落地；29 个定向 fast harness 测试、139 个 lattice-cli 测试及完整 `cargo xtask ci` 全绿。**残余**: 16 条真延期 + 5 条冗余保留 = 21 条 lattice-cli 待处理；fast residual 为 1 条 `planned_lancet_cli`、2 条 status 已完整接管待删、2 条 project-branch 仅部分覆盖待补场景再删；current-MSB residual 为 15 条 deferred + 1 条 `msb_full_turn` 冗余原测试。ADR 0003 落地后这些转入普通 direct-Local harness，不再等待 KVM。40 条 keep 偏差无需后续删除；4 条 delete 已闭环。#23 仍 open、未 push。
+- **当前状态**: PARTIALLY_RESOLVED - round-6 代码与账本已落地；29 个定向 fast harness 测试、139 个 lattice-cli 测试及完整 `cargo xtask ci` 全绿。**残余**: 16 条真延期 + 5 条冗余保留 = 21 条 lattice-cli 待处理；fast residual 为 1 条 `planned_lancet_cli`、2 条 status 已完整接管待删、2 条 project-branch 仅部分覆盖待补场景再删；current-MSB residual 为 15 条 deferred + 1 条 `msb_full_turn` 冗余原测试。ADR 0003 落地后这些转入普通 direct-Local harness，不再等待 KVM（#40 已删除 MSB lane 并落地 direct-Local 骨架；逐条处理归 #24）。40 条 keep 偏差无需后续删除；4 条 delete 已闭环。#23 仍 open、未 push。
 - **升级条件**: 同 T-23-01。
 - **计划**: (a) 下一 fast 批次补 `planned_lancet_cli`，直接删除 2 条已完整接管的 status 原测试；(b) 为 `project_branch_creation_json_output_includes_branch` / `project_branch_persists_through_reopen` 补 branch create/reopen fast 场景，验证后再删；(c) M-LOCAL-01 的普通 harness 通道就绪后处理 15 条 deferred，并删除 `run_integration_commits_existing_session` 这一条 `msb_full_turn` 冗余原测试；(d) 按精确 replacement 逐条勾销。
 
@@ -112,13 +68,6 @@
 - **升级条件**: 若离线/air-gapped CI 成为常态且需跑 `lancet-native` 全套件 → 升为 MEDIUM；或若 `is_private_or_reserved` 被要求覆盖更多保留段（RFC 2544 198.18.0.0/15、RFC 5737 文档 IP 203.0.113.0/24 等）作为 SSRF 防御纵深 → 升为 MEDIUM 并扩 `is_private_or_reserved`。
 - **计划**: （a）短期不改测试行为，接受正常 CI 下通过；（b）可选加固 `is_private_or_reserved` 覆盖 198.18.0.0/15（与现有 169.254/127/0 段同列拒绝），作为 SSRF 纵深而非本测试的主修复；（c）若要彻底消除离线环境对 `lancet-native` 的阻断，给 `fetch_effect_contract_negative` 加 `#[ignore]` 或 env-gated 跳过（如 `LATTICE_SKIP_NETWORK_TESTS=1`），但需权衡是否弱化正常环境下对该契约的覆盖。本 finding 不阻塞 #26 迁移收尾。
 
-### L-21-02: `require_msb_env` 探针探的是 audit 路径，不验证 MSB stack 可用 — `verification` / harness / full-gate
-- **位置**: `crates/lattice-system-harness/src/layer_guard.rs`（`require_msb_env`，:54-106）；`crates/lattice-cli/src/commands/lancet.rs`（`run_status` → `collect_status`）；`crates/lancet-api/src/status.rs`（`collect_status`，:31-40）。
-- **问题**: `require_msb_env` 用 `lattice lancet status` 作 MSB stack 探针，但 `lancet status` 只读 project audit SQLite store（`collect_status` → `CepAuditStore::open` + `query_rows`），**完全不碰 microsandbox daemon、`msb` binary、libkrunfw 或 KVM**。audit DB 不存在时直接返回空 `Ok`（`status.rs:35-40`）。因此探针 exit 0 只证明"产品 CLI 能跑 + audit 路径可读"，不证明"MSB stack 能起 Upper"。owner 实跑时 `msb` binary 缺失（未装 / `MSB_HOME` 指向隔离 HOME 导致 SDK 找不到），探针照样过，turn 才在 Upper 创建阶段撞 `msb binary not found`——失败信号比应有的晚了一整层。
-- **当前状态**: SUPERSEDED DESIGN; CURRENT-PATH RESIDUAL. 在 M-LOCAL-01 落地前探针仍会误绿，但 ADR 0003 的目标路径完全不依赖 MSB/KVM。
-- **升级条件**: 仅当 direct-Local cutover 延后且 KVM 门继续承担发布阻断时升级；不得为目标架构新增长期 MSB probe。
-- **计划**: 随 direct-Local harness 替换删除 `require_msb_env` 和 KVM gate，而不是完善将被删除的 sandbox 探针。
-
 ### L-11-01: `tail_audit` 批次循环有 `yield_now` 但无专用 `CancellationToken` + CLI 接线 — `robustness` / operator-path
 - **位置**: `crates/lancet-api/src/audit.rs`（`tail_audit` 批次循环,`tokio::task::yield_now().await` 在 L235;循环体 `query_rows` 同步）
 - **问题**: 批次循环底部已加 `tokio::task::yield_now().await`,drop-future 取消可在批次边界生效。但无专用 `CancellationToken` 从 CLI 接入 `tail_audit`,`lattice audit --tail` 的 Ctrl-C 仅靠默认 future-drop,无显式信号接线。退役前的 native handler 经 `HandlerContext { cancellation: Cancellation }` 有 per-batch watch 检查;direct-store 路径用 `yield_now` 兜底但未做专用 token + CLI 接线。
@@ -132,15 +81,6 @@
 - **当前状态**: ACCEPTED RESIDUAL(downgraded from MEDIUM → LOW)。合成 writer 测试在 store 并发边界(SQLite WAL + finalize 谓词)上与 live turn 等价 —— live turn 最终也走同一 `CepAuditStore` API,无额外并发 hazard —— 故接受合成 writer 测试为充分兜底(downgrade),不补 live-turn 集成测试(最优处理)。`audit.rs` module doc 已显式写明该降级契约。
 - **升级条件**: 若 audit 写路径引入 `CepAuditStore` 之外的并发 hazard(如跨进程写、外部锁、非 WAL journal mode)、或 `query_rows` 改为跨多次 `SELECT` 拼接而中间释放 snapshot → 升为 MEDIUM 并补 live-turn (`LancetRuntime`/`stream_turn`) 并发读集成测试。
 - **计划**: 暂不补 live-turn 集成测试;维持合成 writer 测试 + 结构保证 + 显式契约文档。
-
-### L-34-02: Direct-mode `changed_paths()` porcelain enforcement weaker than Envelope snapshot diff — `security` / `defense-in-depth`
-- **位置**: `crates/lattice-api/src/turn/workspace_backend.rs:321`（`changed_paths` → 委托 `Backend::git_status`，不再内联 porcelain）；生产 porcelain 在 `crates/lattice-workspace/src/microsandbox.rs:1050`（Upper 跑 `git status --porcelain=v1 -z`），解析器 `crates/lattice-workspace/src/git_status.rs`；WATCH 锚点 `crates/lattice-workspace/AGENTS.md:49-51`。
-- **问题**: Direct-mode post-execution write-scope enforcement uses `git status --porcelain=v1`, which omits all gitignored paths. Envelope-mode uses filesystem snapshot diff (`capture_workspace_snapshot` / `compute_changed_paths`) that only skips `target/`, `.lattice-overlays/`, `.git/`. A Direct workspace-mutating command can write to gitignored paths outside `allowed_write_paths` (e.g. `.env`, `build/`) and pass the gate because porcelain omits ignored paths. Additionally, a TOCTOU exists: a background process spawned by the command can write after `exec` returns but before `changed_paths()` runs.
-- **当前状态**: SUPERSEDED MECHANISM; CURRENT-PATH RESIDUAL. The current Upper path still has the porcelain gap, but `exec.command_run` is retired and ADR 0003 removes `changed_paths()` rather than using it for host writeback. Direct-Local structured mutations have immediate host impact, so their protection must be exact per-target path/effect/precondition checks, not a post-hoc Git diff.
-- **范围变更 (2026-06-27)**: Direct-mode naming was retired (commits `c160d3eb`, `e939ae02`, `dc507d15`); the production execution path is now the MSB/Upper workspace boundary. The underlying changed-path porcelain gap still applies to Upper→Lower write-back detection and is retained as a WATCH in `crates/lattice-workspace/AGENTS.md`. The escalation conditions below still hold.
-- **范围变更 (2026-06-30)**: issue #4（commit `691c0b67`）永久退役 CEP command 执行，`crates/lancet-native/src/handlers/command.rs` 整文件删除——原 post-exec command scope check 执行点已不存在，位置引用相应移除。本 finding 残留 locus 收敛为 porcelain 化的 `changed_paths()`（Upper→Lower write-back 检测）；退役仅移除消费方，porcelain 不列 gitignored 路径的底层缺口不变，故维持 ACCEPTED RESIDUAL。
-- **升级条件**: If any direct-Local method can mutate a path without Guard L1, System Path Exclusion, deny policy, and effect checks, escalate to HIGH. If arbitrary process execution returns, ADR 0003's safety model is invalid and requires a new isolation decision.
-- **计划**: Delete `changed_paths()` with `ExecutionBackend`; cover ignored paths, `.git`/LATTICE exclusions, symlink escape, expected-hash conflicts, and atomic writes in M-LOCAL-01's direct-Local tests. Do not replace porcelain with a whole-tree snapshot diff.
 
 ### L-21: 工具执行 `await_with_deadline` 未与 `cancel_flag` 竞争 — `robustness`
 - **位置**: `crates/lattice-agent/src/agent_loop/mod.rs`（`execute` 调用处）
@@ -203,6 +143,30 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### M-LOCAL-01: ADR 0003 direct Local Workspace execution is not implemented — `architecture` / `lancet-native` / `lattice-api`
+- **当前状态**: 2026-07-17 closed — implemented. Workstream A (#37 → #38 → #39 → #40) is complete. Production Turns operate directly on the canonical Local Workspace through the concrete guarded `LocalWorkspace` in `lancet-native` (#37); the `ExecutionBackend`/routing seam is deleted (#38); Policy-Visible Workspace read visibility is unified across read/list/grep/find (#39); and the Upper/MSB residue — profile `[workspace]`, `WorkspaceSection`/`EgressPolicyConfig`/`CredentialRef`, `lattice-workspace` crate, `microsandbox` dependency, MSB/KVM harness scenarios, `LATTICE_HARNESS_MSB` gate, `set_snapshot_lost`/`get_snapshot_lost` retained-snapshot chain, `lattice-session` promotion builder, and dead `SessionApi` wrappers — is deleted (#40, FIX.md `#40`). Direct-Local harness skeletons (plain-text turn, session reopen, policy denial) run in the ordinary lane with no KVM; the full external-binary scenario matrix is #24, testing-doc rewrite is #25, rewind history is #41/#42.
+
+### M-33-01: Profile `[workspace]` → `UpperSpec` 翻译未在 Phase 33 规划 — `planning` / `v1.5-alpha`
+- **当前状态**: 2026-07-17 closed — moot. #40 deleted the `[workspace]` profile schema (`WorkspaceSection`/`CredentialRef`/`EgressPolicyConfig`) along with the `UpperSpec` target type and `lattice-workspace`; there is nothing left to translate. Network access continues under `[lancet.network]` only; no egress/credential field was carried into the Direct-Local path. See FIX.md `#40`.
+
+### M-33-02: WS-04 按项目 warm template 自动选择未接线 — `planning` / `v1.5-alpha`
+- **当前状态**: 2026-07-17 closed — moot. #40 deleted `crates/lattice-workspace` including `template.rs`, warm-template naming/staleness, and the OCI rootfs/template cache; ADR 0003 has no per-project template concept. See FIX.md `#40`.
+
+### M-33-06: Image 路径每次 create_upper 仍可能在 guest 内 apt-get 装 git（慢/脆/可超时）— `production-hardening` / `performance` / full-gate
+- **当前状态**: 2026-07-17 closed — moot. #40 deleted the Microsandbox adapter, `deliver_baseline`/`APT_GET_GIT`, guest Git capability probing, git-ready templates, and the MSB/KVM harness scenarios that hit the 120s/300s hang. Production Turns no longer create any VM, so the guest apt-get path cannot recur. See FIX.md `#40`.
+
+### M-33-03: 生产 adapter 上 WS-02 contract suite 非强制 — `verification` / `v1.5-alpha`
+- **当前状态**: 2026-07-17 closed — moot. The production Microsandbox adapter this finding asked to harden was deleted in #40; the guarded Local Workspace is covered by temporary-directory tests (`lancet-native`) and the Direct-Local system harness instead. See FIX.md `#40`.
+
+### M-33-04: Phase 33 计划/研究的 microsandbox SDK API 与锁定 crate 不符（已校正）— `planning` / `v1.5-alpha`
+- **当前状态**: 2026-07-17 closed — moot. The `microsandbox` dependency and adapter whose SDK API this finding corrected were removed in #40; the historical lesson (verify SDK APIs against locked crate source) is retained in the overview plan. See FIX.md `#40`.
+
+### L-21-02: `require_msb_env` 探针探的是 audit 路径，不验证 MSB stack 可用 — `verification` / harness / full-gate
+- **当前状态**: 2026-07-17 closed — moot. #40 deleted `require_msb_env`, `layer_guard`, and the `LATTICE_HARNESS_MSB` gate entirely; there is no MSB stack left to probe, and the PTY smoke now runs Direct-Local in the ordinary lane. See FIX.md `#40`.
+
+### L-34-02: Direct-mode `changed_paths()` porcelain enforcement weaker than Envelope snapshot diff — `security` / `defense-in-depth`
+- **当前状态**: 2026-07-17 closed — moot. `changed_paths()` porcelain, `ExecutionBackend`, and `crates/lattice-workspace` (parser, WATCH anchors, production porcelain) were deleted across #38/#40. Direct-Local structured mutations are gated by exact per-target Guard L1 / System Path Exclusion / deny policy / Mutation Precondition / effect checks, not post-hoc Git diffs — the escalation condition (a mutation path bypassing those checks) is structurally excluded by the closed five-method catalog. See FIX.md `#40`.
 
 ### M-WS-01: Microsandbox cannot provide the proposed private CoW Turn Workspace — `architecture` / `lattice-workspace`
 - **当前状态**: 2026-07-16 obsolete by decision, not fixed. Microsandbox 0.6.6 and CubeSandbox evaluation showed that projection plus checkpoint semantics were costly or mismatched. ADR 0003 supersedes ADR 0002 and removes the Turn Workspace requirement entirely; remaining implementation work is tracked by M-LOCAL-01. The capable-host projection/checkpoint probe remains historical evidence only and is deleted with the Microsandbox adapter.

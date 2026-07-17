@@ -33,35 +33,30 @@ integration-test target of any product crate.
   does not commit to Windows (see #26 Out-of-Scope); `set_new_process_group`
   is a no-op on non-Unix.
 
-## Test Layers (RFC #19 decision two / seven)
+## Test Layers (RFC #19 decision two / seven, updated by #40)
 
 - **Fast binary black-box** (`tests/fast_cli_help.rs`, plus all `#[test]`
-  unit tests in `src/`): run on every ordinary CI. No Microsandbox
-  dependency. `cargo xtask ci` runs these by default.
-- **Real Microsandbox + PTY smoke** (`tests/msb_full_turn.rs`,
-  `tests/pty_tui_smoke.rs`): `#[ignore]`-gated, opted into via
-  `LATTICE_HARNESS_MSB=1`. When the flag is set, the test body runs and
-  `require_msb_env` probes the MSB stack via `lattice lancet status`; a
-  broken MSB environment **panics** (the suite fails rather than silently
-  passing — RFC #19 irreversible boundary 7). When the flag is unset the
-  tests are skipped, keeping ordinary CI clean.
-
+  unit tests in `src/`): run on every ordinary CI. `cargo xtask ci` runs
+  these by default.
+- **Direct-Local turn scenarios** (`tests/direct_local_turn.rs`): plain-text
+  turn, session reopen against changed Local state, and policy denial
+  skeletons. They drive the real turn path against the canonical Local
+  Workspace — no KVM, no MSB daemon, no OCI image, no `[workspace]` profile
+  section — and run in the ordinary lane (full Direct-Local scenario matrix
+  is #24).
+- **PTY smoke** (`tests/pty_tui_smoke.rs`): proves the TUI entrypoint wires
+  into the same Direct-Local `stream_turn` chain. Also ordinary-lane since
+  #40; the retired MSB opt-in gate (`LATTICE_HARNESS_MSB`,
+  `layer_guard::require_msb_env`) is gone — a broken Direct-Local
+  environment is a product failure, never a skip.
 ## Verification
 
 Run from the workspace root:
 
 - `cargo xtask harness-boundary`
 - `cargo build -p lattice-cli --bin lattice`
-- Fast lane: `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
-- Full gate (real Microsandbox, owner's KVM host):
-  `LATTICE_HARNESS_MSB=1 LATTICE_MSB_IMAGE=<fully-qualified OCI ref> LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness -- --include-ignored`
-  (or `cargo test ... -- --include-ignored` to run ignored tests too). A
-  broken MSB environment makes this fail, not skip. `LATTICE_MSB_IMAGE` is
-  **required** for the MSB/PTY scenarios — the harness bakes no default so
-  the owner pins exactly the OCI ref (or warm template name) they have
-  cached; unset/empty panics with a clear message before any turn runs.
-  Example: `LATTICE_MSB_IMAGE=docker.m.daocloud.io/library/python:3.12-slim`.
-
+- Full suite (ordinary lane, no KVM/MSB required):
+  `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
 `LATTICE_BIN` is resolved by `LatticeDriver::from_env` **in the test process**
 (`is_file()` then `canonicalize`), i.e. relative to the test-process cwd,
 before any scenario child is spawned. A relative path that is a real file from

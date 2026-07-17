@@ -182,8 +182,8 @@ containing the proposed path and the creation hint
 Discovery never creates files or directories on its own.
 
 To fix it, place an `agent.toml` at one of the discovery paths. A minimal valid
-profile (only `schema_version = 1` and the mandatory `[agent]`, `[prompt]`, and
-`[workspace]` sections are required; see `crates/lattice-profile/src/schema.rs`,
+profile (only `schema_version = 1` and the mandatory `[agent]` and `[prompt]`
+sections are required; see `crates/lattice-profile/src/schema.rs`,
 `AgentProfile`):
 
 ```toml
@@ -195,15 +195,12 @@ model = "sonnet"
 
 [prompt]
 system = "You are a helpful coding agent."
-
-[workspace]
 ```
 
 `[tools]`, `[llm]`, and `[lancet]` are optional and default to empty/defaults.
-`[workspace]` is **mandatory** — every turn starts a microVM (Upper), and
-profiles without `[workspace]` fail to parse. The `[workspace].image` field is
-optional at the schema level but required at runtime by the provisioner.
-
+Turns run Direct-Local against the canonical project workspace — no VM image,
+credential injection, or `[workspace]` section exists (removed in #40);
+legacy profiles that still declare `[workspace]` fail to parse.
 ### (c) Diagnostics with LATTICE_LOG
 
 If a turn fails or behaves unexpectedly, raise the tracing level for more
@@ -229,13 +226,6 @@ one turn has written the project-keyed audit store:
 ```bash
 cargo run -p lattice-cli -- audit --session <session_id>
 ```
-
-Two additional runtime env vars govern Upper VM resource fallbacks when
-`[workspace].cpus` / `[workspace].memory_mb` are unset
-(`crates/lattice-workspace/src/microsandbox.rs`, `from_env`):
-
-- `UPPER_DEFAULT_CPUS` (default `1`)
-- `UPPER_DEFAULT_MEMORY_MB` (default `512`)
 
 ## 5. Next steps
 

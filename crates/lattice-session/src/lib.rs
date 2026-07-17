@@ -5,9 +5,8 @@
 //!
 //! This crate owns the conversation graph contract: sessions,
 //! transcript messages, immutable turn commits, branch refs, HEAD state, and
-//! the SQLite graph store. It intentionally exposes only the graph API used by
-//! the API and CLI facade.
-
+//! the git-backed graph store. It intentionally exposes only the graph API
+//! used by the API and CLI facade.
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,14 +17,7 @@ pub use graph::{
     SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput, TurnCommitStatus,
     TurnLifecycleEvidence, TurnLogEntry, TurnSnapshotIdentity, TurnSnapshotRef, TurnUsage,
     TurnVerificationEvidence, WorkspaceDisposition, canonical_turn_seed, derive_commit_message,
-    derive_snapshot_name, prepare_turn_commit, validate_snapshot_name,
-};
-
-pub mod promotion;
-pub use promotion::{
-    PROMOTION_MANIFEST_SCHEMA_VERSION, PROMOTION_MANIFEST_SCHEMA_VERSION_V2,
-    PromotedSessionCommitInput, PromotedSessionManifest, build_promoted_manifest,
-    create_promoted_session_commit, manifest_json_canonical_bytes,
+    prepare_turn_commit,
 };
 
 pub mod git_graph;

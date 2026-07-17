@@ -13,14 +13,14 @@
 |---|---|
 | 标识 | `crate` + 测试函数名 + 源文件:行号 |
 | 决定 | **保留** / **提升** / **删除** |
-| 目标层 | 局部不变量 / 快速二进制黑盒 / 真实 Microsandbox |
+| 目标层 | 局部不变量 / 快速二进制黑盒 / Direct-Local 外部二进制（#40 后；原「真实 Microsandbox」层已退役） |
 | 替代场景 | 提升或「删除且行为已被覆盖」时指向的已落地或 planned 场景；弱断言/源码扫描删除写 `n/a` |
 | 理由 | 一句话判决依据 |
 
 ### 判决口径（复述 RFC #19 决定六）
 
 - 保护**局部不变量** → **保留**
-- 保护**产品行为**但从内部测 → **提升**到二进制/MSB 场景
+- 保护**产品行为**但从内部测 → **提升**到二进制/Direct-Local 场景
 - 保护**已退役结构**、只断言 `Ok`/可构造、扫描源码 import → **删除**
 - 同一 happy path 已被更高层覆盖 → 删低层重复（4/6 执行；本清单标「提升」或注明替代）
 - **不设**迁移率、数量或覆盖率目标
@@ -30,22 +30,23 @@
 | ID | 说明 | 状态 |
 |---|---|---|
 | `fast_cli_help` | 已落地 `fast_cli_help`（CLI help 表面） | 已落地 |
-| `msb_full_turn` | 已落地 `msb_full_turn`（session send 完整 turn） | 已落地 |
-| `pty_tui_smoke` | 已落地 `pty_tui_smoke`（TUI 入口 smoke） | 已落地 |
+| `msb_full_turn` | ~~已落地~~ **#40 已删**：MSB/KVM 场景退役；语义核心由 `direct_local_turn` plain-text turn 接管 | 已退役 |
+| `pty_tui_smoke` | 已落地 `pty_tui_smoke`（TUI 入口 smoke）；#40 起 Direct-Local ordinary lane（无 KVM/MSB 依赖，不再 `#[ignore]`） | 已落地 |
 | `planned_session_cli` | fast-binary: `session new/list/status/log/branch --json`（no-turn 子集） | **已落地** `tests/fast_session_cli.rs`（#23 批次 1/2） |
 | `planned_audit_cli` | fast-binary: `audit query/replay/tail` 缺失 store 错误态 `--json` | **已落地（部分）** `tests/fast_audit_cli.rs`（#23 批次 2；空态/seeded 态待 MSB） |
 | `planned_config_cli` | fast-binary: `models`/`resolve`/`doctor` + secret redaction + HOME/XDG | **已落地** `tests/fast_config_cli.rs`（#23 批次 1） |
 | `planned_lancet_cli` | fast-binary: `lattice lancet status/doctor` 空态/不变量 | planned（#23 review-fix 新增场景 ID；fast 测试待补） |
-| `planned_observe_msb` | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | planned（#18 矩阵 / 4–6/6） |
-| `planned_mutate_msb` | planned MSB: `mutate.create/edit` Upper-only + effect 记账 | planned（#18 矩阵 / 4–6/6） |
-| `planned_retired_msb` | planned MSB: 已退役 agent 方法明确失败且无副作用 | planned（#18 矩阵 / 4–6/6） |
-| `planned_policy_msb` | planned MSB: policy/channel 拒绝且无宿主 fallback | planned（#18 矩阵 / 4–6/6） |
-| `planned_provider_fail_msb` | planned MSB: provider 断流/非法 SSE/取消 + Upper 清理 | planned（#18 矩阵 / 4–6/6） |
-| `planned_resume_msb` | planned MSB: 跨进程 session resume | planned（#18 矩阵 / 4–6/6） |
-| `planned_secret_msb` | planned MSB: secret sentinel 跨 terminal/session/audit/provenance | planned（#18 矩阵 / 4–6/6） |
-| `planned_audit_ops_msb` | planned MSB: operator audit query/replay（真实 turn 后） | planned（#18 矩阵 / 4–6/6） |
-| `planned_session_graph_msb` | planned MSB: 跨 session 的 branch/checkout/reset/diff 隔离 | planned（#23 review-fix round-5） |
-| `planned_session_history_msb` | planned MSB: 真实 turn 后的 human session log 展示 | planned（#23 review-fix round-5） |
+| `direct_local_turn` | Direct-Local: plain-text turn / session reopen / policy denial | **已落地（骨架）** `tests/direct_local_turn.rs`（#40；完整矩阵归 #24） |
+| `planned_observe_msb` | ~~planned MSB~~ → **#24 Direct-Local**：`observe.workspace` 完整 turn + Local 状态一致 | 由 #24 接管 |
+| `planned_mutate_msb` | ~~planned MSB~~ → **#24 Direct-Local**：`mutate.create/edit` guarded Local mutation + effect 记账 | 由 #24 接管 |
+| `planned_retired_msb` | ~~planned MSB~~ → **#24 Direct-Local**：已退役 agent 方法明确失败且无副作用 | 由 #24 接管 |
+| `planned_policy_msb` | ~~planned MSB~~ → **#24 Direct-Local**：policy 拒绝且无 fallback（#40 已落地骨架 `direct_local_mutate_create_denied_by_write_policy`） | 由 #24 接管 |
+| `planned_provider_fail_msb` | ~~planned MSB~~ → **#24 Direct-Local**：provider 断流/非法 SSE/取消（无 Upper 清理面） | 由 #24 接管 |
+| `planned_resume_msb` | ~~planned MSB~~ → **#24 Direct-Local**：跨进程 session reopen（#40 已落地骨架 `direct_local_session_reopen_after_external_change`） | 由 #24 接管 |
+| `planned_secret_msb` | ~~planned MSB~~ → **#24 Direct-Local**：secret sentinel 跨 terminal/session/audit/provenance | 由 #24 接管 |
+| `planned_audit_ops_msb` | ~~planned MSB~~ → **#24 Direct-Local**：operator audit query/replay（真实 Direct-Local turn 后） | 由 #24 接管 |
+| `planned_session_graph_msb` | ~~planned MSB~~ → **#24 Direct-Local**：跨 session 的 branch/checkout/reset/diff 隔离 | 由 #24 接管 |
+| `planned_session_history_msb` | ~~planned MSB~~ → **#24 Direct-Local**：真实 turn 后的 human session log 展示 | 由 #24 接管 |
 
 ### 汇总
 
@@ -125,6 +126,17 @@
 - lattice-cli 延期为 15 条 MSB + 1 条 fast：保留原内部测试；MSB 通道落地对应场景后逐条删除，`planned_lancet_cli` 不等待 KVM、应在下一 fast 批次补齐。缺凭据 send 已确认早于 `prepare_upper`，round-6 直接落地 fast 场景并删除原弱 smoke。
 - round-4 的 33 条 blanket keep 经源码复核拆分：25 条真正的渲染器/序列化器局部不变量继续 keep；`run_integration_commits_existing_session` 恢复 elevate，精确映射已落地 `msb_full_turn` 但原测试仍冗余保留；5 条 session graph 隔离与 human log 共 6 条映射专门 planned MSB 场景；missing-credential 先恢复 elevate，round-6 再按实际调用顺序落地 fast takeover。
 - 后续（5/6、6/6 或 KVM 可用环境）落地 `planned_*_msb` 场景后，按本表「延期」逐条删除对应内部测试，并在本节勾销。
+
+### #40 状态更新（2026-07-17）
+
+- #40 删除了 Upper/MSB/`lattice-workspace` 残留与 `LATTICE_HARNESS_MSB` 门禁通道；
+  上面的「MSB 项需 KVM 通道」延期理由自此失效。
+- 延期账本中 54 条 MSB/KVM 提升项改由 **#24 Direct-Local external-binary 场景**接管
+  （不再等待 KVM）。#40 已落地 `tests/direct_local_turn.rs` 骨架：plain-text turn、
+  session reopen、policy denial；完整矩阵（observe/mutate/retired/provider_fail/
+  secret/audit_ops/session_graph/session_history 的 Direct-Local 版）归 #24。
+- `session resume` 命令面已随 Upper snapshot 生命周期退役（#37）；对应
+  fast_session 场景已在 #40 一并删除。
 
 ### #23 review-fix 映射精确化（2026-07-12/13，六轮）
 

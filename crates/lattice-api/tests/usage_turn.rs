@@ -69,8 +69,6 @@ struct Workspace {
 
 fn workspace_toml_suffix(_enabled_tools: &[&str]) -> &'static str {
     r#"
-[workspace]
-image = "test-template"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
 "#
@@ -149,24 +147,15 @@ fn make_request(
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
-    support::attach_upper_fixture(
-        RunTurnRequest {
-            input: input.to_string(),
-            session_id: session_id.to_string(),
-            loaded_profile: Some(ws.loaded.clone()),
-            cancel_flag: None,
-            test_llm: Some(llm),
-            test_project_root: Some(ws.root.to_string_lossy().to_string()),
-            test_persist_audit: None,
-        },
-        &ws.loaded
-            .profile
-            .tools
-            .enabled
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>(),
-    )
+    RunTurnRequest {
+        input: input.to_string(),
+        session_id: session_id.to_string(),
+        loaded_profile: Some(ws.loaded.clone()),
+        cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(ws.root.to_string_lossy().to_string()),
+        test_persist_audit: None,
+    }
 }
 
 // ── Test 1: read workspace file through default profile ─────────────────────
@@ -313,7 +302,7 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
         .expect("mutate.edit tool result");
     assert!(
         edit_result.ok,
-        "mutate.edit must succeed in Upper: {:?}",
+        "mutate.edit must succeed in the Local Workspace: {:?}",
         edit_result.error_summary
     );
 

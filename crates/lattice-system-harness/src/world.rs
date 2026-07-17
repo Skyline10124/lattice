@@ -121,13 +121,11 @@ impl ScenarioWorld {
         // initial commit lands on `main` (matching the project_branch the
         // scenarios pass to `session new --project-branch main`). Without
         // this, hosts whose git defaults to `master` create an unborn
-        // refs/heads/master HEAD, and the product's resolve_baseline_head
-        // (upper.rs) fails with UnbornBranch on repo.head(). Using
-        // symbolic-ref is portable across git versions (unlike
-        // `git init -b main` which requires git 2.28+).
+        // refs/heads/master HEAD. Using symbolic-ref is portable across git
+        // versions (unlike `git init -b main` which requires git 2.28+).
         self.git(&["symbolic-ref", "HEAD", "refs/heads/main"])?;
-        // Create an initial commit so HEAD is born — resolve_baseline_head
-        // needs repo.head() to peel to a commit; an unborn branch has none.
+        // Create an initial commit so HEAD is born; an unborn branch has no
+        // commit for the session graph's first turn parent.
         // `git add -A` picks up whatever the scenario already wrote (e.g.
         // .lattice/agents/<name>/agent.toml) so the baseline reflects the
         // real pre-turn project state. `--allow-empty` makes this robust
@@ -155,22 +153,15 @@ impl ScenarioWorld {
     /// (`cargo xtask harness-boundary`) forbids depending on any product
     /// crate; the product reads the same file a user would write.
     ///
-    /// `image` is baked into the mandatory `[workspace].image` field. Fast
-    /// no-turn scenarios (e.g. `session new`, which only creates the session
-    /// record and never resolves the Upper config) pass a dummy image; real
-    /// Microsandbox scenarios pass a fully-qualified OCI ref.
-    pub fn write_agent_profile(
-        &self,
-        name: &str,
-        model: &str,
-        image: &str,
-    ) -> Result<(), WorldError> {
+    /// The profile is the Direct-Local end-state shape: no `[workspace]`
+    /// section (removed in #40), no enabled tools. Turn scenarios that need
+    /// catalog tools write their own profile via `write_project_file`.
+    pub fn write_agent_profile(&self, name: &str, model: &str) -> Result<(), WorldError> {
         let toml = format!(
-            "schema_version = 1\n\n[agent]\nname = \"{name}\"\nmodel = \"{model}\"\n\n[prompt]\nsystem = \"harness agent\"\n\n[workspace]\nimage = \"{image}\"\n\n[tools]\nenabled = []\n"
+            "schema_version = 1\n\n[agent]\nname = \"{name}\"\nmodel = \"{model}\"\n\n[prompt]\nsystem = \"harness agent\"\n\n[tools]\nenabled = []\n"
         );
         self.write_project_file(&format!(".lattice/agents/{name}/agent.toml"), &toml)
     }
-
     /// Spawn a subprocess with cleared environment and only the allow-listed vars.
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
         let mut cmd = Command::new(program);

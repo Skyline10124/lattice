@@ -1,11 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
-
 //! Shared helpers for the Git-backed session graph store.
 //!
-//! DTOs for sidecar files (`meta.json`, `ops/<oid>.json`), ref name
-//! construction/validation, Git tree building/reading, and manifest serialization.
-
+//! DTOs for sidecar files (`meta.json`), ref name construction/validation,
+//! Git tree building/reading, and manifest serialization.
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -34,13 +32,6 @@ pub(crate) struct SessionMetadata {
     pub head_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_commit_id: Option<String>,
-}
-
-/// Operational state stored in `.lattice/sessions/<id>/ops/<oid>.json`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct OperationalState {
-    pub snapshot_lost: bool,
-    pub updated_at: String,
 }
 
 /// Canonical manifest stored at `turn/manifest.json` in every session commit.
@@ -98,28 +89,6 @@ pub(crate) fn session_meta_path(dir: &Path, session_id: &str) -> Result<PathBuf>
         .join("meta.json"))
 }
 
-pub(crate) fn session_ops_dir(dir: &Path, session_id: &str) -> Result<PathBuf> {
-    validate_session_id(session_id)?;
-    Ok(dir
-        .join(".lattice")
-        .join("sessions")
-        .join(session_id)
-        .join("ops"))
-}
-
-pub(crate) fn session_ops_path(dir: &Path, session_id: &str, commit_oid: &str) -> Result<PathBuf> {
-    validate_session_id(session_id)?;
-    // Defense-in-depth: commit_oid is used to build a filesystem path. Reject
-    // anything that is not a plausible hex OID so `/` or `..` cannot escape the
-    // ops directory.
-    if commit_oid.is_empty() || !commit_oid.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(SessionError::Git(format!(
-            "invalid commit oid: {commit_oid}"
-        )));
-    }
-    Ok(session_ops_dir(dir, session_id)?.join(format!("{commit_oid}.json")))
-}
-
 pub(crate) fn read_session_meta(dir: &Path, session_id: &str) -> Result<SessionMetadata> {
     let path = session_meta_path(dir, session_id)?;
     let bytes = fs::read(&path).map_err(|source| {
@@ -148,41 +117,6 @@ pub(crate) fn write_session_meta(
     crate::create_dir_all(path.parent().expect("meta.json path has parent"))?;
     let bytes = serde_json::to_vec_pretty(meta)
         .map_err(|e| SessionError::Git(format!("serialize meta.json: {e}")))?;
-    atomic_write(&path, &bytes)
-}
-
-pub(crate) fn read_ops_state(
-    dir: &Path,
-    session_id: &str,
-    commit_oid: &str,
-) -> Result<Option<OperationalState>> {
-    let path = session_ops_path(dir, session_id, commit_oid)?;
-    match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
-            SessionError::InvalidPersistedValue {
-                field: "ops state",
-                value: e.to_string(),
-            }
-        }),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(SessionError::Io {
-            operation: "reading ops state",
-            path,
-            source,
-        }),
-    }
-}
-
-pub(crate) fn write_ops_state(
-    dir: &Path,
-    session_id: &str,
-    commit_oid: &str,
-    state: &OperationalState,
-) -> Result<()> {
-    let path = session_ops_path(dir, session_id, commit_oid)?;
-    crate::create_dir_all(path.parent().expect("ops path has parent"))?;
-    let bytes = serde_json::to_vec_pretty(state)
-        .map_err(|e| SessionError::Git(format!("serialize ops state: {e}")))?;
     atomic_write(&path, &bytes)
 }
 

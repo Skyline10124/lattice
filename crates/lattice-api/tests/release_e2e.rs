@@ -4,7 +4,7 @@
 //! Fake-LLM end-to-end release scenario.
 //!
 //! Validates the full edit → edit cycle in a **single `run_turn`**
-//! with a multi-round `FakeStreamingLlmClient` under Direct Upper routing.
+//! with a multi-round `FakeStreamingLlmClient` under the Direct-Local runtime.
 //! Uses a persisted on-disk audit DB so the attestation can be inspected after
 //! the turn completes.
 //!
@@ -101,8 +101,6 @@ model = "sonnet"
 system = "You are a test agent."
 [tools]
 enabled = ["mutate.edit"]
-[workspace]
-image = "test-template"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
 "#;
@@ -135,19 +133,16 @@ fn make_release_e2e_request(
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
-    support::attach_upper_fixture(
-        RunTurnRequest {
-            input: input.to_string(),
-            session_id: session_id.to_string(),
-            loaded_profile: Some(ws.loaded.clone()),
-            cancel_flag: None,
-            test_llm: Some(llm),
-            test_project_root: Some(ws.root.to_string_lossy().to_string()),
-            // Persist audit to disk so we can inspect attestation after run_turn.
-            test_persist_audit: Some(false),
-        },
-        &["mutate.edit"],
-    )
+    RunTurnRequest {
+        input: input.to_string(),
+        session_id: session_id.to_string(),
+        loaded_profile: Some(ws.loaded.clone()),
+        cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(ws.root.to_string_lossy().to_string()),
+        // Persist audit to disk so we can inspect attestation after run_turn.
+        test_persist_audit: Some(false),
+    }
 }
 
 // ── Release criterion-8 test ──────────────────────────────────────────────────
@@ -157,7 +152,7 @@ fn make_release_e2e_request(
 //
 // Asserts:
 // 1. Turn completes with status=Completed.
-// 2. Upper-backed edits are verified via tool outcomes (section 6).
+// 2. Direct-Local edits are verified via tool outcomes (section 6).
 // 3. Session has exactly one commit in the graph.
 // 4. On-disk attestation has correct in-toto subject / predicate / materials.
 // 5. Audit rows are in edit → edit order.
@@ -198,7 +193,7 @@ async fn release_e2e_criterion_8() {
         }]
     });
 
-    // Edit 2: refresh expected_hash after edit 1 mutates Upper content.
+    // Edit 2: refresh expected_hash after edit 1 mutates Local content.
     let hash2 = format!("blake3:{}", blake3::hash(bad_content.as_bytes()).to_hex());
     let good_edit_args = serde_json::json!({
         "path": "src/lib.rs",
@@ -270,7 +265,7 @@ async fn release_e2e_criterion_8() {
         result.assistant_output
     );
 
-    // ── 2. Upper-backed edits apply in the workspace adapter (not host tree) ─
+    // ── 2. Direct-Local edits apply in the guarded Local Workspace ─
     // Verified via mutate.edit tool outcomes in section 6 below.
 
     // ── 3. Session has exactly one commit ────────────────────────────────

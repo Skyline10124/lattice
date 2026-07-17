@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 /// Strict v1 `agent.toml` profile. Only `schema_version = 1` is accepted.
 ///
-/// Removed sections: `[security]`, `[context]`, `[behavior]`.
+/// Removed sections: `[security]`, `[context]`, `[behavior]`, `[workspace]`.
 /// The `[tools]` section only supports explicit `enabled` — no `bundles`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -22,175 +22,6 @@ pub struct AgentProfile {
     pub llm: LlmSection,
     #[serde(default)]
     pub lancet: LancetSection,
-    /// Upper workspace execution environment configuration.
-    ///
-    /// The `[workspace]` section is **mandatory** — every turn unconditionally
-    /// starts a microVM (MSB/Upper). Profiles without `[workspace]` fail to
-    /// parse. The `image` field within the section is optional at the schema
-    /// level but required at runtime; the provisioner fails fast if it is
-    /// missing when Upper preparation begins.
-    pub workspace: WorkspaceSection,
-}
-
-// ── Workspace schema types ────────────────────────────────────────────────────
-
-/// Egress network policy for the Upper VM.
-///
-/// Controls which outbound traffic the Upper VM permits. Defaults to `open` when the
-/// `egress` field is absent from `[workspace]`.
-///
-/// - `open`      — full public internet access (SDK default)
-/// - `blocked`   — deny all outbound traffic
-/// - `allowlist` — deny all except `allowed_egress_targets` (domain names)
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum EgressPolicyConfig {
-    /// Full public internet access (SDK default). Implicit when `egress` is absent.
-    #[default]
-    Open,
-    /// Deny all outbound traffic.
-    Blocked,
-    /// Deny all traffic except explicitly listed domains in `allowed_egress_targets`.
-    Allowlist,
-}
-
-/// Reference to a credential by its environment variable name.
-///
-/// **Security invariant:** this type stores only the *name* of the environment variable.
-/// The resolved secret value is NEVER stored here — it is injected at turn time by the
-/// Upper provisioner (`lattice-workspace`). Snapshots and profile files must never
-/// contain actual secrets.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialRef {
-    /// Name of the environment variable that holds the secret at turn time
-    /// (e.g. `"OPENAI_API_KEY"`). The resolved value is never stored here.
-    pub env_var_name: String,
-}
-
-// ── Workspace lifecycle limit constants ─────────────────────────────────────
-
-/// Default number of cleanup rounds before the host exhausts the budget.
-/// Valid range: `1..=32`.
-pub const DEFAULT_CLEANUP_ROUNDS: u32 = 3;
-
-/// Default maximum pending snapshots per session.
-/// Valid range: `1..=100`.
-pub const DEFAULT_MAX_PENDING_SNAPSHOTS: u32 = 5;
-
-fn default_cleanup_rounds() -> u32 {
-    DEFAULT_CLEANUP_ROUNDS
-}
-
-fn default_max_pending_snapshots() -> u32 {
-    DEFAULT_MAX_PENDING_SNAPSHOTS
-}
-
-fn deserialize_bounded_cleanup_rounds<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = u32::deserialize(deserializer)?;
-    if !(1..=32).contains(&value) {
-        return Err(de::Error::custom(format!(
-            "cleanup_rounds must be in 1..=32, got {value}"
-        )));
-    }
-    Ok(value)
-}
-
-fn deserialize_bounded_max_pending_snapshots<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = u32::deserialize(deserializer)?;
-    if !(1..=100).contains(&value) {
-        return Err(de::Error::custom(format!(
-            "max_pending_snapshots must be in 1..=100, got {value}"
-        )));
-    }
-    Ok(value)
-}
-
-/// `[workspace]` — Upper VM execution environment configuration.
-///
-/// Controls egress policy, credential references, resource limits, and the OCI image
-/// (or pre-warmed template name) for the Upper workspace provisioned per turn.
-///
-/// Most fields are `Option<T>` with `#[serde(default)]` so missing fields fall back to
-/// caller defaults. Lifecycle limit fields (`cleanup_rounds`, `max_pending_snapshots`)
-/// are non-optional `u32` with bounded defaults. The `[workspace]` section is
-/// mandatory in `AgentProfile`; profiles without it fail to parse.
-///
-/// **Security invariant:** credentials are turn-time injection only.
-/// This section stores only references (`CredentialRef`); resolved values are never
-/// present in profile or session snapshot data.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceSection {
-    /// Egress policy for the Upper VM. Defaults to `open` when absent.
-    #[serde(default)]
-    pub egress: Option<EgressPolicyConfig>,
-    /// Credential references injected into the Upper at turn time.
-    ///
-    /// Each entry names an environment variable; the resolved value is fetched at
-    /// provisioning time, never stored in the profile.
-    #[serde(default)]
-    pub credentials: Vec<CredentialRef>,
-    /// OCI image reference or pre-warmed template name for the Upper VM.
-    ///
-    /// Use a fully-qualified OCI ref (e.g. `"docker.io/library/python:3.12-slim"`)
-    /// or a template name stored under `~/.microsandbox/snapshots/`. When absent,
-    /// hosts must supply an explicit image or template source for Direct Upper
-    /// preparation — no provisioner default is implied by the profile schema.
-    #[serde(default)]
-    pub image: Option<String>,
-    /// Number of virtual CPUs to allocate to the Upper VM. Defaults to provisioner default.
-    #[serde(default)]
-    pub cpus: Option<u32>,
-    /// Memory in MiB to allocate to the Upper VM. Defaults to provisioner default.
-    #[serde(default)]
-    pub memory_mb: Option<u32>,
-    /// Domain names permitted when `egress = "allowlist"`.
-    ///
-    /// Entries are domain name strings (e.g. `"api.openai.com"`). Ignored when
-    /// `egress` is `open` or `blocked`.
-    #[serde(default)]
-    pub allowed_egress_targets: Vec<String>,
-    /// Number of agent cleanup rounds before the host exhausts the budget.
-    ///
-    /// When the configured limit is exhausted, the cleanup callback returns `None`
-    /// and the orchestrator sets disposition to `pending_worktree`.
-    /// Valid range: `1..=32`. Default: `3`.
-    #[serde(
-        default = "default_cleanup_rounds",
-        deserialize_with = "deserialize_bounded_cleanup_rounds"
-    )]
-    pub cleanup_rounds: u32,
-    /// Maximum number of pending retained snapshots per session.
-    ///
-    /// When the quota is exceeded, new snapshot retention is refused.
-    /// Valid range: `1..=100`. Default: `5`.
-    #[serde(
-        default = "default_max_pending_snapshots",
-        deserialize_with = "deserialize_bounded_max_pending_snapshots"
-    )]
-    pub max_pending_snapshots: u32,
-}
-
-impl Default for WorkspaceSection {
-    fn default() -> Self {
-        Self {
-            egress: None,
-            credentials: Vec::new(),
-            image: None,
-            cpus: None,
-            memory_mb: None,
-            allowed_egress_targets: Vec::new(),
-            cleanup_rounds: DEFAULT_CLEANUP_ROUNDS,
-            max_pending_snapshots: DEFAULT_MAX_PENDING_SNAPSHOTS,
-        }
-    }
 }
 
 /// LANCET `[lancet]` profile section with typed policy sub-tables.
@@ -449,8 +280,6 @@ model = "sonnet"
 
 [prompt]
 system = "You are a helpful assistant."
-
-[workspace]
 "#;
         let profile = parse(toml).unwrap();
         assert_eq!(profile.schema_version, 1);
@@ -484,8 +313,6 @@ enabled = ["observe.workspace", "mutate.create"]
 max_retries = 2
 initial_delay_ms = 250
 max_delay_ms = 1000
-
-[workspace]
 "#;
         let profile = parse(toml).unwrap();
         assert_eq!(
@@ -616,6 +443,32 @@ enabled = true
     }
 
     #[test]
+    fn reject_workspace_section() {
+        // The Upper microVM `[workspace]` section was removed with the
+        // Direct-Local migration (#40). Under `deny_unknown_fields`, legacy
+        // profiles that still declare it now fail to parse — the strict
+        // schema neither declares nor requires `[workspace]`.
+        let toml = r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[workspace]
+image = "docker.io/library/python:3.12-slim"
+"#;
+        let err = parse(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("workspace") || err.to_string().contains("unknown field"),
+            "legacy [workspace] section must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
     fn reject_all_forbidden_top_level_sections() {
         let forbidden = [
             "capabilities",
@@ -629,6 +482,7 @@ enabled = true
             "security",
             "context",
             "behavior",
+            "workspace",
         ];
         for section in forbidden {
             let toml = format!(
@@ -759,15 +613,9 @@ system = "hi"
 "#
     }
 
-    /// Minimal prefix with a `[workspace]` section — for tests that don't
-    /// add their own `[workspace]` section in the format string.
-    fn minimal_profile_with_workspace() -> String {
-        format!("{}\n[workspace]\n", minimal_profile_prefix())
-    }
-
     #[test]
     fn cep_defaults_to_enforce_when_section_absent() {
-        let profile = parse(&minimal_profile_with_workspace()).unwrap();
+        let profile = parse(minimal_profile_prefix()).unwrap();
         assert_eq!(profile.lancet.mode, CepMode::Enforce);
         assert!(profile.lancet.extensions.is_empty());
     }
@@ -776,8 +624,6 @@ system = "hi"
     fn cep_parses_enforce_mode() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [lancet]
 mode = "enforce"
@@ -793,8 +639,6 @@ mode = "enforce"
         let toml = format!(
             r#"{prefix}
 
-[workspace]
-
 [lancet]
 mode = "warn"
 "#,
@@ -808,8 +652,6 @@ mode = "warn"
     fn cep_parses_off_mode() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [lancet]
 mode = "off"
@@ -825,8 +667,6 @@ mode = "off"
         let toml = format!(
             r#"{prefix}
 
-[workspace]
-
 [lancet]
 mode = "permissive"
 "#,
@@ -839,8 +679,6 @@ mode = "permissive"
     fn cep_rejects_scalar_extension_typos() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [lancet]
 mod = "off"
@@ -855,8 +693,6 @@ mod = "off"
     fn cep_parses_typed_prof02_sub_tables() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [lancet]
 mode = "enforce"
@@ -902,8 +738,6 @@ max_web_response_bytes = 2048
         let toml = format!(
             r#"{prefix}
 
-[workspace]
-
 [lancet]
 mode = "enforce"
 
@@ -925,8 +759,6 @@ some_field = true
         let toml = format!(
             r#"{prefix}
 
-[workspace]
-
 [lancet]
 mode = "enforce"
 "#,
@@ -943,8 +775,6 @@ mode = "enforce"
     fn cep_observation_rejects_network_only_field() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [lancet.observation]
 max_web_response_bytes = 1024
@@ -995,8 +825,6 @@ model = "sonnet"
 
 [prompt]
 system = "hi"
-
-[workspace]
 "#;
         let profile = parse(toml).unwrap();
         assert!(profile.tools.enabled.is_empty());
@@ -1004,7 +832,7 @@ system = "hi"
 
     #[test]
     fn llm_retry_defaults_when_section_absent() {
-        let profile = parse(&minimal_profile_with_workspace()).unwrap();
+        let profile = parse(minimal_profile_prefix()).unwrap();
         assert_eq!(profile.llm.retry.max_retries, 3);
         assert_eq!(profile.llm.retry.initial_delay_ms, 500);
         assert_eq!(profile.llm.retry.max_delay_ms, 3_000);
@@ -1014,8 +842,6 @@ system = "hi"
     fn llm_retry_parses_explicit_values() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [llm.retry]
 max_retries = 0
@@ -1030,116 +856,12 @@ max_delay_ms = 2
         assert_eq!(profile.llm.retry.max_delay_ms, 2);
     }
 
-    // ── WorkspaceSection / EgressPolicyConfig / CredentialRef ─────────────────
-
-    #[test]
-    fn workspace_section_missing_fails() {
-        // Profiles without [workspace] fail to parse — the section is mandatory.
-        let toml = minimal_profile_prefix();
-        let err = parse(toml).unwrap_err();
-        assert!(
-            err.to_string().contains("workspace") || err.to_string().contains("missing field"),
-            "missing [workspace] must be a parse error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn workspace_egress_blocked_parses() {
-        // [workspace] egress = "blocked" deserializes to EgressPolicyConfig::Blocked.
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-egress = "blocked"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let ws = &profile.workspace;
-        assert_eq!(ws.egress, Some(EgressPolicyConfig::Blocked));
-        assert!(ws.credentials.is_empty());
-        assert!(ws.allowed_egress_targets.is_empty());
-    }
-
-    #[test]
-    fn workspace_egress_allowlist_with_targets() {
-        // egress = "allowlist" + allowed_egress_targets list parses correctly.
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-egress = "allowlist"
-allowed_egress_targets = ["api.openai.com", "pypi.org"]
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let ws = &profile.workspace;
-        assert_eq!(ws.egress, Some(EgressPolicyConfig::Allowlist));
-        assert_eq!(
-            ws.allowed_egress_targets,
-            vec!["api.openai.com", "pypi.org"]
-        );
-    }
-
-    #[test]
-    fn workspace_credentials_name_only() {
-        // credentials = [{ env_var_name = "OPENAI_API_KEY" }] parses;
-        // CredentialRef has no value field — compile-time structural guarantee.
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-
-[[workspace.credentials]]
-env_var_name = "OPENAI_API_KEY"
-
-[[workspace.credentials]]
-env_var_name = "ANTHROPIC_API_KEY"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let ws = &profile.workspace;
-        assert_eq!(ws.credentials.len(), 2);
-        assert_eq!(ws.credentials[0].env_var_name, "OPENAI_API_KEY");
-        assert_eq!(ws.credentials[1].env_var_name, "ANTHROPIC_API_KEY");
-
-        // Structural check: CredentialRef has only env_var_name; no value field exists.
-        // Serializing must not produce any secret value in output.
-        let serialized = toml::to_string(&profile).unwrap();
-        let fake_secret = "sk-super-secret-value";
-        assert!(
-            !serialized.contains(fake_secret),
-            "CredentialRef serialized form must not contain secret values; got: {serialized}"
-        );
-    }
-
-    #[test]
-    fn workspace_unknown_field_rejected() {
-        // Extra key in [workspace] fails deny_unknown_fields.
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-egress = "open"
-unexpected_key = "bad"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(
-            err.to_string().contains("unexpected_key") || err.to_string().contains("unknown field"),
-            "unknown workspace field must be rejected, got: {err}"
-        );
-    }
+    // ── [lancet.workspace] policy section ─────────────────────────────
 
     #[test]
     fn lancet_workspace_roundtrip() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [lancet.workspace]
 denied_write_patterns = [".git/**", ".env"]
@@ -1154,7 +876,10 @@ denied_read_patterns = ["secrets/**"]
             section.denied_write_patterns,
             vec![".git/**".to_string(), ".env".to_string()]
         );
-        assert_eq!(section.included_ignored_read_patterns, vec![".env".to_string()]);
+        assert_eq!(
+            section.included_ignored_read_patterns,
+            vec![".env".to_string()]
+        );
         assert_eq!(section.denied_read_patterns, vec!["secrets/**".to_string()]);
     }
 
@@ -1162,8 +887,6 @@ denied_read_patterns = ["secrets/**"]
     fn lancet_workspace_unknown_field_rejected() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
@@ -1181,8 +904,6 @@ unexpected = true
         let toml = format!(
             r#"{prefix}
 
-[workspace]
-
 [lancet.verify]
 argv = ["cargo", "test"]
 "#,
@@ -1192,69 +913,12 @@ argv = ["cargo", "test"]
         assert!(profile.lancet.extensions.contains_key("verify"));
     }
 
-    #[test]
-    fn workspace_image_optional_without_provisioner_default() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-egress = "open"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile: AgentProfile = parse(&toml).unwrap();
-        assert!(&profile.workspace.image.is_none());
-        let docs = include_str!("schema.rs");
-        assert!(docs.contains("no provisioner default is implied by the profile schema"));
-    }
-
-    #[test]
-    fn workspace_roundtrip() {
-        // Serialize AgentProfile with workspace section and deserialize back equals.
-        let toml_input = format!(
-            r#"{prefix}
-
-[workspace]
-egress = "allowlist"
-image = "docker.io/library/python:3.12-slim"
-cpus = 2
-memory_mb = 1024
-allowed_egress_targets = ["pypi.org", "files.pythonhosted.org"]
-
-[[workspace.credentials]]
-env_var_name = "PYPI_TOKEN"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-
-        let profile: AgentProfile = parse(&toml_input).unwrap();
-        let ws = &profile.workspace;
-        assert_eq!(ws.egress, Some(EgressPolicyConfig::Allowlist));
-        assert_eq!(
-            ws.image.as_deref(),
-            Some("docker.io/library/python:3.12-slim")
-        );
-        assert_eq!(ws.cpus, Some(2));
-        assert_eq!(ws.memory_mb, Some(1024));
-        assert_eq!(
-            ws.allowed_egress_targets,
-            vec!["pypi.org", "files.pythonhosted.org"]
-        );
-        assert_eq!(ws.credentials[0].env_var_name, "PYPI_TOKEN");
-
-        // Roundtrip: serialize and parse back; result must equal original.
-        let serialized = toml::to_string(&profile).unwrap();
-        let profile2: AgentProfile = toml::from_str(&serialized).unwrap();
-        assert_eq!(profile, profile2, "workspace roundtrip must be lossless");
-    }
     // ── LancetPolicySection ────────────────────────────────────────────────
 
     #[test]
     fn cep_policy_section_parses_path() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [lancet.policy]
 path = "policy.toml"
@@ -1268,7 +932,7 @@ path = "policy.toml"
 
     #[test]
     fn cep_section_without_policy_defaults_to_none() {
-        let profile = parse(&minimal_profile_with_workspace()).unwrap();
+        let profile = parse(minimal_profile_prefix()).unwrap();
         assert!(profile.lancet.policy.is_none());
     }
 
@@ -1276,8 +940,6 @@ path = "policy.toml"
     fn cep_policy_section_rejects_unknown_fields() {
         let toml = format!(
             r#"{prefix}
-
-[workspace]
 
 [lancet.policy]
 unknown = true
@@ -1289,261 +951,5 @@ unknown = true
             err.to_string().contains("unknown"),
             "should reject unknown field, got: {err}"
         );
-    }
-
-    // ── Workspace lifecycle limits ──────────────────────────────────────────
-
-    #[test]
-    fn workspace_lifecycle_limits_defaults_when_omitted() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-egress = "open"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let ws = &profile.workspace;
-        assert_eq!(ws.cleanup_rounds, 3, "default cleanup_rounds must be 3");
-        assert_eq!(
-            ws.max_pending_snapshots, 5,
-            "default max_pending_snapshots must be 5"
-        );
-    }
-
-    #[test]
-    fn workspace_lifecycle_limits_explicit_values_roundtrip() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-cleanup_rounds = 10
-max_pending_snapshots = 20
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let ws = &profile.workspace;
-        assert_eq!(ws.cleanup_rounds, 10);
-        assert_eq!(ws.max_pending_snapshots, 20);
-
-        // Roundtrip
-        let serialized = toml::to_string(&profile).unwrap();
-        let profile2: AgentProfile = toml::from_str(&serialized).unwrap();
-        assert_eq!(
-            profile, profile2,
-            "lifecycle limits roundtrip must be lossless"
-        );
-    }
-
-    #[test]
-    fn workspace_lifecycle_limits_boundary_values_accepted() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-cleanup_rounds = 1
-max_pending_snapshots = 1
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let ws = &profile.workspace;
-        assert_eq!(ws.cleanup_rounds, 1);
-        assert_eq!(ws.max_pending_snapshots, 1);
-
-        let toml_upper = format!(
-            r#"{prefix}
-
-[workspace]
-cleanup_rounds = 32
-max_pending_snapshots = 100
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml_upper).unwrap();
-        let ws = &profile.workspace;
-        assert_eq!(ws.cleanup_rounds, 32);
-        assert_eq!(ws.max_pending_snapshots, 100);
-    }
-
-    #[test]
-    fn workspace_lifecycle_limits_zero_rejected() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-cleanup_rounds = 0
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(
-            err.to_string().contains("cleanup_rounds"),
-            "zero cleanup_rounds must be rejected, got: {err}"
-        );
-
-        let toml2 = format!(
-            r#"{prefix}
-
-[workspace]
-max_pending_snapshots = 0
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml2).unwrap_err();
-        assert!(
-            err.to_string().contains("max_pending_snapshots"),
-            "zero max_pending_snapshots must be rejected, got: {err}"
-        );
-    }
-
-    #[test]
-    fn workspace_lifecycle_limits_out_of_range_rejected() {
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-cleanup_rounds = 33
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(
-            err.to_string().contains("cleanup_rounds"),
-            "cleanup_rounds=33 must be rejected, got: {err}"
-        );
-
-        let toml2 = format!(
-            r#"{prefix}
-
-[workspace]
-max_pending_snapshots = 101
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml2).unwrap_err();
-        assert!(
-            err.to_string().contains("max_pending_snapshots"),
-            "max_pending_snapshots=101 must be rejected, got: {err}"
-        );
-    }
-
-    // ── Workspace compatibility and strictness ──────────────────────────────
-
-    #[test]
-    fn workspace_typo_cleanup_round_rejected() {
-        // `cleanup_round` (singular) is a typo — must be `cleanup_rounds`
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-cleanup_round = 5
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(
-            err.to_string().contains("cleanup_round") || err.to_string().contains("unknown field"),
-            "typo `cleanup_round` must be rejected, got: {err}"
-        );
-    }
-
-    #[test]
-    fn workspace_typo_max_pending_snapshot_rejected() {
-        // `max_pending_snapshot` (singular) is a typo — must be `max_pending_snapshots`
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-max_pending_snapshot = 5
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let err = parse(&toml).unwrap_err();
-        assert!(
-            err.to_string().contains("max_pending_snapshot")
-                || err.to_string().contains("unknown field"),
-            "typo `max_pending_snapshot` must be rejected, got: {err}"
-        );
-    }
-
-    #[test]
-    fn workspace_serialization_contains_resolved_lifecycle_values() {
-        // A profile with [workspace] and omitted limits must serialize with
-        // the resolved default values — ensuring downstream consumers see
-        // explicit numbers in the canonical profile snapshot.
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-egress = "open"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let serialized = toml::to_string(&profile).unwrap();
-        assert!(
-            serialized.contains("cleanup_rounds = 3"),
-            "serialized profile must contain resolved cleanup_rounds, got: {serialized}"
-        );
-        assert!(
-            serialized.contains("max_pending_snapshots = 5"),
-            "serialized profile must contain resolved max_pending_snapshots, got: {serialized}"
-        );
-    }
-
-    #[test]
-    fn workspace_serialization_contains_no_secret_values() {
-        // Even with credentials and lifecycle limits, no secret values appear
-        // in the serialized profile.
-        let toml = format!(
-            r#"{prefix}
-
-[workspace]
-egress = "allowlist"
-cleanup_rounds = 10
-max_pending_snapshots = 20
-allowed_egress_targets = ["api.example.com"]
-
-[[workspace.credentials]]
-env_var_name = "SUPER_SECRET_KEY"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let serialized = toml::to_string(&profile).unwrap();
-
-        // Must contain lifecycle limits
-        assert!(
-            serialized.contains("cleanup_rounds = 10"),
-            "must contain explicit cleanup_rounds"
-        );
-        assert!(
-            serialized.contains("max_pending_snapshots = 20"),
-            "must contain explicit max_pending_snapshots"
-        );
-
-        // Must NOT contain any secret value (only the env var name is stored)
-        assert!(
-            !serialized.contains("sk-") && !serialized.contains("secret-value"),
-            "serialized profile must not contain secret values"
-        );
-
-        // env_var_name is present (it's a reference, not a secret)
-        assert!(
-            serialized.contains("SUPER_SECRET_KEY"),
-            "CredentialRef env_var_name must be present in serialization"
-        );
-    }
-
-    #[test]
-    fn workspace_mandatory_section_present_in_minimal_prefix() {
-        // The minimal_profile_with_workspace helper includes [workspace];
-        // it must parse and produce a default WorkspaceSection.
-        let profile = parse(&minimal_profile_with_workspace()).unwrap();
-        assert_eq!(profile.workspace.cleanup_rounds, 3);
-        assert_eq!(profile.workspace.max_pending_snapshots, 5);
     }
 }
