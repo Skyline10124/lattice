@@ -167,9 +167,9 @@ impl ScenarioWorld {
             .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
         {
             let mut cfg = repo.config_snapshot_mut();
-            cfg.set_raw_value(&"user.name", "Lattice Harness")
+            cfg.set_raw_value("user.name", "Lattice Harness")
                 .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
-            cfg.set_raw_value(&"user.email", "harness@test")
+            cfg.set_raw_value("user.email", "harness@test")
                 .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
             let _ = cfg
                 .commit()

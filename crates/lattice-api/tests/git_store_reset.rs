@@ -7,7 +7,6 @@
 //! points to the first commit, HEAD reflects the reset, and the old commits
 //! (2nd and 3rd) are still reachable by OID in the git object database.
 
-use std::fs;
 
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{

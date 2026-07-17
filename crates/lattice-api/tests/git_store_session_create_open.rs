@@ -8,7 +8,6 @@
 //! and verifies the reopened session has the same `session_id`, `label`, and
 //! `active_agent_name`.
 
-use std::fs;
 
 use lattice_api::{CreateSessionRequest, OpenSessionRequest, SessionApi};
 use tempfile::TempDir;

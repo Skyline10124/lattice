@@ -7,7 +7,6 @@
 //! (HEAD moves to feature), checks out back to main (HEAD returns to main),
 //! then detaches to a commit OID (HEAD is detached at that commit).
 
-use std::fs;
 
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{

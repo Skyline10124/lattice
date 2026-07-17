@@ -127,9 +127,9 @@ fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String
     // Isolated repos have no identity; inject a fixture committer for the reflog.
     {
         let mut cfg = repo.config_snapshot_mut();
-        cfg.set_raw_value(&"user.name", "lattice-test")
+        cfg.set_raw_value("user.name", "lattice-test")
             .expect("set name");
-        cfg.set_raw_value(&"user.email", "test@lattice.local")
+        cfg.set_raw_value("user.email", "test@lattice.local")
             .expect("set email");
         let _ = cfg.commit();
     }

@@ -8,7 +8,6 @@
 //! commit returns a Conflict error because the ref moved between the CAS
 //! check and the ref update.
 
-use std::fs;
 use std::sync::Arc;
 use std::thread;
 
