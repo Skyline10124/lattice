@@ -7,6 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use gix::objs::tree::EntryKind;
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{
@@ -66,12 +67,8 @@ pub(crate) struct GitSessionManifest {
     pub usage: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
-    // Legacy-ID traceability: populated only by SQLite→Git migration.
-    // Native commits leave these as `None`; `skip_serializing_if` omits them
-    // from native manifest JSON, so native commit OIDs are unchanged.
-    // `deny_unknown_fields` rejects unknown JSON keys during deserialization,
-    // but new Rust fields with `#[serde(default)]` deserialize to `None` when
-    // absent from old JSON, so this addition is forward-compatible.
+    // Legacy-ID traceability fields retained for forward-compatible reads of
+    // historically migrated manifests. Native commits leave these as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,17 +163,12 @@ pub(crate) fn candidate_ref_name(session_id: &str, turn_id: &str) -> Result<Stri
     Ok(format!("refs/lattice/candidates/{session_id}/{turn_id}"))
 }
 
-/// Build the `turn/agent.json` blob. Single source of truth shared by
-/// the native commit path and the migration writer so the tree's agent entry
-/// stays byte-identical (and OIDs stay consistent) between both.
+/// Build the `turn/agent.json` blob.
 pub(crate) fn build_agent_json(agent_name: &str) -> String {
     serde_json::json!({ "agent_name": agent_name }).to_string()
 }
 
-/// Build the `turn/audit.json` blob carrying lifecycle ref pointers. Single
-/// source of truth shared by the native commit path and the migration
-/// writer. The format must stay identical between both so migrated and natively
-/// created commits produce consistent tree content.
+/// Build the `turn/audit.json` blob carrying lifecycle ref pointers.
 pub(crate) fn build_audit_json(lifecycle: &Option<TurnLifecycleEvidence>) -> String {
     match lifecycle {
         Some(lc) => serde_json::json!({
@@ -190,84 +182,95 @@ pub(crate) fn build_audit_json(lifecycle: &Option<TurnLifecycleEvidence>) -> Str
     }
 }
 
+pub(crate) fn parse_oid(hex: &str) -> Result<gix::ObjectId> {
+    gix::ObjectId::from_hex(hex.as_bytes())
+        .map_err(|e| SessionError::Git(format!("parse object id '{hex}': {e}")))
+}
+
 pub(crate) fn build_turn_tree(
-    repo: &git2::Repository,
+    repo: &gix::Repository,
     manifest_bytes: &[u8],
     messages_jsonl: &str,
     agent_json: &str,
     profile_json: &str,
     audit_json: &str,
-) -> Result<git2::Oid> {
+) -> Result<gix::ObjectId> {
     let manifest_blob = write_blob(repo, manifest_bytes, "manifest.json")?;
     let messages_blob = write_blob(repo, messages_jsonl.as_bytes(), "messages.jsonl")?;
     let agent_blob = write_blob(repo, agent_json.as_bytes(), "agent.json")?;
     let profile_blob = write_blob(repo, profile_json.as_bytes(), "profile.json")?;
     let audit_blob = write_blob(repo, audit_json.as_bytes(), "audit.json")?;
 
-    let mut turn_builder = repo
-        .treebuilder(None)
-        .map_err(|e| SessionError::Git(format!("create turn treebuilder: {e}")))?;
-    turn_builder
-        .insert("manifest.json", manifest_blob, 0o100644)
+    let empty = gix::ObjectId::empty_tree(repo.object_hash());
+    let mut editor = repo
+        .edit_tree(empty)
+        .map_err(|e| SessionError::Git(format!("create turn tree editor: {e}")))?;
+    editor
+        .upsert("manifest.json", EntryKind::Blob, manifest_blob)
         .map_err(|e| SessionError::Git(format!("insert manifest.json: {e}")))?;
-    turn_builder
-        .insert("messages.jsonl", messages_blob, 0o100644)
+    editor
+        .upsert("messages.jsonl", EntryKind::Blob, messages_blob)
         .map_err(|e| SessionError::Git(format!("insert messages.jsonl: {e}")))?;
-    turn_builder
-        .insert("agent.json", agent_blob, 0o100644)
+    editor
+        .upsert("agent.json", EntryKind::Blob, agent_blob)
         .map_err(|e| SessionError::Git(format!("insert agent.json: {e}")))?;
-    turn_builder
-        .insert("profile.json", profile_blob, 0o100644)
+    editor
+        .upsert("profile.json", EntryKind::Blob, profile_blob)
         .map_err(|e| SessionError::Git(format!("insert profile.json: {e}")))?;
-    turn_builder
-        .insert("audit.json", audit_blob, 0o100644)
+    editor
+        .upsert("audit.json", EntryKind::Blob, audit_blob)
         .map_err(|e| SessionError::Git(format!("insert audit.json: {e}")))?;
-
-    turn_builder
+    editor
         .write()
+        .map(|id| id.detach())
         .map_err(|e| SessionError::Git(format!("write turn tree: {e}")))
 }
 
-fn write_blob(repo: &git2::Repository, bytes: &[u8], context: &str) -> Result<git2::Oid> {
-    repo.blob(bytes)
+fn write_blob(repo: &gix::Repository, bytes: &[u8], context: &str) -> Result<gix::ObjectId> {
+    repo.write_blob(bytes)
+        .map(|id| id.detach())
         .map_err(|e| SessionError::Git(format!("write {context} blob: {e}")))
 }
 
 pub(crate) fn build_root_tree(
-    repo: &git2::Repository,
-    turn_tree_oid: git2::Oid,
-) -> Result<git2::Oid> {
-    let turn_tree = repo
-        .find_tree(turn_tree_oid)
-        .map_err(|e| SessionError::Git(format!("find turn tree: {e}")))?;
-    let mut root_builder = repo
-        .treebuilder(None)
-        .map_err(|e| SessionError::Git(format!("create root treebuilder: {e}")))?;
-    root_builder
-        .insert("turn", turn_tree.id(), 0o040000)
+    repo: &gix::Repository,
+    turn_tree_oid: gix::ObjectId,
+) -> Result<gix::ObjectId> {
+    let empty = gix::ObjectId::empty_tree(repo.object_hash());
+    let mut editor = repo
+        .edit_tree(empty)
+        .map_err(|e| SessionError::Git(format!("create root tree editor: {e}")))?;
+    editor
+        .upsert("turn", EntryKind::Tree, turn_tree_oid)
         .map_err(|e| SessionError::Git(format!("insert turn/: {e}")))?;
-    root_builder
+    editor
         .write()
+        .map(|id| id.detach())
         .map_err(|e| SessionError::Git(format!("write root tree: {e}")))
 }
 
 pub(crate) fn read_tree_blob(
-    repo: &git2::Repository,
-    commit: &git2::Commit,
+    repo: &gix::Repository,
+    commit_id: gix::ObjectId,
     path: &str,
 ) -> Result<Vec<u8>> {
+    let commit = repo
+        .find_commit(commit_id)
+        .map_err(|e| SessionError::Git(format!("find commit for tree read: {e}")))?;
     let tree = commit
         .tree()
         .map_err(|e| SessionError::Git(format!("read commit tree: {e}")))?;
     let entry = tree
-        .get_path(Path::new(path))
-        .map_err(|e| SessionError::Git(format!("find tree path {path}: {e}")))?;
-    let blob = entry
-        .to_object(repo)
-        .map_err(|e| SessionError::Git(format!("load blob object for {path}: {e}")))?
-        .peel_to_blob()
+        .lookup_entry_by_path(path)
+        .map_err(|e| SessionError::Git(format!("lookup tree path {path}: {e}")))?
+        .ok_or_else(|| SessionError::Git(format!("find tree path {path}: not found")))?;
+    let object = entry
+        .object()
+        .map_err(|e| SessionError::Git(format!("load blob object for {path}: {e}")))?;
+    let blob = object
+        .try_into_blob()
         .map_err(|e| SessionError::Git(format!("peel {path} to blob: {e}")))?;
-    Ok(blob.content().to_vec())
+    Ok(blob.data.clone())
 }
 
 pub(crate) fn serialize_manifest(manifest: &GitSessionManifest) -> Result<Vec<u8>> {
@@ -305,17 +308,39 @@ pub(crate) fn parse_messages_jsonl(jsonl: &str) -> Result<Vec<GraphMessage>> {
         .collect()
 }
 
-pub(crate) fn count_reachable_commits(repo: &git2::Repository, oid: git2::Oid) -> Result<usize> {
-    let mut revwalk = repo
-        .revwalk()
+pub(crate) fn count_reachable_commits(repo: &gix::Repository, oid: gix::ObjectId) -> Result<usize> {
+    let walk = repo
+        .rev_walk([oid])
+        .all()
         .map_err(|e| SessionError::Git(format!("create revwalk: {e}")))?;
-    revwalk
-        .push(oid)
-        .map_err(|e| SessionError::Git(format!("push revwalk: {e}")))?;
-    revwalk
-        .set_sorting(git2::Sort::TOPOLOGICAL)
-        .map_err(|e| SessionError::Git(format!("set revwalk sorting: {e}")))?;
-    Ok(revwalk.count())
+    let mut count = 0usize;
+    for item in walk {
+        item.map_err(|e| SessionError::Git(format!("revwalk error: {e}")))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Walk reachable commits oldest-first (topo parents-before-children).
+pub(crate) fn walk_commits_oldest_first(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    hide: Option<gix::ObjectId>,
+) -> Result<Vec<gix::ObjectId>> {
+    let mut platform = repo.rev_walk([tip]);
+    if let Some(hidden) = hide {
+        platform = platform.with_hidden(Some(hidden));
+    }
+    let walk = platform
+        .all()
+        .map_err(|e| SessionError::Git(format!("create revwalk: {e}")))?;
+    let mut ids = Vec::new();
+    for item in walk {
+        let info = item.map_err(|e| SessionError::Git(format!("revwalk error: {e}")))?;
+        ids.push(info.id);
+    }
+    ids.reverse();
+    Ok(ids)
 }
 
 pub(crate) fn turn_log_entry_from_manifest(
@@ -372,4 +397,25 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Resolve a full ref name to its direct object target, if the ref exists.
+pub(crate) fn try_ref_target(
+    repo: &gix::Repository,
+    ref_name: &str,
+) -> Result<Option<gix::ObjectId>> {
+    match repo.try_find_reference(ref_name) {
+        Ok(Some(r)) => Ok(r.target().try_id().map(|id| id.to_owned())),
+        Ok(None) => Ok(None),
+        Err(e) => Err(SessionError::Git(format!("find reference {ref_name}: {e}"))),
+    }
+}
+
+/// Build a lattice author/committer signature at the given unix timestamp.
+pub(crate) fn lattice_signature(ts: i64) -> gix::actor::Signature {
+    gix::actor::Signature {
+        name: LATTICE_AUTHOR_NAME.into(),
+        email: LATTICE_AUTHOR_EMAIL.into(),
+        time: gix::date::Time::new(ts, 0),
+    }
 }

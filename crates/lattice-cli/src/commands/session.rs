@@ -13,7 +13,6 @@ use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
 use lattice_api::{CreateSessionRequest, GraphHead, OpenSessionRequest, SessionApi};
-use lattice_session::{MigrateOptions, migrate, migrate::find_legacy_session_db};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
@@ -35,10 +34,6 @@ pub(crate) fn default_session_dir() -> PathBuf {
 
 fn session_api() -> Result<SessionApi> {
     let git_repo_path = default_session_dir().join("sessions.git");
-    if let Err(msg) = lattice_api::check_migration_guard(&git_repo_path) {
-        eprintln!("{msg}");
-        std::process::exit(1);
-    }
     Ok(SessionApi::git(git_repo_path))
 }
 
@@ -115,30 +110,6 @@ pub enum SessionAction {
         /// Commit id to reset to.
         target: String,
     },
-    /// One-shot SQLite→Git session graph migration.
-    ///
-    /// Reads the legacy SQLite session DB, writes equivalent Git session commits
-    /// and refs into a standalone bare repository, verifies equivalence, then
-    /// archives the source. Restartable and idempotent.
-    Migrate {
-        /// Read + plan only; perform no writes to the target repo.
-        #[arg(long)]
-        dry_run: bool,
-        /// Re-run equivalence checks against an already-written target
-        /// without re-writing.
-        #[arg(long)]
-        verify_only: bool,
-        /// Override the source legacy SQLite DB path (default: auto-detected).
-        #[arg(long)]
-        source: Option<PathBuf>,
-        /// Override the target bare repo path.
-        #[arg(long)]
-        target: Option<PathBuf>,
-        /// Physically delete the source DB after successful
-        /// migration instead of archiving it (default is archive).
-        #[arg(long)]
-        purge_source: bool,
-    },
 }
 
 /// Run the `session` command.
@@ -147,19 +118,6 @@ pub async fn run(
     json: bool,
     verbose: bool,
 ) -> Result<std::process::ExitCode> {
-    // Migrate operates below the SessionApi (direct SQLite read + Git write),
-    // so handle it before constructing the default API.
-    if let SessionAction::Migrate {
-        dry_run,
-        verify_only,
-        source,
-        target,
-        purge_source,
-    } = action
-    {
-        return cmd_migrate(dry_run, verify_only, source, target, purge_source, json);
-    }
-
     let api = session_api()?;
     match action {
         SessionAction::New {
@@ -223,11 +181,6 @@ pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) 
         SessionAction::Reset { session_id, target } => {
             cmd_reset_api(api, &session_id, &target, json)?
         }
-        SessionAction::Migrate { .. } => {
-            return Err(anyhow::anyhow!(
-                "session migrate is handled by the async production runner"
-            ));
-        }
     }
     Ok(())
 }
@@ -243,84 +196,6 @@ fn load_agent_checked(agent: &str) -> Result<lattice_api::LoadedAgentProfile> {
         ));
     }
     Ok(loaded)
-}
-
-/// Run the `session migrate` subcommand.
-///
-/// Thin caller over `lattice_session::migrate::run_migration`. Constructs
-/// `MigrateOptions` from the parsed flags + default paths, runs the pipeline,
-/// and prints the `MigrationResult`. Default source is discovered via
-/// `find_legacy_session_db(default_session_dir())` (probes session_v12.db,
-/// session_v11.db, session.db, sessions.db); default target is
-/// `default_session_dir()/sessions.git` (standalone bare repo).
-fn cmd_migrate(
-    dry_run: bool,
-    verify_only: bool,
-    source: Option<PathBuf>,
-    target: Option<PathBuf>,
-    purge_source: bool,
-    json: bool,
-) -> Result<std::process::ExitCode> {
-    let session_dir = default_session_dir();
-    // probe for the real legacy DB filename instead of hardcoding
-    // sessions.db. If no legacy DB is found, fall back to the session_v12.db
-    // path so the downstream "source not found" error names a real filename.
-    let source_db = source.unwrap_or_else(|| {
-        find_legacy_session_db(&session_dir).unwrap_or_else(|| session_dir.join("session_v12.db"))
-    });
-    let target_repo = target.unwrap_or_else(|| session_dir.join("sessions.git"));
-
-    let opts = MigrateOptions {
-        source_db,
-        target_repo,
-        dry_run,
-        verify_only,
-        purge_source,
-    };
-
-    let result = migrate::run_migration(&opts)?;
-
-    if json {
-        // build the object with serde_json so source_archived serializes
-        // to a real JSON `null` (not the string "null") when absent, and any
-        // path is properly escaped. Hand-built JSON could emit invalid output
-        // for a path containing a quote or backslash.
-        let value = serde_json::json!({
-            "sessions_migrated": result.sessions_migrated,
-            "commits_migrated": result.commits_migrated,
-            "refs_migrated": result.refs_migrated,
-            "verification_passed": result.verification_passed,
-            "source_archived": result
-                .source_archived
-                .as_ref()
-                .map(|p| p.to_string_lossy()),
-        });
-        println!("{}", serde_json::to_string(&value)?);
-    } else {
-        println!("sessions migrated: {}", result.sessions_migrated);
-        println!("commits migrated:  {}", result.commits_migrated);
-        println!("refs migrated:     {}", result.refs_migrated);
-        println!(
-            "verification:      {}",
-            if result.verification_passed {
-                "passed"
-            } else {
-                "failed"
-            }
-        );
-        match &result.source_archived {
-            Some(path) => println!("source archived:   {}", path.display()),
-            None if purge_source => println!("source purged"),
-            None => println!("source:            (not archived)"),
-        }
-    }
-
-    if result.verification_passed {
-        Ok(std::process::ExitCode::SUCCESS)
-    } else {
-        // Verification failure (or dry-run) — non-zero so scripts can detect.
-        Ok(std::process::ExitCode::from(1))
-    }
 }
 
 fn cmd_new_api(
@@ -1032,39 +907,6 @@ mod session_cli {
     #[test]
     fn reject_old_subcommand_rm() {
         assert!(try_parse(&["rm"]).is_err());
-    }
-
-    #[test]
-    fn migrate_subcommand_parses_with_flags() {
-        // `migrate` is a real subcommand with --dry-run,
-        // --verify-only, --source, --target, --purge-source.
-        let action = try_parse(&[
-            "migrate",
-            "--dry-run",
-            "--verify-only",
-            "--source",
-            "/tmp/s.db",
-            "--target",
-            "/tmp/r.git",
-            "--purge-source",
-        ]);
-        match action {
-            Ok(SessionAction::Migrate {
-                dry_run,
-                verify_only,
-                source,
-                target,
-                purge_source,
-            }) => {
-                assert!(dry_run);
-                assert!(verify_only);
-                assert_eq!(source.as_deref(), Some(std::path::Path::new("/tmp/s.db")));
-                assert_eq!(target.as_deref(), Some(std::path::Path::new("/tmp/r.git")));
-                assert!(purge_source);
-            }
-            Ok(_) => panic!("expected Migrate, got a different variant"),
-            Err(e) => panic!("expected Migrate, got parse error: {e}"),
-        }
     }
 
     #[test]

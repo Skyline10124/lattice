@@ -4,6 +4,40 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+
+## gix-only cleanup: session graph + fixtures off git2/shell-git — 2026-07-17
+
+Severity: REFACTOR (docs/plans/2026-07-17-gix-only-cleanup.md).
+
+**Problem:** Production and test code still depended on `git2` and
+`Command::new("git")` for the session graph store and fixtures, blocking the
+gix-only Direct-Local target shared with #41/#42 rewind.
+
+**Fix:**
+- Rewrite `lattice-session::git_graph` over gix 0.85 (`tree-editor` feature):
+  blobs, tree editor, commits, ref CAS, revwalk, merge_base.
+- Delete retired SQLite→Git `src/migrate/` and CLI/API `session migrate` /
+  `check_migration_guard` call sites.
+- Add `lattice-session` `test-utils` fixture helpers (`init_empty_repo`,
+  `init_fixture_repo`, `commit_paths`/`commit_all`) and convert API/CLI/
+  harness/lancet-native fixtures off shell-git and git2.
+- Fix hanging `fetch_effect_contract_negative` (network-policy preflight
+  instead of real DNS/HTTP to evil.example.com).
+
+**Verification:**
+- `rg -n "git2" crates xtask --type rust` → zero
+- `rg -n 'Command::new\("git"\)' crates xtask --type rust` → zero
+- `cargo tree -i git2` → no package
+- `cargo test -p lattice-session --lib` → 54 ok
+- `cargo test -p lattice-api --lib --tests` → all ok
+- `cargo test -p lattice-cli` → all ok
+- `cargo test -p lattice-system-harness` → all ok
+- `cargo test -p lancet-native --lib` → 118 ok (1.55s)
+
+**Changed:** workspace `Cargo.toml`/`Cargo.lock`, `lattice-session` (git_graph,
+test_utils, migrate removed), `lattice-api`/`lattice-cli`/`lattice-tui`,
+`lancet-native` fixtures + effect contract test, `lattice-system-harness`.
+
 ## Codeberg #22: full test triage inventory (keep/elevate/delete) — 2026-07-09
 
 Severity: FEATURE (测试重构 3/6).

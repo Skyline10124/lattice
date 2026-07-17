@@ -408,10 +408,6 @@ async fn run_inner(
     // Build SessionApi backed by Git session graph.
     let session_dir = crate::commands::session::default_session_dir();
     let git_repo_path = session_dir.join("sessions.git");
-    if let Err(msg) = lattice_api::check_migration_guard(&git_repo_path) {
-        eprintln!("{msg}");
-        std::process::exit(1);
-    }
     let session_api = lattice_api::SessionApi::git(git_repo_path);
 
     let request = RunTurnRequest {

@@ -146,31 +146,22 @@ async fn run_integration_commits_existing_session() {
     let temp = tempfile::tempdir().unwrap();
     // The session graph store is git-backed; the fixture needs an initialized repo.
     std::fs::write(temp.path().join("README.md"), "init\n").expect("write");
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(temp.path())
-        .status()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@lattice.local"])
-        .current_dir(temp.path())
-        .status()
-        .expect("git config email");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "lattice-test"])
-        .current_dir(temp.path())
-        .status()
-        .expect("git config name");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(temp.path())
-        .status()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(temp.path())
-        .status()
-        .expect("git commit");
+    let mut __files: Vec<(String, String)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(temp.path()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                __files.push((name, content));
+            }
+        }
+    }
+    let __refs: Vec<(&str, &str)> = __files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let _ = lattice_session::test_utils::init_fixture_repo(temp.path(), &__refs);
 
     let session_api = lattice_api::SessionApi::git(temp.path());
     let created = session_api
@@ -215,31 +206,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
 
     std::fs::create_dir_all(ws.join("src")).unwrap();
     std::fs::write(ws.join("src/lib.rs"), "fn main() {}").unwrap();
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(ws)
-        .status()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@lattice.local"])
-        .current_dir(ws)
-        .status()
-        .expect("git user.email");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "lattice-test"])
-        .current_dir(ws)
-        .status()
-        .expect("git user.name");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(ws)
-        .status()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(ws)
-        .status()
-        .expect("git commit");
+    let _ = lattice_session::test_utils::init_fixture_repo(ws, &[("src/lib.rs", "fn main() {}")]);
 
     let profile_dir = ws.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();

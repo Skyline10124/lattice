@@ -160,11 +160,27 @@ fn make_release_e2e_request(
 
 /// Create an unattached branch at the current HEAD without checking it out.
 fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
-    std::process::Command::new("git")
-        .args(["branch", name])
-        .current_dir(root)
-        .status()
-        .expect("git branch (create unattached target)");
+    let mut repo = gix::open_opts(root, gix::open::Options::isolated()).expect("open repo");
+    // Isolated repos have no identity; inject a fixture committer for the reflog.
+    {
+        let mut cfg = repo.config_snapshot_mut();
+        cfg.set_raw_value(&"user.name", "lattice-test")
+            .expect("set name");
+        cfg.set_raw_value(&"user.email", "test@lattice.local")
+            .expect("set email");
+        let _ = cfg.commit();
+    }
+    let head = repo
+        .head_id()
+        .expect("HEAD id for unattached branch")
+        .detach();
+    repo.reference(
+        format!("refs/heads/{name}"),
+        head,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "create unattached target branch",
+    )
+    .expect("create unattached target branch");
     name.to_string()
 }
 

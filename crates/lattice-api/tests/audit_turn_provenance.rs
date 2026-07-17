@@ -103,39 +103,47 @@ denied_write_patterns = [".git/**"]
 }
 
 fn init_git_repo(root: &std::path::Path) {
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(root)
-        .status()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@lattice.local"])
-        .current_dir(root)
-        .status()
-        .expect("git user.email");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "lattice-test"])
-        .current_dir(root)
-        .status()
-        .expect("git user.name");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(root)
-        .status()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(root)
-        .status()
-        .expect("git commit");
+    let mut files: Vec<(String, String)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                files.push((name, content));
+            }
+        }
+    }
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let _ = lattice_session::test_utils::init_fixture_repo(root, &refs);
 }
 
+/// Create an unattached branch at the current HEAD without checking it out.
 fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
-    std::process::Command::new("git")
-        .args(["branch", name])
-        .current_dir(root)
-        .status()
-        .expect("git branch (create unattached target)");
+    let mut repo = gix::open_opts(root, gix::open::Options::isolated()).expect("open repo");
+    // Isolated repos have no identity; inject a fixture committer for the reflog.
+    {
+        let mut cfg = repo.config_snapshot_mut();
+        cfg.set_raw_value(&"user.name", "lattice-test")
+            .expect("set name");
+        cfg.set_raw_value(&"user.email", "test@lattice.local")
+            .expect("set email");
+        let _ = cfg.commit();
+    }
+    let head = repo
+        .head_id()
+        .expect("HEAD id for unattached branch")
+        .detach();
+    repo.reference(
+        format!("refs/heads/{name}"),
+        head,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "create unattached target branch",
+    )
+    .expect("create unattached target branch");
     name.to_string()
 }
 

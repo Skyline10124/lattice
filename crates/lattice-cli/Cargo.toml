@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 lattice-api = { workspace = true }
-lattice-session = { workspace = true }
+lattice-session = { workspace = true, features = ["test-utils"] }
 lattice-tui = { workspace = true }
 lancet-api = { workspace = true }
 tokio = { workspace = true }
@@ -33,8 +33,8 @@ lattice-session = { workspace = true }
 lancet-catalog = { workspace = true }
 lancet-native = { workspace = true }
 async-trait = { workspace = true }
-rusqlite = { workspace = true }
 tempfile = { workspace = true }
+rusqlite = { workspace = true }
 
 [features]
 default = []

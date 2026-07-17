@@ -71,8 +71,7 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
-git2 = "0.20"
-gix = "0.85"
+gix = { version = "0.85", features = ["tree-editor"] }
 schemars = "1.2"
 bytes = "1"
 

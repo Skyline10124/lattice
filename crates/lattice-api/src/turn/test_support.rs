@@ -186,31 +186,23 @@ pub(super) fn make_loaded_profile_with_tools(
 }
 
 fn init_test_git_repo(root: &std::path::Path) {
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(root)
-        .status()
-        .expect("git init for test fixture");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@lattice.local"])
-        .current_dir(root)
-        .status()
-        .expect("git user.email");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "lattice-test"])
-        .current_dir(root)
-        .status()
-        .expect("git user.name");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(root)
-        .status()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(root)
-        .status()
-        .expect("git commit");
+    // Capture any pre-written files into the initial commit.
+    let mut files: Vec<(String, String)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                files.push((name, content));
+            }
+        }
+    }
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let _ = lattice_session::test_utils::init_fixture_repo(root, &refs);
 }
 
 pub(super) fn with_test_llm(

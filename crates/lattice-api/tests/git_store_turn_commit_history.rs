@@ -6,9 +6,7 @@
 //! Commits a turn via the Git store (`GitSessionGraphStore`). Verifies the
 //! returned `TurnCommit` has a non-empty `commit_id` that is a valid 40-char
 //! hex git OID, and that the commit object actually exists in the git object
-//! database (looked up via `git2`).
-
-use std::fs;
+//! database (looked up via gix).
 
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
@@ -18,8 +16,7 @@ use lattice_session::{
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
-    fs::create_dir_all(dir).expect("create dir");
-    git2::Repository::init(dir).expect("init repo");
+    let _ = lattice_session::test_utils::init_empty_repo(dir);
 }
 
 #[test]
@@ -77,8 +74,8 @@ fn git_store_turn_commit_creates_git_history() {
     // 3. The commit object exists in the git object database. We open the
     //    repository independently (not through the store) to confirm the
     //    object was actually persisted to .git/objects.
-    let oid = git2::Oid::from_str(&commit.commit_id).expect("parse oid");
-    let repo = git2::Repository::open(dir).expect("open repo");
+    let oid = gix::ObjectId::from_hex(commit.commit_id.as_bytes()).expect("parse oid");
+    let repo = gix::open_opts(dir, gix::open::Options::isolated()).expect("open repo");
     let git_commit = repo
         .find_commit(oid)
         .expect("commit object must exist in git object database");
@@ -86,7 +83,7 @@ fn git_store_turn_commit_creates_git_history() {
     // Sanity: the git commit's tree is non-empty (turn/ subtree present).
     let tree = git_commit.tree().expect("commit has a tree");
     assert!(
-        tree.get_name("turn").is_some(),
+        tree.find_entry("turn").is_some(),
         "commit tree should contain a 'turn' entry"
     );
 
@@ -94,10 +91,10 @@ fn git_store_turn_commit_creates_git_history() {
     //    history is reachable (not a dangling object).
     let ref_name = format!("refs/lattice/sessions/{session_id}/main");
     let branch_ref = repo
-        .find_reference(&ref_name)
+        .find_reference(ref_name.as_str())
         .expect("session branch ref should exist");
     assert_eq!(
-        branch_ref.target().map(|o| o.to_string()),
+        branch_ref.target().try_id().map(|o| o.to_string()),
         Some(commit.commit_id.clone()),
         "session branch ref must point at the new commit"
     );

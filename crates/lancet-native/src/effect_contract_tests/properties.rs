@@ -290,7 +290,16 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
+        // Deny at network-policy preflight so the test never performs DNS/HTTP.
+        // safe_defaults() allows any public https host, which would hang here on
+        // a real connect timeout to evil.example.com.
+        let network = NetworkPolicyConfig {
+            allow_public_https: true,
+            allow_localhost: false,
+            allowed_hosts: vec!["allowed.com".into()],
+            max_web_response_bytes: 10 * 1024 * 1024,
+        };
+        let (ctx, _rx, _) = build_test_context(&root, vec![], network);
         let mut kinds = std::collections::BTreeSet::new();
         kinds.insert(ImpactKind::ExternalObservation);
         let authority = AuthorizedEffectRegion {
@@ -310,6 +319,10 @@ proptest! {
         let outcome = rt().block_on(effect_contract_harness::<Fetch>(
             &registry, params, ctx, authority,
         ));
+        assert!(
+            outcome.dispatch_result.is_err(),
+            "disallowed host must be denied at preflight"
+        );
         assert_negative_no_backend_effects(&outcome);
     }
 }

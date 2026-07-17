@@ -21,17 +21,18 @@ fn test_commit_turn_tree_structure() {
     let commit = store.commit_turn(input).expect("commit");
     assert_eq!(commit.commit_id.len(), 40);
 
-    let repo = git2::Repository::open(&dir).expect("open repo");
-    let oid = git2::Oid::from_str(&commit.commit_id).expect("parse oid");
+    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
+    let oid = gix::ObjectId::from_hex(commit.commit_id.as_bytes()).expect("parse oid");
     let git_commit = repo.find_commit(oid).expect("find commit");
     let tree = git_commit.tree().expect("tree");
     let turn = tree
-        .get_path(std::path::Path::new("turn"))
+        .lookup_entry_by_path("turn")
+        .expect("lookup turn")
         .expect("turn entry");
     let turn_tree = turn
-        .to_object(&repo)
+        .object()
         .expect("turn object")
-        .peel_to_tree()
+        .try_into_tree()
         .expect("turn tree");
     for name in [
         "manifest.json",
@@ -40,9 +41,10 @@ fn test_commit_turn_tree_structure() {
         "profile.json",
         "audit.json",
     ] {
-        let _ = turn_tree
-            .get_name(name)
-            .unwrap_or_else(|| panic!("missing {name} in turn tree"));
+        assert!(
+            turn_tree.find_entry(name).is_some(),
+            "missing {name} in turn tree"
+        );
     }
 }
 

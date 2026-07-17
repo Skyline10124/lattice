@@ -23,8 +23,10 @@ pub use graph::{
 pub mod git_graph;
 pub use git_graph::GitSessionGraphStore;
 
-pub mod migrate;
-pub use migrate::{MigrateOptions, MigrationResult, run_migration};
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+#[cfg(feature = "test-utils")]
+pub use test_utils::{init_empty_repo, init_fixture_repo};
 
 pub(crate) const MAX_BRANCH_NAME_LEN: usize = 128;
 
@@ -38,12 +40,6 @@ pub enum SessionError {
         path: PathBuf,
         #[source]
         source: std::io::Error,
-    },
-    #[error("database error in '{path}': {source}")]
-    Database {
-        path: PathBuf,
-        #[source]
-        source: rusqlite::Error,
     },
     #[error("invalid branch name: format or length violation")]
     InvalidBranchName,

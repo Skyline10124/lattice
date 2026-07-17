@@ -17,7 +17,7 @@ lancet-native = { workspace = true }
 lattice-agent = { workspace = true }
 lattice-llm = { workspace = true }
 lattice-profile = { workspace = true }
-lattice-session = { workspace = true }
+lattice-session = { workspace = true, features = ["test-utils"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,9 +28,10 @@ futures = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 uuid = { workspace = true }
-git2 = { workspace = true }
 
 [dev-dependencies]
+gix = { workspace = true }
+lattice-session = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 lancet-audit = { workspace = true }

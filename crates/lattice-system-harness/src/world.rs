@@ -114,25 +114,12 @@ impl ScenarioWorld {
     }
 
     pub fn init_git_project(&self) -> Result<(), WorldError> {
-        self.git(&["init"])?;
-        self.git(&["config", "user.email", "harness@test"])?;
-        self.git(&["config", "user.name", "Lattice Harness"])?;
-        // Point HEAD at refs/heads/main BEFORE the first commit so the
-        // initial commit lands on `main` (matching the project_branch the
-        // scenarios pass to `session new --project-branch main`). Without
-        // this, hosts whose git defaults to `master` create an unborn
-        // refs/heads/master HEAD. Using symbolic-ref is portable across git
-        // versions (unlike `git init -b main` which requires git 2.28+).
-        self.git(&["symbolic-ref", "HEAD", "refs/heads/main"])?;
-        // Create an initial commit so HEAD is born; an unborn branch has no
-        // commit for the session graph's first turn parent.
-        // `git add -A` picks up whatever the scenario already wrote (e.g.
-        // .lattice/agents/<name>/agent.toml) so the baseline reflects the
-        // real pre-turn project state. `--allow-empty` makes this robust
-        // against call ordering: even if no project file has been written
-        // yet, the commit succeeds and HEAD is born.
-        self.git(&["add", "-A"])?;
-        self.git(&["commit", "--allow-empty", "-m", "harness init"])?;
+        let root = &self.project;
+        let repo =
+            gix::init(root).map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
+        // Point HEAD at main before first commit (gix::init already does this).
+        self.commit_all("harness init")?;
+        let _ = repo;
         Ok(())
     }
 
@@ -173,19 +160,85 @@ impl ScenarioWorld {
         cmd
     }
 
-    /// Run `git` with the same isolated environment as `lattice` (no host HOME/config).
-    pub fn git(&self, args: &[&str]) -> Result<(), WorldError> {
-        let mut cmd = self.command("git");
-        cmd.args(args);
-        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
-        cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
-        let status = cmd.status()?;
-        if !status.success() {
-            return Err(WorldError::Io(std::io::Error::other(format!(
-                "git {args:?} failed with {status}"
-            ))));
+    /// Commit all current worktree files (skipping `.git`) onto `refs/heads/main`.
+    pub fn commit_all(&self, message: &str) -> Result<(), WorldError> {
+        let root = &self.project;
+        let mut repo = gix::open_opts(root, gix::open::Options::isolated())
+            .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
+        {
+            let mut cfg = repo.config_snapshot_mut();
+            cfg.set_raw_value(&"user.name", "Lattice Harness")
+                .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
+            cfg.set_raw_value(&"user.email", "harness@test")
+                .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
+            let _ = cfg
+                .commit()
+                .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
         }
+        let mut files: Vec<(String, String)> = Vec::new();
+        collect_files(root, root, &mut files);
+        let empty = gix::ObjectId::empty_tree(repo.object_hash());
+        let base = match repo.head_id() {
+            Ok(id) => repo
+                .find_commit(id)
+                .ok()
+                .and_then(|c| c.tree_id().ok())
+                .map(|t| t.detach())
+                .unwrap_or(empty),
+            Err(_) => empty,
+        };
+        let mut editor = repo
+            .edit_tree(base)
+            .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
+        for (rel, content) in &files {
+            let blob = repo
+                .write_blob(content.as_bytes())
+                .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?
+                .detach();
+            editor
+                .upsert(rel, gix::objs::tree::EntryKind::Blob, blob)
+                .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        let tree_id = editor
+            .write()
+            .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?
+            .detach();
+        let parents: Vec<gix::ObjectId> = match repo.head_id() {
+            Ok(id) => vec![id.detach()],
+            Err(_) => Vec::new(),
+        };
+        let sig = gix::actor::Signature {
+            name: "Lattice Harness".into(),
+            email: "harness@test".into(),
+            time: gix::date::Time::now_utc(),
+        };
+        let mut time_buf = gix::date::parse::TimeBuf::default();
+        let sig_ref = sig.to_ref(&mut time_buf);
+        let commit = repo
+            .new_commit_as(sig_ref, sig_ref, message, tree_id, parents.iter().copied())
+            .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
+        let constraint = match parents.first() {
+            Some(p) => gix::refs::transaction::PreviousValue::MustExistAndMatch(
+                gix::refs::Target::Object(*p),
+            ),
+            None => gix::refs::transaction::PreviousValue::MustNotExist,
+        };
+        repo.reference("refs/heads/main", commit.id, constraint, "harness commit")
+            .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
         Ok(())
+    }
+
+    /// Backward-compatible shim used by a few scenarios that previously shelled
+    /// out to `git add`/`git commit`. Only `add`+`commit` sequences are
+    /// supported; other git subcommands are rejected.
+    pub fn git(&self, args: &[&str]) -> Result<(), WorldError> {
+        match args {
+            ["add", ..] => Ok(()), // staging is implicit in commit_all
+            ["commit", "-m", msg] | ["commit", "--allow-empty", "-m", msg] => self.commit_all(msg),
+            other => Err(WorldError::Io(std::io::Error::other(format!(
+                "unsupported harness git args: {other:?} (use commit_all)"
+            )))),
+        }
     }
 
     pub fn env_summary(&self) -> Vec<(String, String)> {
@@ -209,5 +262,29 @@ impl ScenarioWorld {
             return Err("scenario HOME resolved to the developer HOME".into());
         }
         Ok(())
+    }
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_files(root, &path, out);
+        } else if path.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .expect("under root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            out.push((rel, content));
+        }
     }
 }

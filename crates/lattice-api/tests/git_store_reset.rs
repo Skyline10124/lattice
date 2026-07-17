@@ -17,8 +17,7 @@ use lattice_session::{
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
-    fs::create_dir_all(dir).expect("create dir");
-    git2::Repository::init(dir).expect("init repo");
+    let _ = lattice_session::test_utils::init_empty_repo(dir);
 }
 
 fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCommitInput {
@@ -93,13 +92,13 @@ fn git_store_reset_moves_branch_pointer() {
     assert_eq!(reset_result.new_commit_id, first_oid);
 
     // 1. The branch ref now points to the first commit.
-    let repo = git2::Repository::open(dir).expect("open repo");
+    let repo = gix::open_opts(dir, gix::open::Options::isolated()).expect("open repo");
     let ref_name = format!("refs/lattice/sessions/{session_id}/main");
     let branch_ref = repo
-        .find_reference(&ref_name)
+        .find_reference(ref_name.as_str())
         .expect("main ref should exist");
     assert_eq!(
-        branch_ref.target().map(|o| o.to_string()),
+        branch_ref.target().try_id().map(|o| o.to_string()),
         Some(first_oid.clone()),
         "main branch ref must point at the first commit after reset",
     );
@@ -124,14 +123,14 @@ fn git_store_reset_moves_branch_pointer() {
     // 3. Old commits (2nd and 3rd) are still reachable by OID in the object
     //    database. Reset only moves the ref; it must not delete the commits.
     for old_oid in [&second_oid, &third_oid] {
-        let oid = git2::Oid::from_str(old_oid).expect("parse old oid");
+        let oid = gix::ObjectId::from_hex(old_oid.as_bytes()).expect("parse old oid");
         let commit = repo
             .find_commit(oid)
             .unwrap_or_else(|_| panic!("old commit {old_oid} must still exist in object db"));
         // Confirm it is a real lattice turn commit by checking its tree.
         let tree = commit.tree().expect("old commit has a tree");
         assert!(
-            tree.get_name("turn").is_some(),
+            tree.find_entry("turn").is_some(),
             "old commit {old_oid} should still have a turn/ tree entry",
         );
     }

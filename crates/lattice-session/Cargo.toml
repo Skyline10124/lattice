@@ -8,11 +8,10 @@ description = "LATTICE session graph and git-style conversation refs"
 
 [dependencies]
 chrono = { workspace = true }
-git2 = { workspace = true }
+gix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-rusqlite = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 
@@ -21,3 +20,5 @@ tempfile = { workspace = true }
 
 [features]
 default = []
+# Shared git fixture helpers for downstream crate tests.
+test-utils = []

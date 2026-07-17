@@ -30,9 +30,7 @@ pub use lattice_session::{
 };
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
 pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
-pub use session::{
-    ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi, check_migration_guard,
-};
+pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
 pub use turn::{
     LifecycleFailureKind, RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus,
     ToolResultSummary, TurnEvent, TurnEventStream, TurnLifecycleOutcome, TurnUsageSummary,

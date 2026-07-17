@@ -18,6 +18,7 @@ use crate::graph::{
     derive_commit_message,
 };
 use crate::test_helpers::{assistant_msg, user_msg};
+use crate::test_utils::init_empty_repo;
 
 pub(crate) fn temp_dir(name: &str) -> PathBuf {
     let dir = env::temp_dir()
@@ -27,9 +28,8 @@ pub(crate) fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-pub(crate) fn setup_git_repo(dir: &std::path::Path) -> git2::Repository {
-    fs::create_dir_all(dir).expect("create dir");
-    git2::Repository::init(dir).expect("init repo")
+pub(crate) fn setup_git_repo(dir: &std::path::Path) -> gix::Repository {
+    init_empty_repo(dir)
 }
 
 pub(crate) fn commit_input(

@@ -3,8 +3,6 @@
 
 //! No-remote-push-refspec verification for the Git graph store.
 
-use std::process::Command;
-
 use super::*;
 use crate::git_graph::GitSessionGraphStore;
 use crate::graph::{
@@ -35,26 +33,22 @@ fn test_no_remote_push_refspec() {
     input.disposition = WorkspaceDisposition::PendingPromotion;
     store.commit_turn(input).expect("commit");
 
-    let output = Command::new("git")
-        .args(["remote", "-v"])
-        .current_dir(&dir)
-        .output()
-        .expect("git remote -v");
-    assert!(output.status.success(), "git remote -v should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Inspect the repository config via gix — there must be no remote and no
+    // push refspec that mentions refs/lattice.
+    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
+    let remotes: Vec<_> = repo.remote_names().into_iter().collect();
     assert!(
-        !stdout.contains("refs/lattice"),
-        "no refs/lattice push refspec should exist, got: {stdout}"
+        remotes.is_empty(),
+        "store must not configure remotes, got: {remotes:?}"
     );
 
-    let config_output = Command::new("git")
-        .args(["config", "--get-all", "remote.origin.push"])
-        .current_dir(&dir)
-        .output()
-        .expect("git config");
-    let config_stdout = String::from_utf8_lossy(&config_output.stdout);
-    assert!(
-        !config_stdout.contains("refs/lattice"),
-        "no remote.origin.push should reference refs/lattice: {config_stdout}"
-    );
+    // Also scan raw config for any push refspec mentioning refs/lattice.
+    let config_path = dir.join(".git").join("config");
+    if config_path.is_file() {
+        let text = std::fs::read_to_string(&config_path).expect("read git config");
+        assert!(
+            !text.contains("refs/lattice"),
+            "git config must not reference refs/lattice, got: {text}"
+        );
+    }
 }

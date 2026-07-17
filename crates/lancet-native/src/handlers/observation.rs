@@ -1301,47 +1301,45 @@ mod tests {
     }
 
     fn init_git_ignore_fixture() -> TempDir {
-        use std::process::Command;
         let dir = TempDir::new().unwrap();
         let root = dir.path();
-        assert!(
-            Command::new("git")
-                .args(["init"])
-                .current_dir(root)
-                .status()
-                .unwrap()
-                .success()
-        );
-        fs::write(root.join(".gitignore"), ".env\nsecret/\n").unwrap();
-        fs::write(root.join("visible.txt"), "hello visible\n").unwrap();
-        fs::write(root.join(".env"), "SECRET=1\n").unwrap();
-        fs::create_dir(root.join("secret")).unwrap();
-        fs::write(root.join("secret/key"), "hidden-key\n").unwrap();
-        fs::write(root.join("secret/other"), "other\n").unwrap();
-        assert!(
-            Command::new("git")
-                .args(["add", "visible.txt", ".gitignore"])
-                .current_dir(root)
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            Command::new("git")
-                .args([
-                    "-c",
-                    "user.email=t@t",
-                    "-c",
-                    "user.name=t",
-                    "commit",
-                    "-m",
-                    "init"
-                ])
-                .current_dir(root)
-                .status()
-                .unwrap()
-                .success()
-        );
+        let repo = gix::init(root).expect("gix init");
+        std::fs::write(root.join(".gitignore"), ".env\nsecret/\n").unwrap();
+        std::fs::write(root.join("visible.txt"), "hello visible\n").unwrap();
+
+        std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::create_dir_all(root.join("secret")).unwrap();
+        std::fs::write(root.join("secret/key"), "hidden-key\n").unwrap();
+        std::fs::write(root.join("secret/other"), "denied\n").unwrap();
+        let empty = gix::ObjectId::empty_tree(repo.object_hash());
+        let mut editor = repo.edit_tree(empty).expect("edit tree");
+        for (rel, content) in [
+            (".gitignore", ".env\nsecret/\n"),
+            ("visible.txt", "hello visible\n"),
+        ] {
+            let blob = repo.write_blob(content.as_bytes()).expect("blob").detach();
+            editor
+                .upsert(rel, gix::objs::tree::EntryKind::Blob, blob)
+                .expect("upsert");
+        }
+        let tree_id = editor.write().expect("write tree").detach();
+        let sig = gix::actor::Signature {
+            name: "t".into(),
+            email: "t@t".into(),
+            time: gix::date::Time::now_utc(),
+        };
+        let mut time_buf = gix::date::parse::TimeBuf::default();
+        let sig_ref = sig.to_ref(&mut time_buf);
+        let commit = repo
+            .new_commit_as(sig_ref, sig_ref, "init", tree_id, None::<gix::ObjectId>)
+            .expect("commit");
+        repo.reference(
+            "refs/heads/main",
+            commit.id,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "init",
+        )
+        .expect("update main");
         dir
     }
 

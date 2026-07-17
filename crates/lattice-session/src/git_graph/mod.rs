@@ -3,11 +3,11 @@
 
 //! Git-backed session graph store.
 //!
-//! Implements `SessionGraphStore` over the project's Git object database.
-//! Session commits are immutable Git objects under `refs/lattice/sessions/**`;
-//! mutable session metadata lives in sidecar files under `.lattice/sessions/`.
-//! Candidate refs under `refs/lattice/candidates/**` keep clean-turn commit
-//! ranges reachable.
+//! Implements `SessionGraphStore` over the project's Git object database via
+//! gix. Session commits are immutable Git objects under
+//! `refs/lattice/sessions/**`; mutable session metadata lives in sidecar files
+//! under `.lattice/sessions/`. Candidate refs under `refs/lattice/candidates/**`
+//! keep clean-turn commit ranges reachable.
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -31,22 +31,23 @@ pub(crate) const DEFAULT_BRANCH: &str = "main";
 
 /// Git-backed session graph store.
 ///
-/// Holds the project root path and a lazily opened `git2::Repository`. The
-/// repository is opened on first access and cached under a mutex.
+/// Holds the project root path and a lazily opened `gix::Repository`. The
+/// repository is opened on first access and cached under a mutex (`Repository`
+/// is `Send` but not `Sync`).
 pub struct GitSessionGraphStore {
     pub(crate) dir: PathBuf,
-    pub(crate) repo: Mutex<Option<git2::Repository>>,
+    pub(crate) repo: Mutex<Option<gix::Repository>>,
 }
 
-/// RAII handle around the cached repository. Derefs to `git2::Repository`.
+/// RAII handle around the cached repository. Derefs to `gix::Repository`.
 pub(crate) struct RepoHandle<'a> {
-    guard: MutexGuard<'a, Option<git2::Repository>>,
+    guard: MutexGuard<'a, Option<gix::Repository>>,
 }
 
 impl<'a> Deref for RepoHandle<'a> {
-    type Target = git2::Repository;
+    type Target = gix::Repository;
 
-    fn deref(&self) -> &git2::Repository {
+    fn deref(&self) -> &gix::Repository {
         self.guard
             .as_ref()
             .expect("repository initialized by GitSessionGraphStore::repo()")
@@ -70,27 +71,53 @@ impl GitSessionGraphStore {
 
     /// Acquire a locked handle to the repository, opening it on first access.
     ///
-    /// If `Repository::open` fails (the directory has no Git repository yet),
-    /// auto-initializes a bare repo in-place. This is the
-    /// fresh-install safety net: after the SQLite store is retired, a new
-    /// install with no pre-existing repo auto-creates one on first session
-    /// instead of crashing. Existing installs and tests that pre-init a
-    /// non-bare repo are unaffected — `open` succeeds and `init_bare` never
-    /// runs.
+    /// If open fails (the directory has no Git repository yet), auto-initializes
+    /// a bare repo in-place. This is the fresh-install safety net: a new install
+    /// with no pre-existing repo auto-creates one on first session instead of
+    /// crashing. Existing installs and tests that pre-init a non-bare repo are
+    /// unaffected — open succeeds and auto-init never runs.
     pub(crate) fn repo(&self) -> Result<RepoHandle<'_>> {
         let mut guard = self.repo.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
-            let repo = match git2::Repository::open(&self.dir) {
+            let repo = match gix::open_opts(&self.dir, gix::open::Options::isolated()) {
                 Ok(r) => r,
                 Err(open_err) => {
-                    // open failed — try to init_bare as a fallback for fresh
-                    // installs. If init_bare also fails, surface the original
-                    // open error (more diagnostic for the common "not a git
-                    // repo" case where the user pointed at the wrong path).
-                    match git2::Repository::init_bare(&self.dir) {
-                        Ok(r) => r,
-                        Err(_) => {
-                            return Err(SessionError::Git(format!("open repository: {open_err}")));
+                    if let Err(e) = std::fs::create_dir_all(&self.dir) {
+                        return Err(SessionError::Git(format!(
+                            "create repository directory: {e} (open failed: {open_err})"
+                        )));
+                    }
+                    // Prefer bare init when the directory is empty — this matches
+                    // the sessions.git store layout (path itself is the git dir).
+                    // Fall back to a worktree init when the directory already has
+                    // non-git content (e.g. a project root with source files).
+                    let is_empty = std::fs::read_dir(&self.dir)
+                        .map(|mut d| d.next().is_none())
+                        .unwrap_or(true);
+                    if is_empty {
+                        match gix::init_bare(&self.dir) {
+                            Ok(r) => r,
+                            Err(init_err) => {
+                                return Err(SessionError::Git(format!(
+                                    "open repository: {open_err}; init_bare: {init_err}"
+                                )));
+                            }
+                        }
+                    } else {
+                        match gix::ThreadSafeRepository::init(
+                            &self.dir,
+                            gix::create::Kind::WithWorktree,
+                            gix::create::Options {
+                                destination_must_be_empty: Some(false),
+                                ..Default::default()
+                            },
+                        ) {
+                            Ok(r) => r.to_thread_local(),
+                            Err(init_err) => {
+                                return Err(SessionError::Git(format!(
+                                    "open repository: {open_err}; init: {init_err}"
+                                )));
+                            }
                         }
                     }
                 }
