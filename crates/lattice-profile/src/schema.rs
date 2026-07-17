@@ -258,17 +258,22 @@ pub struct LancetPolicySection {
     pub path: Option<String>,
 }
 
-/// `[lancet.workspace]` — immutable write-deny policy (blacklist).
+/// `[lancet.workspace]` — Local Workspace write-deny and read-visibility policy.
 ///
-/// A path is allowed unless it matches any denied pattern. Glob patterns
-/// (e.g. `".git/**"`) deny a directory subtree; exact paths deny a single
-/// file. No system-level denies are hardcoded — if a user removes
-/// `".git/**"` from the deny list, that is their choice.
+/// Write policy is a blacklist: a path is allowed unless it matches any denied
+/// write pattern. Read visibility defaults to tracked and non-ignored files;
+/// `included_ignored_read_patterns` may expose specific ignored paths, while
+/// `denied_read_patterns` may hide paths from either set. Runtime System Path
+/// Exclusions (`.git`, `.lattice`, root escape) always win over profile rules.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LancetWorkspacePolicySection {
     #[serde(default)]
     pub denied_write_patterns: Vec<String>,
+    #[serde(default)]
+    pub included_ignored_read_patterns: Vec<String>,
+    #[serde(default)]
+    pub denied_read_patterns: Vec<String>,
 }
 
 /// `[lancet.effects]` — runtime effect-kind deny switch.
@@ -1138,17 +1143,19 @@ unexpected_key = "bad"
 
 [lancet.workspace]
 denied_write_patterns = [".git/**", ".env"]
+included_ignored_read_patterns = [".env"]
+denied_read_patterns = ["secrets/**"]
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile: AgentProfile = parse(&toml).unwrap();
-        let patterns = &profile
-            .lancet
-            .workspace
-            .as_ref()
-            .unwrap()
-            .denied_write_patterns;
-        assert_eq!(patterns, &vec![".git/**".to_string(), ".env".to_string()]);
+        let section = profile.lancet.workspace.as_ref().unwrap();
+        assert_eq!(
+            section.denied_write_patterns,
+            vec![".git/**".to_string(), ".env".to_string()]
+        );
+        assert_eq!(section.included_ignored_read_patterns, vec![".env".to_string()]);
+        assert_eq!(section.denied_read_patterns, vec!["secrets/**".to_string()]);
     }
 
     #[test]

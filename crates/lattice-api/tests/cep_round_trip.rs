@@ -322,6 +322,7 @@ async fn production_adapter(
     // Allow all writes under the project root (empty deny list).
     policy_config.workspace = WorkspacePolicy {
         denied_write_patterns: vec![],
+        ..Default::default()
     };
 
     let (client, server) = CepTransport::pair(16);

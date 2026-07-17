@@ -64,6 +64,7 @@ captured the root cause in `stderr.txt`:
 found; class=Reference (4); code=UnbornBranch (-9)`.
 
 **Fix:** `init_git_project` now:
+
 1. `git symbolic-ref HEAD refs/heads/main` — points HEAD at `main` before
    the first commit so the initial commit lands on `main` (matching the
    `project_branch = "main"` the scenarios pass to `session new`). Portable
@@ -858,9 +859,9 @@ Review artifact: `.planning/phases/38-git-session-backend/38-REVIEW.md` (gitigno
 Verified: `cargo build -p lattice-session -p lattice-api` ✓; `cargo test -p lattice-session` ✓ (169 lib + 4 promotion = 173 passed; 0 failed); `cargo test -p lattice-api` ✓ (117 lib + all integration suites green; 0 failed).
 
 | # | Severity | Problem | Fix |
-|---|----------|---------|-----|
+| --- | ---------- | --------- | ----- |
 | CR-01 | CRITICAL | `commit_prepared_turn_impl` performed a non-atomic CAS check (read HEAD OID) followed by a force-update ref write (`repo.reference(..., force=true)`). A concurrent process could move the ref between check and write, and the force update would silently overwrite the other writer's commit. | Replaced the force update with an atomic compare-and-set: `find_reference` → re-verify `target() == head_oid` → `set_target` (fails if ref moved). First-commit path uses `reference(..., force=false)` and errors if the ref unexpectedly exists. Returns `SessionError::Conflict` on any movement. |
-| WR-01 | WARNING | `messages_to_jsonl` used `unwrap_or_else(|_| String::new())`, silently emitting empty lines on serialization failure; `parse_messages_jsonl` would then fail on readback, losing the original message. | Changed signature to `Result<String>` and propagate `serde_json::to_string` errors as `SessionError::Git`. Updated the single caller in `commit_prepared_turn_impl`. |
+| WR-01 | WARNING | `messages_to_jsonl` used `unwrap_or_else( | _ | String::new())`, silently emitting empty lines on serialization failure;`parse_messages_jsonl` would then fail on readback, losing the original message. | Changed signature to `Result<String>` and propagate `serde_json::to_string` errors as `SessionError::Git`. Updated the single caller in `commit_prepared_turn_impl`. |
 | WR-02 | WARNING | `collect_unique_commits` did `let _ = revwalk.hide(oid);`, silently discarding hide failures. A failed hide would include merge-base ancestors in the diff, producing incorrect `only_in_from`/`only_in_to`. | Propagate `revwalk.hide(oid)` errors as `SessionError::Git`. |
 | WR-03 | WARNING | `resolve_session_id_for_commit` did `let _ = revwalk.push(tip);`, silently discarding push failures. A failed push would yield an empty revwalk, returning `Ok(None)` for commits that exist. | Changed to `if revwalk.push(tip).is_err() { continue; }` — the scan is best-effort across sessions, so we skip the session on push failure rather than silently producing a wrong empty result. |
 | WR-04 | WARNING | `session_ops_path` joined `commit_oid` directly into a filesystem path without validating it. Safety depended on upstream `git2::Oid::from_str` rejection, but `write_ops_state`/`read_ops_state` call it directly. | Added defense-in-depth validation: reject `commit_oid` that is empty or contains non-hex characters. |
@@ -1047,7 +1048,7 @@ Files: `Cargo.toml`, `crates/lancet-api/` (new: `Cargo.toml`, `src/{lib,error,co
 Verified: `cargo fmt --all --check` ✓, `cargo test -p lancet-protocol` ✓ (`86 passed; 0 failed`), `cargo test -p lancet-native --lib` ✓ (`357 passed; 0 failed; 6 ignored`), `cargo test -p lancet-native commit_baseline` ✓, `cargo test -p lancet-native artifact_commit_blocks_cleanup_failures_before_lower_recheck` ✓, `cargo test -p lancet-native artifact_overlay_commit_flow_cleanup_failure_blocks_commit` ✓, `cargo clippy -p lancet-native --all-targets -- -D warnings` ✓, `scripts/lancet-boundary-check.sh` ✓, `scripts/release-gate-v1.4.sh` ✓ (`release-gate-v1.4.sh PASSED`)
 
 | # | Severity | Problem | Fix |
-|---|----------|---------|-----|
+| --- | ---------- | --------- | ----- |
 | M-24-01 | MEDIUM | Review records and crate navigation still described `FetchUrl { host_pattern }` even though the current protocol already uses explicit `FetchUrl { host }`. | Kept the current wire shape, removed the stale open finding, and updated protocol/native navigation to describe the current `host` semantics without introducing a protocol rename. |
 | M-24-02 | MEDIUM | Workspace snapshot and lower-baseline capture walked the tree synchronously on the async command path and had no explicit entry/depth ceiling. | Added crate-private `SnapshotLimits` with fail-closed entry/depth checks, preserved sync helpers for pure sync paths/tests, and moved command-path snapshot, lower-baseline, lower-fingerprint, diagnostic consistency, and artifact commit sections through `spawn_blocking`. |
 | M-24-03 | MEDIUM | Hidden `ToolLimits` carried unrelated defaults for shell timeout and patch output size. | Removed `executor::limits::ToolLimits`, made shell `ExecuteConfig.timeout_ms` a required validated `u64`, and moved patch write-size enforcement into focused `PatchApplyLimits`. |
@@ -1078,7 +1079,7 @@ Files: `crates/lancet-native/src/executor/supervisor/artifact.rs`, `crates/lance
 Verified: validation matrix task/plan/wave check ✓ (`validation_rows=14 plan_tasks=14 status=ok`), `gsd-tools.cjs query check.decision-coverage-plan ...` ✓ (`25/25` decisions covered), Phase 31 requirement coverage check ✓ (`ANC-01..ANC-04`, `AUD-01..AUD-03` covered), artifact section noise scan ✓ (no phase-wide inventory wording remains)
 
 | # | Severity | Problem | Fix |
-|---|----------|---------|-----|
+| --- | ---------- | --------- | ----- |
 | P31-PLAN-01 | MEDIUM | `31-VALIDATION.md` task IDs and plan/wave columns were shifted from the actual seven-plan structure, causing native HashLine tests, protocol observed tests, PROV tests, and CLI tests to appear under the wrong plans. | Rebuilt the validation matrix as 14 rows matching the real `31-01-01` through `31-07-02` task IDs, plan numbers, waves, requirements, and automated commands. |
 | P31-PLAN-02 | LOW | `wave_0_complete=false` looked like missing test infrastructure even though Cargo test is already present. | Kept `wave_0_complete=false` because Phase 31's specific regression tests are still created during execution, but clarified that Cargo infrastructure exists and checked the infrastructure/sign-off items that are already true. |
 | P31-PLAN-03 | LOW | Each PLAN.md repeated a phase-wide artifact inventory, making it unclear which symbols a given executor should create. | Narrowed each plan's artifact block to "Produced by this plan" plus explicit consumes/handoff notes for artifacts owned by earlier or later plans. |
@@ -1129,7 +1130,7 @@ Files: `crates/lancet-native/src/executor/supervisor/syscall.rs`, `crates/lancet
 Verified: `cargo test -p lancet-native command_boundary -- --nocapture` ✓, `cargo test -p lancet-native isolation_supervisor -- --nocapture` ✓, `cargo test -p lancet-native shell -- --nocapture` ✓, `cargo test -p lancet-native fd -- --nocapture` ✓, `cargo test -p lancet-native mount -- --nocapture` ✓, `cargo test -p lancet-native network -- --nocapture` ✓, `cargo test -p lancet-native landlock -- --nocapture` ✓, `cargo test -p lancet-native projection -- --nocapture` ✓, `cargo clippy --workspace --all-targets --all-features -- -D warnings` ✓
 
 | # | Severity | Problem | Fix |
-|---|----------|---------|-----|
+| --- | ---------- | --------- | ----- |
 | P29-VG-01 | CRITICAL | Production `exec.command_run` still did not execute the child through the Linux supervisor after the evidence-honesty fix. | `handle_run_as` now calls `execute_argv_supervised` for isolated command plans. The child runs live supervisor setup in pre-exec, reports the setup attempt through a close-on-exec pipe, and parent-side metadata is built from that real report. |
 | P29-VG-02 | CRITICAL | Live mount-view and inherited-authority cleanup stages had no production implementation, so filesystem/fd requirements could not be satisfied. | `LiveSupervisorSyscalls` now builds a per-child tmpfs root, bind-mounts `/project`, declared read-only toolchain paths, scratch tmpfs, and minimal devices, pivots away from the old root, verifies old-root cleanup, and runs fd cleanup while preserving only stdio plus the setup-report pipe. |
 | P29-VG-03 | HIGH | Audit fallback and setup failures could not distinguish setup failure from backend command execution. | Supervised execution now returns setup attempts on success and failure. Setup failures record `backend_invoked=false` for enforce, while audit fallback records the failed setup attempt and then runs the unbounded backend with honest `unbounded` / `not_applied` boundary metadata. |
@@ -1143,7 +1144,7 @@ Files: `crates/lancet-native/src/handlers/command.rs`, `crates/lancet-native/src
 Verified: `cargo test -p lancet-native command_boundary` ✓, `cargo test -p lancet-native isolation_supervisor` ✓, `cargo test -p lancet-native shell` ✓, `cargo test -p lancet-native landlock_live_canary_requires_applied_status_to_pass` ✓, `cargo test -p lancet-native live_supervisor_unimplemented_evidence_stages_fail_closed` ✓, `cargo test -p lancet-authority boundary_credit` ✓, `cargo test -p lancet-native env` ✓, `cargo test -p lancet-native fd` ✓, `cargo test -p lancet-native mount` ✓, `cargo test -p lancet-native network` ✓, `cargo test -p lancet-native landlock` ✓, `cargo test -p lattice-cli lancet` ✓, `cargo test -p lattice-api cep_mode_integration` ✓, `cargo test -p lancet-audit effective_boundary` ✓, `cargo test -p lancet-catalog command` ✓, `cargo test -p lancet-native projection` ✓, `cargo fmt --all --check` ✓, `cargo clippy --workspace --all-targets --all-features -- -D warnings` ✓, `cargo test --workspace` ✓, `LATTICE_LINUX_ISOLATION_LIVE=1 cargo test -p lancet-native -- --ignored --nocapture` ✓ (`passed=2 skipped_unsupported=3 failed=0`)
 
 | # | Severity | Problem | Fix |
-|---|----------|---------|-----|
+| --- | ---------- | --------- | ----- |
 | P29-CR-01 | CRITICAL | Production `exec.command_run` used the `Ready` supervised handoff even though the hook only wrote `ready\n` and applied no Linux setup. | Production no longer calls the fake-ready handoff. Pending child-side setup is reported as `native_linux_pre_exec_pending`; required `enforce` boundaries fail closed before backend execution, while `audit` fallback runs with `unbounded` / `not_applied` metadata. Docs and phase summaries now avoid claiming applied production isolation without a real setup report. |
 | P29-CR-02 | CRITICAL | `LiveSupervisorSyscalls` returned `Ok(())` for evidence-bearing no-op stages, allowing future wiring to mint applied boundary evidence without doing the work. | Unimplemented live stages now return errors, and the netns topology assertion performs a real no-veth/no-default-route check. Added regression coverage so those stages cannot silently report success before implementation. |
 | P29-WR-01 | WARNING | The Landlock live canary passed when the helper printed `landlock_status=not_applied` and exited successfully. | The canary now passes only on `landlock_status=applied`; `not_applied` is classified as failure unless the case is explicitly unsupported. |
@@ -1157,7 +1158,7 @@ Files: `crates/lancet-native/src/handlers/command.rs`, `crates/lancet-native/src
 Verified: `cargo fmt --all --check` ✓, `cargo clippy --workspace --all-targets -- -D warnings` ✓, `cargo test --workspace` ✓ (731 tests), `cargo test -p cep-executor` ✓ (121 tests; default sandbox blocked localhost bind, unrestricted local test passed), `cargo test -p lattice-hooks` ✓
 
 | # | 严重度 | 问题 | 修复 |
-|---|--------|------|------|
+| --- | -------- | ------ | ------ |
 | TD-01 | MEDIUM | Workspace MSRV 声明 1.85，但锁定依赖需要 1.88+ | `rust-version` 升到 1.88；AGENTS 的 Rust 版本说明同步 |
 | TD-02 | MEDIUM | `lattice-hooks` 存在于 `crates/` 但不是 workspace member，CI 不覆盖 | 将 `crates/lattice-hooks` 加回 workspace；`Cargo.lock` 纳入该 package |
 | TD-03 | MEDIUM | CI clippy 未启用 `--all-targets` | CI 与 AGENTS 命令改为 `cargo clippy --workspace --all-targets -- -D warnings` |
@@ -1176,7 +1177,7 @@ Residual: SQLite 单连接串行化与 `ChatRequest` 每轮完整 `Vec<Message>`
 Verified: `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p cep-executor` ✓ (44 tests + 1 doctest), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p cep-protocol` ✓ (46 tests), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p lattice-profile cep` ✓ (10 tests), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo clippy -p cep-executor -p cep-protocol -p lattice-profile --all-targets -- -D warnings` ✓
 
 | # | 严重度 | 问题 | 修复 |
-|---|--------|------|------|
+| --- | -------- | ------ | ------ |
 | P19-CR-01 | CRITICAL | `CepServer::run` 用 vector 截断追踪 cancellation sender，乱序完成时会丢掉仍在运行 handler 的 cancel handle | 改为按 call id 存储 `HashMap<u64, watch::Sender<bool>>`，task join 后只移除对应 id；新增乱序完成后 shutdown 仍能 cancel 剩余 handler 的回归测试 |
 | P19-CR-02 | HIGH | `EventSink::emit` 在 bounded event channel 上 `send().await`，普通 `call()` 不 drain events 时会死锁 | progress event 改为 best-effort `try_send` drop-on-full；新增 buffer=1 且不消费 events 的 call 完成测试 |
 | P19-CR-03 | MEDIUM | JSON-RPC helper / `wire_code()` / `to_jsonrpc_error()` 对标准错误码映射不一致 | `CepError` inherent helpers 统一复用 public constructors；新增 parse/method/params 标准 code 映射，`wire_code()` 与 `to_jsonrpc_error()` 共用同一映射函数 |
@@ -1268,7 +1269,7 @@ Verified: `cargo test -p lattice-session -p lattice-api -p lattice-cli -p lattic
 ### MEDIUM
 
 | # | 问题 | 修复 | 文件 |
-|---|------|------|------|
+| --- | ------ | ------ | ------ |
 | M-12 | `hash_json` 依赖 serde_json 序列化顺序 | 引入 `canonical_json` 递归排序 object keys | `lattice-session/src/graph.rs` |
 | M-13 | profile `canonicalize` 失败时回退非规范路径 | 改为返回 `ProfileError::SystemPathNotFound` | `lattice-profile/src/load.rs` |
 | M-15 | `map_session_error` 丢弃结构化错误信息 | 添加 Conflict/BadRequest/MissingCommit/Io/Database 映射 | `lattice-api/src/session.rs` |
@@ -1278,7 +1279,7 @@ Verified: `cargo test -p lattice-session -p lattice-api -p lattice-cli -p lattic
 ### LOW
 
 | # | 问题 | 修复 | 文件 |
-|---|------|------|------|
+| --- | ------ | ------ | ------ |
 | L-02 | `parse_json_data` 用 sentinel 做控制流 | 改为 `Result<Option<Value>, LlmEvent>`，语义清晰 | `lattice-llm/src/providers/mod.rs` + 调用方 |
 | L-18-02 | TurnEvent 序列化 `.expect()` panic | 改为 `map_err` + `?` | `lattice-cli/src/commands/run.rs` |
 | L-18-03 | 无 stream 超时机制 | CLI 加 5 分钟 idle timeout，超时写 stderr + exit 1；API/Agent durable deadline 留未来 | `lattice-cli/src/commands/run.rs` |
@@ -1292,7 +1293,7 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy --all-targets -- -D warni
 ### HIGH
 
 | # | 问题 | 修复 | 分支 |
-|---|------|------|------|
+| --- | ------ | ------ | ------ |
 | H-01 | thread-local SSE parser 跨请求状态泄漏 | 每次 `stream_sse_response` 创建独立 `ProviderParser` 实例 | llm-stream-sse-hardening |
 | H-02 | `stream_sse_response` 整体下载（假流式 + OOM） | `response.bytes_stream()` 逐 chunk 解析，边读边检查累计大小 | llm-stream-sse-hardening |
 | H-03 | `write_file` 跟随 symlink 绕过 project-root **(partial)** | 写入前 `symlink_metadata` 检测并拒绝；残留 TOCTOU 窗口留 v1.2 | tool-safety-hotfix |
@@ -1306,7 +1307,7 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy --all-targets -- -D warni
 ### MEDIUM
 
 | # | 问题 | 修复 | 分支 |
-|---|------|------|------|
+| --- | ------ | ------ | ------ |
 | M-01 | OpenAI 硬编码 `stream: true` | 改为 `request.stream`，`stream_options` 条件附加 | llm-stream-sse-hardening |
 | M-02 | Gemini 忽略 temperature/max_tokens | 添加 `generationConfig` 块 | llm-stream-sse-hardening |
 | M-03 | `validate_base_url` 接受空字符串 | 改返回 `Err("base_url must not be empty")` | llm-stream-sse-hardening |
@@ -1323,7 +1324,7 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy --all-targets -- -D warni
 ### LOW
 
 | # | 问题 | 修复 | 分支 |
-|---|------|------|------|
+| --- | ------ | ------ | ------ |
 | L-01 | `u32_field` 静默截断 | `u32::try_from(...).unwrap_or(u32::MAX)` | llm-stream-sse-hardening |
 | L-03 | `ToolCallEnd` 顺序不定 | `BTreeMap<u32, String>` 按 index 排序 | llm-stream-sse-hardening |
 | L-04 | `display_id` byte 切片 | `char_indices().nth(12)` 安全截断 | misc-fixes |
@@ -1332,7 +1333,7 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy --all-targets -- -D warni
 ### 重构
 
 | 改动 | 内容 | 分支 |
-|------|------|------|
+| ------ | ------ | ------ |
 | trait 统一 | `lattice_tools::ToolExecutor` = `lattice_agent::ToolCallExecutor`，签名 `Result<String, String>`，12 个工具函数返回 `Err` | agent-loop-hardening |
 | 工具面简化 | 删除 `read_files`（并行 `read_file` 替代），`web_search` → `web_fetch` | tool-safety-hotfix |
 | 测试去重 | `test_helpers` module 提取共享 `user_msg`/`assistant_msg`/`tool_msg` | misc-fixes |
@@ -1341,7 +1342,7 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy --all-targets -- -D warni
 ### Phase 11 遗留项
 
 | # | 问题 | 修复 |
-|---|------|------|
+| --- | ------ | ------ |
 | WR-02 | env var 测试同步 | Router tests 用 local env mutex |
 | WR-03 | SQLite per-method connection | 合并到 H-09 |
 | WR-04 | tool_output_is_ok 前缀 | 合并到 H-07 |
@@ -1353,7 +1354,7 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy --all-targets -- -D warni
 ### PR #6 遗留项
 
 | # | 问题 | 修复 |
-|---|------|------|
+| --- | ------ | ------ |
 | P2-01 | 模型覆盖未持久化 | turn commit metadata 正确记录 override model |
 | P2-02 | NULL-tip branch checkout 失败 | 区分 branch exists + NULL commit_id vs missing |
 | P2-03 | detached HEAD 无法 branch | 从 head_commit_id 取 detached commit |
@@ -1366,41 +1367,49 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy --all-targets -- -D warni
 Verified: `cargo fmt --all --check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test` 504 pass ✓
 
 ### CR-01: Unknown message roles silently mapped to User
+
 - **File:** `crates/lattice-agent/src/agent_loop.rs:474-501`
 - **Before:** `_` wildcard branch mapped unknown roles to `Role::User`, corrupting conversation
 - **After:** `convert_to_llm_message` returns `Result<Message, String>`, errors on unknown roles; caller returns `AgentTurnStatus::Failed`(Deprecated)
 
 ### CR-02: Provider hardcoded "unknown" in TurnCommitInput
+
 - **File:** `crates/lattice-api/src/turn.rs:501`
 - **Before:** `provider: "unknown".to_string()` — audit trail destroyed
 - **After:** `resolve_model_and_prompt` returns `(model, prompt, provider)`; provider resolved via `ModelRouter::resolve(&ModelTarget::new(&model))`
 
 ### CR-03: ${VAR} env var expansion not blocked in check_command
+
 - **File:** `crates/lattice-tools/src/executor.rs:877`
 - **Before:** Metacharacter list blocked `$(` but not `$` or `${`, allowing credential leakage via `echo ${ANTHROPIC_API_KEY}`
 - **After:** `"${"` and `"$"` added to blocked metacharacter list
 
 ### CR-04: Literal API key stored as both HashMap key and value
+
 - **File:** `crates/lattice-cli/src/credentials.rs:53`
 - **Before:** `values.insert(key_spec.clone(), key_spec.clone())` — same secret as key and value
 - **After:** `values.insert(format!("config:{}", provider_name), key_spec.clone())` — secret appears only as value
 
 ### CR-05: aliases() returns empty Vec when no credentials
+
 - **File:** `crates/lattice-llm/src/router.rs:103-119`
 - **Before:** Doc claimed aliases() filtered by credential status; code already returned all known aliases
 - **After:** Doc updated — `resolve()` returns `Ok(ResolvedModel)` for all known aliases regardless of `CredentialStatus`
 
 ### WR-01: Blanket #![allow] suppresses all lint warnings
+
 - **File:** `crates/lattice-cli/src/lib.rs:1`
 - **Before:** `#![allow(dead_code, unused_imports, private_interfaces)]` — masked unused deps, dead code
 - **After:** Removed; per-module `#![allow(dead_code)]` for staged command modules only
 
 ### WR-05: ProviderConfig api_key serializable without protection
+
 - **File:** `crates/lattice-cli/src/config.rs:26`
 - **Before:** `pub api_key: Option<String>` with `#[derive(Serialize)]` — literal keys leak on serialization
 - **After:** `#[serde(skip)]` added to `api_key` field; Deserialize reads, Serialize omits
 
 ### WR-07: write_file uses string concatenation for path construction
+
 - **File:** `crates/lattice-tools/src/executor.rs:491-495`
 - **Before:** `format!("{}/{}", self.project_root, path.trim_start_matches('/'))` — fragile, platform-specific
 - **After:** `PathBuf::from(&self.project_root).join(path.trim_start_matches('/'))`
@@ -1412,7 +1421,7 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy -- -D warnings` ✓, `car
 Verified: `rustfmt --edition 2021 --check` on touched Rust files ✓, `cargo test -p lattice-api` ✓, `cargo test -p lattice-llm provider_kind_as_str_is_stable_snake_case` ✓, `cargo clippy -p lattice-api -p lattice-llm --tests -- -D warnings` ✓
 
 | # | 问题 | 修复 |
-|---|------|------|
+| --- | ------ | ------ |
 | WR-01 | Resolved provider dropped before `AgentTurnRequest` | API now passes routed provider into `AgentTurnRequest.provider`, so `ModelStarted.provider` is populated on the API path |
 | WR-04 | Provider string used `Debug` lowercase | Added `ProviderKind::as_str()` stable identifiers, including `openai_compatible` |
 | WR-05 | `RealTurnDeps` cloned `AgentTurnResult.events` | Uses `std::mem::take` to move events out of the result without cloning |
@@ -1438,7 +1447,7 @@ Verified: `cargo test -p lattice-agent --features test-utils --test streaming_de
 Verified: `cargo fmt --all --check` ✓, `cargo test -p lattice-agent --features test-utils timeout` ✓, `cargo test -p lattice-api stream_turn` ✓, `cargo test -p lattice-api --test consistency` ✓, `cargo clippy -p lattice-agent --features test-utils --all-targets -- -D warnings` ✓, `cargo clippy -p lattice-api --all-targets -- -D warnings` ✓, `cargo test --workspace` ✓
 
 | # | 问题 | 修复 |
-|---|------|------|
+| --- | ------ | ------ |
 | P1-17-01 | Timeout cooperative deadline did not cover tool execution | `ToolCallExecutor::execute` now awaits through the deadline helper; timeout during a tool preserves state, emits no fake `ToolCallFinished`, and commits `Error(timeout)` metadata |
 | P1-17-02 | Expired deadline could lose to ready stream events | Deadline expiry is checked before awaiting and deadline sleeps use `sleep_until`, so timeout wins once expired |
 | P2-17-03 | Run/stream consistency did not compare committed terminal metadata | Both observation paths now read `terminal_reason` from committed log metadata; error stream events assert public `TurnFailed.reason` matches committed metadata |
@@ -1454,7 +1463,7 @@ Verified: `cargo fmt --all --check` ✓, `cargo test -p lattice-agent --features
 Verified: `cargo test -p lattice-api` ✓, `cargo test -p lattice-api --test consistency` ✓, `cargo test -p lattice-api --test usage_turn` ✓, `cargo test -p lattice-cli run_integration` ✓, `cargo clippy -p lattice-api --all-targets -- -D warnings` ✓
 
 | # | 问题 | 修复 |
-|---|------|------|
+| --- | ------ | ------ |
 | Step 1 | Production `run_turn` used buffered `TurnDeps` path parallel to live `stream_turn` | `run_turn` now drains live `stream_turn` via `RunTurnCollector`; round-aware `assistant_output`, usage sum, synthetic stages |
 | Step 2 | `turn/tests.rs` depended on `FakeTurnDeps` buffered seam | Migrated to public `run_turn` / `stream_turn` with `SessionApi` + `FakeStreamingLlmClient`; added optional `RunTurnRequest.cancel_flag` for cooperative-cancel E2E |
 | Step 3 | Legacy `TurnDeps` / `execute_turn_inner` / `run_turn_with_deps` / `stream_turn_with_deps` duplicated orchestration | Deleted `deps.rs`, buffered execute path, and `map_tool_results`; single core is `stream_turn_live` |
@@ -1467,7 +1476,7 @@ Verified: `cargo test -p lattice-api` ✓, `cargo test -p lattice-api --test con
 Verified: `cargo fmt --all --check` ✓, `git diff --check` ✓, `cargo build` ✓, `cargo test` ✓, `cargo clippy --all-targets -- -D warnings` ✓, `cargo test -p lancet-native` ✓, `cargo test -p lattice-cli` ✓, `cargo test -p lattice-cli --bin lattice lancet -- --nocapture` ✓
 
 | # | 严重度 | 问题 | 修复 |
-|---|--------|------|------|
+| --- | -------- | ------ | ------ |
 | P28-CR-01 | CRITICAL | Verify-failed `exec.command_run` workspace mutations could leave durable metadata at `backend_invoked=false` after the backend had already run | Command execution metadata is now recorded and emitted immediately after `execute_argv` succeeds, before diff/verify return paths; added a verify-failure regression asserting durable metadata and events report `backend_invoked=true` |
 | P28-WR-01 | WARNING | Native and CLI host-probe output used a separate Vec-shaped report instead of the protocol primitive-keyed `HostProbeReport` | Native now reuses `lancet_protocol::HostProbeReport`/`HostProbeEntry`; CLI JSON exposes the canonical `host_probe.primitives.<primitive>` shape and serializes gate-missing primitive reasons through the protocol type |
 | P28-WR-02 | WARNING | Live host capability probes resolved `unshare`, `sh`, and child helpers through ambient `PATH` | Probes now use trusted absolute helper candidates, sanitize child `PATH`, and record helper paths in diagnostics; missing trusted helpers are reported as unknown instead of falling back to ambient `PATH` |
@@ -1481,7 +1490,7 @@ Severity: LOW — display-only, no behavioral impact.
 **Changes:**
 
 | File | Change |
-|------|--------|
+| ------ | -------- |
 | `Cargo.toml` | Added `unicode-width = "0.1"` workspace dependency |
 | `crates/lattice-agent/Cargo.toml` | Added `unicode-width` dependency |
 | `crates/lattice-cli/Cargo.toml` | Added `unicode-width` dependency |
@@ -1696,6 +1705,7 @@ Severity: INFO (documentation-only; no behavior change).
 
 **Problem:** Several living-reference docs had drifted from the codebase after
 recent refactors:
+
 - Root `AGENTS.md` and `README.md` claimed a 10-method CEP catalog including
   `session.envelope` (actual: 9 methods; `session.envelope` removed).
 - Root `AGENTS.md` and `crates/lattice-session/AGENTS.md` described the session
@@ -1719,6 +1729,7 @@ recent refactors:
   carried stale "SQLite session" / "Direct-mode" wording.
 
 **Fix:**
+
 - Regenerated canonical docs from the live codebase (each grounded by a
   doc-writer subagent that verified facts against source):
   `README.md` (144 lines), `docs/ARCHITECTURE.md` (332 lines),
@@ -1747,6 +1758,7 @@ recent refactors:
   porcelain gap) to the MSB/Upper boundary.
 
 **Verification:**
+
 - All 7 canonical docs confirmed on disk with GSD markers and line counts.
 - Spot-checked generated docs for stale claims — every `session.envelope` /
   `sqlite_graph` / `ratatui` / `landlock` / `isolation.command` hit is a
@@ -2438,7 +2450,7 @@ weak release smoke was deleted, and its ledger row moved to
 **Final ledger correction:** decisions remain lattice-cli **118/57/10** and
 global **1338/96/15**; elevated target layers are now **41 fast_binary + 16
 real_microsandbox**. The original 101 CLI elevate rows partition as 36 takeover
-+ 16 deferred + 5 redundant-kept + 40 keep rejudgments + 4 delete. Deferred
+- 16 deferred + 5 redundant-kept + 40 keep rejudgments + 4 delete. Deferred
 total is **55** (54 MSB/KVM + 1 fast); CLI residual is 16 deferred + 5
 redundant-kept = 21.
 
@@ -2760,7 +2772,7 @@ routing state through the shared call context.
   old stage labels (alpha no-compat, no migration). Assertions updated in
   the same commit, including the provenance projector fixture.
 - Spies deleted (`registry.rs::SpyBackend`, `observation.rs::ObsSpyBackend`
-  + `HostFsBackend`, `mutation.rs::CreateSpyBackend`/`MutSpyBackend`,
+  - `HostFsBackend`, `mutation.rs::CreateSpyBackend`/`MutSpyBackend`,
   `edit/apply.rs::HostFsBackend`, `effect_contract_tests::SupportFsBackend`,
   lattice-api `TestFsBackend` ×2). Tests now run tempdir + the real
   `LocalWorkspace`. The only fault injection is
@@ -2807,3 +2819,55 @@ routing state through the shared call context.
 `crates/lattice-api/tests/{cep_round_trip.rs,dogfood_impact_matrix.rs,cep_mode_integration.rs,direct_local_acceptance.rs}`,
 `docs/lancet-warn-report.md`, `FINDINGS.md`, `crates/lancet-native/AGENTS.md`,
 `crates/lancet-api/AGENTS.md`, `crates/lancet-audit/AGENTS.md`, `FIX.md`.
+
+## Codeberg #39: unified Policy-Visible Workspace read visibility — 2026-07-17
+
+Severity: FEATURE (ADR 0003 Migration Sequence step 4 / Workstream A).
+
+**Problem:** Observation (read/list/grep/find) exposed every resolvable Local
+path. Gitignored secrets (e.g. `.env`) were Agent-visible; there was no
+profile surface for ignored-path inclusion or read denial; System Path
+Exclusions (`.git` / `.lattice`) were not enforced as a non-relaxable
+runtime rule on the observation path.
+
+**Fix summary:**
+
+- `lattice-profile::LancetWorkspacePolicySection` gains
+  `included_ignored_read_patterns` and `denied_read_patterns` (fail-closed
+  unknown fields; same project-relative pattern validation as write deny).
+- `lancet-authority` adds pure `policy/visibility.rs`:
+  System Exclusion > denied_read > included_ignored > gitignore default.
+  `WorkspacePolicy` carries the two new fields and builds
+  `ReadVisibilityPolicy`; write blacklist / `authorized_region_for` unchanged.
+- `lancet-native` adds per-Tool-call gix visibility engine
+  (`workspace/visibility.rs`, isolated open, index + exclude stack, no
+  subprocess). Non-git roots treat paths as non-ignored.
+- `observe.workspace` read/list/grep/find share one decision. Hidden reads
+  return the same Agent-facing not-found shape; reason is audit-only
+  (`system_exclusion` / `read_denied` / `ignored_default`). Grep/find prune
+  hidden dirs unless an include pattern may still reach inside.
+- Workspace dependency: `gix = "0.85"`.
+
+**Verification:**
+
+- `cargo build --workspace --all-targets` — clean.
+- `cargo test -p lancet-authority -- --test-threads=1` — green (incl. 7
+  visibility unit tests).
+- `cargo test -p lancet-native -- --test-threads=1` — 118 + 1 + 5 + 3 green
+  (incl. gix engine tests + four-op policy-visible observation tests).
+- `cargo test -p lattice-profile -- --test-threads=1` — 96 green.
+- `cargo test -p lattice-api --lib -- --test-threads=1` — 98 green.
+- `cargo test -p lattice-api --test direct_local_acceptance --test cep_round_trip -- --test-threads=1` — green.
+- Closed five-method catalog unchanged.
+
+**Changed files:** `Cargo.toml`,
+`crates/lancet-authority/src/{lib.rs,policy/{mod.rs,default.rs,visibility.rs}}`,
+`crates/lancet-authority/tests/policy_tests.rs`,
+`crates/lattice-profile/src/schema.rs`,
+`crates/lattice-api/src/turn/cep.rs`,
+`crates/lancet-native/Cargo.toml`,
+`crates/lancet-native/src/workspace/{mod.rs,local.rs,visibility.rs}`,
+`crates/lancet-native/src/handlers/observation.rs`,
+`crates/lancet-native/src/handlers/mutation.rs` (WorkspacePolicy literals),
+`crates/lattice-api/tests/{direct_local_acceptance,dogfood_impact_matrix,cep_round_trip}.rs`,
+`FINDINGS.md`, `FIX.md`.

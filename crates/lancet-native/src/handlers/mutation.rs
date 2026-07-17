@@ -956,6 +956,7 @@ mod create_tests {
             );
         policy_cfg.workspace = WorkspacePolicy {
             denied_write_patterns: denied_patterns.iter().map(|s| (*s).into()).collect(),
+            ..Default::default()
         };
         let cep_context = Arc::new(CepTurnContext::from_policy(
             lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root),
@@ -1165,6 +1166,7 @@ mod edit_tests {
             );
         policy_cfg.workspace = WorkspacePolicy {
             denied_write_patterns: Vec::new(),
+            ..Default::default()
         };
         let cep_context = Arc::new(CepTurnContext::from_policy(
             lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root),

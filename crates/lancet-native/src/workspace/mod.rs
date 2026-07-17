@@ -16,9 +16,11 @@
 
 mod local;
 mod types;
+mod visibility;
 
 pub(crate) use local::LocalWorkspace;
 pub(crate) use types::{CreatedFile, InstalledFile, LocalWorkspaceError};
+pub(crate) use visibility::{VisibilityEngine, join_rel};
 pub use types::{
     DirectoryEntry, FindRequest, GrepRequest, PathFacts, PathIntent, PathKind, WorkspacePath,
 };

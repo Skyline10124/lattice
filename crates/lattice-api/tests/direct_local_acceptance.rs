@@ -34,6 +34,7 @@ fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
     let mut policy = PolicyConfig::defaults_for_project_root(root.to_path_buf());
     policy.workspace = WorkspacePolicy {
         denied_write_patterns: Vec::new(),
+        ..Default::default()
     };
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     LancetRuntime::build(LancetRuntimeConfig {
@@ -177,6 +178,7 @@ async fn policy_deny_blocks_create_on_direct_local() {
     let mut policy = PolicyConfig::defaults_for_project_root(dir.path().to_path_buf());
     policy.workspace = WorkspacePolicy {
         denied_write_patterns: vec!["secret/**".into()],
+        ..Default::default()
     };
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     let runtime = LancetRuntime::build(LancetRuntimeConfig {

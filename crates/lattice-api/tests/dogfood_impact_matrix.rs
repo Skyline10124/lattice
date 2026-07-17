@@ -81,6 +81,7 @@ async fn build_production_config(
     // Allow all writes under the project root (empty deny list).
     policy_cfg.workspace = WorkspacePolicy {
         denied_write_patterns: vec![],
+        ..Default::default()
     };
     if allow_localhost {
         policy_cfg.network.allow_localhost = true;

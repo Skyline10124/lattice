@@ -18,8 +18,9 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   patch write limits.
-- `src/workspace/` owns the one concrete `LocalWorkspace` (#37/#38): secure
-  per-segment path resolution, bounded read/list/grep/find, content hashing
+- `src/workspace/` owns the one concrete `LocalWorkspace` (#37/#38/#39): secure
+  per-segment path resolution, Policy-Visible Workspace filtering (gix Git
+  facts + authority read policy), bounded read/list/grep/find, content hashing
   (Local Revision), no-replace create, atomic edit install, filesystem error
   normalization, and the Local operation vocabulary (`WorkspacePath`,
   `PathFacts`, `PathIntent`, requests). ADR 0004 moves this into

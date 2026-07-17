@@ -20,11 +20,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use regex::Regex;
 
 use crate::edit::content_hash;
+use lancet_authority::ReadVisibilityPolicy;
 
 use super::types::{
     CreatedFile, DirectoryEntry, FindRequest, GrepMatch, GrepRequest, InstalledFile,
     LocalWorkspaceError, PathFacts, PathIntent, PathKind, WorkspacePath,
 };
+use super::visibility::VisibilityEngine;
 
 /// The single concrete Local Workspace (ADR 0003 decision 3).
 ///
@@ -53,6 +55,11 @@ impl LocalWorkspace {
             #[cfg(any(test, feature = "test-fault-injection"))]
             fail_install: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Canonical project root this workspace operates on.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Clone the shareable state for a `spawn_blocking` closure.
@@ -274,10 +281,14 @@ impl LocalWorkspace {
     }
 
     /// Grep a directory subtree, returning up to `max_results` matches.
+    ///
+    /// Hidden paths (Policy-Visible Workspace) produce no matches and are not
+    /// counted toward truncation.
     pub(crate) async fn grep(
         &self,
         req: &GrepRequest,
         max_results: usize,
+        visibility: ReadVisibilityPolicy,
     ) -> Result<Vec<GrepMatch>, LocalWorkspaceError> {
         let ws = self.blocking_clone();
         let req = req.clone();
@@ -295,10 +306,19 @@ impl LocalWorkspace {
                 )));
             }
             let re = Regex::new(&req.pattern)
-                .map_err(|e| std::io::Error::other(e))
+                .map_err(std::io::Error::other)
                 .map_err(LocalWorkspaceError::Io)?;
+            let mut engine = VisibilityEngine::load(&ws.root, visibility);
             let mut out: Vec<GrepMatch> = Vec::new();
-            grep_walk(&ws.root, &full, &re, req.glob.as_deref(), max_results, &mut out)?;
+            grep_walk(
+                &ws.root,
+                &full,
+                &re,
+                req.glob.as_deref(),
+                max_results,
+                &mut engine,
+                &mut out,
+            )?;
             Ok(out)
         })
         .await
@@ -306,10 +326,13 @@ impl LocalWorkspace {
     }
 
     /// Find files matching a glob beneath a directory subtree.
+    ///
+    /// Hidden paths are omitted from results and truncation counts.
     pub(crate) async fn find_files(
         &self,
         req: &FindRequest,
         max_results: usize,
+        visibility: ReadVisibilityPolicy,
     ) -> Result<Vec<WorkspacePath>, LocalWorkspaceError> {
         let ws = self.blocking_clone();
         let req = req.clone();
@@ -326,8 +349,16 @@ impl LocalWorkspace {
                     "find root is not a directory",
                 )));
             }
+            let mut engine = VisibilityEngine::load(&ws.root, visibility);
             let mut out: Vec<WorkspacePath> = Vec::new();
-            find_walk(&ws.root, &full, &req.pattern, max_results, &mut out)?;
+            find_walk(
+                &ws.root,
+                &full,
+                &req.pattern,
+                max_results,
+                &mut engine,
+                &mut out,
+            )?;
             Ok(out)
         })
         .await
@@ -377,18 +408,17 @@ impl LocalWorkspace {
                             if !cur.exists() {
                                 fs::create_dir_all(&cur)?;
                                 created_dirs.push(relative_under(&ws.root, &cur)?);
-                            } else if let Ok(m) = fs::symlink_metadata(&cur) {
-                                if m.file_type().is_symlink() {
+                            } else if let Ok(m) = fs::symlink_metadata(&cur)
+                                && m.file_type().is_symlink() {
                                     return Err(LocalWorkspaceError::SymlinkRejected {
                                         component: cur.clone(),
                                     });
                                 }
-                            }
                         }
                     }
                 }
                 let _ = &mut created_dirs;
-            } else if !fs::symlink_metadata(&parent).is_ok() {
+            } else if fs::symlink_metadata(&parent).is_err() {
                 return Err(LocalWorkspaceError::NotFound {
                     normalized: path.as_str().to_string(),
                 });
@@ -566,6 +596,7 @@ fn grep_walk(
     re: &Regex,
     glob: Option<&str>,
     max_results: usize,
+    visibility: &mut VisibilityEngine,
     out: &mut Vec<GrepMatch>,
 ) -> Result<(), LocalWorkspaceError> {
     if out.len() >= max_results {
@@ -578,16 +609,29 @@ fn grep_walk(
         let entry = entry?;
         let path = entry.path();
         let meta = fs::symlink_metadata(&path)?;
+        let rel = relative_under(workspace_root, &path)?;
         if meta.is_dir() {
-            grep_walk(workspace_root, &path, re, glob, max_results, out)?;
+            if visibility.should_descend(&rel) {
+                grep_walk(
+                    workspace_root,
+                    &path,
+                    re,
+                    glob,
+                    max_results,
+                    visibility,
+                    out,
+                )?;
+            }
         } else if meta.is_file() {
+            if !visibility.is_visible_file(&rel) {
+                continue;
+            }
             if let Some(g) = glob {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if !glob_match(g, name) {
                     continue;
                 }
             }
-            let rel = relative_under(workspace_root, &path)?;
             let content = match fs::read_to_string(&path) {
                 Ok(c) => c,
                 Err(_) => continue,
@@ -615,6 +659,7 @@ fn find_walk(
     current: &Path,
     pattern: &str,
     max_results: usize,
+    visibility: &mut VisibilityEngine,
     out: &mut Vec<WorkspacePath>,
 ) -> Result<(), LocalWorkspaceError> {
     if out.len() >= max_results {
@@ -627,13 +672,28 @@ fn find_walk(
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if glob_match(pattern, &name) {
-            let rel = relative_under(workspace_root, &path)?;
-            out.push(WorkspacePath::parse(&rel).map_err(LocalWorkspaceError::Path)?);
-        }
+        let rel = relative_under(workspace_root, &path)?;
         let meta = fs::symlink_metadata(&path)?;
-        if meta.is_dir() {
-            find_walk(workspace_root, &path, pattern, max_results, out)?;
+        let is_dir = meta.is_dir();
+        if glob_match(pattern, &name) {
+            let listable = if is_dir {
+                visibility.is_listable(&rel, true)
+            } else {
+                visibility.is_visible_file(&rel)
+            };
+            if listable {
+                out.push(WorkspacePath::parse(&rel).map_err(LocalWorkspaceError::Path)?);
+            }
+        }
+        if is_dir && visibility.should_descend(&rel) {
+            find_walk(
+                workspace_root,
+                &path,
+                pattern,
+                max_results,
+                visibility,
+                out,
+            )?;
         }
     }
     Ok(())
@@ -848,7 +908,7 @@ mod tests {
             path: WorkspacePath::project_root(),
             glob: None,
         };
-        let matches = ws.grep(&req, 100).await.unwrap();
+        let matches = ws.grep(&req, 100, ReadVisibilityPolicy::default()).await.unwrap();
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].line_number, 1);
         assert_eq!(matches[1].line_number, 3);
@@ -866,7 +926,7 @@ mod tests {
             pattern: "*.rs".into(),
             path: WorkspacePath::project_root(),
         };
-        let paths = ws.find_files(&req, 100).await.unwrap();
+        let paths = ws.find_files(&req, 100, ReadVisibilityPolicy::default()).await.unwrap();
         let strs: Vec<_> = paths.iter().map(|p| p.as_str().to_string()).collect();
         assert!(strs.contains(&"a.rs".to_string()));
         assert!(strs.contains(&"sub/c.rs".to_string()));

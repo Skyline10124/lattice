@@ -250,9 +250,12 @@ fn workspace_policy_from_profile(lancet: &LancetSection) -> Result<WorkspacePoli
     let mut workspace = WorkspacePolicy::default();
     if let Some(section) = lancet.workspace.as_ref() {
         workspace.denied_write_patterns = section.denied_write_patterns.clone();
+        workspace.included_ignored_read_patterns =
+            section.included_ignored_read_patterns.clone();
+        workspace.denied_read_patterns = section.denied_read_patterns.clone();
     }
     workspace.validate().map_err(|err| {
-        ApiError::BadRequest(format!("lancet.workspace.denied_write_patterns: {err}"))
+        ApiError::BadRequest(format!("lancet.workspace: {err}"))
     })?;
     Ok(workspace)
 }
@@ -766,6 +769,7 @@ mod cep_context_profile_policy {
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
                 denied_write_patterns: vec!["src/**".into()],
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -779,18 +783,35 @@ mod cep_context_profile_policy {
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
                 denied_write_patterns: vec!["../etc/passwd".into()],
+                ..Default::default()
             }),
             ..Default::default()
         };
         let err = load_policy_config(&cep, dir.path()).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("lancet.workspace.denied_write_patterns"),
+            err.to_string().contains("lancet.workspace"),
             "{err}"
         );
     }
 
+
     #[test]
+    fn workspace_policy_from_profile_lowers_read_visibility_patterns() {
+        let dir = TempDir::new().unwrap();
+        let cep = LancetSection {
+            workspace: Some(LancetWorkspacePolicySection {
+                denied_write_patterns: vec!["src/**".into()],
+                included_ignored_read_patterns: vec![".env".into()],
+                denied_read_patterns: vec!["secrets/**".into()],
+            }),
+            ..Default::default()
+        };
+        let config = load_policy_config(&cep, dir.path()).expect("policy config");
+        assert_eq!(config.workspace.included_ignored_read_patterns, vec![".env"]);
+        assert_eq!(config.workspace.denied_read_patterns, vec!["secrets/**"]);
+    }
+
+        #[test]
     fn workspace_policy_from_profile_absent_defaults_empty() {
         let dir = TempDir::new().unwrap();
         let config = load_policy_config(&LancetSection::default(), dir.path()).expect("policy");
@@ -803,6 +824,7 @@ mod cep_context_profile_policy {
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
                 denied_write_patterns: vec!["src/**".into()],
+                ..Default::default()
             }),
             ..Default::default()
         };

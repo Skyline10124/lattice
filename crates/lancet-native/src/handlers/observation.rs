@@ -13,8 +13,10 @@ use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::executor::render::render_file_slice;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use crate::workspace::{
-    FindRequest, GrepRequest, LocalWorkspaceError, PathFacts, PathIntent, WorkspacePath,
+    FindRequest, GrepRequest, LocalWorkspaceError, PathFacts, PathIntent, VisibilityEngine,
+    WorkspacePath, join_rel,
 };
+use lancet_authority::{HiddenReason, ReadVisibility, ReadVisibilityPolicy};
 use lancet_audit::{RejectionRecord, RejectionStage};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::effect::region::AuthorizedEffectRegion;
@@ -249,6 +251,36 @@ async fn emit_success_metadata(
         .await;
 }
 
+
+fn read_visibility_policy(ctx: &HandlerContext) -> ReadVisibilityPolicy {
+    ctx.default_policy_hook
+        .as_ref()
+        .and_then(|hook| hook.config().workspace.read_visibility_policy().ok())
+        .unwrap_or_default()
+}
+
+fn load_visibility(ctx: &HandlerContext) -> VisibilityEngine {
+    VisibilityEngine::load(ctx.workspace.root(), read_visibility_policy(ctx))
+}
+
+async fn deny_hidden(
+    ctx: &HandlerContext,
+    method: &str,
+    request_path: &str,
+    reason: HiddenReason,
+) -> CepError {
+    record_observation_denial(
+        ctx,
+        method,
+        RejectionStage::PathGuard,
+        reason.as_audit_label(),
+    )
+    .await;
+    // Agent-facing shape matches a missing path; reason is audit-only.
+    let _ = request_path;
+    path_not_found(request_path)
+}
+
 /// Resolve `ws_path` through the concrete Local Workspace and validate the
 /// observed facts against Guard L1, recording denial evidence on failure.
 async fn resolve_and_validate(
@@ -300,6 +332,10 @@ async fn handle_read_file(
     let facts = resolve_and_validate(&ctx, &ws_path, PathIntent::Read, &params.path, method).await?;
     if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::File)) {
         return Err(path_not_found(&params.path));
+    }
+    let mut visibility = load_visibility(&ctx);
+    if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), false) {
+        return Err(deny_hidden(&ctx, method, &params.path, reason).await);
     }
     if let Some(size) = facts.byte_size
         && size as usize > policy.observation.max_single_read_bytes
@@ -391,6 +427,15 @@ async fn handle_list_directory(
     if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
         return Err(path_not_found(&raw_path));
     }
+    {
+        let mut visibility = load_visibility(&ctx);
+        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true) {
+            // Navigable-only hidden dirs (include reachability) may still be listed.
+            if !visibility.is_listable(ws_path.as_str(), true) {
+                return Err(deny_hidden(&ctx, method, &raw_path, reason).await);
+            }
+        }
+    }
 
     let limit = params
         .limit
@@ -403,10 +448,16 @@ async fn handle_list_directory(
         .list_dir(&ws_path)
         .await
         .map_err(|err| observation_workspace_error(&raw_path, err))?;
-    let mut entries = workspace_entries
-        .iter()
-        .map(convert_directory_entry)
-        .collect::<Vec<_>>();
+    let mut visibility = load_visibility(&ctx);
+    let parent_rel = ws_path.as_str();
+    let mut entries = Vec::new();
+    for entry in &workspace_entries {
+        let child_rel = join_rel(parent_rel, &entry.name);
+        let is_dir = matches!(entry.kind, crate::workspace::PathKind::Directory);
+        if visibility.is_listable(&child_rel, is_dir) {
+            entries.push(convert_directory_entry(entry));
+        }
+    }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let total = entries.len();
     let truncated = total > limit;
@@ -472,6 +523,14 @@ async fn handle_grep(
     if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
         return Err(path_not_found(path));
     }
+    {
+        let mut visibility = load_visibility(&ctx);
+        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true) {
+            if !visibility.is_listable(ws_path.as_str(), true) {
+                return Err(deny_hidden(&ctx, method, path, reason).await);
+            }
+        }
+    }
 
     let max_results = params
         .max_results
@@ -486,7 +545,7 @@ async fn handle_grep(
     };
     let workspace_matches = ctx
         .workspace
-        .grep(&request, max_results)
+        .grep(&request, max_results, read_visibility_policy(&ctx))
         .await
         .map_err(|err| observation_workspace_error(path, err))?;
 
@@ -553,6 +612,14 @@ async fn handle_find_files(
     if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
         return Err(path_not_found(path));
     }
+    {
+        let mut visibility = load_visibility(&ctx);
+        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true) {
+            if !visibility.is_listable(ws_path.as_str(), true) {
+                return Err(deny_hidden(&ctx, method, path, reason).await);
+            }
+        }
+    }
 
     let limit = params
         .limit
@@ -566,7 +633,7 @@ async fn handle_find_files(
     };
     let workspace_paths = ctx
         .workspace
-        .find_files(&request, limit)
+        .find_files(&request, limit, read_visibility_policy(&ctx))
         .await
         .map_err(|err| observation_workspace_error(path, err))?;
 
@@ -653,9 +720,28 @@ mod tests {
         ctx_for_policy(CepPolicyConfig::defaults_for_project_root(root), root)
     }
 
+    fn ctx_for_workspace(
+        root: &str,
+        workspace: lancet_authority::policy::default::WorkspacePolicy,
+    ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
+        ctx_for_policy_workspace(
+            CepPolicyConfig::defaults_for_project_root(root),
+            root,
+            workspace,
+        )
+    }
+
     fn ctx_for_policy(
         policy: CepPolicyConfig,
         root: &str,
+    ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
+        ctx_for_policy_workspace(policy, root, Default::default())
+    }
+
+    fn ctx_for_policy_workspace(
+        policy: CepPolicyConfig,
+        root: &str,
+        workspace: lancet_authority::policy::default::WorkspacePolicy,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -666,7 +752,7 @@ mod tests {
             network: cep_context.policy.network.clone(),
             budget: cep_context.policy.budget.clone(),
             observation: cep_context.policy.observation.clone(),
-            workspace: Default::default(),
+            workspace,
             project_root: cep_context.policy.project_root.clone(),
             denied_effect_kinds: Default::default(),
         };
@@ -1218,4 +1304,295 @@ mod tests {
         assert!(metadata.get("observation_source").is_none());
         assert_eq!(metadata["denial_source"], "cep_policy");
     }
+
+    fn init_git_ignore_fixture() -> TempDir {
+        use std::process::Command;
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        assert!(
+            Command::new("git")
+                .args(["init"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(root.join(".gitignore"), ".env\nsecret/\n").unwrap();
+        fs::write(root.join("visible.txt"), "hello visible\n").unwrap();
+        fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+        fs::create_dir(root.join("secret")).unwrap();
+        fs::write(root.join("secret/key"), "hidden-key\n").unwrap();
+        fs::write(root.join("secret/other"), "other\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "visible.txt", ".gitignore"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-m",
+                    "init"
+                ])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        dir
+    }
+
+    #[tokio::test]
+    async fn policy_visible_secret_sentinel_hidden_on_all_four_ops() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for(root);
+
+        let read_err = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".env".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            read_err.message.contains("not_found"),
+            "hidden read must look like missing: {}",
+            read_err.message
+        );
+
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = list.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"visible.txt"));
+        assert!(!names.contains(&".env"));
+        assert!(!names.contains(&"secret"));
+
+        let grep = dispatch_grep(
+            &registry,
+            GrepParams {
+                pattern: "SECRET|hidden".into(),
+                path: Some(".".into()),
+                max_results: Some(20),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            grep.matches.is_empty(),
+            "hidden files must not produce matches: {:?}",
+            grep.matches
+        );
+
+        let find = dispatch_find_files(
+            &registry,
+            FindFilesParams {
+                pattern: "*".into(),
+                path: Some(".".into()),
+                limit: Some(50),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            find.paths.iter().all(|p| p != ".env" && !p.starts_with("secret")),
+            "find leaked hidden paths: {:?}",
+            find.paths
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_visible_include_and_denial_precedence() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for_workspace(
+            root,
+            lancet_authority::policy::default::WorkspacePolicy {
+                included_ignored_read_patterns: vec![".env".into(), "secret/**".into()],
+                denied_read_patterns: vec!["secret/other".into()],
+                ..Default::default()
+            },
+        );
+
+        let env = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".env".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(env.content.contains("SECRET=1"));
+
+        let key = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: "secret/key".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(key.content.contains("hidden-key"));
+
+        let denied = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: "secret/other".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(denied.message.contains("not_found"), "{}", denied.message);
+
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: "secret".into(),
+                limit: Some(20),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = list.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"key"));
+        assert!(!names.contains(&"other"));
+    }
+
+    #[tokio::test]
+    async fn policy_visible_system_exclusion_beats_include() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for_workspace(
+            root,
+            lancet_authority::policy::default::WorkspacePolicy {
+                included_ignored_read_patterns: vec![".git/**".into(), ".git/config".into()],
+                ..Default::default()
+            },
+        );
+
+        let err = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".git/config".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.message.contains("not_found"), "{}", err.message);
+
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert!(!list.entries.iter().any(|e| e.name == ".git"));
+    }
+
+    #[tokio::test]
+    async fn policy_visible_four_ops_agree_on_same_path() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for(root);
+
+        let read = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".env".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await;
+        assert!(read.is_err());
+
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(!list.entries.iter().any(|e| e.name == ".env"));
+
+        let grep = dispatch_grep(
+            &registry,
+            GrepParams {
+                pattern: "SECRET".into(),
+                path: Some(".".into()),
+                max_results: Some(10),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(grep.matches.iter().all(|m| m.path != ".env"));
+
+        let find = dispatch_find_files(
+            &registry,
+            FindFilesParams {
+                pattern: ".env".into(),
+                path: Some(".".into()),
+                limit: Some(10),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert!(!find.paths.iter().any(|p| p == ".env"));
+    }
+
 }
