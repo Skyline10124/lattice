@@ -855,8 +855,11 @@ mod tests {
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("ro/new.txt").unwrap();
         let err = ws.install_atomic(&path, b"x").await;
-        // Restore permissions so TempDir can clean up.
+        // Restore permissions so TempDir can clean up. Test-only restore
+        // path: the TempDir parent is owner-only, so widening the child back
+        // to writable here carries no production meaning.
         let mut perms = fs::metadata(&ro).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         let _ = fs::set_permissions(&ro, perms);
         assert!(err.is_err(), "expected install to fail in read-only dir");

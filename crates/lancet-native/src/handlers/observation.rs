@@ -520,10 +520,10 @@ async fn handle_grep(
     }
     {
         let mut visibility = load_visibility(&ctx);
-        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true) {
-            if !visibility.is_listable(ws_path.as_str(), true) {
-                return Err(deny_hidden(&ctx, method, path, reason).await);
-            }
+        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true)
+            && !visibility.is_listable(ws_path.as_str(), true)
+        {
+            return Err(deny_hidden(&ctx, method, path, reason).await);
         }
     }
 
@@ -609,10 +609,10 @@ async fn handle_find_files(
     }
     {
         let mut visibility = load_visibility(&ctx);
-        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true) {
-            if !visibility.is_listable(ws_path.as_str(), true) {
-                return Err(deny_hidden(&ctx, method, path, reason).await);
-            }
+        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true)
+            && !visibility.is_listable(ws_path.as_str(), true)
+        {
+            return Err(deny_hidden(&ctx, method, path, reason).await);
         }
     }
 
