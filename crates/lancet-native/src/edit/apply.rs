@@ -57,8 +57,7 @@ async fn apply_patch(
 #[cfg(test)]
 fn test_storage(project_root: &Path) -> EditStorage {
     use std::sync::Arc;
-    let workspace =
-        crate::workspace::LocalWorkspace::new(project_root).expect("test local workspace");
+    let workspace = crate::workspace::LocalWorkspace::new(project_root);
     EditStorage::new(
         Arc::new(workspace),
         lancet_authority::effect::region::AuthorizedEffectRegion::empty(),

@@ -116,8 +116,6 @@ impl WorkspacePolicy {
                 normalize_write_path_pattern(pattern).map_err(|e| e.message)?;
             }
         }
-        // Compile-time parity with the pure visibility decision surface.
-        let _ = self.read_visibility_policy()?;
         Ok(())
     }
 

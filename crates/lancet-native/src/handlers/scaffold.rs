@@ -110,10 +110,9 @@ mod scaffold_tests {
             })),
             audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
             cep_mode: CepMode::Off,
-            workspace: Arc::new(
-                crate::workspace::LocalWorkspace::new(std::path::Path::new(root))
-                    .expect("local workspace"),
-            ),
+            workspace: Arc::new(crate::workspace::LocalWorkspace::new(std::path::Path::new(
+                root,
+            ))),
         }
     }
 

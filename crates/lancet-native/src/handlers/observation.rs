@@ -276,7 +276,6 @@ async fn deny_hidden(
     )
     .await;
     // Agent-facing shape matches a missing path; reason is audit-only.
-    let _ = request_path;
     path_not_found(request_path)
 }
 
@@ -394,6 +393,7 @@ async fn handle_read_file(
             "content_hash": hash,
             "truncated": truncated,
             "policy_enforced": true,
+            "visibility_evidence": visibility.evidence().as_json(),
         }),
     )
     .await;
@@ -422,14 +422,12 @@ async fn handle_list_directory(
     if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
         return Err(path_not_found(&raw_path));
     }
+    let mut visibility = load_visibility(&ctx);
+    let root_assessment = visibility.assess(ws_path.as_str(), true);
+    if let Some(reason) = root_assessment.hidden_reason()
+        && !root_assessment.should_descend()
     {
-        let mut visibility = load_visibility(&ctx);
-        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true) {
-            // Navigable-only hidden dirs (include reachability) may still be listed.
-            if !visibility.is_listable(ws_path.as_str(), true) {
-                return Err(deny_hidden(&ctx, method, &raw_path, reason).await);
-            }
-        }
+        return Err(deny_hidden(&ctx, method, &raw_path, reason).await);
     }
 
     let limit = params
@@ -443,13 +441,12 @@ async fn handle_list_directory(
         .list_dir(&ws_path)
         .await
         .map_err(|err| observation_workspace_error(&raw_path, err))?;
-    let mut visibility = load_visibility(&ctx);
     let parent_rel = ws_path.as_str();
     let mut entries = Vec::new();
     for entry in &workspace_entries {
         let child_rel = join_rel(parent_rel, &entry.name);
         let is_dir = matches!(entry.kind, crate::workspace::PathKind::Directory);
-        if visibility.is_listable(&child_rel, is_dir) {
+        if visibility.is_visible_entry(&child_rel, is_dir) {
             entries.push(convert_directory_entry(entry));
         }
     }
@@ -483,6 +480,7 @@ async fn handle_list_directory(
             "bytes_returned": bytes_returned,
             "truncated": truncated,
             "policy_enforced": true,
+            "visibility_evidence": visibility.evidence().as_json(),
         }),
     )
     .await;
@@ -518,13 +516,12 @@ async fn handle_grep(
     if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
         return Err(path_not_found(path));
     }
+    let mut visibility = load_visibility(&ctx);
+    let root_assessment = visibility.assess(ws_path.as_str(), true);
+    if let Some(reason) = root_assessment.hidden_reason()
+        && !root_assessment.should_descend()
     {
-        let mut visibility = load_visibility(&ctx);
-        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true)
-            && !visibility.is_listable(ws_path.as_str(), true)
-        {
-            return Err(deny_hidden(&ctx, method, path, reason).await);
-        }
+        return Err(deny_hidden(&ctx, method, path, reason).await);
     }
 
     let max_results = params
@@ -538,9 +535,9 @@ async fn handle_grep(
         path: ws_path.clone(),
         glob: None,
     };
-    let workspace_matches = ctx
+    let (workspace_matches, visibility_evidence_value) = ctx
         .workspace
-        .grep(&request, max_results, read_visibility_policy(&ctx))
+        .grep(&request, max_results, visibility)
         .await
         .map_err(|err| observation_workspace_error(path, err))?;
 
@@ -583,6 +580,7 @@ async fn handle_grep(
             "bytes_returned": bytes_returned,
             "truncated": truncated,
             "policy_enforced": true,
+            "visibility_evidence": visibility_evidence_value.as_json(),
         }),
     )
     .await;
@@ -607,13 +605,12 @@ async fn handle_find_files(
     if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
         return Err(path_not_found(path));
     }
+    let mut visibility = load_visibility(&ctx);
+    let root_assessment = visibility.assess(ws_path.as_str(), true);
+    if let Some(reason) = root_assessment.hidden_reason()
+        && !root_assessment.should_descend()
     {
-        let mut visibility = load_visibility(&ctx);
-        if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), true)
-            && !visibility.is_listable(ws_path.as_str(), true)
-        {
-            return Err(deny_hidden(&ctx, method, path, reason).await);
-        }
+        return Err(deny_hidden(&ctx, method, path, reason).await);
     }
 
     let limit = params
@@ -626,9 +623,9 @@ async fn handle_find_files(
         pattern: params.pattern.clone(),
         path: ws_path.clone(),
     };
-    let workspace_paths = ctx
+    let (workspace_paths, visibility_evidence_value) = ctx
         .workspace
-        .find_files(&request, limit, read_visibility_policy(&ctx))
+        .find_files(&request, limit, visibility)
         .await
         .map_err(|err| observation_workspace_error(path, err))?;
 
@@ -663,6 +660,7 @@ async fn handle_find_files(
             "bytes_returned": bytes_returned,
             "truncated": truncated,
             "policy_enforced": true,
+            "visibility_evidence": visibility_evidence_value.as_json(),
         }),
     )
     .await;
@@ -708,7 +706,7 @@ mod tests {
     }
 
     fn local_workspace(root: &str) -> Arc<LocalWorkspace> {
-        Arc::new(LocalWorkspace::new(Path::new(root)).expect("local workspace"))
+        Arc::new(LocalWorkspace::new(Path::new(root)))
     }
 
     fn ctx_for(root: &str) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
@@ -1306,6 +1304,7 @@ mod tests {
         let repo = gix::init(root).expect("gix init");
         std::fs::write(root.join(".gitignore"), ".env\nsecret/\n").unwrap();
         std::fs::write(root.join("visible.txt"), "hello visible\n").unwrap();
+        std::fs::write(root.join("denied.txt"), "DENIED_SENTINEL\n").unwrap();
 
         std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
         std::fs::create_dir_all(root.join("secret")).unwrap();
@@ -1316,6 +1315,7 @@ mod tests {
         for (rel, content) in [
             (".gitignore", ".env\nsecret/\n"),
             ("visible.txt", "hello visible\n"),
+            ("denied.txt", "DENIED_SENTINEL\n"),
         ] {
             let blob = repo.write_blob(content.as_bytes()).expect("blob").detach();
             editor
@@ -1476,6 +1476,18 @@ mod tests {
         .unwrap_err();
         assert!(denied.message.contains("not_found"), "{}", denied.message);
 
+        let root_list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(20),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(root_list.entries.iter().any(|entry| entry.name == "secret"));
+
         let list = dispatch_list_directory(
             &registry,
             ListDirectoryParams {
@@ -1489,6 +1501,250 @@ mod tests {
         let names: Vec<_> = list.entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"key"));
         assert!(!names.contains(&"other"));
+    }
+
+    #[tokio::test]
+    async fn policy_visible_navigable_ancestor_is_not_emitted_but_can_be_listed() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let workspace = lancet_authority::policy::default::WorkspacePolicy {
+            included_ignored_read_patterns: vec!["secret/key".into()],
+            ..Default::default()
+        };
+        let (ctx, _) = ctx_for_workspace(root, workspace);
+
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(!list.entries.iter().any(|entry| entry.name == "secret"));
+
+        let find = dispatch_find_files(
+            &registry,
+            FindFilesParams {
+                pattern: "*".into(),
+                path: Some(".".into()),
+                limit: Some(50),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(!find.paths.iter().any(|path| path == "secret"));
+        assert!(find.paths.iter().any(|path| path == "secret/key"));
+        assert!(!find.paths.iter().any(|path| path == "secret/other"));
+
+        let explicit = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: "secret".into(),
+                limit: Some(50),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = explicit
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["key"]);
+    }
+
+    #[tokio::test]
+    async fn included_ignored_read_records_content_free_success_evidence() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for_workspace(
+            root,
+            lancet_authority::policy::default::WorkspacePolicy {
+                included_ignored_read_patterns: vec![".env".into()],
+                ..Default::default()
+            },
+        );
+        let durable = ctx.durable_metadata.clone();
+
+        let result = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".env".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert!(result.content.contains("SECRET=1"));
+
+        let raw = durable.take_json().expect("durable metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(metadata["observation_source"], "workspace");
+        assert_eq!(metadata["truncated"], false);
+        assert_eq!(
+            metadata["visibility_evidence"],
+            json!({"included_ignored": true, "filtered_by": []})
+        );
+        assert!(!raw.contains("SECRET=1"));
+        assert!(!raw.contains(root));
+    }
+
+    #[tokio::test]
+    async fn recursive_success_metadata_records_all_visibility_categories() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let workspace = || lancet_authority::policy::default::WorkspacePolicy {
+            included_ignored_read_patterns: vec!["secret/key".into()],
+            denied_read_patterns: vec!["denied.txt".into()],
+            ..Default::default()
+        };
+        let expected_recursive = json!({
+            "included_ignored": true,
+            "filtered_by": ["system_exclusion", "read_denied", "ignored_default"],
+        });
+
+        let (list_ctx, _) = ctx_for_workspace(root, workspace());
+        let list_durable = list_ctx.durable_metadata.clone();
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            list_ctx,
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = list
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert!(!names.contains(&".git"));
+        assert!(!names.contains(&".env"));
+        assert!(!names.contains(&"denied.txt"));
+        assert!(!names.contains(&"secret"));
+        let list_metadata: serde_json::Value =
+            serde_json::from_str(&list_durable.take_json().expect("list durable metadata"))
+                .unwrap();
+        assert_eq!(list_metadata["truncated"], false);
+        assert_eq!(
+            list_metadata["visibility_evidence"],
+            json!({
+                "included_ignored": false,
+                "filtered_by": ["system_exclusion", "read_denied", "ignored_default"],
+            })
+        );
+
+        let (grep_ctx, _) = ctx_for_workspace(root, workspace());
+        let grep_durable = grep_ctx.durable_metadata.clone();
+        let grep = dispatch_grep(
+            &registry,
+            GrepParams {
+                pattern: "hidden-key|SECRET|DENIED_SENTINEL|denied".into(),
+                path: Some(".".into()),
+                max_results: Some(50),
+            },
+            grep_ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(grep.matches.len(), 1);
+        assert_eq!(grep.matches[0].path, "secret/key");
+        assert_eq!(grep.matches[0].text, "hidden-key");
+        let grep_raw = grep_durable.take_json().expect("grep durable metadata");
+        let grep_metadata: serde_json::Value = serde_json::from_str(&grep_raw).unwrap();
+        assert_eq!(grep_metadata["truncated"], false);
+        assert_eq!(grep_metadata["visibility_evidence"], expected_recursive);
+        assert!(!grep_raw.contains("SECRET=1"));
+        assert!(!grep_raw.contains("DENIED_SENTINEL"));
+
+        let (find_ctx, _) = ctx_for_workspace(root, workspace());
+        let find_durable = find_ctx.durable_metadata.clone();
+        let find = dispatch_find_files(
+            &registry,
+            FindFilesParams {
+                pattern: "*".into(),
+                path: Some(".".into()),
+                limit: Some(50),
+            },
+            find_ctx,
+        )
+        .await
+        .unwrap();
+        assert!(find.paths.iter().any(|path| path == "secret/key"));
+        assert!(!find.paths.iter().any(|path| {
+            path == ".git"
+                || path.starts_with(".git/")
+                || path == ".env"
+                || path == "denied.txt"
+                || path == "secret"
+                || path == "secret/other"
+        }));
+        let find_raw = find_durable.take_json().expect("find durable metadata");
+        let find_metadata: serde_json::Value = serde_json::from_str(&find_raw).unwrap();
+        assert_eq!(find_metadata["truncated"], false);
+        assert_eq!(find_metadata["visibility_evidence"], expected_recursive);
+        assert!(!find_raw.contains(root));
+    }
+
+    #[tokio::test]
+    async fn direct_visibility_denials_keep_current_audit_labels() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        for (path, workspace, expected_label) in [
+            (".env", Default::default(), "ignored_default"),
+            (
+                "visible.txt",
+                lancet_authority::policy::default::WorkspacePolicy {
+                    denied_read_patterns: vec!["visible.txt".into()],
+                    ..Default::default()
+                },
+                "read_denied",
+            ),
+            (
+                ".git/config",
+                lancet_authority::policy::default::WorkspacePolicy {
+                    included_ignored_read_patterns: vec![".git/**".into()],
+                    ..Default::default()
+                },
+                "system_exclusion",
+            ),
+        ] {
+            let (ctx, _) = ctx_for_workspace(root, workspace);
+            let durable = ctx.durable_metadata.clone();
+            let error = dispatch_read_file(
+                &registry,
+                ReadFileParams {
+                    path: path.into(),
+                    offset: None,
+                    limit: None,
+                    line_numbers: None,
+                },
+                ctx,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.data, path_not_found(path).data);
+            let metadata: serde_json::Value =
+                serde_json::from_str(&durable.take_json().expect("denial durable metadata"))
+                    .unwrap();
+            assert_eq!(metadata["rejection_stage"], "path_guard");
+            assert_eq!(metadata["denial_source"], expected_label);
+            assert!(metadata.get("visibility_evidence").is_none());
+        }
     }
 
     #[tokio::test]

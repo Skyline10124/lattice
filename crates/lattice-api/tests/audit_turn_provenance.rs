@@ -103,22 +103,8 @@ denied_write_patterns = [".git/**"]
 }
 
 fn init_git_repo(root: &std::path::Path) {
-    let mut files: Vec<(String, String)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let content = std::fs::read_to_string(&path).unwrap_or_default();
-                files.push((name, content));
-            }
-        }
-    }
-    let refs: Vec<(&str, &str)> = files
-        .iter()
-        .map(|(p, c)| (p.as_str(), c.as_str()))
-        .collect();
-    let _ = lattice_session::test_utils::init_fixture_repo(root, &refs);
+    let repo = lattice_session::test_utils::init_empty_repo(root);
+    lattice_session::test_utils::commit_all(&repo, root, "init");
 }
 
 /// Create an unattached branch at the current HEAD without checking it out.

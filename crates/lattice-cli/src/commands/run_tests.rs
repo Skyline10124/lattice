@@ -206,7 +206,11 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
 
     std::fs::create_dir_all(ws.join("src")).unwrap();
     std::fs::write(ws.join("src/lib.rs"), "fn main() {}").unwrap();
-    let _ = lattice_session::test_utils::init_fixture_repo(ws, &[("src/lib.rs", "fn main() {}")]);
+    drop(lattice_session::test_utils::init_fixture_repo(
+        ws,
+        &[("src/lib.rs", "fn main() {}")],
+    ));
+    std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).expect("restore test cwd");
 
     let profile_dir = ws.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();

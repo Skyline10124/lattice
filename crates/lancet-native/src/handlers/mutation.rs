@@ -937,7 +937,7 @@ mod create_tests {
     }
 
     fn local_workspace(root: &str) -> Arc<LocalWorkspace> {
-        Arc::new(LocalWorkspace::new(std::path::Path::new(root)).expect("local workspace"))
+        Arc::new(LocalWorkspace::new(std::path::Path::new(root)))
     }
 
     fn ctx_with_denied_patterns(
@@ -1188,9 +1188,7 @@ mod edit_tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            workspace: Arc::new(
-                LocalWorkspace::new(std::path::Path::new(root)).expect("local workspace"),
-            ),
+            workspace: Arc::new(LocalWorkspace::new(std::path::Path::new(root))),
         }
     }
 

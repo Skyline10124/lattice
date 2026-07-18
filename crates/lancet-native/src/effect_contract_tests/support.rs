@@ -205,7 +205,7 @@ pub fn build_test_context(
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::policy::CepMode::Off,
 
-        workspace: Arc::new(LocalWorkspace::new(root_path).expect("local workspace")),
+        workspace: Arc::new(LocalWorkspace::new(root_path)),
     };
     (ctx, event_rx, canonical_root)
 }

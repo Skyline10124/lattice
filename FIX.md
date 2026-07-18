@@ -3015,3 +3015,63 @@ stale active documentation describing the sandbox path.
 L-21-02, L-34-02 closed as moot with the deleted adapter/probe/porcelain;
 T-23-01 re-targeted — 54 ex-MSB elevations now owned by #24 Direct-Local
 scenarios; T-23-02 residual note updated.
+
+## Codeberg #39 follow-up: visibility traversal separation and durable evidence — 2026-07-17
+
+Severity: MEDIUM (post-review correctness and audit evidence).
+
+**Problem:** An ignored directory with an explicitly included descendant was
+both navigable and emitted by parent list/find results, leaking the hidden
+ancestor name. Successful read/list/grep/find calls also lacked durable
+visibility-rule evidence, and recursive walkers discarded filtered decisions.
+
+**Fix summary:**
+
+- Split entry visibility from directory descent in the native visibility
+  engine. Exact includes may navigate through an ignored ancestor without
+  making that ancestor visible; directory-glob includes still make the
+  ancestor itself visible.
+- List and find emit only visible entries while grep/find recurse only through
+  descendable directories. Explicit observation of a navigable hidden
+  directory remains supported and exposes only visible children.
+- Added per-call, content-free `visibility_evidence` success metadata with an
+  `included_ignored` presence bit and deterministic `filtered_by` categories
+  (`system_exclusion`, `read_denied`, `ignored_default`). No paths, contents,
+  hashes, or counts are recorded. Direct-denial metadata and Agent-facing
+  not-found behavior remain unchanged.
+- Grep/find now use one visibility engine from root assessment through the
+  recursive walk, so one Tool call accumulates coherent evidence.
+
+**Verification:**
+
+- `cargo fmt --all --check` and targeted `rustfmt --edition 2024 --check` on
+  all modified Rust files — passed.
+- `cargo test -p lancet-native -- --test-threads=1` — 124 unit, 1 warning
+  harness, 5 policy integration, and 3 provenance tests passed.
+- `cargo clippy -p lancet-native --all-targets -- -D warnings` — passed.
+- `cargo test -p lancet-audit -- --test-threads=1` — 34 passed.
+- `cargo test -p lattice-api --test cep_round_trip --test direct_local_acceptance -- --test-threads=1` — 5 + 10 passed.
+- `cargo test -p lattice-api --test audit_turn_provenance -- --test-threads=1` — 1 passed.
+
+**Changed files:** `crates/lancet-native/src/workspace/{local,visibility}.rs`,
+`crates/lancet-native/src/handlers/observation.rs`,
+`crates/lancet-native/src/server/native_registry.rs`,
+`crates/lancet-native/AGENTS.md`, `FIX.md`.
+
+## Gix migration review cleanup: restored workspace formatting — 2026-07-18
+
+Severity: LOW (format-only).
+
+**Problem:** Removing obsolete `std::fs` imports from seven gix-backed
+`lattice-api` integration tests left adjacent blank lines between their module
+documentation and imports, so workspace rustfmt validation failed.
+
+**Fix summary:** Removed the redundant blank line in each affected test; no
+behavior or test logic changed.
+
+**Verification:** `cargo fmt --all --check` — passed; `git diff --check` —
+passed.
+
+**Changed files:**
+`crates/lattice-api/tests/git_store_{branch_checkout,diff,head_transcript,profile_snapshot,reset,session_create_open,session_prefix_resolve}.rs`,
+`FIX.md`.

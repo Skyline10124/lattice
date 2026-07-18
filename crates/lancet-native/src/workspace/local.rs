@@ -20,13 +20,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use regex::Regex;
 
 use crate::edit::content_hash;
-use lancet_authority::ReadVisibilityPolicy;
 
 use super::types::{
     CreatedFile, DirectoryEntry, FindRequest, GrepMatch, GrepRequest, InstalledFile,
     LocalWorkspaceError, PathFacts, PathIntent, PathKind, WorkspacePath,
 };
-use super::visibility::VisibilityEngine;
+use super::visibility::{VisibilityEngine, VisibilityEvidence};
 
 /// The single concrete Local Workspace (ADR 0003 decision 3).
 ///
@@ -48,13 +47,13 @@ impl LocalWorkspace {
     ///
     /// Falls back to the raw path if canonicalize fails (mirrors
     /// `CepPolicyConfig::defaults_for_project_root` tolerance).
-    pub(crate) fn new(root: &Path) -> Result<Self, LocalWorkspaceError> {
+    pub(crate) fn new(root: &Path) -> Self {
         let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        Ok(Self {
+        Self {
             root: canonical,
             #[cfg(any(test, feature = "test-fault-injection"))]
             fail_install: Arc::new(AtomicBool::new(false)),
-        })
+        }
     }
 
     /// Canonical project root this workspace operates on.
@@ -296,8 +295,8 @@ impl LocalWorkspace {
         &self,
         req: &GrepRequest,
         max_results: usize,
-        visibility: ReadVisibilityPolicy,
-    ) -> Result<Vec<GrepMatch>, LocalWorkspaceError> {
+        mut visibility: VisibilityEngine,
+    ) -> Result<(Vec<GrepMatch>, VisibilityEvidence), LocalWorkspaceError> {
         let ws = self.blocking_clone();
         let req = req.clone();
         tokio::task::spawn_blocking(move || {
@@ -316,7 +315,6 @@ impl LocalWorkspace {
             let re = Regex::new(&req.pattern)
                 .map_err(std::io::Error::other)
                 .map_err(LocalWorkspaceError::Io)?;
-            let mut engine = VisibilityEngine::load(&ws.root, visibility);
             let mut out: Vec<GrepMatch> = Vec::new();
             grep_walk(
                 &ws.root,
@@ -324,10 +322,10 @@ impl LocalWorkspace {
                 &re,
                 req.glob.as_deref(),
                 max_results,
-                &mut engine,
+                &mut visibility,
                 &mut out,
             )?;
-            Ok(out)
+            Ok((out, visibility.evidence()))
         })
         .await
         .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
@@ -340,8 +338,8 @@ impl LocalWorkspace {
         &self,
         req: &FindRequest,
         max_results: usize,
-        visibility: ReadVisibilityPolicy,
-    ) -> Result<Vec<WorkspacePath>, LocalWorkspaceError> {
+        mut visibility: VisibilityEngine,
+    ) -> Result<(Vec<WorkspacePath>, VisibilityEvidence), LocalWorkspaceError> {
         let ws = self.blocking_clone();
         let req = req.clone();
         tokio::task::spawn_blocking(move || {
@@ -357,17 +355,16 @@ impl LocalWorkspace {
                     "find root is not a directory",
                 )));
             }
-            let mut engine = VisibilityEngine::load(&ws.root, visibility);
             let mut out: Vec<WorkspacePath> = Vec::new();
             find_walk(
                 &ws.root,
                 &full,
                 &req.pattern,
                 max_results,
-                &mut engine,
+                &mut visibility,
                 &mut out,
             )?;
-            Ok(out)
+            Ok((out, visibility.evidence()))
         })
         .await
         .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
@@ -407,7 +404,6 @@ impl LocalWorkspace {
                 // Only walk the ancestor directories of the file — never
                 // mkdir the file's own leaf component. Walk the parent path
                 // component-by-component from the root.
-                let mut created_dirs = Vec::new();
                 let mut cur = ws.root.clone();
                 if let Ok(rel) = parent.strip_prefix(&ws.root) {
                     for comp in rel.components() {
@@ -415,7 +411,6 @@ impl LocalWorkspace {
                             cur.push(part);
                             if !cur.exists() {
                                 fs::create_dir_all(&cur)?;
-                                created_dirs.push(relative_under(&ws.root, &cur)?);
                             } else if let Ok(m) = fs::symlink_metadata(&cur)
                                 && m.file_type().is_symlink()
                             {
@@ -426,7 +421,6 @@ impl LocalWorkspace {
                         }
                     }
                 }
-                let _ = &mut created_dirs;
             } else if fs::symlink_metadata(&parent).is_err() {
                 return Err(LocalWorkspaceError::NotFound {
                     normalized: path.as_str().to_string(),
@@ -446,16 +440,10 @@ impl LocalWorkspace {
             file.write_all(&content)?;
             file.sync_all()?;
             drop(file);
-            let created_dirs = if create_parents {
-                collect_created_dirs(&ws.root, &parent)?
-            } else {
-                Vec::new()
-            };
             Ok(CreatedFile {
                 path,
                 content_hash: content_hash(&content),
                 bytes_written: content.len() as u64,
-                created_dirs,
             })
         })
         .await
@@ -493,8 +481,7 @@ impl LocalWorkspace {
                 .tempfile_in(&parent)?;
             tmp.as_file().write_all(&content)?;
             tmp.as_file().sync_all()?;
-            let persist_path = full.clone();
-            tmp.persist(&persist_path).map_err(|e| {
+            tmp.persist(&full).map_err(|e| {
                 LocalWorkspaceError::Io(std::io::Error::other(format!(
                     "atomic persist failed: {e}"
                 )))
@@ -578,23 +565,6 @@ fn relative_under(root: &Path, p: &Path) -> Result<String, LocalWorkspaceError> 
         }
     }
     Ok(parts.join("/"))
-}
-
-/// Helper used by `create_excl` to enumerate the ancestor directories
-/// created by `create_parents`.
-fn collect_created_dirs(root: &Path, parent: &Path) -> Result<Vec<String>, LocalWorkspaceError> {
-    let mut out = Vec::new();
-    let mut cur = root.to_path_buf();
-    let rel = parent
-        .strip_prefix(root)
-        .map_err(|_| LocalWorkspaceError::RootEscape)?;
-    for c in rel.components() {
-        if let Component::Normal(n) = c {
-            cur.push(n);
-            out.push(relative_under(root, &cur)?);
-        }
-    }
-    Ok(out)
 }
 
 fn fsync_dir(dir: &Path) -> Result<(), LocalWorkspaceError> {
@@ -688,17 +658,11 @@ fn find_walk(
         let rel = relative_under(workspace_root, &path)?;
         let meta = fs::symlink_metadata(&path)?;
         let is_dir = meta.is_dir();
-        if glob_match(pattern, &name) {
-            let listable = if is_dir {
-                visibility.is_listable(&rel, true)
-            } else {
-                visibility.is_visible_file(&rel)
-            };
-            if listable {
-                out.push(WorkspacePath::parse(&rel).map_err(LocalWorkspaceError::Path)?);
-            }
+        let assessment = visibility.assess(&rel, is_dir);
+        if glob_match(pattern, &name) && assessment.is_visible() {
+            out.push(WorkspacePath::parse(&rel).map_err(LocalWorkspaceError::Path)?);
         }
-        if is_dir && visibility.should_descend(&rel) {
+        if is_dir && assessment.should_descend() {
             find_walk(workspace_root, &path, pattern, max_results, visibility, out)?;
         }
     }
@@ -723,7 +687,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn ws_at(dir: &TempDir) -> LocalWorkspace {
-        LocalWorkspace::new(dir.path()).expect("local workspace")
+        LocalWorkspace::new(dir.path())
     }
 
     // ── ADR step 1: eight test classes ───────────────────────────────────
@@ -917,10 +881,8 @@ mod tests {
             path: WorkspacePath::project_root(),
             glob: None,
         };
-        let matches = ws
-            .grep(&req, 100, ReadVisibilityPolicy::default())
-            .await
-            .unwrap();
+        let visibility = VisibilityEngine::load(dir.path(), Default::default());
+        let (matches, _evidence) = ws.grep(&req, 100, visibility).await.unwrap();
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].line_number, 1);
         assert_eq!(matches[1].line_number, 3);
@@ -938,10 +900,8 @@ mod tests {
             pattern: "*.rs".into(),
             path: WorkspacePath::project_root(),
         };
-        let paths = ws
-            .find_files(&req, 100, ReadVisibilityPolicy::default())
-            .await
-            .unwrap();
+        let visibility = VisibilityEngine::load(dir.path(), Default::default());
+        let (paths, _evidence) = ws.find_files(&req, 100, visibility).await.unwrap();
         let strs: Vec<_> = paths.iter().map(|p| p.as_str().to_string()).collect();
         assert!(strs.contains(&"a.rs".to_string()));
         assert!(strs.contains(&"sub/c.rs".to_string()));
@@ -962,12 +922,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let ws = ws_at(&dir);
         let path = WorkspacePath::parse("a/b/c.txt").unwrap();
-        let created = ws.create_excl(&path, b"hi".as_ref(), true).await.unwrap();
+        ws.create_excl(&path, b"hi".as_ref(), true).await.unwrap();
         assert!(dir.path().join("a/b/c.txt").exists());
-        assert_eq!(
-            created.created_dirs,
-            vec!["a".to_string(), "a/b".to_string()]
-        );
     }
 
     #[tokio::test]

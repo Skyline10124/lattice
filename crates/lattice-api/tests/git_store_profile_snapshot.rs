@@ -8,7 +8,6 @@
 //! `profile_snapshot_json` field contains the full profile JSON (not an empty
 //! string).
 
-
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,

@@ -7,7 +7,6 @@
 //! `head_transcript` and verifies all 6 messages are returned in commit order
 //! — first turn's messages first, last turn's messages last.
 
-
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,

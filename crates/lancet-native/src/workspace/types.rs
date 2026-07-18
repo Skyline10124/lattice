@@ -269,14 +269,13 @@ pub struct InstalledFile {
 
 /// Record of a no-replace create.
 ///
-/// Carries the project-relative normalized path, the post-install content
-/// hash (Local Revision), and the ancestor directories the install created.
+/// Carries the project-relative normalized path and post-install content hash
+/// (Local Revision).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreatedFile {
     pub path: WorkspacePath,
     pub content_hash: String,
     pub bytes_written: u64,
-    pub created_dirs: Vec<String>,
 }
 
 #[cfg(test)]

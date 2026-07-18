@@ -20,6 +20,11 @@ const FIXTURE_AUTHOR_EMAIL: &str = "test@lattice.local";
 /// if needed). No commits are created.
 pub fn init_empty_repo(dir: &Path) -> gix::Repository {
     fs::create_dir_all(dir).expect("create fixture dir");
+    // gix queries the process CWD even for an absolute target. Recover when a
+    // previous test left CWD inside a TempDir that has already been removed.
+    if std::env::current_dir().is_err() {
+        std::env::set_current_dir(std::env::temp_dir()).expect("restore fixture cwd");
+    }
     gix::init(dir).expect("gix init empty repo")
 }
 
@@ -93,38 +98,31 @@ pub fn commit_paths(
 /// Create a commit that captures every regular file under `root` (skipping
 /// `.git`) and advances `refs/heads/main`.
 pub fn commit_all(repo: &gix::Repository, root: &Path, message: &str) -> gix::ObjectId {
-    let mut files: Vec<(String, String)> = Vec::new();
-    collect_files(root, root, &mut files);
-    let file_refs: Vec<(&str, &str)> = files
-        .iter()
-        .map(|(p, c)| (p.as_str(), c.as_str()))
-        .collect();
-    // Re-read from disk in commit_paths; content here is only for path list.
-    let path_pairs: Vec<(&str, &str)> = file_refs.iter().map(|(p, _)| (*p, "")).collect();
-    commit_paths(repo, root, &path_pairs, message)
+    let mut paths = Vec::new();
+    collect_file_paths(root, root, &mut paths);
+    let files: Vec<(&str, &str)> = paths.iter().map(|path| (path.as_str(), "")).collect();
+    commit_paths(repo, root, &files, message)
 }
 
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+fn collect_file_paths(root: &Path, dir: &Path, out: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
+        Ok(entries) => entries,
         Err(_) => return,
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = entry.file_name();
-        if name == ".git" {
+        if entry.file_name() == ".git" {
             continue;
         }
         if path.is_dir() {
-            collect_files(root, &path, out);
+            collect_file_paths(root, &path, out);
         } else if path.is_file() {
             let rel = path
                 .strip_prefix(root)
                 .expect("path under root")
                 .to_string_lossy()
                 .replace('\\', "/");
-            let content = fs::read_to_string(&path).unwrap_or_default();
-            out.push((rel, content));
+            out.push(rel);
         }
     }
 }

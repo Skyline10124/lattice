@@ -13,10 +13,71 @@ use std::path::Path;
 
 use lancet_authority::{GitFileStatus, HiddenReason, ReadVisibility, ReadVisibilityPolicy};
 
+/// Content-free category evidence accumulated while evaluating one Tool call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct VisibilityEvidence {
+    included_ignored: bool,
+    filtered_system_exclusion: bool,
+    filtered_read_denied: bool,
+    filtered_ignored_default: bool,
+}
+
+impl VisibilityEvidence {
+    pub(crate) fn as_json(self) -> serde_json::Value {
+        let mut filtered_by = Vec::new();
+        if self.filtered_system_exclusion {
+            filtered_by.push("system_exclusion");
+        }
+        if self.filtered_read_denied {
+            filtered_by.push("read_denied");
+        }
+        if self.filtered_ignored_default {
+            filtered_by.push("ignored_default");
+        }
+        serde_json::json!({
+            "included_ignored": self.included_ignored,
+            "filtered_by": filtered_by,
+        })
+    }
+
+    fn record_hidden(&mut self, reason: HiddenReason) {
+        match reason {
+            HiddenReason::SystemExclusion => self.filtered_system_exclusion = true,
+            HiddenReason::ReadDenied => self.filtered_read_denied = true,
+            HiddenReason::GitIgnored => self.filtered_ignored_default = true,
+        }
+    }
+}
+
+/// Visibility and traversal assessment for one project-relative entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VisibilityAssessment {
+    visibility: ReadVisibility,
+    descend: bool,
+}
+
+impl VisibilityAssessment {
+    pub(crate) fn is_visible(self) -> bool {
+        matches!(self.visibility, ReadVisibility::Visible)
+    }
+
+    pub(crate) fn should_descend(self) -> bool {
+        self.descend
+    }
+
+    pub(crate) fn hidden_reason(self) -> Option<HiddenReason> {
+        match self.visibility {
+            ReadVisibility::Visible => None,
+            ReadVisibility::Hidden(reason) => Some(reason),
+        }
+    }
+}
+
 /// Per Tool-call visibility engine: pure policy + current Local Git facts.
 pub(crate) struct VisibilityEngine {
     policy: ReadVisibilityPolicy,
     git: Option<GitVisibility>,
+    evidence: VisibilityEvidence,
 }
 
 struct GitVisibility {
@@ -32,32 +93,51 @@ impl VisibilityEngine {
         Self {
             policy,
             git: GitVisibility::open(root),
+            evidence: VisibilityEvidence::default(),
+        }
+    }
+
+    pub(crate) fn assess(&mut self, rel: &str, is_dir: bool) -> VisibilityAssessment {
+        let git = self.git_status(rel, is_dir);
+        let visibility = self.policy.decide(rel, git);
+        match visibility {
+            ReadVisibility::Visible => {
+                if git == GitFileStatus::Ignored {
+                    self.evidence.included_ignored = true;
+                }
+            }
+            ReadVisibility::Hidden(reason) => self.evidence.record_hidden(reason),
+        }
+        let descend = is_dir
+            && (matches!(visibility, ReadVisibility::Visible)
+                || matches!(visibility, ReadVisibility::Hidden(HiddenReason::GitIgnored))
+                    && self.policy.may_reach_included(rel));
+        VisibilityAssessment {
+            visibility,
+            descend,
         }
     }
 
     pub(crate) fn decide(&mut self, rel: &str, is_dir: bool) -> ReadVisibility {
-        let git = self.git_status(rel, is_dir);
-        self.policy.decide(rel, git)
+        self.assess(rel, is_dir).visibility
+    }
+
+    pub(crate) fn is_visible_entry(&mut self, rel: &str, is_dir: bool) -> bool {
+        self.assess(rel, is_dir).is_visible()
     }
 
     pub(crate) fn is_visible_file(&mut self, rel: &str) -> bool {
-        matches!(self.decide(rel, false), ReadVisibility::Visible)
+        self.is_visible_entry(rel, false)
     }
 
-    /// List/find/grep descent: visible entries, or hidden dirs that an
-    /// include pattern may still reach.
-    pub(crate) fn is_listable(&mut self, rel: &str, is_dir: bool) -> bool {
-        match self.decide(rel, is_dir) {
-            ReadVisibility::Visible => true,
-            ReadVisibility::Hidden(HiddenReason::GitIgnored) if is_dir => {
-                self.policy.may_reach_included(rel)
-            }
-            ReadVisibility::Hidden(_) => false,
-        }
-    }
-
+    /// Recursive navigation may pass through an ignored directory only when
+    /// an explicit include can still be reached beneath it.
     pub(crate) fn should_descend(&mut self, dir_rel: &str) -> bool {
-        self.is_listable(dir_rel, true)
+        self.assess(dir_rel, true).should_descend()
+    }
+
+    pub(crate) fn evidence(&self) -> VisibilityEvidence {
+        self.evidence
     }
 
     fn git_status(&mut self, rel: &str, is_dir: bool) -> GitFileStatus {
@@ -83,11 +163,9 @@ impl VisibilityEngine {
         match git.stack.at_path(Path::new(rel), mode, &git.repo.objects) {
             Ok(platform) if platform.is_excluded() => GitFileStatus::Ignored,
             Ok(_) => GitFileStatus::NotIgnored,
-            // Fail open on stack errors would leak secrets; fail closed as ignored
-            // only if we cannot evaluate. Prefer NotIgnored for I/O errors on
-            // intermediate dirs that simply don't exist yet — callers already
-            // handle missing paths. Conservative: treat evaluation failure as
-            // NotIgnored so System Exclusion / denied_read still apply.
+            // Missing ignore data is treated as not ignored. System exclusions
+            // and explicit read denials still apply, while callers handle paths
+            // that disappeared during observation.
             Err(_) => GitFileStatus::NotIgnored,
         }
     }
@@ -190,7 +268,7 @@ mod tests {
             engine.decide("secret/key", false),
             ReadVisibility::Hidden(HiddenReason::GitIgnored)
         ));
-        assert!(!engine.is_listable(".env", false));
+        assert!(!engine.is_visible_entry(".env", false));
         assert!(!engine.should_descend("secret"));
     }
 
@@ -208,7 +286,28 @@ mod tests {
             engine.decide("secret/key", false),
             ReadVisibility::Visible
         ));
+        assert!(engine.is_visible_entry("secret", true));
         assert!(engine.should_descend("secret"));
+        assert_eq!(engine.evidence().as_json()["included_ignored"], true);
+    }
+
+    #[test]
+    fn exact_descendant_include_separates_visibility_from_descent() {
+        let dir = init_repo_with_ignore();
+        let policy = ReadVisibilityPolicy::from_patterns(&["secret/key".into()], &[]).unwrap();
+        let mut engine = VisibilityEngine::load(dir.path(), policy);
+
+        let ancestor = engine.assess("secret", true);
+        assert!(!ancestor.is_visible());
+        assert!(ancestor.should_descend());
+        assert!(engine.is_visible_entry("secret/key", false));
+        assert_eq!(
+            engine.evidence().as_json(),
+            serde_json::json!({
+                "included_ignored": true,
+                "filtered_by": ["ignored_default"],
+            })
+        );
     }
 
     #[test]

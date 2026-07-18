@@ -8,7 +8,6 @@
 //! `only_in_from` and the feature-only commit in `only_in_to`, with the base
 //! as `common_ancestor_id`.
 
-
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,

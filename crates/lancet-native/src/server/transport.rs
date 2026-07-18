@@ -112,11 +112,7 @@ impl CepServerNativeExt for CepServer {
             // ADR 0003: the one concrete Local Workspace is constructed once
             // per server run from the resolved policy's canonical project
             // root. No caller-supplied workspace implementation is accepted.
-            let workspace = Arc::new(
-                LocalWorkspace::new(&config.cep_context.policy.project_root).map_err(|err| {
-                    CepError::internal_error(format!("local workspace construction: {err}"))
-                })?,
-            );
+            let workspace = Arc::new(LocalWorkspace::new(&config.cep_context.policy.project_root));
             self.run(registry, NativeServerRuntime { config, workspace })
                 .await
         })

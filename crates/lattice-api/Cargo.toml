@@ -17,7 +17,7 @@ lancet-native = { workspace = true }
 lattice-agent = { workspace = true }
 lattice-llm = { workspace = true }
 lattice-profile = { workspace = true }
-lattice-session = { workspace = true, features = ["test-utils"] }
+lattice-session = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

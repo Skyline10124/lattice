@@ -54,6 +54,10 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   (guarded path, `local_revision`, post-install content hash,
   `PathGuard`/`LocalIo` rejection stages); narrow one-shot
   `fail_next_install` fault injection is the only test seam.
+- FIXED #39 follow-up: ignored ancestors reachable only for an exact included
+  descendant are navigable but not emitted by list/find; successful
+  read/list/grep/find audit metadata now records content-free visibility rule
+  categories without hidden paths, content, counts, or hashes.
 - FIXED M-24-02: command workspace snapshots and artifact lower rechecks run in
   the blocking pool with entry/depth limits.
 - FIXED M-24-03: `ToolLimits` was removed; shell timeouts are explicit and

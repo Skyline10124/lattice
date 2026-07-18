@@ -115,11 +115,9 @@ impl ScenarioWorld {
 
     pub fn init_git_project(&self) -> Result<(), WorldError> {
         let root = &self.project;
-        let repo =
-            gix::init(root).map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
+        gix::init(root).map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
         // Point HEAD at main before first commit (gix::init already does this).
         self.commit_all("harness init")?;
-        let _ = repo;
         Ok(())
     }
 

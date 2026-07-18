@@ -56,7 +56,8 @@ mod cep_native_registry_tests {
     use lancet_catalog::CepMethod;
     use lancet_catalog::catalog;
     use lancet_catalog::methods::workspace::{
-        ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
+        FindFilesParams, ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult,
+        ReadFileParams,
     };
     use lancet_protocol::CepErrorCode;
     use std::sync::Arc;
@@ -120,9 +121,7 @@ mod cep_native_registry_tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            workspace: Arc::new(
-                LocalWorkspace::new(std::path::Path::new(root)).expect("local workspace"),
-            ),
+            workspace: Arc::new(LocalWorkspace::new(std::path::Path::new(root))),
         };
 
         let params = ReadFileParams {
@@ -180,6 +179,71 @@ mod cep_native_registry_tests {
         assert_eq!(read_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
         assert_eq!(read_row.guard_stage, GUARD_STAGE_NATIVE);
         assert!(read_row.policy_enforced);
+        let metadata: serde_json::Value =
+            serde_json::from_str(read_row.metadata_json.as_deref().expect("metadata json"))
+                .unwrap();
+        assert_eq!(
+            metadata["visibility_evidence"],
+            serde_json::json!({"included_ignored": false, "filtered_by": []})
+        );
+
+        drop(client);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn recursive_visibility_evidence_survives_transport_finalization() {
+        let dir = TempDir::new().unwrap();
+        gix::init(dir.path()).expect("gix init");
+        std::fs::write(dir.path().join(".gitignore"), "secret/\n").unwrap();
+        std::fs::create_dir(dir.path().join("secret")).unwrap();
+        std::fs::write(dir.path().join("secret/key"), "AUDIT_SENTINEL\n").unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = production_registry();
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
+        let mut policy_config =
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(root.into());
+        policy_config.workspace.included_ignored_read_patterns = vec!["secret/key".into()];
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            policy_config,
+        ));
+        config.policy_hook = default_hook.clone();
+        config.default_policy_hook = Some(default_hook);
+
+        let (client, server) = CepTransport::pair(8);
+        let audit = Arc::clone(&config.audit);
+        let server_task = tokio::spawn(async move {
+            server.run_native(registry, config).await.unwrap();
+        });
+
+        let result = client
+            .call::<ObserveWorkspace>(ObserveWorkspaceParams::FindFiles(FindFilesParams {
+                pattern: "*".into(),
+                path: Some(".".into()),
+                limit: Some(50),
+            }))
+            .await
+            .unwrap();
+        let ObserveWorkspaceResult::FindFiles(result) = result else {
+            panic!("expected find result");
+        };
+        assert!(result.paths.iter().any(|path| path == "secret/key"));
+        assert!(!result.paths.iter().any(|path| path == "secret"));
+
+        let row = audit.row_by_audit_id(1).unwrap();
+        let raw = row.metadata_json.as_deref().expect("metadata json");
+        let metadata: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            metadata["visibility_evidence"],
+            serde_json::json!({
+                "included_ignored": true,
+                "filtered_by": ["system_exclusion", "ignored_default"],
+            })
+        );
+        assert!(!raw.contains("secret/key"));
+        assert!(!raw.contains("AUDIT_SENTINEL"));
+        assert!(!raw.contains(root));
 
         drop(client);
         server_task.abort();

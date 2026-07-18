@@ -6,7 +6,6 @@
 //! Create a session with a 32-char hex ID. Query status with the first 4
 //! chars. The API resolves the prefix and returns the full session's status.
 
-
 use lattice_api::SessionApi;
 use lattice_session::{GitSessionGraphStore, SessionGraphStore};
 use tempfile::TempDir;

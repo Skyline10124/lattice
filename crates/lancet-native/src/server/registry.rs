@@ -122,7 +122,7 @@ mod tests {
                 audit_context: Arc::new(RwLock::new(CepAuditContext::default())),
                 audit: Arc::new(CepAuditStore::in_memory().expect("audit")),
                 cep_mode: CepMode::Off,
-                workspace: Arc::new(LocalWorkspace::new(root).expect("workspace")),
+                workspace: Arc::new(LocalWorkspace::new(root)),
             }
         }
 
