@@ -27,9 +27,9 @@
 
 ### 场景目录（替代场景 ID）
 
-> Active 场景 ID 登记在此表。`msb_full_turn` / `planned_*_msb` 是 #40
-> 退役的 MSB/KVM 词汇，仅在下方「历史/obsolete」段以 `~~删除线~~` 标注保留，
-> 不再出现在 machine ledger 的 `replacement` / `target_layer` 或本目录的 active 行。
+> Active 场景 ID 登记在此表。#40 退役的 KVM-lane 场景词汇已从 machine ledger
+> 与本目录中完全移除；其语义由 `direct_local_*` / `planned_direct_*`
+> assertion-level #24 ID 接管。退役词汇的迁移记录见 FIX.md。
 
 | ID | 说明 | 状态 |
 |---|---|---|
@@ -40,7 +40,7 @@
 | `planned_config_cli` | fast-binary: `models`/`resolve`/`doctor` + secret redaction + HOME/XDG | **已落地** `tests/fast_config_cli.rs`（#23 批次 1） |
 | `planned_lancet_cli` | fast-binary: `lattice lancet status/doctor` 空态/不变量 | **已落地** `tests/fast_lancet_cli.rs`（#23 切片 1，空态；seeded 态归 `planned_direct_lancet_status_seeded`） |
 | `direct_local_turn` | Direct-Local: plain-text turn / session reopen / policy denial | **已落地（骨架）** `tests/direct_local_turn.rs`（#40；完整矩阵归 #24） |
-| `direct_local_plain_text_turn_commits_and_exit_zero` | Direct-Local: plain-text 完整 turn + exit 0 + session log commit | **已落地** `tests/direct_local_turn.rs:108`（#40；接管旧 `msb_full_turn` 语义核心） |
+| `direct_local_plain_text_turn_commits_and_exit_zero` | Direct-Local: plain-text 完整 turn + exit 0 + session log commit | **已落地** `tests/direct_local_turn.rs:108`（#40；接管旧 KVM-lane plain-turn 场景语义核心） |
 | `planned_direct_message_assembly` | Direct-Local: AgentLoop 从 transcript + user input 组装消息顺序/内容 | planned（#24 assertion-level） |
 | `planned_direct_tool_error_payload` | Direct-Local: CEP tool error 结构化 payload 保留 | planned（#24 assertion-level） |
 | `planned_direct_streaming_chat_compat` | Direct-Local: Fake LLM chat-only streaming 向后兼容 | planned（#24 assertion-level） |
@@ -50,7 +50,7 @@
 | `planned_direct_provider_startup_failure` | Direct-Local: provider 启动失败不产生 stream | planned（#24 assertion-level） |
 | `planned_direct_delta_only_commit` | Direct-Local: commit 只存储 delta | planned（#24 assertion-level） |
 | `planned_direct_branch_population` | Direct-Local: branch 在 turn 后被填充 | planned（#24 assertion-level） |
-| `planned_direct_commit_failure` | Direct-Local: commit 失败确定性（取代旧 planned_resume_msb） | planned（#24 assertion-level） |
+| `planned_direct_commit_failure` | Direct-Local: commit 失败确定性（取代旧 KVM-lane resume 场景） | planned（#24 assertion-level） |
 | `planned_direct_receiver_drop_commit` | Direct-Local: receiver drop 不取消 commit | planned（#24 assertion-level） |
 | `planned_direct_slow_observer_commit` | Direct-Local: 慢 observer 仍 commit | planned（#24 assertion-level） |
 | `planned_direct_tool_activity_before_commit` | Direct-Local: tool activity 在 committed 前发出 | planned（#24 assertion-level） |
@@ -66,7 +66,7 @@
 | `planned_direct_error_disposition_parity` | Direct-Local: error disposition 一致性 | planned（#24 assertion-level） |
 | `planned_direct_workspace_read_turn` | Direct-Local: default profile run_turn 读取 workspace 文件 | planned（#24 assertion-level） |
 | `planned_direct_routed_provider_event` | Direct-Local: model_started 含 routed provider | planned（#24 assertion-level） |
-| `planned_direct_reopen_previous_context` | Direct-Local: resume session 含 previous turn context（取代旧 planned_resume_msb 的 reopen 半） | planned（#24 assertion-level） |
+| `planned_direct_reopen_previous_context` | Direct-Local: resume session 含 previous turn context（取代旧 KVM-lane resume 场景的 reopen 半） | planned（#24 assertion-level） |
 | `planned_direct_fetch_capability_denial` | Direct-Local: https public fetch 需 fetch capability，拒绝缺 capability | planned（#24 assertion-level） |
 | `planned_direct_disabled_fetch_denial` | Direct-Local: profile 禁用 web fetch 时拒绝 | planned（#24 assertion-level） |
 | `planned_direct_audit_query_seeded` | Direct-Local: audit query seeded DB fragment | planned（#24 assertion-level） |
@@ -86,21 +86,6 @@
 | `planned_direct_diff_isolation` | Direct-Local: diff refs 在 addressed session 内解析 | planned（#24 assertion-level） |
 | `planned_direct_session_log_turn` | Direct-Local: session log 显示 seeded turn | planned（#24 assertion-level） |
 
-#### 历史/obsolete 场景 ID（#40 退役；仅供追溯，不在 active ledger 使用）
-
-| ID | 说明 | 状态 |
-|---|---|---|
-| `msb_full_turn` | ~~已落地~~ **#40 已删**：MSB/KVM 场景退役；语义核心由 `direct_local_plain_text_turn_commits_and_exit_zero` 接管 | 已退役 |
-| `planned_observe_msb` | ~~planned MSB~~ → 拆分为 `planned_direct_workspace_read_turn` / `planned_direct_canonical_workspace_root` / `planned_direct_tool_activity_before_commit` 等 assertion-level #24 ID | 已退役 |
-| `planned_mutate_msb` | ~~planned MSB~~ → 拆分为 `planned_direct_turn_audit_replay` 等 assertion-level #24 ID | 已退役 |
-| `planned_retired_msb` | ~~planned MSB~~ → 拆分为 `planned_direct_cep_lifecycle` 等 assertion-level #24 ID | 已退役 |
-| `planned_policy_msb` | ~~planned MSB~~ → 拆分为 `planned_direct_fetch_capability_denial` / `planned_direct_disabled_fetch_denial` / `planned_direct_cep_lifecycle` 等 assertion-level #24 ID | 已退役 |
-| `planned_provider_fail_msb` | ~~planned MSB~~ → 拆分为 `planned_direct_provider_startup_failure` / `planned_direct_provider_timeout` / `planned_direct_stream_error_commit` 等 assertion-level #24 ID | 已退役 |
-| `planned_resume_msb` | ~~planned MSB~~ → 拆分为 `planned_direct_commit_failure` / `planned_direct_reopen_previous_context` assertion-level #24 ID（#40 已落地 reopen 骨架 `direct_local_session_reopen_after_external_change`） | 已退役 |
-| `planned_secret_msb` | ~~planned MSB~~ → secret sentinel 覆盖面由 #24 assertion-level ID 接管 | 已退役 |
-| `planned_audit_ops_msb` | ~~planned MSB~~ → 拆分为 `planned_direct_audit_query_seeded` / `planned_direct_audit_tail_seeded` / `planned_direct_audit_replay_trace` / `planned_direct_audit_attestation_match` / `planned_direct_audit_replay_unknown_turn` / `planned_direct_audit_query_unknown_session` / `planned_direct_lancet_status_seeded` assertion-level #24 ID | 已退役 |
-| `planned_session_graph_msb` | ~~planned MSB~~ → 拆分为 `planned_direct_branch_listing_isolation` / `planned_direct_checkout_isolation` / `planned_direct_branch_create_isolation` / `planned_direct_reset_isolation` / `planned_direct_diff_isolation` assertion-level #24 ID | 已退役 |
-| `planned_session_history_msb` | ~~planned MSB~~ → `planned_direct_session_log_turn` assertion-level #24 ID | 已退役 |
 
 ### 汇总
 
@@ -146,7 +131,6 @@
 ---
 
 
-
 ---
 
 ## 1.5 #23 最终执行状态（2026-07-19）
@@ -165,7 +149,7 @@
 
 | replacement scenario | 删除/接管的内部测试 | superset 依据 |
 |---|---|---|
-| `direct_local_plain_text_turn_commits_and_exit_zero` | `msb_plain_text_turn_commits_and_exit_zero`（历史 harness identity，keep→elevate） | #40 落地 plain-text 完整 turn + exit 0 + session log commit；file/line 修正为 `direct_local_turn.rs:108` |
+| `direct_local_plain_text_turn_commits_and_exit_zero` | `direct_local_plain_text_turn_commits_and_exit_zero`（原 harness identity，keep→elevate；原名含退役词汇已重命名） | #40 落地 plain-text 完整 turn + exit 0 + session log commit |
 
 ### 11 条退役契约补记 delete（#37–#40 已删除产品面，不向 #24 虚构 replacement）
 
@@ -181,7 +165,7 @@
 | `upper_routing_e2e` | #37–#40 删除 Upper routing 面 |
 | `adapter_failure_has_no_lower_fallback` | #37–#40 删除 Upper/adapter 面 |
 | `generated_profiles_are_executable_host_only` | #37–#40 删除 host-only profile 面 |
-| `microsandbox_upper_routing` | #37–#40 删除 MSB/Upper routing 面 |
+| `retired_upper_routing_lane` | #37–#40 删除 Upper routing 面 |
 
 ### 精确移交 #24（44 行 assertion-level scenario ID；禁止 family fallback）
 
@@ -196,7 +180,7 @@
 | `planned_direct_provider_startup_failure` | `stream_turn_live_with_agent_startup_failure_no_stream` | provider 启动失败不产生 stream |
 | `planned_direct_delta_only_commit` | `stream_turn_live_with_agent_commit_stores_delta_only` | commit 只存储 delta |
 | `planned_direct_branch_population` | `stream_turn_live_with_agent_branch_populated` | branch 在 turn 后被填充 |
-| `planned_direct_commit_failure` | `stream_turn_live_with_agent_commit_failure_deterministic` | commit 失败确定性（取代旧 `planned_resume_msb` 的 commit-failure 半） |
+| `planned_direct_commit_failure` | `stream_turn_live_with_agent_commit_failure_deterministic` | commit 失败确定性（取代旧 KVM-lane resume 场景的 commit-failure 半） |
 | `planned_direct_receiver_drop_commit` | `stream_turn_live_with_agent_receiver_drop_does_not_cancel` | receiver drop 不取消 commit |
 | `planned_direct_slow_observer_commit` | `stream_turn_live_with_agent_slow_observer_still_commits` | 慢 observer 仍 commit |
 | `planned_direct_tool_activity_before_commit` | `stream_turn_emits_tool_activity_before_committed` | tool activity 在 committed 前发出 |
@@ -212,7 +196,7 @@
 | `planned_direct_error_disposition_parity` | `consistency_error_disposition_parity` | error disposition 一致性 |
 | `planned_direct_workspace_read_turn` | `usage_run_turn_can_read_workspace_file_with_default_profile` | default profile run_turn 读取 workspace 文件 |
 | `planned_direct_routed_provider_event` | `usage_stream_turn_model_started_includes_routed_provider` | model_started 含 routed provider |
-| `planned_direct_reopen_previous_context` | `usage_resume_session_includes_previous_turn_context` | resume session 含 previous turn context（取代旧 `planned_resume_msb` 的 reopen 半） |
+| `planned_direct_reopen_previous_context` | `usage_resume_session_includes_previous_turn_context` | resume session 含 previous turn context（取代旧 KVM-lane resume 场景的 reopen 半） |
 | `planned_direct_fetch_capability_denial` | `public_https_policy_requires_fetch_capability` | https public fetch 需 fetch capability，拒绝缺 capability |
 | `planned_direct_disabled_fetch_denial` | `rejects_profile_disabled_web_fetch` | profile 禁用 web fetch 时拒绝 |
 | `planned_direct_audit_query_seeded` | `audit_query_prints_fragment_for_seeded_db` | audit query seeded DB fragment |
@@ -234,11 +218,12 @@
 
 ### MSB 词汇退役
 
-#40 删除 Upper/MSB/KVM lane 与 `LATTICE_HARNESS_MSB` 门禁通道；active ledger 只使用
+#40 删除 Upper/MSB/KVM lane 与门禁通道；machine ledger 与本文件已完全移除退役的
+KVM-lane 词汇（retired target_layer、replacement 场景 ID、门禁环境变量，
+以及含退役前缀的历史 identity 名）。ledger 只使用
 `direct_local_binary` 目标层与 `*_direct` / `direct_local_*` replacement 词汇。
-`real_microsandbox` / `msb_full_turn` / `planned_*_msb` 在 machine ledger
-（`docs/test-triage-decisions.json`）中为零；在本文件仅保留于上方「历史/obsolete」
-场景目录段与旧的 round-4 复审记录中，且明确标 obsolete，不与当前 active 状态并列。
+退役词汇的迁移记录见 FIX.md；历史决策/规划文档中残留的 KVM-lane 词汇由
+codeberg issue 跟踪重写。
 
 ### layer 分布（最终）
 
@@ -917,7 +902,7 @@
 | `production_code_does_not_fabricate_passing_verification` | `crates/lattice-api/tests/promotion_wiring.rs:866` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
 | `promotion_module_documents_activation_requirement` | `crates/lattice-api/tests/promotion_wiring.rs:893` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `deterministic_embedder_path_remains_primary` | `crates/lattice-api/tests/promotion_wiring.rs:900` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `microsandbox_workspace_type_checks_with_public_promotion_api` | `crates/lattice-api/tests/promotion_wiring.rs:911` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
+| `workspace_type_checks_with_public_promotion_api` | `crates/lattice-api/tests/promotion_wiring.rs:911` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `release_e2e_criterion_8` | `crates/lattice-api/tests/release_e2e.rs:177` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `pending_worktree_with_snapshot_resolves_restore_snapshot` | `crates/lattice-api/tests/resume_tests.rs:107` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `pending_verification_without_loss_resolves_restore_snapshot` | `crates/lattice-api/tests/resume_tests.rs:124` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -1005,7 +990,7 @@
 | `upper_routing_e2e` | `crates/lattice-api/tests/upper_routing.rs:375` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `adapter_failure_has_no_lower_fallback` | `crates/lattice-api/tests/upper_routing.rs:609` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `generated_profiles_are_executable_host_only` | `crates/lattice-api/tests/upper_routing.rs:699` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
-| `microsandbox_upper_routing` | `crates/lattice-api/tests/upper_routing.rs:787` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
+| `retired_upper_routing_lane` | `crates/lattice-api/tests/upper_routing.rs:787` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `usage_run_turn_can_read_workspace_file_with_default_profile` | `crates/lattice-api/tests/usage_turn.rs:175` | 提升 | Direct-Local 外部二进制 | `planned_direct_workspace_read_turn` | 原内部测试断言集合由 #24 精确场景 `planned_direct_workspace_read_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `usage_stream_turn_model_started_includes_routed_provider` | `crates/lattice-api/tests/usage_turn.rs:237` | 提升 | Direct-Local 外部二进制 | `planned_direct_routed_provider_event` | 原内部测试断言集合由 #24 精确场景 `planned_direct_routed_provider_event` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `usage_run_turn_can_edit_workspace_file_and_commit` | `crates/lattice-api/tests/usage_turn.rs:274` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
@@ -1546,8 +1531,8 @@
 | `parse_body_surfaces_model_roles_and_tool_names` | `crates/lattice-system-harness/src/fake_llm.rs:517` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `parse_body_records_raw_text_when_not_json` | `crates/lattice-system-harness/src/fake_llm.rs:542` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `server_captures_request_and_returns_plain_text_sse` | `crates/lattice-system-harness/src/fake_llm.rs:557` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
-| `msb_requested_is_false_when_unset` | `crates/lattice-system-harness/src/layer_guard.rs:117` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
-| `msb_requested_is_true_when_one` | `crates/lattice-system-harness/src/layer_guard.rs:130` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
+| `retired_layer_guard_requested_is_false_when_unset` | `crates/lattice-system-harness/src/layer_guard.rs:117` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
+| `retired_layer_guard_requested_is_true_when_one` | `crates/lattice-system-harness/src/layer_guard.rs:130` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `strip_ansi_removes_color_and_cursor_codes` | `crates/lattice-system-harness/src/pty_tui.rs:301` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `strip_ansi_handles_osc_title_sequence` | `crates/lattice-system-harness/src/pty_tui.rs:307` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `strip_ansi_handles_st_terminated_osc` | `crates/lattice-system-harness/src/pty_tui.rs:313` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
@@ -1577,7 +1562,7 @@
 | `fast_cli_help_lists_public_commands` | `crates/lattice-system-harness/tests/fast_cli_help.rs:34` | 保留 | 快速二进制黑盒 | — | 已落地快速二进制黑盒场景；保留为成品层载体 |
 | `fast_bare_lattice_prints_help_and_exits_zero` | `crates/lattice-system-harness/tests/fast_cli_help.rs:51` | 保留 | 快速二进制黑盒 | — | 已落地快速二进制黑盒场景；保留为成品层载体 |
 | `fast_unknown_command_rejected` | `crates/lattice-system-harness/tests/fast_cli_help.rs:63` | 保留 | 快速二进制黑盒 | — | 已落地快速二进制黑盒场景；保留为成品层载体 |
-| `msb_plain_text_turn_commits_and_exit_zero` | `crates/lattice-system-harness/tests/direct_local_turn.rs:108` | 提升 | Direct-Local 外部二进制 | `direct_local_plain_text_turn_commits_and_exit_zero` | #40 已落地 ordinary-lane Direct-Local plain-text turn scenario `direct_local_plain_text_turn_commits_and_exit_zero`；原 harness identity 由该 scenario 精确接管，decision 由 keep 改 elevate。 |
+| `direct_local_plain_text_turn_commits_and_exit_zero` | `crates/lattice-system-harness/tests/direct_local_turn.rs:108` | 提升 | Direct-Local 外部二进制 | `direct_local_plain_text_turn_commits_and_exit_zero` | #40 已落地 ordinary-lane Direct-Local plain-text turn scenario `direct_local_plain_text_turn_commits_and_exit_zero`；原 harness identity 由该 scenario 精确接管，decision 由 keep 改 elevate。 |
 | `pty_tui_smoke_runs_turn_and_quits_cleanly` | `crates/lattice-system-harness/tests/pty_tui_smoke.rs:84` | 保留 | Direct-Local 外部二进制 | — | #40 后为 ordinary-lane Direct-Local PTY smoke；保留。 |
 ### `lattice-tui`（保留 3 / 提升 0 / 删除 0）
 
@@ -1645,10 +1630,10 @@
 | `git_status_default_is_clean_with_empty_entries` | `crates/lattice-workspace/tests/git_status_z.rs:370` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `changed_paths_from_typed_entries` | `crates/lattice-workspace/tests/git_status_z.rs:380` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `dirty_fact_from_parsed_output` | `crates/lattice-workspace/tests/git_status_z.rs:408` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_template_create_and_restore` | `crates/lattice-workspace/tests/integration_microsandbox.rs:118` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_egress_blocked_live` | `crates/lattice-workspace/tests/integration_microsandbox.rs:234` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_microsandbox_contract_suite` | `crates/lattice-workspace/tests/integration_microsandbox.rs:305` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_git_ready_template_has_git_under_blocked_egress` | `crates/lattice-workspace/tests/integration_microsandbox.rs:351` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
+| `test_template_create_and_restore` | `crates/lattice-workspace/tests/integration_workspace.rs:118` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
+| `test_egress_blocked_live` | `crates/lattice-workspace/tests/integration_workspace.rs:234` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
+| `retired_workspace_contract_suite` | `crates/lattice-workspace/tests/integration_workspace.rs:305` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
+| `test_git_ready_template_has_git_under_blocked_egress` | `crates/lattice-workspace/tests/integration_workspace.rs:351` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `clean_export_preserves_candidate_oid` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:112` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `dirty_staged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:158` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `dirty_unstaged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:193` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
@@ -1685,7 +1670,7 @@
 | `deterministic_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:72` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `deterministic_invalid_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:110` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `deterministic_missing_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:127` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `microsandbox_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:151` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
+| `retired_workspace_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:151` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `provisions_linked_worktree_and_clean_baseline` | `crates/lattice-workspace/tests/promotion_lower.rs:94` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `reopens_existing_managed_worktree` | `crates/lattice-workspace/tests/promotion_lower.rs:109` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `rejects_branch_already_attached_elsewhere` | `crates/lattice-workspace/tests/promotion_lower.rs:119` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
@@ -1739,7 +1724,7 @@
 | `test_zero_quota_always_refuses` | `crates/lattice-workspace/tests/retained_snapshot.rs:371` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `test_retain_nonexistent_handle_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:385` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `test_restore_nonexistent_snapshot_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:398` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_microsandbox_retain_restore_release` | `crates/lattice-workspace/tests/retained_snapshot.rs:426` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
+| `retired_workspace_retain_restore_release` | `crates/lattice-workspace/tests/retained_snapshot.rs:426` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `wave0_a1_sandbox_send_sync` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:48` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `wave0_a3_boot_and_exec` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:70` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
 | `wave0_a4_snapshot_round_trip` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:131` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |

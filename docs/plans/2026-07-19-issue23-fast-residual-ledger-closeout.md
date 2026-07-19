@@ -1,5 +1,10 @@
 # #23 实现计划：快速测试残留与分类账收口（测试重构 4/6）
 
+> **⚠️ 过时词汇警告（2026-07-19）**：本计划仍含已退役的 KVM-lane 词汇
+>（MSB、Microsandbox 等）。这些词汇已从 active 代码、machine ledger
+>（`docs/test-triage-decisions.json`）与 `docs/TEST-TRIAGE.md` 中完全移除。
+> 本文件待重写以替换为当前 Direct-Local 词汇。重写工作由 codeberg issue 跟踪。
+
 - 票：<https://codeberg.org/AstRin/LATTICE/issues/23>（`ready-for-agent`，无前置依赖）
 - 上级：#18（PRD）/ #19（RFC，已接受）。判决书 = `docs/TEST-TRIAGE.md` + `docs/test-triage-decisions.json`（1449 条，身份不变）。
 - 排序依据：roadmap #16 既定顺序，#23 先于 #5 开工。

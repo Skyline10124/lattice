@@ -11,7 +11,7 @@
 //!
 //! - **plain-text turn** — a complete text-only turn commits and exits 0;
 //!   `session log --json` cross-validates the commit (supersedes the retired
-//!   MSB-lane `msb_full_turn.rs` scenario with the same semantic core).
+//!   KVM-lane plain-turn scenario with the same semantic core).
 //! - **session reopen** — a second `session send` on the same session
 //!   succeeds after an external (non-LATTICE) edit + commit changed the
 //!   Local state, and carries the first turn's transcript context.

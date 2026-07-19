@@ -6,6 +6,12 @@
 - Amended by: ADR 0004 (Tool catalog and execution ownership only)
 - Canonical vocabulary: root `CONTEXT.md`
 
+> **⚠️ 过时词汇警告（2026-07-19）**：本文件仍含已退役的 KVM-lane 词汇
+>（Microsandbox、MSB 等）作为历史决策上下文。这些词汇已从 active 代码、
+> machine ledger（`docs/test-triage-decisions.json`）与 `docs/TEST-TRIAGE.md`
+> 中完全移除。本文件待重写以替换为当前 Direct-Local 词汇。重写工作由
+> codeberg issue 跟踪。
+
 ## Context
 
 ADR 0002 made the Local Workspace authoritative but still copied it into a

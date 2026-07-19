@@ -1,5 +1,10 @@
 # #40 实现计划：删除 Upper 配置、Microsandbox 与 lattice-workspace 残留
 
+> **⚠️ 过时词汇警告（2026-07-19）**：#40 已完成。本计划文件作为历史记录保留，
+> 但仍含已退役的 KVM-lane 词汇（Microsandbox、MSB 等）。这些词汇已从 active
+> 代码、machine ledger 与 `docs/TEST-TRIAGE.md` 中完全移除。本文件待重写或
+> 归档以替换为当前 Direct-Local 词汇。重写工作由 codeberg issue 跟踪。
+
 - 票：<https://codeberg.org/AstRin/LATTICE/issues/40>
 - 前置依赖：#39（[计划](2026-07-17-issue39-policy-visible-read.md)）。全局约束
   与验证矩阵见 [总览](2026-07-17-direct-local-overview.md)。

@@ -1,5 +1,10 @@
 # Issue #5 模型设计 —— Effect 模型(R7a/R8)+ 工具 substrate + 通道模型 + ToolHost
 
+> **⚠️ 过时词汇警告（2026-07-19）**：本 spec 仍含已退役的 KVM-lane 词汇
+>（MSB 等）。这些词汇已从 active 代码、machine ledger 与
+> `docs/TEST-TRIAGE.md` 中完全移除。本文件待重写以替换为当前 Direct-Local
+> 词汇。重写工作由 codeberg issue 跟踪。
+
 日期:2026-07-01;第四轮修订 2026-07-02(工具后端结构规范讨论,原 4 项待拍全部落定)
 
 状态:由 brainstorming 讨论产出(2026-07-01),2026-07-02 与用户逐项拍板后第四轮修订;**待用户复审定稿**。

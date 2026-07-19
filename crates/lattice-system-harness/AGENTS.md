@@ -46,9 +46,9 @@ integration-test target of any product crate.
   is #24).
 - **PTY smoke** (`tests/pty_tui_smoke.rs`): proves the TUI entrypoint wires
   into the same Direct-Local `stream_turn` chain. Also ordinary-lane since
-  #40; the retired MSB opt-in gate (`LATTICE_HARNESS_MSB`,
-  `layer_guard::require_msb_env`) is gone — a broken Direct-Local
-  environment is a product failure, never a skip.
+  #40; the retired KVM-lane opt-in gate and its `layer_guard` module are
+  gone — a broken Direct-Local environment is a product failure, never a
+  skip.
 ## Verification
 
 Run from the workspace root:

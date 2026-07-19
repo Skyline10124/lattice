@@ -1,5 +1,10 @@
 # #23 切片 4：TEST-TRIAGE prose ↔ machine ledger 原子同步
 
+> **⚠️ 过时词汇警告（2026-07-19）**：本计划仍含已退役的 KVM-lane 词汇
+>（MSB 等），因其描述的是退役工作本身。这些词汇已从 active 代码、
+> machine ledger 与 `docs/TEST-TRIAGE.md` 中完全移除。本文件待重写以替换
+> 为当前 Direct-Local 词汇。重写工作由 codeberg issue 跟踪。
+
 - 父计划：`2026-07-19-issue23-fast-residual-ledger-closeout.md` §4
 - 前置：切片 3 已在同一 PR 的前一 commit 改完 JSON；本切片不得改变测试身份或新增场景实现。
 - 目标：`docs/TEST-TRIAGE.md` 成为 JSON 判决书的可读、可复核投影。

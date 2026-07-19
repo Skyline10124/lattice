@@ -313,7 +313,7 @@ pub fn redact_env_pair(name: &str, value: &str, secrets: &[&str]) -> String {
 /// summary, project/home/port, and the redacted env allow-list — into `dir`.
 /// Shared by every failure-artifact path so the world-context block is not
 /// duplicated per caller (the copies had drifted across
-/// `assert_with_failure_artifacts` and the retired MSB full-turn bundle).
+/// `assert_with_failure_artifacts` and the retired KVM-lane full-turn bundle).
 ///
 /// `command_summary` must already be redacted (the caller passes
 /// `artifacts.command_summary`, which `capture_from_output` redacts). Env

@@ -1,5 +1,10 @@
 # #23 切片 3：MSB 词汇退役与 assertion-level #24 映射
 
+> **⚠️ 过时词汇警告（2026-07-19）**：本计划文件标题与内容仍含已退役的
+> KVM-lane 词汇（MSB 等），因其描述的是退役工作本身。这些词汇已从 active
+> 代码、machine ledger 与 `docs/TEST-TRIAGE.md` 中完全移除。本文件待重写
+> 以替换为当前 Direct-Local 词汇。重写工作由 codeberg issue 跟踪。
+
 - 父计划：`2026-07-19-issue23-fast-residual-ledger-closeout.md` §3
 - 前置：切片 1/2（fast residual 已归零）。
 - 与切片 4 **同一 PR、相邻 commit**：本切片改 machine ledger，切片 4 立即同步 prose。
