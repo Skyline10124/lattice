@@ -6,6 +6,11 @@
   spec §6.7 "v1 = 进程内 trait" 的分代方案已被 ADR 0004 取代——本票直接落 WASM Component）。
 - 前置依赖：#4 ✅、#11 ✅、#15 ✅、#40 ✅。
 - 维护者既定顺序：#23（测试收口）应先于本票开工（roadmap #16 评论 7/4、7/5）。
+- 独立切片计划（均含示例代码）：
+  [A：protocol Cell 核](2026-07-19-issue5-sliceA-protocol-cell-core.md) →
+  [B：manifest/codegen/no-op](2026-07-19-issue5-sliceB-manifest-codegen-noop.md) →
+  [C：Component engine/gate](2026-07-19-issue5-sliceC-component-engine-composition-gate.md) →
+  [D：CEP adapter/round-trip](2026-07-19-issue5-sliceD-cep-adapter-roundtrip.md)。
 
 ## 0. 现状锚点（已核验 2026-07-19）
 
@@ -37,12 +42,13 @@
 - `CtxOp { Alloc, Free, Mutate }`、`ExtImpact { None, Read, Write }`（封闭枚举）。
 - `Trust { In, Ex }`：只能显式声明 `in`，缺省 = `ex`（fail-closed）。
 - `ScopeDecl { name, trust, channel }`、`ChannelKind { Workspace, Network, Session }`。
-- `Cell`（`ctx_op × ext_impact × scope`）+ cell-key 字符串形式 `"ctx:ext:scope:in|ex"`，parse/format 往返。
+- `Cell`（`ctx_op × ext_impact × scope`）：manifest/guest 用 trust-free 3 段 CellRef；host 从 scope 派生
+  trust 后形成 4 段 audit key `ctx:ext:scope:in|ex`。
 - `Capability { name, cell }`：工具侧定义、一 cell 可多 capability（alias）。
-- `ToolDescriptor { name, version, description, params_schema, result_schema, scopes, capabilities, required_channels, artifact: ArtifactIdentity, abi_version }`
+- `ToolDescriptor { name, version, description, params_schema, result_schema, scopes, capabilities, artifact: ArtifactIdentity, abi_version }`
   —— Tool Descriptor 唯一 authority 的宿主表示；含 `description`+`version`（复审第 4 条）。
 - `ToolOutput { result_cell, value }`。
-- 校验：`capability.cell.scope` 必须引用已声明 scope；`required_channels` ⊆ scopes 派生通道集（无独立 channels 字段，spec §11.3）。
+- 校验：`capability.cell.scope` 必须引用已声明 scope；通道集只从 scopes 派生，不设独立 `required_channels` 字段。
 
 测试：fail-closed `in`/`ex`；cell-key 往返；descriptor 引用未声明 scope 报错；一次调用多 cell 表示。
 
@@ -63,14 +69,16 @@
 
 从 manifest 生成（全部带 `@generated` 头、可重复生成、byte-identical）：
 
-1. WIT world `lattice:tool-host@0.1.0`：guest export `run(params-json) -> result-json`；
-   host import 仅限声明通道 + `events` + `cancellation`。**通道句柄按 capability 绑定
-   （handle-per-capability）**——#6 落 `ObservedEffect { capability, cell, target }` 精确归因时
-   无需 breaking WIT 变更。本票 world 只含 workspace 只读最小子集（tracer 所需），#7–#10 按版本化 world 扩展。
-2. host descriptor `const`（`ToolDescriptor`）。
+1. WIT world `lattice:tool-host@0.1.0`：guest export structured ToolOutput；#5 no-op 只导入
+   无领域权限的 `host-control`（events/cancellation），不导入 workspace/network/session operation。
+#6 与 capability admission 同票定义 handle-per-capability domain WIT，避免“声明即授权”旁路；
+#7–#10 再扩展真实通道操作。
+2. canonical host descriptor JSON（`ToolDescriptor` owning 值；registration 以 `include_bytes!` 嵌入，
+   避免把含 `String`/`Value` 的 descriptor 伪装成不可实现的 Rust `const`）。
 3. LLM projection metadata（tool definition JSON）。
 4. `artifact.sha256` 元数据。
-5. inventory registration 模块：`descriptor` + `include_bytes!(noop.wasm)` + ABI 版本 + WIT import 清单。
+5. Tool registration 只含 name + embedded descriptor/component bytes；另产 expected-identity candidate，
+   由 trusted host composition 选择后私有 pin descriptor/artifact digest、ABI 与 imports（Tool 不可自批）。
 
 确定性门：`xtask ci` 内重跑 codegen + `git diff --exit-code`；manifest↔descriptor drift 测试
 （#7–#11 验收依赖的机制，前移进本票，spec §9）。
@@ -81,8 +89,9 @@
 - `tools/noop`：**`wasm32-unknown-unknown` target + wit-bindgen**（不用 `wasm32-wasip2`：其 std 经
   wasi-libc 自动引入 `wasi:cli`/`wasi:filesystem`/`wasi:random` 等 imports，会触发本票自己的零
   ambient WASI import 门；纯计算 + Tool Host imports 下 import 白名单恰好等于 Tool Host world，
-  门的实现变得平凡）。经 prelude 实现 `run`，声明一个 workspace `in` scope +
-  单 capability，调用一次 workspace 只读 import 后返回 structured result（打穿完整 tracer）。
+  门的实现变得平凡）。经 prelude 实现 `run`，声明一个 session `in` result capability，
+  只调用 host-control 后返回 trust-free result CellRef；host 验证并产生 Cell/audit evidence，
+  不提前迁移任何 domain behavior。
   #7–#10 若需 clocks/random，以版本化 host import 显式供给，不回退 wasip2。prelude 封装该选择。
 - 构建产物 `.wasm` + sha256 入库（committed，视作生成物）；`xtask` 提供 rebuild-verify（依赖 §9.1 pin）。
 
@@ -93,21 +102,20 @@
   - 只实例化 embedded artifacts（inventory 收集的 generated registration）；无目录扫描/动态链接/native `&dyn Tool` 收集。
   - limits：`StoreLimits`（memory）+ epoch deadline（timeout/cancellation）+ fuel；
     trap/timeout/exhaustion → 结构化 `CepError`，server 不退出。
-- `ToolHost`（call-scoped）：按准入 capability 发通道句柄；本票实现 workspace 只读通道
-  （复用现有 guard/policy 路径）+ `events()` + `cancellation()`；不暴露
-  policy_hook/raw budget/effect_ledger/authorized_region（spec §6.3）。
+- `ToolHost`（call-scoped）：本票仅实现无领域 authority 的 events/cancellation control；
+  result CellRef 在 host 侧验证并派生 trust。domain operation + capability admission 同归 #6/#7–#10；
+  不暴露 policy_hook/raw budget/effect_ledger/authorized_region（spec §6.3）。
 - composition gate（启动时、serve 前，逐项 fail closed）：
-  missing / duplicate / unapproved name（inventory 集 ≠ 组合清单，双向都失败，spec §8.1）/
-  descriptor drift / artifact hash mismatch / WIT import drift / unsupported ABI version。
+  missing / duplicate / unapproved name + identity（inventory registration 必须匹配 host-pinned composition）/
+  descriptor digest/name/artifact drift / artifact hash mismatch / WIT import drift / unsupported ABI version。
 - 启动后 catalog immutable：不存在运行时注册 API。
 
-## 5. 切片 D：raw registry + descriptor 驱动 adapter + round-trip
+## 5. 切片 D：closed Component dispatch + descriptor 驱动 adapter + round-trip
 
-- `MethodRegistry` 增加 raw 注册路径：按 `ToolDescriptor` 接受 dyn handler
-  （`registry.rs:118` 的 `CatalogMethod` 泛型无法表达非编译期方法名）；与现有
-  `register_method<M>` 过渡并存。
-- `lattice-api::CepExecutorAdapter`：Component tool 走 descriptor 驱动 dispatch；
-  5 个 native 方法保持硬编码 match 至 #7–#10 逐票替换（`cep.rs:106` 8 臂 match 不在本票展开重写）。
+- 不开放通用 raw registrar。`lancet-runtime::ClosedCatalog` 在现有 native audit lifecycle 内私有分流；
+  5 个 native 方法继续使用 typed `MethodRegistry`，production Tool 实现不迁移。
+- `lattice-api::CepExecutorAdapter` 的 available set 由 runtime definitions 驱动；所有工具走
+  `CepClient::call_raw`，删除五臂硬编码 `dispatch_typed`。
 - LLM tool definitions：Component tool 只从 generated descriptor inventory 投影；
   断言无手写 method match/schema shim。
 - audit：复用 transport 的 audit start/finalize 生命周期 + dispatch 后 effect 校验；
@@ -121,13 +129,13 @@
 | codegen determinism | 双跑 diff + golden 文件 |
 | manifest 唯一 authority / drift | manifest↔descriptor/WIT/hash 不一致 → 失败 |
 | import denial | 未声明 import 的 component 过不了 gate；WASI fs/socket import → link 失败 |
-| registration gates | 7 种失败模式各一例，全部 fail closed |
+| registration gates | missing/duplicate/unapproved/full-identity drift/ABI/import/channel adapter 各负例，全部 fail closed |
 | round-trip | CepClient → result + cell effect + events + audit 行断言 |
 | limits | trap / memory 超限 / deadline / cancellation → 结构化错误，server 存活 |
 | no-ambient-authority | component 内尝试 WASI 系统调用的负例 |
 | catalog immutable | 启动后无注册缝；inventory 集 == 组合清单（恰好相等） |
 | LLM projection | 投影列表恰含 5 native + noop（测试组合），无手写 shim |
-| capability↔通道绑定 | 未声明 network scope 的工具取 `network()` 失败；alias 单独授权成功 |
+| ToolHost/Cell 边界 | no-op 仅有 host-control；guest 4 段 key（自带 trust）被拒；domain imports 为零 |
 
 验证命令：
 
@@ -148,7 +156,7 @@ A（protocol 类型）→ B（manifest/codegen/WIT/prelude/noop）→ C（runtim
 - 不动 `ImpactKind`-keyed authority 机器（#6 R7b）；旧 effect 类型 add-only 并存。
 - 无 `ContextStore`/`Free` 执行机制（PRD R10，仅枚举变体）。
 - 无 Tool Bundle install/list/uninstall CLI 与 release gate（#13）。
-- network/session 通道 host 实现（#10/#7）；WIT world 版本化预留。
+- 完整 workspace/network/session domain operations 与 capability admission（#6/#8/#10/#7）；本票只有 control tracer。
 
 ## 9. 决议记录（原"待决点"，全部已决 2026-07-19）
 
@@ -159,10 +167,11 @@ A（protocol 类型）→ B（manifest/codegen/WIT/prelude/noop）→ C（runtim
 2. **budget/measure 归属与 tokenizer 选型**：本票只做 `result_cell` ∈ descriptor cell 集校验；
    `measure()`/context 记账推迟到 #6。canonical 尺 = **o200k_base，经 `bpe-openai` crate**
    （纯 Rust，词表编译进二进制，零运行时资产），取代原 DeepSeek HF 资产方案；spec 决议 8 已修订。
-3. **capability 归因粒度**：本票按 "observed ⊆ declared 上界检查" 实现；但 WIT 形状现在就按
-   handle-per-capability 设计（§3.2），#6 精确归因只加实现、不动接口。
+3. **capability 归因粒度**：#5 只做 result CellRef ⊆ descriptor 上界检查且 guest 无权提供 trust；
+   domain handle-per-capability WIT 与 admission 同归 #6，防止在 admission 前形成声明即授权。
 4. **wasmtime 选型**：当前 stable 主版本 **46.x**，`Cargo.toml` 精确 pin。deadline/cancellation 走
-   epoch interruption（cancel 时 bump epoch），memory 走 `StoreLimits`，fuel 作粗粒度 CPU 上界。
+   epoch interruption（共享 ticker + 每 Store callback 判 cancellation/deadline；取消不直接 bump 全局 epoch），
+   memory 走 `StoreLimits`，fuel 作粗粒度 CPU 上界。
    注意：wasmtime 46 MSRV = 1.94，workspace `rust-version = "1.88"` 需在 pin commit 同步升至 1.94；
    `xtask ci` 前置检查 wasm target 已安装。
 
