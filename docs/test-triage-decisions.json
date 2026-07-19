@@ -4579,9 +4579,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部 Fake LLM 完整对话/tool happy path；提升到 session send 黑盒并删除低层重复"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_message_assembly",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_message_assembly` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-agent",
@@ -4627,9 +4627,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部 Fake LLM 完整对话/tool happy path；提升到 session send 黑盒并删除低层重复"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_tool_error_payload",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_tool_error_payload` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-agent",
@@ -5095,9 +5095,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部 Fake LLM 完整对话/tool happy path；提升到 session send 黑盒并删除低层重复"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_streaming_chat_compat",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_streaming_chat_compat` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-agent",
@@ -6079,9 +6079,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_basic_completed_event_contract",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_basic_completed_event_contract` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6091,9 +6091,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_live_error_commit",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_live_error_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6103,9 +6103,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_live_event_order",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_live_event_order` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6115,9 +6115,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_provider_startup_failure",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_provider_startup_failure` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6127,9 +6127,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_delta_only_commit",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_delta_only_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6139,9 +6139,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_branch_population",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_branch_population` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6151,9 +6151,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_resume_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_commit_failure",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_commit_failure` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6163,9 +6163,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_receiver_drop_commit",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_receiver_drop_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6175,9 +6175,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb|planned_policy_msb|planned_retired_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_slow_observer_commit",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_slow_observer_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6295,9 +6295,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_tool_activity_before_commit",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_tool_activity_before_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6307,9 +6307,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_stream_error_commit",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_stream_error_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6319,9 +6319,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb|planned_provider_fail_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_cancelled_commit",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_cancelled_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6331,9 +6331,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_partial_output_error_commit",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_partial_output_error_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6343,9 +6343,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_policy_msb|planned_retired_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_cep_lifecycle",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_cep_lifecycle` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6631,9 +6631,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb|planned_mutate_msb|planned_audit_ops_msb|planned_provider_fail_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_turn_audit_replay",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_turn_audit_replay` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6811,9 +6811,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_partial_token_parity",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_partial_token_parity` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6823,9 +6823,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_tool_call_parity",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_tool_call_parity` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6835,9 +6835,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_activity_commit_order",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_activity_commit_order` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6847,9 +6847,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_completed_disposition_parity",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_completed_disposition_parity` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6859,9 +6859,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb|planned_provider_fail_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_error_disposition_parity",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_error_disposition_parity` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -7086,10 +7086,10 @@
     "name": "stale_verification_reaches_no_promotion_effects",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -7098,10 +7098,10 @@
     "name": "success_uses_real_session_callback_and_materializes_lower",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -7290,10 +7290,10 @@
     "name": "promotion_module_documents_activation_requirement",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -7530,10 +7530,10 @@
     "name": "prune_one_session_does_not_remove_another",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -7542,10 +7542,10 @@
     "name": "prune_idempotent_second_call_returns_zero_released",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -7554,10 +7554,10 @@
     "name": "prune_session_snapshots_skips_pending_worktree_snapshot",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -7950,10 +7950,10 @@
     "name": "cleanup_status_error_yields_error_aborted",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部拼装 turn 路径；提升到 session send 黑盒"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -8334,10 +8334,10 @@
     "name": "upper_routing_e2e",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb|planned_mutate_msb|planned_audit_ops_msb|planned_provider_fail_msb|planned_policy_msb|planned_retired_msb|planned_secret_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -8346,10 +8346,10 @@
     "name": "adapter_failure_has_no_lower_fallback",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb|planned_audit_ops_msb|planned_provider_fail_msb|planned_secret_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -8358,10 +8358,10 @@
     "name": "generated_profiles_are_executable_host_only",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_mutate_msb|planned_audit_ops_msb|planned_provider_fail_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -8370,10 +8370,10 @@
     "name": "microsandbox_upper_routing",
     "ignored": true,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "decision": "delete",
+    "target_layer": "local_invariant",
+    "replacement": "n/a",
+    "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-api",
@@ -8383,9 +8383,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_workspace_read_turn",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_workspace_read_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8395,9 +8395,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_routed_provider_event",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_routed_provider_event` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8419,9 +8419,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb|planned_resume_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_reopen_previous_context",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_reopen_previous_context` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8431,9 +8431,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_policy_msb|planned_retired_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_fetch_capability_denial",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_fetch_capability_denial` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8443,9 +8443,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb",
-    "reason": "内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_disabled_fetch_denial",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_disabled_fetch_denial` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8455,9 +8455,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_audit_ops_msb",
-    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；seed audit DB 需 committed turn，本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_audit_query_seeded",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_query_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8467,9 +8467,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_audit_ops_msb",
-    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_audit_tail_seeded",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_tail_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8491,9 +8491,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_audit_ops_msb",
-    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；seed audit DB 需 committed turn，本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_audit_query_unknown_session",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_query_unknown_session` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8503,9 +8503,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_audit_ops_msb",
-    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_audit_replay_trace",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_replay_trace` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8515,9 +8515,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_audit_ops_msb",
-    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_audit_attestation_match",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_attestation_match` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8527,9 +8527,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_audit_ops_msb",
-    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_audit_replay_unknown_turn",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_replay_unknown_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8553,7 +8553,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-3 复审判偏差：手工植入旧 SQLite schema 测向后兼容；RFC #19 harness 边界禁止直接打开/植入内部 audit DB，planned_audit_ops_msb 永远无法覆盖（真实 turn 只生成当前 schema）；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-3 复审判偏差：手工植入旧 SQLite schema 测向后兼容；RFC #19 harness 边界禁止直接打开/植入内部 audit DB，#24 audit scenarios 永远无法覆盖（真实 turn 只生成当前 schema）；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -8719,9 +8719,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_audit_ops_msb",
-    "reason": "延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_lancet_status_seeded",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_lancet_status_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8887,9 +8887,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_provider_fail_msb",
-    "reason": "延期到 planned_provider_fail_msb（provider 断流/超时清理）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_provider_timeout",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_provider_timeout` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8935,9 +8935,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "msb_full_turn",
-    "reason": "已落地 msb_full_turn 已通过公开 session send 完成真实 turn 并断言 commit；原内部集成测试仍保留，记为冗余待删，不能改判 local_invariant。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_existing_session_run_result",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_existing_session_run_result` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8959,9 +8959,9 @@
     "ignored": false,
     "async": true,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_observe_msb",
-    "reason": "延期到 planned_observe_msb（需 observe.workspace tool call 才能验证 workspace-root vs profile package-dir 分离；msb_full_turn profile 只执行纯文本 turn）；本机无 /dev/kvm，原内部测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_canonical_workspace_root",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_canonical_workspace_root` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8985,7 +8985,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -8997,7 +8997,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9009,7 +9009,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9021,7 +9021,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9033,7 +9033,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9057,7 +9057,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9069,7 +9069,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9081,7 +9081,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9093,7 +9093,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9105,7 +9105,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9117,7 +9117,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9129,7 +9129,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9141,7 +9141,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9177,7 +9177,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9189,7 +9189,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9201,7 +9201,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9213,7 +9213,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9237,7 +9237,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9249,7 +9249,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9261,7 +9261,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9273,7 +9273,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9285,7 +9285,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9297,7 +9297,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9309,7 +9309,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9381,7 +9381,7 @@
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
+    "reason": "#23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。"
   },
   {
     "crate": "lattice-cli",
@@ -9943,9 +9943,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_session_graph_msb",
-    "reason": "延期到 planned_session_graph_msb：需用公开 branch/list 路径验证仅读取目标 session refs；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_branch_listing_isolation",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_branch_listing_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -9955,9 +9955,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_session_graph_msb",
-    "reason": "延期到 planned_session_graph_msb：需用公开 checkout 路径验证只修改目标 session HEAD；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_checkout_isolation",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_checkout_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -9967,9 +9967,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_session_graph_msb",
-    "reason": "延期到 planned_session_graph_msb：需用公开 branch create 路径验证只影响目标 session；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_branch_create_isolation",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_branch_create_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -9979,9 +9979,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_session_graph_msb",
-    "reason": "延期到 planned_session_graph_msb：需用公开 reset 路径验证只移动目标 session branch pointer；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_reset_isolation",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_reset_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -9991,9 +9991,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_session_graph_msb",
-    "reason": "延期到 planned_session_graph_msb：需用公开 diff 路径验证 refs 在目标 session 内解析；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_diff_isolation",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_diff_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -10543,9 +10543,9 @@
     "ignored": false,
     "async": false,
     "decision": "elevate",
-    "target_layer": "real_microsandbox",
-    "replacement": "planned_session_history_msb",
-    "reason": "延期到 planned_session_history_msb：需真实 turn 后通过公开 human session log 验证 seeded turn 展示；现有 msb_full_turn 只断言 JSON log，原测试保留。"
+    "target_layer": "direct_local_binary",
+    "replacement": "planned_direct_session_log_turn",
+    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_session_log_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -14941,15 +14941,15 @@
   },
   {
     "crate": "lattice-system-harness",
-    "file": "crates/lattice-system-harness/tests/msb_full_turn.rs",
-    "line": 192,
+    "file": "crates/lattice-system-harness/tests/direct_local_turn.rs",
+    "line": 108,
     "name": "msb_plain_text_turn_commits_and_exit_zero",
     "ignored": true,
     "async": false,
-    "decision": "keep",
-    "target_layer": "real_microsandbox",
-    "replacement": null,
-    "reason": "已落地真实 Microsandbox 完整 turn；保留"
+    "decision": "elevate",
+    "target_layer": "direct_local_binary",
+    "replacement": "direct_local_plain_text_turn_commits_and_exit_zero",
+    "reason": "#40 已落地 ordinary-lane Direct-Local plain-text turn scenario `direct_local_plain_text_turn_commits_and_exit_zero`；原 harness identity 由该 scenario 精确接管，decision 由 keep 改 elevate。"
   },
   {
     "crate": "lattice-system-harness",
@@ -14959,9 +14959,9 @@
     "ignored": true,
     "async": false,
     "decision": "keep",
-    "target_layer": "real_microsandbox",
+    "target_layer": "direct_local_binary",
     "replacement": null,
-    "reason": "已落地 PTY TUI 入口 smoke；保留"
+    "reason": "#40 后为 ordinary-lane Direct-Local PTY smoke；保留。"
   },
   {
     "crate": "lattice-tui",
