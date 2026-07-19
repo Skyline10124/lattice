@@ -116,7 +116,7 @@ Upper 里,文件改动出不去 Upper、网络请求过不了 egress 网关,§6.
 > 准入(capability + `in`/`ex` + `ObservedScope`)。框架因此只剩两样:一把 context 度量 + 一条
 > 准入轴。**度量由 runtime 在事后量返回值的大小**(不信工具自报)——量的是进了共享 context 的那
 > 份返回值,不是工具内部读了多少字节。成本(context 占用)记给 `Alloc`,收益(逐出低相关内容)记
-> 给 `Free`,两者正交。度量单位 = 参考 tokenizer(DeepSeek,§11.8 决议记录)的 token 数,真实 token
+> 给 `Free`,两者正交。度量单位 = 参考 tokenizer(o200k_base,§11.8 决议记录,2026-07-19 修订)的 token 数,真实 token
 > 用 provider `usage` 回校。扣费在 §6.5 第 3 层(事后),不在第 2 层逐操作扣。
 
 ### 5.2 开放 scope 轴
@@ -394,7 +394,7 @@ fetch 的 microsandbox 实现(guest 内 helper 发包)本质是模式 B 的特�
    执行。**这一层不碰 budget**;`max_single_read_bytes` 这种 per-op 上限是 backend 的输出整形
    (mechanism),不进框架预算。未覆盖到的 cell 操作在这一层失败,不是整工具被拒(工具还能调其他
    已覆盖 cell 的操作)。
-3. **事后**(runtime,dispatch 后):由 runtime 经 `measure()`(DeepSeek 参考 tokenizer,§11.8 决议
+3. **事后**(runtime,dispatch 后):由 runtime 经 `measure()`(o200k_base 参考 tokenizer,§11.8 决议
    记录)**量返回 `Value` 的 token 数**(不信工具自报)→ 扣统一 context 预算(§5.1);并校验
    observed effects ⊆ 声明的天花板——即今天 `apply_effect_check`(`transport.rs:177`)的泛化。
    **该校验对越界(实际效果超出声明 cell)有效,对漏记(有效果但没声明)无效**——模式 B 尤甚
@@ -657,8 +657,8 @@ drift check = 解析 `manifest.toml` + 读 `ToolDescriptor` const,逐字段比�
     通道 trait + 强制装饰器 + 供需校验(`ChannelKind` 纯数据类型归 `lancet-protocol`,§12)、
     统一 context 预算与 `measure()` 模块(§11.8 决议记录)。
   - **不进 runtime**:工具领域 policy(`observation.rs` → #8、`network.rs` → #10 工具 crate)、
-    通道实现(留 `lattice-workspace` adapter)、audit 读库(operator 库,#11)、tokenizer 资产
-    (作 `measure` 模块数据,可换,§11.8 决议记录)。
+    通道实现(留 `lattice-workspace` adapter)、audit 读库(operator 库,#11)、tokenizer 词表
+    (随 `bpe-openai` 依赖编译进二进制,可换,§11.8 决议记录)。
   - #12 验收 = 上述"进"清单全部搬迁完成 + `lancet-native`/`lancet-cep`/`lancet-dispatch` 删掉后
     workspace 构建/测试全绿。
 - **#13** —— manifest **格式**移到 #5;#13 保留 CLI + release gate。
@@ -693,9 +693,14 @@ drift check = 解析 `manifest.toml` + 读 `ToolDescriptor` const,逐字段比�
 6. **R8 `FailureSemantics`** —— 删整个枚举和 `EffectDecl.failure` 字段。见 §5.4。
 7. **backend I/O 面** —— 维持继承的 9 方法,通道化成 `workspace` 通道。见 §6.2。
 8. **budget 统一为单一 context 度量** —— runtime 事后量返回 `Value` 的 footprint,不信工具自报;
-   度量点 §6.5 第 3 层。单位 = DeepSeek 参考 tokenizer(`measure()` 先作模块,不单开 crate);真实
-   token 由 provider `usage` 校准。资产验收:pin revision+sha256、MIT 许可随资产、确定性离线加载、
-   加载失败 fail-closed(不回落字节估算)。见本条上文 tokenizer 段与 §6.5 第 3 层。
+   度量点 §6.5 第 3 层。单位 = **o200k_base 参考 tokenizer,经 `bpe-openai` crate(github/rust-gems,
+   纯 Rust,词表编译进二进制,count 线性最坏复杂度)**;`measure()` 先作模块,不单开 crate;真实
+   token 由 provider `usage` 校准。
+   〔2026-07-19 修订:原决议 = DeepSeek HF `tokenizer.json` 资产 + 离线加载。改选 `bpe-openai` +
+   o200k_base 后无运行时资产:pin 坍缩为 `Cargo.lock`,原资产验收(revision+sha256、许可随资产、
+   确定性离线加载、加载失败 fail-closed)全部作废——fail-closed 构造性成立。o200k 为 200k 多语
+   词表,中文压缩率可接受;这把尺只是内部记账货币,绝对精度由 provider `usage` 回校承担。
+   实现归属 #6(#5 不含 budget/measure)。〕见 §6.5 第 3 层。
 9. **通道模型 + 双模收口 + capability↔通道绑定** —— 绑定链 `capability → cell → scope → channel`,
    通道集派生自 `[[scopes]]`、无独立字段;模式 B 只证 containment 不证完整 effect;供需校验
    fail-closed,永不宿主兜底。见 §5.2/§5.3/§6.1–§6.4。
