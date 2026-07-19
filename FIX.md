@@ -2,6 +2,49 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #23 slice 1: `fast_lancet_cli` black-box replaces internal `cep_status_missing_db` test — 2026-07-19
+
+Severity: FEATURE (测试重构 4/6, slice 1 of #23 closeout;
+docs/plans/2026-07-19-issue23-slice1-fast-lancet-cli.md).
+
+**Problem:** The `lattice lancet status` empty-state contract (no audit DB →
+exit 0, `recent_calls: []`, `last_guard_verdict: null` in JSON; `Recent CEP
+Calls:` / `none` / `Last Guard Verdict` in text) was only guarded by the
+crate-internal unit test `cep_status_missing_db_returns_empty_state` in
+`lattice-cli`, which triage elevated to `fast_binary` under replacement
+`planned_lancet_cli` but the external black-box scenario had not landed.
+
+**Fix:**
+- New `crates/lattice-system-harness/tests/fast_lancet_cli.rs` with two
+  ordinary-lane fast-binary scenarios:
+  `fast_lancet_status_missing_audit_store_reports_empty_state_json` (exit 0
+  + JSON shape) and
+  `fast_lancet_status_missing_audit_store_text_mode_smoke` (exit 0 + three
+  text substrings). Harness pattern mirrors `fast_audit_cli.rs`; no product
+  crate dependency (`cargo xtask harness-boundary` passes).
+- Delete the superseded internal test
+  `cep_status_missing_db_returns_empty_state` from
+  `crates/lattice-cli/src/commands/lancet.rs`. The seeded-state
+  `cep_status_seeded_audit_json` test and its `ScopedXdgStateHome` /
+  `seed_audit_db` fixtures are retained (deferred to `planned_audit_ops_*`,
+  not in this slice's scope).
+- Update `docs/test-triage-decisions.json` `reason` for
+  `cep_status_missing_db_returns_empty_state` to record the black-box
+  takeover; `decision` / `target_layer` / `replacement` / identity fields
+  unchanged (prose↔ledger reconciliation is slice 4).
+
+**Verification:**
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness --test fast_lancet_cli` → 2 passed.
+- `cargo test -p lattice-cli` → 134 passed (seeded test + fixtures intact).
+- `cargo xtask ci` → all green (fmt / clippy -D warnings / build / harness-boundary / workspace tests incl. new `fast_lancet_cli` in ordinary lane + pty smoke).
+- `cargo xtask lancet-boundary` → LANCET boundary check passed.
+- Full harness suite `cargo test -p lattice-system-harness` → 90 passed.
+
+**Changed files:**
+- `crates/lattice-system-harness/tests/fast_lancet_cli.rs` (new)
+- `crates/lattice-cli/src/commands/lancet.rs` (test deletion only)
+- `docs/test-triage-decisions.json` (single `reason` string)
+
 ---
 
 

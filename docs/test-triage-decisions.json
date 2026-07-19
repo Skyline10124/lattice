@@ -8709,7 +8709,7 @@
     "decision": "elevate",
     "target_layer": "fast_binary",
     "replacement": "planned_lancet_cli",
-    "reason": "延期到 planned_lancet_cli（lattice lancet status 空态：audit DB 不存在时返回空 recent_calls + None verdict，exit 0）；fast 测试尚未新增，原内部测试保留。"
+    "reason": "已删除原内部测试，由已落地 fast_lancet_cli（lancet status 空态 JSON/text）黑盒接管"
   },
   {
     "crate": "lattice-cli",

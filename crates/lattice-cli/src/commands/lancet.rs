@@ -286,15 +286,6 @@ mod tests {
     }
 
     #[test]
-    fn cep_status_missing_db_returns_empty_state() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        let output = collect_status(dir.path()).unwrap();
-        assert!(output.recent_calls.is_empty());
-        assert!(output.last_guard_verdict.is_none());
-    }
-
-    #[test]
     fn cep_status_seeded_audit_json() {
         let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
