@@ -3,12 +3,18 @@
 - 票：<https://codeberg.org/AstRin/LATTICE/issues/23>（`ready-for-agent`，无前置依赖）
 - 上级：#18（PRD）/ #19（RFC，已接受）。判决书 = `docs/TEST-TRIAGE.md` + `docs/test-triage-decisions.json`（1449 条，身份不变）。
 - 排序依据：roadmap #16 既定顺序，#23 先于 #5 开工。
+- 独立切片计划（均含示例代码）：
+  [1：fast lancet CLI](2026-07-19-issue23-slice1-fast-lancet-cli.md) →
+  [2：branch fast scenarios](2026-07-19-issue23-slice2-branch-fast-scenarios.md) →
+  [3：MSB 词汇退役/映射](2026-07-19-issue23-slice3-msb-vocabulary-retirement.md) →
+  [4：prose/ledger 一致性](2026-07-19-issue23-slice4-ledger-prose-consistency.md)。
+  切片 3/4 文档独立，但必须同一 PR 相邻 commit（账本原子性）。
 
 ## 0. 现状锚点（已核验 2026-07-19）
 
 - ledger 1449 条：keep 1338 / elevate 96 / delete 15（15 条删除已全部执行）。
-- elevate 96 = **41 条 fast_binary + 55 条 msb-bound**（54 条 `real_microsandbox` 延期 + 1 条
-  `run_integration_commits_existing_session`）。
+- elevate 96 = **41 条 fast_binary + 55 条 MSB-era replacement**；另有 2 条 keep 的
+  `target_layer=real_microsandbox`，所以待改 layer 总数为 57。
 - 41 条 fast 中 **36 条已接管完成**；残留 5 条，全在 `lattice-cli`：
   1. `cep_status_missing_db_returns_empty_state`（`lancet.rs:289`）→ `planned_lancet_cli`，场景未建。
   2. `project_branch_creation_json_output_includes_branch`（`session.rs:1284`）→ 部分覆盖，缺 branch 创建 JSON 场景。
@@ -56,39 +62,31 @@ ledger：该条 reason 改「已删除原内部测试，由已落地 fast_lancet
 
 ## 3. 切片 3：`*_msb` 词汇退役 + #24 精确映射
 
-### 3.1 词汇替换（ledger + prose 同步）
+### 3.1 精确处置（不做大类正则替换）
 
-| 旧 | 新 |
-| --- | --- |
-| target_layer `real_microsandbox` | `direct_local_binary` |
-| `msb_full_turn` | `direct_local_turn`（已落地骨架场景按名引用） |
-| `planned_observe_msb` 等 `planned_*_msb` | `planned_*_direct`（scope 后缀统一替换） |
+当前 57 条 stale layer 逐一分成：
 
-### 3.2 逐条映射（54 条延期 + 1 条冗余）
+- 1 条历史 harness identity 已由 #40 plain-text scenario 接管；
+- 44 条映射到 **44 个 assertion-level #24 scenario ID**（例如 basic event contract、existing-session
+  RunTurnResult、message assembly、audit query/tail/replay、五种 session graph isolation 分别命名），
+  禁止 `planned_mutate_direct` 一类 family fallback；
+- 11 条绑定已删除 Upper/promotion/prune 产品面的历史测试补记为 delete，不向 #24 虚构场景；
+- 1 条现存 PTY smoke 只把 layer 改为 `direct_local_binary`，decision=keep。
 
-- **已被 #40 骨架接管的条目就地收口**：`run_integration_commits_existing_session`
-  （`run_tests.rs:145`，replacement 原 `msb_full_turn` 已落地为
-  `direct_local_plain_text_turn_commits_and_exit_zero`，ordinary lane 通过）→ 删除内部测试，
-  reason 改「已删除，由 direct_local_turn 接管」。其余条目若语义核已被骨架三场景
-  （plain commit / reopen / policy denial）完整覆盖，同样就地收口；语义核不符的**不删**。
-- **其余条目**逐条改 replacement 为 #24 矩阵中的**具名场景**
-  （`planned_observe_direct` / `planned_mutate_direct` / `planned_retired_direct` /
-  `planned_provider_fail_direct` / `planned_secret_direct` / `planned_audit_ops_direct` /
-  `planned_session_graph_direct` / `planned_session_history_direct`），
-  多场景复合条目保留 `|` 复合表示；禁止兜底三元泛化（review-fix 六轮教训）。
-- TEST-TRIAGE §1「场景目录」补登新场景 ID 及其 #24 归属；§1.5 延期账本表改写为
-  「#24 接管清单」，逐条可审计。
+精确 57 条 identity、44 个 scenario ID 与预期 decision delta 见
+[切片 3 独立计划](2026-07-19-issue23-slice3-msb-vocabulary-retirement.md)。
 
-### 3.3 范围红线
+### 3.2 范围红线
 
 - 不实现任何 Direct-Local runtime 行为（#24 范围）。
-- 语义核未被已落地场景覆盖的内部测试一律保留——即使词汇改名。
+- 语义核未被已落地场景形成 assertion superset 的内部测试一律保留。
+- `crate/file/line/name/async/ignored` identity 字段不变；decision 只允许独立计划列出的显式 delta。
 
 ## 4. 切片 4：prose ↔ ledger 一致性收口
 
 - 更新 §1.5 执行状态：fast residual 归零表、`*_msb` 退役记录、删除计数。
-- 各 crate 小节头计数（如 `lattice-cli`（保留 118 / 提升 57 / 删除 10））与 JSON 重算对齐；
-  总数维持 1449，身份不变。
+- 各 crate 小节头计数与 JSON 重算对齐；按当前基线预期 keep 1337 / elevate 86 / delete 26；
+  总数维持 1449，identity 不变。
 - 一致性核验脚本化跑一次（python 重算 JSON 分布 vs prose 计数）；结果贴 PR，不新增常驻工具。
 
 ## 5. 验收对照（票文逐条）
@@ -96,7 +94,7 @@ ledger：该条 reason 改「已删除原内部测试，由已落地 fast_lancet
 | 票文验收 | 对应切片 |
 | --- | --- |
 | fast residual 为零；`lancet status` + branch create/reopen 有 external-binary 覆盖 | 切片 1 + 2 |
-| 已接管的内部测试删除；未接管的不提前删 | 切片 1 + 2 + 3.2（红线 3.3） |
+| 已接管的内部测试删除；未接管的不提前删 | 切片 1 + 2 + 切片 3 assertion-superset 表 |
 | `*_msb` 全部分成「本票完成」或「#24 精确接管」，无含糊兜底 | 切片 3 |
 | prose 与 ledger 计数/layer/replacement/状态一致 | 切片 4 |
 | harness 只依赖 `LATTICE_BIN` 与公开接口 | 切片 1 + 2 不加产品 crate 依赖（`cargo xtask harness-boundary` 门） |
@@ -106,7 +104,7 @@ ledger：该条 reason 改「已删除原内部测试，由已落地 fast_lancet
 
 ```
 cargo xtask ci                        # fmt / clippy -D warnings / build / harness-boundary / workspace tests
-LATTICE_BIN=target/debug/lattice cargo test -p lattice-system-harness --test fast_lancet_cli --test fast_session_cli
+LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness --test fast_lancet_cli --test fast_session_cli
 cargo xtask lancet-boundary
 ```
 
@@ -122,4 +120,5 @@ cargo xtask lancet-boundary
 - `session new` 的 `--project-branch` 为必填（`session.rs:47-49`）：branch 创建场景实为
   session 创建路径的断言强化，若 CLI 面与预期不符（如 branch 字段在 status 而非 new 输出），
   以实际公开 JSON 契约为准调整断言，不改产品面。
-- 55 条映射是机械量大但无技术风险的工作；用脚本批改 + 人工抽查，避免手滑改动测试身份字段。
+- 57 条 stale layer 中含 42 个 exact planned ID + 12 条显式 decision delta；只允许显式 dict/set
+  批改并用 identity snapshot 断言，禁止正则 family fallback。
