@@ -92,60 +92,13 @@ fn seed_session(temp_home: &Path, session_id: &str) {
 // ─── resolve sonnet ─────────────────────────────────────────────────────────
 // ─── session status ─────────────────────────────────────────────────────────
 
-#[test]
-fn smoke_session_status_list_shows_seeded_session() {
-    let home = temp_home("session-status");
-    let session_id = "smoke-session-status-001";
-    seed_session(&home, session_id);
-
-    let output = lattice(&home)
-        .args(["session", "status"])
-        .output()
-        .expect("session status should run");
-
-    assert!(
-        output.status.success(),
-        "session status should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Should show the seeded session
-    assert!(
-        stdout.contains(session_id) || stdout.contains("1 session"),
-        "session status should show seeded session, got:\n{stdout}"
-    );
-}
-
-#[test]
-fn smoke_session_status_specific_session() {
-    let home = temp_home("session-status-specific");
-    let session_id = "smoke-session-specific-002";
-    seed_session(&home, session_id);
-
-    let output = lattice(&home)
-        .args(["session", "status", session_id])
-        .output()
-        .expect("session status <id> should run");
-
-    assert!(
-        output.status.success(),
-        "session status <id> should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // The CLI truncates long IDs to 8 chars + ".."
-    let truncated = if session_id.len() > 8 {
-        &session_id[..8]
-    } else {
-        session_id
-    };
-    assert!(
-        stdout.contains(truncated),
-        "session status <id> should contain the session id (or prefix), got:\n{stdout}"
-    );
-}
+// The two `smoke_session_status_*` tests that previously lived here were
+// superseded by `fast_session_new_creates_session_and_appears_in_list` and
+// the `fast_session_status_*` scenarios in
+// `crates/lattice-system-harness/tests/fast_session_cli.rs` (issue #23
+// slice 2). The seeded-session list/specific status surface is now asserted
+// through the public `lattice` binary in the harness; the in-crate smoke
+// version was redundant.
 
 // ─── session log ─────────────────────────────────────────────────────────────
 

@@ -169,6 +169,113 @@ fn parse_json_or_artifacts(
     })
 }
 
+/// Create a session on an explicit project branch and retain the parsed
+/// public JSON so the caller can assert branch-specific fields. Unlike
+/// `create_session`, this does NOT run `assert_session_new_contract` (which
+/// pins the default `project_branch=main` contract); the caller owns the
+/// branch-specific assertions. The main-default contract stays pinned by the
+/// other scenarios that go through `create_session`.
+fn create_session_on_branch(
+    world: &ScenarioWorld,
+    spec: &ScenarioSpec,
+    branch: &str,
+) -> (String, Value, Output) {
+    let out = run(
+        world,
+        spec,
+        &[
+            "--json",
+            "session",
+            "new",
+            "--agent",
+            "plain",
+            "--project-branch",
+            branch,
+        ],
+    );
+    let parsed = parse_json_or_artifacts(
+        world,
+        &spec.name,
+        "lattice --json session new with explicit project branch",
+        &out,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let id = parsed
+        .get("session_id")
+        .and_then(Value::as_str)
+        .expect("session_id")
+        .to_string();
+    (id, parsed, out)
+}
+
+#[test]
+fn fast_session_new_json_reports_requested_project_branch() {
+    // Public JSON contract for `session new --project-branch <b> --json`:
+    // the response object echoes the requested branch under `project_branch`
+    // (renderer at `crates/lattice-cli/src/commands/session.rs:215-220`).
+    // `assert_session_new_contract` already pins the main-default case; this
+    // scenario pins the non-default branch value so a regression that
+    // hardcodes `main` or drops the field is caught. Supersedes the
+    // crate-internal `project_branch_creation_json_output_includes_branch`.
+    let (world, spec) = project_with_agent("fast-session-new-branch-json");
+    let (_id, parsed, out) = create_session_on_branch(&world, &spec, "feature/test");
+    let result = assert_exit_success(&out).and_then(|_| {
+        if parsed.get("project_branch").and_then(Value::as_str) == Some("feature/test") {
+            Ok(())
+        } else {
+            Err(AssertError::StdoutMissing {
+                expected: "project_branch=feature/test in session new output".into(),
+            })
+        }
+    });
+    ok_or_artifacts(
+        &world,
+        &spec.name,
+        "session new --project-branch feature/test --json",
+        &out,
+        result,
+    );
+}
+
+#[test]
+fn fast_session_project_branch_persists_across_cli_invocations() {
+    // The session graph must persist `project_target_branch` across CLI
+    // invocations. The second `lattice --json session status <id>` runs in a
+    // fully independent process and reopens the session through
+    // `SessionApi::open_session`, so this is a strictly stronger reopen
+    // semantics than the in-crate `SessionApi::open_session` round-trip it
+    // supersedes (`project_branch_persists_through_reopen`). The asymmetric
+    // JSON key names (`project_branch` in `new`, `project_target_branch` in
+    // `status`) are the existing public contract; assert them as-is.
+    let (world, spec) = project_with_agent("fast-session-branch-reopen");
+    let (id, _created, _new_out) = create_session_on_branch(&world, &spec, "feature/persist");
+
+    // Second, independent CLI process reopens the session through the public
+    // status surface.
+    let out = run(&world, &spec, &["--json", "session", "status", &id]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let result = assert_exit_success(&out).and_then(|_| {
+        let parsed: Value =
+            serde_json::from_str(stdout.trim()).map_err(|e| AssertError::StdoutMissing {
+                expected: format!("valid JSON (parse error: {e})"),
+            })?;
+        if parsed.get("project_target_branch").and_then(Value::as_str) == Some("feature/persist") {
+            Ok(())
+        } else {
+            Err(AssertError::StdoutMissing {
+                expected: "project_target_branch=feature/persist after reopen".into(),
+            })
+        }
+    });
+    ok_or_artifacts(
+        &world,
+        &spec.name,
+        "session status --json across process boundary",
+        &out,
+        result,
+    );
+}
+
 #[test]
 fn fast_session_list_empty_reports_no_sessions() {
     let spec = ScenarioSpec::fast("fast-session-list-empty");

@@ -10017,7 +10017,7 @@
     "decision": "elevate",
     "target_layer": "fast_binary",
     "replacement": "planned_session_cli",
-    "reason": "替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。"
+    "reason": "已删除原内部测试，由已落地 fast_session_cli（fast_session_new_json_reports_requested_project_branch：session new --project-branch feature/test --json 输出 project_branch=feature/test）黑盒接管"
   },
   {
     "crate": "lattice-cli",
@@ -10053,7 +10053,7 @@
     "decision": "elevate",
     "target_layer": "fast_binary",
     "replacement": "planned_session_cli",
-    "reason": "替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。"
+    "reason": "已删除原内部测试，由已落地 fast_session_cli（fast_session_project_branch_persists_across_cli_invocations：独立第二次 CLI 进程读 session status --json 断言 project_target_branch=feature/persist；进程边界 reopen 严格强于库内 SessionApi::open_session 往返）黑盒接管"
   },
   {
     "crate": "lattice-cli",
@@ -10521,7 +10521,7 @@
     "decision": "elevate",
     "target_layer": "fast_binary",
     "replacement": "planned_session_cli",
-    "reason": "替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；seed_session 的 committed turn 是测试夹具而非断言对象，实际断言（session 出现在 status 列表）已被 fast_session_new_creates_session_and_appears_in_list 覆盖；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。"
+    "reason": "已删除原内部测试，由已落地 fast_session_cli（fast_session_new_creates_session_and_appears_in_list：session new 后 session list --json 含 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象"
   },
   {
     "crate": "lattice-cli",
@@ -10533,7 +10533,7 @@
     "decision": "elevate",
     "target_layer": "fast_binary",
     "replacement": "planned_session_cli",
-    "reason": "替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；seed_session 的 committed turn 是测试夹具而非断言对象，实际断言（status <id> 输出含 ID）已被 fast_session_status_new_session_shows_zero_commits_and_agent 覆盖；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。"
+    "reason": "已删除原内部测试，由已落地 fast_session_cli（fast_session_status_new_session_shows_zero_commits_and_agent + fast_session_status_json_stable_contract：session status <id> 文本/JSON 双模断言 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象"
   },
   {
     "crate": "lattice-cli",

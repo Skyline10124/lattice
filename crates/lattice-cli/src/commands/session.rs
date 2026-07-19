@@ -1281,26 +1281,6 @@ mod project_branch_tests {
     }
 
     #[test]
-    fn project_branch_creation_json_output_includes_branch() {
-        let api = temp_api("json-output");
-        // Seed a session with a known project_branch via the store.
-        // The cmd_new_api function will be updated to accept project_branch.
-        // For now, this test verifies the expected behavior after implementation.
-        let created = api
-            .create_session(lattice_api::CreateSessionRequest {
-                label: None,
-                active_agent: "coder".to_string(),
-                project_branch: "feature/test".to_string(),
-            })
-            .expect("create session");
-        assert_eq!(
-            created.project_target_branch.as_deref(),
-            Some("feature/test"),
-            "created session should carry project_branch"
-        );
-    }
-
-    #[test]
     fn project_branch_status_output_includes_target_branch() {
         let api = temp_api("status-output");
         let created = api
@@ -1338,30 +1318,6 @@ mod project_branch_tests {
             found.unwrap().project_target_branch.as_deref(),
             Some("release/v1"),
             "list output should expose project_target_branch"
-        );
-    }
-
-    #[test]
-    fn project_branch_persists_through_reopen() {
-        let api = temp_api("reopen");
-        let created = api
-            .create_session(lattice_api::CreateSessionRequest {
-                label: None,
-                active_agent: "coder".to_string(),
-                project_branch: "feature/persist".to_string(),
-            })
-            .expect("create session");
-
-        // Reopen by ID
-        let opened = api
-            .open_session(lattice_api::OpenSessionRequest {
-                id: created.session_id.clone(),
-            })
-            .expect("open session");
-        assert_eq!(
-            opened.project_target_branch.as_deref(),
-            Some("feature/persist"),
-            "reopened session should retain project_branch"
         );
     }
 }
