@@ -175,7 +175,7 @@ fn parse_json_schema(s: &str, what: &str) -> anyhow::Result<serde_json::Value> {
 // Discovery
 // ---------------------------------------------------------------------------
 
-fn discover_tool_manifests(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+pub(crate) fn discover_tool_manifests(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let tools_dir = root.join("tools");
     if !tools_dir.is_dir() {
         return Ok(Vec::new());
@@ -355,14 +355,14 @@ fn descriptor_static_ident(name: &str) -> String {
 }
 
 /// `noop.echo` -> `noop_echo.component.wasm`.
-fn component_filename(name: &str) -> String {
+pub(crate) fn component_filename(name: &str) -> String {
     format!("{}.component.wasm", name.replace('.', "_"))
 }
 
 /// Canonical SHA-256 over bytes, hex-lowercase. The identity candidate
 /// records the real descriptor digest; the host recomputes and verifies it
 /// at composition time.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);

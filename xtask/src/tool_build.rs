@@ -22,11 +22,11 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::repo_root;
+use crate::tool_codegen;
+use crate::tool_codegen::{component_filename, discover_tool_manifests, sha256_hex};
 use anyhow::{Context as _, bail};
 use clap::Args;
-use sha2::{Digest, Sha256};
-
-use crate::{repo_root, tool_codegen};
 
 #[derive(Args, Debug)]
 pub struct ToolBuildArgs {
@@ -243,12 +243,7 @@ fn validate_component(component: &Path, gen_dir: &Path) -> anyhow::Result<()> {
 
 fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let bytes = std::fs::read(path)?;
-    let digest = Sha256::digest(&bytes);
-    let mut out = String::with_capacity(64);
-    for b in digest {
-        out.push_str(&format!("{b:02x}"));
-    }
-    Ok(out)
+    Ok(sha256_hex(&bytes))
 }
 
 /// Write the pinned sha256 back into `manifest.toml [artifact] sha256`,
@@ -280,30 +275,6 @@ fn read_tool_name(manifest_path: &Path) -> anyhow::Result<String> {
 
 fn crate_name(tool_name: &str) -> String {
     tool_name.replace('.', "-")
-}
-
-fn component_filename(tool_name: &str) -> String {
-    format!("{}.component.wasm", tool_name.replace('.', "_"))
-}
-
-fn discover_tool_manifests(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let tools_dir = root.join("tools");
-    if !tools_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(&tools_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let manifest = entry.path().join("manifest.toml");
-        if manifest.is_file() {
-            found.push(manifest);
-        }
-    }
-    found.sort();
-    Ok(found)
 }
 
 #[cfg(test)]
