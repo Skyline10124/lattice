@@ -6,6 +6,7 @@ mod output;
 mod path_norm;
 mod repo_root;
 mod scan_rs_tree;
+mod tool_build;
 mod tool_codegen;
 
 use clap::{Parser, Subcommand};
@@ -27,6 +28,8 @@ enum Commands {
     LancetBoundary,
     /// Generate (or check) Source Tool artifacts from manifests.
     ToolCodegen(tool_codegen::ToolCodegenArgs),
+    /// Build a Source Tool's WASM Component and pin its artifact hash.
+    ToolBuild(tool_build::ToolBuildArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -36,5 +39,6 @@ fn main() -> anyhow::Result<()> {
         Commands::HarnessBoundary => harness_boundary::run(),
         Commands::LancetBoundary => lancet_boundary::run(),
         Commands::ToolCodegen(args) => tool_codegen::run(args),
+        Commands::ToolBuild(args) => tool_build::run(args),
     }
 }

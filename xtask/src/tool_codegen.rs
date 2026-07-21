@@ -50,6 +50,12 @@ pub fn check() -> anyhow::Result<()> {
     run_inner(true)
 }
 
+/// Write generated artifacts for every manifest (the non-check path).
+/// Used by `tool-build` after it pins the artifact hash.
+pub fn generate() -> anyhow::Result<()> {
+    run_inner(false)
+}
+
 fn run_inner(check: bool) -> anyhow::Result<()> {
     let root = repo_root::repo_root()?;
     let manifests = discover_tool_manifests(&root)?;

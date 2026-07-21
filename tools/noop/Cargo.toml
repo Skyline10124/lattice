@@ -1,0 +1,21 @@
+[package]
+name = "noop-echo"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+description = "Tracer no-op Source Tool: emits progress/cancellation and echoes params."
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+
+[dependencies]
+lattice-tool-prelude = { workspace = true }
+# wit-bindgen is also a direct dep: its `generate!` macro emits code that
+# references `wit_bindgen::rt::...` by bare crate path, so the crate must be
+# linked. The version is pinned through the prelude's re-export + workspace.
+wit-bindgen = "0.59"

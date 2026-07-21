@@ -2,7 +2,88 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
-## Codeberg #5 slice A: `lancet-protocol` Cell effect core (add-only) — 2026-07-19
+## Codeberg #5 slice B: manifest + deterministic tool-codegen + WIT + prelude + no-op guest — 2026-07-22
+
+Severity: FEATURE (#5 slice B of 4; docs/plans/2026-07-19-issue5-sliceB-manifest-codegen-noop.md).
+
+**Problem:** ADR 0004 makes each Source Tool manifest the sole Tool Descriptor
+authority and requires deterministic build tooling to generate WIT bindings,
+host descriptor, LLM projection, artifact hash, and `inventory` registration
+from it, plus a `lattice-tool-prelude` guest SDK and a no-op tracer Tool whose
+Component is committed and bit-for-bit reproducible. Slice A landed the Cell
+vocabulary; this slice builds the manifest→codegen→Component substrate.
+
+**Fix:**
+- `rust-toolchain.toml` pins rustc 1.96.0 + `wasm32-unknown-unknown`; workspace
+  + xtask `rust-version` bumped 1.88→1.94 (wasmtime 46 MSRV). `xtask ci` adds a
+  'toolchain precheck' step asserting the pinned compiler + wasm target.
+- `tools/noop/manifest.toml` is the sole Tool Descriptor authority for
+  `noop.echo` (params/result JSON Schema, one `session/in` result scope, one
+  `alloc:none:session` capability, artifact identity).
+- `xtask tool-codegen` deterministically generates five artifacts under
+  `tools/noop/generated/`: `tool-host.wit` (WIT world), `descriptor.json`
+  (canonical host ToolDescriptor, pure JSON for `include_bytes!`+strict
+  serde_json), `llm-projection.json`, `registration.rs` (name + include_bytes!
+  only — no self-approval), `expected-identity.json` (real SHA-256 descriptor
+  digest + artifact digest + expected imports; a CANDIDATE the host composition
+  step alone may pin). Manifest parsing is strict (deny_unknown_fields); cells
+  parse through `lancet_protocol::parse_cell_ref`; `ToolDescriptor::validate()`
+  enforces scope/capability consistency.
+- `lattice-tool-prelude` (new crate, `#![no_std]`) re-exports pinned
+  `wit_bindgen` and provides `export_tool!` Component export glue; no host
+  internals (`cargo tree -p lattice-tool-prelude` has no `lancet-*`).
+- `noop-echo` guest crate (`wasm32-unknown-unknown`, `#![no_std]`) implements
+  the tracer: probes cancellation, emits one progress event, echoes `message`
+  as a trust-free `alloc:none:session` result CellRef. Its import surface is
+  exactly `host-control` (no `wasi:*`).
+- `xtask tool-build` builds the guest release (with `--remap-path-prefix`),
+  encodes the Component (`wasm-tools component new`), validates it
+  (`wasm-tools validate` + `component wit` no-`wasi:` assertion + `component
+  targets` conformance), pins the sha256 back into the manifest, and re-runs
+  codegen. `--verify` rebuilds into a temp path and compares digests
+  (warn-only per decision 1).
+- `xtask ci` adds `tool-codegen --check` (determinism drift gate) and
+  `tool-build --verify` (warn-only) lanes.
+- 12 new unit tests (codegen determinism, WIT surface, canonical descriptor
+  round-trip, no-self-approval, manifest validation, build name mapping) plus
+  4 guest extraction tests.
+
+**Divergences from the plan (toolchain-authority driven):**
+- WIT record fields use `,` separators (wasm-tools 1.254 / wit-bindgen 0.59
+  grammar), not the plan's `;` sketch (older WIT grammar).
+- `wit-bindgen` is a direct guest dep: its `generate!` emits code referencing
+  `wit_bindgen::rt::...` by bare crate path, which a prelude re-export cannot
+  satisfy. The prelude still pins the version and provides the export glue.
+- `export_tool!` is invoked INSIDE `mod bindings` (not the crate root):
+  wit-bindgen's generated `export!` resolves `self` at the call site, so the
+  export must be wired where `generate!` ran.
+- Toolchain fingerprint records `wit-bindgen-0.59` (installed latest), not the
+  plan's 0.57.
+
+**Verification:**
+- `cargo fmt --all --check` — clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- `cargo test -p xtask -p lattice-tool-prelude -p noop-echo` — 41 passed / 0
+  failed.
+- `cargo xtask ci` — all lanes pass; `tool-codegen --check` drift-free;
+  `tool-build --verify` reproduces the committed digest bit-for-bit
+  (6fcc7fc8...) locally.
+- `wasm-tools component targets <component> <wit>` — conforms;
+  `wasm-tools component wit` — imports exactly `host-control`, no `wasi:*`.
+- `cargo tree -p lattice-tool-prelude` — no `lancet-*` dependencies.
+
+**Changed files:**
+- `rust-toolchain.toml` (new), `Cargo.toml`, `xtask/Cargo.toml`
+- `xtask/src/{main.rs,ci.rs,tool_codegen.rs,tool_build.rs}` (tool_codegen.rs,
+  tool_build.rs new)
+- `crates/lattice-tool-prelude/` (new crate)
+- `tools/noop/{manifest.toml,Cargo.toml,src/lib.rs}` + `tools/noop/generated/`
+  (tool-host.wit, descriptor.json, llm-projection.json, registration.rs,
+  expected-identity.json, noop_echo.component.wasm)
+- `FINDINGS.md`, `FIX.md`, crate `AGENTS.md` files
+
+---
+
 
 Severity: FEATURE (#5 slice A of 4; docs/plans/2026-07-19-issue5-sliceA-protocol-cell-core.md).
 

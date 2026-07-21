@@ -27,7 +27,7 @@ use anyhow::Context as _;
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
 use clap::Args;
 
-use crate::{harness_boundary, repo_root, tool_codegen};
+use crate::{harness_boundary, repo_root, tool_build, tool_codegen};
 
 #[derive(Args, Debug)]
 pub struct CiArgs {}
@@ -82,6 +82,8 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
     step("test", || {
         run_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
     })?;
+
+    step("tool-build --verify (warn-only)", tool_build::verify)?;
 
     println!();
     println!("\u{1b}[1;32mAll checks passed.\u{1b}[0m");

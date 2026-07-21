@@ -1,0 +1,15 @@
+[package]
+name = "lattice-tool-prelude"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Guest-side SDK for LATTICE Source Tools: generated WIT bindings re-export, Component export glue, and descriptor/Cell helpers. Exposes no host internals."
+
+[features]
+default = []
+
+[dependencies]
+# Pinned re-export: guest Tools depend on this crate, never on wit-bindgen
+# directly, so the Component bindings toolchain is fixed for every Tool.
+wit-bindgen = "0.59"

@@ -17,7 +17,9 @@ members = [
     "crates/lattice-tui",
     "crates/lattice-cli",
     "crates/lattice-profile",
+    "crates/lattice-tool-prelude",
     "crates/lattice-system-harness",
+    "tools/noop",
     "xtask",
 ]
 
@@ -46,6 +48,7 @@ lancet-api      = { path = "crates/lancet-api" }
 lattice-tui      = { path = "crates/lattice-tui" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
+lattice-tool-prelude = { path = "crates/lattice-tool-prelude" }
 
 # External dependencies — shared versions
 async-trait = "0.1"
