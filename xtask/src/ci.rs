@@ -46,6 +46,8 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
     let harness_failures = root.join("target/harness-failures");
     let build_jobs = env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| DEFAULT_BUILD_JOBS.to_owned());
 
+    step("toolchain precheck", check_toolchain)?;
+
     step("fmt", || {
         run_cargo(&root, &["fmt", "--all", "--check"], &build_jobs)
     })?;
@@ -89,6 +91,48 @@ fn step(name: &str, run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<
     println!("\u{1b}[1m── {name} ──\u{1b}[0m");
     run()?;
     println!("\u{1b}[0;32m✓\u{1b}[0m {name}");
+    Ok(())
+}
+
+/// Assert the Source Tool build prerequisites (#5 slice B decision 1): the
+/// pinned rustc from `rust-toolchain.toml` and the `wasm32-unknown-unknown`
+/// target std. `tool-codegen`/`tool-build` and the guest crate both need the
+/// wasm target installed; a missing target would otherwise surface as an
+/// opaque linker error deep in `tool-build`.
+fn check_toolchain() -> anyhow::Result<()> {
+    let rustc_out = Command::new("rustc")
+        .arg("--version")
+        .stderr(Stdio::inherit())
+        .output()
+        .context("failed to run `rustc --version`")?;
+    if !rustc_out.status.success() {
+        anyhow::bail!("`rustc --version` failed");
+    }
+    let version = String::from_utf8_lossy(&rustc_out.stdout);
+    // The pinned channel is 1.96.0 (rust-toolchain.toml). We assert the major
+    // minor so a host on an older stable fails the gate early with a clear
+    // message instead of a later wasmtime/wit-bindgen MSRV error.
+    if !version.contains("1.96.0") {
+        anyhow::bail!("pinned rustc 1.96.0 required; got: {version}");
+    }
+
+    let targets = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .stderr(Stdio::inherit())
+        .output()
+        .context("failed to run `rustup target list --installed`")?;
+    if !targets.status.success() {
+        anyhow::bail!("`rustup target list --installed` failed");
+    }
+    let installed = String::from_utf8_lossy(&targets.stdout);
+    if !installed
+        .lines()
+        .any(|l| l.trim() == "wasm32-unknown-unknown")
+    {
+        anyhow::bail!(
+            "wasm32-unknown-unknown target not installed; run `rustup target add wasm32-unknown-unknown`"
+        );
+    }
     Ok(())
 }
 
