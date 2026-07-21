@@ -2,6 +2,265 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## FINDINGS T-23-03: 158 条 lattice-workspace keep 行补记 delete（owner 决议选项 a） — 2026-07-19
+
+Severity: TRIAGE-DECISION (FINDINGS.md T-23-03 option a; owner-directed re-decision
+of the signed-off count baseline).
+
+**Problem:** The 158 `lattice-workspace` ledger rows still carried
+decision=keep even though #40 deleted the crate — inconsistent with slice
+3's 11 OBSOLETE rows, which were re-decided to delete for the same reason
+(product surface deleted in #37–#40; tests no longer exist). Their reason
+strings also retained retired KVM-lane vocabulary (fixed separately in the
+review-fix round below).
+
+**Fix:**
+- Re-decide all 158 `crate=lattice-workspace` rows in
+  `docs/test-triage-decisions.json`: keep → delete, replacement → `n/a`,
+  reason → "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试
+  已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
+  identity fields and `target_layer=local_invariant` unchanged.
+- Sync `docs/TEST-TRIAGE.md`: §1 汇总 (保留 1337→1179 / 删除 26→184),
+  per-crate table (lattice-workspace 158/0/0 → 0/0/158), §1.5 决定分布
+  (final), section header, and all 158 per-test rows (决定 保留→删除,
+  替代场景 —→n/a, 理由 synced). Layer distribution unchanged (1358/45/46).
+- Move FINDINGS.md T-23-03 to OBSOLETE / CLOSED with the resolution record.
+
+**Verification:**
+- Ledger recount: keep 1179 / elevate 86 / delete 184, total 1449 (only the
+  158 re-decided rows changed; diff confined to 474 JSON lines = 158 × 3 fields).
+- Full 1449-row prose↔ledger consistency check (decision / layer /
+  replacement / reason): zero mismatches; same checker against HEAD also
+  passes, so no new drift introduced. All 19 per-crate count rows match.
+
+**Changed files:**
+- `docs/test-triage-decisions.json`
+- `docs/TEST-TRIAGE.md`
+- `FINDINGS.md` (T-23-03 → closed)
+
+---
+
+## Codeberg #23 review-fix: two-axis review findings closed (FIX.md backfill, KVM residue, harness dedup) — 2026-07-19
+
+Severity: REVIEW-FIX (post-landing two-axis review of df62ec84..HEAD: Standards 2 hard
+violations + 5 judgement calls, Spec 1 medium + 1 low + 1 info).
+
+**Problem:** (1) FIX.md had no entries for slices 2–4 and TEST-TRIAGE.md
+pointed at a nonexistent FIX.md migration record (dangling pointer). (2) 157
+`lattice-workspace` ledger rows still claimed "KVM live 仍为可选车道" —
+retired vocabulary contradicting the crate-local AGENTS.md and the range's
+own removal claim. (3) `driver()`/`run()`/`ok_or_artifacts()` were
+byte-duplicated across fast CLI test files. (4) 5 prose replacement cells
+kept stale 延期/冗余保留 prefixes after the scenarios had landed. (5)
+`release_smoke.rs` carried an orphan doc comment, empty section banners, and
+a stale module coverage line. (6) Repeated scenario-name string literals.
+
+**Fix:**
+- Backfill FIX.md entries for slice 2, slice 3, slice 4, and the 9f238b79
+  vocabulary closeout (making the TEST-TRIAGE pointer valid); the closeout
+  entry records the identity-rename deviation with its sign-off (commit
+  message: "退役词汇清零优先于 identity 冻结", user-directed) and notes the
+  plan anchors were stale predictions — ledger identity lines verified
+  unchanged against df62ec84.
+- Rewrite the 157 stale reason strings in JSON + prose to "保留（历史决定；
+  lattice-workspace 已随 #40 删除，行留档待重审，见 FINDINGS.md T-23-03）";
+  identity/decision/counts untouched (keep 1337 / elevate 86 / delete 26 /
+  total 1449; layers 1358/46/45). The keep-vs-deleted-crate re-decision
+  itself changes the signed-off baseline, so it is filed as FINDINGS.md
+  T-23-03 for human triage.
+- Fix the 5 stale replacement cells to the sibling-row convention
+  "已删除原测试，由 `planned_*` 接管" (1× planned_lancet_cli, 4×
+  planned_session_cli).
+- Extract `driver()`/`run()`/`ok_or_artifacts()` into a new shared
+  `lattice-system-harness::cli` module; convert `fast_lancet_cli.rs` and
+  `fast_session_cli.rs`. Other fast/direct/pty test files keep local copies
+  (outside this change's scope; follow-up noted).
+- `fast_session_cli.rs`: `assert_session_new_contract` now delegates JSON
+  parsing to `parse_json_or_artifacts`; new `session_new_args(branch)` helper
+  removes the duplicated `session new` argv in `create_session` /
+  `create_session_on_branch`; scenario-name literals replaced with
+  `&spec.name` (same file: `fast_lancet_cli.rs` too).
+- `release_smoke.rs`: drop the orphan doc comment and the empty
+  models/resolve banners (the session-status banner stays as the header of
+  the slice-2 tombstone); module coverage line now describes the actual
+  remaining tests.
+
+**Verification:**
+- `cargo xtask ci` → All checks passed (fmt / clippy -D warnings / build /
+  harness-boundary / workspace tests incl. fast_lancet_cli 2 +
+  fast_session_cli 15 + PTY smoke).
+- `cargo xtask lancet-boundary` → passed.
+- `cargo test -p lattice-cli --test release_smoke` → 3 passed.
+- Ledger recount: keep 1337 / elevate 86 / delete 26 / total 1449; layers
+  1358/46/45; zero retired-token rows; prose §1 汇总 matches.
+
+**Changed files:**
+- `crates/lattice-system-harness/src/cli.rs` (new), `src/lib.rs`
+- `crates/lattice-system-harness/tests/{fast_lancet_cli,fast_session_cli}.rs`
+- `crates/lattice-cli/tests/release_smoke.rs` (comments only)
+- `docs/TEST-TRIAGE.md`, `docs/test-triage-decisions.json` (reason/replacement cells)
+- `FIX.md`, `FINDINGS.md`
+
+---
+
+## Codeberg #23 vocabulary closeout: retired KVM-lane vocabulary removed from code, ledger, and TEST-TRIAGE — 2026-07-19
+
+Severity: REFACTOR (#23 closeout follow-up; commit 9f238b79; applies a
+stricter user-directed standard than the §4.7 grep gate; historical-document
+rewrite tracked by Codeberg issue #43).
+
+**Problem:** Retired KVM-lane field values (`real_microsandbox`,
+`msb_full_turn`, `planned_*_msb`, `LATTICE_HARNESS_MSB`, and identity
+names/file paths containing `msb`/`microsandbox`) were still present in the
+machine ledger, `docs/TEST-TRIAGE.md`, and code comments even though #40
+deleted the lane and slice 3 retired the layers.
+
+**Fix:**
+- Zero retired field values across code, `docs/test-triage-decisions.json`,
+  and `docs/TEST-TRIAGE.md`; meta text describing the retirement itself
+  ("no KVM, no MSB daemon") retained.
+- Rename 8 JSON identity names and correct 4 file paths containing retired
+  tokens (all already-deleted tests).
+- Tag 6 historical ADR/plan/spec documents with an outdated-vocabulary
+  warning blockquote pointing at Codeberg issue #43 for the rewrite.
+- **Deviation record (sign-off):** this intentionally relaxes slice 3 §3.5's
+  identity-snapshot invariant ("`crate/file/line/name/async/ignored` identity
+  字段不变") for those 8 names + 4 files — an explicit user-directed
+  trade-off recorded in commit 9f238b79's message ("退役词汇清零优先于
+  identity 冻结"). Total 1449 and decision counts (keep 1337 / elevate 86 /
+  delete 26) unchanged. The line anchors cited in
+  `docs/plans/2026-07-19-issue23-fast-residual-ledger-closeout.md`
+  (lancet.rs:289, session.rs:1284/1345) were stale plan predictions; the
+  ledger identity line fields did not drift in-range (verified against
+  df62ec84).
+
+**Verification:**
+- rg for retired field values in JSON/TEST-TRIAGE.md/code: zero hits; meta
+  uppercase MSB retained (17 occurrences, describing the retirement).
+- JSON 1449 rows, decision counts unchanged.
+- `cargo xtask ci` all green.
+
+**Changed files:**
+- `docs/test-triage-decisions.json`, `docs/TEST-TRIAGE.md`
+- `crates/lattice-system-harness/{AGENTS.md,src/artifacts.rs,tests/direct_local_turn.rs}`
+- 6 historical docs tagged with the outdated-vocabulary warning
+
+---
+
+## Codeberg #23 slice 4: TEST-TRIAGE prose synced with post-slice-3 machine ledger — 2026-07-19
+
+Severity: FEATURE (测试重构 4/6, slice 4 of #23 closeout;
+docs/plans/2026-07-19-issue23-slice4-ledger-prose-consistency.md; commit 4c2c861d).
+
+**Problem:** After slices 1–3 rewrote the machine ledger, the prose in
+`docs/TEST-TRIAGE.md` (scenario catalog, summary counts, §1.5 execution
+status, crate section headers, per-test rows) no longer matched it.
+
+**Fix:**
+- §1 catalog: register the 44 assertion-level `planned_direct_*` #24 IDs and
+  the landed `direct_local_plain_text_turn_commits_and_exit_zero`; move
+  `msb_full_turn` + 11 `planned_*_msb` IDs to a dedicated historical/obsolete
+  subsection; mark `planned_lancet_cli` 已落地.
+- Counts: keep 1338→1337 / elevate 96→86 / delete 15→26 (total 1449);
+  per-crate headers resynced (lattice-api 223/25/12,
+  lattice-system-harness 56/1/0).
+- §1.5 rewritten: fast residual zero table, #40 skeleton takeover record, 11
+  OBSOLETE delete identities, 44-row #24 handoff table, MSB vocabulary
+  retirement note, final layer/decision distribution.
+- 90 per-test rows synced to the JSON (layer names, replacement atoms,
+  reasons); rich landed-takeover cells preserved where the atom matched.
+
+**Verification:**
+- §4.4 crate count headers: all 19 in sync; §4.5 replacement coverage: all
+  50 atoms present; §4.7 forbidden-token grep: zero in JSON and §2 table.
+- Full 1442-row consistency check (1449 entries, 7 duplicate names across
+  crates): zero decision/layer/replacement/reason mismatches.
+
+**Changed files:**
+- `docs/TEST-TRIAGE.md`
+
+---
+
+## Codeberg #23 slice 3: 57 stale-layer rows retired/mapped to assertion-level #24 scenarios — 2026-07-19
+
+Severity: FEATURE (测试重构 4/6, slice 3 of #23 closeout;
+docs/plans/2026-07-19-issue23-slice3-msb-vocabulary-retirement.md; commit ce8880c0).
+
+**Problem:** 57 ledger rows still carried `target_layer=real_microsandbox`
+(and `*_msb` replacement names) after #40 deleted the lane — dead vocabulary
+with no executable target.
+
+**Fix:**
+- Redistribute all 57 stale-layer rows across `direct_local_binary` (46) and
+  `local_invariant` (11 obsolete), with exactly 12 decision deltas: 11
+  elevate→delete for identities whose product contract was deleted in
+  #37–#40 (no fabricated #24 replacements), and 1 keep→elevate for the
+  historical harness identity taken over by the landed #40
+  `direct_local_plain_text_turn_commits_and_exit_zero`.
+- Map 44 internal tests to 44 distinct assertion-level `planned_direct_*`
+  #24 scenario IDs — exact per-row mapping, no regex family fallback.
+- PTY smoke row: layer→`direct_local_binary`, decision stays keep.
+- 26 `local_invariant` keep rows: reason rewritten to swap retired MSB
+  scenario references for live equivalents (decision/layer/replacement
+  unchanged).
+- Identity snapshot: crate/name/async/ignored unchanged for all 1449 rows;
+  file/line unchanged for 1448; the single exception (historical harness
+  identity whose file path contained the forbidden `msb_full_turn` token) is
+  justified in commit ce8880c0's message.
+
+**Verification:**
+- Mechanical transformation script: all assertions pass (57 rows; 12 deltas;
+  45 exact + 11 obsolete + 1 PTY; final keep 1337 / elevate 86 / delete 26).
+- rg `real_microsandbox|planned_[a-z_]+_msb|msb_full_turn` in JSON: zero hits.
+- 44 `planned_direct_*` IDs all distinct; re-dump byte-identical (no format drift).
+
+**Changed files:**
+- `docs/test-triage-decisions.json`
+
+---
+
+## Codeberg #23 slice 2: fast_session_cli branch scenarios + 4 redundant tests deleted — 2026-07-19
+
+Severity: FEATURE (测试重构 4/6, slice 2 of #23 closeout;
+docs/plans/2026-07-19-issue23-slice2-branch-fast-scenarios.md; commit 55128410).
+
+**Problem:** The project-branch create/reopen contract was guarded only by
+crate-internal `lattice-cli` tests elevated to `fast_binary`
+(`planned_session_cli`) without landed external scenarios, and two
+`release_smoke` session-status tests were fully covered yet still present.
+
+**Fix:**
+- Two ordinary-lane fast-binary scenarios in
+  `crates/lattice-system-harness/tests/fast_session_cli.rs`:
+  `fast_session_new_json_reports_requested_project_branch` (non-default
+  `project_branch` echoed by `session new --json`) and
+  `fast_session_project_branch_persists_across_cli_invocations` (a second,
+  independent CLI process reopens via `session status --json`, asserting
+  `project_target_branch` — strictly stronger than the in-crate reopen
+  round-trip it supersedes). New `create_session_on_branch` helper; no
+  product crate dependency (harness-boundary green).
+- Delete the 4 superseded tests: `session.rs`
+  `project_branch_creation_json_output_includes_branch` /
+  `project_branch_persists_through_reopen`; `release_smoke.rs`
+  `smoke_session_status_list_shows_seeded_session` /
+  `smoke_session_status_specific_session`. `seed_session` retained (still
+  used by `smoke_session_log_shows_seeded_turn`).
+- Ledger: the 4 rows' `reason` records the black-box takeover;
+  decision/target_layer/replacement/identity unchanged (prose sync deferred
+  to slice 4).
+
+**Verification:**
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness --test fast_session_cli` → 15 passed (2 new + 13 existing).
+- `cargo test -p lattice-cli` → 129 passed.
+
+**Changed files:**
+- `crates/lattice-system-harness/tests/fast_session_cli.rs`
+- `crates/lattice-cli/src/commands/session.rs` (test deletions only)
+- `crates/lattice-cli/tests/release_smoke.rs` (test deletions + tombstone)
+- `docs/test-triage-decisions.json` (reason strings)
+
+---
+
 ## Codeberg #23 slice 1: `fast_lancet_cli` black-box replaces internal `cep_status_missing_db` test — 2026-07-19
 
 Severity: FEATURE (测试重构 4/6, slice 1 of #23 closeout;

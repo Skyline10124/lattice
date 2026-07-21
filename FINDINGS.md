@@ -144,6 +144,9 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
 
+### T-23-03: 158 条 `lattice-workspace` keep 行指向已随 #40 删除的 crate — keep 决定待重审 - `test-refactor` / #23 / #24
+- **当前状态**: 2026-07-19 closed — resolved by owner decision (option a)。158 行全部补记 delete（reason 对齐切片 3 的 11 条 OBSOLETE 口径：「#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete，不向 #24 虚构 replacement」），replacement 置 `n/a`，identity/target_layer(local_invariant) 不变。计数基线 keep 1337→1179 / elevate 86 / delete 26→184（总 1449 不变）；§1 汇总、按 crate 表、§1.5 决定分布与 lattice-workspace 小节 158 行全部同步。全量 1449 行 prose↔ledger 一致性校验零 mismatches，19 个 crate 计数行全对齐。完整记录见 FIX.md 对应条目。
+
 ### M-LOCAL-01: ADR 0003 direct Local Workspace execution is not implemented — `architecture` / `lancet-native` / `lattice-api`
 - **当前状态**: 2026-07-17 closed — implemented. Workstream A (#37 → #38 → #39 → #40) is complete. Production Turns operate directly on the canonical Local Workspace through the concrete guarded `LocalWorkspace` in `lancet-native` (#37); the `ExecutionBackend`/routing seam is deleted (#38); Policy-Visible Workspace read visibility is unified across read/list/grep/find (#39); and the Upper/MSB residue — profile `[workspace]`, `WorkspaceSection`/`EgressPolicyConfig`/`CredentialRef`, `lattice-workspace` crate, `microsandbox` dependency, MSB/KVM harness scenarios, `LATTICE_HARNESS_MSB` gate, `set_snapshot_lost`/`get_snapshot_lost` retained-snapshot chain, `lattice-session` promotion builder, and dead `SessionApi` wrappers — is deleted (#40, FIX.md `#40`). Direct-Local harness skeletons (plain-text turn, session reopen, policy denial) run in the ordinary lane with no KVM; the full external-binary scenario matrix is #24, testing-doc rewrite is #25, rewind history is #41/#42.
 

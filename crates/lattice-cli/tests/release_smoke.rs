@@ -6,8 +6,8 @@
 //! Every smoke command sets temporary HOME, XDG_CONFIG_HOME, and project cwd
 //! to prevent reading real user ~/.lattice state or leaking credentials.
 //!
-//! Coverage: session-first execution, models --auth, resolve sonnet, session status,
-//! session log, and doctor.
+//! Coverage: `session log` against a seeded session turn, plus release-gate
+//! script wiring.
 //!
 //! Threat model: (information disclosure), (tampering).
 
@@ -87,9 +87,6 @@ fn seed_session(temp_home: &Path, session_id: &str) {
     store.commit_turn(input).expect("commit turn");
 }
 
-/// Create a minimal .lattice/agents/default/agent.toml in the project dir.
-// ─── models --auth ─────────────────────────────────────────────────────────
-// ─── resolve sonnet ─────────────────────────────────────────────────────────
 // ─── session status ─────────────────────────────────────────────────────────
 
 // The two `smoke_session_status_*` tests that previously lived here were

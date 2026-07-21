@@ -8,6 +8,7 @@
 
 pub mod artifacts;
 mod assert;
+pub mod cli;
 pub mod driver;
 pub mod fake_llm;
 #[cfg(unix)]

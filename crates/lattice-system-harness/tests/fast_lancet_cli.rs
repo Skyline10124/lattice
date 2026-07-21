@@ -10,40 +10,11 @@
 //! store). Supersedes the crate-internal
 //! `cep_status_missing_db_returns_empty_state` unit test in `lattice-cli`.
 
-use std::process::Output;
-
+use lattice_system_harness::cli::{ok_or_artifacts, run};
 use lattice_system_harness::{
-    AssertError, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld, assert_exit_success,
-    assert_stdout_contains, assert_with_failure_artifacts,
+    AssertError, ScenarioSpec, ScenarioWorld, assert_exit_success, assert_stdout_contains,
 };
 use serde_json::Value;
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
-    driver()
-        .run(
-            world,
-            &LatticeCommand {
-                args: args.iter().map(|s| s.to_string()).collect(),
-                timeout: Some(spec.step_timeout()),
-            },
-        )
-        .expect("drive lattice")
-}
-
-fn ok_or_artifacts(
-    world: &ScenarioWorld,
-    name: &str,
-    summary: &str,
-    out: &Output,
-    result: Result<(), AssertError>,
-) {
-    assert_with_failure_artifacts(world, name, summary, out, &[], result)
-        .unwrap_or_else(|e| panic!("{e}"));
-}
 
 #[test]
 fn fast_lancet_status_missing_audit_store_reports_empty_state_json() {
@@ -72,7 +43,7 @@ fn fast_lancet_status_missing_audit_store_reports_empty_state_json() {
     });
     ok_or_artifacts(
         &world,
-        "fast-lancet-status-empty-json",
+        &spec.name,
         "lattice lancet status --json (no audit store)",
         &out,
         result,
@@ -90,7 +61,7 @@ fn fast_lancet_status_missing_audit_store_text_mode_smoke() {
         .and_then(|_| assert_stdout_contains(&out, "Last Guard Verdict"));
     ok_or_artifacts(
         &world,
-        "fast-lancet-status-empty-text",
+        &spec.name,
         "lattice lancet status (no audit store, text)",
         &out,
         result,

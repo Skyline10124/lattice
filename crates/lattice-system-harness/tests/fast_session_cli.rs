@@ -16,16 +16,13 @@
 //! covered here (see `docs/TEST-TRIAGE.md`).
 use std::process::Output;
 
+use lattice_system_harness::cli::{ok_or_artifacts, run};
 use lattice_system_harness::{
-    AssertError, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld, assert_exit_code,
-    assert_exit_failure, assert_exit_success, assert_no_secret, assert_stderr_contains,
-    assert_stdout_contains, assert_stdout_contains_all, assert_with_failure_artifacts,
+    AssertError, ScenarioSpec, ScenarioWorld, assert_exit_code, assert_exit_failure,
+    assert_exit_success, assert_no_secret, assert_stderr_contains, assert_stdout_contains,
+    assert_stdout_contains_all, assert_with_failure_artifacts,
 };
 use serde_json::Value;
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
 
 /// An isolated project that already contains a discoverable `plain` agent
 /// profile and a born `main` HEAD, ready for `session new`.
@@ -38,35 +35,24 @@ fn project_with_agent(prefix: &str) -> (ScenarioWorld, ScenarioSpec) {
     (world, spec)
 }
 
-fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
-    driver()
-        .run(
-            world,
-            &LatticeCommand {
-                args: args.iter().map(|s| s.to_string()).collect(),
-                timeout: Some(spec.step_timeout()),
-            },
-        )
-        .expect("drive lattice")
+/// argv for the public `--json session new` surface on the given project branch.
+fn session_new_args(branch: &str) -> [&str; 7] {
+    [
+        "--json",
+        "session",
+        "new",
+        "--agent",
+        "plain",
+        "--project-branch",
+        branch,
+    ]
 }
 
 /// Create an empty session through the public `--json session new` surface and
 /// return its id. Used by every no-turn scenario that needs a real session id
 /// without seeding any turn state. Never touches the product crate internals.
 fn create_session(world: &ScenarioWorld, spec: &ScenarioSpec) -> String {
-    let out = run(
-        world,
-        spec,
-        &[
-            "--json",
-            "session",
-            "new",
-            "--agent",
-            "plain",
-            "--project-branch",
-            "main",
-        ],
-    );
+    let out = run(world, spec, &session_new_args("main"));
     assert_session_new_contract(world, &spec.name, &out).unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -83,23 +69,7 @@ fn assert_session_new_contract(
     scenario_name: &str,
     out: &Output,
 ) -> Result<String, AssertError> {
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let parsed: Value = match serde_json::from_str(stdout.trim()) {
-        Ok(v) => v,
-        Err(e) => {
-            assert_with_failure_artifacts(
-                world,
-                scenario_name,
-                "lattice --json session new",
-                out,
-                &[],
-                Err(AssertError::StdoutMissing {
-                    expected: format!("valid JSON object (parse error: {e})"),
-                }),
-            )?;
-            unreachable!()
-        }
-    };
+    let parsed = parse_json_or_artifacts(world, scenario_name, "lattice --json session new", out)?;
     let session_id = parsed
         .get("session_id")
         .and_then(|v| v.as_str())
@@ -131,17 +101,6 @@ fn assert_session_new_contract(
     Ok(session_id.expect("checked above"))
 }
 
-fn ok_or_artifacts(
-    world: &ScenarioWorld,
-    name: &str,
-    summary: &str,
-    out: &Output,
-    result: Result<(), AssertError>,
-) {
-    assert_with_failure_artifacts(world, name, summary, out, &[], result)
-        .unwrap_or_else(|e| panic!("{e}"));
-}
-
 /// Parse `--json` stdout as a JSON value. On parse failure, record the
 /// failure artifact (redacted stdout/stderr + world context) under
 /// `scenario_name` and return an `AssertError` instead of panicking, so
@@ -169,6 +128,28 @@ fn parse_json_or_artifacts(
     })
 }
 
+/// Assert a top-level JSON string field equals `expected`.
+fn expect_str_field(parsed: &Value, key: &str, expected: &str) -> Result<(), AssertError> {
+    if parsed.get(key).and_then(Value::as_str) == Some(expected) {
+        Ok(())
+    } else {
+        Err(AssertError::StdoutMissing {
+            expected: format!("{key} == {expected}"),
+        })
+    }
+}
+
+/// Assert a top-level JSON field is an empty array; the error carries the
+/// actual value for diagnosis.
+fn expect_empty_array(parsed: &Value, key: &str) -> Result<(), AssertError> {
+    match parsed.get(key).and_then(Value::as_array) {
+        Some(a) if a.is_empty() => Ok(()),
+        other => Err(AssertError::StdoutMissing {
+            expected: format!("{key} == [], got {other:?}"),
+        }),
+    }
+}
+
 /// Create a session on an explicit project branch and retain the parsed
 /// public JSON so the caller can assert branch-specific fields. Unlike
 /// `create_session`, this does NOT run `assert_session_new_contract` (which
@@ -180,19 +161,7 @@ fn create_session_on_branch(
     spec: &ScenarioSpec,
     branch: &str,
 ) -> (String, Value, Output) {
-    let out = run(
-        world,
-        spec,
-        &[
-            "--json",
-            "session",
-            "new",
-            "--agent",
-            "plain",
-            "--project-branch",
-            branch,
-        ],
-    );
+    let out = run(world, spec, &session_new_args(branch));
     let parsed = parse_json_or_artifacts(
         world,
         &spec.name,
@@ -284,13 +253,7 @@ fn fast_session_list_empty_reports_no_sessions() {
 
     let result =
         assert_exit_success(&out).and_then(|_| assert_stdout_contains(&out, "No sessions found"));
-    ok_or_artifacts(
-        &world,
-        "fast-session-list-empty",
-        "lattice session list",
-        &out,
-        result,
-    );
+    ok_or_artifacts(&world, &spec.name, "lattice session list", &out, result);
 }
 
 #[test]
@@ -299,29 +262,13 @@ fn fast_session_list_empty_json_is_empty_sessions_array() {
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let out = run(&world, &spec, &["session", "list", "--json"]);
 
-    let parsed: Value = parse_json_or_artifacts(
-        &world,
-        "fast-session-list-empty-json",
-        "lattice session list --json",
-        &out,
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    let result = assert_exit_success(&out).and_then(|_| {
-        if parsed
-            .get("sessions")
-            .and_then(|v| v.as_array())
-            .map(|a| a.is_empty())
-            != Some(true)
-        {
-            return Err(AssertError::StdoutMissing {
-                expected: "{\"sessions\":[]}".into(),
-            });
-        }
-        Ok(())
-    });
+    let parsed: Value =
+        parse_json_or_artifacts(&world, &spec.name, "lattice session list --json", &out)
+            .unwrap_or_else(|e| panic!("{e}"));
+    let result = assert_exit_success(&out).and_then(|_| expect_empty_array(&parsed, "sessions"));
     ok_or_artifacts(
         &world,
-        "fast-session-list-empty-json",
+        &spec.name,
         "lattice session list --json",
         &out,
         result,
@@ -339,7 +286,7 @@ fn fast_session_new_creates_session_and_appears_in_list() {
         assert_exit_success(&list).and_then(|_| assert_stdout_contains(&list, &session_id));
     ok_or_artifacts(
         &world,
-        "fast-session-new",
+        &spec.name,
         "lattice session list --json (after new)",
         &list,
         list_result,
@@ -356,7 +303,7 @@ fn fast_session_status_new_session_shows_zero_commits_and_agent() {
         .and_then(|_| assert_stdout_contains_all(&out, &["plain", "Commits:", "0", "main"]));
     ok_or_artifacts(
         &world,
-        "fast-session-status",
+        &spec.name,
         "lattice session status <id>",
         &out,
         result,
@@ -375,22 +322,14 @@ fn fast_session_status_json_stable_contract() {
     let out = run(&world, &spec, &["--json", "session", "status", &session_id]);
     let parsed: Value = parse_json_or_artifacts(
         &world,
-        "fast-session-status-json",
+        &spec.name,
         "lattice --json session status <id>",
         &out,
     )
     .unwrap_or_else(|e| panic!("{e}"));
     let result = assert_exit_success(&out).and_then(|_| {
-        if parsed.get("session_id").and_then(|v| v.as_str()) != Some(&session_id) {
-            return Err(AssertError::StdoutMissing {
-                expected: format!("session_id == {session_id}"),
-            });
-        }
-        if parsed.get("active_agent").and_then(|v| v.as_str()) != Some("plain") {
-            return Err(AssertError::StdoutMissing {
-                expected: "active_agent == plain".into(),
-            });
-        }
+        expect_str_field(&parsed, "session_id", &session_id)?;
+        expect_str_field(&parsed, "active_agent", "plain")?;
         if parsed.get("commit_count").and_then(|v| v.as_i64()) != Some(0) {
             return Err(AssertError::StdoutMissing {
                 expected: "commit_count == 0".into(),
@@ -416,7 +355,7 @@ fn fast_session_status_json_stable_contract() {
     });
     ok_or_artifacts(
         &world,
-        "fast-session-status-json",
+        &spec.name,
         "lattice --json session status <id>",
         &out,
         result,
@@ -431,13 +370,7 @@ fn fast_session_log_new_session_reports_no_turns() {
     let out = run(&world, &spec, &["session", "log", &session_id]);
     let result =
         assert_exit_success(&out).and_then(|_| assert_stdout_contains(&out, "No turns found"));
-    ok_or_artifacts(
-        &world,
-        "fast-session-log-empty",
-        "lattice session log <id>",
-        &out,
-        result,
-    );
+    ok_or_artifacts(&world, &spec.name, "lattice session log <id>", &out, result);
 }
 
 #[test]
@@ -449,30 +382,15 @@ fn fast_session_log_json_empty_turns_stable_contract() {
     let session_id = create_session(&world, &spec);
 
     let out = run(&world, &spec, &["--json", "session", "log", &session_id]);
-    let parsed: Value = parse_json_or_artifacts(
-        &world,
-        "fast-session-log-json",
-        "lattice --json session log <id>",
-        &out,
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    let result = assert_exit_success(&out).and_then(|_| {
-        if parsed.get("session_id").and_then(|v| v.as_str()) != Some(&session_id) {
-            return Err(AssertError::StdoutMissing {
-                expected: format!("session_id == {session_id}"),
-            });
-        }
-        let turns = parsed.get("turns").and_then(|v| v.as_array());
-        match turns {
-            Some(a) if a.is_empty() => Ok(()),
-            other => Err(AssertError::StdoutMissing {
-                expected: format!("turns == [], got {other:?}"),
-            }),
-        }
-    });
+    let parsed: Value =
+        parse_json_or_artifacts(&world, &spec.name, "lattice --json session log <id>", &out)
+            .unwrap_or_else(|e| panic!("{e}"));
+    let result = assert_exit_success(&out)
+        .and_then(|_| expect_str_field(&parsed, "session_id", &session_id))
+        .and_then(|_| expect_empty_array(&parsed, "turns"));
     ok_or_artifacts(
         &world,
-        "fast-session-log-json",
+        &spec.name,
         "lattice --json session log <id>",
         &out,
         result,
@@ -489,7 +407,7 @@ fn fast_session_branch_new_session_reports_no_branches() {
         assert_exit_success(&out).and_then(|_| assert_stdout_contains(&out, "No branches found"));
     ok_or_artifacts(
         &world,
-        "fast-session-branch-empty",
+        &spec.name,
         "lattice session branch <id>",
         &out,
         result,
@@ -509,28 +427,17 @@ fn fast_session_branch_json_empty_branches_stable_contract() {
     let out = run(&world, &spec, &["--json", "session", "branch", &session_id]);
     let parsed: Value = parse_json_or_artifacts(
         &world,
-        "fast-session-branch-json",
+        &spec.name,
         "lattice --json session branch <id>",
         &out,
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    let result = assert_exit_success(&out).and_then(|_| {
-        if parsed.get("session_id").and_then(|v| v.as_str()) != Some(&session_id) {
-            return Err(AssertError::StdoutMissing {
-                expected: format!("session_id == {session_id}"),
-            });
-        }
-        let branches = parsed.get("branches").and_then(|v| v.as_array());
-        match branches {
-            Some(a) if a.is_empty() => Ok(()),
-            other => Err(AssertError::StdoutMissing {
-                expected: format!("branches == [], got {other:?}"),
-            }),
-        }
-    });
+    let result = assert_exit_success(&out)
+        .and_then(|_| expect_str_field(&parsed, "session_id", &session_id))
+        .and_then(|_| expect_empty_array(&parsed, "branches"));
     ok_or_artifacts(
         &world,
-        "fast-session-branch-json",
+        &spec.name,
         "lattice --json session branch <id>",
         &out,
         result,
@@ -548,7 +455,7 @@ fn fast_session_status_nonexistent_session_errors() {
         .and_then(|_| assert_stderr_contains(&out, "nope-sid"));
     ok_or_artifacts(
         &world,
-        "fast-session-status-missing",
+        &spec.name,
         "lattice session status nope-sid",
         &out,
         result,
@@ -566,7 +473,7 @@ fn fast_session_log_nonexistent_session_errors() {
         .and_then(|_| assert_stderr_contains(&out, "nope-sid"));
     ok_or_artifacts(
         &world,
-        "fast-session-log-missing",
+        &spec.name,
         "lattice session log nope-sid",
         &out,
         result,
@@ -593,7 +500,7 @@ fn fast_session_send_nonexistent_session_errors() {
         .and_then(|_| assert_stderr_contains(&out, "nope-sid"));
     ok_or_artifacts(
         &world,
-        "fast-session-send-missing",
+        &spec.name,
         "lattice session send nope-sid hello",
         &out,
         result,
@@ -629,7 +536,7 @@ fn fast_session_send_no_agent_profile_errors() {
         .and_then(|_| assert_no_secret(&out, "sk-fast-send-no-profile-sentinel"));
     assert_with_failure_artifacts(
         &world,
-        "fast-session-send-no-profile",
+        &spec.name,
         "lattice session send <id> hello (no profile)",
         &out,
         &["sk-fast-send-no-profile-sentinel"],

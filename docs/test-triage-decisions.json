@@ -15006,10 +15006,10 @@
     "name": "blocked_maps_to_blocked_plan",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15018,10 +15018,10 @@
     "name": "open_maps_to_open_plan",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15030,10 +15030,10 @@
     "name": "allowlist_propagates_domains_in_order",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15042,10 +15042,10 @@
     "name": "allowlist_empty_is_empty_allow",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15054,10 +15054,10 @@
     "name": "validate_baseline_oid_accepts_sha1_40_hex",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15066,10 +15066,10 @@
     "name": "validate_baseline_oid_accepts_sha256_64_hex",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15078,10 +15078,10 @@
     "name": "validate_baseline_oid_rejects_non_hex",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15090,10 +15090,10 @@
     "name": "validate_baseline_oid_rejects_wrong_lengths",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15102,10 +15102,10 @@
     "name": "test_deterministic_create_upper_returns_handle",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15114,10 +15114,10 @@
     "name": "test_deterministic_exec_upper_echo",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15126,10 +15126,10 @@
     "name": "test_deterministic_destroy_is_idempotent",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15138,10 +15138,10 @@
     "name": "test_deterministic_requested_policy",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15150,10 +15150,10 @@
     "name": "test_deterministic_git_status_clean",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15162,10 +15162,10 @@
     "name": "test_deterministic_contract_suite",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "DeterministicWorkspace adapter 合同套件入口；保留（workspace adapter 合同车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15174,10 +15174,10 @@
     "name": "test_deterministic_policy_is_recorded",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15186,10 +15186,10 @@
     "name": "test_no_lower_path_in_handle_explicit",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15198,10 +15198,10 @@
     "name": "env_var_debug_does_not_contain_value",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15210,10 +15210,10 @@
     "name": "file_cred_debug_does_not_contain_content",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15222,10 +15222,10 @@
     "name": "upper_spec_debug_via_credential_list",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15234,10 +15234,10 @@
     "name": "test_cred_debug_redaction",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15246,10 +15246,10 @@
     "name": "test_egress_variants_constructible",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15258,10 +15258,10 @@
     "name": "test_egress_blocked_debug_is_printable",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15270,10 +15270,10 @@
     "name": "test_egress_allowlist_entry_target",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15282,10 +15282,10 @@
     "name": "allowlist_entries_are_publicly_constructible",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15294,10 +15294,10 @@
     "name": "blocked_variant_is_publicly_constructible",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15306,10 +15306,10 @@
     "name": "open_variant_is_publicly_constructible",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15318,10 +15318,10 @@
     "name": "allowlist_entry_target_field_is_readable",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15330,10 +15330,10 @@
     "name": "empty_bytes_are_clean",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15342,10 +15342,10 @@
     "name": "ordinary_modified_entry",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15354,10 +15354,10 @@
     "name": "ordinary_staged_added_entry",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15366,10 +15366,10 @@
     "name": "untracked_entry",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15378,10 +15378,10 @@
     "name": "multiple_ordinary_entries",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15390,10 +15390,10 @@
     "name": "path_with_spaces_preserved_exactly",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15402,10 +15402,10 @@
     "name": "path_with_embedded_newline_preserved_exactly",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15414,10 +15414,10 @@
     "name": "path_with_tabs_and_special_whitespace",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15426,10 +15426,10 @@
     "name": "rename_entry_preserves_source_and_destination",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15438,10 +15438,10 @@
     "name": "copy_entry_preserves_source_and_destination",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15450,10 +15450,10 @@
     "name": "rename_with_worktree_modification",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15462,10 +15462,10 @@
     "name": "rename_followed_by_ordinary_entry",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15474,10 +15474,10 @@
     "name": "all_index_status_codes",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15486,10 +15486,10 @@
     "name": "all_worktree_status_codes",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15498,10 +15498,10 @@
     "name": "truncated_entry_rejected",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15510,10 +15510,10 @@
     "name": "truncated_rename_missing_second_path_rejected",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15522,10 +15522,10 @@
     "name": "non_utf8_path_rejected",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15534,10 +15534,10 @@
     "name": "absolute_path_rejected",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15546,10 +15546,10 @@
     "name": "traversal_path_rejected",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15558,10 +15558,10 @@
     "name": "invalid_status_code_rejected",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15570,10 +15570,10 @@
     "name": "workspace_dirty_fact_is_valid_json",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15582,10 +15582,10 @@
     "name": "workspace_dirty_fact_escapes_hostile_paths",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15594,10 +15594,10 @@
     "name": "workspace_dirty_fact_cannot_inject_record",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15606,10 +15606,10 @@
     "name": "crate_level_git_status_has_typed_entries",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15618,10 +15618,10 @@
     "name": "git_status_default_is_clean_with_empty_entries",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15630,10 +15630,10 @@
     "name": "changed_paths_from_typed_entries",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15642,10 +15642,10 @@
     "name": "dirty_fact_from_parsed_output",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15654,10 +15654,10 @@
     "name": "test_template_create_and_restore",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15666,10 +15666,10 @@
     "name": "test_egress_blocked_live",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15678,10 +15678,10 @@
     "name": "retired_workspace_contract_suite",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15690,10 +15690,10 @@
     "name": "test_git_ready_template_has_git_under_blocked_egress",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15702,10 +15702,10 @@
     "name": "clean_export_preserves_candidate_oid",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15714,10 +15714,10 @@
     "name": "dirty_staged_rejects_export",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15726,10 +15726,10 @@
     "name": "dirty_unstaged_rejects_export",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15738,10 +15738,10 @@
     "name": "dirty_untracked_rejects_export",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15750,10 +15750,10 @@
     "name": "artifact_byte_limit_boundary",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15762,10 +15762,10 @@
     "name": "verification_mismatch_rejects_before_import",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15774,10 +15774,10 @@
     "name": "failed_verification_rejects",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15786,10 +15786,10 @@
     "name": "valid_candidate_passes_validation",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15798,10 +15798,10 @@
     "name": "malformed_bundle_rejects",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15810,10 +15810,10 @@
     "name": "object_count_limit_boundary",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15822,10 +15822,10 @@
     "name": "gitmodules_change_rejects",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15834,10 +15834,10 @@
     "name": "symlink_add_rejects",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15846,10 +15846,10 @@
     "name": "rejection_leaves_refs_unchanged",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15858,10 +15858,10 @@
     "name": "verification_empty_argv_rejected",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15870,10 +15870,10 @@
     "name": "verification_empty_profile_hash_rejected",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15882,10 +15882,10 @@
     "name": "verification_coherence_exit_mismatch_rejected",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15894,10 +15894,10 @@
     "name": "verification_timeout_cannot_pass",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15906,10 +15906,10 @@
     "name": "verification_valid_evidence_constructs",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15918,10 +15918,10 @@
     "name": "verification_failed_with_nonzero_exit_constructs",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15930,10 +15930,10 @@
     "name": "verification_failed_with_timeout_constructs",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15942,10 +15942,10 @@
     "name": "prepare_rejection_creates_no_lock_or_journal",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15954,10 +15954,10 @@
     "name": "stale_project_ref_blocks_before_callback",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15966,10 +15966,10 @@
     "name": "dirty_lower_blocks_before_callback",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15978,10 +15978,10 @@
     "name": "callback_error_leaves_refs_and_lower_unchanged",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -15990,10 +15990,10 @@
     "name": "existing_candidate_ref_with_same_oid_succeeds_via_verify",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16002,10 +16002,10 @@
     "name": "callback_uses_observed_session_parent_and_cas",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16014,10 +16014,10 @@
     "name": "absent_session_ref_uses_create_without_parent",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16026,10 +16026,10 @@
     "name": "lock_precedes_journal_and_lower_writes",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16038,10 +16038,10 @@
     "name": "clean_candidate_advances_refs_and_materializes_lower",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16050,10 +16050,10 @@
     "name": "noop_candidate_keeps_project_oid_while_session_and_candidate_refs_advance",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16062,10 +16062,10 @@
     "name": "post_ref_materialization_fault_requires_recovery_before_retry",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16074,10 +16074,10 @@
     "name": "third_state_conflict_preserves_journal",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16086,10 +16086,10 @@
     "name": "only_commit_and_recover_mutate_managed_lower",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16098,10 +16098,10 @@
     "name": "deterministic_exact_baseline",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16110,10 +16110,10 @@
     "name": "deterministic_invalid_baseline_oid_rejected_before_handle",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16122,10 +16122,10 @@
     "name": "deterministic_missing_baseline_oid_rejected_before_handle",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16134,10 +16134,10 @@
     "name": "retired_workspace_exact_baseline",
     "ignored": true,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16146,10 +16146,10 @@
     "name": "provisions_linked_worktree_and_clean_baseline",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16158,10 +16158,10 @@
     "name": "reopens_existing_managed_worktree",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16170,10 +16170,10 @@
     "name": "rejects_branch_already_attached_elsewhere",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16182,10 +16182,10 @@
     "name": "rejects_staged_changes",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16194,10 +16194,10 @@
     "name": "rejects_unstaged_changes",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16206,10 +16206,10 @@
     "name": "rejects_untracked_files",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16218,10 +16218,10 @@
     "name": "allows_ignored_untracked_files",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16230,10 +16230,10 @@
     "name": "rejects_detached_head",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16242,10 +16242,10 @@
     "name": "rejects_wrong_branch",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16254,10 +16254,10 @@
     "name": "rejects_index_dirty_unmerged",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16266,10 +16266,10 @@
     "name": "same_identity_is_live_same_pid_different_ticks_is_stale",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16278,10 +16278,10 @@
     "name": "acquire_and_drop_records_parent_fsync",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16290,10 +16290,10 @@
     "name": "recovery_callback_failure_leaves_stale_lock",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16302,10 +16302,10 @@
     "name": "successful_recovery_removes_stale_lock",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16314,10 +16314,10 @@
     "name": "malformed_lock_json_is_not_auto_deleted",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16326,10 +16326,10 @@
     "name": "pin_creates_candidate_ref_with_exact_oid",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16338,10 +16338,10 @@
     "name": "pin_is_idempotent_for_same_oid",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16350,10 +16350,10 @@
     "name": "pin_rejects_different_oid",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16362,10 +16362,10 @@
     "name": "load_pinned_candidate_validates_and_returns",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16374,10 +16374,10 @@
     "name": "load_pinned_rejects_missing_ref",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16386,10 +16386,10 @@
     "name": "candidate_remains_resolvable_after_pin",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16398,10 +16398,10 @@
     "name": "prepare_pinned_rebuilds_validated_candidate",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16410,10 +16410,10 @@
     "name": "prepare_pinned_rejects_verification_mismatch",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16422,10 +16422,10 @@
     "name": "prepare_pinned_runs_hazard_and_limit_checks",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16434,10 +16434,10 @@
     "name": "add_modify_delete_and_executable_transitions_converge",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16446,10 +16446,10 @@
     "name": "non_empty_directory_blocks_removal",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16458,10 +16458,10 @@
     "name": "third_state_returns_conflict_without_mutation",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16470,10 +16470,10 @@
     "name": "durable_fs_syncs_file_before_parent",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16482,10 +16482,10 @@
     "name": "crash_matrix_recovers_toward_candidate_ref",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16494,10 +16494,10 @@
     "name": "recovery_after_baseline_ref_preserves_baseline",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16506,10 +16506,10 @@
     "name": "third_ref_and_third_state_preserve_journal",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16518,10 +16518,10 @@
     "name": "torn_final_line_is_tolerated_malformed_middle_is_fatal",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16530,10 +16530,10 @@
     "name": "golden_payload_has_one_transaction_cycle_and_three_commands",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16542,10 +16542,10 @@
     "name": "first_session_commit_uses_create_not_update",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16554,10 +16554,10 @@
     "name": "injection_corpus_rejects_before_git_spawn",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16566,10 +16566,10 @@
     "name": "derived_refs_match_d07_layout",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16578,10 +16578,10 @@
     "name": "success_moves_all_three_refs_together",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16590,10 +16590,10 @@
     "name": "stale_project_oid_leaves_refs_unchanged",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16602,10 +16602,10 @@
     "name": "stale_session_oid_leaves_refs_unchanged",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16614,10 +16614,10 @@
     "name": "existing_candidate_ref_blocks_whole_transaction",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16626,10 +16626,10 @@
     "name": "project_ref_moves_between_request_and_execution",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16638,10 +16638,10 @@
     "name": "session_ref_moves_between_request_and_execution",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16650,10 +16650,10 @@
     "name": "child_failure_surfaces_typed_error",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16662,10 +16662,10 @@
     "name": "test_retain_preserves_dirty_state_and_git",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16674,10 +16674,10 @@
     "name": "test_retain_preserves_clean_commits",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16686,10 +16686,10 @@
     "name": "test_retain_removes_live_handle",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16698,10 +16698,10 @@
     "name": "test_release_is_idempotent",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16710,10 +16710,10 @@
     "name": "test_list_returns_exact_session_snapshots",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16722,10 +16722,10 @@
     "name": "test_quota_refuses_at_limit",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16734,10 +16734,10 @@
     "name": "test_invalid_name_rejected",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16746,10 +16746,10 @@
     "name": "test_zero_quota_always_refuses",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16758,10 +16758,10 @@
     "name": "test_retain_nonexistent_handle_fails",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16770,10 +16770,10 @@
     "name": "test_restore_nonexistent_snapshot_fails",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16782,10 +16782,10 @@
     "name": "retired_workspace_retain_restore_release",
     "ignored": true,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16794,10 +16794,10 @@
     "name": "wave0_a1_sandbox_send_sync",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16806,10 +16806,10 @@
     "name": "wave0_a3_boot_and_exec",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16818,10 +16818,10 @@
     "name": "wave0_a4_snapshot_round_trip",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16830,10 +16830,10 @@
     "name": "wave0_a7_egress_allowlist",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16842,10 +16842,10 @@
     "name": "deterministic_primitives_contract",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16854,10 +16854,10 @@
     "name": "rejects_invalid_paths",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16866,10 +16866,10 @@
     "name": "content_too_large_before_write",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16878,10 +16878,10 @@
     "name": "git_facts_without_bypass",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "lattice-workspace",
@@ -16890,10 +16890,10 @@
     "name": "create_overwrite_delete_intents",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道）"
+    "replacement": "n/a",
+    "reason": "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
   },
   {
     "crate": "net-guard",

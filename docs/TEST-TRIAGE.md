@@ -91,9 +91,9 @@
 
 | 决定 | 条数 |
 |---|---:|
-| 保留 | 1337 |
+| 保留 | 1179 |
 | 提升 | 86 |
-| 删除 | 26 |
+| 删除 | 184 |
 | **合计** | **1449** |
 
 #### 按 crate
@@ -102,7 +102,7 @@
 |---|---:|---:|---:|---:|
 | `lattice-api` | 223 | 25 | 12 | 260 |
 | `lattice-cli` | 118 | 57 | 10 | 185 |
-| `lattice-workspace` | 158 | 0 | 0 | 158 |
+| `lattice-workspace` | 0 | 0 | 158 | 158 |
 | `lancet-authority` | 135 | 0 | 0 | 135 |
 | `lattice-llm` | 133 | 0 | 0 | 133 |
 | `lancet-native` | 107 | 0 | 0 | 107 |
@@ -238,9 +238,9 @@ codeberg issue 跟踪重写。
 
 | 决定 | 条数 |
 |---|---:|
-| 保留 | 1337 |
+| 保留 | 1179 |
 | 提升 | 86 |
-| 删除 | 26 |
+| 删除 | 184 |
 | **合计** | **1449** |
 ## 2. 逐条清单
 
@@ -1022,7 +1022,7 @@ codeberg issue 跟踪重写。
 | `lancet_status_json_flag_parses` | `crates/lattice-cli/src/commands/lancet.rs:208` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `lancet_status_no_args_parses` | `crates/lattice-cli/src/commands/lancet.rs:218` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `lancet_doctor_parses` | `crates/lattice-cli/src/commands/lancet.rs:228` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cep_status_missing_db_returns_empty_state` | `crates/lattice-cli/src/commands/lancet.rs:288` | 提升 | 快速二进制黑盒 | 延期 `planned_lancet_cli` | 已删除原内部测试，由已落地 fast_lancet_cli（lancet status 空态 JSON/text）黑盒接管 |
+| `cep_status_missing_db_returns_empty_state` | `crates/lattice-cli/src/commands/lancet.rs:288` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_lancet_cli` 接管 | 已删除原内部测试，由已落地 fast_lancet_cli（lancet status 空态 JSON/text）黑盒接管 |
 | `cep_status_seeded_audit_json` | `crates/lattice-cli/src/commands/lancet.rs:297` | 提升 | Direct-Local 外部二进制 | `planned_direct_lancet_status_seeded` | 原内部测试断言集合由 #24 精确场景 `planned_direct_lancet_status_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `cep_doctor_passes_on_repo_root` | `crates/lattice-cli/src/commands/lancet.rs:345` | 保留 | 局部不变量 | - | #23 复审偏差：测试 run_doctor_inner_for_project_root（LANCET doctor catalog 方法数 + registry 注册检查）是编译期不变量检查，经 #[cfg(test)] helper 驱动，非公开黑盒行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
 | `cli_diagnostics_models_auth_text_lists_aliases_one_per_line` | `crates/lattice-cli/src/commands/models.rs:37` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
@@ -1131,10 +1131,10 @@ codeberg issue 跟踪重写。
 | `reset_changes_only_addressed_session_branch_pointer` | `crates/lattice-cli/src/commands/session.rs:1613` | 提升 | Direct-Local 外部二进制 | `planned_direct_reset_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_reset_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `diff_resolves_refs_inside_addressed_session_only` | `crates/lattice-cli/src/commands/session.rs:1650` | 提升 | Direct-Local 外部二进制 | `planned_direct_diff_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_diff_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `boundary_no_legacy_session_store_patterns` | `crates/lattice-cli/src/commands/session.rs:1691` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
-| `project_branch_creation_json_output_includes_branch` | `crates/lattice-cli/src/commands/session.rs:1755` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 已删除原内部测试，由已落地 fast_session_cli（fast_session_new_json_reports_requested_project_branch：session new --project-branch feature/test --json 输出 project_branch=feature/test）黑盒接管 |
+| `project_branch_creation_json_output_includes_branch` | `crates/lattice-cli/src/commands/session.rs:1755` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_new_json_reports_requested_project_branch：session new --project-branch feature/test --json 输出 project_branch=feature/test）黑盒接管 |
 | `project_branch_status_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1775` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `project_branch_list_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1794` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `project_branch_persists_through_reopen` | `crates/lattice-cli/src/commands/session.rs:1816` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 已删除原内部测试，由已落地 fast_session_cli（fast_session_project_branch_persists_across_cli_invocations：独立第二次 CLI 进程读 session status --json 断言 project_target_branch=feature/persist；进程边界 reopen 严格强于库内 SessionApi::open_session 往返）黑盒接管 |
+| `project_branch_persists_through_reopen` | `crates/lattice-cli/src/commands/session.rs:1816` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_project_branch_persists_across_cli_invocations：独立第二次 CLI 进程读 session status --json 断言 project_target_branch=feature/persist；进程边界 reopen 严格强于库内 SessionApi::open_session 往返）黑盒接管 |
 | `cli_surface_run_is_not_exposed` | `crates/lattice-cli/src/main.rs:153` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `cli_surface_session_new_agent` | `crates/lattice-cli/src/main.rs:158` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `cli_surface_session_send` | `crates/lattice-cli/src/main.rs:173` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
@@ -1173,8 +1173,8 @@ codeberg issue 跟踪重写。
 | `smoke_models_auth_lists_aliases_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:100` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_resolve_sonnet_json_shows_env_var_not_secret` | `crates/lattice-cli/tests/release_smoke.rs:131` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_resolve_missing_credential_names_env_var` | `crates/lattice-cli/tests/release_smoke.rs:159` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `smoke_session_status_list_shows_seeded_session` | `crates/lattice-cli/tests/release_smoke.rs:185` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 已删除原内部测试，由已落地 fast_session_cli（fast_session_new_creates_session_and_appears_in_list：session new 后 session list --json 含 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象 |
-| `smoke_session_status_specific_session` | `crates/lattice-cli/tests/release_smoke.rs:210` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 已删除原内部测试，由已落地 fast_session_cli（fast_session_status_new_session_shows_zero_commits_and_agent + fast_session_status_json_stable_contract：session status <id> 文本/JSON 双模断言 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象 |
+| `smoke_session_status_list_shows_seeded_session` | `crates/lattice-cli/tests/release_smoke.rs:185` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_new_creates_session_and_appears_in_list：session new 后 session list --json 含 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象 |
+| `smoke_session_status_specific_session` | `crates/lattice-cli/tests/release_smoke.rs:210` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_status_new_session_shows_zero_commits_and_agent + fast_session_status_json_stable_contract：session status <id> 文本/JSON 双模断言 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象 |
 | `smoke_session_log_shows_seeded_turn` | `crates/lattice-cli/tests/release_smoke.rs:242` | 提升 | Direct-Local 外部二进制 | `planned_direct_session_log_turn` | 原内部测试断言集合由 #24 精确场景 `planned_direct_session_log_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `smoke_doctor_runs_without_leaking_secrets` | `crates/lattice-cli/tests/release_smoke.rs:269` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_doctor_json_does_not_leak_secrets` | `crates/lattice-cli/tests/release_smoke.rs:299` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
@@ -1572,168 +1572,168 @@ codeberg issue 跟踪重写。
 | `new_session_project_branch_rejects_blank_values` | `crates/lattice-tui/src/runtime.rs:415` | 保留 | 局部不变量 | — | TUI 局部纯逻辑（若有）保留；展示细节不进契约 |
 | `new_session_project_branch_preserves_explicit_value` | `crates/lattice-tui/src/runtime.rs:425` | 保留 | 局部不变量 | — | TUI 局部纯逻辑（若有）保留；展示细节不进契约 |
 
-### `lattice-workspace`（保留 158 / 提升 0 / 删除 0）
+### `lattice-workspace`（保留 0 / 提升 0 / 删除 158）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 |---|---|---|---|---|---|
-| `blocked_maps_to_blocked_plan` | `crates/lattice-workspace/src/lib.rs:735` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `open_maps_to_open_plan` | `crates/lattice-workspace/src/lib.rs:741` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allowlist_propagates_domains_in_order` | `crates/lattice-workspace/src/lib.rs:746` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allowlist_empty_is_empty_allow` | `crates/lattice-workspace/src/lib.rs:763` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `validate_baseline_oid_accepts_sha1_40_hex` | `crates/lattice-workspace/src/lib.rs:778` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `validate_baseline_oid_accepts_sha256_64_hex` | `crates/lattice-workspace/src/lib.rs:783` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `validate_baseline_oid_rejects_non_hex` | `crates/lattice-workspace/src/lib.rs:789` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `validate_baseline_oid_rejects_wrong_lengths` | `crates/lattice-workspace/src/lib.rs:795` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_create_upper_returns_handle` | `crates/lattice-workspace/src/testing/mod.rs:524` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_exec_upper_echo` | `crates/lattice-workspace/src/testing/mod.rs:537` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_destroy_is_idempotent` | `crates/lattice-workspace/src/testing/mod.rs:548` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_requested_policy` | `crates/lattice-workspace/src/testing/mod.rs:559` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_git_status_clean` | `crates/lattice-workspace/src/testing/mod.rs:573` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_contract_suite` | `crates/lattice-workspace/tests/contract_deterministic.rs:21` | 保留 | 局部不变量 | — | DeterministicWorkspace adapter 合同套件入口；保留（workspace adapter 合同车道） |
-| `test_deterministic_policy_is_recorded` | `crates/lattice-workspace/tests/contract_deterministic.rs:29` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_no_lower_path_in_handle_explicit` | `crates/lattice-workspace/tests/contract_deterministic.rs:66` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `env_var_debug_does_not_contain_value` | `crates/lattice-workspace/tests/cred_redaction.rs:15` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `file_cred_debug_does_not_contain_content` | `crates/lattice-workspace/tests/cred_redaction.rs:36` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `upper_spec_debug_via_credential_list` | `crates/lattice-workspace/tests/cred_redaction.rs:57` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_cred_debug_redaction` | `crates/lattice-workspace/tests/cred_redaction.rs:90` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_egress_variants_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:25` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_egress_blocked_debug_is_printable` | `crates/lattice-workspace/tests/egress_policy.rs:48` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_egress_allowlist_entry_target` | `crates/lattice-workspace/tests/egress_policy.rs:55` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allowlist_entries_are_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:63` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `blocked_variant_is_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:75` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `open_variant_is_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:84` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allowlist_entry_target_field_is_readable` | `crates/lattice-workspace/tests/egress_policy.rs:93` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `empty_bytes_are_clean` | `crates/lattice-workspace/tests/git_status_z.rs:16` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `ordinary_modified_entry` | `crates/lattice-workspace/tests/git_status_z.rs:25` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `ordinary_staged_added_entry` | `crates/lattice-workspace/tests/git_status_z.rs:38` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `untracked_entry` | `crates/lattice-workspace/tests/git_status_z.rs:49` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `multiple_ordinary_entries` | `crates/lattice-workspace/tests/git_status_z.rs:60` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `path_with_spaces_preserved_exactly` | `crates/lattice-workspace/tests/git_status_z.rs:73` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `path_with_embedded_newline_preserved_exactly` | `crates/lattice-workspace/tests/git_status_z.rs:81` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `path_with_tabs_and_special_whitespace` | `crates/lattice-workspace/tests/git_status_z.rs:89` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rename_entry_preserves_source_and_destination` | `crates/lattice-workspace/tests/git_status_z.rs:99` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `copy_entry_preserves_source_and_destination` | `crates/lattice-workspace/tests/git_status_z.rs:114` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rename_with_worktree_modification` | `crates/lattice-workspace/tests/git_status_z.rs:129` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rename_followed_by_ordinary_entry` | `crates/lattice-workspace/tests/git_status_z.rs:140` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `all_index_status_codes` | `crates/lattice-workspace/tests/git_status_z.rs:154` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `all_worktree_status_codes` | `crates/lattice-workspace/tests/git_status_z.rs:195` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `truncated_entry_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:217` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `truncated_rename_missing_second_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:228` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `non_utf8_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:239` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `absolute_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:252` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `traversal_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:263` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `invalid_status_code_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:274` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `workspace_dirty_fact_is_valid_json` | `crates/lattice-workspace/tests/git_status_z.rs:287` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `workspace_dirty_fact_escapes_hostile_paths` | `crates/lattice-workspace/tests/git_status_z.rs:316` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `workspace_dirty_fact_cannot_inject_record` | `crates/lattice-workspace/tests/git_status_z.rs:333` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `crate_level_git_status_has_typed_entries` | `crates/lattice-workspace/tests/git_status_z.rs:353` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `git_status_default_is_clean_with_empty_entries` | `crates/lattice-workspace/tests/git_status_z.rs:370` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `changed_paths_from_typed_entries` | `crates/lattice-workspace/tests/git_status_z.rs:380` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_fact_from_parsed_output` | `crates/lattice-workspace/tests/git_status_z.rs:408` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_template_create_and_restore` | `crates/lattice-workspace/tests/integration_workspace.rs:118` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_egress_blocked_live` | `crates/lattice-workspace/tests/integration_workspace.rs:234` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `retired_workspace_contract_suite` | `crates/lattice-workspace/tests/integration_workspace.rs:305` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_git_ready_template_has_git_under_blocked_egress` | `crates/lattice-workspace/tests/integration_workspace.rs:351` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `clean_export_preserves_candidate_oid` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:112` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_staged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:158` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_unstaged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:193` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_untracked_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:215` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `artifact_byte_limit_boundary` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:237` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_mismatch_rejects_before_import` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:454` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `failed_verification_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:476` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `valid_candidate_passes_validation` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:492` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `malformed_bundle_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:518` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `object_count_limit_boundary` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:540` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `gitmodules_change_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:594` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `symlink_add_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:645` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejection_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:692` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_empty_argv_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:721` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_empty_profile_hash_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:739` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_coherence_exit_mismatch_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:757` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_timeout_cannot_pass` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:776` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_valid_evidence_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:795` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_failed_with_nonzero_exit_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:814` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_failed_with_timeout_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:830` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `prepare_rejection_creates_no_lock_or_journal` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:253` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `stale_project_ref_blocks_before_callback` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:264` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_lower_blocks_before_callback` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:286` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `callback_error_leaves_refs_and_lower_unchanged` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:304` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `existing_candidate_ref_with_same_oid_succeeds_via_verify` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:321` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `callback_uses_observed_session_parent_and_cas` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:336` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `absent_session_ref_uses_create_without_parent` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:360` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `lock_precedes_journal_and_lower_writes` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:373` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `clean_candidate_advances_refs_and_materializes_lower` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:395` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `noop_candidate_keeps_project_oid_while_session_and_candidate_refs_advance` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:416` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `post_ref_materialization_fault_requires_recovery_before_retry` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:458` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `third_state_conflict_preserves_journal` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:503` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `only_commit_and_recover_mutate_managed_lower` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:529` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `deterministic_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:72` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `deterministic_invalid_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:110` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `deterministic_missing_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:127` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `retired_workspace_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:151` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `provisions_linked_worktree_and_clean_baseline` | `crates/lattice-workspace/tests/promotion_lower.rs:94` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `reopens_existing_managed_worktree` | `crates/lattice-workspace/tests/promotion_lower.rs:109` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_branch_already_attached_elsewhere` | `crates/lattice-workspace/tests/promotion_lower.rs:119` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_staged_changes` | `crates/lattice-workspace/tests/promotion_lower.rs:130` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_unstaged_changes` | `crates/lattice-workspace/tests/promotion_lower.rs:147` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_untracked_files` | `crates/lattice-workspace/tests/promotion_lower.rs:159` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allows_ignored_untracked_files` | `crates/lattice-workspace/tests/promotion_lower.rs:171` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_detached_head` | `crates/lattice-workspace/tests/promotion_lower.rs:193` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_wrong_branch` | `crates/lattice-workspace/tests/promotion_lower.rs:210` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_index_dirty_unmerged` | `crates/lattice-workspace/tests/promotion_lower.rs:235` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `same_identity_is_live_same_pid_different_ticks_is_stale` | `crates/lattice-workspace/tests/promotion_lower.rs:332` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `acquire_and_drop_records_parent_fsync` | `crates/lattice-workspace/tests/promotion_lower.rs:354` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `recovery_callback_failure_leaves_stale_lock` | `crates/lattice-workspace/tests/promotion_lower.rs:372` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `successful_recovery_removes_stale_lock` | `crates/lattice-workspace/tests/promotion_lower.rs:401` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `malformed_lock_json_is_not_auto_deleted` | `crates/lattice-workspace/tests/promotion_lower.rs:424` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `pin_creates_candidate_ref_with_exact_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:111` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `pin_is_idempotent_for_same_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:131` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `pin_rejects_different_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:151` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `load_pinned_candidate_validates_and_returns` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:183` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `load_pinned_rejects_missing_ref` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:206` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `candidate_remains_resolvable_after_pin` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:225` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `prepare_pinned_rebuilds_validated_candidate` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:247` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `prepare_pinned_rejects_verification_mismatch` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:282` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `prepare_pinned_runs_hazard_and_limit_checks` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:319` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `add_modify_delete_and_executable_transitions_converge` | `crates/lattice-workspace/tests/promotion_recovery.rs:124` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `non_empty_directory_blocks_removal` | `crates/lattice-workspace/tests/promotion_recovery.rs:178` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `third_state_returns_conflict_without_mutation` | `crates/lattice-workspace/tests/promotion_recovery.rs:212` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `durable_fs_syncs_file_before_parent` | `crates/lattice-workspace/tests/promotion_recovery.rs:252` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `crash_matrix_recovers_toward_candidate_ref` | `crates/lattice-workspace/tests/promotion_recovery.rs:330` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `recovery_after_baseline_ref_preserves_baseline` | `crates/lattice-workspace/tests/promotion_recovery.rs:378` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `third_ref_and_third_state_preserve_journal` | `crates/lattice-workspace/tests/promotion_recovery.rs:413` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `torn_final_line_is_tolerated_malformed_middle_is_fatal` | `crates/lattice-workspace/tests/promotion_recovery.rs:451` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `golden_payload_has_one_transaction_cycle_and_three_commands` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:124` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `first_session_commit_uses_create_not_update` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:164` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `injection_corpus_rejects_before_git_spawn` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:180` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `derived_refs_match_d07_layout` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:214` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `success_moves_all_three_refs_together` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:232` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `stale_project_oid_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:247` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `stale_session_oid_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:267` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `existing_candidate_ref_blocks_whole_transaction` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:291` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `project_ref_moves_between_request_and_execution` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:311` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `session_ref_moves_between_request_and_execution` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:334` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `child_failure_surfaces_typed_error` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:377` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_retain_preserves_dirty_state_and_git` | `crates/lattice-workspace/tests/retained_snapshot.rs:87` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_retain_preserves_clean_commits` | `crates/lattice-workspace/tests/retained_snapshot.rs:150` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_retain_removes_live_handle` | `crates/lattice-workspace/tests/retained_snapshot.rs:196` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_release_is_idempotent` | `crates/lattice-workspace/tests/retained_snapshot.rs:215` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_list_returns_exact_session_snapshots` | `crates/lattice-workspace/tests/retained_snapshot.rs:253` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_quota_refuses_at_limit` | `crates/lattice-workspace/tests/retained_snapshot.rs:299` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_invalid_name_rejected` | `crates/lattice-workspace/tests/retained_snapshot.rs:346` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_zero_quota_always_refuses` | `crates/lattice-workspace/tests/retained_snapshot.rs:371` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_retain_nonexistent_handle_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:385` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_restore_nonexistent_snapshot_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:398` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `retired_workspace_retain_restore_release` | `crates/lattice-workspace/tests/retained_snapshot.rs:426` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `wave0_a1_sandbox_send_sync` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:48` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `wave0_a3_boot_and_exec` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:70` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `wave0_a4_snapshot_round_trip` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:131` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `wave0_a7_egress_allowlist` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:231` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `deterministic_primitives_contract` | `crates/lattice-workspace/tests/workspace_primitives.rs:28` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_invalid_paths` | `crates/lattice-workspace/tests/workspace_primitives.rs:101` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `content_too_large_before_write` | `crates/lattice-workspace/tests/workspace_primitives.rs:121` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `git_facts_without_bypass` | `crates/lattice-workspace/tests/workspace_primitives.rs:137` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `create_overwrite_delete_intents` | `crates/lattice-workspace/tests/workspace_primitives.rs:154` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
+| `blocked_maps_to_blocked_plan` | `crates/lattice-workspace/src/lib.rs:735` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `open_maps_to_open_plan` | `crates/lattice-workspace/src/lib.rs:741` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allowlist_propagates_domains_in_order` | `crates/lattice-workspace/src/lib.rs:746` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allowlist_empty_is_empty_allow` | `crates/lattice-workspace/src/lib.rs:763` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `validate_baseline_oid_accepts_sha1_40_hex` | `crates/lattice-workspace/src/lib.rs:778` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `validate_baseline_oid_accepts_sha256_64_hex` | `crates/lattice-workspace/src/lib.rs:783` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `validate_baseline_oid_rejects_non_hex` | `crates/lattice-workspace/src/lib.rs:789` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `validate_baseline_oid_rejects_wrong_lengths` | `crates/lattice-workspace/src/lib.rs:795` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_create_upper_returns_handle` | `crates/lattice-workspace/src/testing/mod.rs:524` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_exec_upper_echo` | `crates/lattice-workspace/src/testing/mod.rs:537` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_destroy_is_idempotent` | `crates/lattice-workspace/src/testing/mod.rs:548` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_requested_policy` | `crates/lattice-workspace/src/testing/mod.rs:559` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_git_status_clean` | `crates/lattice-workspace/src/testing/mod.rs:573` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_contract_suite` | `crates/lattice-workspace/tests/contract_deterministic.rs:21` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_policy_is_recorded` | `crates/lattice-workspace/tests/contract_deterministic.rs:29` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_no_lower_path_in_handle_explicit` | `crates/lattice-workspace/tests/contract_deterministic.rs:66` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `env_var_debug_does_not_contain_value` | `crates/lattice-workspace/tests/cred_redaction.rs:15` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `file_cred_debug_does_not_contain_content` | `crates/lattice-workspace/tests/cred_redaction.rs:36` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `upper_spec_debug_via_credential_list` | `crates/lattice-workspace/tests/cred_redaction.rs:57` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_cred_debug_redaction` | `crates/lattice-workspace/tests/cred_redaction.rs:90` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_egress_variants_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:25` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_egress_blocked_debug_is_printable` | `crates/lattice-workspace/tests/egress_policy.rs:48` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_egress_allowlist_entry_target` | `crates/lattice-workspace/tests/egress_policy.rs:55` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allowlist_entries_are_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:63` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `blocked_variant_is_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:75` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `open_variant_is_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:84` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allowlist_entry_target_field_is_readable` | `crates/lattice-workspace/tests/egress_policy.rs:93` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `empty_bytes_are_clean` | `crates/lattice-workspace/tests/git_status_z.rs:16` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `ordinary_modified_entry` | `crates/lattice-workspace/tests/git_status_z.rs:25` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `ordinary_staged_added_entry` | `crates/lattice-workspace/tests/git_status_z.rs:38` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `untracked_entry` | `crates/lattice-workspace/tests/git_status_z.rs:49` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `multiple_ordinary_entries` | `crates/lattice-workspace/tests/git_status_z.rs:60` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `path_with_spaces_preserved_exactly` | `crates/lattice-workspace/tests/git_status_z.rs:73` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `path_with_embedded_newline_preserved_exactly` | `crates/lattice-workspace/tests/git_status_z.rs:81` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `path_with_tabs_and_special_whitespace` | `crates/lattice-workspace/tests/git_status_z.rs:89` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rename_entry_preserves_source_and_destination` | `crates/lattice-workspace/tests/git_status_z.rs:99` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `copy_entry_preserves_source_and_destination` | `crates/lattice-workspace/tests/git_status_z.rs:114` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rename_with_worktree_modification` | `crates/lattice-workspace/tests/git_status_z.rs:129` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rename_followed_by_ordinary_entry` | `crates/lattice-workspace/tests/git_status_z.rs:140` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `all_index_status_codes` | `crates/lattice-workspace/tests/git_status_z.rs:154` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `all_worktree_status_codes` | `crates/lattice-workspace/tests/git_status_z.rs:195` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `truncated_entry_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:217` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `truncated_rename_missing_second_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:228` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `non_utf8_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:239` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `absolute_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:252` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `traversal_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:263` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `invalid_status_code_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:274` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `workspace_dirty_fact_is_valid_json` | `crates/lattice-workspace/tests/git_status_z.rs:287` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `workspace_dirty_fact_escapes_hostile_paths` | `crates/lattice-workspace/tests/git_status_z.rs:316` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `workspace_dirty_fact_cannot_inject_record` | `crates/lattice-workspace/tests/git_status_z.rs:333` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `crate_level_git_status_has_typed_entries` | `crates/lattice-workspace/tests/git_status_z.rs:353` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `git_status_default_is_clean_with_empty_entries` | `crates/lattice-workspace/tests/git_status_z.rs:370` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `changed_paths_from_typed_entries` | `crates/lattice-workspace/tests/git_status_z.rs:380` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_fact_from_parsed_output` | `crates/lattice-workspace/tests/git_status_z.rs:408` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_template_create_and_restore` | `crates/lattice-workspace/tests/integration_workspace.rs:118` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_egress_blocked_live` | `crates/lattice-workspace/tests/integration_workspace.rs:234` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `retired_workspace_contract_suite` | `crates/lattice-workspace/tests/integration_workspace.rs:305` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_git_ready_template_has_git_under_blocked_egress` | `crates/lattice-workspace/tests/integration_workspace.rs:351` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `clean_export_preserves_candidate_oid` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:112` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_staged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:158` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_unstaged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:193` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_untracked_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:215` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `artifact_byte_limit_boundary` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:237` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_mismatch_rejects_before_import` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:454` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `failed_verification_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:476` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `valid_candidate_passes_validation` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:492` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `malformed_bundle_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:518` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `object_count_limit_boundary` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:540` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `gitmodules_change_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:594` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `symlink_add_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:645` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejection_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:692` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_empty_argv_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:721` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_empty_profile_hash_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:739` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_coherence_exit_mismatch_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:757` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_timeout_cannot_pass` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:776` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_valid_evidence_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:795` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_failed_with_nonzero_exit_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:814` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_failed_with_timeout_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:830` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `prepare_rejection_creates_no_lock_or_journal` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:253` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `stale_project_ref_blocks_before_callback` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:264` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_lower_blocks_before_callback` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:286` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `callback_error_leaves_refs_and_lower_unchanged` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:304` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `existing_candidate_ref_with_same_oid_succeeds_via_verify` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:321` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `callback_uses_observed_session_parent_and_cas` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:336` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `absent_session_ref_uses_create_without_parent` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:360` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `lock_precedes_journal_and_lower_writes` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:373` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `clean_candidate_advances_refs_and_materializes_lower` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:395` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `noop_candidate_keeps_project_oid_while_session_and_candidate_refs_advance` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:416` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `post_ref_materialization_fault_requires_recovery_before_retry` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:458` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `third_state_conflict_preserves_journal` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:503` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `only_commit_and_recover_mutate_managed_lower` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:529` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `deterministic_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:72` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `deterministic_invalid_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:110` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `deterministic_missing_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:127` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `retired_workspace_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:151` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `provisions_linked_worktree_and_clean_baseline` | `crates/lattice-workspace/tests/promotion_lower.rs:94` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `reopens_existing_managed_worktree` | `crates/lattice-workspace/tests/promotion_lower.rs:109` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_branch_already_attached_elsewhere` | `crates/lattice-workspace/tests/promotion_lower.rs:119` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_staged_changes` | `crates/lattice-workspace/tests/promotion_lower.rs:130` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_unstaged_changes` | `crates/lattice-workspace/tests/promotion_lower.rs:147` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_untracked_files` | `crates/lattice-workspace/tests/promotion_lower.rs:159` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allows_ignored_untracked_files` | `crates/lattice-workspace/tests/promotion_lower.rs:171` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_detached_head` | `crates/lattice-workspace/tests/promotion_lower.rs:193` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_wrong_branch` | `crates/lattice-workspace/tests/promotion_lower.rs:210` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_index_dirty_unmerged` | `crates/lattice-workspace/tests/promotion_lower.rs:235` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `same_identity_is_live_same_pid_different_ticks_is_stale` | `crates/lattice-workspace/tests/promotion_lower.rs:332` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `acquire_and_drop_records_parent_fsync` | `crates/lattice-workspace/tests/promotion_lower.rs:354` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `recovery_callback_failure_leaves_stale_lock` | `crates/lattice-workspace/tests/promotion_lower.rs:372` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `successful_recovery_removes_stale_lock` | `crates/lattice-workspace/tests/promotion_lower.rs:401` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `malformed_lock_json_is_not_auto_deleted` | `crates/lattice-workspace/tests/promotion_lower.rs:424` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `pin_creates_candidate_ref_with_exact_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:111` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `pin_is_idempotent_for_same_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:131` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `pin_rejects_different_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:151` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `load_pinned_candidate_validates_and_returns` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:183` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `load_pinned_rejects_missing_ref` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:206` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `candidate_remains_resolvable_after_pin` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:225` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `prepare_pinned_rebuilds_validated_candidate` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:247` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `prepare_pinned_rejects_verification_mismatch` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:282` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `prepare_pinned_runs_hazard_and_limit_checks` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:319` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `add_modify_delete_and_executable_transitions_converge` | `crates/lattice-workspace/tests/promotion_recovery.rs:124` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `non_empty_directory_blocks_removal` | `crates/lattice-workspace/tests/promotion_recovery.rs:178` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `third_state_returns_conflict_without_mutation` | `crates/lattice-workspace/tests/promotion_recovery.rs:212` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `durable_fs_syncs_file_before_parent` | `crates/lattice-workspace/tests/promotion_recovery.rs:252` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `crash_matrix_recovers_toward_candidate_ref` | `crates/lattice-workspace/tests/promotion_recovery.rs:330` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `recovery_after_baseline_ref_preserves_baseline` | `crates/lattice-workspace/tests/promotion_recovery.rs:378` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `third_ref_and_third_state_preserve_journal` | `crates/lattice-workspace/tests/promotion_recovery.rs:413` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `torn_final_line_is_tolerated_malformed_middle_is_fatal` | `crates/lattice-workspace/tests/promotion_recovery.rs:451` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `golden_payload_has_one_transaction_cycle_and_three_commands` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:124` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `first_session_commit_uses_create_not_update` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:164` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `injection_corpus_rejects_before_git_spawn` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:180` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `derived_refs_match_d07_layout` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:214` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `success_moves_all_three_refs_together` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:232` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `stale_project_oid_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:247` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `stale_session_oid_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:267` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `existing_candidate_ref_blocks_whole_transaction` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:291` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `project_ref_moves_between_request_and_execution` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:311` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `session_ref_moves_between_request_and_execution` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:334` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `child_failure_surfaces_typed_error` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:377` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_retain_preserves_dirty_state_and_git` | `crates/lattice-workspace/tests/retained_snapshot.rs:87` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_retain_preserves_clean_commits` | `crates/lattice-workspace/tests/retained_snapshot.rs:150` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_retain_removes_live_handle` | `crates/lattice-workspace/tests/retained_snapshot.rs:196` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_release_is_idempotent` | `crates/lattice-workspace/tests/retained_snapshot.rs:215` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_list_returns_exact_session_snapshots` | `crates/lattice-workspace/tests/retained_snapshot.rs:253` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_quota_refuses_at_limit` | `crates/lattice-workspace/tests/retained_snapshot.rs:299` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_invalid_name_rejected` | `crates/lattice-workspace/tests/retained_snapshot.rs:346` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_zero_quota_always_refuses` | `crates/lattice-workspace/tests/retained_snapshot.rs:371` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_retain_nonexistent_handle_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:385` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_restore_nonexistent_snapshot_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:398` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `retired_workspace_retain_restore_release` | `crates/lattice-workspace/tests/retained_snapshot.rs:426` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `wave0_a1_sandbox_send_sync` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:48` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `wave0_a3_boot_and_exec` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:70` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `wave0_a4_snapshot_round_trip` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:131` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `wave0_a7_egress_allowlist` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:231` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `deterministic_primitives_contract` | `crates/lattice-workspace/tests/workspace_primitives.rs:28` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_invalid_paths` | `crates/lattice-workspace/tests/workspace_primitives.rs:101` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `content_too_large_before_write` | `crates/lattice-workspace/tests/workspace_primitives.rs:121` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `git_facts_without_bypass` | `crates/lattice-workspace/tests/workspace_primitives.rs:137` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `create_overwrite_delete_intents` | `crates/lattice-workspace/tests/workspace_primitives.rs:154` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
 
 ### `net-guard`（保留 15 / 提升 0 / 删除 0）
 
