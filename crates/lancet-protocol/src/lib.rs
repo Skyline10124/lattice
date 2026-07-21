@@ -8,6 +8,7 @@
 //! - **JSON-RPC 2.0** envelope types (`jsonrpc`) — domain-neutral request/response/notification.
 //! - **Frame aliases** (`frame`) — CEP-specific type aliases over JSON-RPC (`ToolCall`, `ToolResult`, `ToolEvent`).
 //! - **Execution envelopes** (`envelope`) — intent, capabilities, scope, impact, and guard verdicts.
+//! - **Cell effect model** (`cell`) — ADR 0004 `CtxOp`/`ExtImpact`/scope/trust/capability core.
 //! - **Typed errors** (`error`) — error families with structured data and retriability.
 //! - **Policy hook API** (`policy`) — deterministic policy seam data types.
 //! - **Provenance wire types** (`provenance`) — PROV and unsigned in-toto shapes.
@@ -15,6 +16,7 @@
 //! This crate is pure data: no I/O, no runtime, no tokio.
 
 pub mod capability;
+pub mod cell;
 pub mod effect_types;
 pub mod error;
 pub mod frame;

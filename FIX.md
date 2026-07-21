@@ -2,6 +2,34 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #5 slice A: `lancet-protocol` Cell effect core (add-only) — 2026-07-19
+
+Severity: FEATURE (#5 slice A of 4; docs/plans/2026-07-19-issue5-sliceA-protocol-cell-core.md).
+
+**Problem:** ADR 0004 needs a closed Cell effect vocabulary in the protocol
+contract layer before the manifest/codegen/Component-engine/round-trip slices
+(B/C/D) can build on it. The legacy `ImpactKind` machinery in
+`effect_types.rs` stays in production until #6/#12, so the new vocabulary
+lands add-only alongside it.
+
+**Fix:**
+- New `crates/lancet-protocol/src/cell.rs`: closed enums `CtxOp` {Alloc,Free,Mutate}, `ExtImpact` {None,Read,Write}, `Trust` {In,Ex} (Ex default, fail-closed), `ChannelKind` {Workspace,Network,Session}; structs `ScopeDecl`, `Cell`, `Capability`, `ToolDescriptor` (+`ArtifactIdentity`, `abi_version`), `ToolOutput`.
+- Strict CellRef/audit-key layering: `Cell::reference()` emits a trust-free 3-segment `ctx:ext:scope`; only the host appends `:in|ex` via `audit_key(trust)` after descriptor scope lookup; `parse_cell_ref` rejects a guest-supplied 4-segment trust suffix as `SegmentCount(4)` (guests cannot self-claim `in`).
+- `ToolDescriptor::validate()` registration-time consistency (duplicate scope → duplicate capability → undeclared scope); `required_channels()` derived only from `scopes` (no independent channels field, spec §11.3); `trust_of(undeclared) == Trust::Ex` (fail-closed).
+- 8 inline tests covering the plan's test table (default-trust, undeclared scope, cartesian CellRef round-trip, guest-trust rejection, host-derived audit trust, undeclared-scope/duplicate-name rejection, multi-cell `session.todo_write` representation per spec §5.1).
+- `lib.rs` gains a single `pub mod cell;` (+ module-doc bullet); `effect_types.rs` and existing re-exports untouched (add-only).
+
+**Verification:**
+- `cargo fmt --all --check` — clean.
+- `cargo test -p lancet-protocol` — 44 passed / 0 failed (8 new `cell::tests`).
+- `cargo clippy -p lancet-protocol --all-targets -- -D warnings` — clean.
+
+**Changed files:**
+- `crates/lancet-protocol/src/cell.rs` (new), `src/lib.rs`
+- `crates/lancet-protocol/AGENTS.md`, `FINDINGS.md`, `FIX.md`
+
+---
+
 ## FINDINGS T-23-03: 158 条 lattice-workspace keep 行补记 delete（owner 决议选项 a） — 2026-07-19
 
 Severity: TRIAGE-DECISION (FINDINGS.md T-23-03 option a; owner-directed re-decision

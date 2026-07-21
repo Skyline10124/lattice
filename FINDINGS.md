@@ -51,6 +51,12 @@
 
 ## LOW
 
+### L-5-01: `lancet-protocol` Cell core coexists add-only with legacy `ImpactKind` — `architecture` / #5 / #6 / #12
+- **位置**: `crates/lancet-protocol/src/cell.rs` (new ADR 0004 closed core: `CtxOp`/`ExtImpact`/`Trust`/`ChannelKind`/`ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`/`ToolOutput`); `crates/lancet-protocol/src/effect_types.rs` (`ImpactKind`/`EffectScopeKind`/`OverlayBehavior`/`FailureSemantics`/`EffectDecl`, still consumed by production handlers).
+- **问题**: #5 slice A landed the ADR 0004 Cell vocabulary add-only. The legacy `effect_types.rs` machinery remains the production effect path (authority/audit/native handlers still key on `ImpactKind`), so two effect vocabularies coexist in the crate until #6 unifies Cell authorization/evidence and #12 deletes the migration crates. `cell.rs` has no production consumers yet (slices B/C/D build them).
+- **当前状态**: ACCEPTED RESIDUAL (by plan). Add-only coexistence is the intended transition state; `cell.rs` is exercised only by its own unit tests this slice. Umbrella: M-TOOL-01.
+- **计划**: Do not extend `effect_types.rs` for new ADR 0004 needs. Slices B/C/D (#5) wire manifest→codegen→Component engine→CEP round-trip over `cell.rs`; #6 unifies Cell authorization/evidence and retires `ImpactKind`-keyed authority; #12 deletes `effect_types.rs` and the migration crates once production Tools migrate (#7–#10).
+
 ### L-21-03: `net_guard::validate_base_url` 拒绝 `127.0.0.1`/`::1` IP 字面量但放行 `localhost` hostname — localhost 政策不对称 — `security` / net-guard / llm
 - **位置**: `crates/net-guard/src/lib.rs:167-221`（`validate_base_url`，:194 scheme 检查列 `127.0.0.1`/`::1` 为 localhost，:206-213 IP 检查又把它们当 private/reserved 拒绝）；`crates/lattice-llm/src/client.rs:28-48`（`validate_and_read_key` 配置时调 `validate_base_url`）、`:342-344`（`is_localhost_request_host` 请求时放行 `127.0.0.1`/`::1`）、`:369-373`（`build_http_client_for_url` 请求时 localhost 跳过 `resolve_public_socket_addrs`）。
 - **问题**: 两层 localhost 政策不对称，`127.0.0.1` 在同一函数内自相矛盾：

@@ -15,6 +15,8 @@ types.
 - `src/frame.rs` gives CEP-specific aliases over JSON-RPC frames.
 - `src/envelope.rs` owns intent, impact, scope, effects, guard verdicts, and
   `ExecutionEnvelope`.
+- `src/cell.rs` owns the ADR 0004 Cell effect core (`CtxOp`/`ExtImpact`/`Trust`/
+  `ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`) + trust-free CellRef layering.
 - `src/capability.rs` owns required-capability patterns and resolution errors.
 - `src/error.rs` owns `CepError`, families, wire codes, and retriability.
 - `src/policy.rs` owns deterministic policy hook input/output data.
@@ -53,6 +55,8 @@ types.
   in the same series.
 - When adding boundary evidence fields, update authority validation and native
   host/runtime projection together.
+- ADR 0004 Cell core landed add-only in `src/cell.rs` (#5 slice A); legacy
+  `ImpactKind` in `effect_types.rs` coexists, retired by #6/#12 — do not extend.
 
 ## Record Maintenance
 
