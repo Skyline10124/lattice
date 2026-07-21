@@ -1,0 +1,11 @@
+{
+  "abi-version": 1,
+  "artifact-sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "descriptor-sha256": "a2706453a20431f613b069fb75c26c78b1f4d6e4d4cc7f3e98f421250b860b0a",
+  "expected-imports": [
+    "host-control"
+  ],
+  "name": "noop.echo",
+  "toolchain": "rustc-1.96.0+wit-bindgen-0.57",
+  "version": "0.1.0"
+}

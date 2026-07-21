@@ -1,0 +1,19 @@
+{
+  "function": {
+    "description": "Tracer no-op: emits progress/cancellation and echoes params.",
+    "name": "noop.echo",
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "type": "function"
+}

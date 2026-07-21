@@ -1,0 +1,40 @@
+# Sole Tool Descriptor authority (ADR 0004 §2). Everything else is generated.
+[tool]
+name = "noop.echo"
+version = "0.1.0"
+description = "Tracer no-op: emits progress/cancellation and echoes params."
+abi-version = 1
+
+[params]
+schema = '''
+{
+  "type": "object",
+  "properties": { "message": { "type": "string" } },
+  "required": ["message"],
+  "additionalProperties": false
+}
+'''
+
+[result]
+schema = '''
+{
+  "type": "object",
+  "properties": { "echoed": { "type": "string" } },
+  "required": ["echoed"],
+  "additionalProperties": false
+}
+'''
+
+[[scopes]]
+name = "session"
+trust = "in"
+channel = "session"
+
+[[capabilities]]
+name = "session.result"
+cell = "alloc:none:session"
+
+[artifact]
+# Written by `cargo xtask tool-build`; verified by the composition gate.
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+toolchain = "rustc-1.96.0+wit-bindgen-0.57"

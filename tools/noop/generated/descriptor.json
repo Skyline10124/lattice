@@ -1,0 +1,51 @@
+{
+  "name": "noop.echo",
+  "version": "0.1.0",
+  "description": "Tracer no-op: emits progress/cancellation and echoes params.",
+  "params_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "message": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "message"
+    ],
+    "type": "object"
+  },
+  "result_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "echoed": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "echoed"
+    ],
+    "type": "object"
+  },
+  "scopes": [
+    {
+      "name": "session",
+      "trust": "in",
+      "channel": "session"
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "session.result",
+      "cell": {
+        "ctx_op": "alloc",
+        "ext_impact": "none",
+        "scope": "session"
+      }
+    }
+  ],
+  "artifact": {
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "toolchain": "rustc-1.96.0+wit-bindgen-0.57"
+  },
+  "abi_version": 1
+}

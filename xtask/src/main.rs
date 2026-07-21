@@ -1,6 +1,3 @@
-// Copyright 2026 Ast Rin
-// SPDX-License-Identifier: Apache-2.0
-
 mod boundary_report;
 mod ci;
 mod harness_boundary;
@@ -9,6 +6,7 @@ mod output;
 mod path_norm;
 mod repo_root;
 mod scan_rs_tree;
+mod tool_codegen;
 
 use clap::{Parser, Subcommand};
 
@@ -27,6 +25,8 @@ enum Commands {
     HarnessBoundary,
     /// LANCET architecture boundary gate.
     LancetBoundary,
+    /// Generate (or check) Source Tool artifacts from manifests.
+    ToolCodegen(tool_codegen::ToolCodegenArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -35,5 +35,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Ci(args) => ci::run(args),
         Commands::HarnessBoundary => harness_boundary::run(),
         Commands::LancetBoundary => lancet_boundary::run(),
+        Commands::ToolCodegen(args) => tool_codegen::run(args),
     }
 }
