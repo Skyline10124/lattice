@@ -1,0 +1,36 @@
+[package]
+name = "lancet-runtime"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "ADR 0004 Component engine, closed composition gate, and minimal ToolHost for LATTICE Source Tools"
+
+[features]
+default = []
+# Exposes a fixed no-op fixture constructor for cross-crate integration tests.
+# Non-default: production binaries compose from inventory + generated
+# EXPECTED_COMPONENTS, not from this helper.
+test-utils = []
+
+[dependencies]
+wasmtime = { workspace = true }
+inventory = { workspace = true }
+lancet-protocol = { workspace = true }
+lancet-dispatch = { workspace = true }
+jsonschema = { workspace = true }
+wasmparser = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+wat = "1"
+sha2 = { workspace = true }
+
+# Tests use the fixed no-op fixture constructor.
+[dev-dependencies.lancet-runtime]
+path = "."
+features = ["test-utils"]

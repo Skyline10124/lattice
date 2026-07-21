@@ -37,6 +37,9 @@ cancellation, and server runtime plumbing. ADR 0004 absorbs this behavior into
   truncation; unordered completion could lose live handler cancel handles.
 - FIXED P19-CR-02: `EventSink::emit` previously awaited on bounded channels and
   could deadlock ordinary calls that did not drain progress events.
+- ADDED #5 slice C: `EventSink::emit_sync` — synchronous event emit for
+  Component ToolHost imports that run inside synchronous wasmtime calls.
+  Same best-effort semantics as `emit` (closed/full channel doesn't fail).
 - WATCH: native and API live streaming depend on dispatch not blocking server
   progress when observers are slow or absent.
 - WATCH: JSON-RPC wire-code mapping must stay consistent with

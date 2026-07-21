@@ -18,6 +18,7 @@ members = [
     "crates/lattice-cli",
     "crates/lattice-profile",
     "crates/lattice-tool-prelude",
+    "crates/lancet-runtime",
     "crates/lattice-system-harness",
     "tools/noop",
     "xtask",
@@ -45,6 +46,7 @@ lancet-audit    = { path = "crates/lancet-audit" }
 lancet-authority = { path = "crates/lancet-authority" }
 lancet-native   = { path = "crates/lancet-native" }
 lancet-api      = { path = "crates/lancet-api" }
+lancet-runtime  = { path = "crates/lancet-runtime" }
 lattice-tui      = { path = "crates/lattice-tui" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
@@ -77,6 +79,15 @@ libc = "0.2"
 gix = { version = "0.85", features = ["tree-editor"] }
 schemars = "1.2"
 bytes = "1"
+# Component Tool engine (ADR 0004 / #5 slice C). Pinned exactly; wasmtime
+# major bumps change the component-model API surface. No wasmtime-wasi.
+wasmtime = { version = "=46.0.1", default-features = false, features = [
+  "async", "component-model", "cranelift", "runtime", "std", "wit-parser"
+] }
+inventory = "=0.3.24"
+jsonschema = "=0.48.1"
+# Component binary parser for import inspection in the composition gate.
+wasmparser = "0.251"
 
 # CLI dependencies
 clap = { version = "4", features = ["derive", "env"] }

@@ -2,6 +2,78 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #5 slice C: lancet-runtime Component engine + composition gate + minimal ToolHost — 2026-07-22
+
+Severity: FEATURE (#5 slice C of 4; docs/plans/2026-07-19-issue5-sliceC-component-engine-composition-gate.md).
+
+**Problem:** ADR 0004 requires a Component engine that executes embedded WASM
+Tool Components with no ambient WASI, a fail-closed composition gate that
+verifies every registration against a host-pinned identity at startup, and a
+minimal ToolHost that provides control (cancellation + events) without granting
+domain authority before #6 capability admission. Slice B landed the manifest,
+codegen, WIT, prelude, and no-op guest; this slice builds the host runtime.
+
+**Fix:**
+- `lancet-protocol` Execution family: added `ToolTrap` (-32023),
+  `ToolTimeout` (-32024), `ToolResourceExhausted` (-32025), `CallCancelled`
+  (-32026) codes + `ToolExecutionErrorData` (method + category + optional
+  resource; no guest backtrace/host path/secret) + `CepError::tool_execution`
+  helper. Round-trip + leak-free tests added.
+- `lancet-dispatch` `EventSink::emit_sync`: synchronous event emit for
+  Component ToolHost imports that run inside synchronous wasmtime calls.
+- New `crates/lancet-runtime`: wasmtime 46.0.1 (exact-pinned, no
+  `wasmtime-wasi`/`wasi-common`), `inventory` 0.3.24, `jsonschema` 0.48.1,
+  `wasmparser` 0.251. Sub-modules:
+  - `composition.rs`: `EmbeddedTool` (name + bytes, `inventory::collect!`),
+    `ExpectedToolIdentity` (host-pinned digests/ABI/imports), `ClosedCatalog`
+    (immutable after `compose`), `CompositionError`. The gate verifies:
+    unapproved name, duplicate, descriptor digest drift, artifact hash
+    mismatch, descriptor JSON/validate/name drift, unsupported ABI, descriptor
+    artifact drift, component compile, ambient WASI import, import drift,
+    missing channel adapter, params/result schema, missing expected names.
+  - `runtime.rs`: `ComponentRuntime` (engine + catalog + linker + limits +
+    lazy epoch ticker), `ComponentCallContext` (call_id, turn_id, events,
+    cancellation, evidence), `StoreState`, `call` method (params validation,
+    instantiation, result CellRef parsing/validation, result schema
+    validation, Cell evidence recording, error mapping).
+  - `host.rs`: `host-control` Host impl (cancelled + emit_event via
+    `emit_sync`).
+  - `limits.rs`: `ExecutionLimits`, `RecordingLimits` (wraps `StoreLimits`,
+    records which limit rejected), `AbortReason`.
+  - `evidence.rs`: `CellEvidenceLedger` (in-memory `(Cell, Trust)` recorder).
+  - `error_map.rs`: maps wasmtime errors to `CepError` codes (Cancelled →
+    CallCancelled, Deadline → ToolTimeout, Memory/Instances →
+    ToolResourceExhausted, fuel=0 → ToolResourceExhausted(fuel), else →
+    ToolTrap).
+  - `bindings.rs`: `wasmtime::component::bindgen!` for the Tool Host WIT.
+  - `generated/`: production `EXPECTED_COMPONENTS` (empty until #7–#10) +
+    `test-utils` no-op fixture from committed bytes.
+  - `test_helpers.rs` (`test-utils`): synthetic registration/identity
+    construction for gate negative-case tests.
+- `lancet-runtime` added to workspace members + workspace deps. No
+  `lancet-native`/`lancet-api`/LATTICE dependency; no cycle.
+- Tests (26 total): 12 gate (missing, duplicate, unapproved, descriptor/artifact
+  drift, import drift, unsupported ABI, ambient WASI, missing channel adapter,
+  positive compose, immutable catalog), 6 call (round-trip, method-not-found,
+  bad params, evidence, events, pre-cancelled), 6 negative (survival after
+  method-not-found/schema-mismatch/guest-error, extra params, fuel exhaustion
+  + survival, short deadline + survival), 2 unit (hex digest, sha256 verify).
+
+**Verification:**
+```
+cargo test -p lancet-runtime -p lancet-protocol   # 73 tests, 0 failures
+cargo clippy -p lancet-runtime --all-targets -- -D warnings   # clean
+cargo tree -p lancet-runtime | grep -E "wasmtime-wasi|wasi-common"   # empty
+```
+
+**Changed files:**
+- `Cargo.toml` (workspace members + deps: wasmtime, inventory, jsonschema, wasmparser)
+- `crates/lancet-protocol/src/error.rs` (new codes + data + helper + tests)
+- `crates/lancet-protocol/src/lib.rs` (re-export ToolExecutionErrorData)
+- `crates/lancet-protocol/AGENTS.md` (slice C note)
+- `crates/lancet-dispatch/src/registry.rs` (emit_sync)
+- `crates/lancet-runtime/` (new crate: Cargo.toml, AGENTS.md, src/*.rs, tests/*.rs)
+
 ## Codeberg #5 slice B: manifest + deterministic tool-codegen + WIT + prelude + no-op guest — 2026-07-22
 
 Severity: FEATURE (#5 slice B of 4; docs/plans/2026-07-19-issue5-sliceB-manifest-codegen-noop.md).

@@ -78,6 +78,23 @@ impl EventSink {
         let event = ToolEvent::new(method.into(), params);
         let _ = self.tx.try_send(event);
     }
+
+    /// Emit a CEP notification synchronously, without the `&self` async
+    /// context required by `emit`. Used by Component Tool Host imports
+    /// (#5 slice C), which run inside a synchronous wasmtime call.
+    pub fn emit_sync(&self, method: impl Into<String>, mut params: Value) {
+        if let Some(obj) = params.as_object_mut() {
+            obj.entry("call_id".to_string())
+                .or_insert_with(|| Value::from(self.call_id));
+        } else {
+            params = serde_json::json!({
+                "call_id": self.call_id,
+                "payload": params,
+            });
+        }
+        let event = ToolEvent::new(method.into(), params);
+        let _ = self.tx.try_send(event);
+    }
 }
 
 /// Typed registry of catalog method handlers.

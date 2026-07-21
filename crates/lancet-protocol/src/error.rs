@@ -55,6 +55,11 @@ pub enum CepErrorCode {
     ExecutionFailed,
     CommandTimeout,
     ChildKillFailed,
+    // Component Tool execution failures (#5 slice C).
+    ToolTrap,
+    ToolTimeout,
+    ToolResourceExhausted,
+    CallCancelled,
     // State (-32030..-32039)
     StaleContext,
     ResourceConflict,
@@ -83,6 +88,10 @@ impl CepErrorCode {
             Self::ExecutionFailed => -32020,
             Self::CommandTimeout => -32021,
             Self::ChildKillFailed => -32022,
+            Self::ToolTrap => -32023,
+            Self::ToolTimeout => -32024,
+            Self::ToolResourceExhausted => -32025,
+            Self::CallCancelled => -32026,
             Self::StaleContext => -32030,
             Self::ResourceConflict => -32031,
             Self::EnvelopeAlreadyActive => -32032,
@@ -104,9 +113,13 @@ impl CepErrorCode {
             Self::CapabilityNotGranted
             | Self::ProjectRootViolation
             | Self::AmbientAuthorityDenied => CepErrorFamily::Permission,
-            Self::ExecutionFailed | Self::CommandTimeout | Self::ChildKillFailed => {
-                CepErrorFamily::Execution
-            }
+            Self::ExecutionFailed
+            | Self::CommandTimeout
+            | Self::ChildKillFailed
+            | Self::ToolTrap
+            | Self::ToolTimeout
+            | Self::ToolResourceExhausted
+            | Self::CallCancelled => CepErrorFamily::Execution,
             Self::StaleContext
             | Self::ResourceConflict
             | Self::EnvelopeAlreadyActive
@@ -131,6 +144,10 @@ impl CepErrorCode {
             -32020 => Self::ExecutionFailed,
             -32021 => Self::CommandTimeout,
             -32022 => Self::ChildKillFailed,
+            -32023 => Self::ToolTrap,
+            -32024 => Self::ToolTimeout,
+            -32025 => Self::ToolResourceExhausted,
+            -32026 => Self::CallCancelled,
             -32030 => Self::StaleContext,
             -32031 => Self::ResourceConflict,
             -32032 => Self::EnvelopeAlreadyActive,
@@ -163,6 +180,19 @@ pub struct ExecutionErrorData {
     pub command: String,
     pub exit_code: Option<i32>,
     pub stderr: Option<String>,
+}
+
+/// Structured error data for Component Tool execution failures (#5 slice C).
+///
+/// Carries the tool `method`, a coarse `category` (`"trap"`, `"timeout"`,
+/// `"resource_exhausted"`, `"cancelled"`), and an optional `resource` name
+/// for resource-exhaustion cases (`"memory"`, `"fuel"`, `"instances"`).
+/// It deliberately exposes **no** guest backtrace, host path, or secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolExecutionErrorData {
+    pub method: String,
+    pub category: String,
+    pub resource: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -199,6 +229,7 @@ pub enum CepErrorData {
     Validation(ValidationErrorData),
     Permission(PermissionErrorData),
     Execution(ExecutionErrorData),
+    ToolExecution(ToolExecutionErrorData),
     State(StateErrorData),
     Guard(GuardErrorData),
     Effect(Box<EffectErrorData>),
@@ -239,6 +270,31 @@ impl CepError {
 
     pub fn invalid_params(message: impl Into<String>) -> Self {
         invalid_params(message)
+    }
+
+    /// Build a Component Tool execution error (#5 slice C). `method` is the
+    /// tool name, `category` is the coarse failure class (`"trap"`, `"timeout"`,
+    /// `"resource_exhausted"`, `"cancelled"`), and `resource` names the
+    /// exhausted resource for resource-exhaustion cases.
+    pub fn tool_execution(
+        code: CepErrorCode,
+        method: impl Into<String>,
+        category: impl Into<String>,
+        resource: Option<String>,
+        retriability: Retriability,
+    ) -> Self {
+        let method = method.into();
+        let category = category.into();
+        Self::new(
+            code,
+            format!("tool {method} failed: {category}"),
+            CepErrorData::ToolExecution(ToolExecutionErrorData {
+                method,
+                category,
+                resource,
+            }),
+            retriability,
+        )
     }
 
     pub fn internal_error(message: impl Into<String>) -> Self {
@@ -359,6 +415,10 @@ mod tests {
             CepErrorCode::SchemaMismatch,
             CepErrorCode::CapabilityNotGranted,
             CepErrorCode::ExecutionFailed,
+            CepErrorCode::ToolTrap,
+            CepErrorCode::ToolTimeout,
+            CepErrorCode::ToolResourceExhausted,
+            CepErrorCode::CallCancelled,
             CepErrorCode::StaleContext,
             CepErrorCode::EnvelopeMissing,
             CepErrorCode::EffectViolation,
@@ -546,6 +606,10 @@ mod tests {
             CepErrorCode::ExecutionFailed,
             CepErrorCode::CommandTimeout,
             CepErrorCode::ChildKillFailed,
+            CepErrorCode::ToolTrap,
+            CepErrorCode::ToolTimeout,
+            CepErrorCode::ToolResourceExhausted,
+            CepErrorCode::CallCancelled,
             CepErrorCode::StaleContext,
             CepErrorCode::ResourceConflict,
             CepErrorCode::EnvelopeAlreadyActive,
@@ -573,6 +637,100 @@ mod tests {
             field: "x".into(),
             reason: "y".into(),
         }));
+    }
+
+    #[test]
+    fn tool_execution_codes_are_in_execution_family_range() {
+        // #5 slice C: new Execution-family codes for Component tool failures.
+        // Each must sit in -32020..-32029, map to the Execution family, and
+        // round-trip through as_i32/from_i32.
+        let new_codes = [
+            (CepErrorCode::ToolTrap, -32023),
+            (CepErrorCode::ToolTimeout, -32024),
+            (CepErrorCode::ToolResourceExhausted, -32025),
+            (CepErrorCode::CallCancelled, -32026),
+        ];
+        for (code, expected_i) in new_codes {
+            let i = code.as_i32();
+            assert_eq!(i, expected_i, "wire code for {code:?}");
+            assert_eq!(
+                code.family(),
+                CepErrorFamily::Execution,
+                "{code:?} must be in Execution family"
+            );
+            assert_eq!(
+                CepErrorCode::from_i32(i),
+                Some(code),
+                "from_i32 round-trip for {code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_execution_error_data_is_tagged_and_leak_free() {
+        // The data carries method + category + optional resource, never a
+        // guest backtrace, host path, or secret.
+        let data = ToolExecutionErrorData {
+            method: "noop.echo".into(),
+            category: "trap".into(),
+            resource: None,
+        };
+        let wrapped = CepErrorData::ToolExecution(data.clone());
+        let value = serde_json::to_value(&wrapped).unwrap();
+        assert_eq!(value["kind"], "tool_execution");
+        assert_eq!(value["method"], "noop.echo");
+        assert_eq!(value["category"], "trap");
+        assert!(value["resource"].is_null());
+
+        // No backtrace/host_path/secret field exists.
+        let serialized = serde_json::to_string(&wrapped).unwrap();
+        assert!(!serialized.contains("backtrace"));
+        assert!(!serialized.contains("host_path"));
+        assert!(!serialized.contains("secret"));
+
+        let deserialized: CepErrorData = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, wrapped);
+
+        // Resource-exhausted variant carries the resource name.
+        let res_data = ToolExecutionErrorData {
+            method: "noop.echo".into(),
+            category: "resource_exhausted".into(),
+            resource: Some("memory".into()),
+        };
+        let res_wrapped = CepErrorData::ToolExecution(res_data);
+        let res_value = serde_json::to_value(&res_wrapped).unwrap();
+        assert_eq!(res_value["resource"], "memory");
+    }
+
+    #[test]
+    fn tool_execution_error_round_trips_through_jsonrpc_response() {
+        let err = CepError {
+            code: CepErrorCode::ToolTrap,
+            message: "guest trap".into(),
+            data: CepErrorData::ToolExecution(ToolExecutionErrorData {
+                method: "noop.echo".into(),
+                category: "trap".into(),
+                resource: None,
+            }),
+            retriability: Retriability::Permanent,
+        };
+        let resp: crate::frame::ToolResult = crate::jsonrpc::Response::Error {
+            error: crate::jsonrpc::ErrorObject {
+                code: err.code.as_i32(),
+                message: err.message.clone(),
+                data: Some(err.clone()),
+            },
+            id: crate::jsonrpc::Id::Number(1),
+        };
+        let serialized = serde_json::to_string(&resp).unwrap();
+        let parsed: crate::frame::ToolResult = serde_json::from_str(&serialized).unwrap();
+        if let crate::jsonrpc::Response::Error { error, .. } = parsed {
+            let data = error.data.unwrap();
+            assert_eq!(data.code, CepErrorCode::ToolTrap);
+            assert_eq!(data.retriability, Retriability::Permanent);
+        } else {
+            panic!("expected error response");
+        }
     }
 
     #[test]

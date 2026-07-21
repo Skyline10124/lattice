@@ -57,6 +57,10 @@ types.
   host/runtime projection together.
 - ADR 0004 Cell core landed add-only in `src/cell.rs` (#5 slice A); legacy
   `ImpactKind` in `effect_types.rs` coexists, retired by #6/#12 — do not extend.
+- Component Tool execution error codes (`ToolTrap`/`ToolTimeout`/
+  `ToolResourceExhausted`/`CallCancelled`) + `ToolExecutionErrorData` landed
+  in `src/error.rs` Execution family (#5 slice C). No guest backtrace/host
+  path/secret in the data.
 
 ## Record Maintenance
 

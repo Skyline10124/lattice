@@ -29,7 +29,9 @@ pub use capability::RequiredCapability;
 pub use effect_types::{
     EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
 };
-pub use error::{CepError, CepErrorCode, CepErrorData, CepErrorFamily, Retriability};
+pub use error::{
+    CepError, CepErrorCode, CepErrorData, CepErrorFamily, Retriability, ToolExecutionErrorData,
+};
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};
 pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};
 pub use policy::{
