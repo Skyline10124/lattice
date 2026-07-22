@@ -2,6 +2,56 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #45: close stale FINDINGS T-23-01/T-23-02 to the #24 Direct-Local residual — 2026-07-22
+
+Severity: MEDIUM (#45 review follow-up to #23; spec review of `df62ec84...8d6926d9`,
+verified by two independent skeptics).
+
+**Problem:** The open `FINDINGS.md` entries `T-23-01` and `T-23-02` still
+described completed work as pending. `T-23-01` claimed "55 条提升仍待替代场景
+（54 current-MSB + 1 fast）" with MSB/KVM-lane reasoning and a `planned_lancet_cli`
+fast residual; `T-23-02` claimed a fast residual of 1 `planned_lancet_cli`, 2 status
+tests待删, 2 project-branch scenarios待补, and 15+1 current-MSB residual. Current
+facts (landed 2026-07-19 in #23 slices 1–4, commits `dbb31b14` / `55128410` /
+`ce8880c0` / `4c2c861d` / `9f238b79`, with `8d6926d9` closing the #23 review
+findings and T-23-03): #23 fast residual is zero, status and project-branch
+create/reopen are owned by external-binary scenarios with the internal tests
+deleted, the MSB/KVM lane is retired (#40), and the only remaining work is 44
+`planned_direct_*` assertion-level scenarios handed to #24. The stale open text
+conflicted with the final machine ledger (`docs/test-triage-decisions.json`: 44
+unique `planned_direct_*` IDs; distribution keep 1179 / elevate 86 / delete 184,
+total 1449) and with `docs/TEST-TRIAGE.md` §1.5, which was already correct.
+
+**Fix:**
+- `FINDINGS.md` `T-23-01` (open MEDIUM): rewritten to "#24 Direct-Local
+  assertion-level replacements 尚待落地". It now states fast residual is zero,
+  names the landed takeovers (`fast_lancet_cli` / `fast_session_cli` + deleted
+  internal tests), records the 11 retired-contract deletes, and describes only the
+  44 `planned_direct_*` residual with the verified ledger counts. MSB/KVM is
+  mentioned only as retired (#40), not as a current lane. The `T-23-01` ID is
+  retained so cross-refs in `docs/TESTING.md` and `FIX.md` stay valid.
+- `FINDINGS.md` `T-23-02`: removed from open MEDIUM and closed into the
+  `OBSOLETE / CLOSED` section (dated 2026-07-19, placed beside `T-23-03`), noting
+  fast/status/branch work is done by #23 slices 1–2 and the remaining Direct-Local
+  work is handed to `T-23-01` / #24.
+- No change to `docs/TEST-TRIAGE.md` or `docs/test-triage-decisions.json`: both
+  were already consistent with the current口径.
+
+**Verification:**
+- `rg -n "T-23-01|T-23-02|planned_lancet_cli|current-MSB|KVM|待删" FINDINGS.md docs/TEST-TRIAGE.md`
+  — open `T-23-01` uses only Direct-Local/#24口径; `T-23-02` is closed; no open
+  finding describes fast/status/branch as pending or KVM/MSB as a current lane
+  (`KVM`/`MSB` appear only in closed findings as historical context, or in the open
+  `T-23-01` as retired/prohibited — never as a current lane).
+- `python3` recount of `docs/test-triage-decisions.json`: 44 `planned_direct_*`
+  rows (44 unique IDs); decision distribution keep 1179 / elevate 86 / delete 184.
+- `FINDINGS.md` open MEDIUM now lists `T-23-01` (open, #24 residual) and no longer
+  lists `T-23-02`; `T-23-02` appears once in `OBSOLETE / CLOSED`.
+
+**Changed files:**
+- `FINDINGS.md` — rewrote `T-23-01` (open MEDIUM) to the 44-row #24 residual;
+  moved `T-23-02` from open MEDIUM to `OBSOLETE / CLOSED` as a 2026-07-19 closure.
+
 ## Codeberg #5 slice D: closed Component dispatch, descriptor-driven adapter, no-op CEP round-trip — 2026-07-22
 
 Severity: FEATURE (#5 slice D of 4; docs/plans/2026-07-19-issue5-sliceD-cep-adapter-roundtrip.md).
