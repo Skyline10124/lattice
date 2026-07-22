@@ -158,36 +158,75 @@ async fn component_call_emits_events_with_consistent_call_id() {
     );
 }
 
-/// D.6: a cancelled Component call doesn't crash the server. The no-op
-/// guest is too fast for epoch-based interruption, but dropping the call
-/// future (which triggers the transport's `CancelGuard`) proves the
-/// server survives cancellation. A subsequent call works normally.
-///
-/// The spec also asks for `audit outcome = cancelled`. The no-op guest
-/// checks `cancelled()` cooperatively; if the cancel signal arrives before
-/// the guest runs, it returns `Err("cancelled")` which the audit
-/// finalizer records as `ExecutionFailed` (not `Cancelled` — the audit
-/// `Cancelled` outcome is for transport-level cancellation where the
-/// handler never completes). This test verifies server survival, which
-/// is the safety-critical property.
+/// #48: a cancelled Component call converges on `CallCancelled` end to end:
+/// the client receives the server-mapped structured error, the audit
+/// finalizer records `AuditOutcome::Cancelled`, and the server survives to
+/// serve the next call. Cancellation state (never a guest error string) is
+/// the classification authority at every observation point.
 #[tokio::test]
-async fn cancelled_component_call_server_survives() {
+async fn cancelled_component_call_returns_call_cancelled_and_audits_cancelled() {
     let (client, audit, _task) = spawn_native_with_noop().await;
 
-    // Start a call and immediately drop the future — the CancelGuard
-    // signals cancellation. We don't await the result.
-    // Use call_raw which returns a future; dropping it cancels.
-    let events = client.events();
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_millis(1),
-        client.call_raw("noop.echo", serde_json::json!({ "message": "cancel" })),
-    )
-    .await;
+    // Cancel before awaiting: the server's pre-call check observes the
+    // already-set watch, so the outcome is deterministic.
+    let (call, control) = client.start_call_raw(
+        "noop.echo".to_string(),
+        serde_json::json!({ "message": "cancel" }),
+    );
+    control.cancel();
 
-    // Drain events to avoid interfering with the next call.
-    let mut guard = events.lock().await;
-    while guard.try_recv().is_ok() {}
-    drop(guard);
+    let err = call.await.expect_err("cancelled call must fail");
+    assert_eq!(
+        err.code,
+        lancet_protocol::CepErrorCode::CallCancelled,
+        "client must receive the server-mapped CallCancelled"
+    );
+
+    // The audit finalizer records the cancellation as `cancelled`. The
+    // finalize runs before the server responds, so the row is durable by
+    // the time the client sees the error.
+    audit.await_pending().await;
+    let rows = audit
+        .query_rows(&AuditQueryFilters {
+            method: Some("noop.echo".to_string()),
+            ..Default::default()
+        })
+        .expect("audit query");
+    assert_eq!(rows.len(), 1, "exactly one noop.echo audit row");
+    assert_eq!(
+        rows[0].result_or_error.as_deref(),
+        Some("cancelled"),
+        "audit outcome must be cancelled"
+    );
+
+    // A subsequent call works — the server survived.
+    let value: serde_json::Value = client
+        .call_named(
+            "noop.echo",
+            serde_json::json!({ "message": "after-cancel" }),
+        )
+        .await
+        .expect("server survives cancellation");
+    assert_eq!(value, serde_json::json!({ "echoed": "after-cancel" }));
+}
+
+/// #48: dropping the call future mid-flight funnels through the same
+/// server-side cancellation mapping (CancelGuard semantics unchanged): the
+/// audit row records `cancelled` and the server survives.
+#[tokio::test]
+async fn dropped_component_call_audits_cancelled_and_server_survives() {
+    let (client, audit, _task) = spawn_native_with_noop().await;
+
+    let (call, control) = client.start_call_raw(
+        "noop.echo".to_string(),
+        serde_json::json!({ "message": "cancel" }),
+    );
+    control.cancel();
+    let handle = tokio::spawn(call);
+    // Let the spawned call send its request, then drop it mid-flight.
+    tokio::task::yield_now().await;
+    handle.abort();
+    let _ = handle.await;
 
     // A subsequent call works — the server survived.
     let value: serde_json::Value = client
@@ -199,11 +238,15 @@ async fn cancelled_component_call_server_survives() {
         .expect("server survives cancellation");
     assert_eq!(value, serde_json::json!({ "echoed": "after-cancel" }));
 
-    // The audit should have at least the successful retry row.
     audit.await_pending().await;
     let rows = audit
         .query_rows(&AuditQueryFilters::default())
         .expect("audit");
+    assert!(
+        rows.iter()
+            .any(|r| r.result_or_error.as_deref() == Some("cancelled")),
+        "audit must record the dropped call as cancelled"
+    );
     assert!(
         rows.iter().any(|r| {
             r.result_or_error

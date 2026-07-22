@@ -205,19 +205,6 @@ pub fn duplicate_registration(method: impl Into<String>) -> CepError {
     )
 }
 
-/// Build a client-visible cancellation error.
-pub fn call_cancelled() -> CepError {
-    CepError::new(
-        CepErrorCode::ExecutionFailed,
-        "call cancelled",
-        CepErrorData::State(StateErrorData {
-            resource: "call".into(),
-            reason: "cancelled".into(),
-        }),
-        Retriability::Permanent,
-    )
-}
-
 /// Map a registry error to its JSON-RPC wire code.
 pub fn wire_code_for_error(err: &CepError) -> i32 {
     to_jsonrpc_error(err).0

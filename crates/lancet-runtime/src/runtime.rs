@@ -20,7 +20,7 @@ use wasmtime::{Engine, Store, UpdateDeadline};
 
 use crate::bindings;
 use crate::composition::{ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity};
-use crate::error_map::{effect_violation, map_component_error, schema_mismatch};
+use crate::error_map::{cancelled_error, effect_violation, map_component_error, schema_mismatch};
 use crate::evidence::CellEvidenceLedger;
 use crate::generated;
 use crate::limits::{AbortReason, ExecutionLimits, RecordingLimits, ResourceFootprint};
@@ -142,12 +142,14 @@ impl ComponentRuntime {
     ///
     /// 1. Look up the tool → `method_not_found` if absent.
     /// 2. Validate params against the descriptor's JSON Schema.
-    /// 3. Instantiate the Component in a fresh Store.
-    /// 4. Call `tool-api.run`.
-    /// 5. Parse the result CellRef (reject 4-segment guest-supplied trust).
-    /// 6. Verify the result cell is in the descriptor's capabilities.
-    /// 7. Validate the result value against the descriptor's JSON Schema.
-    /// 8. Derive trust from the descriptor's scope and record Cell evidence.
+    /// 3. Short-circuit with `CallCancelled` if the call is pre-cancelled.
+    /// 4. Instantiate the Component in a fresh Store.
+    /// 5. Call `tool-api.run`; a guest logical error while cancellation is
+    ///    set maps to `CallCancelled` (state, not the guest's string).
+    /// 6. Parse the result CellRef (reject 4-segment guest-supplied trust).
+    /// 7. Verify the result cell is in the descriptor's capabilities.
+    /// 8. Validate the result value against the descriptor's JSON Schema.
+    /// 9. Derive trust from the descriptor's scope and record Cell evidence.
     pub async fn call(
         &self,
         name: &str,
@@ -168,6 +170,12 @@ impl ComponentRuntime {
             .validate(&params)
             .map_err(|e| schema_mismatch(name, format!("params: {e}")))?;
 
+        // Pre-cancelled call: cancellation state is the authority; never
+        // enter Wasmtime (#48).
+        if ctx.cancellation.is_cancelled() {
+            return Err(cancelled_error(name));
+        }
+
         let mut store = self.new_store(ctx);
 
         let instance = match bindings::Tool::instantiate(&mut store, &tool.component, &self.linker)
@@ -186,13 +194,12 @@ impl ComponentRuntime {
         };
 
         // The guest's `result<tool-output, string>`: the outer Result is
-        // wasmtime's (traps), the inner is the guest's logical error.
-        let raw = match raw {
-            Ok(output) => output,
-            Err(guest_err) => {
-                return Err(guest_error(name, guest_err));
-            }
-        };
+        // wasmtime's (traps), the inner is the guest's logical error. A
+        // logical error while call-scoped cancellation is set maps to
+        // `CallCancelled` — cancellation state, not the guest-controlled
+        // error string, is the classification authority (#48).
+        let cancelled = store.data().call.cancellation.is_cancelled();
+        let raw = map_guest_logical_result(name, raw, cancelled)?;
 
         // WIT output uses a trust-free 3-segment CellRef. Guest cannot
         // claim `in` — parse_cell_ref rejects a 4th segment.
@@ -274,6 +281,24 @@ impl ComponentRuntime {
     }
 }
 
+/// Map the guest's logical result to the host-visible result (#48).
+///
+/// Call-scoped cancellation state is the sole classification authority: a
+/// guest logical `Err` while cancellation is set maps to `CallCancelled`,
+/// whatever string the guest returned. A guest `Err` without cancellation
+/// keeps the `ExecutionFailed` semantics; `Ok` passes through.
+fn map_guest_logical_result(
+    name: &str,
+    raw: Result<bindings::exports::lattice::tool_host::tool_api::ToolOutput, String>,
+    cancelled: bool,
+) -> Result<bindings::exports::lattice::tool_host::tool_api::ToolOutput, CepError> {
+    match raw {
+        Ok(output) => Ok(output),
+        Err(_) if cancelled => Err(cancelled_error(name)),
+        Err(guest_err) => Err(guest_error(name, guest_err)),
+    }
+}
+
 /// Build a `CepError` for a guest-returned logical error string.
 fn guest_error(method: &str, guest_err: String) -> CepError {
     let mut err = CepError::tool_execution(
@@ -320,4 +345,48 @@ fn spawn_epoch_ticker(engine: Engine, mut stop: tokio::sync::watch::Receiver<boo
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use bindings::exports::lattice::tool_host::tool_api::ToolOutput;
+
+    fn tool_output() -> ToolOutput {
+        ToolOutput {
+            result_cell: "alloc:none:session".into(),
+            value_json: "{}".into(),
+        }
+    }
+
+    /// #48: a guest logical error while call-scoped cancellation is set
+    /// maps to the shared `CallCancelled` error — the guest-controlled
+    /// error string plays no role.
+    #[test]
+    fn guest_error_with_cancellation_set_maps_to_call_cancelled() {
+        let err = map_guest_logical_result("noop.echo", Err("cancelled".into()), true)
+            .expect_err("cancelled guest error must fail");
+        assert_eq!(err.code, CepErrorCode::CallCancelled);
+        assert_eq!(err.message, "tool noop.echo failed: cancelled");
+    }
+
+    /// #48: a guest logical error without cancellation keeps the
+    /// `ExecutionFailed` semantics.
+    #[test]
+    fn guest_error_without_cancellation_stays_execution_failed() {
+        let err = map_guest_logical_result("noop.echo", Err("boom".into()), false)
+            .expect_err("guest error must fail");
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert_eq!(err.message, "tool noop.echo guest error: boom");
+    }
+
+    #[test]
+    fn guest_ok_passes_through_regardless_of_cancellation() {
+        for cancelled in [false, true] {
+            let out = map_guest_logical_result("noop.echo", Ok(tool_output()), cancelled)
+                .expect("ok passes through");
+            assert_eq!(out.value_json, "{}");
+        }
+    }
 }

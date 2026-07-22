@@ -2,6 +2,38 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #48: cooperative Component cancellation 统一映射为 `CallCancelled` — 2026-07-22
+
+Severity: High (#48 review follow-up to #5; Spec review of `d659b067^...a628d0e2`, verified by two independent skeptics; tradeoff confirmed on the issue after pre-implementation verification). Plan: `docs/plans/2026-07-22-issue48-callcancelled-unified-mapping.md`.
+
+**Problem:** Call-scoped cancellation produced divergent outcomes depending on which observation point fired. Epoch interruption mapped to `CallCancelled`, but a guest observing the same cancellation via `host-control.cancelled()` and returning `Err("cancelled")` was unconditionally mapped to `ExecutionFailed` — so identical call-scoped cancellation surfaced different CEP error codes by guest/epoch race. Two further gaps confirmed before implementation: (1) the audit finalizer's `Cancelled` arm matched the exact message `"call cancelled"`, whose only producer (`lancet_dispatch::call_cancelled()`) ran exclusively on the client side — the arm was dead code, so even correctly-mapped epoch cancellations were audited as `Error`; (2) the dispatch client's `select` returned a client-synthesized `call_cancelled()` (`ExecutionFailed`) as soon as the cancel watch fired, never surfacing the server-mapped structured error. `is_incomplete_dispatch` likewise matched `ExecutionFailed + message.contains("cancelled")`, so re-mapping cooperative cancellation without extending it would have regressed the partial-effects durable-metadata path.
+
+**Fix:** cancellation state is now the sole classification authority end to end; no guest/client-controlled error string participates anywhere.
+- `lancet-runtime`: shared `cancelled_error()` helper (also used by the epoch `AbortReason::Cancelled` arm); `call()` short-circuits pre-cancelled calls with `CallCancelled` after params validation, before entering Wasmtime; the guest logical-error path goes through `map_guest_logical_result()`, which maps any guest `Err` to `CallCancelled` when call-scoped cancellation is set and keeps `ExecutionFailed` otherwise.
+- `lancet-native` transport: `finalize_audit_for_dispatch` records `AuditOutcome::Cancelled` on `CepErrorCode::CallCancelled` (dead message arm deleted); `is_incomplete_dispatch` matches the `CallCancelled` code only (string clause dropped).
+- `lancet-dispatch`: after cancellation the client future awaits the server's structured response instead of synthesizing `call_cancelled()` — the server is the authority for the call outcome; `call_cancelled()` and its `lancet-dispatch`/`lancet-cep` re-exports deleted; `start_call_raw` promoted to `#[doc(hidden)] pub` so round-trip tests can hold `CallControl`. Drop-future semantics (`CancelGuard`) unchanged; Component-path responsiveness stays bounded by the epoch ticker + deadline, native handlers run to completion (decision D2 in the plan).
+
+**Verification:**
+- `cargo +1.96.0 test -p lancet-runtime` — 38 passed (new: `precancelled_call_returns_call_cancelled`, 3 `map_guest_logical_result` unit tests).
+- `cargo +1.96.0 test -p lancet-dispatch` — 10 passed (new: `cancel_resolves_with_server_structured_error`, `drop_future_signals_cancellation_to_server`).
+- `cargo +1.96.0 test -p lancet-native --test cep_component_round_trip` — 7 passed (rewritten `cancelled_component_call_returns_call_cancelled_and_audits_cancelled` asserting client `CallCancelled` + audit `cancelled` + server survival; new `dropped_component_call_audits_cancelled_and_server_survives`).
+- `cargo +1.96.0 test -p lancet-native` / `-p lattice-api` — all pass (dispatch AGENTS.md transport-change requirement).
+- `cargo +1.96.0 test --workspace` — 82 suites ok, zero failures.
+- `cargo +1.96.0 clippy -p lancet-runtime -p lancet-dispatch -p lancet-native -p lancet-cep --all-targets -- -D warnings` — clean.
+- `cargo +1.96.0 fmt --all -- --check` — clean (also fixed pre-existing fmt drift in `lancet-runtime/tests/negative.rs` from #47).
+
+**Changed files:**
+- `crates/lancet-runtime/src/error_map.rs` — `cancelled_error()` helper; epoch arm delegates; module doc.
+- `crates/lancet-runtime/src/runtime.rs` — pre-cancel check; `map_guest_logical_result()`; call doc; 3 unit tests.
+- `crates/lancet-runtime/tests/call.rs` — pre-cancel test renamed/re-asserted.
+- `crates/lancet-runtime/tests/negative.rs` — fmt-only (pre-existing drift).
+- `crates/lancet-dispatch/src/transport.rs` — cancel arm awaits server response; `start_call_raw` pub; docs; 2 transport tests.
+- `crates/lancet-dispatch/src/{registry.rs,lib.rs}` — `call_cancelled()` deleted.
+- `crates/lancet-cep/src/lib.rs` — re-export cleanup.
+- `crates/lancet-native/src/server/transport.rs` — code-based `Cancelled` audit + `is_incomplete_dispatch`.
+- `crates/lancet-native/tests/cep_component_round_trip.rs` — rewritten/new cancellation round-trip tests.
+- `docs/plans/2026-07-22-issue48-callcancelled-unified-mapping.md` — implementation plan (D1–D5 decisions).
+
 ## Codeberg #46: composition gate rejects duplicate host-pinned expected identity — 2026-07-22
 
 Severity: MEDIUM (#46 review follow-up to #5; Spec + Zoom-out review of `d659b067^...a628d0e2`, verified by two independent skeptics).

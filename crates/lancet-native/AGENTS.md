@@ -47,6 +47,12 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Recent Issues
 
+- FIXED #48: call-scoped cancellation is audited from the structured code,
+  not a message string — `finalize_audit_for_dispatch` records
+  `AuditOutcome::Cancelled` on `CepErrorCode::CallCancelled` (the old
+  exact-message arm was unreachable dead code), and `is_incomplete_dispatch`
+  matches the code only. Component and (future) native cancellations share
+  one classification authority.
 - ADDED #5 slice D: `ServerRunConfig` carries `Option<Arc<ComponentRuntime>>`.
   `handle_request` branches Component vs native dispatch after audit start
   and before finalize, sharing one durable audit path. Component calls

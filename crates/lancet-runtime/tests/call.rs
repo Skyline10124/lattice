@@ -124,22 +124,20 @@ async fn call_forwards_guest_events() {
 }
 
 /// Cancellation: if the cancellation signal is set before the call, the
-/// guest's `cancelled()` check returns true and it returns an error.
+/// host short-circuits with `CallCancelled` before entering Wasmtime (#48).
 #[tokio::test]
-async fn call_with_precancelled_returns_guest_error() {
+async fn precancelled_call_returns_call_cancelled() {
     let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
     let (ctx, _rx, cancel_tx) = call_ctx();
 
     // Set cancellation before the call.
     cancel_tx.send(true).unwrap();
 
-    let result = rt
+    let err = rt
         .call("noop.echo", serde_json::json!({"message": "cancel"}), ctx)
-        .await;
-    assert!(result.is_err());
-    // The guest returns Err("cancelled") which maps to ExecutionFailed.
-    let err = result.unwrap_err();
-    assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        .await
+        .expect_err("pre-cancelled call must fail");
+    assert_eq!(err.code, CepErrorCode::CallCancelled);
 }
 
 /// `contains` reports whether a method name is in the closed catalog.

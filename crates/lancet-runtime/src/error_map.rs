@@ -19,6 +19,11 @@
 //! callback and are classified from the tool's static footprint (never from a
 //! wasmtime/guest error string).
 //!
+//! Call-scoped cancellation state is the sole cancellation authority (#48):
+//! the epoch-abort path here, the pre-call check, and the guest-logical-error
+//! path in `runtime::call` all produce the shared [`cancelled_error`]; a
+//! guest-controlled error string never classifies a cancellation.
+//!
 //! No guest backtrace, host path, or secret is exposed.
 
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
@@ -43,13 +48,7 @@ pub(crate) fn map_component_error(
     // a cancellation during growth is still reported as a cancellation.
     if let Some(reason) = data.abort.or(data.limits.last_rejection) {
         return match reason {
-            AbortReason::Cancelled => CepError::tool_execution(
-                CepErrorCode::CallCancelled,
-                method,
-                "cancelled",
-                None,
-                Retriability::Permanent,
-            ),
+            AbortReason::Cancelled => cancelled_error(method),
             AbortReason::Deadline => CepError::tool_execution(
                 CepErrorCode::ToolTimeout,
                 method,
@@ -82,6 +81,19 @@ pub(crate) fn map_component_error(
         CepErrorCode::ToolTrap,
         method,
         "trap",
+        None,
+        Retriability::Permanent,
+    )
+}
+
+/// Build the shared structured cancellation error (#48). Every call-scoped
+/// cancellation observation point (host pre-check, guest cooperative exit,
+/// epoch interruption) maps to this exact error.
+pub(crate) fn cancelled_error(method: &str) -> CepError {
+    CepError::tool_execution(
+        CepErrorCode::CallCancelled,
+        method,
+        "cancelled",
         None,
         Retriability::Permanent,
     )

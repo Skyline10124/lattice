@@ -19,8 +19,12 @@ for the D.3 dispatch split and D.4 LLM projection.
   adapters at startup. The catalog is immutable after `compose`.
 - `src/runtime.rs` owns `ComponentRuntime`, `ComponentCallContext`,
   `StoreState`, the engine/linker/ticker construction, and the `call`
-  method (params validation, instantiation, result CellRef validation,
-  result schema validation, Cell evidence recording). `call` takes `&self`
+  method (params validation, pre-cancel short-circuit, instantiation,
+  cancellation-aware guest-error mapping, result CellRef validation,
+  result schema validation, Cell evidence recording). Call-scoped
+  cancellation state is the sole cancellation authority (#48): pre-call
+  check, guest logical-error path, and epoch abort all converge on one
+  shared `CallCancelled` error. `call` takes `&self`
   (the epoch ticker is lazily spawned via `OnceLock`); an
   `Arc<ComponentRuntime>` can be shared across the projection (D.4) and
   server dispatch (D.3) paths.
@@ -37,7 +41,9 @@ for the D.3 dispatch split and D.4 LLM projection.
   call moves one clone into the wasmtime `Store` (D.3).
 - `src/error_map.rs` maps wasmtime traps/limits/aborts to structured
   `CepError` codes (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/
-  `CallCancelled`). No guest backtrace/host path/secret is exposed.
+  `CallCancelled`) and owns the shared `cancelled_error` used by every
+  cancellation observation point (#48). No guest backtrace/host path/secret
+  is exposed.
 - `src/generated/` owns the production `EXPECTED_COMPONENTS` list (empty
   until #7–#10) and the `test-utils` no-op fixture.
 - `src/test_helpers.rs` (`test-utils` feature) provides synthetic

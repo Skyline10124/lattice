@@ -239,13 +239,21 @@ async fn assert_resource_exhausted_then_survives(
         CepErrorCode::ToolResourceExhausted,
         "expected resource-exhausted for {resource}, got {err:?}"
     );
-    assert_eq!(tool_resource(&err), Some(resource), "wrong resource for {err:?}");
+    assert_eq!(
+        tool_resource(&err),
+        Some(resource),
+        "wrong resource for {err:?}"
+    );
 
     // The engine must survive: a normal call with default limits still works.
     rt.set_limits(lancet_runtime::ExecutionLimits::default());
     let (ctx2, _rx, _cancel) = call_ctx();
     let result = rt
-        .call("noop.echo", serde_json::json!({"message": "survived"}), ctx2)
+        .call(
+            "noop.echo",
+            serde_json::json!({"message": "survived"}),
+            ctx2,
+        )
         .await
         .expect("call succeeds after resource-limit rejection");
     assert_eq!(result, serde_json::json!({"echoed": "survived"}));

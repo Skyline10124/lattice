@@ -33,8 +33,12 @@ cancellation, and server runtime plumbing. ADR 0004 absorbs this behavior into
 
 ## Recent Issues
 
+- CHANGED #48: after cancellation the client call future resolves with the
+  server-mapped structured outcome (the server observes the same watch and is
+  the outcome authority); the client-synthesized `call_cancelled()` and its
+  re-exports are deleted, and `start_call_raw` is `#[doc(hidden)] pub`.
+  Drop-future `CancelGuard` semantics are unchanged.
 - ADDED #5 slice D: `CepClient::call_named<P, R>` — name-dynamic, type-static
-  transport helper. `call<M>` delegates to it. `call_named` serializes
   params, sends a raw JSON-RPC call, and deserializes the result without
   carrying a JSON Schema; Component params/result validation is done by
   generated descriptor validators on the server side. #12 absorbs this

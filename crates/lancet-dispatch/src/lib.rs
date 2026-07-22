@@ -7,7 +7,6 @@ pub mod registry;
 pub mod transport;
 
 pub use registry::{
-    Cancellation, EventSink, MethodRegistry, call_cancelled, duplicate_registration,
-    wire_code_for_error,
+    Cancellation, EventSink, MethodRegistry, duplicate_registration, wire_code_for_error,
 };
 pub use transport::{CallControl, CepClient, CepServer, CepTransport, ServerCall, ServerRuntime};

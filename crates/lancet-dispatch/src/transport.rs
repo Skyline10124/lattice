@@ -3,7 +3,7 @@
 
 //! In-process Tokio channel transport for CEP JSON-RPC frames.
 
-use crate::registry::{Cancellation, EventSink, MethodRegistry, call_cancelled};
+use crate::registry::{Cancellation, EventSink, MethodRegistry};
 use lancet_catalog::CatalogMethod;
 use lancet_protocol::{CepError, ErrorObject, Id, ToolEvent, ToolResult, error::to_jsonrpc_error};
 use serde::Serialize;
@@ -119,7 +119,10 @@ impl CepClient {
         })
     }
 
-    /// Begin a typed call; dropping the future or calling [`CallControl::cancel`] signals cancellation.
+    /// Begin a typed call. Dropping the future or calling [`CallControl::cancel`]
+    /// signals cancellation; a pending call then resolves with the server-mapped
+    /// structured outcome (the server observes the same cancellation watch), not
+    /// a client-synthesized error (#48).
     #[doc(hidden)]
     pub fn start_call<M>(&self, params: M::Params) -> (BoxCallFuture<M::Result>, CallControl)
     where
@@ -155,7 +158,15 @@ impl CepClient {
         }
     }
 
-    fn start_call_raw(&self, method: String, params: Value) -> (BoxValueCallFuture, CallControl) {
+    /// Begin a raw JSON call, returning the pending future and its cancellation
+    /// control. After cancellation the future resolves with the server-mapped
+    /// structured outcome (#48).
+    #[doc(hidden)]
+    pub fn start_call_raw(
+        &self,
+        method: String,
+        params: Value,
+    ) -> (BoxValueCallFuture, CallControl) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (response_tx, response_rx) = oneshot::channel();
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
@@ -186,13 +197,20 @@ impl CepClient {
                 .await
                 .map_err(|_| CepError::internal_error("transport request channel closed"))?;
 
+            let mut response_rx = response_rx;
             let response = tokio::select! {
-                res = response_rx => {
+                res = &mut response_rx => {
                     guard.complete();
                     res.map_err(|_| CepError::internal_error("response channel closed"))??
                 }
                 _ = wait_cancelled(&mut cancel_rx) => {
-                    return Err(call_cancelled());
+                    // Cancellation requested: the server observes the same
+                    // watch and maps the call outcome authoritatively (#48).
+                    // Await its structured response instead of synthesizing
+                    // a client-side error.
+                    response_rx
+                        .await
+                        .map_err(|_| CepError::internal_error("response channel closed"))??
                 }
             };
 
@@ -593,6 +611,94 @@ mod tests {
             .expect_err("deserialize failure must error");
         assert_eq!(err.code, lancet_protocol::CepErrorCode::ExecutionFailed);
         assert!(err.message.contains("failed to deserialize"));
+        drop(client);
+        task.abort();
+    }
+
+    /// #48: after cancellation the pending call resolves with the
+    /// server-mapped structured error, not a client-synthesized one. The
+    /// server observes the same cancellation watch and is the authority
+    /// for the call outcome.
+    #[tokio::test]
+    async fn cancel_resolves_with_server_structured_error() {
+        let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
+        registry
+            .register_method::<TodoWrite, _, _>(|_params, mut ctx| async move {
+                // Simulate the Component path: wait until cancellation is
+                // observed, then return the host-mapped `CallCancelled`.
+                ctx.1.cancelled().await;
+                Err(lancet_protocol::CepError::tool_execution(
+                    lancet_protocol::CepErrorCode::CallCancelled,
+                    "session.todo_write",
+                    "cancelled",
+                    None,
+                    lancet_protocol::Retriability::Permanent,
+                ))
+            })
+            .unwrap();
+        let (client, task) = spawn_echo_server(registry);
+
+        let (call, control) = client.start_call::<TodoWrite>(TodoWriteParams {
+            todos: vec![TodoItem {
+                content: "cancel-me".into(),
+                status: TodoStatus::Pending,
+            }],
+        });
+        control.cancel();
+
+        let err = call.await.expect_err("cancelled call must fail");
+        assert_eq!(
+            err.code,
+            lancet_protocol::CepErrorCode::CallCancelled,
+            "client must see the server-mapped error code"
+        );
+        assert_eq!(err.message, "tool session.todo_write failed: cancelled");
+        drop(client);
+        task.abort();
+    }
+
+    /// #48: dropping the call future still signals cancellation to the
+    /// server-side handler through `CancelGuard` (unchanged semantics).
+    #[tokio::test]
+    async fn drop_future_signals_cancellation_to_server() {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (observed_tx, mut observed_rx) = tokio::sync::mpsc::channel::<bool>(1);
+        let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
+        registry
+            .register_method::<TodoWrite, _, _>(move |params, mut ctx| {
+                let started_tx = started_tx.clone();
+                let observed_tx = observed_tx.clone();
+                async move {
+                    let _ = started_tx.send(()).await;
+                    ctx.1.cancelled().await;
+                    let _ = observed_tx.send(true).await;
+                    Ok(TodoWriteResult {
+                        todos: params.todos,
+                    })
+                }
+            })
+            .unwrap();
+        let (client, task) = spawn_echo_server(registry);
+
+        let (mut call, control) = client.start_call::<TodoWrite>(TodoWriteParams {
+            todos: vec![TodoItem {
+                content: "drop-me".into(),
+                status: TodoStatus::Pending,
+            }],
+        });
+        // Poll the call until the request reaches the server handler.
+        tokio::select! {
+            _ = &mut call => panic!("call cannot complete before the handler runs"),
+            _ = started_rx.recv() => {}
+        }
+        drop(call);
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx.recv())
+            .await
+            .expect("server observes cancellation")
+            .expect("observation channel open");
+        assert!(observed);
+        drop(control);
         drop(client);
         task.abort();
     }

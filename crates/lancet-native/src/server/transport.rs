@@ -262,13 +262,12 @@ async fn handle_request(
     call.respond(final_result);
 }
 
+/// #48: a dispatch that never completed because the call was cancelled.
+/// Cancellation state is the classification authority end to end, so every
+/// call-scoped cancellation surfaces as the structured `CallCancelled` code
+/// — never matched on a guest/client-controlled error string.
 fn is_incomplete_dispatch(result: &Result<Value, CepError>) -> bool {
-    matches!(
-        result,
-        Err(err)
-            if err.code == CepErrorCode::ExecutionFailed
-                && err.message.contains("cancelled")
-    )
+    matches!(result, Err(err) if err.code == CepErrorCode::CallCancelled)
 }
 
 fn apply_effect_check(
@@ -407,7 +406,7 @@ fn finalize_audit_for_dispatch(
                 metadata.as_deref(),
             );
         }
-        Err(err) if err.message == "call cancelled" => {
+        Err(err) if err.code == CepErrorCode::CallCancelled => {
             let _ = audit.finalize_call(audit_start, AuditOutcome::Cancelled, None, None);
         }
         Err(err) => {
