@@ -6,8 +6,10 @@
 //! sealed.
 //!
 //! The gate is fail-closed: missing, duplicate, unapproved, drifted, or
-//! ambient-importing registrations are rejected. After `compose` returns,
-//! the `ClosedCatalog` is immutable — there is no runtime registration API.
+//! ambient-importing registrations are rejected, as are duplicate
+//! host-pinned expected identities (checked before any registration is
+//! processed). After `compose` returns, the `ClosedCatalog` is immutable
+//! — there is no runtime registration API.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -47,6 +49,8 @@ pub enum CompositionError {
     UnapprovedName(String),
     #[error("duplicate tool name: {0}")]
     DuplicateName(String),
+    #[error("duplicate expected Tool identity: {0}")]
+    DuplicateExpectedName(String),
     #[error("descriptor digest drift for {0}")]
     DescriptorDrift(#[source] sha2::digest::InvalidOutputSize),
     #[error("artifact hash mismatch for {0}")]
@@ -122,10 +126,14 @@ impl ClosedCatalog {
         registrations: impl IntoIterator<Item = &'static EmbeddedTool>,
         expected_identities: &[ExpectedToolIdentity],
     ) -> Result<Self, CompositionError> {
-        let expected: BTreeMap<&str, &ExpectedToolIdentity> = expected_identities
-            .iter()
-            .map(|identity| (identity.name, identity))
-            .collect();
+        let mut expected: BTreeMap<&str, &ExpectedToolIdentity> = BTreeMap::new();
+        for identity in expected_identities {
+            if expected.insert(identity.name, identity).is_some() {
+                return Err(CompositionError::DuplicateExpectedName(
+                    identity.name.to_string(),
+                ));
+            }
+        }
         let mut tools: BTreeMap<String, CompiledTool> = BTreeMap::new();
 
         for reg in registrations {

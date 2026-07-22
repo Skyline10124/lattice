@@ -2,6 +2,28 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #46: composition gate rejects duplicate host-pinned expected identity — 2026-07-22
+
+Severity: MEDIUM (#46 review follow-up to #5; Spec + Zoom-out review of `d659b067^...a628d0e2`, verified by two independent skeptics).
+
+**Problem:** `ClosedCatalog::compose` collected `expected_identities` directly into a `BTreeMap<&str, &ExpectedToolIdentity>` via `.collect()`, so two host-pinned expected identities sharing a name silently used last-wins: the later pin overwrote the earlier descriptor/artifact/import pin while composition still succeeded. The existing `DuplicateName` check only covered inventory registrations, not the host-pinned expected set. Production `EXPECTED_COMPONENTS` is still empty, so the defect had not yet fired, but once #7–#10 migrate production Tools it would weaken closed-catalog approval semantics. `xtask tool-codegen` generates each manifest's expected-identity candidate independently and does not deduplicate across manifests, so uniqueness cannot be left to the generation flow.
+
+**Fix:**
+- `crates/lancet-runtime/src/composition.rs`: added a distinct `CompositionError::DuplicateExpectedName(String)` variant (`#[error("duplicate expected Tool identity: {0}")]`), separate from `DuplicateName` so callers and tests can distinguish registration-name duplicates from host-pinned-identity duplicates.
+- `ClosedCatalog::compose` now builds the `expected` map with an explicit insert loop that fails closed with `DuplicateExpectedName` on the first repeated expected-identity name, before any registration is processed. The rest of the gate (registration duplicate, unapproved, digest/artifact/ABI/import/channel drift, missing names) is unchanged.
+- Module doc updated to state the gate also rejects duplicate host-pinned expected identities, checked before registration processing.
+- `crates/lancet-runtime/tests/gate.rs`: added `gate_rejects_duplicate_expected_name` — one valid registration plus two same-name expected identities with different descriptor digests, asserting `DuplicateExpectedName("noop.echo")` (no last-wins). Rewrote `gate_rejects_duplicate_name` to call `ClosedCatalog::compose` directly with two same-name registrations and a single expected identity, isolating the registration-duplicate check (the old form passed two same-name `SyntheticTool`s through the `compose` helper, which builds expected identities 1:1 and now correctly trips the expected-identity check first).
+
+**Verification:**
+- `cargo +1.96.0 test -p lancet-runtime --test gate` — 13 passed (incl. new `gate_rejects_duplicate_expected_name` and rewritten `gate_rejects_duplicate_name`).
+- `cargo +1.96.0 clippy -p lancet-runtime --all-targets -- -D warnings` — clean.
+- `cargo +1.96.0 test -p lancet-runtime` — gate 13 / call 8 / negative 6, all pass.
+- `cargo +1.96.0 fmt -p lancet-runtime -- --check` — clean.
+
+**Changed files:**
+- `crates/lancet-runtime/src/composition.rs` — `DuplicateExpectedName` variant + duplicate-detecting expected collection + module doc.
+- `crates/lancet-runtime/tests/gate.rs` — new `gate_rejects_duplicate_expected_name` test; rewritten `gate_rejects_duplicate_name`.
+
 ## Codeberg #45: close stale FINDINGS T-23-01/T-23-02 to the #24 Direct-Local residual — 2026-07-22
 
 Severity: MEDIUM (#45 review follow-up to #23; spec review of `df62ec84...8d6926d9`,

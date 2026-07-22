@@ -59,14 +59,43 @@ fn gate_rejects_missing_expected_name() {
     );
 }
 
-/// Duplicate: two registrations with the same name.
+/// Duplicate registration: two registrations share a name. The expected
+/// identity set carries a single pin for that name, so the
+/// duplicate-registration check fires (not the duplicate-expected check,
+/// which guards the host-pinned identity set and runs first).
 #[test]
 fn gate_rejects_duplicate_name() {
     let tool_a = SyntheticTool::from_noop_bytes("noop.echo");
     let tool_b = SyntheticTool::from_noop_bytes("noop.echo");
-    let result = compose(&[&tool_a, &tool_b]);
+    // One expected identity for "noop.echo"; two registrations claim it, so
+    // the expected set is unique and the registration duplicate fires.
+    let ids: &'static [_] = Box::leak(vec![tool_a.identity].into_boxed_slice());
+    let reg_a: &'static _ = Box::leak(Box::new(tool_a.registration));
+    let reg_b: &'static _ = Box::leak(Box::new(tool_b.registration));
+    let result = ClosedCatalog::compose(&engine(), vec![reg_a, reg_b], ids);
     assert!(
         matches!(result, Err(CompositionError::DuplicateName(ref n)) if n == "noop.echo"),
+        "{result:?}"
+    );
+}
+
+/// Duplicate expected identity: two host-pinned identities share a name with
+/// different digests. The gate must fail closed rather than silently letting
+/// the later entry overwrite the earlier pin (no last-wins). The uniqueness
+/// check runs before registration processing.
+#[test]
+fn gate_rejects_duplicate_expected_name() {
+    let tool = SyntheticTool::from_noop_bytes("noop.echo");
+    // A second identity with the same name but a different descriptor digest,
+    // proving the gate does not silently adopt a last-wins pin.
+    let mut second = tool.identity;
+    second.descriptor_sha256[0] ^= 0xff;
+
+    let ids: &'static [_] = Box::leak(vec![tool.identity, second].into_boxed_slice());
+    let reg: &'static _ = Box::leak(Box::new(tool.registration));
+    let result = ClosedCatalog::compose(&engine(), std::iter::once(reg), ids);
+    assert!(
+        matches!(result, Err(CompositionError::DuplicateExpectedName(ref n)) if n == "noop.echo"),
         "{result:?}"
     );
 }
