@@ -5094,10 +5094,10 @@
     "name": "streaming_backward_compat_fake_llm_chat_only_still_works",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_streaming_chat_compat",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_streaming_chat_compat` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "trait fallback（Fake LLM chat-only streaming）无忠实的外部二进制触发；保留为局部不变量"
   },
   {
     "crate": "lattice-agent",
@@ -6162,10 +6162,10 @@
     "name": "stream_turn_live_with_agent_receiver_drop_does_not_cancel",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_receiver_drop_commit",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_receiver_drop_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "API observer 行为（receiver drop 不取消 commit）无忠实的外部二进制触发；保留为局部不变量"
   },
   {
     "crate": "lattice-api",
@@ -6174,10 +6174,10 @@
     "name": "stream_turn_live_with_agent_slow_observer_still_commits",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_slow_observer_commit",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_slow_observer_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "API observer 行为（慢 observer 仍 commit）无忠实的外部二进制触发；保留为局部不变量"
   },
   {
     "crate": "lattice-api",
@@ -6810,10 +6810,10 @@
     "name": "consistency_error_after_partial_token",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_partial_token_parity",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_partial_token_parity` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "`run_turn`/collector parity（partial token 后 error）无忠实的外部二进制触发；保留为局部不变量"
   },
   {
     "crate": "lattice-api",
@@ -6822,10 +6822,10 @@
     "name": "consistency_tool_call_path",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_tool_call_parity",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_tool_call_parity` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "`run_turn`/collector parity（tool call path）无忠实的外部二进制触发；保留为局部不变量"
   },
   {
     "crate": "lattice-api",
@@ -6846,10 +6846,10 @@
     "name": "consistency_completed_disposition_parity",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_completed_disposition_parity",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_completed_disposition_parity` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "`run_turn`/collector parity（completed disposition）无忠实的外部二进制触发；保留为局部不变量"
   },
   {
     "crate": "lattice-api",
@@ -6858,10 +6858,10 @@
     "name": "consistency_error_disposition_parity",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_error_disposition_parity",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_error_disposition_parity` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "`run_turn`/collector parity（error disposition）无忠实的外部二进制触发；保留为局部不变量"
   },
   {
     "crate": "lattice-api",
