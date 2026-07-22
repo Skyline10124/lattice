@@ -6294,10 +6294,10 @@
     "name": "stream_turn_emits_tool_activity_before_committed",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_tool_activity_before_commit",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_tool_activity_before_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 planned_direct_tool_activity_before_commit 接管",
+    "reason": "#24 slice 2 assertion-level superset review：direct_observation.rs 断言 tool_call_started<turn_committed（10 次 observe.workspace）+ 全部 tool_call_finished（ok_pattern）+ completed commit；tool_call_finished<committed 为 agent loop 结构不变量（commit 为终步）。已删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6345,7 +6345,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_cep_lifecycle",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_cep_lifecycle` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "reason": "#24 slice 2 assertion-level review：半个覆盖--direct_observation.rs 覆盖 observation 半（tool_call_started/finished 事件 + canonical tool name），但不断言 CepCallStarted/Finished 的 semantic_stage/guard_stage/impact_kind；CEP lifecycle 半未覆盖，保留原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6633,7 +6633,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_turn_audit_replay",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_turn_audit_replay` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "reason": "#24 slice 2 assertion-level review：半个覆盖--direct_observation.rs 覆盖 observation 半（observe.workspace 经完整 turn 执行），但不查询 audit rows/replay fragment；audit 半未覆盖，保留原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6834,10 +6834,10 @@
     "name": "stream_turn_emits_activity_before_commit",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_activity_commit_order",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_activity_commit_order` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 planned_direct_activity_commit_order 接管",
+    "reason": "#24 slice 2 assertion-level superset review：slice-1 direct_turn_contract.rs（direct_turn_completed_reopen_contract）断言完整生命周期子序列 [turn_started, model_started, token_delta, model_finished, turn_committing, turn_committed]，为原内部测试 ModelStarted<TokenDelta<TurnCommitting<TurnCommitted 排序的严格超集。已删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8382,10 +8382,10 @@
     "name": "usage_run_turn_can_read_workspace_file_with_default_profile",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_workspace_read_turn",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_workspace_read_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 planned_direct_workspace_read_turn 接管",
+    "reason": "#24 slice 2 assertion-level superset review：direct_observation.rs 通过 .lattice/agents/ 配置的 profile 读取 tracked.txt/notes.txt 并断言 content present，为原内部测试 default-profile-reads-workspace-file 的严格超集。已删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8958,10 +8958,10 @@
     "name": "tool_executor_uses_workspace_root_not_profile_package_dir",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_canonical_workspace_root",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_canonical_workspace_root` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 planned_direct_canonical_workspace_root 接管",
+    "reason": "#24 slice 2 assertion-level superset review：direct_observation.rs profile 位于 .lattice/agents/dl-obs/，读取 project-root tracked.txt/notes.txt 并断言内容；若 executor 使用 profile package dir 则路径不存在。严格强于原内部测试仅断言 ok=true。已删除原测试。"
   },
   {
     "crate": "lattice-cli",

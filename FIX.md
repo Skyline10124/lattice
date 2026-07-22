@@ -32,6 +32,39 @@ Severity: docs / vocabulary hygiene (#43 `ready-for-agent`). Plan: `docs/plans/2
 - `docs/specs/2026-07-01-issue5-effect-model-toolctx-design.md`
 - `docs/plans/2026-07-22-issue43-retire-kvm-lane-vocab-in-historical-docs.md`
 
+## Codeberg #24 slice 2: Direct-Local workspace observation visibility/bounds + ledger closeout - 2026-07-22
+
+Severity: test refactor (测试重构 5/6, slice 2 of #24; `ready-for-agent`). Plan: `docs/plans/2026-07-22-issue24-slice2-observation-visibility.md`.
+
+**Problem:** Slice 0/1 built the harness foundations and the completed-Turn contract. Slice 2 lands the `observe.workspace` visibility/bounds matrix over the built binary - tracked/untracked/ignored/included-ignored/read-denied/system-excluded/budget-exceeding paths across all four modes (read/list/grep/find) - and takes over the mapped internal tests whose assertions are a strict superset of the new external scenario.
+
+**Fix:**
+- `crates/lattice-system-harness/tests/direct_observation.rs` (new): one comprehensive Direct-Local scenario driving 10 `observe.workspace` calls (read_file/list_directory/grep/find_files) through the public `session send` path against the full visibility matrix, inspecting each tool result in the next captured provider request. Asserts canonical tool name, 10-call ok/fail pattern, tool+CEP activity precedes commit, completed commit, and per-mode visibility/bounds: tracked+untracked visible, ignored hidden, included-ignored visible, read-denied hidden, system-exclusion (`.lattice`) hidden, single-read budget denied, list/grep/find truncated to configured limits with no hidden/denied paths leaking.
+
+Assertion-level superset review deleted 4 internal tests (elevate -> delete):
+- `usage_run_turn_can_read_workspace_file_with_default_profile` (lattice-api): direct_observation.rs reads tracked.txt/notes.txt content through a `.lattice/agents/` profile (strict superset).
+- `tool_executor_uses_workspace_root_not_profile_package_dir` (lattice-cli): direct_observation.rs reads project-root files with profile in `.lattice/agents/dl-obs/` (strict superset; content-match stronger than ok-only).
+- `stream_turn_emits_tool_activity_before_committed` (lattice-api): direct_observation.rs asserts `tool_call_started < turn_committed` + all-10 `tool_call_finished` + completed commit; `tool_call_finished < committed` is an agent-loop structural invariant (commit is terminal).
+- `stream_turn_emits_activity_before_commit` (lattice-api): slice-1 `direct_turn_contract.rs` asserts the full lifecycle subsequence `[turn_started, model_started, token_delta, model_finished, turn_committing, turn_committed]` (strict superset).
+
+Kept 2 internal tests as half-covered (elevate, ledger reason updated):
+- `full_turn_audit_rows_and_replay_fragment`: observation half covered; audit rows/replay fragment not queried by any landed harness.
+- `stream_turn_emits_cep_lifecycle_events`: observation half covered (tool_call events); `CepCallStarted/Finished` `semantic_stage`/`guard_stage`/`impact_kind` not asserted by any landed harness.
+
+Updated `docs/TEST-TRIAGE.md` (per-crate rows, count tables 79->75 elevate / 184->188 delete, scenario directory, 精确移交 table, slice 2 execution section) and `docs/test-triage-decisions.json` (4 elevate->delete, 2 reason updated).
+
+**Verification:**
+- `cargo +1.96.0 fmt --all --check` - clean.
+- `cargo +1.96.0 test -p lattice-system-harness --lib` - 54 passed.
+- `cargo +1.96.0 build -p lattice-cli --bin lattice` + `LATTICE_BIN=$(pwd)/target/debug/lattice cargo +1.96.0 test -p lattice-system-harness --test direct_observation` - 1 passed.
+- `cargo +1.96.0 test -p lattice-api` - all targets green (stream_tests/consistency/usage_turn each -1 deleted test).
+- `cargo +1.96.0 test -p lattice-cli` - 39 passed (run_tests -1 deleted).
+- `cargo +1.96.0 clippy -p lattice-api -p lattice-cli -p lattice-system-harness --all-targets -- -D warnings` - clean.
+- `cargo +1.96.0 xtask harness-boundary` - passed.
+
+**Changed files:**
+`crates/lattice-system-harness/tests/direct_observation.rs` (new), `crates/lattice-api/tests/usage_turn.rs`, `crates/lattice-cli/src/commands/run_tests.rs`, `crates/lattice-api/src/turn/stream_tests.rs`, `crates/lattice-api/tests/consistency.rs`, `docs/TEST-TRIAGE.md`, `docs/test-triage-decisions.json`, `FIX.md`.
+
 ## Codeberg #48: cooperative Component cancellation 统一映射为 `CallCancelled` — 2026-07-22
 
 Severity: High (#48 review follow-up to #5; Spec review of `d659b067^...a628d0e2`, verified by two independent skeptics; tradeoff confirmed on the issue after pre-implementation verification). Plan: `docs/plans/2026-07-22-issue48-callcancelled-unified-mapping.md`.

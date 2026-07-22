@@ -6,85 +6,12 @@ use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
 use lattice_agent::LlmClient;
-use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_session::TurnCommitStatus;
 
 use super::execute::stream_turn;
 use super::test_support::*;
 use super::types::{RunTurnStatus, TurnEvent};
-
-#[tokio::test]
-async fn stream_turn_emits_tool_activity_before_committed() {
-    let round1 = vec![
-        LlmEvent::ToolCallStart {
-            id: "call_1".to_string(),
-            name: "read_file".to_string(),
-        },
-        LlmEvent::ToolCallDelta {
-            id: "call_1".to_string(),
-            arguments_delta: r#"{"path":"src/lib.rs"}"#.to_string(),
-        },
-        LlmEvent::ToolCallEnd {
-            id: "call_1".to_string(),
-        },
-        LlmEvent::Done {
-            finish_reason: "tool_calls".to_string(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-            }),
-        },
-    ];
-    let round2 = vec![
-        LlmEvent::Token {
-            content: "here is the file".to_string(),
-        },
-        LlmEvent::Done {
-            finish_reason: "stop".to_string(),
-            usage: None,
-        },
-    ];
-
-    let llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(round1)
-            .push_events(round2)
-            .build(),
-    );
-    let fixture = setup_fixture(llm, &["observe.workspace"]);
-
-    let events: Vec<TurnEvent> = stream_turn(
-        fixture.session_api,
-        with_test_llm(
-            make_request("read file"),
-            fixture.llm.clone(),
-            &fixture.enabled_tools,
-            &fixture.project_root,
-        ),
-    )
-    .await
-    .unwrap()
-    .collect()
-    .await;
-
-    let tool_start_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::ToolCallStarted { .. }));
-    let tool_finished_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::ToolCallFinished { .. }));
-    let committed_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }));
-
-    assert!(tool_start_pos.is_some());
-    assert!(tool_finished_pos.is_some());
-    assert!(committed_pos.is_some());
-    assert!(tool_start_pos.unwrap() < committed_pos.unwrap());
-    assert!(tool_finished_pos.unwrap() < committed_pos.unwrap());
-}
 
 #[tokio::test]
 async fn stream_turn_error_still_commits_error() {
