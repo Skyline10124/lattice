@@ -14,6 +14,7 @@ target/
 .omo/
 .zcode/
 .pi-subagents/
+.pi/
 .mcp.json
 opencode.jsonc
 .pytest_cache/
