@@ -23,7 +23,7 @@ use crate::composition::{ClosedCatalog, CompositionError, EmbeddedTool, Expected
 use crate::error_map::{effect_violation, map_component_error, schema_mismatch};
 use crate::evidence::CellEvidenceLedger;
 use crate::generated;
-use crate::limits::{AbortReason, ExecutionLimits, RecordingLimits};
+use crate::limits::{AbortReason, ExecutionLimits, RecordingLimits, ResourceFootprint};
 
 /// Call-scoped context passed to `ComponentRuntime::call`.
 pub struct ComponentCallContext {
@@ -41,6 +41,10 @@ pub(crate) struct StoreState {
     pub limits: RecordingLimits,
     pub deadline: Instant,
     pub abort: Option<AbortReason>,
+    /// Configured per-call count limits, kept so a count-limit instantiation
+    /// failure (which has no rejection callback) can be classified against the
+    /// tool's static footprint.
+    pub count_limits: ResourceFootprint,
 }
 
 /// The Component runtime. Composed once at startup; immutable after.
@@ -169,7 +173,7 @@ impl ComponentRuntime {
         let instance = match bindings::Tool::instantiate(&mut store, &tool.component, &self.linker)
         {
             Ok(v) => v,
-            Err(e) => return Err(map_component_error(&store, name, e)),
+            Err(e) => return Err(map_component_error(&store, name, e, &tool.footprint)),
         };
 
         let tool_api = instance.lattice_tool_host_tool_api();
@@ -178,7 +182,7 @@ impl ComponentRuntime {
 
         let raw = match tool_api.call_run(&mut store, &params_json) {
             Ok(r) => r,
-            Err(e) => return Err(map_component_error(&store, name, e)),
+            Err(e) => return Err(map_component_error(&store, name, e, &tool.footprint)),
         };
 
         // The guest's `result<tool-output, string>`: the outer Result is
@@ -225,6 +229,14 @@ impl ComponentRuntime {
         let limits = self.limits.lock().unwrap().clone();
         let deadline = Instant::now() + limits.deadline;
         let fuel = limits.fuel;
+        // Snapshot the count limits before `limits` is consumed into the
+        // `RecordingLimits` wrapper; the mapper needs them to classify a
+        // count-limit instantiation failure.
+        let count_limits = ResourceFootprint {
+            instances: limits.instances,
+            memories: limits.memories,
+            tables: limits.tables,
+        };
         let limits = RecordingLimits::new(&limits);
         let mut store = Store::new(
             &self.engine,
@@ -233,6 +245,7 @@ impl ComponentRuntime {
                 limits,
                 deadline,
                 abort: None,
+                count_limits,
             },
         );
 

@@ -18,6 +18,8 @@ use lancet_protocol::cell::{ChannelKind, ToolDescriptor};
 use sha2::{Digest, Sha256};
 use wasmtime::component::Component;
 
+use crate::limits::ResourceFootprint;
+
 /// Tool-side discovery record. It is **not** an approval record — a Tool
 /// crate submits name + embedded bytes; only the trusted host composition
 /// step may pin the identity (digest/ABI/imports).
@@ -91,13 +93,15 @@ pub enum CompositionError {
     Linker(#[source] wasmtime::Error),
 }
 
-/// A compiled Tool ready for execution: descriptor, Component, and pre-built
-/// JSON Schema validators (invalid schemas fail startup, not the first call).
+/// A compiled Tool ready for execution: descriptor, Component, pre-built
+/// JSON Schema validators (invalid schemas fail startup, not the first call),
+/// and the static resource footprint used to classify count-limit failures.
 pub struct CompiledTool {
     pub descriptor: Arc<ToolDescriptor>,
     pub component: Component,
     pub params_validator: jsonschema::Validator,
     pub result_validator: jsonschema::Validator,
+    pub(crate) footprint: ResourceFootprint,
 }
 
 /// Immutable catalog of verified Tools. No insert/register/load/path API:
@@ -210,6 +214,11 @@ impl ClosedCatalog {
             let result_validator = jsonschema::validator_for(&descriptor.result_schema)
                 .map_err(|e| CompositionError::ResultSchema(format!("{}: {e}", reg.name)))?;
 
+            // Static resource footprint: parsed once here so a count-limit
+            // instantiation failure can be classified without matching
+            // wasmtime's error strings.
+            let footprint = component_footprint(reg.component_bytes);
+
             let descriptor = Arc::new(descriptor);
             tools.insert(
                 descriptor.name.clone(),
@@ -218,6 +227,7 @@ impl ClosedCatalog {
                     component,
                     params_validator,
                     result_validator,
+                    footprint,
                 },
             );
         }
@@ -305,6 +315,71 @@ fn collect_component_imports(bytes: &[u8]) -> BTreeSet<String> {
     imports
 }
 
+/// Compute a Component's static [`ResourceFootprint`]: the core instances,
+/// linear memories, and tables it allocates on instantiation. This mirrors
+/// wasmtime's `bump_resource_counts` accounting (one instance plus the module's
+/// defined memories/tables per instantiated core module), so a count-limit
+/// instantiation failure can be classified without matching wasmtime's error
+/// strings.
+///
+/// Uses `wasmparser` directly. Only the top-level component's core modules and
+/// core instance section are considered; deeper nesting is ignored (the tool
+/// pipeline emits a single flat component).
+fn component_footprint(bytes: &[u8]) -> ResourceFootprint {
+    use wasmparser::{Instance, Payload};
+
+    // Per top-level core module: (defined memories, defined tables), indexed by
+    // core module definition order.
+    let mut modules: Vec<(usize, usize)> = Vec::new();
+    // Nesting stack. `Some(idx)` marks a top-level core module body whose
+    // sections we are collecting; `None` marks any other nested container
+    // (nested module or nested component) whose sections we ignore.
+    let mut stack: Vec<Option<usize>> = Vec::new();
+    let mut footprint = ResourceFootprint::default();
+
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        let Ok(payload) = payload else { break };
+        match payload {
+            Payload::ModuleSection { .. } => {
+                if stack.is_empty() {
+                    modules.push((0, 0));
+                    stack.push(Some(modules.len() - 1));
+                } else {
+                    stack.push(None);
+                }
+            }
+            Payload::ComponentSection { .. } => stack.push(None),
+            Payload::End(_) => {
+                stack.pop();
+            }
+            Payload::MemorySection(reader) => {
+                if let [Some(idx)] = stack.as_slice() {
+                    modules[*idx].0 += reader.count() as usize;
+                }
+            }
+            Payload::TableSection(reader) => {
+                if let [Some(idx)] = stack.as_slice() {
+                    modules[*idx].1 += reader.count() as usize;
+                }
+            }
+            Payload::InstanceSection(reader) if stack.is_empty() => {
+                for instance in reader.into_iter() {
+                    let Ok(instance) = instance else { continue };
+                    if let Instance::Instantiate { module_index, .. } = instance
+                        && let Some(&(memories, tables)) = modules.get(module_index as usize)
+                    {
+                        footprint.instances += 1;
+                        footprint.memories += memories;
+                        footprint.tables += tables;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    footprint
+}
+
 /// Derive the domain channel set supplied by the actual imports. Only known
 /// ToolHost domain WIT imports grant a channel; `host-control` grants none.
 /// #6 will add handle-per-capability domain imports.
@@ -362,5 +437,24 @@ mod tests {
         assert!(verify_sha256(data, arr).is_ok());
         arr[0] ^= 0xff;
         assert!(verify_sha256(data, arr).is_err());
+    }
+
+    /// The committed noop Component expands into 3 core instances (the guest
+    /// module plus the wit-component shim and fixup), 1 memory, and 2 tables.
+    /// This pins the footprint parser against the real artifact so drift (e.g. a
+    /// wasmtime or wit-component change) is caught, and documents why the
+    /// default count limits carry headroom above 1.
+    #[test]
+    fn noop_component_footprint_is_three_instances() {
+        let bytes = include_bytes!("../../../tools/noop/generated/noop_echo.component.wasm");
+        let fp = component_footprint(bytes);
+        assert_eq!(
+            fp,
+            ResourceFootprint {
+                instances: 3,
+                memories: 1,
+                tables: 2,
+            }
+        );
     }
 }

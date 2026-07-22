@@ -5,30 +5,44 @@
 //! reasons into structured `CepError` codes.
 //!
 //! Mapping priority:
-//! 1. `abort = Cancelled` → `CallCancelled` (Permanent)
-//! 2. `abort = Deadline`  → `ToolTimeout` (Transient)
-//! 3. `abort = Memory`    → `ToolResourceExhausted` (resource = "memory")
-//! 4. `abort = Instances` → `ToolResourceExhausted` (resource = "instances")
-//! 5. fuel exhausted       → `ToolResourceExhausted` (resource = "fuel")
-//! 6. other wasmtime trap → `ToolTrap` (Permanent)
+//! 1. `abort = Cancelled`      → `CallCancelled` (Permanent)
+//! 2. `abort = Deadline`       → `ToolTimeout` (Transient)
+//! 3. `last_rejection = MemoryBytes`   → `ToolResourceExhausted` (resource = "memory")
+//! 4. `last_rejection = TableElements` → `ToolResourceExhausted` (resource = "table")
+//! 5. fuel exhausted           → `ToolResourceExhausted` (resource = "fuel")
+//! 6. count limit exceeded     → `ToolResourceExhausted` (resource = "instances"/"memories"/"tables")
+//! 7. other wasmtime trap      → `ToolTrap` (Permanent)
+//!
+//! Cancellation/deadline are checked before any resource rejection so their
+//! priority is preserved. Memory/table byte-and-element growth rejections are
+//! recorded by `RecordingLimits`; count-limit failures have no rejection
+//! callback and are classified from the tool's static footprint (never from a
+//! wasmtime/guest error string).
 //!
 //! No guest backtrace, host path, or secret is exposed.
 
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 
-use crate::limits::AbortReason;
+use crate::limits::{AbortReason, ResourceFootprint};
 use crate::runtime::StoreState;
 
-/// Map a wasmtime error to a `CepError` using the store's abort reason and
-/// remaining fuel.
+/// Map a wasmtime error to a `CepError` using the store's abort reason, the
+/// limiter's recorded growth rejection, remaining fuel, and — for count limits
+/// with no rejection callback — the tool's static `footprint` versus the
+/// configured counts.
 pub(crate) fn map_component_error(
     store: &wasmtime::Store<StoreState>,
     method: &str,
     err: wasmtime::Error,
+    footprint: &ResourceFootprint,
 ) -> CepError {
     let data = store.data();
-    if let Some(abort) = data.abort {
-        return match abort {
+
+    // Cancellation/deadline (epoch) take priority; then a memory/table growth
+    // rejection recorded by the limiter. `abort` wins over `last_rejection` so
+    // a cancellation during growth is still reported as a cancellation.
+    if let Some(reason) = data.abort.or(data.limits.last_rejection) {
+        return match reason {
             AbortReason::Cancelled => CepError::tool_execution(
                 CepErrorCode::CallCancelled,
                 method,
@@ -43,32 +57,23 @@ pub(crate) fn map_component_error(
                 None,
                 Retriability::Transient,
             ),
-            AbortReason::Memory => CepError::tool_execution(
-                CepErrorCode::ToolResourceExhausted,
-                method,
-                "resource_exhausted",
-                Some("memory".into()),
-                Retriability::Transient,
-            ),
-            AbortReason::Instances => CepError::tool_execution(
-                CepErrorCode::ToolResourceExhausted,
-                method,
-                "resource_exhausted",
-                Some("instances".into()),
-                Retriability::Transient,
-            ),
+            AbortReason::MemoryBytes => resource_exhausted(method, "memory"),
+            AbortReason::TableElements => resource_exhausted(method, "table"),
         };
     }
 
     // Fuel exhaustion: wasmtime reports this as a trap. Check remaining fuel.
     if store.get_fuel().map(|f| f == 0).unwrap_or(false) {
-        return CepError::tool_execution(
-            CepErrorCode::ToolResourceExhausted,
-            method,
-            "resource_exhausted",
-            Some("fuel".into()),
-            Retriability::Transient,
-        );
+        return resource_exhausted(method, "fuel");
+    }
+
+    // Count-limit exhaustion (instances/memories/tables). These have no
+    // rejection callback, so classify from the component's static footprint
+    // against the configured counts, in wasmtime's own enforcement order. A
+    // successful instantiation implies the footprint fit, so this is a no-op on
+    // the `call_run` path.
+    if let Some(resource) = footprint.first_exceeded(&data.count_limits) {
+        return resource_exhausted(method, resource);
     }
 
     // Default: guest trap (unreachable, etc.).
@@ -79,6 +84,19 @@ pub(crate) fn map_component_error(
         "trap",
         None,
         Retriability::Permanent,
+    )
+}
+
+/// Build a `ToolResourceExhausted` error carrying a fixed, non-leaking resource
+/// label (`"memory"`, `"table"`, `"fuel"`, `"instances"`, `"memories"`,
+/// `"tables"`).
+fn resource_exhausted(method: &str, resource: &str) -> CepError {
+    CepError::tool_execution(
+        CepErrorCode::ToolResourceExhausted,
+        method,
+        "resource_exhausted",
+        Some(resource.into()),
+        Retriability::Transient,
     )
 }
 
