@@ -41,6 +41,7 @@ fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
             },
         )
         .expect("drive lattice")
+        .output
 }
 
 fn ok_or_artifacts(

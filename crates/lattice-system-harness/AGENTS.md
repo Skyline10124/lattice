@@ -23,15 +23,19 @@ integration-test target of any product crate.
   `OPENAI_COMPATIBLE_*` configuration; there is no test-only provider,
   hidden flag, or product-side change (RFC #19 decision four).
 - `SessionSendDriver` (`src/session_send.rs`) drives the public
-  `lattice --json session send` entrypoint and parses JSONL with a tolerant
-  parser (unknown `TurnEvent` variants are kept as `Unknown`, never a parse
-  error — the public contract is incremental). Exit code classification
-  mirrors the product's 0/1/2 contract but never imports the product enum.
+  `lattice --json session send` entrypoint and returns raw command evidence
+  together with parsed JSONL. Unknown valid `TurnEvent` variants are kept as
+  `Unknown`; malformed nonblank lines are retained separately. Exit code
+  classification mirrors the product's 0/1/2 contract without importing it.
 - Subprocesses are spawned in their own process group
-  (`process_group(0)` on Unix) and a timeout kills the whole group via
-  `kill -KILL -<pgid>` (RFC #19 decision eight, PRD user story 20). The repo
-  does not commit to Windows (see #26 Out-of-Scope); `set_new_process_group`
-  is a no-op on non-Unix.
+  (`process_group(0)` on Unix). Timeout and controlled interrupt retain drained
+  stdout/stderr, reap the direct child, and clean the whole group. The repo does
+  not commit to Windows (see #26 Out-of-Scope); process groups are a no-op there.
+- Fake-provider races use `ResponseGate` plus bounded request waits. Failure
+  evidence is redacted before writing, stale bundles are cleared, and recursive
+  byte-level sentinel scans fail closed on both hits and I/O errors.
+- `ScenarioBudget::cap_timeout` applies `min(step_timeout, remaining_total)`;
+  multi-command drivers must use the capped value for every spawned command.
 
 ## Test Layers (RFC #19 decision two / seven, updated by #40)
 
@@ -49,6 +53,7 @@ integration-test target of any product crate.
   #40; the retired KVM-lane opt-in gate and its `layer_guard` module are
   gone — a broken Direct-Local environment is a product failure, never a
   skip.
+
 ## Verification
 
 Run from the workspace root:

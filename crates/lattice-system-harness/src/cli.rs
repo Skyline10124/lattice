@@ -33,6 +33,7 @@ pub fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output 
             },
         )
         .expect("drive lattice")
+        .output
 }
 
 /// Unwrap an assertion result, writing the failure-artifact bundle (redacted

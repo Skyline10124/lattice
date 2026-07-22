@@ -23,7 +23,7 @@ use crate::world::ScenarioWorld;
 /// collects every scenario's bundle in one place.
 const FAILURE_DIR_ENV: &str = "LATTICE_HARNESS_FAILURE_DIR";
 
-fn failure_dir(scenario_name: &str) -> PathBuf {
+pub fn failure_dir(scenario_name: &str) -> PathBuf {
     match std::env::var(FAILURE_DIR_ENV) {
         Ok(base) => PathBuf::from(base).join(scenario_name),
         Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -157,8 +157,14 @@ pub fn assert_with_failure_artifacts(
     secrets: &[&str],
     result: Result<(), AssertError>,
 ) -> Result<(), AssertError> {
+    let dir = failure_dir(scenario_name);
+    if result.is_ok() {
+        if dir.exists() {
+            std::fs::remove_dir_all(dir)?;
+        }
+        return Ok(());
+    }
     if let Err(err) = result {
-        let dir = failure_dir(scenario_name);
         let artifacts = capture_from_output(dir.clone(), output, command_summary, secrets);
         write_failure_artifacts(&artifacts)?;
         // Persist the scenario-world context so the post-mortem can reproduce
@@ -180,7 +186,8 @@ pub fn assert_with_failure_artifacts(
         // recorded in `sentinel_scan.txt` so the operator can see the
         // pre-write redaction missed it. The scan never masks the original
         // assertion error: we still return `err` below.
-        let leaked = scan_artifacts_for_secrets(&dir, secrets);
+        let leaked = scan_artifacts_for_secrets(&dir, secrets)
+            .map_err(|error| AssertError::ArtifactIo(std::io::Error::other(error)))?;
         if !leaked.is_empty() {
             let _ = std::fs::write(
                 dir.join("sentinel_scan.txt"),
@@ -189,6 +196,7 @@ pub fn assert_with_failure_artifacts(
                     leaked.len()
                 ),
             );
+            return Err(AssertError::SecretLeak(format!("{leaked:?}")));
         }
         return Err(err);
     }

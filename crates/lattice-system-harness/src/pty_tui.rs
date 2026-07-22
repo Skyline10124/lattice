@@ -168,8 +168,7 @@ impl PtyTuiDriver {
                 self.output.extend_from_slice(&buf[..n]);
                 if self.output.len() > READ_BUDGET {
                     return Err(PtyError::Pty(format!(
-                        "PTY output exceeded {} byte budget",
-                        READ_BUDGET
+                        "PTY output exceeded {READ_BUDGET} byte budget"
                     )));
                 }
                 let stripped = strip_ansi(&String::from_utf8_lossy(&self.output));

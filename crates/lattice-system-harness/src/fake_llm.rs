@@ -25,8 +25,9 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -112,6 +113,8 @@ pub enum ServeError {
     Io(#[from] std::io::Error),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("timed out after {0:?} waiting for fake-provider requests")]
+    Timeout(Duration),
 }
 
 /// A running fake LLM server bound to a scenario-local port.
@@ -120,16 +123,56 @@ pub enum ServeError {
 /// and drops the listener — so the bound port actually releases before
 /// `Drop` returns (the previous implementation set a `shutdown` flag the
 /// blocking `accept` could never observe, leaving the thread and port
-/// alive for the whole test process). In-flight per-connection handler
-/// threads run to completion by design: they are short-lived (one request
-/// each) and outlive the serve-thread join. The captured requests are
-/// readable from any thread via `captured_requests` until the server is
-/// dropped.
+/// alive for the whole test process). Drop also cancels a response gate and
+/// joins every connection handler; socket I/O has finite deadlines, so teardown
+/// cannot leave a gated handler behind. Captures remain readable until drop.
+#[derive(Clone)]
+pub struct ResponseGate {
+    state: Arc<(Mutex<GateState>, Condvar)>,
+}
+
+#[derive(Default)]
+struct GateState {
+    released: bool,
+    cancelled: bool,
+}
+
+impl ResponseGate {
+    pub fn release(&self) {
+        let (lock, wake) = &*self.state;
+        lock.lock().unwrap().released = true;
+        wake.notify_all();
+    }
+
+    fn cancel(&self) {
+        let (lock, wake) = &*self.state;
+        lock.lock().unwrap().cancelled = true;
+        wake.notify_all();
+    }
+
+    fn wait(&self) -> bool {
+        let (lock, wake) = &*self.state;
+        let state = wake
+            .wait_while(lock.lock().unwrap(), |state| {
+                !state.released && !state.cancelled
+            })
+            .unwrap();
+        state.released
+    }
+}
+
+#[derive(Default)]
+struct CaptureState {
+    requests: Vec<CapturedRequest>,
+}
+
 pub struct FakeLlmServer {
     listener: TcpListener,
-    captures: Arc<Mutex<Vec<CapturedRequest>>>,
+    captures: Arc<(Mutex<CaptureState>, Condvar)>,
     serve_handle: Option<JoinHandle<()>>,
+    handlers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     shutdown: Arc<Mutex<bool>>,
+    gate: Option<ResponseGate>,
 }
 
 impl FakeLlmServer {
@@ -142,23 +185,49 @@ impl FakeLlmServer {
     /// and re-checks `shutdown`, so `Drop` setting the flag is observed
     /// within that granularity and the thread can be joined promptly.
     pub fn start(script: SseScript) -> Result<Self, ServeError> {
+        Self::start_inner(script, None)
+    }
+
+    pub fn start_gated(script: SseScript) -> Result<(Self, ResponseGate), ServeError> {
+        let gate = ResponseGate {
+            state: Arc::new((Mutex::new(GateState::default()), Condvar::new())),
+        };
+        let server = Self::start_inner(script, Some(gate.clone()))?;
+        Ok((server, gate))
+    }
+
+    fn start_inner(script: SseScript, gate: Option<ResponseGate>) -> Result<Self, ServeError> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let state = Arc::new(Mutex::new(ScriptState { script, next: 0 }));
-        let captures: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captures = Arc::new((Mutex::new(CaptureState::default()), Condvar::new()));
+        let handlers = Arc::new(Mutex::new(Vec::new()));
         let shutdown = Arc::new(Mutex::new(false));
         let handle = {
             let listener_clone = listener.try_clone()?;
             let state = Arc::clone(&state);
             let captures = Arc::clone(&captures);
+            let handlers = Arc::clone(&handlers);
             let shutdown = Arc::clone(&shutdown);
-            thread::spawn(move || serve_loop(listener_clone, state, captures, shutdown))
+            let handler_gate = gate.clone();
+            thread::spawn(move || {
+                serve_loop(
+                    listener_clone,
+                    state,
+                    captures,
+                    handlers,
+                    shutdown,
+                    handler_gate,
+                )
+            })
         };
         Ok(Self {
             listener,
             captures,
             serve_handle: Some(handle),
+            handlers,
             shutdown,
+            gate,
         })
     }
 
@@ -183,7 +252,25 @@ impl FakeLlmServer {
 
     /// A snapshot of every request captured so far, in arrival order.
     pub fn captured_requests(&self) -> Vec<CapturedRequest> {
-        self.captures.lock().unwrap().clone()
+        self.captures.0.lock().unwrap().requests.clone()
+    }
+
+    pub fn wait_for_requests(&self, count: usize, timeout: Duration) -> Result<(), ServeError> {
+        let deadline = Instant::now() + timeout;
+        let (lock, wake) = &*self.captures;
+        let mut captures = lock.lock().unwrap();
+        while captures.requests.len() < count {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ServeError::Timeout(timeout));
+            }
+            let (next, result) = wake.wait_timeout(captures, remaining).unwrap();
+            captures = next;
+            if result.timed_out() && captures.requests.len() < count {
+                return Err(ServeError::Timeout(timeout));
+            }
+        }
+        Ok(())
     }
 
     fn local_addr(&self) -> std::net::SocketAddr {
@@ -197,12 +284,18 @@ impl Drop for FakeLlmServer {
         // non-blocking, the loop's `WouldBlock` branch polls this flag every
         // ~5ms, so the thread observes the signal promptly.
         *self.shutdown.lock().unwrap() = true;
+        if let Some(gate) = &self.gate {
+            gate.cancel();
+        }
         // Join the serve thread so it has exited (and dropped its listener
         // clone) before we drop our own listener — this is what actually
         // closes the socket and releases the port. Join errors are swallowed:
         // a panicked serve thread is not actionable from Drop, and the
         // priority is releasing the port, not surfacing a thread bug.
         if let Some(handle) = self.serve_handle.take() {
+            let _ = handle.join();
+        }
+        for handle in self.handlers.lock().unwrap().drain(..) {
             let _ = handle.join();
         }
     }
@@ -218,19 +311,23 @@ struct ScriptState {
 fn serve_loop(
     listener: TcpListener,
     state: Arc<Mutex<ScriptState>>,
-    captures: Arc<Mutex<Vec<CapturedRequest>>>,
+    captures: Arc<(Mutex<CaptureState>, Condvar)>,
+    handlers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     shutdown: Arc<Mutex<bool>>,
+    gate: Option<ResponseGate>,
 ) {
     while !*shutdown.lock().unwrap() {
         match listener.accept() {
             Ok((stream, _)) => {
                 let state = Arc::clone(&state);
                 let captures = Arc::clone(&captures);
-                thread::spawn(move || {
-                    if let Err(e) = handle_request(stream, &state, &captures) {
+                let gate = gate.clone();
+                let handle = thread::spawn(move || {
+                    if let Err(e) = handle_request(stream, &state, &captures, gate.as_ref()) {
                         eprintln!("fake_llm: serve error: {e}");
                     }
                 });
+                handlers.lock().unwrap().push(handle);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Non-blocking accept with no pending connection: poll the
@@ -248,8 +345,11 @@ fn serve_loop(
 fn handle_request(
     mut stream: TcpStream,
     state: &Mutex<ScriptState>,
-    captures: &Mutex<Vec<CapturedRequest>>,
+    captures: &(Mutex<CaptureState>, Condvar),
+    gate: Option<&ResponseGate>,
 ) -> Result<(), ServeError> {
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -279,7 +379,13 @@ fn handle_request(
     };
 
     let captured = parse_chat_completions_body(&body);
-    captures.lock().unwrap().push(captured);
+    captures.0.lock().unwrap().requests.push(captured);
+    captures.1.notify_all();
+    if let Some(gate) = gate
+        && !gate.wait()
+    {
+        return Ok(());
+    }
 
     // Resolve the active script for this request. A `Sequence` serves each
     // inner script to exactly one request; out-of-range requests repeat the
@@ -635,5 +741,61 @@ mod tests {
         assert_eq!(captured[0].message_roles, vec!["user"]);
 
         let _ = url;
+    }
+
+    fn request_in_thread(
+        addr: std::net::SocketAddr,
+    ) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
+        let (sent, received) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let result = TcpStream::connect(addr).and_then(|mut stream| {
+                let body = r#"{"model":"compat:test","messages":[],"stream":true}"#;
+                write!(
+                    stream,
+                    "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                )?;
+                stream.flush()?;
+                let mut response = Vec::new();
+                stream.read_to_end(&mut response)?;
+                Ok(response)
+            });
+            let _ = sent.send(result);
+        });
+        received
+    }
+
+    #[test]
+    fn gated_response_waits_for_release_and_shutdown_joins_handlers() {
+        let (server, gate) = FakeLlmServer::start_gated(SseScript::plain("gated")).expect("server");
+        let response = request_in_thread(server.local_addr());
+        server
+            .wait_for_requests(1, Duration::from_secs(2))
+            .expect("captured request");
+        assert!(matches!(
+            response.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        gate.release();
+        let bytes = response
+            .recv_timeout(Duration::from_secs(2))
+            .expect("bounded response")
+            .expect("response io");
+        assert!(String::from_utf8_lossy(&bytes).contains("gated"));
+
+        let (server, _gate) =
+            FakeLlmServer::start_gated(SseScript::plain("cancelled")).expect("server");
+        let response = request_in_thread(server.local_addr());
+        server
+            .wait_for_requests(1, Duration::from_secs(2))
+            .expect("captured request");
+        let start = Instant::now();
+        drop(server);
+        assert!(start.elapsed() < Duration::from_secs(3));
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancelled handler joined")
+            .expect("client io");
     }
 }
