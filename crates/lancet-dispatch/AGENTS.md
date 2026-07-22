@@ -33,6 +33,12 @@ cancellation, and server runtime plumbing. ADR 0004 absorbs this behavior into
 
 ## Recent Issues
 
+- ADDED #5 slice D: `CepClient::call_named<P, R>` — name-dynamic, type-static
+  transport helper. `call<M>` delegates to it. `call_named` serializes
+  params, sends a raw JSON-RPC call, and deserializes the result without
+  carrying a JSON Schema; Component params/result validation is done by
+  generated descriptor validators on the server side. #12 absorbs this
+  helper into `lancet-runtime`.
 - FIXED P19-CR-01: cancellation senders were previously tracked by vector
   truncation; unordered completion could lose live handler cancel handles.
 - FIXED P19-CR-02: `EventSink::emit` previously awaited on bounded channels and

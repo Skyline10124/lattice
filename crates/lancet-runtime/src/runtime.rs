@@ -9,13 +9,14 @@
 //! Each call gets a fresh `Store` with per-call limits, fuel, and epoch
 //! deadline. The shared engine's epoch ticker runs in a background task.
 
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use lancet_dispatch::{Cancellation, EventSink};
 use lancet_protocol::cell::{Cell, parse_cell_ref};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
-use wasmtime::{Engine, Store, UpdateDeadline};
 use wasmtime::component::Linker;
+use wasmtime::{Engine, Store, UpdateDeadline};
 
 use crate::bindings;
 use crate::composition::{ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity};
@@ -43,12 +44,16 @@ pub(crate) struct StoreState {
 }
 
 /// The Component runtime. Composed once at startup; immutable after.
+///
+/// `call` takes `&self`: the epoch ticker is lazily spawned on the first
+/// call via a [`OnceLock`], so an `Arc<ComponentRuntime>` can be shared
+/// across the projection and server dispatch paths (D.2/D.3).
 pub struct ComponentRuntime {
     engine: Engine,
     catalog: ClosedCatalog,
     linker: Linker<StoreState>,
-    limits: ExecutionLimits,
-    ticker: Option<EpochTicker>,
+    limits: std::sync::Mutex<ExecutionLimits>,
+    ticker: OnceLock<EpochTicker>,
 }
 
 /// Handle to the epoch ticker task. Stops when dropped.
@@ -87,7 +92,8 @@ impl ComponentRuntime {
         expected_identities: &[ExpectedToolIdentity],
     ) -> Result<Self, CompositionError> {
         let engine = build_engine().map_err(CompositionError::Engine)?;
-        let catalog = ClosedCatalog::compose(&engine, registrations.iter().copied(), expected_identities)?;
+        let catalog =
+            ClosedCatalog::compose(&engine, registrations.iter().copied(), expected_identities)?;
         let linker = build_linker(&engine).map_err(CompositionError::Linker)?;
         let limits = ExecutionLimits::default();
 
@@ -95,18 +101,19 @@ impl ComponentRuntime {
             engine,
             catalog,
             linker,
-            limits,
-            ticker: None,
+            limits: std::sync::Mutex::new(limits),
+            ticker: OnceLock::new(),
         })
     }
 
     /// Ensure the epoch ticker is running. Called lazily from `call` so
-    /// composition doesn't require a tokio runtime context.
-    fn ensure_ticker(&mut self) {
-        if self.ticker.is_none() {
+    /// composition doesn't require a tokio runtime context. Idempotent via
+    /// `OnceLock`: concurrent first calls install the ticker exactly once.
+    fn ensure_ticker(&self) {
+        if self.ticker.get().is_none() {
             let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
             spawn_epoch_ticker(self.engine.clone(), stop_rx);
-            self.ticker = Some(EpochTicker { stop: stop_tx });
+            let _ = self.ticker.set(EpochTicker { stop: stop_tx });
         }
     }
 
@@ -115,10 +122,16 @@ impl ComponentRuntime {
         self.catalog.descriptors()
     }
 
+    /// True if `name` is a Component method in the closed catalog.
+    /// D.3's dispatch split uses this to branch Component vs native.
+    pub fn contains(&self, name: &str) -> bool {
+        self.catalog.get(name).is_some()
+    }
+
     /// Override the per-call execution limits. Used by tests to exercise
     /// fuel/timeout/memory limits without composing a new runtime.
     pub fn set_limits(&mut self, limits: ExecutionLimits) {
-        self.limits = limits;
+        *self.limits.lock().unwrap() = limits;
     }
 
     /// Call a Component Tool by name.
@@ -132,7 +145,7 @@ impl ComponentRuntime {
     /// 7. Validate the result value against the descriptor's JSON Schema.
     /// 8. Derive trust from the descriptor's scope and record Cell evidence.
     pub async fn call(
-        &mut self,
+        &self,
         name: &str,
         params: serde_json::Value,
         ctx: ComponentCallContext,
@@ -153,7 +166,8 @@ impl ComponentRuntime {
 
         let mut store = self.new_store(ctx);
 
-        let instance = match bindings::Tool::instantiate(&mut store, &tool.component, &self.linker) {
+        let instance = match bindings::Tool::instantiate(&mut store, &tool.component, &self.linker)
+        {
             Ok(v) => v,
             Err(e) => return Err(map_component_error(&store, name, e)),
         };
@@ -208,20 +222,25 @@ impl ComponentRuntime {
 
     /// Create a fresh `Store` with per-call limits, fuel, and epoch deadline.
     fn new_store(&self, ctx: ComponentCallContext) -> Store<StoreState> {
-        let limits = RecordingLimits::new(&self.limits);
-        let deadline = Instant::now() + self.limits.deadline;
-        let mut store = Store::new(&self.engine, StoreState {
-            call: ctx,
-            limits,
-            deadline,
-            abort: None,
-        });
+        let limits = self.limits.lock().unwrap().clone();
+        let deadline = Instant::now() + limits.deadline;
+        let fuel = limits.fuel;
+        let limits = RecordingLimits::new(&limits);
+        let mut store = Store::new(
+            &self.engine,
+            StoreState {
+                call: ctx,
+                limits,
+                deadline,
+                abort: None,
+            },
+        );
 
         // Resource limiter: memory/tables/instances.
         store.limiter(|state| &mut state.limits as &mut dyn wasmtime::ResourceLimiter);
 
         // Fuel: coarse CPU upper bound.
-        let _ = store.set_fuel(self.limits.fuel);
+        let _ = store.set_fuel(fuel);
 
         // Epoch interruption: per-Store cancellation/deadline. The callback
         // checks THIS store's cancellation/deadline; unrelated stores yield.

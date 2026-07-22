@@ -39,8 +39,9 @@ async fn adapter_with_registry(registry: MethodRegistry) -> CepExecutorAdapter {
             .run_native(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
+    let definitions = lancet_cep::project_tool_definitions(catalog());
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    let adapter = CepExecutorAdapter::new(client, enabled);
+    let adapter = CepExecutorAdapter::new(client, &definitions, enabled);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
     adapter
@@ -198,7 +199,7 @@ async fn cep_round_trip_unknown_method_rejected_at_adapter() {
 }
 
 #[tokio::test]
-async fn cep_round_trip_schema_mismatch_preserves_field_path() {
+async fn cep_round_trip_schema_mismatch_returns_invalid_params() {
     let dir = TempDir::new().unwrap();
     let (adapter, _audit) = production_adapter(
         dir.path().to_str().unwrap(),
@@ -215,16 +216,10 @@ async fn cep_round_trip_schema_mismatch_preserves_field_path() {
         .await
         .expect_err("missing required path must fail");
 
+    // D.5: the adapter no longer does client-side typed deserialization,
+    // so it does not extract the missing field path. The server-side native
+    // registry validates params and returns invalid_params (-32602).
     assert_cep_payload(&err, jsonrpc::INVALID_PARAMS);
-    let field = err
-        .cep_error
-        .as_ref()
-        .unwrap()
-        .data
-        .get("field")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    assert_eq!(field, "path");
 }
 
 #[tokio::test]
@@ -338,7 +333,8 @@ async fn production_adapter(
         let _ = server.run_native(registry, config).await;
     });
     let enabled_names: Vec<String> = enabled.iter().map(|s| (*s).to_string()).collect();
-    let adapter = CepExecutorAdapter::new(client, enabled_names);
+    let definitions = lancet_cep::project_tool_definitions(catalog());
+    let adapter = CepExecutorAdapter::new(client, &definitions, enabled_names);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
     (adapter, audit)

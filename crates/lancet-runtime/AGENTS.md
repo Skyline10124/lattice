@@ -5,9 +5,11 @@ Crate-local guidance for `lancet-runtime`.
 ## Role
 
 ADR 0004 Component engine, closed composition gate, and minimal ToolHost
-for LATTICE Source Tools (#5 slice C). Owns the wasmtime engine, embedded
+for LATTICE Source Tools (#5 slices C–D). Owns the wasmtime engine, embedded
 inventory collection, the fail-closed composition gate, the control-only
-ToolHost, and the `call` execution path with result/effect validation.
+ToolHost, the `call` execution path with result/effect validation, and the
+`contains`/`descriptors` surface that `lancet-native` and `lancet-api` use
+for the D.3 dispatch split and D.4 LLM projection.
 
 ## Sub-Architecture
 
@@ -18,7 +20,10 @@ ToolHost, and the `call` execution path with result/effect validation.
 - `src/runtime.rs` owns `ComponentRuntime`, `ComponentCallContext`,
   `StoreState`, the engine/linker/ticker construction, and the `call`
   method (params validation, instantiation, result CellRef validation,
-  result schema validation, Cell evidence recording).
+  result schema validation, Cell evidence recording). `call` takes `&self`
+  (the epoch ticker is lazily spawned via `OnceLock`); an
+  `Arc<ComponentRuntime>` can be shared across the projection (D.4) and
+  server dispatch (D.3) paths.
 - `src/bindings.rs` owns the `wasmtime::component::bindgen!` expansion for
   the Tool Host WIT world (`lattice:tool-host@0.1.0`).
 - `src/host.rs` implements the `host-control` interface on `StoreState`
@@ -26,8 +31,10 @@ ToolHost, and the `call` execution path with result/effect validation.
 - `src/limits.rs` owns `ExecutionLimits`, `RecordingLimits`, and
   `AbortReason`. Resource limits use `StoreLimits` + epoch interruption +
   fuel.
-- `src/evidence.rs` owns `CellEvidenceLedger` — in-memory recorder for
-  one call's `(Cell, Trust)` pairs.
+- `src/evidence.rs` owns `CellEvidenceLedger` — `Arc<Mutex>`-backed
+  recorder for one call's `(Cell, Trust)` pairs. Clones share the
+  underlying records so the caller can read `snapshot_keys()` after the
+  call moves one clone into the wasmtime `Store` (D.3).
 - `src/error_map.rs` maps wasmtime traps/limits/aborts to structured
   `CepError` codes (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/
   `CallCancelled`). No guest backtrace/host path/secret is exposed.
@@ -50,8 +57,9 @@ ToolHost, and the `call` execution path with result/effect validation.
 - The `host-control` interface is control-only (cancellation + events).
   No workspace/network/session domain operation before #6 capability
   admission.
-- `call` is `&mut self` because the epoch ticker is lazily spawned on
-  first call (requires a tokio runtime context; composition does not).
+- `call` is `&self`: the epoch ticker is lazily spawned on first call via
+  `OnceLock` (requires a tokio runtime context; composition does not).
+  `set_limits` remains `&mut self` (tests only).
 
 ## Verification
 

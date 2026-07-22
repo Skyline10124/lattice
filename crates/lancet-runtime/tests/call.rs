@@ -34,15 +34,11 @@ fn call_ctx() -> (
 /// result and records Cell evidence.
 #[tokio::test]
 async fn noop_call_round_trips() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
     let (ctx, _rx, _cancel) = call_ctx();
 
     let result = rt
-        .call(
-            "noop.echo",
-            serde_json::json!({"message": "hello"}),
-            ctx,
-        )
+        .call("noop.echo", serde_json::json!({"message": "hello"}), ctx)
         .await
         .expect("call succeeds");
 
@@ -52,12 +48,10 @@ async fn noop_call_round_trips() {
 /// Calling a non-existent tool returns `method_not_found`.
 #[tokio::test]
 async fn call_unknown_tool_returns_method_not_found() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
     let (ctx, _rx, _cancel) = call_ctx();
 
-    let result = rt
-        .call("does.not.exist", serde_json::json!({}), ctx)
-        .await;
+    let result = rt.call("does.not.exist", serde_json::json!({}), ctx).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code, CepErrorCode::SchemaMismatch);
@@ -68,7 +62,7 @@ async fn call_unknown_tool_returns_method_not_found() {
 /// Params that don't match the schema are rejected before entering Wasmtime.
 #[tokio::test]
 async fn call_rejects_bad_params_schema() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
     let (ctx, _rx, _cancel) = call_ctx();
 
     // Missing required "message" field.
@@ -83,7 +77,7 @@ async fn call_rejects_bad_params_schema() {
 /// Evidence: a successful call records the result Cell with derived trust.
 #[tokio::test]
 async fn call_records_cell_evidence() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
     let (ctx, _rx, _cancel) = call_ctx();
 
     // We need to capture the evidence after the call. The evidence is in
@@ -108,7 +102,7 @@ async fn call_records_cell_evidence() {
 /// Events: the no-op guest emits a progress event via host-control.
 #[tokio::test]
 async fn call_forwards_guest_events() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
     let (ctx, mut rx, _cancel) = call_ctx();
 
     let _result = rt
@@ -133,7 +127,7 @@ async fn call_forwards_guest_events() {
 /// guest's `cancelled()` check returns true and it returns an error.
 #[tokio::test]
 async fn call_with_precancelled_returns_guest_error() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
     let (ctx, _rx, cancel_tx) = call_ctx();
 
     // Set cancellation before the call.
@@ -146,4 +140,41 @@ async fn call_with_precancelled_returns_guest_error() {
     // The guest returns Err("cancelled") which maps to ExecutionFailed.
     let err = result.unwrap_err();
     assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+}
+
+/// `contains` reports whether a method name is in the closed catalog.
+/// D.3's dispatch split uses this to branch Component vs native.
+#[test]
+fn contains_reports_catalog_membership() {
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    assert!(rt.contains("noop.echo"));
+    assert!(!rt.contains("observe.workspace"));
+    assert!(!rt.contains("does.not.exist"));
+}
+
+/// `snapshot_keys` returns the 4-segment audit keys (cell + derived trust)
+/// recorded by the evidence ledger. D.3 merges these into audit metadata.
+#[test]
+fn evidence_snapshot_keys_returns_audit_keys() {
+    use lancet_protocol::cell::{Cell, CtxOp, ExtImpact, Trust};
+
+    // An empty ledger has no keys.
+    let empty = CellEvidenceLedger::new();
+    assert!(empty.snapshot_keys().is_empty());
+
+    // After recording a (cell, trust) pair, snapshot_keys returns the
+    // 4-segment audit key. The noop descriptor declares session/in trust
+    // and the result cell is alloc:none:session, so the audit key is
+    // "alloc:none:session:in".
+    let ledger = CellEvidenceLedger::new();
+    let cell = Cell {
+        ctx_op: CtxOp::Alloc,
+        ext_impact: ExtImpact::None,
+        scope: "session".into(),
+    };
+    ledger.record(cell, Trust::In);
+    assert_eq!(
+        ledger.snapshot_keys(),
+        vec!["alloc:none:session:in".to_string()]
+    );
 }

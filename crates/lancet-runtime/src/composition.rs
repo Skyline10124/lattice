@@ -129,9 +129,9 @@ impl ClosedCatalog {
         let mut tools: BTreeMap<String, CompiledTool> = BTreeMap::new();
 
         for reg in registrations {
-            let identity = expected.get(reg.name).ok_or_else(|| {
-                CompositionError::UnapprovedName(reg.name.to_string())
-            })?;
+            let identity = expected
+                .get(reg.name)
+                .ok_or_else(|| CompositionError::UnapprovedName(reg.name.to_string()))?;
             if tools.contains_key(reg.name) {
                 return Err(CompositionError::DuplicateName(reg.name.to_string()));
             }
@@ -159,7 +159,9 @@ impl ClosedCatalog {
                 return Err(CompositionError::UnsupportedAbi(descriptor.abi_version));
             }
             if descriptor.artifact.sha256 != encode_sha256_hex(identity.artifact_sha256) {
-                return Err(CompositionError::DescriptorArtifactDrift(reg.name.to_string()));
+                return Err(CompositionError::DescriptorArtifactDrift(
+                    reg.name.to_string(),
+                ));
             }
 
             let component = Component::new(engine, reg.component_bytes)

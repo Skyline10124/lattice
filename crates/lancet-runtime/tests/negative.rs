@@ -34,17 +34,23 @@ fn call_ctx() -> (
 /// Wasmtime), a normal no-op call still works.
 #[tokio::test]
 async fn survival_after_method_not_found() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
 
     // Call a non-existent tool.
     let (ctx_bad, _rx, _cancel) = call_ctx();
-    let bad = rt.call("no.such.tool", serde_json::json!({}), ctx_bad).await;
+    let bad = rt
+        .call("no.such.tool", serde_json::json!({}), ctx_bad)
+        .await;
     assert!(bad.is_err());
 
     // A normal no-op call still works.
     let (ctx_ok, _rx, _cancel) = call_ctx();
     let result = rt
-        .call("noop.echo", serde_json::json!({"message": "survived"}), ctx_ok)
+        .call(
+            "noop.echo",
+            serde_json::json!({"message": "survived"}),
+            ctx_ok,
+        )
         .await
         .expect("call succeeds after error");
     assert_eq!(result, serde_json::json!({"echoed": "survived"}));
@@ -53,7 +59,7 @@ async fn survival_after_method_not_found() {
 /// Survival proof: after a params schema mismatch, a normal call works.
 #[tokio::test]
 async fn survival_after_schema_mismatch() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
 
     // Bad params.
     let (ctx_bad, _rx, _cancel) = call_ctx();
@@ -74,7 +80,7 @@ async fn survival_after_schema_mismatch() {
 /// Survival proof: after a guest error (cancelled), a normal call works.
 #[tokio::test]
 async fn survival_after_guest_error() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
 
     // Pre-cancelled call → guest error.
     let (ctx_bad, _rx, cancel_tx) = call_ctx();
@@ -96,7 +102,7 @@ async fn survival_after_guest_error() {
 /// Params schema mismatch: extra/missing fields are rejected before Wasmtime.
 #[tokio::test]
 async fn call_rejects_extra_params() {
-    let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
+    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
     let (ctx, _rx, _cancel) = call_ctx();
 
     // The schema has additionalProperties: false and requires "message".
@@ -137,7 +143,11 @@ async fn call_fuel_exhaustion_then_survival() {
     rt.set_limits(lancet_runtime::ExecutionLimits::default());
     let (ctx2, _rx, _cancel) = call_ctx();
     let result = rt
-        .call("noop.echo", serde_json::json!({"message": "survived"}), ctx2)
+        .call(
+            "noop.echo",
+            serde_json::json!({"message": "survived"}),
+            ctx2,
+        )
         .await
         .expect("call succeeds after fuel restoration");
     assert_eq!(result, serde_json::json!({"echoed": "survived"}));
@@ -184,7 +194,11 @@ async fn call_with_past_deadline_does_not_crash() {
     rt.set_limits(lancet_runtime::ExecutionLimits::default());
     let (ctx2, _rx, _cancel) = call_ctx();
     let result = rt
-        .call("noop.echo", serde_json::json!({"message": "survived"}), ctx2)
+        .call(
+            "noop.echo",
+            serde_json::json!({"message": "survived"}),
+            ctx2,
+        )
         .await
         .expect("call succeeds after short deadline");
     assert_eq!(result, serde_json::json!({"echoed": "survived"}));

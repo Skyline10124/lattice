@@ -19,18 +19,11 @@ use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig, Worksp
 use lancet_authority::{
     BudgetLimits, CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig,
 };
-use lancet_catalog::catalog;
-use lancet_catalog::methods::external::Fetch;
-use lancet_catalog::methods::session::TodoWrite;
-use lancet_catalog::methods::workspace::{Create, Edit, ObserveWorkspace};
-use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
     CepAuditContext, CepAuditStore, CepClient, impact_kind_for_method, impact_kind_label,
     wire_code_for_error,
 };
-use lancet_protocol::error::{
-    CepErrorData, invalid_params, jsonrpc, method_not_found, parse_error,
-};
+use lancet_protocol::error::{CepErrorData, jsonrpc, method_not_found, parse_error};
 use lancet_protocol::{CepError, Retriability, ToolEvent};
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
@@ -39,8 +32,6 @@ use lattice_llm::ToolCall;
 #[cfg(test)]
 use lattice_profile::LancetWorkspacePolicySection;
 use lattice_profile::{LancetNetworkSection, LancetObservationSection, LancetSection};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
@@ -66,24 +57,38 @@ pub(crate) struct CepRuntimeBuildMetrics {
     pub transport_pairs: usize,
 }
 
-/// Client-backed adapter that maps LLM-shape tool calls into typed CEP invocations.
+/// Client-backed adapter that maps LLM-shape tool calls into CEP invocations.
+///
+/// D.5: the available set is driven by runtime definitions (native catalog
+/// methods + Component Tools projected from generated descriptors), not by
+/// a hardcoded catalog membership check. All methods — native and Component
+/// alike — go through `CepClient::call_raw`, so the server-side dispatch
+/// split (D.3) handles routing. The adapter does not hand-write method
+/// matches or schemas; params/result validation is done by the native typed
+/// registry or by generated descriptor validators on the server side.
 pub struct CepExecutorAdapter {
     client: CepClient,
-    catalog_names: HashSet<String>,
+    available_names: HashSet<String>,
     enabled_names: HashSet<String>,
 }
 
 impl CepExecutorAdapter {
+    /// Construct from a CEP client, the runtime-projected tool definitions
+    /// (available set), and the enabled-tool names.
+    ///
+    /// `definitions` is the combined native + Component projection from
+    /// `LancetRuntime::build`; `enabled_names` is the subset the profile
+    /// allows for this turn. A tool call is accepted only if its name is in
+    /// both sets.
     pub fn new(
         client: CepClient,
+        definitions: &[lancet_api::ToolDefinition],
         enabled_names: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        let catalog_names: HashSet<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-        let enabled_names = enabled_names.into_iter().map(Into::into).collect();
         Self {
             client,
-            catalog_names,
-            enabled_names,
+            available_names: definitions.iter().map(|d| d.name.clone()).collect(),
+            enabled_names: enabled_names.into_iter().map(Into::into).collect(),
         }
     }
 
@@ -98,63 +103,25 @@ impl CepExecutorAdapter {
             }),
         }
     }
-
-    fn catalog_method_names(&self) -> &HashSet<String> {
-        &self.catalog_names
-    }
-
-    async fn dispatch_typed(&self, method: &str, params: Value) -> Result<Value, CepError> {
-        match method {
-            ObserveWorkspace::NAME => self.call_typed::<ObserveWorkspace>(params).await,
-            Create::NAME => self.call_typed::<Create>(params).await,
-            Edit::NAME => self.call_typed::<Edit>(params).await,
-            Fetch::NAME => self.call_typed::<Fetch>(params).await,
-            TodoWrite::NAME => self.call_typed::<TodoWrite>(params).await,
-            other => Err(method_not_found(other)),
-        }
-    }
-
-    async fn call_typed<M>(&self, params: Value) -> Result<Value, CepError>
-    where
-        M: CatalogMethod,
-        M::Params: DeserializeOwned + Serialize,
-        M::Result: Serialize,
-    {
-        let typed = serde_json::from_value::<M::Params>(params)
-            .map_err(|err| schema_mismatch_for_method::<M>(err))?;
-        let result = self.client.call::<M>(typed).await?;
-        serde_json::to_value(result).map_err(|err| {
-            CepError::internal_error(format!("failed to serialize {} result: {err}", M::NAME))
-        })
-    }
 }
 
 #[async_trait]
 impl ToolCallExecutor for CepExecutorAdapter {
     async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
-        let params: Value = match serde_json::from_str(&call.function.arguments) {
-            Ok(value) => value,
-            Err(err) => {
-                return Err(Self::map_cep_error(parse_error(format!(
-                    "invalid tool arguments JSON: {err}"
-                ))));
-            }
-        };
-
-        if !self.catalog_method_names().contains(&call.function.name) {
-            return Err(Self::map_cep_error(method_not_found(&call.function.name)));
+        let name = &call.function.name;
+        if !self.available_names.contains(name) || !self.enabled_names.contains(name) {
+            return Err(Self::map_cep_error(method_not_found(name)));
         }
-
-        if !self.enabled_names.contains(&call.function.name) {
-            return Err(Self::map_cep_error(method_not_found(&call.function.name)));
-        }
-
-        match self.dispatch_typed(&call.function.name, params).await {
-            Ok(value) => serde_json::to_string(&value).map_err(|err| {
-                ToolExecutionError::simple(format!("failed to serialize tool result: {err}"))
-            }),
-            Err(cep) => Err(Self::map_cep_error(cep)),
-        }
+        let params: Value = serde_json::from_str(&call.function.arguments).map_err(|e| {
+            Self::map_cep_error(parse_error(format!("invalid tool arguments JSON: {e}")))
+        })?;
+        let value = self
+            .client
+            .call_raw(name.clone(), params)
+            .await
+            .map_err(Self::map_cep_error)?;
+        serde_json::to_string(&value)
+            .map_err(|e| ToolExecutionError::simple(format!("serialize tool result: {e}")))
     }
 }
 
@@ -509,12 +476,16 @@ pub(crate) async fn build_production_turn_deps(
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
+    let adapter = Arc::new(CepExecutorAdapter::new(
+        parts.client.clone(),
+        &parts.tool_definitions,
+        enabled_names,
+    ));
     let tool_definitions = parts
         .tool_definitions
         .into_iter()
         .map(to_llm_tool_definition)
         .collect();
-    let adapter = Arc::new(CepExecutorAdapter::new(parts.client.clone(), enabled_names));
     let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
         llm,
         tool_executor: adapter,
@@ -575,12 +546,16 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
+    let adapter = Arc::new(CepExecutorAdapter::new(
+        parts.client.clone(),
+        &parts.tool_definitions,
+        enabled_names,
+    ));
     let tool_definitions = parts
         .tool_definitions
         .into_iter()
         .map(to_llm_tool_definition)
         .collect();
-    let adapter = Arc::new(CepExecutorAdapter::new(parts.client.clone(), enabled_names));
     let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
         llm,
         tool_executor: adapter,
@@ -656,34 +631,6 @@ fn retriability_label(value: &Retriability) -> String {
         Retriability::RequiresReplan => "requires_replan".to_string(),
         Retriability::Unknown => "unknown".to_string(),
     }
-}
-
-fn schema_mismatch_for_method<M: CepMethod>(err: serde_json::Error) -> CepError {
-    let field = extract_json_field_path(&err).unwrap_or_else(|| "params".to_string());
-    let mut cep = invalid_params(format!("invalid params for {}: {err}", M::NAME));
-    if let CepErrorData::Validation(data) = &mut cep.data {
-        data.field = field;
-    }
-    cep
-}
-
-fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
-    let message = err.to_string();
-    if let Some(start) = message.find("missing field `") {
-        let rest = &message[start + "missing field `".len()..];
-        if let Some(end) = rest.find('`') {
-            return Some(rest[..end].to_string());
-        }
-    }
-    if let Some(start) = message.find("invalid type: ")
-        && let Some(field_start) = message[..start].rfind('`')
-    {
-        let prefix = &message[field_start + 1..];
-        if let Some(field_end) = prefix.find('`') {
-            return Some(prefix[..field_end].to_string());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -852,7 +799,9 @@ mod cep_context_profile_policy {
 mod turn_wiring {
     use super::*;
     use lancet_audit::{AuditOutcome, CallAuditMetadata};
+    use lancet_catalog::CepMethod;
     use lancet_catalog::methods::session::TodoWrite;
+    use lancet_catalog::methods::workspace::ObserveWorkspace;
     use lancet_cep::ToolExposure;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_profile::{

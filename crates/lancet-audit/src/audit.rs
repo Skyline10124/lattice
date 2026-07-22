@@ -213,10 +213,16 @@ fn required_capability_for_method(method: &str) -> Option<RequiredCapability> {
 }
 
 /// Merge transport and catalog summary keys into metadata JSON only.
+///
+/// `component_cells` carries the 4-segment Cell audit keys
+/// (`ctx:ext:scope:trust`) produced by Component Tool calls (ADR 0004).
+/// Audit records cells, not capability names (spec §6.3). Native handler
+/// calls pass an empty slice.
 pub fn merge_finalize_metadata(
     existing: Option<&str>,
     method: &str,
     observed_capabilities: &[RequiredCapability],
+    component_cells: &[String],
 ) -> Option<String> {
     let mut obj = existing
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -246,6 +252,14 @@ pub fn merge_finalize_metadata(
             "observed_capabilities".into(),
             serde_json::Value::Array(list),
         );
+    }
+
+    if !component_cells.is_empty() {
+        let list: Vec<_> = component_cells
+            .iter()
+            .map(|cell| serde_json::Value::String(cell.clone()))
+            .collect();
+        obj_map.insert("component_cells".into(), serde_json::Value::Array(list));
     }
 
     serde_json::to_string(&obj).ok()

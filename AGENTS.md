@@ -51,10 +51,11 @@ Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
                  lancet-authority(->protocol,catalog,net-guard)
 Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
+                 lancet-runtime(->protocol,dispatch)
 Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
-                               authority,net-guard)
+                               authority,net-guard,runtime)
 Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,
-                            authority,native)
+                            authority,native,runtime)
 Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
 Layer 5:         lattice-tui(-> api + presentation dependencies)
                  lattice-cli(-> api,tui + presentation dependencies)

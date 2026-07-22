@@ -93,17 +93,15 @@ pub(crate) fn effect_violation(method: &str, cell_ref: &str) -> CepError {
     CepError::new(
         CepErrorCode::EffectViolation,
         format!("{method}: result cell {cell_ref} not in declared capabilities"),
-        lancet_protocol::CepErrorData::Effect(Box::new(
-            lancet_protocol::error::EffectErrorData {
-                method: method.into(),
-                declared_effect: vec![],
-                authorized_effect: vec![],
-                observed_effects: vec![],
-                violations: vec![format!(
-                    "result cell {cell_ref} not in descriptor capability cells"
-                )],
-            },
-        )),
+        lancet_protocol::CepErrorData::Effect(Box::new(lancet_protocol::error::EffectErrorData {
+            method: method.into(),
+            declared_effect: vec![],
+            authorized_effect: vec![],
+            observed_effects: vec![],
+            violations: vec![format!(
+                "result cell {cell_ref} not in descriptor capability cells"
+            )],
+        })),
         Retriability::Permanent,
     )
 }

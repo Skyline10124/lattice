@@ -28,6 +28,11 @@ in-toto attestation construction, and attestation persistence.
 
 ## Recent Issues
 
+- ADDED #5 slice D: `merge_finalize_metadata` gained a `component_cells: &[String]`
+  parameter. Component Tool calls record 4-segment Cell audit keys
+  (`ctx:ext:scope:trust`) as a `component_cells` JSON array; native handler
+  calls pass an empty slice (no behavior change). Audit records cells, not
+  capability names (spec §6.3).
 - FIXED #38: `RejectionStage` vocabulary de-Uppered — `AdapterPreflight` →
   `PathGuard`, `BackendExecution` → `LocalIo`, `VerificationFailure` removed;
   `CallAuditMetadata.backend_invoked` and all routing metadata

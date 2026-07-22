@@ -8,11 +8,15 @@ use std::sync::Arc;
 use lancet_audit::{CepAuditContext, CepAuditStore};
 use lancet_authority::policy::default::DefaultPolicyHook;
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
-use lancet_cep::{ToolDefinition, ToolExposure, ToolExposureError};
+use lancet_catalog::catalog;
+use lancet_cep::{
+    ToolDefinition, ToolExposureError, project_tool_definitions, resolve_enabled_tools,
+};
 use lancet_dispatch::{CepClient, CepTransport};
 use lancet_native::{
     CepServerNativeExt, MethodRegistry, ServerRunConfig, register_production_method_registry,
 };
+use lancet_runtime::ComponentRuntime;
 use tokio::sync::RwLock;
 
 use crate::config::{AuditBacking, LancetRuntimeConfig};
@@ -66,10 +70,37 @@ pub struct LancetServer;
 
 impl LancetServer {
     /// Spawn a native CEP server bound to `config`, returning the client and lifecycle.
+    ///
+    /// Composes the production Component runtime once from embedded inventory
+    /// and the generated `EXPECTED_COMPONENTS` identity list, then delegates
+    /// to [`LancetServer::spawn_composed`]. There is no public path to inject
+    /// Component bytes, paths, or handlers; the catalog is closed at build
+    /// time (ADR 0004).
     pub fn spawn(
         config: ServerRunConfig,
         channel_capacity: usize,
     ) -> Result<(CepClient, ServerLifecycle), LancetError> {
+        let components = Arc::new(
+            ComponentRuntime::from_embedded()
+                .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?,
+        );
+        Self::spawn_composed(config, channel_capacity, components)
+    }
+
+    /// Spawn a native CEP server with a pre-composed Component runtime.
+    ///
+    /// `pub(crate)`: the only public entry ([`LancetServer::spawn`]) composes
+    /// from embedded inventory. Tests inject a fixed no-op fixture through
+    /// this seam (D.6). The same `Arc<ComponentRuntime>` is threaded into
+    /// `ServerRunConfig.components` so `handle_request` can branch Component
+    /// vs native dispatch within the existing audit lifecycle (D.3).
+    pub(crate) fn spawn_composed(
+        mut config: ServerRunConfig,
+        channel_capacity: usize,
+        components: Arc<ComponentRuntime>,
+    ) -> Result<(CepClient, ServerLifecycle), LancetError> {
+        config.components = Some(Arc::clone(&components));
+
         let mut registry = MethodRegistry::new();
         register_production_method_registry(&mut registry).map_err(|err| {
             LancetError::Internal(format!("production method registry registration: {err:?}"))
@@ -121,6 +152,11 @@ pub struct LancetRuntime {
 
 impl LancetRuntime {
     /// Compose and spawn a production LANCET runtime from `config`.
+    ///
+    /// D.2: composes the Component runtime once from embedded inventory +
+    /// generated `EXPECTED_COMPONENTS`. The same `Arc<ComponentRuntime>`
+    /// is threaded into `ServerRunConfig.components` for dispatch (D.3)
+    /// and projected into LLM tool definitions (D.4).
     pub fn build(config: LancetRuntimeConfig) -> Result<Self, LancetError> {
         let LancetRuntimeConfig {
             project_root,
@@ -132,8 +168,22 @@ impl LancetRuntime {
             runtime_version,
         } = config;
 
-        let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools)?;
-        let tool_definitions = tool_exposure.definitions().to_vec();
+        // D.2: compose the Component runtime once. Production builds compose
+        // from embedded inventory (empty until #7–#10); the same instance
+        // serves dispatch (D.3) and LLM projection (D.4).
+        let components = Arc::new(
+            ComponentRuntime::from_embedded()
+                .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?,
+        );
+
+        // D.4: project Component descriptors into LLM tool definitions.
+        // The available set is native catalog methods + Component Tools;
+        // enabled_tools is resolved against the combined set (spec D.4:
+        // profile enabled_tools ⊆ (5 native + built Components): LLM exposure).
+        let mut available = project_tool_definitions(catalog());
+        available.extend(project_component_definitions(&components));
+        let tool_definitions =
+            resolve_enabled_tools(&enabled_tools, &available).map_err(map_tool_exposure_err)?;
 
         let cep_policy = CepPolicyConfig {
             project_root: policy.project_root.clone(),
@@ -182,9 +232,11 @@ impl LancetRuntime {
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode,
+            components: None, // set by spawn_composed
         };
 
-        let (client, lifecycle) = LancetServer::spawn(server_config, DEFAULT_CHANNEL_CAPACITY)?;
+        let (client, lifecycle) =
+            LancetServer::spawn_composed(server_config, DEFAULT_CHANNEL_CAPACITY, components)?;
 
         Ok(Self {
             client,
@@ -232,15 +284,30 @@ impl LancetRuntime {
     }
 }
 
-fn resolve_catalog_tool_exposure(enabled: &[String]) -> Result<ToolExposure, LancetError> {
-    ToolExposure::from_catalog_enabled(enabled).map_err(map_tool_exposure_err)
-}
-
 fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
     LancetError::UnknownTools {
         unknown: err.unknown,
         available: err.available,
     }
+}
+
+/// D.4: Project Component Tool descriptors into LLM-facing tool definitions.
+///
+/// The name/description/params schema come only from the generated descriptor
+/// JSON — the adapter does not hand-write method/schema matches. Production
+/// builds have zero Component Tools until #7–#10; tests inject a no-op
+/// fixture whose descriptor projects a `noop.echo` definition.
+fn project_component_definitions(components: &ComponentRuntime) -> Vec<ToolDefinition> {
+    components
+        .descriptors()
+        .map(|desc| {
+            ToolDefinition::new(
+                desc.name.clone(),
+                desc.description.clone(),
+                desc.params_schema.clone(),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

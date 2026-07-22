@@ -16,6 +16,7 @@ use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_dispatch::{CepServer, ServerCall, ServerRuntime};
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, policy::CepMode};
+use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime};
 use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
@@ -28,6 +29,12 @@ use tokio::sync::RwLock;
 /// concrete [`LocalWorkspace`] from `cep_context.policy.project_root` when the
 /// run starts. Callers supply only the canonical project root (via policy)
 /// and resolved policy.
+///
+/// `components` carries the closed Component runtime (ADR 0004). When a
+/// method name is in the Component catalog, `handle_request` dispatches to
+/// it instead of the native typed registry. Production builds compose
+/// `ComponentRuntime::from_embedded()` (empty until #7–#10); tests may
+/// inject a no-op fixture via `with_components`.
 #[derive(Clone)]
 pub struct ServerRunConfig {
     pub audit: Arc<CepAuditStore>,
@@ -39,6 +46,10 @@ pub struct ServerRunConfig {
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     /// CEP enforcement mode.
     pub cep_mode: CepMode,
+    /// Closed Component runtime for ADR 0004 Tool dispatch. `None` in
+    /// legacy callers; the native server treats `None` as an empty
+    /// Component catalog (all methods go to the native typed registry).
+    pub components: Option<Arc<ComponentRuntime>>,
 }
 
 impl ServerRunConfig {
@@ -59,6 +70,7 @@ impl ServerRunConfig {
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
+            components: None,
         }
     }
 }
@@ -132,6 +144,7 @@ async fn handle_request(
         policy_hook,
         default_policy_hook,
         cep_mode,
+        components,
     } = config;
 
     let id = call.id();
@@ -158,24 +171,45 @@ async fn handle_request(
     let authorized_region_slot = lancet_authority::effect::ledger::AuthorizedRegionSlot::new();
     let turn_id = ctx_snapshot.turn_id.clone();
 
-    let ctx = HandlerContext {
-        call_id: id,
-        events: events.clone(),
-        cancellation,
-        cep_context: Arc::clone(&cep_context),
-        turn_id,
-        durable_metadata: durable_metadata.clone(),
-        effect_ledger: effect_ledger.clone(),
-        authorized_region: authorized_region_slot.clone(),
-        policy_hook: Arc::clone(&policy_hook),
-        default_policy_hook: default_policy_hook.clone(),
-        audit_context: Arc::clone(&audit_context),
-        audit: Arc::clone(&audit),
-        cep_mode: cep_mode.clone(),
-        workspace,
+    // D.3: Component/native dispatch split. If the method name is in the
+    // closed Component catalog, dispatch to the Component runtime; otherwise
+    // fall through to the existing 5-method typed registry. The split happens
+    // after audit start and before finalize, so Component and native calls
+    // share one durable audit path. Component calls produce Cell evidence
+    // (no domain operation in #5); native calls produce effect-ledger evidence.
+    let component_evidence = CellEvidenceLedger::new();
+
+    let dispatch_result = if let Some(ref rt) = components
+        && rt.contains(&method)
+    {
+        let comp_ctx = ComponentCallContext {
+            call_id: id,
+            turn_id: turn_id.clone(),
+            events: events.clone(),
+            cancellation: cancellation.clone(),
+            evidence: component_evidence.clone(),
+        };
+        rt.call(&method, params, comp_ctx).await
+    } else {
+        let ctx = HandlerContext {
+            call_id: id,
+            events: events.clone(),
+            cancellation,
+            cep_context: Arc::clone(&cep_context),
+            turn_id,
+            durable_metadata: durable_metadata.clone(),
+            effect_ledger: effect_ledger.clone(),
+            authorized_region: authorized_region_slot.clone(),
+            policy_hook: Arc::clone(&policy_hook),
+            default_policy_hook: default_policy_hook.clone(),
+            audit_context: Arc::clone(&audit_context),
+            audit: Arc::clone(&audit),
+            cep_mode: cep_mode.clone(),
+            workspace,
+        };
+        registry.dispatch(&method, params, ctx).await
     };
 
-    let dispatch_result = registry.dispatch(&method, params, ctx).await;
     let observed_effects = effect_ledger.snapshot();
 
     let final_result = apply_effect_check(
@@ -193,10 +227,12 @@ async fn handle_request(
         .iter()
         .map(|effect| effect.required_capability)
         .collect();
+    let component_cells = component_evidence.snapshot_keys();
     let merged_metadata = merge_finalize_metadata(
         durable_metadata_json.as_deref(),
         &method,
         &observed_capabilities,
+        &component_cells,
     );
 
     finalize_audit_for_dispatch(

@@ -39,6 +39,13 @@ agent loop over `lancet-api`'s CEP runtime.
 
 ## Recent Issues
 
+- ADDED #5 slice D: `CepExecutorAdapter` now takes `definitions: &[ToolDefinition]`
+  + `enabled_names` instead of deriving the available set from `catalog()`.
+  The hardcoded five-arm `dispatch_typed`/`call_typed`/`schema_mismatch_for_method`
+  and the five method type imports are deleted; all methods go through
+  `CepClient::call_raw`, so Component Tools are no longer blocked by central
+  catalog membership. Params/result validation is done server-side (native
+  typed registry or generated descriptor validators).
 - FIXED M-24-04: `lancet-cep` now separates `ToolExposure` from
   `BaseAuthorityPlan`, and catalog descriptors declare method-local base
   authority requirements. This crate converts CEP tool definitions to provider

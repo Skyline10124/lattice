@@ -8,17 +8,15 @@
 //! fixed: no caller-controlled registrations, paths, bytes, handlers, or
 //! approval set. This is the only non-production composition entry point.
 
-use crate::composition::{EmbeddedTool, ExpectedToolIdentity, _parse_hex_digest as parse_hex_digest};
+use crate::composition::{
+    _parse_hex_digest as parse_hex_digest, EmbeddedTool, ExpectedToolIdentity,
+};
 
 /// Fixed registration: the committed `noop.echo` descriptor + component bytes.
 static NOOP_FIXTURE: EmbeddedTool = EmbeddedTool {
     name: "noop.echo",
-    descriptor_json: include_bytes!(
-        "../../../../tools/noop/generated/descriptor.json"
-    ),
-    component_bytes: include_bytes!(
-        "../../../../tools/noop/generated/noop_echo.component.wasm"
-    ),
+    descriptor_json: include_bytes!("../../../../tools/noop/generated/descriptor.json"),
+    component_bytes: include_bytes!("../../../../tools/noop/generated/noop_echo.component.wasm"),
 };
 
 pub fn registration() -> &'static EmbeddedTool {

@@ -814,10 +814,42 @@ fn merge_finalize_metadata_adds_required_capability() {
         Some(r#"{"observation_source":"workspace"}"#),
         "observe.workspace",
         &[],
+        &[],
     )
     .unwrap();
     assert!(merged.contains("required_capability"));
     assert!(merged.contains("inspect"));
+}
+
+#[test]
+fn merge_finalize_metadata_records_component_cells() {
+    // Component Tools (ADR 0004) record 4-segment Cell audit keys
+    // (ctx:ext:scope:trust). merge_finalize_metadata must add them as a
+    // `component_cells` JSON array so the durable audit row carries
+    // cell-attributed effect evidence (spec §6.3: audit records cells,
+    // not capability names).
+    let merged = merge_finalize_metadata(
+        None,
+        "noop.echo",
+        &[],
+        &["alloc:none:session:in".to_string()],
+    )
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert_eq!(
+        parsed["component_cells"],
+        serde_json::json!(["alloc:none:session:in"])
+    );
+}
+
+#[test]
+fn merge_finalize_metadata_omits_component_cells_when_empty() {
+    let merged = merge_finalize_metadata(None, "observe.workspace", &[], &[]).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert!(
+        parsed.get("component_cells").is_none(),
+        "empty component_cells must not appear in metadata"
+    );
 }
 
 #[tokio::test]

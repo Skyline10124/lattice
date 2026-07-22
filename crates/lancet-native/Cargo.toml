@@ -13,6 +13,7 @@ lancet-catalog = { workspace = true }
 lancet-dispatch = { workspace = true }
 lancet-audit = { workspace = true }
 lancet-authority = { workspace = true }
+lancet-runtime = { workspace = true }
 schemars = { workspace = true }
 blake3 = { workspace = true }
 futures = { workspace = true }
@@ -33,6 +34,7 @@ gix = { workspace = true }
 proptest = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
+lancet-runtime = { workspace = true, features = ["test-utils"] }
 
 [features]
 default = []

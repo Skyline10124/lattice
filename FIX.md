@@ -2,6 +2,84 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #5 slice D: closed Component dispatch, descriptor-driven adapter, no-op CEP round-trip — 2026-07-22
+
+Severity: FEATURE (#5 slice D of 4; docs/plans/2026-07-19-issue5-sliceD-cep-adapter-roundtrip.md).
+
+**Problem:** ADR 0004 requires Component Tools to dispatch through the same
+CEP server/audit lifecycle as the 5 production native handlers, with the
+LLM adapter driven by generated descriptors rather than a hardcoded catalog
+match gate. Slices A–C landed the Cell core, manifest/codegen/WIT/prelude/
+no-op guest, and the Component engine + composition gate; this slice wires
+them into the existing native dispatch path and deletes the adapter's
+hardcoded five-arm typed dispatch.
+
+**Fix:**
+- `lancet-dispatch` `CepClient::call_named<P, R>`: name-dynamic, type-static
+  transport helper. `call<M>` delegates to it. Serialize/deserialize failure
+  maps to `invalid_params`/`internal_error`; no JSON Schema carried. #12
+  absorbs this into `lancet-runtime`.
+- `lancet-runtime`: `ComponentRuntime::call` changed from `&mut self` to
+  `&self` (epoch ticker via `OnceLock`; `set_limits` stays `&mut` for tests).
+  Added `contains(&self, name)` for the D.3 dispatch split.
+  `CellEvidenceLedger` changed to `Arc<Mutex<Vec<…>>>`-backed + `Clone` so
+  a pre-call clone retains records added during execution; added
+  `snapshot_keys() -> Vec<String>` (4-segment `ctx:ext:scope:trust` keys).
+- `lancet-audit` `merge_finalize_metadata`: extended with
+  `component_cells: &[String]` parameter. Component calls record Cell audit
+  keys as a `component_cells` JSON array; native calls pass `&[]` (no
+  behavior change). Audit records cells, not capability names (spec §6.3).
+- `lancet-native` + `lancet-api`: gained production dependency on
+  `lancet-runtime`. `ServerRunConfig` carries
+  `Option<Arc<ComponentRuntime>>`. `handle_request` branches Component vs
+  native dispatch after audit start and before finalize, sharing one
+  durable audit path. Component calls produce Cell evidence; native calls
+  produce effect-ledger evidence as before. Production `from_embedded()`
+  yields an empty Component catalog so all 5 native methods are unchanged.
+- `lancet-api` `LancetRuntime::build`: composes
+  `ComponentRuntime::from_embedded()` once; the same `Arc<ComponentRuntime>`
+  threads into `ServerRunConfig.components` (D.3) and projects into LLM
+  tool definitions (D.4). `LancetServer::spawn` composes from embedded
+  inventory and delegates to `pub(crate) spawn_composed`; no public path
+  to inject Component bytes/paths/handlers.
+- `lattice-api` `CepExecutorAdapter`: `new` takes
+  `definitions: &[ToolDefinition]` + `enabled_names`; the available set is
+  driven by runtime definitions, not `catalog()`. Deleted the hardcoded
+  five-arm `dispatch_typed`/`call_typed`/`schema_mismatch_for_method` +
+  `extract_json_field_path` + five method type imports. All methods go
+  through `CepClient::call_raw`; params/result validation is server-side.
+- D.6 end-to-end tests (`crates/lancet-native/tests/cep_component_round_trip.rs`):
+  `noop.echo` round-trips through CEP + audit (asserts
+  `alloc:none:session:in` in metadata); native method coexists; Component
+  events forwarded; server survives method-not-found and schema mismatch.
+  `lattice-api` adapter tests: `CepExecutorAdapter` executes a Component
+  Tool via descriptor-projected definition; rejects disabled Component Tool.
+
+**Verification:**
+- `cargo test -p lancet-dispatch -p lancet-runtime -p lancet-native -p lancet-api -p lattice-api` — all pass.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- `cargo xtask ci` — all checks pass (codegen determinism, build, boundary, test).
+- Manual gate: `rg "dispatch_typed|schema_mismatch_for_method" crates/lattice-api/src/turn/cep.rs` — empty.
+
+**Changed files:**
+- `crates/lancet-dispatch/src/transport.rs` — `call_named` helper + tests.
+- `crates/lancet-runtime/src/runtime.rs` — `&self` call, `OnceLock` ticker, `contains`, `Mutex` limits.
+- `crates/lancet-runtime/src/evidence.rs` — `Arc<Mutex>`-backed ledger, `Clone`, `snapshot_keys`.
+- `crates/lancet-runtime/tests/call.rs` — `contains` + `snapshot_keys` tests, `&self` call fixes.
+- `crates/lancet-runtime/tests/negative.rs` — `&self` call fixes.
+- `crates/lancet-audit/src/audit.rs` — `merge_finalize_metadata` + `component_cells`.
+- `crates/lancet-audit/src/audit_tests.rs` — `component_cells` tests + existing test updated.
+- `crates/lancet-native/Cargo.toml` — `lancet-runtime` dep + dev-dep with `test-utils`.
+- `crates/lancet-native/src/server/transport.rs` — `ServerRunConfig.components`, D.3 dispatch split.
+- `crates/lancet-native/tests/cep_component_round_trip.rs` — D.6 end-to-end tests (new).
+- `crates/lancet-api/Cargo.toml` — `lancet-runtime` dep.
+- `crates/lancet-api/src/runtime.rs` — `spawn_composed`, compose once, project defs.
+- `crates/lattice-api/Cargo.toml` — `lancet-runtime` dev-dep with `test-utils`.
+- `crates/lattice-api/src/turn/cep.rs` — D.5 adapter rewrite, delete hardcoded dispatch.
+- `crates/lattice-api/src/turn/cep_tests.rs` — adapter signature update + D.6 Component adapter tests.
+- `crates/lattice-api/tests/cep_round_trip.rs` — adapter signature update.
+- `crates/*/AGENTS.md` — slice D notes for dispatch, runtime, native, api, lattice-api, audit.
+
 ## Codeberg #5 slice C: lancet-runtime Component engine + composition gate + minimal ToolHost — 2026-07-22
 
 Severity: FEATURE (#5 slice C of 4; docs/plans/2026-07-19-issue5-sliceC-component-engine-composition-gate.md).

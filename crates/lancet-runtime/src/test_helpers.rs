@@ -16,9 +16,7 @@ use lancet_protocol::cell::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::composition::{
-    ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity,
-};
+use crate::composition::{ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity};
 
 /// A synthetic registration + expected identity pair. Tests mutate fields
 /// to create drift.
@@ -88,12 +86,9 @@ impl SyntheticTool {
     /// Build a SyntheticTool from the committed noop fixture bytes but with
     /// a custom name (for duplicate/missing tests).
     pub fn from_noop_bytes(name: &'static str) -> Self {
-        let descriptor_json = include_bytes!(
-            "../../../tools/noop/generated/descriptor.json"
-        );
-        let component_bytes = include_bytes!(
-            "../../../tools/noop/generated/noop_echo.component.wasm"
-        );
+        let descriptor_json = include_bytes!("../../../tools/noop/generated/descriptor.json");
+        let component_bytes =
+            include_bytes!("../../../tools/noop/generated/noop_echo.component.wasm");
         Self::new(
             name,
             descriptor_json,
@@ -113,10 +108,7 @@ pub fn compose(tools: &[&SyntheticTool]) -> Result<ClosedCatalogHandle, Composit
         .epoch_interruption(true);
     let engine = wasmtime::Engine::new(&c).map_err(CompositionError::Engine)?;
 
-    let regs: Vec<&'static EmbeddedTool> = tools
-        .iter()
-        .map(|t| leak(t.registration))
-        .collect();
+    let regs: Vec<&'static EmbeddedTool> = tools.iter().map(|t| leak(t.registration)).collect();
     let ids: Vec<ExpectedToolIdentity> = tools.iter().map(|t| t.identity).collect();
     let ids: &'static [ExpectedToolIdentity] = leak_vec(ids);
 

@@ -47,6 +47,12 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Recent Issues
 
+- ADDED #5 slice D: `ServerRunConfig` carries `Option<Arc<ComponentRuntime>>`.
+  `handle_request` branches Component vs native dispatch after audit start
+  and before finalize, sharing one durable audit path. Component calls
+  produce Cell evidence (`component_cells` in audit metadata); native calls
+  produce effect-ledger evidence as before. Production `from_embedded()`
+  yields an empty Component catalog so all 5 native methods are unchanged.
 - FIXED #38: `ExecutionBackend`/`ExecutionRouting`/`UpperContext`/
   `RoutingInvocationState`/`NullExecutionBackend` and all spy backends
   deleted; handlers and the edit engine call the concrete `LocalWorkspace`

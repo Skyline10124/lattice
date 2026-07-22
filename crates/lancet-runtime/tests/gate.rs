@@ -185,9 +185,7 @@ fn gate_rejects_missing_channel_adapter() {
     let descriptor_json: &'static [u8] = Box::leak(descriptor_json.into_boxed_slice());
 
     // Use the noop component bytes (imports host-control only).
-    let component_bytes = include_bytes!(
-        "../../../tools/noop/generated/noop_echo.component.wasm"
-    );
+    let component_bytes = include_bytes!("../../../tools/noop/generated/noop_echo.component.wasm");
     let component_bytes: &'static [u8] = component_bytes;
 
     // Patch the descriptor's artifact sha256 to match the noop component.
@@ -197,7 +195,13 @@ fn gate_rejects_missing_channel_adapter() {
     let descriptor_json = serde_json::to_vec(&value).unwrap();
     let descriptor_json: &'static [u8] = Box::leak(descriptor_json.into_boxed_slice());
 
-    let tool = SyntheticTool::new("ws.tool", descriptor_json, component_bytes, 1, &["lattice:tool-host/host-control@0.1.0"]);
+    let tool = SyntheticTool::new(
+        "ws.tool",
+        descriptor_json,
+        component_bytes,
+        1,
+        &["lattice:tool-host/host-control@0.1.0"],
+    );
     let result = compose(&[&tool]);
     assert!(
         matches!(result, Err(CompositionError::MissingChannelAdapters { ref missing }) if missing.iter().any(|c| matches!(c, lancet_protocol::cell::ChannelKind::Workspace))),
