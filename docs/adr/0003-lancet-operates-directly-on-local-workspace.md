@@ -6,21 +6,17 @@
 - Amended by: ADR 0004 (Tool catalog and execution ownership only)
 - Canonical vocabulary: root `CONTEXT.md`
 
-> **⚠️ 过时词汇警告（2026-07-19）**：本文件仍含已退役的 KVM-lane 词汇
->（Microsandbox、MSB 等）作为历史决策上下文。这些词汇已从 active 代码、
-> machine ledger（`docs/test-triage-decisions.json`）与 `docs/TEST-TRIAGE.md`
-> 中完全移除。本文件待重写以替换为当前 Direct-Local 词汇。重写工作由
-> codeberg issue 跟踪。
 
 ## Context
 
 ADR 0002 made the Local Workspace authoritative but still copied it into a
-turn-scoped Microsandbox, snapshotted each Tool call, watched Local changes,
-merged two filesystem histories, and wrote approved results back. Evaluation
-of both Microsandbox 0.6.6 and CubeSandbox showed that faithfully projecting
-project trees, preserving metadata, establishing consistent savepoints, and
-operating the required VM infrastructure creates more machinery than the
-Agent's actual capability surface requires.
+turn-scoped isolated workspace mirror, snapshotted each Tool call, watched
+Local changes, merged two filesystem histories, and wrote approved results
+back. Evaluation of that projection-and-isolation stack (and of alternative
+VM sandbox candidates) showed that faithfully projecting project trees,
+preserving metadata, establishing consistent savepoints, and operating the
+required VM infrastructure creates more machinery than the Agent's actual
+capability surface requires.
 
 The production CEP catalog contains exactly five Agent-visible methods:
 `observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`, and
@@ -214,11 +210,11 @@ audit diagnostics must preserve this distinction.
    them as project-relative patterns, and apply one visibility decision across
    read, list, grep, and find operations without invoking a Git subprocess.
 5. Delete guest-Git baseline delivery, candidate export, changed-path
-   porcelain, warm templates, Microsandbox capable-host probes, KVM guards,
+   porcelain, warm templates, capable-host probes, KVM guards,
    and the `lattice-workspace` crate once no production or test dependency
    remains. Update generated architecture documentation after the dependency
    graph changes.
-6. Replace MSB-bound harness scenarios with direct-Local scenarios covering
+6. Replace retired-lane harness scenarios with Direct-Local scenarios covering
    observation, mutation, policy denial, concurrent external edits,
    cancellation, audit evidence, and session reopen against changed Local
    state. Remove tests whose only contract was sandbox lifecycle.
@@ -236,9 +232,10 @@ allowed during the cutover.
 
 - Continuing ADR 0002's Turn Workspace projection, savepoint, watcher, merge,
   and writeback model.
-- Replacing Microsandbox with CubeSandbox; its stronger VM snapshots do not
-  remove projection, protocol-ownership, and deployment costs, and they restore
-  process/memory state that LATTICE does not want.
+- Replacing the retired projection sandbox with another VM sandbox product;
+  stronger VM snapshots do not remove projection, protocol-ownership, and
+  deployment costs, and they restore process/memory state that LATTICE does
+  not want.
 - A Host-private project copy with later promotion. It retains duplicate state,
   reconciliation, and crash-recovery machinery while providing no process
   isolation benefit for the closed structured catalog.

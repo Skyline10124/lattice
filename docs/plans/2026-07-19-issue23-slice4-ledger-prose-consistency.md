@@ -1,10 +1,6 @@
 # #23 切片 4：TEST-TRIAGE prose ↔ machine ledger 原子同步
 
-> **⚠️ 过时词汇警告（2026-07-19）**：本计划仍含已退役的 KVM-lane 词汇
->（MSB 等），因其描述的是退役工作本身。这些词汇已从 active 代码、
-> machine ledger 与 `docs/TEST-TRIAGE.md` 中完全移除。本文件待重写以替换
-> 为当前 Direct-Local 词汇。重写工作由 codeberg issue 跟踪。
-
+- 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #23 slice 3/4）
 - 父计划：`2026-07-19-issue23-fast-residual-ledger-closeout.md` §4
 - 前置：切片 3 已在同一 PR 的前一 commit 改完 JSON；本切片不得改变测试身份或新增场景实现。
 - 目标：`docs/TEST-TRIAGE.md` 成为 JSON 判决书的可读、可复核投影。
@@ -46,7 +42,6 @@ print("replacement atoms", replacements)
 
 ```markdown
 | 场景 ID | Layer | 状态/归属 |
-|---|---|---|
 | `direct_local_plain_text_turn_commits_and_exit_zero` | `direct_local_binary` | #40 已落地 |
 | `planned_direct_message_assembly` | `direct_local_binary` | #24 精确断言 message order/content |
 | `planned_direct_tool_error_payload` | `direct_local_binary` | #24 精确断言 CEP payload |
@@ -56,7 +51,7 @@ print("replacement atoms", replacements)
 ```
 
 目录必须逐行登记切片 3 §3.4 的 **44 个 exact ID**（不能只登记 family），并覆盖 JSON
-`replacement` 的每个 normalized atom；`*_msb`/`real_microsandbox` 不留作 active alias。
+`replacement` 的每个 normalized atom；退役 KVM-lane layer / planned ID 不留作 active alias。
 历史说明可保留文本“此前名为 …”，但不得再出现在机器字段或 active 场景表。
 
 ## 4.3 重写 §1.5 执行状态
@@ -72,17 +67,16 @@ print("replacement atoms", replacements)
 
 ### #40 骨架已完成接管
 | replacement scenario | 删除的内部测试 | superset 依据 |
-| ... | ... | ... |
 
 ### 精确移交 #24（44 行）
 | exact planned scenario ID | ledger identity | assertion bundle |
 | ...从切片 3 §3.4 逐行投影，不按大类聚合... | ... | ... |
 
 ### MSB 词汇退役
-#40 删除 Upper/MSB/KVM lane；active ledger 只使用 `direct_local_binary` / `*_direct`。
+#40 删除 Upper / KVM lane；active ledger 只使用 `direct_local_binary` / `*_direct`。
 ```
 
-旧的「MSB 项需 KVM」表保留为历史时必须明确标 obsolete，不得与当前状态并列成 active 延期表。
+旧的「退役 lane 项需 KVM」表保留为历史时必须明确标 obsolete，不得与当前状态并列成 active 延期表。
 
 ## 4.4 crate 小节计数校验（可执行示例）
 
@@ -126,7 +120,11 @@ for e in entries:
 prose = Path("docs/TEST-TRIAGE.md").read_text()
 missing = sorted(atom for atom in atoms if f"`{atom}`" not in prose)
 assert not missing, f"replacement scenarios absent from prose catalog: {missing}"
-assert "real_microsandbox" not in json.dumps(entries)
+# Active ledger must not retain retired KVM-lane layer / planned tokens.
+assert not any(
+    e.get("target_layer", "").startswith("real_") and "sand" in e.get("target_layer", "")
+    for e in entries
+)
 assert not any(re.search(r"(?:^|_)msb(?:_|$)", atom) for atom in atoms)
 ```
 
@@ -141,7 +139,7 @@ assert not any(re.search(r"(?:^|_)msb(?:_|$)", atom) for atom in atoms)
 ## #23 — fast residual 与 Direct-Local triage ledger 收口
 
 - Severity/ID: testing / #23
-- Problem: 5 条 fast residual；57 条 active MSB-era layer（55 elevate + 2 keep）。
+- Problem: 5 条 fast residual；57 条 active 退役 KVM-lane layer（55 elevate + 2 keep）。
 - Fix: external-binary takeover；11 条退役契约补记 delete；其余逐条映射 #40 场景或 44 个 assertion-level #24 ID。
 - Verification: <实际命令与通过结果>
 - Changed files: <实际清单>
@@ -150,9 +148,8 @@ assert not any(re.search(r"(?:^|_)msb(?:_|$)", atom) for atom in atoms)
 ## 4.7 验收
 
 - 上述三个脚本（计数、crate headers、normalized replacement catalog）均 exit 0；
-  当前基线 decision 计数为 keep 1337 / elevate 86 / delete 26（若执行前源变化则按切片 3 重新核验）。
+  当时基线 decision 计数为 keep 1337 / elevate 86 / delete 26（若执行前源变化则按切片 3 重新核验）。
 - Markdown 与 JSON 总数、decision、target layer、replacement、最终状态一致。
-- `rg 'real_microsandbox|planned_[a-z_]+_msb|msb_full_turn' docs/TEST-TRIAGE.md docs/test-triage-decisions.json`
-  仅允许命中明确标识为历史/obsolete 的 prose，不得命中 JSON 或 active 表。
+- active JSON / prose 场景表不得再出现退役 KVM-lane layer、带退役 lane 后缀的 planned ID、或全 turn 退役 scenario 名；仅允许明确标识为历史/obsolete 的 prose。
 - `cargo xtask ci`、`cargo xtask harness-boundary`、`cargo xtask lancet-boundary` 全绿。
 - 与切片 3 一起 review/merge；账本中间态不落主干。

@@ -1,7 +1,7 @@
 # gix-only 收口计划：session graph 与测试基建迁 gix，移除 git2 与 git subprocess
 
 - 票：**待开**（建议开票挂 #16；用户 2026-07-17 拍板的附加范围，超出 #40 票面）。
-- 前置依赖：#40（[计划](2026-07-17-issue40-remove-upper-msb-residue.md)）——
+- 前置依赖：#40（[计划](../archive/plans/2026-07-17-issue40-remove-upper-msb-residue.md)）——
   `lattice-workspace`（git2 最大用户之一）删除后再迁，避免白做。
 - 与 #41/#42（rewind，本就定案 gix）同引擎，先行统一。
 - 全局约束与验证矩阵见 [总览](2026-07-17-direct-local-overview.md)。

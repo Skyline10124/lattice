@@ -1,33 +1,29 @@
 # #23 实现计划：快速测试残留与分类账收口（测试重构 4/6）
 
-> **⚠️ 过时词汇警告（2026-07-19）**：本计划仍含已退役的 KVM-lane 词汇
->（MSB、Microsandbox 等）。这些词汇已从 active 代码、machine ledger
->（`docs/test-triage-decisions.json`）与 `docs/TEST-TRIAGE.md` 中完全移除。
-> 本文件待重写以替换为当前 Direct-Local 词汇。重写工作由 codeberg issue 跟踪。
-
-- 票：<https://codeberg.org/AstRin/LATTICE/issues/23>（`ready-for-agent`，无前置依赖）
+- 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #23）
+- 票：<https://codeberg.org/AstRin/LATTICE/issues/23>
 - 上级：#18（PRD）/ #19（RFC，已接受）。判决书 = `docs/TEST-TRIAGE.md` + `docs/test-triage-decisions.json`（1449 条，身份不变）。
 - 排序依据：roadmap #16 既定顺序，#23 先于 #5 开工。
 - 独立切片计划（均含示例代码）：
   [1：fast lancet CLI](2026-07-19-issue23-slice1-fast-lancet-cli.md) →
   [2：branch fast scenarios](2026-07-19-issue23-slice2-branch-fast-scenarios.md) →
-  [3：MSB 词汇退役/映射](2026-07-19-issue23-slice3-msb-vocabulary-retirement.md) →
+  [3：退役 KVM-lane 词汇/映射](2026-07-19-issue23-slice3-retired-lane-vocabulary.md) →
   [4：prose/ledger 一致性](2026-07-19-issue23-slice4-ledger-prose-consistency.md)。
-  切片 3/4 文档独立，但必须同一 PR 相邻 commit（账本原子性）。
+  切片 3/4 文档独立，但当时必须同一 PR 相邻 commit（账本原子性）。
 
-## 0. 现状锚点（已核验 2026-07-19）
+## 0. 收口前锚点（已核验 2026-07-19；现已清零）
 
-- ledger 1449 条：keep 1338 / elevate 96 / delete 15（15 条删除已全部执行）。
-- elevate 96 = **41 条 fast_binary + 55 条 MSB-era replacement**；另有 2 条 keep 的
-  `target_layer=real_microsandbox`，所以待改 layer 总数为 57。
-- 41 条 fast 中 **36 条已接管完成**；残留 5 条，全在 `lattice-cli`：
+- ledger 当时 1449 条：keep 1338 / elevate 96 / delete 15（15 条删除已全部执行）。
+- elevate 96 = **41 条 fast_binary + 55 条退役 KVM-lane replacement**；另有 2 条 keep 仍挂退役
+  KVM-lane `target_layer`，所以待改 layer 总数曾为 57。切片 3 后该类 layer 已清零。
+- 41 条 fast 中 **36 条已接管完成**；残留 5 条当时全在 `lattice-cli`：
   1. `cep_status_missing_db_returns_empty_state`（`lancet.rs:289`）→ `planned_lancet_cli`，场景未建。
   2. `project_branch_creation_json_output_includes_branch`（`session.rs:1284`）→ 部分覆盖，缺 branch 创建 JSON 场景。
   3. `project_branch_persists_through_reopen`（`session.rs:1345`）→ 部分覆盖，缺 reopen 持久化场景。
   4. `smoke_session_status_list_shows_seeded_session`（`release_smoke.rs:185`）→ 已完整接管，冗余待删。
   5. `smoke_session_status_specific_session`（`release_smoke.rs:210`）→ 已完整接管，冗余待删。
-- #40 已删 Upper/MSB/`LATTICE_HARNESS_MSB`：ledger 里 `*_msb` replacement 名与
-  `real_microsandbox` target_layer 全部成为**死词汇**（TEST-TRIAGE §1.5 "#40 状态更新"已声明延期理由失效）。
+- #40 已删 Upper 与退役 KVM-lane harness 门禁通道：ledger 里带退役 lane 后缀的 replacement 名与
+  退役 KVM-lane `target_layer` 全部成为**死词汇**（TEST-TRIAGE §1.5 已声明延期理由失效）。
 - #40 落地 `tests/direct_local_turn.rs` 骨架（ordinary lane，非 ignore）：plain-text turn commit、
   session reopen、mutate policy denial 三场景已通过。
 - harness 契约：仅 `LATTICE_BIN` + 公开接口（`driver.rs:14`，AGENTS.md）；无产品 crate 依赖。
@@ -56,20 +52,19 @@ ledger：该条 reason 改「已删除原内部测试，由已落地 fast_lancet
 两场景通过后删除：
 
 | 删除 | 依据 |
-| --- | --- |
 | `session.rs:1284` `project_branch_creation_json_output_includes_branch` | 新场景 1 接管 |
 | `session.rs:1345` `project_branch_persists_through_reopen` | 新场景 2 接管 |
 | `release_smoke.rs:185` `smoke_session_status_list_shows_seeded_session` | prose §1.5 已判「完整接管待删」（`fast_session_new_creates_session_and_appears_in_list` 等） |
 | `release_smoke.rs:210` `smoke_session_status_specific_session` | 同上（`fast_session_status_specific` 系列） |
 
 夹具收口（票文「仅由测试重复造成的 fixtures」）：删除后检查 `release_smoke.rs` 的
-`seed_session` 类 helper 是否成为孤儿，孤儿即删；**不为旧 Upper/MSB API 新增 shared helper**。
+`seed_session` 类 helper 是否成为孤儿，孤儿即删；**不为已删 Upper / 退役 KVM-lane API 新增 shared helper**。
 
-## 3. 切片 3：`*_msb` 词汇退役 + #24 精确映射
+## 3. 切片 3：退役 KVM-lane 词汇 + #24 精确映射
 
 ### 3.1 精确处置（不做大类正则替换）
 
-当前 57 条 stale layer 逐一分成：
+当时 57 条 stale layer 逐一分成：
 
 - 1 条历史 harness identity 已由 #40 plain-text scenario 接管；
 - 44 条映射到 **44 个 assertion-level #24 scenario ID**（例如 basic event contract、existing-session
@@ -79,7 +74,7 @@ ledger：该条 reason 改「已删除原内部测试，由已落地 fast_lancet
 - 1 条现存 PTY smoke 只把 layer 改为 `direct_local_binary`，decision=keep。
 
 精确 57 条 identity、44 个 scenario ID 与预期 decision delta 见
-[切片 3 独立计划](2026-07-19-issue23-slice3-msb-vocabulary-retirement.md)。
+[切片 3 独立计划](2026-07-19-issue23-slice3-retired-lane-vocabulary.md)。
 
 ### 3.2 范围红线
 
@@ -89,18 +84,17 @@ ledger：该条 reason 改「已删除原内部测试，由已落地 fast_lancet
 
 ## 4. 切片 4：prose ↔ ledger 一致性收口
 
-- 更新 §1.5 执行状态：fast residual 归零表、`*_msb` 退役记录、删除计数。
-- 各 crate 小节头计数与 JSON 重算对齐；按当前基线预期 keep 1337 / elevate 86 / delete 26；
+- 更新 §1.5 执行状态：fast residual 归零表、退役 KVM-lane 词汇退役记录、删除计数。
+- 各 crate 小节头计数与 JSON 重算对齐；按当时基线预期 keep 1337 / elevate 86 / delete 26；
   总数维持 1449，identity 不变。
 - 一致性核验脚本化跑一次（python 重算 JSON 分布 vs prose 计数）；结果贴 PR，不新增常驻工具。
 
 ## 5. 验收对照（票文逐条）
 
 | 票文验收 | 对应切片 |
-| --- | --- |
 | fast residual 为零；`lancet status` + branch create/reopen 有 external-binary 覆盖 | 切片 1 + 2 |
 | 已接管的内部测试删除；未接管的不提前删 | 切片 1 + 2 + 切片 3 assertion-superset 表 |
-| `*_msb` 全部分成「本票完成」或「#24 精确接管」，无含糊兜底 | 切片 3 |
+| 退役 KVM-lane replacement 全部分成「本票完成」或「#24 精确接管」，无含糊兜底 | 切片 3 |
 | prose 与 ledger 计数/layer/replacement/状态一致 | 切片 4 |
 | harness 只依赖 `LATTICE_BIN` 与公开接口 | 切片 1 + 2 不加产品 crate 依赖（`cargo xtask harness-boundary` 门） |
 | fmt、clippy、workspace tests、fast harness 通过 | 下方门禁 |

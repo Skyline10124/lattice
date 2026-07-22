@@ -2,6 +2,36 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #43: rewrite retired KVM-lane vocabulary in historical ADR/plans/spec — 2026-07-22
+
+Severity: docs / vocabulary hygiene (#43 `ready-for-agent`). Plan: `docs/plans/2026-07-22-issue43-retire-kvm-lane-vocab-in-historical-docs.md`.
+
+**Problem:** After #40 deleted the Upper/KVM lane and after #23 slice 3/4 cleared retired tokens from active code, machine ledger, and `docs/TEST-TRIAGE.md`, six historical documents still presented Microsandbox/MSB-era field values and physical assumptions as current decision context (ADR 0003, completed #40 plan, #23 parent + slices 3/4, #5 effect-model spec).
+
+**Fix (docs-only):**
+- ADR 0003 rewritten to Direct-Local vocabulary; Upper/KVM/MSB retained only as retirement/migration narrative (meta "no MSB daemon" allowed).
+- #40 completed plan archived under `docs/archive/plans/` with Direct-Local archive header; `docs/archive/README.md` documents `plans/`; relative links retargeted (`../../plans/…`); overview/gix-only plans point at the archive path.
+- #23 parent + slice 3/4 marked completed and rewritten in Direct-Local terms; slice 3 renamed to `…-slice3-retired-lane-vocabulary.md`; historical closeout scripts avoid forbidden active field literals.
+- #5 effect-model spec aligned to ADR 0003/0004: `in`/`ex` = Tool Host domain / external world; network = host Tool Host + `net-guard` / `[lancet.network]`; Mode B (hosted backends) marked superseded; WASM Component is the current carriage. Soft-wrap ATX `#13` escaped.
+- Removed all `⚠️ 过时词汇警告` banners from rewrite targets.
+
+**Verification:**
+- Targeted `rg -i 'microsandbox|msb_full_turn|planned_[a-z_]+_msb|LATTICE_HARNESS_MSB|real_microsandbox'` on ADR 0003, #23 rewritten plans, and #5 spec → empty.
+- `rg '过时词汇警告'` on those targets → empty.
+- Standards + Spec review of the working-tree #43 delta → clean (rename/archive links; Mode B superseded; network/Tool Host framing).
+
+**Changed files:**
+- `docs/adr/0003-lancet-operates-directly-on-local-workspace.md`
+- `docs/archive/README.md`
+- `docs/archive/plans/2026-07-17-issue40-remove-upper-msb-residue.md` (moved from `docs/plans/`)
+- `docs/plans/2026-07-17-direct-local-overview.md`
+- `docs/plans/2026-07-17-gix-only-cleanup.md`
+- `docs/plans/2026-07-19-issue23-fast-residual-ledger-closeout.md`
+- `docs/plans/2026-07-19-issue23-slice3-retired-lane-vocabulary.md` (renamed from `…-slice3-msb-vocabulary-retirement.md`)
+- `docs/plans/2026-07-19-issue23-slice4-ledger-prose-consistency.md`
+- `docs/specs/2026-07-01-issue5-effect-model-toolctx-design.md`
+- `docs/plans/2026-07-22-issue43-retire-kvm-lane-vocab-in-historical-docs.md`
+
 ## Codeberg #48: cooperative Component cancellation 统一映射为 `CallCancelled` — 2026-07-22
 
 Severity: High (#48 review follow-up to #5; Spec review of `d659b067^...a628d0e2`, verified by two independent skeptics; tradeoff confirmed on the issue after pre-implementation verification). Plan: `docs/plans/2026-07-22-issue48-callcancelled-unified-mapping.md`.

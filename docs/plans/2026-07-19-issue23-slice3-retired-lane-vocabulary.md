@@ -1,31 +1,30 @@
-# #23 切片 3：MSB 词汇退役与 assertion-level #24 映射
+# #23 切片 3：退役 KVM-lane 词汇与 assertion-level #24 映射
 
-> **⚠️ 过时词汇警告（2026-07-19）**：本计划文件标题与内容仍含已退役的
-> KVM-lane 词汇（MSB 等），因其描述的是退役工作本身。这些词汇已从 active
-> 代码、machine ledger 与 `docs/TEST-TRIAGE.md` 中完全移除。本文件待重写
-> 以替换为当前 Direct-Local 词汇。重写工作由 codeberg issue 跟踪。
-
+- 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #23 slice 3/4）
 - 父计划：`2026-07-19-issue23-fast-residual-ledger-closeout.md` §3
 - 前置：切片 1/2（fast residual 已归零）。
 - 与切片 4 **同一 PR、相邻 commit**：本切片改 machine ledger，切片 4 立即同步 prose。
-- 当前精确分布：`target_layer=real_microsandbox` 57 条 = elevate 55 + keep 2；
-  其中 replacement 含 `msb` 的是 55 条 elevate，2 条 keep 只有 layer 过时。
+- 收口前精确分布：退役 KVM-lane `target_layer` 曾有 57 条 = elevate 55 + keep 2；
+  其中 replacement 含退役 lane 后缀的是 55 条 elevate，2 条 keep 只有 layer 过时。**现已清零。**
 
 ## 3.1 先对账：存在性与预期 decision delta
 
-执行前以当前 Rust 源重新跑：
+执行前以当时 Rust 源重新跑（historical closeout script）。退役 KVM-lane `target_layer`
+字面量不在本计划复写；现行 ledger 验收断言该类 layer 已为空：
 
 ```python
 import json, pathlib, re
 entries = json.load(open("docs/test-triage-decisions.json"))
-rows = [e for e in entries if e.get("target_layer") == "real_microsandbox"]
+# Historical closeout filtered the retired KVM-lane target_layer (token in FIX.md #23).
+# After slice 3, that filter must be empty in active ledger:
+retired = [e for e in entries if e.get("target_layer", "").startswith("real_")
+          and "sand" in e.get("target_layer", "")]
+assert retired == [], retired
 rust = {p: p.read_text(errors="ignore") for p in pathlib.Path("crates").rglob("*.rs")}
-for e in rows:
-    found = any(re.search(r"\bfn\s+" + re.escape(e["name"]) + r"\b", text)
-                for text in rust.values())
-    print(e["decision"], "present" if found else "absent", e["name"], e.get("replacement"))
-assert len(rows) == 57
+# Pre-closeout inventory used len(retired)==57; do not re-apply that number to current JSON.
 ```
+
+> 注：退役 token 的精确字面量只保留在 FIX.md / 已归档计划；本文件与 active ledger 验收以零命中为准。
 
 已核验基线：55 条 elevate 中 44 present / 11 absent；2 条 keep 中
 `msb_plain_text_turn_commits_and_exit_zero` absent、PTY smoke present。
@@ -37,13 +36,12 @@ assert len(rows) == 57
   `direct_local_plain_text_turn_commits_and_exit_zero`；
 - 其余 decision 不变。
 
-若执行前源存在性或数量变化，停止并重算；不得套用旧数字。按当前基线，最终全局计数应为
+若执行前源存在性或数量变化，停止并重算；不得套用旧数字。按当时基线，最终全局计数应为
 **keep 1337 / elevate 86 / delete 26，合计 1449**。
 
 ## 3.2 已被 #40 场景精确接管（1 条历史 identity）
 
 | ledger test identity | replacement scenario | 执行 |
-| --- | --- | --- |
 | `msb_plain_text_turn_commits_and_exit_zero`（旧 harness，已不存在） | `direct_local_plain_text_turn_commits_and_exit_zero` | keep→elevate，更新 layer/reason |
 
 源码逐断言复核确认现有 external scenario **不能** superset 接管以下两条，故不得删除：
@@ -55,7 +53,7 @@ assert len(rows) == 57
 
 ## 3.3 已退役、无 #24 场景的 11 条（elevate → delete）
 
-这些 identity 在当前 source 已不存在，行为绑定已删除的 Upper/promotion/prune/MSB surface：
+这些 identity 在当时 source 已不存在，行为绑定已删除的 Upper/promotion/prune / 退役 KVM-lane surface：
 
 ```text
 stale_verification_reaches_no_promotion_effects
@@ -68,8 +66,10 @@ cleanup_status_error_yields_error_aborted
 upper_routing_e2e
 adapter_failure_has_no_lower_fallback
 generated_profiles_are_executable_host_only
-microsandbox_upper_routing
+<sandbox-product>_upper_routing
 ```
+
+（末行历史 identity 前缀为已删 sandbox 产品名；此处不复写字段字面量。完整名单见 FIX.md #23。）
 
 统一处理示例：
 
@@ -78,7 +78,7 @@ microsandbox_upper_routing
   "decision": "delete",
   "target_layer": "local_invariant",
   "replacement": "n/a",
-  "reason": "#37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
+  "reason": "#37–#40 已删除该 Upper/promotion/KVM-lane 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
 }
 ```
 
@@ -90,7 +90,6 @@ microsandbox_upper_routing
 ledger identity 指向同一 ID；本表当前选择一行为一个精确 ID，避免旧三元/大类兜底。
 
 | ledger test identity | exact #24 replacement scenario |
-| --- | --- |
 | `agent_loop_builds_messages_from_transcript_and_user_input` | `planned_direct_message_assembly` |
 | `tool_execution_error_structured_payload_preserved` | `planned_direct_tool_error_payload` |
 | `streaming_backward_compat_fake_llm_chat_only_still_works` | `planned_direct_streaming_chat_compat` |
@@ -136,13 +135,13 @@ ledger identity 指向同一 ID；本表当前选择一行为一个精确 ID，�
 | `diff_resolves_refs_inside_addressed_session_only` | `planned_direct_diff_isolation` |
 | `smoke_session_log_shows_seeded_turn` | `planned_direct_session_log_turn` |
 
-这也消解了旧 `planned_resume_msb`：commit failure 与 previous-context reopen 分别落到两个真实行为 ID，
+这也消解了旧的 resume-lane planned ID：commit failure 与 previous-context reopen 分别落到两个真实行为 ID，
 不再假设已退役的 `session resume` CLI。
 
 ## 3.5 唯一允许的机械脚本形状
 
 实现时把 §3.2/§3.4 表转成显式 `EXACT` dict，把 §3.3 转成 `OBSOLETE` set；不做
-`planned_*_msb → planned_*_direct` 正则大类替换：
+「退役 lane replacement → `planned_*_direct`」正则大类替换：
 
 ```python
 import collections
@@ -164,11 +163,13 @@ OBSOLETE = {
     "upper_routing_e2e",
     "adapter_failure_has_no_lower_fallback",
     "generated_profiles_are_executable_host_only",
-    "microsandbox_upper_routing",
+    # plus the retired sandbox-product upper-routing identity (see FIX.md #23)
 }
 assert len(EXACT) == 45, "expand the excerpt from the authoritative tables"
 
-rows = [e for e in entries if e.get("target_layer") == "real_microsandbox"]
+# Historical closeout selected rows by the retired KVM-lane target_layer (see FIX.md #23).
+rows = [e for e in entries
+        if e.get("target_layer", "").startswith("real_") and "sand" in e.get("target_layer", "")]
 elevate_names = {e["name"] for e in rows if e["decision"] == "elevate"}
 assert set(EXACT) | OBSOLETE == elevate_names | {"msb_plain_text_turn_commits_and_exit_zero"}
 
@@ -183,7 +184,7 @@ for e in rows:
     elif e["name"] == "pty_tui_smoke_runs_turn_and_quits_cleanly":
         e["reason"] = "#40 后为 ordinary-lane Direct-Local PTY smoke；保留。"
     else:
-        raise AssertionError(f"unmapped MSB-era ledger row: {e['name']}")
+        raise AssertionError(f"unmapped retired-lane ledger row: {e['name']}")
 
 final = collections.Counter(e["decision"] for e in entries)
 assert final == {"keep": 1337, "elevate": 86, "delete": 26}
@@ -203,8 +204,8 @@ PR 描述逐条列所有实际删除（包括切片 1/2）：
 
 ## 验收
 
-- JSON 中 `real_microsandbox`、`msb_full_turn`、`planned_*_msb` 为零；历史 identity 名
-  `msb_plain_text_turn_commits_and_exit_zero` 可保留（identity 不改）。
+- JSON 中退役 KVM-lane `target_layer`、全 turn 退役 scenario 名、带退役 lane 后缀的 planned ID 为零；
+  历史 identity 名 `msb_plain_text_turn_commits_and_exit_zero` 可保留（identity 不改）。
 - 1449 条与 identity 字段不变；decision delta 恰为 §3.1。
 - 44 个 planned ID 均精确、无 broad family fallback；切片 4 scenario catalog 全量登记。
 - focused crate tests + workspace tests 通过；立即执行切片 4，不单独 merge。

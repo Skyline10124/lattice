@@ -7,6 +7,8 @@ proposals that were never implemented.
 - [`releases/`](releases/) contains point-in-time release walkthroughs, reports,
   and evidence templates.
 - [`designs/`](designs/) contains superseded architecture designs.
+- [`plans/`](plans/) contains completed migration plans retained only for
+  historical execution context.
 - [`uninode/`](uninode/) contains the unimplemented Uninode/context-compiler
   research line and its latest implementation plan.
 
