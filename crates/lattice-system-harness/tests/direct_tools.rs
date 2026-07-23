@@ -20,9 +20,9 @@ use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    failure_dir, AssertError, CapturedRequest, CommandOutcome, FixtureHttpServer, HttpFixture,
+    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FixtureHttpServer, HttpFixture,
     LatticeDriver, ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SessionSendDriver,
-    SseScript, Termination, TurnEventLine, FAKE_API_KEY,
+    SseScript, Termination, TurnEventLine, failure_dir,
 };
 use serde_json::Value;
 
