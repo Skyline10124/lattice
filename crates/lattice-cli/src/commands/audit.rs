@@ -356,46 +356,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn audit_query_prints_fragment_for_seeded_db() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        let session = "sess-cli-query";
-        seed_audit_db(dir.path(), session);
-
-        run_at(dir.path(), query_cmd(session, true), false).expect("audit query should succeed");
-    }
-
-    #[tokio::test]
-    async fn audit_tail_streams_rows_for_seeded_db() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        let session = "sess-cli-tail";
-        seed_audit_db(dir.path(), session);
-
-        run_async(tail_cmd(session, true), false, dir.path())
-            .await
-            .expect("audit tail should succeed");
-    }
-    #[test]
-    fn audit_query_empty_result_for_unknown_session() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        seed_audit_db(dir.path(), "sess-seeded");
-        run_at(dir.path(), query_cmd("other-session", true), false).expect("empty query ok");
-    }
-
-    #[tokio::test]
-    async fn audit_replay_reconstructs_turn_trace_for_seeded_db() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        let session = "sess-cli-replay";
-        seed_audit_db(dir.path(), session);
-
-        run_async(replay_cmd(session, "turn-cli", true), false, dir.path())
-            .await
-            .expect("audit replay should succeed");
-    }
 
     #[tokio::test]
     async fn audit_replay_reports_stored_attestation_match() {

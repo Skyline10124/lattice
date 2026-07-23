@@ -2,6 +2,26 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #24 slice 6: operator audit paths + secret discipline + turn_id — 2026-07-22
+
+Severity: test refactor + additive event field (测试重构 5/6, slice 6 of #24). Plan: `docs/plans/2026-07-22-issue24-slice6-operator-audit-secrets.md`.
+
+**Problem:** Public audit/session/lancet operator paths had no external-binary cross-validation; audit replay needed a stable public turn identity; secret-sentinel discipline had no black-box coverage.
+
+**Fix:**
+- Additive `turn_id` on `TurnEvent::TurnStarted` (audit replay needs it); harness parser + fixtures updated.
+- New `tests/direct_operator.rs` (3 scenarios): audit query/replay/tail + lancet status + session status/log cross-validation after success+denial turns; unknown-session empty query; unknown-turn replay nonzero.
+- New `tests/direct_secrets.rs` (2 scenarios): provider-credential + denied-content sentinels never leak into any public sink; failure bundle recursively scanned/redacted.
+- Deleted 4 simple `Ok`-assertion audit CLI internals (superseded by JSON-fragment assertions); kept complex attestation-match/lancet-status internals.
+
+**Verification:**
+- `cargo +1.96.0 test -p lattice-api` / `-p lattice-cli` — green (4 audit internals removed, 121→117).
+- `LATTICE_BIN=... cargo +1.96.0 test -p lattice-system-harness --test direct_operator --test direct_secrets` — 5 passed.
+- clippy + harness-boundary — green.
+
+**Changed files:**
+`crates/lattice-api/src/turn/{types,live,types_tests,collector}.rs`, `crates/lattice-cli/src/commands/{audit,run_tests,lancet}.rs`, `crates/lattice-system-harness/src/session_send.rs`, `tests/direct_operator.rs` (new), `tests/direct_secrets.rs` (new), `docs/TEST-TRIAGE.md`, `docs/test-triage-decisions.json`, `FIX.md`.
+
 ## Codeberg #24 slice 5: provider failures, SIGINT cancellation, deadline — 2026-07-22
 
 Severity: test refactor + product controls (测试重构 5/6, slice 5 of #24). Plan: `docs/plans/2026-07-22-issue24-slice5-failures-cancel-deadline.md`.

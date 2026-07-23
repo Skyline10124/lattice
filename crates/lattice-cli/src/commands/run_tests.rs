@@ -216,6 +216,7 @@ fn render_json_event_roundtrips_every_variant() {
     let events: Vec<TurnEvent> = vec![
         TurnEvent::TurnStarted {
             session_id: "s1".into(),
+            turn_id: "s1:root".into(),
             parent_commit_id: None,
             branch: Some("main".into()),
         },
@@ -463,6 +464,7 @@ fn render_human_reasoning_visible_verbose() {
 fn render_human_turn_started_silent_default() {
     let event = TurnEvent::TurnStarted {
         session_id: "s1".into(),
+        turn_id: "s1:root".into(),
         parent_commit_id: None,
         branch: None,
     };
@@ -676,6 +678,7 @@ fn s(bytes: &[u8]) -> String {
 fn seq_happy_path_human() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S1".into(),
             parent_commit_id: None,
             branch: Some("main".into()),
@@ -729,6 +732,7 @@ fn seq_happy_path_human() {
 fn seq_happy_path_verbose_with_epilogue() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S1".into(),
             parent_commit_id: None,
             branch: Some("main".into()),
@@ -868,6 +872,7 @@ fn seq_multiround_usage_sums_into_state() {
 fn seq_tool_failure_renders_summary() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S".into(),
             parent_commit_id: None,
             branch: None,
@@ -909,6 +914,7 @@ fn seq_tool_failure_renders_summary() {
 fn seq_turn_failed_then_commit_drains_stream() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S".into(),
             parent_commit_id: None,
             branch: None,
@@ -975,6 +981,7 @@ fn seq_commit_failed_renders_reason() {
 fn seq_stream_ends_without_terminal_is_protocol_violation() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S".into(),
             parent_commit_id: None,
             branch: None,
@@ -1000,6 +1007,7 @@ fn seq_jsonl_round_trips_every_variant() {
     // Build a Vec<TurnEvent> covering every variant with representative field values.
     let events: Vec<TurnEvent> = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "s1".into(),
             parent_commit_id: None,
             branch: Some("main".into()),
@@ -1181,3 +1189,4 @@ fn seq_reasoning_visible_in_verbose() {
         "verbose stderr must contain 'reasoning'"
     );
 }
+

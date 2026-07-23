@@ -96,12 +96,14 @@ fn turn_event_llm_request_error_serializes_structured_fields() {
 fn turn_event_turn_started_serializes() {
     let event = TurnEvent::TurnStarted {
         session_id: "s1".to_string(),
+        turn_id: "s1:root".to_string(),
         parent_commit_id: None,
         branch: None,
     };
     let json = serde_json::to_value(&event).expect("TurnStarted should serialize");
     assert_eq!(json["type"], "turn_started");
     assert_eq!(json["session_id"], "s1");
+    assert_eq!(json["turn_id"], "s1:root");
 }
 
 #[test]

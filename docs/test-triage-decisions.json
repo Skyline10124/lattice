@@ -8454,10 +8454,10 @@
     "name": "audit_query_prints_fragment_for_seeded_db",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_audit_query_seeded",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_query_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 planned_direct_audit_query_seeded 接管",
+    "reason": "#24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：row_count>0 + 两个方法 + method/verdict 过滤 + tail rows + session status/log。已删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8466,10 +8466,10 @@
     "name": "audit_tail_streams_rows_for_seeded_db",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_audit_tail_seeded",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_tail_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 planned_direct_audit_tail_seeded 接管",
+    "reason": "#24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：tail 返回非零 rows。已删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8490,10 +8490,10 @@
     "name": "audit_query_empty_result_for_unknown_session",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_audit_query_unknown_session",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_query_unknown_session` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 planned_direct_audit_query_unknown_session 接管",
+    "reason": "#24 slice 6 assertion-level superset review：direct_operator_audit_query_unknown_session_empty：exit 0 + row_count==0。已删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8502,10 +8502,10 @@
     "name": "audit_replay_reconstructs_turn_trace_for_seeded_db",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_audit_replay_trace",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_replay_trace` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 planned_direct_audit_replay_trace 接管",
+    "reason": "#24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：replay trace.turn_id 非空 + 引用 observe.workspace。已删除原测试。"
   },
   {
     "crate": "lattice-cli",

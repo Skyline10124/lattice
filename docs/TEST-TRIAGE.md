@@ -85,8 +85,8 @@
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1186 |
-| 提升 | 74 |
-| 删除 | 189 |
+| 提升 | 70 |
+| 删除 | 193 |
 | **合计** | **1449** |
 
 #### 按 crate
@@ -226,8 +226,8 @@ codeberg issue 跟踪重写。
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1186 |
-| 提升 | 74 |
-| 删除 | 189 |
+| 提升 | 70 |
+| 删除 | 193 |
 | **合计** | **1449** |
 
 ## 1.6 #24 slice 2 执行状态（2026-07-22）
@@ -295,6 +295,28 @@ codeberg issue 跟踪重写。
 | scenario | 不变量 |
 | --- | --- |
 | `direct_failure_mutation_survives_provider_failure` | 成功 mutation 后 provider 失败，Local bytes 保留（Direct-Local 无回滚） |
+
+
+## 1.9 #24 slice 6 执行状态（2026-07-22）
+
+> 外部测试 `crates/lattice-system-harness/tests/direct_operator.rs`（3 场景）+ `tests/direct_secrets.rs`（2 场景）已实现并通过全部 gate。
+> 产品变更：`TurnStarted` 添加 additive `turn_id` 字段（audit replay 需要稳定 turn 标识）。
+
+### 已删除（4 条，提升->删除）
+
+| ledger identity | replacement scenario | superset 依据 |
+| --- | --- | --- |
+| `audit_query_prints_fragment_for_seeded_db` | `planned_direct_audit_query_seeded` | row_count>0 + 两个方法 + method/verdict 过滤 + tail rows + session status/log |
+| `audit_tail_streams_rows_for_seeded_db` | `planned_direct_audit_tail_seeded` | tail 返回非零 rows |
+| `audit_query_empty_result_for_unknown_session` | `planned_direct_audit_query_unknown_session` | exit 0 + row_count==0 |
+| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `planned_direct_audit_replay_trace` | replay trace.turn_id 非空 + 引用 observe.workspace |
+
+### 半保留（2 条）
+
+| ledger identity | replacement scenario | 未覆盖半 |
+| --- | --- | --- |
+| `audit_replay_reports_stored_attestation_match` | `planned_direct_audit_attestation_match` | stored attestation 匹配由 API 级断言；外部仅断言 replay 引用 observe.workspace |
+| `cep_status_seeded_audit_json` | `planned_direct_lancet_status_seeded` | recent_calls 含 todo_write + last_guard_verdict 为 API 级；外部仅断言 recent_calls 非空 |
 
 
 ## 2. 逐条清单
@@ -1855,7 +1877,12 @@ codeberg issue 跟踪重写。
 - [x] 清单覆盖枚举到的全部现存测试，无遗漏条目（`docs/test-triage-decisions.json` 共 1449 条，与枚举键集合一致）
 - [x] 每条都有决定、理由、目标层；提升/删除条目标明替代场景（或显式 `n/a`）
 - [x] 以文档形式入库（本文件 + JSON）
-- [x] 本票未删除、未修改任何测试源码| `direct_failure_http_error_no_retry` | Direct-Local: provider HTTP 启动失败（retry disabled）→ error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+- [x] 本票未删除、未修改任何测试源码| `direct_operator_audit_session_lancet_cross` | Direct-Local: audit query/replay/tail + lancet status + session status/log 交叉校验 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
+| `direct_operator_audit_query_unknown_session` | Direct-Local: 未知 session query 返回空成功 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
+| `direct_operator_audit_replay_unknown_turn` | Direct-Local: 未知 turn replay 非零失败 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
+| `direct_secrets_sentinels_never_leak` | Direct-Local: provider 凭证 + 拒绝内容 sentinel 不泄漏到任何公开 sink | **已落地** `tests/direct_secrets.rs`（#24 slice 6） |
+| `direct_secrets_failure_bundle_redacts` | Direct-Local: 失败 bundle 递归 sentinel 扫描/脱敏 | **已落地** `tests/direct_secrets.rs`（#24 slice 6） |
+| `direct_failure_http_error_no_retry` | Direct-Local: provider HTTP 启动失败（retry disabled）→ error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
 | `direct_failure_disconnect_before_output` | Direct-Local: 流前断连 → error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
 | `direct_failure_disconnect_after_partial` | Direct-Local: partial token 后断连 → error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
 | `direct_failure_malformed_sse` | Direct-Local: 非法 SSE → error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |

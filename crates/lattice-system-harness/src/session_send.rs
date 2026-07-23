@@ -77,6 +77,7 @@ impl SendExitCode {
 pub enum TurnEventLine {
     TurnStarted {
         session_id: String,
+        turn_id: String,
         branch: Option<String>,
     },
     ModelStarted {
@@ -170,6 +171,7 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
             required_nullable_string(&value, "parent_commit_id")?;
             TurnEventLine::TurnStarted {
                 session_id: required_string(&value, "session_id")?,
+                turn_id: required_string(&value, "turn_id")?,
                 branch: required_nullable_string(&value, "branch")?,
             }
         }
@@ -718,12 +720,13 @@ mod tests {
     #[test]
     fn parse_turn_started() {
         let e = line(
-            r#"{"type":"turn_started","session_id":"s1","parent_commit_id":null,"branch":"main"}"#,
+            r#"{"type":"turn_started","session_id":"s1","turn_id":"s:root","parent_commit_id":null,"branch":"main"}"#,
         );
         assert_eq!(
             e,
             TurnEventLine::TurnStarted {
                 session_id: "s1".into(),
+                turn_id: "s:root".into(),
                 branch: Some("main".into())
             }
         );
@@ -778,7 +781,7 @@ mod tests {
     #[test]
     fn known_variants_validate_required_discarded_fields() {
         let lines = [
-            r#"{"type":"turn_started","session_id":"s","branch":null}"#,
+            r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","branch":null}"#,
             r#"{"type":"tool_call_finished","id":"c","name":"x","ok":true,"error_summary":null}"#,
             r#"{"type":"model_finished","finish_reason":"stop"}"#,
             r#"{"type":"turn_committed","session_id":"s","commit_id":"c","status":"completed"}"#,
@@ -812,7 +815,7 @@ mod tests {
     fn derive_exit_committed_completed_is_zero() {
         let events = vec![
             line(
-                r#"{"type":"turn_started","session_id":"s","parent_commit_id":null,"branch":null}"#,
+                r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","parent_commit_id":null,"branch":null}"#,
             ),
             line(r#"{"type":"model_started","provider":null,"model":"compat:test"}"#),
             line(r#"{"type":"token_delta","content":"hi"}"#),
@@ -829,7 +832,7 @@ mod tests {
     fn derive_exit_commit_failed_is_one() {
         let events = vec![
             line(
-                r#"{"type":"turn_started","session_id":"s","parent_commit_id":null,"branch":null}"#,
+                r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","parent_commit_id":null,"branch":null}"#,
             ),
             line(r#"{"type":"commit_failed","reason":"boom"}"#),
         ];
@@ -840,7 +843,7 @@ mod tests {
     fn derive_exit_turn_failed_is_one() {
         let events = vec![
             line(
-                r#"{"type":"turn_started","session_id":"s","parent_commit_id":null,"branch":null}"#,
+                r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","parent_commit_id":null,"branch":null}"#,
             ),
             line(r#"{"type":"turn_failed","reason":"provider boom"}"#),
         ];
@@ -859,7 +862,7 @@ mod tests {
     fn derive_exit_no_terminal_is_one() {
         let events = vec![
             line(
-                r#"{"type":"turn_started","session_id":"s","parent_commit_id":null,"branch":null}"#,
+                r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","parent_commit_id":null,"branch":null}"#,
             ),
             line(r#"{"type":"token_delta","content":"hi"}"#),
         ];
@@ -869,7 +872,7 @@ mod tests {
     #[test]
     fn parse_send_stdout_concatenates_text_and_classifies() {
         let stdout = b"\
-{\"type\":\"turn_started\",\"session_id\":\"s\",\"parent_commit_id\":null,\"branch\":null}\n\
+{\"type\":\"turn_started\",\"session_id\":\"s\",\"turn_id\":\"s:root\",\"parent_commit_id\":null,\"branch\":null}\n\
 {\"type\":\"model_started\",\"provider\":null,\"model\":\"compat:test\"}\n\
 {\"type\":\"token_delta\",\"content\":\"Hello\"}\n\
 {\"type\":\"token_delta\",\"content\":\" world\"}\n\
@@ -900,7 +903,7 @@ mod tests {
     #[test]
     fn parse_send_stdout_with_unknown_variant_tolerated() {
         let stdout = b"\
-{\"type\":\"turn_started\",\"session_id\":\"s\",\"parent_commit_id\":null,\"branch\":null}\n\
+{\"type\":\"turn_started\",\"session_id\":\"s\",\"turn_id\":\"s:root\",\"parent_commit_id\":null,\"branch\":null}\n\
 {\"type\":\"some_future_event\",\"x\":1}\n\
 {\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":\"not_applicable\"}\n";
         let outcome = parse_send_stdout(stdout, Some(0));
@@ -915,7 +918,7 @@ mod tests {
     fn assert_event_subsequence_satisfied_in_order() {
         let outcome = parse_send_stdout(
             b"\
-{\"type\":\"turn_started\",\"session_id\":\"s\",\"parent_commit_id\":null,\"branch\":null}\n\
+{\"type\":\"turn_started\",\"session_id\":\"s\",\"turn_id\":\"s:root\",\"parent_commit_id\":null,\"branch\":null}\n\
 {\"type\":\"model_started\",\"provider\":null,\"model\":\"m\"}\n\
 {\"type\":\"token_delta\",\"content\":\"x\"}\n\
 {\"type\":\"model_finished\",\"finish_reason\":\"stop\",\"usage\":null}\n\
@@ -936,7 +939,7 @@ mod tests {
     #[test]
     fn assert_event_subsequence_missing_event_reports() {
         let outcome = parse_send_stdout(
-            b"{\"type\":\"turn_started\",\"session_id\":\"s\",\"parent_commit_id\":null,\"branch\":null}\n",
+            b"{\"type\":\"turn_started\",\"session_id\":\"s\",\"turn_id\":\"s:root\",\"parent_commit_id\":null,\"branch\":null}\n",
             Some(0),
         );
         let err = assert_event_subsequence(&outcome, &["turn_started", "turn_committed"])

@@ -275,12 +275,13 @@ async fn run_live_turn_task(
     let mut observer = ObserverSink::new(turn_tx);
 
     // 1. Emit TurnStarted
-    observer
-        .emit(TurnEvent::TurnStarted {
-            session_id: prepared.session_id.clone(),
-            parent_commit_id: prepared.parent_commit_id.clone(),
-            branch: prepared.branch.clone(),
-        })
+        observer
+            .emit(TurnEvent::TurnStarted {
+                session_id: prepared.session_id.clone(),
+                turn_id: turn_id.clone(),
+                parent_commit_id: prepared.parent_commit_id.clone(),
+                branch: prepared.branch.clone(),
+            })
         .await;
 
     // 2. Build agent request

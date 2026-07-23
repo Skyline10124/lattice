@@ -158,6 +158,7 @@ fn assert_completed_turn(outcome: &SendOutcome, session_id: &str) -> Result<(), 
     match outcome.events.first() {
         Some(TurnEventLine::TurnStarted {
             session_id: started,
+            turn_id: _,
             branch,
         }) => {
             require(

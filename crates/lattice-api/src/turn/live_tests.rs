@@ -271,6 +271,7 @@ async fn stream_turn_live_with_agent_basic_completed() {
     let first = &events[0];
     if let TurnEvent::TurnStarted {
         session_id,
+        turn_id: _,
         parent_commit_id: _,
         branch: _,
     } = first

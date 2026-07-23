@@ -150,6 +150,10 @@ pub enum TurnEvent {
     /// The turn has started execution.
     TurnStarted {
         session_id: String,
+        /// Additive stable turn identifier (`<session>:<parent-or-root>`).
+        /// Audit replay needs it to address a turn deterministically; old
+        /// consumers ignore the extra field.
+        turn_id: String,
         parent_commit_id: Option<String>,
         branch: Option<String>,
     },
