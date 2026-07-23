@@ -8433,7 +8433,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_fetch_capability_denial",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_fetch_capability_denial` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "reason": "#24 slice 4：direct_tools 落地 host-policy/disabled fetch 半；FetchUrl capability + allow_public_https 半与 CepCallStarted external_observation 标签仍依赖 API 级断言，保留原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8442,10 +8442,10 @@
     "name": "rejects_profile_disabled_web_fetch",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_disabled_fetch_denial",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_disabled_fetch_denial` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 planned_direct_disabled_fetch_denial 接管",
+    "reason": "#24 slice 4 assertion-level superset review：direct_tools_fetch_disabled_no_dispatch 断言 disabled fetch.web 失败、fixture 零请求、无 cep_call_started；严格超集。已删除原测试。"
   },
   {
     "crate": "lattice-cli",

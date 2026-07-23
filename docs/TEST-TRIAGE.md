@@ -61,8 +61,8 @@
 | `planned_direct_workspace_read_turn` | Direct-Local: default profile run_turn 读取 workspace 文件 | **已落地** `tests/direct_observation.rs`（#24 slice 2） |
 | `planned_direct_routed_provider_event` | Direct-Local: model_started 含 routed provider | planned（#24 assertion-level） |
 | `planned_direct_reopen_previous_context` | Direct-Local: resume session 含 previous turn context（取代旧 KVM-lane resume 场景的 reopen 半） | planned（#24 assertion-level） |
-| `planned_direct_fetch_capability_denial` | Direct-Local: https public fetch 需 fetch capability，拒绝缺 capability | planned（#24 assertion-level） |
-| `planned_direct_disabled_fetch_denial` | Direct-Local: profile 禁用 web fetch 时拒绝 | planned（#24 assertion-level） |
+| `planned_direct_fetch_capability_denial` | Direct-Local: https public fetch 需 fetch capability，拒绝缺 capability | planned（#24 assertion-level；host-policy/disabled 半已落地 direct_tools.rs slice 4，capability 半待落地） |
+| `planned_direct_disabled_fetch_denial` | Direct-Local: profile 禁用 web fetch 时拒绝 | **已落地** `tests/direct_tools.rs`（#24 slice 4） |
 | `planned_direct_audit_query_seeded` | Direct-Local: audit query seeded DB fragment | planned（#24 assertion-level） |
 | `planned_direct_audit_tail_seeded` | Direct-Local: audit tail seeded DB rows | planned（#24 assertion-level） |
 | `planned_direct_audit_query_unknown_session` | Direct-Local: audit query unknown session 空结果 | planned（#24 assertion-level） |
@@ -85,15 +85,15 @@
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1186 |
-| 提升 | 75 |
-| 删除 | 188 |
+| 提升 | 74 |
+| 删除 | 189 |
 | **合计** | **1449** |
 
 #### 按 crate
 
 | crate | 保留 | 提升 | 删除 | 合计 |
 | --- | ---: | ---: | ---: | ---: |
-| `lattice-api` | 229 | 16 | 15 | 260 |
+| `lattice-api` | 229 | 15 | 16 | 260 |
 | `lattice-cli` | 118 | 56 | 11 | 185 |
 | `lattice-workspace` | 0 | 0 | 158 | 158 |
 | `lancet-authority` | 135 | 0 | 0 | 135 |
@@ -183,8 +183,8 @@
 | `planned_direct_workspace_read_turn` | `usage_run_turn_can_read_workspace_file_with_default_profile` | default profile run_turn 读取 workspace 文件 ✓已删除（#24 slice 2） |
 | `planned_direct_routed_provider_event` | `usage_stream_turn_model_started_includes_routed_provider` | model_started 含 routed provider |
 | `planned_direct_reopen_previous_context` | `usage_resume_session_includes_previous_turn_context` | resume session 含 previous turn context（取代旧 KVM-lane resume 场景的 reopen 半） |
-| `planned_direct_fetch_capability_denial` | `public_https_policy_requires_fetch_capability` | https public fetch 需 fetch capability，拒绝缺 capability |
-| `planned_direct_disabled_fetch_denial` | `rejects_profile_disabled_web_fetch` | profile 禁用 web fetch 时拒绝 |
+| `planned_direct_fetch_capability_denial` | `public_https_policy_requires_fetch_capability` | https public fetch 需 fetch capability，拒绝缺 capability 半保留（#24 slice 4：host/disabled 半已落地，capability 半待落地） |
+| `planned_direct_disabled_fetch_denial` | `rejects_profile_disabled_web_fetch` | profile 禁用 web fetch 时拒绝 ✓已删除（#24 slice 4） |
 | `planned_direct_audit_query_seeded` | `audit_query_prints_fragment_for_seeded_db` | audit query seeded DB fragment |
 | `planned_direct_audit_tail_seeded` | `audit_tail_streams_rows_for_seeded_db` | audit tail seeded DB rows |
 | `planned_direct_audit_query_unknown_session` | `audit_query_empty_result_for_unknown_session` | audit query unknown session 空结果 |
@@ -226,8 +226,8 @@ codeberg issue 跟踪重写。
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1186 |
-| 提升 | 75 |
-| 删除 | 188 |
+| 提升 | 74 |
+| 删除 | 189 |
 | **合计** | **1449** |
 
 ## 1.6 #24 slice 2 执行状态（2026-07-22）
@@ -256,6 +256,23 @@ codeberg issue 跟踪重写。
 - lattice-api：提升 19->16，删除 12->15（3 条提升->删除）
 - lattice-cli：提升 57->56，删除 10->11（1 条提升->删除）
 - 合计：提升 79->75，删除 184->188
+
+## 1.7 #24 slice 4 执行状态（2026-07-22）
+
+> 外部测试 `crates/lattice-system-harness/tests/direct_tools.rs` 已实现并通过全部 gate。
+
+### 已删除（1 条，提升->删除）
+
+| ledger identity | replacement scenario | superset 依据 |
+| --- | --- | --- |
+| `rejects_profile_disabled_web_fetch` | `planned_direct_disabled_fetch_denial` | direct_tools_fetch_disabled_no_dispatch：失败 tool + fixture 零请求 + 无 cep_call_started |
+
+### 半保留（1 条）
+
+| ledger identity | replacement scenario | 未覆盖半 |
+| --- | --- | --- |
+| `public_https_policy_requires_fetch_capability` | `planned_direct_fetch_capability_denial` | FetchUrl capability + allow_public_https + CepCallStarted external_observation 标签 |
+
 
 ## 2. 逐条清单
 
@@ -748,7 +765,7 @@ codeberg issue 跟踪重写。
 | `fake_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:473` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `fake_stream_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:486` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 
-### `lattice-api`（保留 229 / 提升 16 / 删除 15）
+### `lattice-api`（保留 229 / 提升 15 / 删除 16）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -1010,8 +1027,8 @@ codeberg issue 跟踪重写。
 | `usage_stream_turn_model_started_includes_routed_provider` | `crates/lattice-api/tests/usage_turn.rs:237` | 提升 | Direct-Local 外部二进制 | `planned_direct_routed_provider_event` | 原内部测试断言集合由 #24 精确场景 `planned_direct_routed_provider_event` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `usage_run_turn_can_edit_workspace_file_and_commit` | `crates/lattice-api/tests/usage_turn.rs:274` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `usage_resume_session_includes_previous_turn_context` | `crates/lattice-api/tests/usage_turn.rs:340` | 提升 | Direct-Local 外部二进制 | `planned_direct_reopen_previous_context` | 原内部测试断言集合由 #24 精确场景 `planned_direct_reopen_previous_context` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 提升 | Direct-Local 外部二进制 | `planned_direct_fetch_capability_denial` | 原内部测试断言集合由 #24 精确场景 `planned_direct_fetch_capability_denial` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `rejects_profile_disabled_web_fetch` | `crates/lattice-api/tests/usage_turn.rs:519` | 提升 | Direct-Local 外部二进制 | `planned_direct_disabled_fetch_denial` | 原内部测试断言集合由 #24 精确场景 `planned_direct_disabled_fetch_denial` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 提升 | Direct-Local 外部二进制 | `planned_direct_fetch_capability_denial` | #24 slice 4：direct_tools 落地 host-policy/disabled fetch 半；FetchUrl capability + allow_public_https 半与 CepCallStarted external_observation 标签仍依赖 API 级断言，保留原测试。 |
+| `rejects_profile_disabled_web_fetch` | `crates/lattice-api/tests/usage_turn.rs:519` | 删除 | Direct-Local 外部二进制 | 已删除原测试，由 `planned_direct_disabled_fetch_denial` 接管 | #24 slice 4 assertion-level superset review：direct_tools_fetch_disabled_no_dispatch 断言 disabled fetch.web 失败、fixture 零请求、无 cep_call_started。已删除原测试。 |
 
 ### `lattice-cli`（保留 118 / 提升 56 / 删除 11）
 

@@ -2,6 +2,26 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #24 slice 4: fetch/todo/catalog/retired tools external coverage — 2026-07-22
+
+Severity: test refactor (测试重构 5/6, slice 4 of #24). Plan: `docs/plans/2026-07-22-issue24-slice4-tools-and-retired-methods.md`.
+
+**Problem:** Default five-Tool distribution and retired-method fail-closed behavior lacked external-binary coverage; fetch needed a localhost fixture separate from the fake LLM.
+
+**Fix:**
+- New harness `FixtureHttpServer` (`src/fixture_http.rs`): OS-assigned port, localhost URL, fixed status/body, captured method/path, bounded shutdown.
+- New `tests/direct_tools.rs` (7 scenarios): fetch success+cap, fetch disabled (no fixture hit / no cep_call_started), fetch host-policy denial, todo_write success, todo validation reject, catalog wire-name exposure, retired methods fail-closed.
+- Deleted internal `rejects_profile_disabled_web_fetch` (strict external supersets). Kept `public_https_policy_requires_fetch_capability` (capability half residual).
+
+**Verification:**
+- `cargo +1.96.0 test -p lattice-system-harness --lib fixture_http` — passed.
+- `LATTICE_BIN=... cargo +1.96.0 test -p lattice-system-harness --test direct_tools` — 7 passed.
+- `cargo +1.96.0 test -p lattice-api --test usage_turn` — 4 passed.
+- clippy + harness-boundary — green.
+
+**Changed files:**
+`crates/lattice-system-harness/src/fixture_http.rs` (new), `src/lib.rs`, `tests/direct_tools.rs` (new), `crates/lattice-api/tests/usage_turn.rs`, `docs/TEST-TRIAGE.md`, `docs/test-triage-decisions.json`, `FIX.md`.
+
 ## Codeberg #24 slice 3: atomic mutation, effect denial, external concurrency — 2026-07-22
 
 Severity: test refactor + product fix (测试重构 5/6, slice 3 of #24). Plan: `docs/plans/2026-07-22-issue24-slice3-mutation-concurrency-effects.md`.
