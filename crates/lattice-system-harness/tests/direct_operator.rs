@@ -17,9 +17,9 @@
 use std::process::Output;
 
 use lattice_system_harness::{
-    failure_dir, AssertError, CommandOutcome, LatticeDriver, ScenarioEvidence, ScenarioSpec,
+    AssertError, CommandOutcome, FAKE_API_KEY, LatticeDriver, ScenarioEvidence, ScenarioSpec,
     ScenarioWorld, SendExecution, SessionSendDriver, SseScript, Termination, TurnEventLine,
-    FAKE_API_KEY,
+    failure_dir,
 };
 use serde_json::Value;
 
@@ -163,7 +163,6 @@ fn fragment_activities(query: &Value) -> Vec<&str> {
         .unwrap_or_default()
 }
 
-
 /// Extract the turn_id from a turn_started event in a SendExecution.
 fn turn_id_of(outcome: &SendExecution) -> Option<String> {
     outcome.events.iter().find_map(|e| match e {
@@ -242,7 +241,10 @@ fn direct_operator_audit_session_lancet_cross_validate() {
             .get("row_count")
             .and_then(Value::as_u64)
             .expect("row_count");
-        require(row_count > 0, format!("audit query must return rows: {query_obj}"))?;
+        require(
+            row_count > 0,
+            format!("audit query must return rows: {query_obj}"),
+        )?;
         let acts = fragment_activities(&query_obj);
         require(!acts.is_empty(), "fragment activities must be non-empty")?;
         let methods: Vec<&str> = acts.clone();
@@ -331,10 +333,7 @@ fn direct_operator_audit_session_lancet_cross_validate() {
             .and_then(Value::as_array)
             .map(Vec::len)
             .unwrap_or(0);
-        require(
-            tail_rows > 0,
-            format!("tail must stream rows: {query_t}"),
-        )?;
+        require(tail_rows > 0, format!("tail must stream rows: {query_t}"))?;
 
         // audit replay --turn <turn_id_1> reconstructs the success turn.
         let rp = cli(
@@ -478,8 +477,7 @@ fn direct_operator_audit_replay_unknown_turn_fails() {
     let driver = driver();
     let (world, spec) = operator_world("direct-operator-unknown-turn", "dl-op-ut", "[]", "");
     let _server = wire_fake_llm(&world, "dl-op-ut", SseScript::plain("seed"));
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-op-ut", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-op-ut", "main").expect("session");
     let seed = send.send("seed turn").expect("seed");
     assert_clean_send(&seed).expect("seed turn clean");
     let sid = send.session_id().to_string();

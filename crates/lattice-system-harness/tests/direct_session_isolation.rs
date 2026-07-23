@@ -116,7 +116,11 @@ fn log_commit_ids(log: &Value) -> Vec<String> {
         .map(|turns| {
             turns
                 .iter()
-                .filter_map(|t| t.get("commit_id").and_then(Value::as_str).map(str::to_string))
+                .filter_map(|t| {
+                    t.get("commit_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -137,13 +141,21 @@ fn setup_two_sessions<'a>(
     let send_a = SessionSendDriver::new(driver, world, spec, "dl-iso", "main").expect("session A");
     let _t1 = send_a.send("turn a1").expect("a turn 1");
     let _t2 = send_a.send("turn a2").expect("a turn 2");
-    let log_a = cli_json(world, spec, &["--json", "session", "log", send_a.session_id()]);
+    let log_a = cli_json(
+        world,
+        spec,
+        &["--json", "session", "log", send_a.session_id()],
+    );
     let commits_a = log_commit_ids(&log_a);
 
     let send_b = SessionSendDriver::new(driver, world, spec, "dl-iso", "main").expect("session B");
     let _t1 = send_b.send("turn b1").expect("b turn 1");
     let _t2 = send_b.send("turn b2").expect("b turn 2");
-    let log_b = cli_json(world, spec, &["--json", "session", "log", send_b.session_id()]);
+    let log_b = cli_json(
+        world,
+        spec,
+        &["--json", "session", "log", send_b.session_id()],
+    );
     let commits_b = log_commit_ids(&log_b);
 
     (send_a, send_b, commits_a, commits_b)
@@ -167,12 +179,28 @@ fn direct_session_branch_listing_isolation() {
     let _ = cli(
         &world,
         &spec,
-        &["--json", "session", "branch", &sid_a, "feature", "--from", &commits_a[0]],
+        &[
+            "--json",
+            "session",
+            "branch",
+            &sid_a,
+            "feature",
+            "--from",
+            &commits_a[0],
+        ],
     );
     let _ = cli(
         &world,
         &spec,
-        &["--json", "session", "branch", &sid_b, "feature", "--from", &commits_b[1]],
+        &[
+            "--json",
+            "session",
+            "branch",
+            &sid_b,
+            "feature",
+            "--from",
+            &commits_b[1],
+        ],
     );
 
     // List A's branches: feature must point to commits_a[0].
@@ -180,8 +208,15 @@ fn direct_session_branch_listing_isolation() {
     let feature_a = list_a
         .get("branches")
         .and_then(Value::as_array)
-        .and_then(|bs| bs.iter().find(|b| b.get("name").and_then(Value::as_str) == Some("feature")))
-        .and_then(|b| b.get("commit_id").and_then(Value::as_str).map(str::to_string));
+        .and_then(|bs| {
+            bs.iter()
+                .find(|b| b.get("name").and_then(Value::as_str) == Some("feature"))
+        })
+        .and_then(|b| {
+            b.get("commit_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     require(
         feature_a.as_deref() == Some(commits_a[0].as_str()),
         format!("A feature must point to A's commit: {feature_a:?}"),
@@ -193,8 +228,15 @@ fn direct_session_branch_listing_isolation() {
     let feature_b = list_b
         .get("branches")
         .and_then(Value::as_array)
-        .and_then(|bs| bs.iter().find(|b| b.get("name").and_then(Value::as_str) == Some("feature")))
-        .and_then(|b| b.get("commit_id").and_then(Value::as_str).map(str::to_string));
+        .and_then(|bs| {
+            bs.iter()
+                .find(|b| b.get("name").and_then(Value::as_str) == Some("feature"))
+        })
+        .and_then(|b| {
+            b.get("commit_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     require(
         feature_b.as_deref() == Some(commits_b[1].as_str()),
         format!("B feature must be unchanged: {feature_b:?}"),
@@ -212,7 +254,10 @@ fn direct_session_branch_listing_isolation() {
 
     finish_scenario(
         scenario_evidence,
-        &[("branch listing isolation", &send_a.send("seed").unwrap().command)],
+        &[(
+            "branch listing isolation",
+            &send_a.send("seed").unwrap().command,
+        )],
         Ok(()),
     );
 }
@@ -235,7 +280,15 @@ fn direct_session_checkout_isolation() {
     let _ = cli(
         &world,
         &spec,
-        &["--json", "session", "branch", &sid_a, "feature", "--from", &commits_a[0]],
+        &[
+            "--json",
+            "session",
+            "branch",
+            &sid_a,
+            "feature",
+            "--from",
+            &commits_a[0],
+        ],
     );
     let _ = cli(
         &world,
@@ -288,7 +341,15 @@ fn direct_session_branch_create_isolation() {
     let _ = cli(
         &world,
         &spec,
-        &["--json", "session", "branch", &sid_a, "work", "--from", &commits_a[0]],
+        &[
+            "--json",
+            "session",
+            "branch",
+            &sid_a,
+            "work",
+            "--from",
+            &commits_a[0],
+        ],
     );
 
     // A has work pointing to commits_a[0].
@@ -296,8 +357,15 @@ fn direct_session_branch_create_isolation() {
     let work_a = list_a
         .get("branches")
         .and_then(Value::as_array)
-        .and_then(|bs| bs.iter().find(|b| b.get("name").and_then(Value::as_str) == Some("work")))
-        .and_then(|b| b.get("commit_id").and_then(Value::as_str).map(str::to_string));
+        .and_then(|bs| {
+            bs.iter()
+                .find(|b| b.get("name").and_then(Value::as_str) == Some("work"))
+        })
+        .and_then(|b| {
+            b.get("commit_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     require(
         work_a.as_deref() == Some(commits_a[0].as_str()),
         format!("A work must point to A's commit: {work_a:?}"),
@@ -309,12 +377,18 @@ fn direct_session_branch_create_isolation() {
     let work_b = list_b
         .get("branches")
         .and_then(Value::as_array)
-        .and_then(|bs| bs.iter().find(|b| b.get("name").and_then(Value::as_str) == Some("work")));
+        .and_then(|bs| {
+            bs.iter()
+                .find(|b| b.get("name").and_then(Value::as_str) == Some("work"))
+        });
     require(work_b.is_none(), "B must NOT have a work branch").expect("B no work");
 
     finish_scenario(
         scenario_evidence,
-        &[("branch create isolation", &send_a.send("seed").unwrap().command)],
+        &[(
+            "branch create isolation",
+            &send_a.send("seed").unwrap().command,
+        )],
         Ok(()),
     );
 }
@@ -342,9 +416,7 @@ fn direct_session_reset_isolation() {
 
     // A's current commit is now commits_a[0].
     let a_after = cli_json(&world, &spec, &["--json", "session", "status", &sid_a]);
-    let a_commit = a_after
-        .get("current_commit_id")
-        .and_then(Value::as_str);
+    let a_commit = a_after.get("current_commit_id").and_then(Value::as_str);
     require(
         a_commit == Some(commits_a[0].as_str()),
         format!("A current commit must be reset target: {a_after}"),
@@ -384,12 +456,28 @@ fn direct_session_diff_isolation() {
     let _ = cli(
         &world,
         &spec,
-        &["--json", "session", "branch", &sid_a, "feature", "--from", &commits_a[0]],
+        &[
+            "--json",
+            "session",
+            "branch",
+            &sid_a,
+            "feature",
+            "--from",
+            &commits_a[0],
+        ],
     );
     let _ = cli(
         &world,
         &spec,
-        &["--json", "session", "branch", &sid_b, "feature", "--from", &commits_b[1]],
+        &[
+            "--json",
+            "session",
+            "branch",
+            &sid_b,
+            "feature",
+            "--from",
+            &commits_b[1],
+        ],
     );
 
     // Diff A: main vs feature resolves within A.

@@ -308,7 +308,6 @@ mod tests {
         }
     }
 
-
     fn replay_cmd(session: &str, turn: &str, json: bool) -> AuditCmd {
         AuditCmd {
             action: Some(AuditAction::Replay(AuditReplayArgs {
@@ -329,7 +328,6 @@ mod tests {
             },
         }
     }
-
 
     #[tokio::test]
     async fn audit_replay_reports_stored_attestation_match() {

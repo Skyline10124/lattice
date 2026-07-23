@@ -235,8 +235,6 @@ impl LlmClient for BlockingLlmClient {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-
-
 #[tokio::test]
 async fn stream_turn_live_with_agent_error_commits_error() {
     let dir = tempfile::tempdir().unwrap();
@@ -293,8 +291,6 @@ async fn stream_turn_live_with_agent_error_commits_error() {
         "should not contain CommitFailed"
     );
 }
-
-
 
 #[tokio::test]
 async fn stream_turn_live_with_agent_startup_failure_no_stream() {
@@ -447,8 +443,6 @@ async fn stream_turn_live_with_agent_commit_stores_delta_only() {
     // The first turn's messages are unchanged at positions 0-1
     assert_eq!(all_messages[0].content, "What is 2+2?");
 }
-
-
 
 #[tokio::test]
 async fn stream_turn_live_with_agent_commit_failure_deterministic() {

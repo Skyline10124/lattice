@@ -46,8 +46,14 @@ integration-test target of any product crate.
   turn, session reopen against changed Local state, and policy denial
   skeletons. They drive the real turn path against the canonical Local
   Workspace — no KVM, no MSB daemon, no OCI image, no `[workspace]` profile
-  section — and run in the ordinary lane (full Direct-Local scenario matrix
-  is #24).
+  section — and run in the ordinary lane. The full Direct-Local scenario
+  matrix landed in #24 slices 0–8: `direct_turn_contract` (turn lifecycle +
+  reopen), `direct_observation` (visibility/bounds), `direct_mutation`
+  (atomic mutation/concurrency/effect denial), `direct_tools`
+  (fetch/todo/catalog/retired methods), `direct_failures` (provider
+  failures/SIGINT/deadline/no-rollback), `direct_operator` (audit/session/
+  lancet cross-validation), `direct_secrets` (sentinel scanning),
+  `direct_session_isolation` (two-session graph isolation).
 - **PTY smoke** (`tests/pty_tui_smoke.rs`): proves the TUI entrypoint wires
   into the same Direct-Local `stream_turn` chain. Also ordinary-lane since
   #40; the retired KVM-lane opt-in gate and its `layer_guard` module are

@@ -618,4 +618,3 @@ mod tests {
         assert_ne!(promoted.disposition, not_applicable.disposition);
     }
 }
-

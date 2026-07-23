@@ -159,20 +159,48 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
 
         let ss = cli(&world, &spec, &["--json", "session", "status", &sid]);
         let sl = cli(&world, &spec, &["--json", "session", "log", &sid]);
-        let aq = cli(&world, &spec, &["--json", "audit", "query", "--session", &sid]);
+        let aq = cli(
+            &world,
+            &spec,
+            &["--json", "audit", "query", "--session", &sid],
+        );
         let ls = cli(&world, &spec, &["--json", "lancet", "status"]);
 
         let sinks: Vec<(&str, String)> = vec![
             ("send stdout", send_stdout.to_string()),
             ("send stderr", send_stderr.to_string()),
-            ("session status", String::from_utf8_lossy(&ss.stdout).to_string()),
-            ("session status stderr", String::from_utf8_lossy(&ss.stderr).to_string()),
-            ("session log", String::from_utf8_lossy(&sl.stdout).to_string()),
-            ("session log stderr", String::from_utf8_lossy(&sl.stderr).to_string()),
-            ("audit query", String::from_utf8_lossy(&aq.stdout).to_string()),
-            ("audit query stderr", String::from_utf8_lossy(&aq.stderr).to_string()),
-            ("lancet status", String::from_utf8_lossy(&ls.stdout).to_string()),
-            ("lancet status stderr", String::from_utf8_lossy(&ls.stderr).to_string()),
+            (
+                "session status",
+                String::from_utf8_lossy(&ss.stdout).to_string(),
+            ),
+            (
+                "session status stderr",
+                String::from_utf8_lossy(&ss.stderr).to_string(),
+            ),
+            (
+                "session log",
+                String::from_utf8_lossy(&sl.stdout).to_string(),
+            ),
+            (
+                "session log stderr",
+                String::from_utf8_lossy(&sl.stderr).to_string(),
+            ),
+            (
+                "audit query",
+                String::from_utf8_lossy(&aq.stdout).to_string(),
+            ),
+            (
+                "audit query stderr",
+                String::from_utf8_lossy(&aq.stderr).to_string(),
+            ),
+            (
+                "lancet status",
+                String::from_utf8_lossy(&ls.stdout).to_string(),
+            ),
+            (
+                "lancet status stderr",
+                String::from_utf8_lossy(&ls.stderr).to_string(),
+            ),
         ];
 
         for (name, text) in &sinks {
@@ -228,8 +256,7 @@ fn direct_secrets_failure_bundle_redacts_sentinels() {
         },
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-sec-b", "main").expect("session");
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-sec-b", "main").expect("session");
 
     let turn = send.send("trigger failure").expect("turn");
     let captures = server.captured_requests();
@@ -266,8 +293,9 @@ fn direct_secrets_failure_bundle_redacts_sentinels() {
             "bundle stdout must not contain provider credential",
         )?;
         // The recursive scanner should find no sentinels in the bundle dir.
-        let leaks = lattice_system_harness::scan_artifacts_for_secrets(&bundle_dir, &[FAKE_API_KEY])
-            .expect("scan artifacts");
+        let leaks =
+            lattice_system_harness::scan_artifacts_for_secrets(&bundle_dir, &[FAKE_API_KEY])
+                .expect("scan artifacts");
         require(leaks.is_empty(), format!("bundle leaks: {leaks:?}"))?;
         Ok(())
     })();

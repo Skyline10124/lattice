@@ -1189,4 +1189,3 @@ fn seq_reasoning_visible_in_verbose() {
         "verbose stderr must contain 'reasoning'"
     );
 }
-
