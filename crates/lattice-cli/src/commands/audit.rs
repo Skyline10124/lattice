@@ -308,32 +308,6 @@ mod tests {
         }
     }
 
-    fn tail_cmd(session: &str, json: bool) -> AuditCmd {
-        AuditCmd {
-            action: Some(AuditAction::Query(AuditQueryArgs {
-                session: Some(session.to_string()),
-                turn: None,
-                method: None,
-                impact: None,
-                capability: None,
-                verdict: None,
-                tail: true,
-                since: Some(0),
-                json,
-            })),
-            query: AuditQueryArgs {
-                session: None,
-                turn: None,
-                method: None,
-                impact: None,
-                capability: None,
-                verdict: None,
-                tail: false,
-                since: None,
-                json: false,
-            },
-        }
-    }
 
     fn replay_cmd(session: &str, turn: &str, json: bool) -> AuditCmd {
         AuditCmd {
