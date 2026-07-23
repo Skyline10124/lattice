@@ -2,6 +2,27 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #24 slice 3: atomic mutation, effect denial, external concurrency — 2026-07-22
+
+Severity: test refactor + product fix (测试重构 5/6, slice 3 of #24). Plan: `docs/plans/2026-07-22-issue24-slice3-mutation-concurrency-effects.md`.
+
+**Problem:** Effect-kind denial only ran post-dispatch on observed effects, so a denied `mutate.create` could still change Local state before the check failed. Direct-Local mutation/concurrency/effect-denial coverage was also missing from the external binary harness.
+
+**Fix:**
+- Pre-dispatch effect-kind denial: `check_declared_effect_kinds_denied` in `lancet-authority` compares a method's static declared effect kinds with `denied_effect_kinds` before handler dispatch; `lancet-native` transport applies it and audits the denial without calling the backend. Post-dispatch observed-effect check remains defense in depth.
+- System Path Exclusions (`.git`, `.lattice`) are always injected into mutation authorized-region write-deny prefixes (not profile-configurable).
+- `SessionSendDriver::spawn` / `wait_spawned` for concurrent send races; `ScenarioWorld::set_env` is `&self` via interior mutability so multi-phase fake-LLM rewiring works while a driver is live.
+- New `tests/direct_mutation.rs` (7 scenarios): create atomic + existing-target; edit hash/anchor; stale edit + external visibility; no rollback after provider disconnect; write/system/effect denials; concurrent commit race; tool activity before commit.
+
+**Verification:**
+- `cargo +1.96.0 test -p lancet-authority --lib effect::checker` — 11 passed.
+- `cargo +1.96.0 test -p lancet-native denied_effect_kind_blocks` — passed.
+- `LATTICE_BIN=... cargo +1.96.0 test -p lattice-system-harness --test direct_mutation -- --test-threads=1` — 7 passed.
+- Related harness tests (direct_local_turn/observation/turn_contract) + clippy + harness-boundary — green.
+
+**Changed files:**
+`crates/lancet-authority/src/effect/checker.rs`, `crates/lancet-authority/src/policy/default.rs`, `crates/lancet-native/src/server/transport.rs`, `crates/lancet-native/src/server/native_registry.rs`, `crates/lattice-system-harness/src/{world,session_send,artifacts}.rs`, `crates/lattice-system-harness/tests/direct_mutation.rs` (new), plus unused-mut cleanups in existing harness tests.
+
 ## Codeberg #43: rewrite retired KVM-lane vocabulary in historical ADR/plans/spec — 2026-07-22
 
 Severity: docs / vocabulary hygiene (#43 `ready-for-agent`). Plan: `docs/plans/2026-07-22-issue43-retire-kvm-lane-vocab-in-historical-docs.md`.

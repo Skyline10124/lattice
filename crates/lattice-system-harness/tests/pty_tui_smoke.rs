@@ -67,7 +67,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         total_timeout_secs: Some(300),
     };
     let budget = spec.start_budget();
-    let mut world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
     world
         .write_project_file(".lattice/agents/tui-smoke/agent.toml", AGENT_TOML)
         .expect("write agent.toml");

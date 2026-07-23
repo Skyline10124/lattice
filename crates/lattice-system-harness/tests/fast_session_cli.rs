@@ -518,7 +518,7 @@ fn fast_session_send_no_agent_profile_errors() {
     // The agent profile is removed from the working tree after `session new`
     // so the persisted session still references `plain` but the lookup at
     // send time can no longer resolve it.
-    let (mut world, spec) = project_with_agent("fast-session-send-no-profile");
+    let (world, spec) = project_with_agent("fast-session-send-no-profile");
     let session_id = create_session(&world, &spec);
 
     std::fs::remove_dir_all(world.project_dir().join(".lattice/agents/plain"))

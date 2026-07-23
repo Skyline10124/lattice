@@ -109,7 +109,7 @@ fn turn_world(
 /// Point the world at a fake LLM through the formal `OPENAI_COMPATIBLE_*`
 /// configuration (RFC #19 decision four: no test-only provider).
 fn wire_fake_llm(
-    world: &mut ScenarioWorld,
+    world: &ScenarioWorld,
     agent: &str,
     script: SseScript,
 ) -> lattice_system_harness::FakeLlmServer {
@@ -130,8 +130,8 @@ fn wire_fake_llm(
 #[test]
 fn direct_local_plain_text_turn_commits_and_exit_zero() {
     let driver = driver();
-    let (mut world, spec) = turn_world("direct-local-plain-turn", "dl-plain", "[]", "");
-    let server = wire_fake_llm(&mut world, "dl-plain", SseScript::plain("ok"));
+    let (world, spec) = turn_world("direct-local-plain-turn", "dl-plain", "[]", "");
+    let server = wire_fake_llm(&world, "dl-plain", SseScript::plain("ok"));
     let scenario_evidence = evidence(&world, &spec);
 
     let send =
@@ -212,9 +212,9 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
 #[test]
 fn direct_local_session_reopen_after_external_change() {
     let driver = driver();
-    let (mut world, spec) = turn_world("direct-local-reopen", "dl-reopen", "[]", "");
+    let (world, spec) = turn_world("direct-local-reopen", "dl-reopen", "[]", "");
     let server = wire_fake_llm(
-        &mut world,
+        &world,
         "dl-reopen",
         SseScript::Sequence {
             scripts: vec![SseScript::plain("pong-one"), SseScript::plain("pong-two")],
@@ -306,14 +306,14 @@ fn direct_local_session_reopen_after_external_change() {
 #[test]
 fn direct_local_mutate_create_denied_by_write_policy() {
     let driver = driver();
-    let (mut world, spec) = turn_world(
+    let (world, spec) = turn_world(
         "direct-local-policy-denial",
         "dl-deny",
         "[\"mutate.create\"]",
         "\n[lancet.workspace]\ndenied_write_patterns = [\"blocked/**\"]\n",
     );
     let server = wire_fake_llm(
-        &mut world,
+        &world,
         "dl-deny",
         SseScript::Sequence {
             scripts: vec![

@@ -110,7 +110,7 @@ fn turn_world(prefix: &str, agent: &str) -> (ScenarioWorld, ScenarioSpec) {
 /// Point the world at a fake LLM through the formal `OPENAI_COMPATIBLE_*`
 /// configuration (RFC #19 decision four: no test-only provider).
 fn wire_fake_llm(
-    world: &mut ScenarioWorld,
+    world: &ScenarioWorld,
     agent: &str,
     script: SseScript,
 ) -> lattice_system_harness::FakeLlmServer {
@@ -268,9 +268,9 @@ fn committed_id(outcome: &SendOutcome) -> String {
 #[test]
 fn direct_turn_completed_reopen_contract() {
     let driver = driver();
-    let (mut world, spec) = turn_world("direct-turn-contract", "dl-contract");
+    let (world, spec) = turn_world("direct-turn-contract", "dl-contract");
     let server = wire_fake_llm(
-        &mut world,
+        &world,
         "dl-contract",
         SseScript::Sequence {
             scripts: vec![

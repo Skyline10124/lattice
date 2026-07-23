@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use thiserror::Error;
 
@@ -37,7 +38,7 @@ pub struct ScenarioWorld {
     project: PathBuf,
     session_store: PathBuf,
     port: u16,
-    allowed_env: HashMap<String, String>,
+    allowed_env: Mutex<HashMap<String, String>>,
 }
 
 #[derive(Debug, Error)]
@@ -85,7 +86,7 @@ impl ScenarioWorld {
             project,
             session_store,
             port,
-            allowed_env,
+            allowed_env: Mutex::new(allowed_env),
         })
     }
 
@@ -109,8 +110,11 @@ impl ScenarioWorld {
         self.port
     }
 
-    pub fn set_env(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.allowed_env.insert(key.into(), value.into());
+    pub fn set_env(&self, key: impl Into<String>, value: impl Into<String>) {
+        self.allowed_env
+            .lock()
+            .expect("allowed_env lock")
+            .insert(key.into(), value.into());
     }
 
     pub fn init_git_project(&self) -> Result<(), WorldError> {
@@ -152,7 +156,7 @@ impl ScenarioWorld {
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.project);
         cmd.env_clear();
-        for (key, value) in &self.allowed_env {
+        for (key, value) in self.allowed_env.lock().expect("allowed_env lock").iter() {
             cmd.env(key, value);
         }
         cmd
@@ -242,6 +246,8 @@ impl ScenarioWorld {
     pub fn env_summary(&self) -> Vec<(String, String)> {
         let mut pairs: Vec<_> = self
             .allowed_env
+            .lock()
+            .expect("allowed_env lock")
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();

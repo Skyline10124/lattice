@@ -179,6 +179,45 @@ async fn handle_request(
     // (no domain operation in #5); native calls produce effect-ledger evidence.
     let component_evidence = CellEvidenceLedger::new();
 
+    // Pre-dispatch effect-kind deny (issue #24 slice 3): compare the method's
+    // static declared effect kinds with `denied_effect_kinds` before invoking
+    // any handler/backend. Post-dispatch observed-effect checking remains
+    // defense in depth below.
+    if let Some(descriptor) = lancet_catalog::catalog()
+        .iter()
+        .find(|descriptor| descriptor.name == method)
+        && let Err(denial) = lancet_authority::effect::checker::check_declared_effect_kinds_denied(
+            &method,
+            &descriptor.effect,
+            &cep_context.policy.denied_effect_kinds,
+        )
+    {
+        let final_result: Result<Value, CepError> = Err(denial);
+        finalize_audit_for_dispatch(
+            &audit,
+            audit_start,
+            &method,
+            &final_result,
+            &call_audit_metadata,
+            None,
+        );
+        let error_code = final_result
+            .as_ref()
+            .err()
+            .map(|err| format!("{:?}", err.code));
+        emit_cep_call_finished(
+            &events,
+            &method,
+            audit_start.audit_id,
+            false,
+            error_code.as_deref(),
+            &call_audit_metadata,
+        )
+        .await;
+        call.respond(final_result);
+        return;
+    }
+
     let dispatch_result = if let Some(ref rt) = components
         && rt.contains(&method)
     {

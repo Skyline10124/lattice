@@ -79,7 +79,7 @@ fn finish_scenario(
 }
 
 fn wire_fake_llm(
-    world: &mut ScenarioWorld,
+    world: &ScenarioWorld,
     agent: &str,
     script: SseScript,
 ) -> lattice_system_harness::FakeLlmServer {
@@ -213,7 +213,7 @@ fn tool_sequence(calls: &[(&str, &str)], terminator: &str) -> SseScript {
 #[test]
 fn direct_observation_visibility_and_bounds() {
     let driver = driver();
-    let (mut world, spec) = observation_world("direct-observation");
+    let (world, spec) = observation_world("direct-observation");
     let calls: &[(&str, &str)] = &[
         (
             "observe.workspace",
@@ -257,7 +257,7 @@ fn direct_observation_visibility_and_bounds() {
         ),
     ];
     let server = wire_fake_llm(
-        &mut world,
+        &world,
         "dl-obs",
         tool_sequence(calls, "observation complete"),
     );

@@ -56,8 +56,8 @@ mod cep_native_registry_tests {
     use lancet_catalog::CepMethod;
     use lancet_catalog::catalog;
     use lancet_catalog::methods::workspace::{
-        FindFilesParams, ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult,
-        ReadFileParams,
+        Create, CreateParams, FindFilesParams, ObserveWorkspace, ObserveWorkspaceParams,
+        ObserveWorkspaceResult, ReadFileParams,
     };
     use lancet_protocol::CepErrorCode;
     use std::sync::Arc;
@@ -244,6 +244,66 @@ mod cep_native_registry_tests {
         assert!(!raw.contains("secret/key"));
         assert!(!raw.contains("AUDIT_SENTINEL"));
         assert!(!raw.contains(root));
+
+        drop(client);
+        server_task.abort();
+    }
+
+    /// Issue #24 slice 3: pre-dispatch effect-kind denial must never call the
+    /// mutation backend. A denied `mutate.create` leaves no file and records a
+    /// denied audit row.
+    #[tokio::test]
+    async fn denied_effect_kind_blocks_mutate_create_before_backend() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = production_registry();
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        let mut policy = lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root);
+        policy
+            .denied_effect_kinds
+            .insert(lancet_protocol::ImpactKind::WorkspaceMutation);
+        config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from(root),
+            ),
+        ));
+        config.policy_hook = default_hook.clone();
+        config.default_policy_hook = Some(default_hook);
+
+        let (client, server) = CepTransport::pair(8);
+        let audit = Arc::clone(&config.audit);
+        let server_task = tokio::spawn(async move {
+            server.run_native(registry, config).await.unwrap();
+        });
+
+        let err = client
+            .call::<Create>(CreateParams {
+                path: "must-not-land.txt".into(),
+                content: "denied content".into(),
+                create_parents: false,
+            })
+            .await
+            .expect_err("denied WorkspaceMutation must reject mutate.create");
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert!(
+            err.message.contains("declared effect denied")
+                || err.message.contains("effect-kind policy"),
+            "denial must identify effect-kind policy: {}",
+            err.message
+        );
+        assert!(
+            !dir.path().join("must-not-land.txt").exists(),
+            "pre-dispatch denial must never create the target file"
+        );
+
+        let row = audit.row_by_audit_id(1).expect("denied audit row");
+        assert_eq!(row.method, Create::NAME);
+        let result = row.result_or_error.as_deref().unwrap_or("");
+        assert!(
+            !result.is_empty() && !result.to_lowercase().contains("success"),
+            "denied call must record a non-success audit result: {result:?}"
+        );
 
         drop(client);
         server_task.abort();

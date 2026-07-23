@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn write_world_context_redacts_secret_env_value() {
-        let mut world = ScenarioWorld::new("lattice-harness-ctx-redact").expect("world");
+        let world = ScenarioWorld::new("lattice-harness-ctx-redact").expect("world");
         world.set_env("CUSTOM_BEARER", "sk-leak-me");
         let out_dir = TempDir::new().unwrap();
         write_world_context(out_dir.path(), &world, "s", "c", &["sk-leak-me"]).unwrap();

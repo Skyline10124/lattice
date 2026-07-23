@@ -27,7 +27,9 @@
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::driver::{CommandOutcome, DriverError, LatticeCommand, LatticeDriver, Termination};
+use crate::driver::{
+    CommandOutcome, DriverError, LatticeCommand, LatticeDriver, RunningCommand, Termination,
+};
 use crate::scenario::{ScenarioBudget, ScenarioSpec};
 use crate::world::ScenarioWorld;
 
@@ -635,6 +637,33 @@ impl<'a> SessionSendDriver<'a> {
             &self.session_id,
             prompt,
         )
+    }
+
+    /// Spawn `session send` without waiting. Used for concurrent races where
+    /// the scenario must mutate Local state or release a fake-LLM gate while
+    /// the turn is in flight.
+    pub fn spawn(&self, prompt: &str) -> Result<RunningCommand, DriverError> {
+        self.driver.start(
+            self.world,
+            &LatticeCommand {
+                args: vec![
+                    "--json".into(),
+                    "session".into(),
+                    "send".into(),
+                    self.session_id.clone(),
+                    prompt.into(),
+                ],
+                timeout: Some(self.budget.cap_timeout(self.spec.step_timeout())),
+            },
+        )
+    }
+
+    /// Wait for a previously [`spawn`](Self::spawn)ed send and parse its
+    /// JSONL the same way [`send`](Self::send) does.
+    pub fn wait_spawned(&self, running: RunningCommand) -> Result<SendExecution, DriverError> {
+        let command = running.wait(Some(self.budget.cap_timeout(self.spec.step_timeout())))?;
+        let parsed = parse_send_stdout(&command.stdout, command.status.code());
+        Ok(SendExecution { command, parsed })
     }
 
     /// Run another public CLI command under this scenario's shared total budget.

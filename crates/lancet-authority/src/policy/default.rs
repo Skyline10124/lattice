@@ -151,6 +151,13 @@ impl WorkspacePolicy {
             }
             "mutate.create" | "mutate.edit" => {
                 region.kinds.insert(ImpactKind::WorkspaceMutation);
+                // System Path Exclusions are host-enforced and not
+                // profile-configurable (AGENTS.md / ADR 0003).
+                for exclusion in super::visibility::SYSTEM_PATH_EXCLUSIONS {
+                    region
+                        .denied_write_path_prefixes
+                        .push(PathBuf::from(exclusion));
+                }
                 apply_denied_write_patterns(
                     &mut region,
                     &self.denied_write_patterns,
