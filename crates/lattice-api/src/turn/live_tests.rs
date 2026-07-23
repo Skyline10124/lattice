@@ -144,23 +144,6 @@ fn happy_events() -> Vec<LlmEvent> {
     ]
 }
 
-/// Multi-event sequence for ordering tests.
-fn ordered_events() -> Vec<LlmEvent> {
-    vec![
-        LlmEvent::Token {
-            content: "response text".to_string(),
-        },
-        LlmEvent::Done {
-            finish_reason: "stop".to_string(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 8,
-                completion_tokens: 3,
-                total_tokens: 11,
-            }),
-        },
-    ]
-}
-
 // ── BlockingLlmClient ─────────────────────────────────────────────────
 //
 // A streaming LLM fake that yields initial events, then blocks on a
@@ -252,97 +235,7 @@ impl LlmClient for BlockingLlmClient {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn stream_turn_live_with_agent_basic_completed() {
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-    let client = FakeStreamingLlmClient::builder()
-        .push_events(happy_events())
-        .build();
-    let agent_loop = make_agent_loop(client);
-    let request = make_request("hello");
 
-    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
-        .await
-        .expect("stream_turn_live_with_agent should succeed");
-    let events: Vec<TurnEvent> = stream.collect().await;
-
-    // First event is TurnStarted with non-empty session_id
-    let first = &events[0];
-    if let TurnEvent::TurnStarted {
-        session_id,
-        turn_id: _,
-        parent_commit_id: _,
-        branch: _,
-    } = first
-    {
-        assert!(!session_id.is_empty(), "session_id should not be empty");
-    } else {
-        panic!("first event should be TurnStarted, got: {first:?}");
-    }
-
-    // Contains TokenDelta events
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TokenDelta { .. })),
-        "should contain TokenDelta events"
-    );
-
-    // Contains ModelFinished
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::ModelFinished { .. })),
-        "should contain ModelFinished event"
-    );
-
-    // No TurnFailed or TurnCancelled
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnFailed { .. })),
-        "should not contain TurnFailed"
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnCancelled { .. })),
-        "should not contain TurnCancelled"
-    );
-
-    // Contains TurnCommitting followed by TurnCommitted with status Completed
-    let committing_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitting))
-        .expect("should have TurnCommitting");
-    let committed_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
-        .expect("should have TurnCommitted");
-    assert!(
-        committing_pos < committed_pos,
-        "TurnCommitting must precede TurnCommitted"
-    );
-
-    if let TurnEvent::TurnCommitted {
-        session_id: committed_sid,
-        commit_id,
-        status,
-        ..
-    } = &events[committed_pos]
-    {
-        assert_eq!(*status, RunTurnStatus::Completed);
-        assert!(!commit_id.is_empty(), "commit_id should not be empty");
-
-        // TurnCommitted.session_id matches TurnStarted.session_id
-        if let TurnEvent::TurnStarted { session_id, .. } = first {
-            assert_eq!(committed_sid, session_id);
-        }
-    } else {
-        panic!("expected TurnCommitted at committed_pos");
-    }
-}
 
 #[tokio::test]
 async fn stream_turn_live_with_agent_error_commits_error() {
@@ -401,76 +294,7 @@ async fn stream_turn_live_with_agent_error_commits_error() {
     );
 }
 
-#[tokio::test]
-async fn stream_turn_live_with_agent_event_ordering() {
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-    let client = FakeStreamingLlmClient::builder()
-        .push_events(ordered_events())
-        .build();
-    let agent_loop = make_agent_loop(client);
-    let request = make_request("test ordering");
 
-    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
-        .await
-        .expect("stream_turn_live_with_agent should succeed");
-    let events: Vec<TurnEvent> = stream.collect().await;
-
-    // TurnStarted is first
-    assert!(
-        matches!(&events[0], TurnEvent::TurnStarted { .. }),
-        "first event should be TurnStarted"
-    );
-
-    // ModelStarted appears after TurnStarted
-    let started_pos = 0;
-    let model_started_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::ModelStarted { .. }))
-        .expect("should have ModelStarted");
-    assert!(model_started_pos > started_pos);
-
-    // TokenDelta appears after ModelStarted
-    let token_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TokenDelta { .. }))
-        .expect("should have TokenDelta");
-    assert!(
-        token_pos > model_started_pos,
-        "TokenDelta should appear after ModelStarted"
-    );
-
-    // ModelFinished appears after TokenDelta
-    let model_finished_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::ModelFinished { .. }))
-        .expect("should have ModelFinished");
-    assert!(
-        model_finished_pos > token_pos,
-        "ModelFinished should appear after TokenDelta"
-    );
-
-    // TurnCommitting appears after ModelFinished
-    let committing_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitting))
-        .expect("should have TurnCommitting");
-    assert!(
-        committing_pos > model_finished_pos,
-        "TurnCommitting should appear after ModelFinished"
-    );
-
-    // TurnCommitted is last
-    let committed_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
-        .expect("should have TurnCommitted");
-    assert_eq!(
-        committed_pos,
-        events.len() - 1,
-        "TurnCommitted should be the last event"
-    );
-}
 
 #[tokio::test]
 async fn stream_turn_live_with_agent_startup_failure_no_stream() {
@@ -624,36 +448,7 @@ async fn stream_turn_live_with_agent_commit_stores_delta_only() {
     assert_eq!(all_messages[0].content, "What is 2+2?");
 }
 
-#[tokio::test]
-async fn stream_turn_live_with_agent_branch_populated() {
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-    let client = FakeStreamingLlmClient::builder()
-        .push_events(happy_events())
-        .build();
-    let agent_loop = make_agent_loop(client);
-    let request = make_request("hello");
 
-    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
-        .await
-        .expect("stream_turn_live_with_agent should succeed");
-    let events: Vec<TurnEvent> = stream.collect().await;
-
-    // TurnStarted.branch should be Some (default branch name) when session is on a branch
-    if let TurnEvent::TurnStarted { branch, .. } = &events[0] {
-        assert!(
-            branch.is_some(),
-            "TurnStarted.branch should be Some when session is on a branch"
-        );
-        assert_eq!(
-            branch.as_deref(),
-            Some("main"),
-            "default branch should be 'main'"
-        );
-    } else {
-        panic!("first event should be TurnStarted");
-    }
-}
 
 #[tokio::test]
 async fn stream_turn_live_with_agent_commit_failure_deterministic() {

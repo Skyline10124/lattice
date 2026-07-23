@@ -85,8 +85,8 @@
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1186 |
-| 提升 | 65 |
-| 删除 | 198 |
+| 提升 | 62 |
+| 删除 | 201 |
 | **合计** | **1449** |
 
 #### 按 crate
@@ -226,8 +226,8 @@ codeberg issue 跟踪重写。
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1186 |
-| 提升 | 65 |
-| 删除 | 198 |
+| 提升 | 62 |
+| 删除 | 201 |
 | **合计** | **1449** |
 
 ## 1.6 #24 slice 2 执行状态（2026-07-22）
@@ -332,6 +332,23 @@ codeberg issue 跟踪重写。
 | `branch_create_affects_only_addressed_session` | `direct_session_branch_create_isolation` |
 | `reset_changes_only_addressed_session_branch_pointer` | `direct_session_reset_isolation` |
 | `diff_resolves_refs_inside_addressed_session_only` | `direct_session_diff_isolation` |
+
+
+## 1.11 #24 slice 8 执行状态（2026-07-22）
+
+> Ledger deletion closeout: strict-superset removals only; all half-covered mappings retained with documented reasons.
+
+### 已删除（3 条，提升->删除）
+
+| ledger identity | replacement scenario |
+| --- | --- |
+| `stream_turn_live_with_agent_basic_completed` | `direct_turn_completed_reopen_contract`（完整生命周期 + session_id/branch/exit code） |
+| `stream_turn_live_with_agent_event_ordering` | `direct_turn_completed_reopen_contract`（相同事件子序列） |
+| `stream_turn_live_with_agent_branch_populated` | `direct_turn_completed_reopen_contract`（branch == main） |
+
+### 半保留（20 条，事件链半已落地，durable log/transcript/terminal_reason/attestation 半未覆盖）
+
+详见各 slice 部分。所有半保留条目保留原测试并附明确 residual 理由。
 
 
 ## 2. 逐条清单

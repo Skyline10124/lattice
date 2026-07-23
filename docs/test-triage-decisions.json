@@ -6078,10 +6078,10 @@
     "name": "stream_turn_live_with_agent_basic_completed",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_basic_completed_event_contract",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_basic_completed_event_contract` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 direct_turn_completed_reopen_contract（完整生命周期 + session_id/branch/exit code） 接管",
+    "reason": "#24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（完整生命周期 + session_id/branch/exit code）。已删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6102,10 +6102,10 @@
     "name": "stream_turn_live_with_agent_event_ordering",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_live_event_order",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_live_event_order` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 direct_turn_completed_reopen_contract（相同事件子序列） 接管",
+    "reason": "#24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（相同事件子序列）。已删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6138,10 +6138,10 @@
     "name": "stream_turn_live_with_agent_branch_populated",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_branch_population",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_branch_population` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 direct_turn_completed_reopen_contract（branch == main） 接管",
+    "reason": "#24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（branch == main）。已删除原测试。"
   },
   {
     "crate": "lattice-api",
