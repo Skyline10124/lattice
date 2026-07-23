@@ -21,9 +21,9 @@ use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    assert_event_subsequence, failure_dir, AssertError, CapturedRequest, CommandOutcome,
-    LatticeDriver, ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SendExitCode,
-    SessionSendDriver, SseScript, Termination, TurnEventLine, FAKE_API_KEY,
+    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, LatticeDriver, ScenarioEvidence,
+    ScenarioSpec, ScenarioWorld, SendExecution, SendExitCode, SessionSendDriver, SseScript,
+    Termination, TurnEventLine, assert_event_subsequence, failure_dir,
 };
 use serde_json::Value;
 
