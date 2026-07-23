@@ -2,6 +2,24 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #24 slice 7: public session graph isolation — 2026-07-22
+
+Severity: test refactor (测试重构 5/6, slice 7 of #24). Plan: `docs/plans/2026-07-22-issue24-slice7-session-isolation.md`.
+
+**Problem:** Session graph isolation (branch/checkout/reset/diff scoped to the addressed session) had no external-binary coverage; the five internal CLI tests used the internal API.
+
+**Fix:**
+- New `tests/direct_session_isolation.rs` (5 scenarios): two sessions seeded with real turns, then branch-listing/checkout/branch-create/reset/diff isolation asserted via public `--json` commands only.
+- Deleted the five internal `d25_scoped_session` tests (strict superset).
+
+**Verification:**
+- `LATTICE_BIN=... cargo +1.96.0 test -p lattice-system-harness --test direct_session_isolation -- --test-threads=1` — 5 passed.
+- `cargo +1.96.0 test -p lattice-cli` — 117→112 (5 internals removed), all green.
+- clippy + harness-boundary — green.
+
+**Changed files:**
+`crates/lattice-system-harness/tests/direct_session_isolation.rs` (new), `crates/lattice-cli/src/commands/session.rs`, `docs/TEST-TRIAGE.md`, `docs/test-triage-decisions.json`, `FIX.md`.
+
 ## Codeberg #24 slice 6: operator audit paths + secret discipline + turn_id — 2026-07-22
 
 Severity: test refactor + additive event field (测试重构 5/6, slice 6 of #24). Plan: `docs/plans/2026-07-22-issue24-slice6-operator-audit-secrets.md`.

@@ -9942,10 +9942,10 @@
     "name": "branch_listing_reads_only_addressed_session_refs",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_branch_listing_isolation",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_branch_listing_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 direct_session_branch_listing_isolation 接管",
+    "reason": "#24 slice 7 assertion-level superset review：direct_session_branch_listing_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -9954,10 +9954,10 @@
     "name": "checkout_changes_only_addressed_session_head",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_checkout_isolation",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_checkout_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 direct_session_checkout_isolation 接管",
+    "reason": "#24 slice 7 assertion-level superset review：direct_session_checkout_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -9966,10 +9966,10 @@
     "name": "branch_create_affects_only_addressed_session",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_branch_create_isolation",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_branch_create_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 direct_session_branch_create_isolation 接管",
+    "reason": "#24 slice 7 assertion-level superset review：direct_session_branch_create_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -9978,10 +9978,10 @@
     "name": "reset_changes_only_addressed_session_branch_pointer",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_reset_isolation",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_reset_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 direct_session_reset_isolation 接管",
+    "reason": "#24 slice 7 assertion-level superset review：direct_session_reset_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -9990,10 +9990,10 @@
     "name": "diff_resolves_refs_inside_addressed_session_only",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_diff_isolation",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_diff_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "已删除原测试，由 direct_session_diff_isolation 接管",
+    "reason": "#24 slice 7 assertion-level superset review：direct_session_diff_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
     "crate": "lattice-cli",

@@ -85,8 +85,8 @@
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1186 |
-| 提升 | 70 |
-| 删除 | 193 |
+| 提升 | 65 |
+| 删除 | 198 |
 | **合计** | **1449** |
 
 #### 按 crate
@@ -226,8 +226,8 @@ codeberg issue 跟踪重写。
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1186 |
-| 提升 | 70 |
-| 删除 | 193 |
+| 提升 | 65 |
+| 删除 | 198 |
 | **合计** | **1449** |
 
 ## 1.6 #24 slice 2 执行状态（2026-07-22）
@@ -317,6 +317,21 @@ codeberg issue 跟踪重写。
 | --- | --- | --- |
 | `audit_replay_reports_stored_attestation_match` | `planned_direct_audit_attestation_match` | stored attestation 匹配由 API 级断言；外部仅断言 replay 引用 observe.workspace |
 | `cep_status_seeded_audit_json` | `planned_direct_lancet_status_seeded` | recent_calls 含 todo_write + last_guard_verdict 为 API 级；外部仅断言 recent_calls 非空 |
+
+
+## 1.10 #24 slice 7 执行状态（2026-07-22）
+
+> 外部测试 `crates/lattice-system-harness/tests/direct_session_isolation.rs`（5 场景）已实现并通过全部 gate。
+
+### 已删除（5 条，提升->删除）
+
+| ledger identity | replacement scenario |
+| --- | --- |
+| `branch_listing_reads_only_addressed_session_refs` | `direct_session_branch_listing_isolation` |
+| `checkout_changes_only_addressed_session_head` | `direct_session_checkout_isolation` |
+| `branch_create_affects_only_addressed_session` | `direct_session_branch_create_isolation` |
+| `reset_changes_only_addressed_session_branch_pointer` | `direct_session_reset_isolation` |
+| `diff_resolves_refs_inside_addressed_session_only` | `direct_session_diff_isolation` |
 
 
 ## 2. 逐条清单
@@ -1877,7 +1892,12 @@ codeberg issue 跟踪重写。
 - [x] 清单覆盖枚举到的全部现存测试，无遗漏条目（`docs/test-triage-decisions.json` 共 1449 条，与枚举键集合一致）
 - [x] 每条都有决定、理由、目标层；提升/删除条目标明替代场景（或显式 `n/a`）
 - [x] 以文档形式入库（本文件 + JSON）
-- [x] 本票未删除、未修改任何测试源码| `direct_operator_audit_session_lancet_cross` | Direct-Local: audit query/replay/tail + lancet status + session status/log 交叉校验 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
+- [x] 本票未删除、未修改任何测试源码| `direct_session_branch_listing_isolation` | Direct-Local: 两个 session 同分支名，列表仅报告被寻址 session | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_session_checkout_isolation` | Direct-Local: checkout A feature，B 保持 main 不变 | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_session_branch_create_isolation` | Direct-Local: A 创建 work，B 无 work | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_session_reset_isolation` | Direct-Local: A reset 到 A0，B 不变 | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_session_diff_isolation` | Direct-Local: 同名 main/feature 在被寻址 session 内解析，A/B 指向不同 commit | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_operator_audit_session_lancet_cross` | Direct-Local: audit query/replay/tail + lancet status + session status/log 交叉校验 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
 | `direct_operator_audit_query_unknown_session` | Direct-Local: 未知 session query 返回空成功 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
 | `direct_operator_audit_replay_unknown_turn` | Direct-Local: 未知 turn replay 非零失败 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
 | `direct_secrets_sentinels_never_leak` | Direct-Local: provider 凭证 + 拒绝内容 sentinel 不泄漏到任何公开 sink | **已落地** `tests/direct_secrets.rs`（#24 slice 6） |
