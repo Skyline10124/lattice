@@ -1,6 +1,6 @@
 # #43：重写含退役 KVM-lane 词汇的历史文档（ADR/plan/spec）
 
-- 票：<https://codeberg.org/AstRin/LATTICE/issues/43>（`ready-for-agent`）
+- 票：<https://github.com/Skyline10124/lattice/issues/65>（原 Codeberg #43；`ready-for-agent`）
 - 覆盖范围：本票列出的六份文档覆盖 #40「historical ADR/FIX records 不重写」旧约束；只限本票文档范围，不改 #40 产品行为。
 - 词汇源：根 `CONTEXT.md` + ADR 0003（Direct-Local）+ ADR 0004（Tool Host / Source Tool）。
 - 迁移历史归属：`FIX.md`（append-only）；历史文档只保留理解决策所需的因果，不保留退役字段值作现行概念。
@@ -94,7 +94,7 @@ assert not any(e.get("target_layer") == "real_microsandbox" for e in entries)
 ```markdown
 # [Archived] #40 实现计划：删除 Upper 配置与 lattice-workspace 残留
 
-> Archived 2026-07-22 under Codeberg #43. Completed work; historical
+> Archived 2026-07-22 under GitHub #65 (formerly Codeberg #43). Completed work; historical
 > migration detail lives in FIX.md. Do not treat retired lane names in the
 > body as current requirements. Canonical workspace model: ADR 0003
 > (Direct-Local) + ADR 0004 (Tool Host).

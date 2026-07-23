@@ -2,6 +2,7 @@
 
 未修复项，留给后续 alpha 主线。已修复项见 [FIX.md](./FIX.md)。
 
+> Issue-number migration (2026-07-24): historical bare issue references in this ledger use Codeberg numbering. Translate Codeberg #1 to GitHub #23 and Codeberg #2–#50 to GitHub #24–#72 (`github = codeberg + 22`); new references use GitHub numbers.
 ---
 
 ## HIGH

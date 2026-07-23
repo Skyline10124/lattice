@@ -1,7 +1,7 @@
 # Issue #5 模型设计 —— Effect 模型(R7a/R8)+ 工具 substrate + 通道模型 + ToolHost
 
 日期:2026-07-01;第四轮修订 2026-07-02(工具后端结构规范讨论,原 4 项待拍全部落定);
-Codeberg #43 词汇对齐修订 2026-07-22(物理假设对齐 ADR 0003 Direct-Local + ADR 0004 Tool Host / WASM Component)。
+GitHub #65(原 Codeberg #43)词汇对齐修订 2026-07-22(物理假设对齐 ADR 0003 Direct-Local + ADR 0004 Tool Host / WASM Component)。
 
 状态:由 brainstorming 讨论产出(2026-07-01),2026-07-02 与用户逐项拍板后第四轮修订;**待用户复审定稿**。
 取代现 issue #5 正文的模型部分(该票被标 `need-major-revision`)。派生自 PRD #2(crate 边界重构)及其

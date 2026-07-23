@@ -8,7 +8,7 @@ read `crates/<crate>/AGENTS.md`.
 
 ### Issue tracker
 
-Issues are tracked in Codeberg Issues for `AstRin/LATTICE` through the Forgejo tools; external pull requests are not a triage surface. See `docs/agents/issue-tracker.md`.
+Issues and PRDs are tracked in GitHub Issues for `Skyline10124/lattice`; external pull requests remain outside issue triage. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
@@ -32,7 +32,7 @@ built runtime has a closed catalog of embedded WASM Components whose source
 manifests own their descriptors; the default distribution contains five Tools,
 and operators may install precompiled Tool Bundles before rebuilding a new
 closed runtime. The MSB/Upper path and `lattice-workspace` crate were removed
-in #40; the central catalog authority, native handlers, and native/CEP/dispatch
+in GitHub #62; the central catalog authority, native handlers, and native/CEP/dispatch
 split remain migration residue. Do not add projection, checkpoint, ambient Tool
 authority, runtime code loading, user-process, or arbitrary-command
 capabilities while completing the migration.
@@ -149,7 +149,7 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
 6. Turn outcomes are persisted as commits in the session graph.
 
 Session commits never imply a Local Workspace snapshot; only the explicit
-gix-backed `/rewind` path (#41/#42) restores recorded LATTICE mutations.
+gix-backed `/rewind` path (GitHub #63/#64) restores recorded LATTICE mutations.
 
 ## Review Records
 
@@ -208,7 +208,7 @@ gix-backed `/rewind` path (#41/#42) restores recorded LATTICE mutations.
   profile→policy translation and the agent-loop wiring over `lancet-api`. Keep
   TUI terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
   output, non-interactive rendering, and argument parsing in `lattice-cli`.
-- `lattice-workspace` was deleted in #40. Do not reintroduce an Upper/MSB
+- `lattice-workspace` was deleted in GitHub #62. Do not reintroduce an Upper/MSB
   workspace boundary, snapshot lifecycle, or a pluggable execution-backend
   seam in any crate.
 - Prefer crate-local `AGENTS.md` files for detailed navigation before editing.

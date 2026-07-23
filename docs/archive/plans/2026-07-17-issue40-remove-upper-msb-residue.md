@@ -1,11 +1,11 @@
 # [Archived] #40 实现计划：删除 Upper 配置与 lattice-workspace 残留
 
-> Archived 2026-07-22 under Codeberg #43. Completed work; historical
+> Archived 2026-07-22 under GitHub #65 (formerly Codeberg #43). Completed work; historical
 > migration detail lives in FIX.md. Do not treat retired lane names in the
 > body as current requirements. Canonical workspace model: ADR 0003
 > (Direct-Local) + ADR 0004 (Tool Host).
 
-- 票：<https://codeberg.org/AstRin/LATTICE/issues/40>
+- 票：<https://github.com/Skyline10124/lattice/issues/62>（原 Codeberg #40）
 - 前置依赖：#39（[计划](../../plans/2026-07-17-issue39-policy-visible-read.md)）。全局约束
   与验证矩阵见 [总览](../../plans/2026-07-17-direct-local-overview.md)。
 - 对应 ADR 0003 Migration Sequence step 4 的 `[workspace]` 删除 + step 5 +

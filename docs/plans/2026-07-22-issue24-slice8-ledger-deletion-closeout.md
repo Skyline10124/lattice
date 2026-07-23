@@ -57,7 +57,7 @@ Do not rewrite historical records. Do not modify `.gitignore`.
   residual findings for any approved local-only invariant or unsupported public
   behavior.
 - Update affected crate `AGENTS.md` recent issues/next actions.
-- Comment on Codeberg #24 with scenario/deletion counts and gate results; do not
+- Comment on GitHub #46 (formerly Codeberg #24) with scenario/deletion counts and gate results; do not
   close the issue unless the maintainer workflow requests it.
 
 ## Final verification

@@ -1,6 +1,6 @@
 # #39 实现计划：统一 Policy-Visible Workspace 读可见性
 
-- 票：<https://codeberg.org/AstRin/LATTICE/issues/39>
+- 票：<https://github.com/Skyline10124/lattice/issues/61>（原 Codeberg #39）
 - 前置依赖：#38（[计划](2026-07-17-issue38-remove-execution-backend.md)）。
   全局约束与验证矩阵见 [总览](2026-07-17-direct-local-overview.md)。
 - 对应 ADR 0003 Migration Sequence step 4 的 `[lancet.workspace]` 部分

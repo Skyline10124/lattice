@@ -21,8 +21,8 @@ release records.
 - [`agents/`](agents/) contains repository configuration consumed by engineering
   skills.
 - [`specs/`](specs/) contains active design contracts. The issue #5
-  effect-model and tool-context specification remains authoritative while that
-  Codeberg issue is open.
+  effect-model and tool-context specification remains authoritative while the
+  migrated GitHub issue #27 (formerly Codeberg #5) is open.
 - [`plans/`](plans/) contains per-issue implementation plans for active work.
   A document belongs in `specs/` or `plans/` only while its issue or
   implementation remains active; completed, superseded, or abandoned documents

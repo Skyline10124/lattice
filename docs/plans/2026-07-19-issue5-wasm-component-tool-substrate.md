@@ -1,6 +1,6 @@
 # #5 实现计划：WASM Component Tool 基础 + Cell effect 模型贯通
 
-- 票：<https://codeberg.org/AstRin/LATTICE/issues/5>（`ready-for-agent`，minor-revision 遗留点见 §9）
+- 票：<https://github.com/Skyline10124/lattice/issues/27>（原 Codeberg #5；`ready-for-agent`，minor-revision 遗留点见 §9）
 - 事实源优先级：issue 正文（2026-07-16 按 ADR 0004 重写）> ADR 0004 > `docs/specs/2026-07-01-issue5-effect-model-toolctx-design.md`
   （spec 的逻辑模型继续有效：Cell 核、通道模型、ToolHost 面、fail-closed 供需校验；
   spec §6.7 "v1 = 进程内 trait" 的分代方案已被 ADR 0004 取代——本票直接落 WASM Component）。

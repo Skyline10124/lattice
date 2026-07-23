@@ -1,6 +1,6 @@
 # #38 实现计划：收拢 Structured Workspace Operations，删除 ExecutionBackend 路由层
 
-- 票：<https://codeberg.org/AstRin/LATTICE/issues/38>
+- 票：<https://github.com/Skyline10124/lattice/issues/60>（原 Codeberg #38）
 - 前置依赖：#37（[计划](2026-07-17-issue37-direct-local-turn.md)）。全局约束与
   验证矩阵见 [总览](2026-07-17-direct-local-overview.md)。
 - 对应 ADR 0003 Migration Sequence step 2 + step 3 的删除部分。

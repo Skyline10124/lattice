@@ -1,7 +1,7 @@
 # #23 实现计划：快速测试残留与分类账收口（测试重构 4/6）
 
 - 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #23）
-- 票：<https://codeberg.org/AstRin/LATTICE/issues/23>
+- 票：<https://github.com/Skyline10124/lattice/issues/45>（原 Codeberg #23）
 - 上级：#18（PRD）/ #19（RFC，已接受）。判决书 = `docs/TEST-TRIAGE.md` + `docs/test-triage-decisions.json`（1449 条，身份不变）。
 - 排序依据：roadmap #16 既定顺序，#23 先于 #5 开工。
 - 独立切片计划（均含示例代码）：

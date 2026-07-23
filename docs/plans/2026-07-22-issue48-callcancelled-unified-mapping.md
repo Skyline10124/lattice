@@ -1,6 +1,6 @@
 # #48:cooperative Component cancellation 统一映射为 `CallCancelled`
 
-- 来源:Codeberg issue #48(#5 Spec 审查 follow-up,severity High,`ready-for-agent`)。
+- 来源:GitHub issue #70(原 Codeberg #48;GitHub #27/原 Codeberg #5 Spec 审查 follow-up,severity High,`ready-for-agent`)。
 - 前置核验:issue 最新 comment(2026-07-22)列出的两处缺口已逐行复核属实;另发现
   audit `Cancelled` 臂当前是 dead code —— 唯一产出 `"call cancelled"` message 的
   `call_cancelled()` 只在 dispatch 客户端使用,服务端永远不会返回它,因此连现已正确
