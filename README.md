@@ -66,7 +66,7 @@ methods and cannot be enabled in `[tools].enabled`.
 
 There is no `session.envelope` method (it was removed; the catalog and tests
 assert its absence). There is no `exec.command_run` method — it and
-post-mutation verify were permanently retired from the CEP layer (issue #4);
+post-mutation verify were permanently retired from the CEP layer (issue #26);
 command execution is not an agent-visible capability.
 
 ## Installation

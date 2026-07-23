@@ -252,7 +252,7 @@ There is **no** `session.envelope` method. It was removed from the catalog;
 `session.envelope` fails because it is no longer a catalog method.
 
 There is **no** `exec.command_run` method. It and post-mutation verify were
-permanently retired from the CEP layer (issue #4); command execution is not an
+permanently retired from the CEP layer (issue #26); command execution is not an
 agent-visible capability. `crates/lancet-catalog/src/catalog.rs` contains a
 regression test (`catalog_retires_exec_command_run`) asserting its absence, and
 `crates/lancet-api/src/runtime.rs` contains a production-path regression test

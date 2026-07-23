@@ -1,4 +1,4 @@
-# Issue #24 Slice 3 — Atomic mutation, external concurrency, and effect denial
+# Issue #46 Slice 3 — Atomic mutation, external concurrency, and effect denial
 
 ## Goal
 

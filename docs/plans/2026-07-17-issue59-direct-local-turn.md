@@ -1,4 +1,4 @@
-# #37 实现计划：production Turn 直连 Local Workspace
+# #59 实现计划：production Turn 直连 Local Workspace
 
 - 票：<https://github.com/Skyline10124/lattice/issues/59>（原 Codeberg #37）
 - 前置依赖：无。全局约束与验证矩阵见
@@ -85,9 +85,9 @@ debug_assert!(cur.starts_with(&self.root));   // 词法层已由 WorkspacePath �
 - I/O 放 `tokio::task::spawn_blocking`（对齐现有 handler 习惯）。
 
 **module 级测试**（ADR step 1 钦定八类，全部 tempdir）：root escape、symlink
-parent/leaf 拒绝、System Path Exclusion 占位（#39 前先只测 root escape）、
+parent/leaf 拒绝、System Path Exclusion 占位（#61 前先只测 root escape）、
 limits、expected-hash conflict、no-replace create、atomic replacement、
-partial-write failure（正式 fault injection 归 #38，本票先用"写只读目录"这类
+partial-write failure（正式 fault injection 归 #60，本票先用"写只读目录"这类
 真实故障近似）。
 
 ## 2. crate-internal migration adapter
@@ -105,14 +105,14 @@ impl ExecutionBackend for LocalExecutionBackend {
     // changed_paths：无 production caller（实测仅 cfg(test)），返回 Ok(vec![])
 }
 
-/// #37 过渡期唯一构造点；#38 连同本文件一起删除。
+/// #59 过渡期唯一构造点；#60 连同本文件一起删除。
 pub fn direct_local_routing(root: &Path) -> Result<ExecutionRouting, LancetError> {
     let ws = Arc::new(LocalWorkspace::new(root)?);
     Ok(ExecutionRouting {
         backend: Arc::new(LocalExecutionBackend(ws)),
         upper: UpperContext {
             execution_backend: "direct-local".into(),
-            // 过渡值：填真实 canonical root，audit 不再声称 Upper。#38 删字段。
+            // 过渡值：填真实 canonical root，audit 不再声称 Upper。#60 删字段。
             upper_workspace_id: root.display().to_string(),
         },
     })
@@ -125,10 +125,10 @@ pub fn direct_local_routing(root: &Path) -> Result<ExecutionRouting, LancetError
   "`LancetRuntimeConfig` no longer receives `ExecutionRouting`"）。
 - `LancetRuntime::build`：
   `let execution = lancet_native::direct_local_routing(&policy.project_root)?;`
-  塞进 `ServerRunConfig`（`ServerRunConfig.execution` 字段保留到 #38）。
+  塞进 `ServerRunConfig`（`ServerRunConfig.execution` 字段保留到 #60）。
 - 改写 `runtime_config_defaults_have_null_execution` 测试 → 断言 build 出的
   routing 为 `direct-local`。
-- `NullExecutionBackend` 自此无 production 引用，留给 #38 删。
+- `NullExecutionBackend` 自此无 production 引用，留给 #60 删。
 
 ## 4. `lattice-api`：切换并删除 Upper 链（no-compat 硬切）
 
@@ -173,7 +173,7 @@ production 代码同步修改：
   destroy 分支——runtime 构建失败不再有 Upper 需要清理
 
 ```rust
-// turn/cep.rs（#37 后）
+// turn/cep.rs（#59 后）
 let runtime = LancetRuntime::build(LancetRuntimeConfig {
     project_root: PathBuf::from(project_root),
     enabled_tools: enabled_tools.to_vec(),
@@ -216,17 +216,17 @@ let runtime = LancetRuntime::build(LancetRuntimeConfig {
 |---|---|
 | `tests/turn_target_tests.rs` | 裁剪：`resolve_upper_config`/`UpperPrepareError` 用例删，`resolve_turn_target` 其余用例保留 |
 | `tests/turn_lifecycle_tests.rs` | 删（全部绑 promotion/verification/`DeterministicWorkspace`） |
-| `tests/resume_tests.rs` | 删（绑 `SnapshotRef`/`UpperSpec`；direct-local session-reopen 场景由 #40 harness 骨架与 #24 重建） |
+| `tests/resume_tests.rs` | 删（绑 `SnapshotRef`/`UpperSpec`；direct-local session-reopen 场景由 #62 harness 骨架与 #46 重建） |
 | `tests/upper_routing.rs`、`tests/promotion_wiring.rs` | 删（契约已不存在） |
 | `tests/consistency.rs`、`tests/release_e2e.rs`、`tests/usage_turn.rs` | 机械改：删 `workspace_override: None` 字段行 |
 | `tests/support/mod.rs` | 删 `deterministic_workspace` helper 与自动注入分支 |
 | `tests/cep_round_trip.rs`、`tests/audit_turn_provenance.rs`、`tests/dogfood_impact_matrix.rs` | 改 temp Local root 直跑（不再需要 override） |
 | `src/turn/{test_support.rs, run_tests.rs, live_tests.rs, cep.rs(turn_wiring)}` | 删 override/`DeterministicWorkspace` 用法，temp root 直跑 |
 
-- `[workspace]` profile 段：schema 保持必填但 runtime 完全不读（#40 删）。
+- `[workspace]` profile 段：schema 保持必填但 runtime 完全不读（#62 删）。
   `profile_with_workspace` 测试 helper 继续存在。
 - Cargo.toml：本票结束时 `lattice-api` 与 `lattice-cli` 对 `lattice-workspace`
-  的依赖应清零并删除声明；crate 本体删除仍归 #40。
+  的依赖应清零并删除声明；crate 本体删除仍归 #62。
 
 ## 5. 验收 → 测试映射
 

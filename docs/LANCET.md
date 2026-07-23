@@ -12,11 +12,11 @@
 > may add verified precompiled Tool Bundles before building another closed
 > runtime; running processes cannot load code. Components receive no ambient
 > WASI filesystem, network, or process authority and can act only through Tool
-> Host imports. Until #5-#14 land, production still uses the
+> Host imports. Until #27-#36 land, production still uses the
 > `lancet-catalog`/CEP/dispatch and native-handler path documented below. Treat
 > those surfaces as migration residue, not extension points. Command execution,
 > post-mutation verify, agent-visible audit, and SQLite session storage remain
-> retired. Final line-by-line synchronization is tracked by #14.
+> retired. Final line-by-line synchronization is tracked by #36.
 
 LATTICE agents execute tools through **LANCET**, the controlled execution and failure-learning subsystem. LANCET uses **CEP** (Controlled Execution Protocol) internally: JSON-RPC methods with capability envelopes, policy gating, path guards, and a flat append-only audit store.
 

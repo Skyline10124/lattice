@@ -1,13 +1,13 @@
 # gix-only 收口计划：session graph 与测试基建迁 gix，移除 git2 与 git subprocess
 
-- 票：**待开**（建议开票挂 #16；用户 2026-07-17 拍板的附加范围，超出 #40 票面）。
-- 前置依赖：#40（[计划](../archive/plans/2026-07-17-issue40-remove-upper-msb-residue.md)）——
+- 票：**待开**（建议开票挂 #38；用户 2026-07-17 拍板的附加范围，超出 #62 票面）。
+- 前置依赖：#62（[计划](../archive/plans/2026-07-17-issue62-remove-upper-msb-residue.md)）——
   `lattice-workspace`（git2 最大用户之一）删除后再迁，避免白做。
-- 与 #41/#42（rewind，本就定案 gix）同引擎，先行统一。
+- 与 #63/#64（rewind，本就定案 gix）同引擎，先行统一。
 - 全局约束与验证矩阵见 [总览](2026-07-17-direct-local-overview.md)。
 
 范围：`git2` 与 `Command::new("git")` 在仓库内清零（production、测试、
-harness）。#40 之后的实测残留面：`lattice-session`（git_graph 4 文件 +
+harness）。#62 之后的实测残留面：`lattice-session`（git_graph 4 文件 +
 migrate 4 文件）、`lattice-api`（session.rs + 13 个 `git_store_*.rs` 测试 +
 若干 fixture）、`lattice-cli/run_tests.rs`、`lattice-system-harness/world.rs`。
 

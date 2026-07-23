@@ -1,6 +1,6 @@
-# #23 切片 1：`fast_lancet_cli` 场景 + 删除内部空态测试
+# #45 切片 1：`fast_lancet_cli` 场景 + 删除内部空态测试
 
-- 父计划：`2026-07-19-issue23-fast-residual-ledger-closeout.md` §1
+- 父计划：`2026-07-19-issue45-fast-residual-ledger-closeout.md` §1
 - 接管目标：`planned_lancet_cli`（1 条）——`cep_status_missing_db_returns_empty_state`
   （`crates/lattice-cli/src/commands/lancet.rs:289`）
 

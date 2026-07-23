@@ -1,9 +1,9 @@
-# Issue #24 Slice 1 — Completed Turn contract and ledger correction
+# Issue #46 Slice 1 — Completed Turn contract and ledger correction
 
 ## Goal
 
 Expand the existing plain/reopen scenarios into the public completed-Turn
-contract, and correct #23 mappings that cannot honestly be elevated through the
+contract, and correct #45 mappings that cannot honestly be elevated through the
 binary seam.
 
 ## Approved ledger correction

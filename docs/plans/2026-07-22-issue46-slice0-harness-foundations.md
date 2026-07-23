@@ -1,4 +1,4 @@
-# Issue #24 Slice 0 — Direct-Local harness foundations
+# Issue #46 Slice 0 — Direct-Local harness foundations
 
 ## Goal
 

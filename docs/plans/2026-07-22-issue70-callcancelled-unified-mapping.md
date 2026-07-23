@@ -1,4 +1,4 @@
-# #48:cooperative Component cancellation 统一映射为 `CallCancelled`
+# #70:cooperative Component cancellation 统一映射为 `CallCancelled`
 
 - 来源:GitHub issue #70(原 Codeberg #48;GitHub #27/原 Codeberg #5 Spec 审查 follow-up,severity High,`ready-for-agent`)。
 - 前置核验:issue 最新 comment(2026-07-22)列出的两处缺口已逐行复核属实;另发现

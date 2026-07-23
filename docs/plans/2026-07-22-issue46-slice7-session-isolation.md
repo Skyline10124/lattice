@@ -1,4 +1,4 @@
-# Issue #24 Slice 7 — Public session graph isolation
+# Issue #46 Slice 7 — Public session graph isolation
 
 ## Goal
 

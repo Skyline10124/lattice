@@ -1,7 +1,7 @@
-# #38 实现计划：收拢 Structured Workspace Operations，删除 ExecutionBackend 路由层
+# #60 实现计划：收拢 Structured Workspace Operations，删除 ExecutionBackend 路由层
 
 - 票：<https://github.com/Skyline10124/lattice/issues/60>（原 Codeberg #38）
-- 前置依赖：#37（[计划](2026-07-17-issue37-direct-local-turn.md)）。全局约束与
+- 前置依赖：#59（[计划](2026-07-17-issue59-direct-local-turn.md)）。全局约束与
   验证矩阵见 [总览](2026-07-17-direct-local-overview.md)。
 - 对应 ADR 0003 Migration Sequence step 2 + step 3 的删除部分。
 
@@ -34,8 +34,8 @@ pub(crate) struct EditStorage {
 
 - `execution_backend.rs` 整文件：`ExecutionBackend` trait、`ExecutionRouting`、
   `UpperContext`、`NullExecutionBackend`、`RoutingInvocationState`、
-  `direct_local_routing`（#37 的过渡工厂）、`changed_paths`（实测无 production
-  caller，仅 `workspace_backend.rs` 的 `#[cfg(test)]` 引用，随 #37 已删）。
+  `direct_local_routing`（#59 的过渡工厂）、`changed_paths`（实测无 production
+  caller，仅 `workspace_backend.rs` 的 `#[cfg(test)]` 引用，随 #59 已删）。
 - 中性类型 `WorkspacePath`/`WorkspacePathError`/`PathFacts`/`PathIntent`/
   `PathKind`/`DirectoryEntry`/`GrepRequest`/`GrepMatch`/`FindRequest` 迁至
   `workspace/types.rs`（这些是 Local 操作词汇，非 routing 词汇）。
@@ -72,7 +72,7 @@ pub(crate) fn fail_next_install(&self) { self.fail_install.store(true, SeqCst); 
 
 ## 6. 验收对照
 
-- 产品级 smoke：#37 留下的 direct-Local observation/mutation 行为在删层前后
+- 产品级 smoke：#59 留下的 direct-Local observation/mutation 行为在删层前后
   输出一致（对同一 tempdir 场景快照对比）。
 - cancellation、Turn commit、policy denial、effect contracts、audit provenance
   全绿。

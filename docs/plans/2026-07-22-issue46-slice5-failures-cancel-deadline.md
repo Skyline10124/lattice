@@ -1,4 +1,4 @@
-# Issue #24 Slice 5 — Provider failures, public cancellation, and deadline
+# Issue #46 Slice 5 — Provider failures, public cancellation, and deadline
 
 ## Goal
 

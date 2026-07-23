@@ -1,7 +1,7 @@
-# #23 切片 3：退役 KVM-lane 词汇与 assertion-level #24 映射
+# #45 切片 3：退役 KVM-lane 词汇与 assertion-level #46 映射
 
-- 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #23 slice 3/4）
-- 父计划：`2026-07-19-issue23-fast-residual-ledger-closeout.md` §3
+- 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #45 slice 3/4）
+- 父计划：`2026-07-19-issue45-fast-residual-ledger-closeout.md` §3
 - 前置：切片 1/2（fast residual 已归零）。
 - 与切片 4 **同一 PR、相邻 commit**：本切片改 machine ledger，切片 4 立即同步 prose。
 - 收口前精确分布：退役 KVM-lane `target_layer` 曾有 57 条 = elevate 55 + keep 2；
@@ -15,7 +15,7 @@
 ```python
 import json, pathlib, re
 entries = json.load(open("docs/test-triage-decisions.json"))
-# Historical closeout filtered the retired KVM-lane target_layer (token in FIX.md #23).
+# Historical closeout filtered the retired KVM-lane target_layer (token in FIX.md #45).
 # After slice 3, that filter must be empty in active ledger:
 retired = [e for e in entries if e.get("target_layer", "").startswith("real_")
           and "sand" in e.get("target_layer", "")]
@@ -31,7 +31,7 @@ rust = {p: p.read_text(errors="ignore") for p in pathlib.Path("crates").rglob("*
 
 预期 decision 计数变化（只有这些显式改判）：
 
-- 11 条已随 #37–#40 删除的 Upper/promotion/prune 测试：elevate → delete；
+- 11 条已随 #59–#62 删除的 Upper/promotion/prune 测试：elevate → delete；
 - 历史 `msb_plain_text_turn_commits_and_exit_zero`：keep → elevate，精确指向已落地
   `direct_local_plain_text_turn_commits_and_exit_zero`；
 - 其余 decision 不变。
@@ -39,7 +39,7 @@ rust = {p: p.read_text(errors="ignore") for p in pathlib.Path("crates").rglob("*
 若执行前源存在性或数量变化，停止并重算；不得套用旧数字。按当时基线，最终全局计数应为
 **keep 1337 / elevate 86 / delete 26，合计 1449**。
 
-## 3.2 已被 #40 场景精确接管（1 条历史 identity）
+## 3.2 已被 #62 场景精确接管（1 条历史 identity）
 
 | ledger test identity | replacement scenario | 执行 |
 | `msb_plain_text_turn_commits_and_exit_zero`（旧 harness，已不存在） | `direct_local_plain_text_turn_commits_and_exit_zero` | keep→elevate，更新 layer/reason |
@@ -51,7 +51,7 @@ rust = {p: p.read_text(errors="ignore") for p in pathlib.Path("crates").rglob("*
 - `run_integration_commits_existing_session` 额外断言 `RunTurnResult.assistant_output/status` →
   `planned_direct_existing_session_run_result`。
 
-## 3.3 已退役、无 #24 场景的 11 条（elevate → delete）
+## 3.3 已退役、无 #46 场景的 11 条（elevate → delete）
 
 这些 identity 在当时 source 已不存在，行为绑定已删除的 Upper/promotion/prune / 退役 KVM-lane surface：
 
@@ -69,7 +69,7 @@ generated_profiles_are_executable_host_only
 <sandbox-product>_upper_routing
 ```
 
-（末行历史 identity 前缀为已删 sandbox 产品名；此处不复写字段字面量。完整名单见 FIX.md #23。）
+（末行历史 identity 前缀为已删 sandbox 产品名；此处不复写字段字面量。完整名单见 FIX.md #45。）
 
 统一处理示例：
 
@@ -78,18 +78,18 @@ generated_profiles_are_executable_host_only
   "decision": "delete",
   "target_layer": "local_invariant",
   "replacement": "n/a",
-  "reason": "#37–#40 已删除该 Upper/promotion/KVM-lane 产品契约；对应测试已不存在，不向 #24 虚构 replacement。"
+  "reason": "#59–#62 已删除该 Upper/promotion/KVM-lane 产品契约；对应测试已不存在，不向 #46 虚构 replacement。"
 }
 ```
 
-这里不是提前删除测试，而是把 #40 已发生的删除补记进 ledger。
+这里不是提前删除测试，而是把 #62 已发生的删除补记进 ledger。
 
-## 3.4 #24 assertion-level scenario IDs（44 条；禁止 family fallback）
+## 3.4 #46 assertion-level scenario IDs（44 条；禁止 family fallback）
 
 每个 ID 对应一个具体可执行 scenario/assertion bundle。只有断言形成 superset 时才允许多个
 ledger identity 指向同一 ID；本表当前选择一行为一个精确 ID，避免旧三元/大类兜底。
 
-| ledger test identity | exact #24 replacement scenario |
+| ledger test identity | exact #46 replacement scenario |
 | `agent_loop_builds_messages_from_transcript_and_user_input` | `planned_direct_message_assembly` |
 | `tool_execution_error_structured_payload_preserved` | `planned_direct_tool_error_payload` |
 | `streaming_backward_compat_fake_llm_chat_only_still_works` | `planned_direct_streaming_chat_compat` |
@@ -163,11 +163,11 @@ OBSOLETE = {
     "upper_routing_e2e",
     "adapter_failure_has_no_lower_fallback",
     "generated_profiles_are_executable_host_only",
-    # plus the retired sandbox-product upper-routing identity (see FIX.md #23)
+    # plus the retired sandbox-product upper-routing identity (see FIX.md #45)
 }
 assert len(EXACT) == 45, "expand the excerpt from the authoritative tables"
 
-# Historical closeout selected rows by the retired KVM-lane target_layer (see FIX.md #23).
+# Historical closeout selected rows by the retired KVM-lane target_layer (see FIX.md #45).
 rows = [e for e in entries
         if e.get("target_layer", "").startswith("real_") and "sand" in e.get("target_layer", "")]
 elevate_names = {e["name"] for e in rows if e["decision"] == "elevate"}
@@ -182,7 +182,7 @@ for e in rows:
     elif e["name"] in OBSOLETE:
         e.update(decision="delete", target_layer="local_invariant", replacement="n/a")
     elif e["name"] == "pty_tui_smoke_runs_turn_and_quits_cleanly":
-        e["reason"] = "#40 后为 ordinary-lane Direct-Local PTY smoke；保留。"
+        e["reason"] = "#62 后为 ordinary-lane Direct-Local PTY smoke；保留。"
     else:
         raise AssertionError(f"unmapped retired-lane ledger row: {e['name']}")
 

@@ -1,4 +1,4 @@
-# Issue #24 Slice 2 — Policy-Visible Workspace observation
+# Issue #46 Slice 2 — Policy-Visible Workspace observation
 
 ## Goal
 

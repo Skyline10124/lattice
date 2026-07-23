@@ -4,7 +4,7 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ## Codeberg #24 slice 7: public session graph isolation — 2026-07-22
 
-Severity: test refactor (测试重构 5/6, slice 7 of #24). Plan: `docs/plans/2026-07-22-issue24-slice7-session-isolation.md`.
+Severity: test refactor (测试重构 5/6, slice 7 of #46). Plan: `docs/plans/2026-07-22-issue46-slice7-session-isolation.md`.
 
 **Problem:** Session graph isolation (branch/checkout/reset/diff scoped to the addressed session) had no external-binary coverage; the five internal CLI tests used the internal API.
 
@@ -22,7 +22,7 @@ Severity: test refactor (测试重构 5/6, slice 7 of #24). Plan: `docs/plans/20
 
 ## Codeberg #24 slice 6: operator audit paths + secret discipline + turn_id — 2026-07-22
 
-Severity: test refactor + additive event field (测试重构 5/6, slice 6 of #24). Plan: `docs/plans/2026-07-22-issue24-slice6-operator-audit-secrets.md`.
+Severity: test refactor + additive event field (测试重构 5/6, slice 6 of #46). Plan: `docs/plans/2026-07-22-issue46-slice6-operator-audit-secrets.md`.
 
 **Problem:** Public audit/session/lancet operator paths had no external-binary cross-validation; audit replay needed a stable public turn identity; secret-sentinel discipline had no black-box coverage.
 
@@ -42,7 +42,7 @@ Severity: test refactor + additive event field (测试重构 5/6, slice 6 of #24
 
 ## Codeberg #24 slice 5: provider failures, SIGINT cancellation, deadline — 2026-07-22
 
-Severity: test refactor + product controls (测试重构 5/6, slice 5 of #24). Plan: `docs/plans/2026-07-22-issue24-slice5-failures-cancel-deadline.md`.
+Severity: test refactor + product controls (测试重构 5/6, slice 5 of #46). Plan: `docs/plans/2026-07-22-issue46-slice5-failures-cancel-deadline.md`.
 
 **Problem:** `session send` had no public cooperative cancellation or per-turn deadline; the agent loop only checked the cancel flag after each provider event (a stalled provider would not observe SIGINT); provider failure/disconnect/malformed-SSE/deadline had no external-binary coverage.
 
@@ -66,7 +66,7 @@ Severity: test refactor + product controls (测试重构 5/6, slice 5 of #24). P
 
 ## Codeberg #24 slice 4: fetch/todo/catalog/retired tools external coverage — 2026-07-22
 
-Severity: test refactor (测试重构 5/6, slice 4 of #24). Plan: `docs/plans/2026-07-22-issue24-slice4-tools-and-retired-methods.md`.
+Severity: test refactor (测试重构 5/6, slice 4 of #46). Plan: `docs/plans/2026-07-22-issue46-slice4-tools-and-retired-methods.md`.
 
 **Problem:** Default five-Tool distribution and retired-method fail-closed behavior lacked external-binary coverage; fetch needed a localhost fixture separate from the fake LLM.
 
@@ -86,7 +86,7 @@ Severity: test refactor (测试重构 5/6, slice 4 of #24). Plan: `docs/plans/20
 
 ## Codeberg #24 slice 3: atomic mutation, effect denial, external concurrency — 2026-07-22
 
-Severity: test refactor + product fix (测试重构 5/6, slice 3 of #24). Plan: `docs/plans/2026-07-22-issue24-slice3-mutation-concurrency-effects.md`.
+Severity: test refactor + product fix (测试重构 5/6, slice 3 of #46). Plan: `docs/plans/2026-07-22-issue46-slice3-mutation-concurrency-effects.md`.
 
 **Problem:** Effect-kind denial only ran post-dispatch on observed effects, so a denied `mutate.create` could still change Local state before the check failed. Direct-Local mutation/concurrency/effect-denial coverage was also missing from the external binary harness.
 
@@ -107,37 +107,37 @@ Severity: test refactor + product fix (测试重构 5/6, slice 3 of #24). Plan: 
 
 ## Codeberg #43: rewrite retired KVM-lane vocabulary in historical ADR/plans/spec — 2026-07-22
 
-Severity: docs / vocabulary hygiene (#43 `ready-for-agent`). Plan: `docs/plans/2026-07-22-issue43-retire-kvm-lane-vocab-in-historical-docs.md`.
+Severity: docs / vocabulary hygiene (#65 `ready-for-agent`). Plan: `docs/plans/2026-07-22-issue65-retire-kvm-lane-vocab-in-historical-docs.md`.
 
-**Problem:** After #40 deleted the Upper/KVM lane and after #23 slice 3/4 cleared retired tokens from active code, machine ledger, and `docs/TEST-TRIAGE.md`, six historical documents still presented Microsandbox/MSB-era field values and physical assumptions as current decision context (ADR 0003, completed #40 plan, #23 parent + slices 3/4, #5 effect-model spec).
+**Problem:** After #62 deleted the Upper/KVM lane and after #45 slice 3/4 cleared retired tokens from active code, machine ledger, and `docs/TEST-TRIAGE.md`, six historical documents still presented Microsandbox/MSB-era field values and physical assumptions as current decision context (ADR 0003, completed #62 plan, #45 parent + slices 3/4, #27 effect-model spec).
 
 **Fix (docs-only):**
 - ADR 0003 rewritten to Direct-Local vocabulary; Upper/KVM/MSB retained only as retirement/migration narrative (meta "no MSB daemon" allowed).
-- #40 completed plan archived under `docs/archive/plans/` with Direct-Local archive header; `docs/archive/README.md` documents `plans/`; relative links retargeted (`../../plans/…`); overview/gix-only plans point at the archive path.
-- #23 parent + slice 3/4 marked completed and rewritten in Direct-Local terms; slice 3 renamed to `…-slice3-retired-lane-vocabulary.md`; historical closeout scripts avoid forbidden active field literals.
-- #5 effect-model spec aligned to ADR 0003/0004: `in`/`ex` = Tool Host domain / external world; network = host Tool Host + `net-guard` / `[lancet.network]`; Mode B (hosted backends) marked superseded; WASM Component is the current carriage. Soft-wrap ATX `#13` escaped.
+- #62 completed plan archived under `docs/archive/plans/` with Direct-Local archive header; `docs/archive/README.md` documents `plans/`; relative links retargeted (`../../plans/…`); overview/gix-only plans point at the archive path.
+- #45 parent + slice 3/4 marked completed and rewritten in Direct-Local terms; slice 3 renamed to `…-slice3-retired-lane-vocabulary.md`; historical closeout scripts avoid forbidden active field literals.
+- #27 effect-model spec aligned to ADR 0003/0004: `in`/`ex` = Tool Host domain / external world; network = host Tool Host + `net-guard` / `[lancet.network]`; Mode B (hosted backends) marked superseded; WASM Component is the current carriage. Soft-wrap ATX `#35` escaped.
 - Removed all `⚠️ 过时词汇警告` banners from rewrite targets.
 
 **Verification:**
-- Targeted `rg -i 'microsandbox|msb_full_turn|planned_[a-z_]+_msb|LATTICE_HARNESS_MSB|real_microsandbox'` on ADR 0003, #23 rewritten plans, and #5 spec → empty.
+- Targeted `rg -i 'microsandbox|msb_full_turn|planned_[a-z_]+_msb|LATTICE_HARNESS_MSB|real_microsandbox'` on ADR 0003, #45 rewritten plans, and #27 spec → empty.
 - `rg '过时词汇警告'` on those targets → empty.
-- Standards + Spec review of the working-tree #43 delta → clean (rename/archive links; Mode B superseded; network/Tool Host framing).
+- Standards + Spec review of the working-tree #65 delta → clean (rename/archive links; Mode B superseded; network/Tool Host framing).
 
 **Changed files:**
 - `docs/adr/0003-lancet-operates-directly-on-local-workspace.md`
 - `docs/archive/README.md`
-- `docs/archive/plans/2026-07-17-issue40-remove-upper-msb-residue.md` (moved from `docs/plans/`)
+- `docs/archive/plans/2026-07-17-issue62-remove-upper-msb-residue.md` (moved from `docs/plans/`)
 - `docs/plans/2026-07-17-direct-local-overview.md`
 - `docs/plans/2026-07-17-gix-only-cleanup.md`
-- `docs/plans/2026-07-19-issue23-fast-residual-ledger-closeout.md`
-- `docs/plans/2026-07-19-issue23-slice3-retired-lane-vocabulary.md` (renamed from `…-slice3-msb-vocabulary-retirement.md`)
-- `docs/plans/2026-07-19-issue23-slice4-ledger-prose-consistency.md`
-- `docs/specs/2026-07-01-issue5-effect-model-toolctx-design.md`
-- `docs/plans/2026-07-22-issue43-retire-kvm-lane-vocab-in-historical-docs.md`
+- `docs/plans/2026-07-19-issue45-fast-residual-ledger-closeout.md`
+- `docs/plans/2026-07-19-issue45-slice3-retired-lane-vocabulary.md` (renamed from `…-slice3-msb-vocabulary-retirement.md`)
+- `docs/plans/2026-07-19-issue45-slice4-ledger-prose-consistency.md`
+- `docs/specs/2026-07-01-issue27-effect-model-toolctx-design.md`
+- `docs/plans/2026-07-22-issue65-retire-kvm-lane-vocab-in-historical-docs.md`
 
 ## Codeberg #24 slice 2: Direct-Local workspace observation visibility/bounds + ledger closeout - 2026-07-22
 
-Severity: test refactor (测试重构 5/6, slice 2 of #24; `ready-for-agent`). Plan: `docs/plans/2026-07-22-issue24-slice2-observation-visibility.md`.
+Severity: test refactor (测试重构 5/6, slice 2 of #46; `ready-for-agent`). Plan: `docs/plans/2026-07-22-issue46-slice2-observation-visibility.md`.
 
 **Problem:** Slice 0/1 built the harness foundations and the completed-Turn contract. Slice 2 lands the `observe.workspace` visibility/bounds matrix over the built binary - tracked/untracked/ignored/included-ignored/read-denied/system-excluded/budget-exceeding paths across all four modes (read/list/grep/find) - and takes over the mapped internal tests whose assertions are a strict superset of the new external scenario.
 
@@ -170,7 +170,7 @@ Updated `docs/TEST-TRIAGE.md` (per-crate rows, count tables 79->75 elevate / 184
 
 ## Codeberg #48: cooperative Component cancellation 统一映射为 `CallCancelled` — 2026-07-22
 
-Severity: High (#48 review follow-up to #5; Spec review of `d659b067^...a628d0e2`, verified by two independent skeptics; tradeoff confirmed on the issue after pre-implementation verification). Plan: `docs/plans/2026-07-22-issue48-callcancelled-unified-mapping.md`.
+Severity: High (#70 review follow-up to #27; Spec review of `d659b067^...a628d0e2`, verified by two independent skeptics; tradeoff confirmed on the issue after pre-implementation verification). Plan: `docs/plans/2026-07-22-issue70-callcancelled-unified-mapping.md`.
 
 **Problem:** Call-scoped cancellation produced divergent outcomes depending on which observation point fired. Epoch interruption mapped to `CallCancelled`, but a guest observing the same cancellation via `host-control.cancelled()` and returning `Err("cancelled")` was unconditionally mapped to `ExecutionFailed` — so identical call-scoped cancellation surfaced different CEP error codes by guest/epoch race. Two further gaps confirmed before implementation: (1) the audit finalizer's `Cancelled` arm matched the exact message `"call cancelled"`, whose only producer (`lancet_dispatch::call_cancelled()`) ran exclusively on the client side — the arm was dead code, so even correctly-mapped epoch cancellations were audited as `Error`; (2) the dispatch client's `select` returned a client-synthesized `call_cancelled()` (`ExecutionFailed`) as soon as the cancel watch fired, never surfacing the server-mapped structured error. `is_incomplete_dispatch` likewise matched `ExecutionFailed + message.contains("cancelled")`, so re-mapping cooperative cancellation without extending it would have regressed the partial-effects durable-metadata path.
 
@@ -198,13 +198,13 @@ Severity: High (#48 review follow-up to #5; Spec review of `d659b067^...a628d0e2
 - `crates/lancet-cep/src/lib.rs` — re-export cleanup.
 - `crates/lancet-native/src/server/transport.rs` — code-based `Cancelled` audit + `is_incomplete_dispatch`.
 - `crates/lancet-native/tests/cep_component_round_trip.rs` — rewritten/new cancellation round-trip tests.
-- `docs/plans/2026-07-22-issue48-callcancelled-unified-mapping.md` — implementation plan (D1–D5 decisions).
+- `docs/plans/2026-07-22-issue70-callcancelled-unified-mapping.md` — implementation plan (D1–D5 decisions).
 
 ## Codeberg #46: composition gate rejects duplicate host-pinned expected identity — 2026-07-22
 
-Severity: MEDIUM (#46 review follow-up to #5; Spec + Zoom-out review of `d659b067^...a628d0e2`, verified by two independent skeptics).
+Severity: MEDIUM (#46 review follow-up to #27; Spec + Zoom-out review of `d659b067^...a628d0e2`, verified by two independent skeptics).
 
-**Problem:** `ClosedCatalog::compose` collected `expected_identities` directly into a `BTreeMap<&str, &ExpectedToolIdentity>` via `.collect()`, so two host-pinned expected identities sharing a name silently used last-wins: the later pin overwrote the earlier descriptor/artifact/import pin while composition still succeeded. The existing `DuplicateName` check only covered inventory registrations, not the host-pinned expected set. Production `EXPECTED_COMPONENTS` is still empty, so the defect had not yet fired, but once #7–#10 migrate production Tools it would weaken closed-catalog approval semantics. `xtask tool-codegen` generates each manifest's expected-identity candidate independently and does not deduplicate across manifests, so uniqueness cannot be left to the generation flow.
+**Problem:** `ClosedCatalog::compose` collected `expected_identities` directly into a `BTreeMap<&str, &ExpectedToolIdentity>` via `.collect()`, so two host-pinned expected identities sharing a name silently used last-wins: the later pin overwrote the earlier descriptor/artifact/import pin while composition still succeeded. The existing `DuplicateName` check only covered inventory registrations, not the host-pinned expected set. Production `EXPECTED_COMPONENTS` is still empty, so the defect had not yet fired, but once #29–#32 migrate production Tools it would weaken closed-catalog approval semantics. `xtask tool-codegen` generates each manifest's expected-identity candidate independently and does not deduplicate across manifests, so uniqueness cannot be left to the generation flow.
 
 **Fix:**
 - `crates/lancet-runtime/src/composition.rs`: added a distinct `CompositionError::DuplicateExpectedName(String)` variant (`#[error("duplicate expected Tool identity: {0}")]`), separate from `DuplicateName` so callers and tests can distinguish registration-name duplicates from host-pinned-identity duplicates.
@@ -222,9 +222,9 @@ Severity: MEDIUM (#46 review follow-up to #5; Spec + Zoom-out review of `d659b06
 - `crates/lancet-runtime/src/composition.rs` — `DuplicateExpectedName` variant + duplicate-detecting expected collection + module doc.
 - `crates/lancet-runtime/tests/gate.rs` — new `gate_rejects_duplicate_expected_name` test; rewritten `gate_rejects_duplicate_name`.
 
-## Codeberg #45: close stale FINDINGS T-23-01/T-23-02 to the #24 Direct-Local residual — 2026-07-22
+## Codeberg #45: close stale FINDINGS T-23-01/T-23-02 to the #46 Direct-Local residual — 2026-07-22
 
-Severity: MEDIUM (#45 review follow-up to #23; spec review of `df62ec84...8d6926d9`,
+Severity: MEDIUM (#45 review follow-up to #45; spec review of `df62ec84...8d6926d9`,
 verified by two independent skeptics).
 
 **Problem:** The open `FINDINGS.md` entries `T-23-01` and `T-23-02` still
@@ -232,28 +232,28 @@ described completed work as pending. `T-23-01` claimed "55 条提升仍待替代
 （54 current-MSB + 1 fast）" with MSB/KVM-lane reasoning and a `planned_lancet_cli`
 fast residual; `T-23-02` claimed a fast residual of 1 `planned_lancet_cli`, 2 status
 tests待删, 2 project-branch scenarios待补, and 15+1 current-MSB residual. Current
-facts (landed 2026-07-19 in #23 slices 1–4, commits `dbb31b14` / `55128410` /
-`ce8880c0` / `4c2c861d` / `9f238b79`, with `8d6926d9` closing the #23 review
-findings and T-23-03): #23 fast residual is zero, status and project-branch
+facts (landed 2026-07-19 in #45 slices 1–4, commits `dbb31b14` / `55128410` /
+`ce8880c0` / `4c2c861d` / `9f238b79`, with `8d6926d9` closing the #45 review
+findings and T-23-03): #45 fast residual is zero, status and project-branch
 create/reopen are owned by external-binary scenarios with the internal tests
-deleted, the MSB/KVM lane is retired (#40), and the only remaining work is 44
-`planned_direct_*` assertion-level scenarios handed to #24. The stale open text
+deleted, the MSB/KVM lane is retired (#62), and the only remaining work is 44
+`planned_direct_*` assertion-level scenarios handed to #46. The stale open text
 conflicted with the final machine ledger (`docs/test-triage-decisions.json`: 44
 unique `planned_direct_*` IDs; distribution keep 1179 / elevate 86 / delete 184,
 total 1449) and with `docs/TEST-TRIAGE.md` §1.5, which was already correct.
 
 **Fix:**
-- `FINDINGS.md` `T-23-01` (open MEDIUM): rewritten to "#24 Direct-Local
+- `FINDINGS.md` `T-23-01` (open MEDIUM): rewritten to "#46 Direct-Local
   assertion-level replacements 尚待落地". It now states fast residual is zero,
   names the landed takeovers (`fast_lancet_cli` / `fast_session_cli` + deleted
   internal tests), records the 11 retired-contract deletes, and describes only the
   44 `planned_direct_*` residual with the verified ledger counts. MSB/KVM is
-  mentioned only as retired (#40), not as a current lane. The `T-23-01` ID is
+  mentioned only as retired (#62), not as a current lane. The `T-23-01` ID is
   retained so cross-refs in `docs/TESTING.md` and `FIX.md` stay valid.
 - `FINDINGS.md` `T-23-02`: removed from open MEDIUM and closed into the
   `OBSOLETE / CLOSED` section (dated 2026-07-19, placed beside `T-23-03`), noting
-  fast/status/branch work is done by #23 slices 1–2 and the remaining Direct-Local
-  work is handed to `T-23-01` / #24.
+  fast/status/branch work is done by #45 slices 1–2 and the remaining Direct-Local
+  work is handed to `T-23-01` / #46.
 - No change to `docs/TEST-TRIAGE.md` or `docs/test-triage-decisions.json`: both
   were already consistent with the current口径.
 
@@ -265,16 +265,16 @@ total 1449) and with `docs/TEST-TRIAGE.md` §1.5, which was already correct.
   `T-23-01` as retired/prohibited — never as a current lane).
 - `python3` recount of `docs/test-triage-decisions.json`: 44 `planned_direct_*`
   rows (44 unique IDs); decision distribution keep 1179 / elevate 86 / delete 184.
-- `FINDINGS.md` open MEDIUM now lists `T-23-01` (open, #24 residual) and no longer
+- `FINDINGS.md` open MEDIUM now lists `T-23-01` (open, #46 residual) and no longer
   lists `T-23-02`; `T-23-02` appears once in `OBSOLETE / CLOSED`.
 
 **Changed files:**
-- `FINDINGS.md` — rewrote `T-23-01` (open MEDIUM) to the 44-row #24 residual;
+- `FINDINGS.md` — rewrote `T-23-01` (open MEDIUM) to the 44-row #46 residual;
   moved `T-23-02` from open MEDIUM to `OBSOLETE / CLOSED` as a 2026-07-19 closure.
 
 ## Codeberg #5 slice D: closed Component dispatch, descriptor-driven adapter, no-op CEP round-trip — 2026-07-22
 
-Severity: FEATURE (#5 slice D of 4; docs/plans/2026-07-19-issue5-sliceD-cep-adapter-roundtrip.md).
+Severity: FEATURE (#27 slice D of 4; docs/plans/2026-07-19-issue27-sliceD-cep-adapter-roundtrip.md).
 
 **Problem:** ADR 0004 requires Component Tools to dispatch through the same
 CEP server/audit lifecycle as the 5 production native handlers, with the
@@ -287,7 +287,7 @@ hardcoded five-arm typed dispatch.
 **Fix:**
 - `lancet-dispatch` `CepClient::call_named<P, R>`: name-dynamic, type-static
   transport helper. `call<M>` delegates to it. Serialize/deserialize failure
-  maps to `invalid_params`/`internal_error`; no JSON Schema carried. #12
+  maps to `invalid_params`/`internal_error`; no JSON Schema carried. #34
   absorbs this into `lancet-runtime`.
 - `lancet-runtime`: `ComponentRuntime::call` changed from `&mut self` to
   `&self` (epoch ticker via `OnceLock`; `set_limits` stays `&mut` for tests).
@@ -352,13 +352,13 @@ hardcoded five-arm typed dispatch.
 
 ## Codeberg #5 slice C: lancet-runtime Component engine + composition gate + minimal ToolHost — 2026-07-22
 
-Severity: FEATURE (#5 slice C of 4; docs/plans/2026-07-19-issue5-sliceC-component-engine-composition-gate.md).
+Severity: FEATURE (#27 slice C of 4; docs/plans/2026-07-19-issue27-sliceC-component-engine-composition-gate.md).
 
 **Problem:** ADR 0004 requires a Component engine that executes embedded WASM
 Tool Components with no ambient WASI, a fail-closed composition gate that
 verifies every registration against a host-pinned identity at startup, and a
 minimal ToolHost that provides control (cancellation + events) without granting
-domain authority before #6 capability admission. Slice B landed the manifest,
+domain authority before #28 capability admission. Slice B landed the manifest,
 codegen, WIT, prelude, and no-op guest; this slice builds the host runtime.
 
 **Fix:**
@@ -394,7 +394,7 @@ codegen, WIT, prelude, and no-op guest; this slice builds the host runtime.
     ToolResourceExhausted, fuel=0 → ToolResourceExhausted(fuel), else →
     ToolTrap).
   - `bindings.rs`: `wasmtime::component::bindgen!` for the Tool Host WIT.
-  - `generated/`: production `EXPECTED_COMPONENTS` (empty until #7–#10) +
+  - `generated/`: production `EXPECTED_COMPONENTS` (empty until #29–#32) +
     `test-utils` no-op fixture from committed bytes.
   - `test_helpers.rs` (`test-utils`): synthetic registration/identity
     construction for gate negative-case tests.
@@ -424,7 +424,7 @@ cargo tree -p lancet-runtime | grep -E "wasmtime-wasi|wasi-common"   # empty
 
 ## Codeberg #5 slice B: manifest + deterministic tool-codegen + WIT + prelude + no-op guest — 2026-07-22
 
-Severity: FEATURE (#5 slice B of 4; docs/plans/2026-07-19-issue5-sliceB-manifest-codegen-noop.md).
+Severity: FEATURE (#27 slice B of 4; docs/plans/2026-07-19-issue27-sliceB-manifest-codegen-noop.md).
 
 **Problem:** ADR 0004 makes each Source Tool manifest the sole Tool Descriptor
 authority and requires deterministic build tooling to generate WIT bindings,
@@ -505,12 +505,12 @@ vocabulary; this slice builds the manifest→codegen→Component substrate.
 ---
 
 
-Severity: FEATURE (#5 slice A of 4; docs/plans/2026-07-19-issue5-sliceA-protocol-cell-core.md).
+Severity: FEATURE (#27 slice A of 4; docs/plans/2026-07-19-issue27-sliceA-protocol-cell-core.md).
 
 **Problem:** ADR 0004 needs a closed Cell effect vocabulary in the protocol
 contract layer before the manifest/codegen/Component-engine/round-trip slices
 (B/C/D) can build on it. The legacy `ImpactKind` machinery in
-`effect_types.rs` stays in production until #6/#12, so the new vocabulary
+`effect_types.rs` stays in production until #28/#34, so the new vocabulary
 lands add-only alongside it.
 
 **Fix:**
@@ -537,17 +537,17 @@ Severity: TRIAGE-DECISION (FINDINGS.md T-23-03 option a; owner-directed re-decis
 of the signed-off count baseline).
 
 **Problem:** The 158 `lattice-workspace` ledger rows still carried
-decision=keep even though #40 deleted the crate — inconsistent with slice
+decision=keep even though #62 deleted the crate — inconsistent with slice
 3's 11 OBSOLETE rows, which were re-decided to delete for the same reason
-(product surface deleted in #37–#40; tests no longer exist). Their reason
+(product surface deleted in #59–#62; tests no longer exist). Their reason
 strings also retained retired KVM-lane vocabulary (fixed separately in the
 review-fix round below).
 
 **Fix:**
 - Re-decide all 158 `crate=lattice-workspace` rows in
   `docs/test-triage-decisions.json`: keep → delete, replacement → `n/a`,
-  reason → "#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试
-  已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。"
+  reason → "#62 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试
+  已不存在；补记 delete（FINDINGS.md T-23-03），不向 #46 虚构 replacement。"
   identity fields and `target_layer=local_invariant` unchanged.
 - Sync `docs/TEST-TRIAGE.md`: §1 汇总 (保留 1337→1179 / 删除 26→184),
   per-crate table (lattice-workspace 158/0/0 → 0/0/158), §1.5 决定分布
@@ -592,7 +592,7 @@ a stale module coverage line. (6) Repeated scenario-name string literals.
   plan anchors were stale predictions — ledger identity lines verified
   unchanged against df62ec84.
 - Rewrite the 157 stale reason strings in JSON + prose to "保留（历史决定；
-  lattice-workspace 已随 #40 删除，行留档待重审，见 FINDINGS.md T-23-03）";
+  lattice-workspace 已随 #62 删除，行留档待重审，见 FINDINGS.md T-23-03）";
   identity/decision/counts untouched (keep 1337 / elevate 86 / delete 26 /
   total 1449; layers 1358/46/45). The keep-vs-deleted-crate re-decision
   itself changes the signed-off baseline, so it is filed as FINDINGS.md
@@ -634,14 +634,14 @@ a stale module coverage line. (6) Repeated scenario-name string literals.
 
 ## Codeberg #23 vocabulary closeout: retired KVM-lane vocabulary removed from code, ledger, and TEST-TRIAGE — 2026-07-19
 
-Severity: REFACTOR (#23 closeout follow-up; commit 9f238b79; applies a
+Severity: REFACTOR (#45 closeout follow-up; commit 9f238b79; applies a
 stricter user-directed standard than the §4.7 grep gate; historical-document
-rewrite tracked by Codeberg issue #43).
+rewrite tracked by Codeberg issue #65).
 
 **Problem:** Retired KVM-lane field values (`real_microsandbox`,
 `msb_full_turn`, `planned_*_msb`, `LATTICE_HARNESS_MSB`, and identity
 names/file paths containing `msb`/`microsandbox`) were still present in the
-machine ledger, `docs/TEST-TRIAGE.md`, and code comments even though #40
+machine ledger, `docs/TEST-TRIAGE.md`, and code comments even though #62
 deleted the lane and slice 3 retired the layers.
 
 **Fix:**
@@ -651,14 +651,14 @@ deleted the lane and slice 3 retired the layers.
 - Rename 8 JSON identity names and correct 4 file paths containing retired
   tokens (all already-deleted tests).
 - Tag 6 historical ADR/plan/spec documents with an outdated-vocabulary
-  warning blockquote pointing at Codeberg issue #43 for the rewrite.
+  warning blockquote pointing at Codeberg issue #65 for the rewrite.
 - **Deviation record (sign-off):** this intentionally relaxes slice 3 §3.5's
   identity-snapshot invariant ("`crate/file/line/name/async/ignored` identity
   字段不变") for those 8 names + 4 files — an explicit user-directed
   trade-off recorded in commit 9f238b79's message ("退役词汇清零优先于
   identity 冻结"). Total 1449 and decision counts (keep 1337 / elevate 86 /
   delete 26) unchanged. The line anchors cited in
-  `docs/plans/2026-07-19-issue23-fast-residual-ledger-closeout.md`
+  `docs/plans/2026-07-19-issue45-fast-residual-ledger-closeout.md`
   (lancet.rs:289, session.rs:1284/1345) were stale plan predictions; the
   ledger identity line fields did not drift in-range (verified against
   df62ec84).
@@ -678,23 +678,23 @@ deleted the lane and slice 3 retired the layers.
 
 ## Codeberg #23 slice 4: TEST-TRIAGE prose synced with post-slice-3 machine ledger — 2026-07-19
 
-Severity: FEATURE (测试重构 4/6, slice 4 of #23 closeout;
-docs/plans/2026-07-19-issue23-slice4-ledger-prose-consistency.md; commit 4c2c861d).
+Severity: FEATURE (测试重构 4/6, slice 4 of #45 closeout;
+docs/plans/2026-07-19-issue45-slice4-ledger-prose-consistency.md; commit 4c2c861d).
 
 **Problem:** After slices 1–3 rewrote the machine ledger, the prose in
 `docs/TEST-TRIAGE.md` (scenario catalog, summary counts, §1.5 execution
 status, crate section headers, per-test rows) no longer matched it.
 
 **Fix:**
-- §1 catalog: register the 44 assertion-level `planned_direct_*` #24 IDs and
+- §1 catalog: register the 44 assertion-level `planned_direct_*` #46 IDs and
   the landed `direct_local_plain_text_turn_commits_and_exit_zero`; move
   `msb_full_turn` + 11 `planned_*_msb` IDs to a dedicated historical/obsolete
   subsection; mark `planned_lancet_cli` 已落地.
 - Counts: keep 1338→1337 / elevate 96→86 / delete 15→26 (total 1449);
   per-crate headers resynced (lattice-api 223/25/12,
   lattice-system-harness 56/1/0).
-- §1.5 rewritten: fast residual zero table, #40 skeleton takeover record, 11
-  OBSOLETE delete identities, 44-row #24 handoff table, MSB vocabulary
+- §1.5 rewritten: fast residual zero table, #62 skeleton takeover record, 11
+  OBSOLETE delete identities, 44-row #46 handoff table, MSB vocabulary
   retirement note, final layer/decision distribution.
 - 90 per-test rows synced to the JSON (layer names, replacement atoms,
   reasons); rich landed-takeover cells preserved where the atom matched.
@@ -710,24 +710,24 @@ status, crate section headers, per-test rows) no longer matched it.
 
 ---
 
-## Codeberg #23 slice 3: 57 stale-layer rows retired/mapped to assertion-level #24 scenarios — 2026-07-19
+## Codeberg #23 slice 3: 57 stale-layer rows retired/mapped to assertion-level #46 scenarios — 2026-07-19
 
-Severity: FEATURE (测试重构 4/6, slice 3 of #23 closeout;
-docs/plans/2026-07-19-issue23-slice3-msb-vocabulary-retirement.md; commit ce8880c0).
+Severity: FEATURE (测试重构 4/6, slice 3 of #45 closeout;
+docs/plans/2026-07-19-issue45-slice3-msb-vocabulary-retirement.md; commit ce8880c0).
 
 **Problem:** 57 ledger rows still carried `target_layer=real_microsandbox`
-(and `*_msb` replacement names) after #40 deleted the lane — dead vocabulary
+(and `*_msb` replacement names) after #62 deleted the lane — dead vocabulary
 with no executable target.
 
 **Fix:**
 - Redistribute all 57 stale-layer rows across `direct_local_binary` (46) and
   `local_invariant` (11 obsolete), with exactly 12 decision deltas: 11
   elevate→delete for identities whose product contract was deleted in
-  #37–#40 (no fabricated #24 replacements), and 1 keep→elevate for the
-  historical harness identity taken over by the landed #40
+  #59–#62 (no fabricated #46 replacements), and 1 keep→elevate for the
+  historical harness identity taken over by the landed #62
   `direct_local_plain_text_turn_commits_and_exit_zero`.
 - Map 44 internal tests to 44 distinct assertion-level `planned_direct_*`
-  #24 scenario IDs — exact per-row mapping, no regex family fallback.
+  #46 scenario IDs — exact per-row mapping, no regex family fallback.
 - PTY smoke row: layer→`direct_local_binary`, decision stays keep.
 - 26 `local_invariant` keep rows: reason rewritten to swap retired MSB
   scenario references for live equivalents (decision/layer/replacement
@@ -750,8 +750,8 @@ with no executable target.
 
 ## Codeberg #23 slice 2: fast_session_cli branch scenarios + 4 redundant tests deleted — 2026-07-19
 
-Severity: FEATURE (测试重构 4/6, slice 2 of #23 closeout;
-docs/plans/2026-07-19-issue23-slice2-branch-fast-scenarios.md; commit 55128410).
+Severity: FEATURE (测试重构 4/6, slice 2 of #45 closeout;
+docs/plans/2026-07-19-issue45-slice2-branch-fast-scenarios.md; commit 55128410).
 
 **Problem:** The project-branch create/reopen contract was guarded only by
 crate-internal `lattice-cli` tests elevated to `fast_binary`
@@ -792,8 +792,8 @@ crate-internal `lattice-cli` tests elevated to `fast_binary`
 
 ## Codeberg #23 slice 1: `fast_lancet_cli` black-box replaces internal `cep_status_missing_db` test — 2026-07-19
 
-Severity: FEATURE (测试重构 4/6, slice 1 of #23 closeout;
-docs/plans/2026-07-19-issue23-slice1-fast-lancet-cli.md).
+Severity: FEATURE (测试重构 4/6, slice 1 of #45 closeout;
+docs/plans/2026-07-19-issue45-slice1-fast-lancet-cli.md).
 
 **Problem:** The `lattice lancet status` empty-state contract (no audit DB →
 exit 0, `recent_calls: []`, `last_guard_verdict: null` in JSON; `Recent CEP
@@ -875,8 +875,8 @@ Severity: FEATURE (测试重构 3/6).
 
 **What:** Enumerated all `#[test]` / `#[tokio::test]` under `crates/**` and
 `xtask/**` plus the `cep_family_test!` macro expansions (1449 entries) and
-produced a reviewable triage list for issue #18 step 3 / issue #22. Decisions
-follow RFC #19 decision two (layers) and decision six (no migration quota):
+produced a reviewable triage list for issue #40 step 3 / issue #44. Decisions
+follow RFC #41 decision two (layers) and decision six (no migration quota):
 keep local invariants, elevate product paths that are tested via internal
 APIs, delete source-scan / weak construction checks.
 
@@ -1029,9 +1029,9 @@ pty_tui_smoke}.rs`, `crates/lattice-system-harness/AGENTS.md`, `FIX.md`.
 
 ## Codeberg #21 review follow-up: harness probe/pgid/shutdown/sentinel-scan/dedup/dead-code — 2026-07-05
 
-Severity: MEDIUM (two implementation errors + one RFC #19 decision-eight spec gap; remainder standards).
+Severity: MEDIUM (two implementation errors + one RFC #41 decision-eight spec gap; remainder standards).
 
-**Problem:** A two-axis (Standards + Spec) review of the #21 commit
+**Problem:** A two-axis (Standards + Spec) review of the #43 commit
 (`186d675d`) found no hard standards violations but several baseline smells
 and three implementation errors plus one spec gap:
 
@@ -1043,31 +1043,31 @@ and three implementation errors plus one spec gap:
   scenario children did set the group; only the probe had drifted.
 - **(c#1, implementation error)** `tests/pty_tui_smoke.rs` matched the prompt
   character `>` directly in the scenario (`wait_for(..., |s| s.contains('>'))`),
-  violating RFC #19 decision three: "prompt recognition and ANSI cleanup only
+  violating RFC #41 decision three: "prompt recognition and ANSI cleanup only
   exist inside the driver; scenarios assert no display details".
-- **(c#3 / Standards #5, implementation error + dead branch)** `FakeLlmServer`
+- **(c#3 / Standards #27, implementation error + dead branch)** `FakeLlmServer`
   set the listener back to blocking (`set_nonblocking(false)`), making the
   `serve_loop` `WouldBlock` branch unreachable; `Drop` set a `shutdown` flag
   the blocking `accept` could never observe, then bound a throwaway listener
   (no wake). The serve thread and bound port survived for the whole test
   process; `_handle` was never joined. The `set_script` method and `script`
   field were also dead (no callers).
-- **(a#2, spec gap)** RFC #19 decision eight requires "redact failure
+- **(a#2, spec gap)** RFC #41 decision eight requires "redact failure
   artifacts before writing, then scan after writing". Pre-write redaction was
   implemented, but there was no post-write scan of the on-disk artifacts;
   `assert_no_secret` only scanned the raw `Output`, not the written files.
-- **(Standards #1)** The `world.txt` context block was duplicated across
+- **(Standards #23)** The `world.txt` context block was duplicated across
   `assert_with_failure_artifacts`, `assert_with_full_artifacts`, and the MSB
   test's `write_full_bundle` (already diverging in how they sourced the
   command summary).
-- **(Standards #2)** The `kill -KILL -{pgid}` shape was duplicated across
+- **(Standards #24)** The `kill -KILL -{pgid}` shape was duplicated across
   `driver.rs`, `layer_guard.rs`, and `pty_tui.rs`.
-- **(Standards #6)** pgid type drift: `driver.rs` used `u32`, `pty_tui` returned
+- **(Standards #28)** pgid type drift: `driver.rs` used `u32`, `pty_tui` returned
   `i32`, and `pty_tui_smoke.rs` cast `pgid as u32`.
-- **(Standards #3/#4 + Spec b#1)** Four public APIs with no callers:
+- **(Standards #25/#26 + Spec b#1)** Four public APIs with no callers:
   `assert_with_full_artifacts`, `SessionSendDriver::for_existing`,
   `SessionSendDriver::run_json`, `FakeLlmServer::set_script` — speculative
-  generality / out-of-scope general test DSL (RFC #18).
+  generality / out-of-scope general test DSL (RFC #40).
 
 **Fix:**
 
@@ -1084,7 +1084,7 @@ and three implementation errors plus one spec gap:
   shape now lives inside the driver, never in a scenario). `pgid` is now
   `Option<u32>` (filtered for positive leaders, cast at the portable-pty
   boundary), `pgid()` returns `Option<u32>`, and `kill_and_reap` delegates to
-  the shared `kill_process_group` — fixing (c#1), Standards #2, and #6. The
+  the shared `kill_process_group` — fixing (c#1), Standards #24, and #28. The
   now-unused `Stdio` import was removed.
 - `crates/lattice-system-harness/tests/pty_tui_smoke.rs`: the scenario calls
   `tui.wait_for_prompt(...)` instead of matching `>`, and the `pgid as u32`
@@ -1094,7 +1094,7 @@ and three implementation errors plus one spec gap:
   ~5ms and is reachable; `Drop` sets `shutdown` and joins the serve thread
   (renamed `_handle` → `serve_handle`), so the thread exits and the bound port
   releases before `Drop` returns. Removed the dead `set_script` method and the
-  now-unused `script` field — fixing (c#3) / Standards #5.
+  now-unused `script` field — fixing (c#3) / Standards #27.
 - `crates/lattice-system-harness/src/artifacts.rs`: added
   `scan_artifacts_for_secrets` (walks the failure dir, redacts any file that
   still contains a secret sentinel in place, returns the patched paths; skips
@@ -1473,7 +1473,7 @@ agent lost a single atomic multi-file mutation contract.
 - `cargo test --workspace`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `rg 'mutate\.batch|BatchOperation' --glob '*.{rs,toml,md}'` (excluding historical
-  #5 spec notes and regression comments that assert absence)
+  #27 spec notes and regression comments that assert absence)
 
 ---
 
@@ -1562,12 +1562,12 @@ tests/*), `crates/lattice-profile/` (schema.rs, defaults.rs, lib.rs),
 
 ## Codeberg #4 (follow-up): review cleanup — release-gate false-green, dead `brush-parser` dep, raw CEP -32601 regression, `PolicyReasonCode::CommandDenied` — 2026-06-30
 
-Severity: MEDIUM (closes the open review items blocking issue #4; no behavior
+Severity: MEDIUM (closes the open review items blocking issue #26; no behavior
 change to retired methods — these are cleanup, regression-proof, and
 dead-code removal).
 
-**Problem:** The 2026-06-30 post-implementation review of issue #4 left three
-P2 items plus one residual dead-code variant open before #4 could be closed:
+**Problem:** The 2026-06-30 post-implementation review of issue #26 left three
+P2 items plus one residual dead-code variant open before #26 could be closed:
 
 1. **Release-gate false-green.** `scripts/release-gate-v1.4.sh` still ran the
    deleted `v1_4_command_artifact_dogfood` lane; Cargo exits 0 when a filter
@@ -1585,7 +1585,7 @@ P2 items plus one residual dead-code variant open before #4 could be closed:
 4. **`PolicyReasonCode::CommandDenied` dead code.** No production policy
    constructs it; it survived only via exhaustive `match` arms and tests. The
    review decided to delete it with **no wire-value compatibility** (the goal
-   of #4 is permanent contraction of the CEP command interface; the
+   of #26 is permanent contraction of the CEP command interface; the
    `"command_denied"` wire value has no legitimate producer).
 
 **Fix:**
@@ -1633,7 +1633,7 @@ P2 items plus one residual dead-code variant open before #4 could be closed:
   retirement note), and `crates/lancet-authority/AGENTS.md` (removed the
   deleted `src/policy/command.rs` reference; added a do-not-reintroduce note).
 
-**Pre-existing gate blockers fixed in the same pass (out of #4 scope, but
+**Pre-existing gate blockers fixed in the same pass (out of #26 scope, but
 required to run `scripts/release-gate-v1.4.sh` per the review):**
 
 - `cargo fmt --all --check` had 287 diff lines at commit `691c0b67`; ran
@@ -2216,7 +2216,7 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy --all-targets -- -D warni
 | IN-02 | lattice-hooks 未使用 | 从 workspace members 移除 |
 | IN-03 | CLI 依赖 hooks 未 import | 删除依赖 |
 
-### PR #6 遗留项
+### PR #28 遗留项
 
 | # | 问题 | 修复 |
 | --- | ------ | ------ |
@@ -2687,7 +2687,7 @@ production CEP catalog and executed through the native server, granting agents
 
 Severity: LOW (operator surface completeness / verification).
 
-**Problem:** The #11 retirement left `replay_audit` as a `lancet-api` library
+**Problem:** The #33 retirement left `replay_audit` as a `lancet-api` library
 API with no operator CLI entry point — documentation promised `replay_audit`
 for provenance reconstruction, but `lattice audit` only exposed query/tail.
 Separately, the audit read-path needed verification across four axes: direct
@@ -2750,9 +2750,9 @@ concurrent-read safety.
 
 Severity: FEATURE (测试重构 2/6).
 
-**Problem:** `lattice-system-harness` (#20) 只能驱动 `lattice --help` 等
-fast-binary 黑盒；无法驱动确定性的完整 turn，后续产品级场景 (#24/#27–#30)
-没有载体。#21 要求四块交付：localhost 假 LLM、`SessionSendDriver`、`PtyTuiDriver`、
+**Problem:** `lattice-system-harness` (#42) 只能驱动 `lattice --help` 等
+fast-binary 黑盒；无法驱动确定性的完整 turn，后续产品级场景 (#46/#27–#30)
+没有载体。#43 要求四块交付：localhost 假 LLM、`SessionSendDriver`、`PtyTuiDriver`、
 场景超时 + 进程组清理 + 失败产物 + 一个最小完整 turn 场景。
 
 **Fix summary:**
@@ -2775,7 +2775,7 @@ fast-binary 黑盒；无法驱动确定性的完整 turn，后续产品级场景
   新增 `processes_in_pgid` 公开 helper（Linux /proc 扫描）供测试与 PTY smoke
   机检“整组已死”。3 个 fast 单测，含 **grandchild-kill** 测试（`sh -c 'sleep 30
   & wait'` + 1s 超时 → 验证 /proc 无同 pgid 幸存者），这是单 `kill()` 不满足、
-  `killpg` 满足的核心 #21 验收点。
+  `killpg` 满足的核心 #43 验收点。
 - `src/artifacts.rs` + `src/assert.rs` — 失败产物扩容：`write_fake_llm_log`
   写假 LLM 请求日志；`WorkspaceSnapshot::capture` 捕获 turn 前工作区树清单，
   `write_workspace_diff` 写 turn 前/后清单 + 统一 diff（`workspace_before.txt` /
@@ -2791,7 +2791,7 @@ fast-binary 黑盒；无法驱动确定性的完整 turn，后续产品级场景
   退出普通 CI，保持 fast lane 干净。2 个 fast 单测。
 - `src/scenario.rs` — 新增可选 `total_timeout_secs` + `ScenarioBudget`
   （PRD user story 19：步骤级 + 总量超时）。多步场景每步前 `budget.check`，
-  超时 panic。`None` 默认保留 #20 单步行为。5 个 fast 单测。
+  超时 panic。`None` 默认保留 #42 单步行为。5 个 fast 单测。
 - `src/pty_tui.rs` — `PtyTuiDriver`（`portable-pty`，Unix-only target dep，
   harness-boundary 通过）。`wait_for` 用 ANSI 剥离后的文本做语义匹配，提示符/
   颜色/排版只存在于 driver 内，场景零展示细节断言（RFC 决定三）。5 个 fast 单测
@@ -2829,9 +2829,9 @@ fast-binary 黑盒；无法驱动确定性的完整 turn，后续产品级场景
   smoke, gated by `LATTICE_HARNESS_MSB=1`).
 - `cargo test --workspace --exclude lancet-native` — **1307 passed, 0 failed**.
   - **L-26-01 已知坑**：`lancet-native` 的 `fetch_effect_contract_negative` 在
-    本 DNS 黑洞环境挂起（远早于 #21 的 ACCEPTED RESIDUAL，见 FINDINGS.md:42）；
+    本 DNS 黑洞环境挂起（远早于 #43 的 ACCEPTED RESIDUAL，见 FINDINGS.md:42）；
     正常网络无此问题。`cargo xtask ci` 的 test step 在受限环境需
-    `--exclude lancet-native` 绕过，已在 FINDINGS.md 注明，非 #21 回归。
+    `--exclude lancet-native` 绕过，已在 FINDINGS.md 注明，非 #43 回归。
 - **MSB 实跑约束**：本执行环境 `microsandbox` daemon 未运行、`msb` CLI 不在
   PATH；`tests/msb_full_turn.rs` 与 `tests/pty_tui_smoke.rs` 的 fast 层
   （编译 + `#[ignore]` 跳过 + layer_guard/parse/budget 单测）已全绿，**真实
@@ -2924,9 +2924,9 @@ phase. Tracked in FINDINGS.md ENV-OOM-01.
 
 ## Codeberg #23: test refactor 4/6 - batch-execute triage (fast-binary lane) - 2026-07-11
 
-Severity: FEATURE (测试重构 4/6). Parent #18; triage #22.
+Severity: FEATURE (测试重构 4/6). Parent #40; triage #44.
 
-**What:** Executed the #22 triage for the lanes verifiable without KVM:
+**What:** Executed the #44 triage for the lanes verifiable without KVM:
 landed the fast-binary black-box scenarios for the no-turn CLI surface,
 deleted the source-scan/weak tests, and consolidated fixtures. Batch 3
 (turn/Upper, 39 MSB-bound elevates) and the turn-bearing CLI subset (70
@@ -2954,7 +2954,7 @@ elevates) are deferred - recorded as deviations, not silently re-judged
   missing/empty audit store. Made `audit::run` async (reuses the top-level
   runtime); `run_at` kept sync under `#[cfg(test)]` for the crate-internal
   audit unit tests. This unblocked `planned_audit_cli` and is in scope per
-  PRD #18 ("不顺手修复独立产品问题，除非直接阻塞本测试体系").
+  PRD #40 ("不顺手修复独立产品问题，除非直接阻塞本测试体系").
 - Deleted 11 source-scan tests (all `n/a` - no replacement; boundary covered
   by `cargo xtask harness-boundary` / `lancet-boundary` + dependency graph):
   `lancet-api::operator_audit_module_does_not_reference_cep_server_types`,
@@ -3006,14 +3006,14 @@ unchanged.
 `crates/lattice-system-harness/tests/{fast_config_cli,fast_session_cli,fast_audit_cli,fast_cli_help}.rs`,
 `docs/TEST-TRIAGE.md`, `FIX.md`, `FINDINGS.md`.
 
-**Note:** Issue #23 left open and not pushed per request; 109 deferred
+**Note:** Issue #45 left open and not pushed per request; 109 deferred
 elevates tracked in FINDINGS.md `T-23-01` for the MSB/KVM lane.
 
 ## Codeberg #23 review-fix round 1+2: triage mapping precision + fast-binary JSON contracts - 2026-07-12
 
-Severity: TEST (review feedback on #23 commit `0a365c89`). Parent #18; triage #22.
+Severity: TEST (review feedback on #45 commit `0a365c89`). Parent #40; triage #44.
 
-**What:** Closed all 6 review comments on #23's fast-binary test migration,
+**What:** Closed all 6 review comments on #45's fast-binary test migration,
 making the triage replacement mapping per-row auditable and re-securing the
 public JSON / semantic text contracts. Two rounds of review-fix. No product
 behavior changed; old crate-internal tests stay deleted (plus 3 more deleted
@@ -3072,12 +3072,12 @@ in round 2). Round 3 corrections are recorded in the next entry below.
   `release_smoke_release_gate_sh_is_retired`: elevate -> `keep`/`local_invariant`
   (script-file content scan / script-deprecation smoke, not CLI help surface).
 - `project_branch_new_source_defines_field`: `keep` -> **delete** + code deleted
-  (`include_str!` source-scan; RFC #19 decision six).
+  (`include_str!` source-scan; RFC #41 decision six).
 - `not_found_error_includes_object_id`: `keep` -> **delete** + code deleted
   (`#[cfg(test)]` helper; missing-id behavior covered by fast binary).
 
 **Triage mapping detail after round 2** (JSON total/identity preserved at 1449):
-32 already-deleted rows -> the landed scenario that took them over (31 from #23
+32 already-deleted rows -> the landed scenario that took them over (31 from #45
 batch + 1 `run_integration_missing_session` via new `session send` fast test);
 47 true-deferred rows -> `msb_full_turn` / `planned_audit_ops_msb` /
 `planned_resume_msb` / `planned_provider_fail_msb` / `planned_lancet_cli`;
@@ -3093,7 +3093,7 @@ entry below for the final authoritative counts.
 
 ## Codeberg #23 review-fix round 3: target_layer correction + Upper-prior failures + failure-artifact contracts - 2026-07-13
 
-Severity: TEST (review feedback on round-1+2). Parent #18; triage #22.
+Severity: TEST (review feedback on round-1+2). Parent #40; triage #44.
 
 **What:** Corrected 10 mapping errors from round 1+2, added 4 new fast-binary
 tests for Upper-prior failure paths, fixed `target_layer` for MSB-scenario
@@ -3123,7 +3123,7 @@ records, and hardened test failure-artifact contracts.
 
 3. *`audit_query_reads_legacy_schema_store` cannot be covered by MSB.* Changed
    elevate -> `keep`/`local_invariant`. Manually implanted old SQLite schema
-   tests backward compat; RFC #19 harness boundary forbids opening/implanting
+   tests backward compat; RFC #41 harness boundary forbids opening/implanting
    internal audit DB, and real turns only generate current schema.
 
 4. *`tool_executor_uses_workspace_root` needs observe tool call.* Changed
@@ -3133,7 +3133,7 @@ records, and hardened test failure-artifact contracts.
 
 5. *2 resume source-scan tests should be delete.* `session_resume_handler_function_exists`
    and `session_resume_calls_typed_api` both use `impl_source()` + string
-   search. Changed keep -> `delete` (RFC #19 decision six). Code deleted from
+   search. Changed keep -> `delete` (RFC #41 decision six). Code deleted from
    `session.rs`.
 
 6. *`session send` exit code not pinned to 2.* `assert_exit_failure` only
@@ -3152,7 +3152,7 @@ records, and hardened test failure-artifact contracts.
    `"session-new"`, so parallel callers don't clobber each other's artifacts.
 
 **Final triage mapping detail** (JSON total/identity preserved at 1449):
-36 already-deleted takeover rows (31 #23 batch + 1 round-2 + 4 round-3);
+36 already-deleted takeover rows (31 #45 batch + 1 round-2 + 4 round-3);
 41 true-deferred rows -> `msb_full_turn`(33) / `planned_audit_ops_msb`(7) /
 `planned_provider_fail_msb`(1) / `planned_observe_msb`(1) / `planned_resume_msb`(1),
 all with `target_layer = "real_microsandbox"`;
@@ -3203,7 +3203,7 @@ history rewrite.
 
 ## Codeberg #23 review-fix round 4: msb_full_turn coverage honesty + exit-code precision + secret scan - 2026-07-13
 
-Severity: TEST (review feedback on round 1-3). Parent #18; triage #22.
+Severity: TEST (review feedback on round 1-3). Parent #40; triage #44.
 
 **What:** Corrected 33 false `msb_full_turn` mappings, fixed the lancet status
 false takeover, hardened resume/send exit-code and secret-scan assertions,
@@ -3251,8 +3251,8 @@ boundary/xtask ci all green.
 
 ## Codeberg #23 review-fix round 5: restore invocation-error and honest residual contracts - 2026-07-13
 
-Severity: TEST (independent follow-up review of the round-4 claim). Parent #18;
-triage #22.
+Severity: TEST (independent follow-up review of the round-4 claim). Parent #40;
+triage #44.
 
 **Problem:** Round 4 still accepted exit 1 for `session resume <missing-id>`,
 blanket-rejudged eight product-behavior tests as local invariants, and left the
@@ -3297,7 +3297,7 @@ mismatches); `git diff --check HEAD`.
 
 ## Codeberg #23 review-fix round 6: missing credential is fast input failure - 2026-07-13
 
-Severity: TEST (final spec-axis follow-up). Parent #18; triage #22.
+Severity: TEST (final spec-axis follow-up). Parent #40; triage #44.
 
 **Problem:** `smoke_session_send_missing_credentials_fails_without_secrets`
 was still classified as an MSB scenario, although credential resolution occurs
@@ -3360,7 +3360,7 @@ them):
    `test_support.rs:73` with the DB path visibly under `/tmp/.tmpXXXXXX/…`
    (another test's tempdir) — confirming the FINDINGS hypothesis and also
    explaining the historical `ci-local.sh` "disk I/O error" flake noted in
-   the #20 entry.
+   the #42 entry.
 
 **Fix** (house pattern — hand-rolled test mutex as in
 `lattice-api/src/test_env.rs` / `lancet-api`'s `XDG_TEST_LOCK`; no new
@@ -3430,7 +3430,7 @@ operate on the canonical Local Workspace directly.
 - `lancet-api`: `LancetRuntimeConfig` no longer carries an `execution` field;
   `LancetRuntime::build` constructs the one Direct-Local routing internally
   from `policy.project_root`. `NullExecutionBackend` has no production
-  references (left for #38).
+  references (left for #60).
 - `lattice-api`: deleted `turn/{upper,workspace_backend,promotion,resume,
   snapshot_journal}.rs`; trimmed `turn/lifecycle.rs` to the terminal
   classification + `finalize_turn` Destroy path; removed
@@ -3461,13 +3461,13 @@ turn_lifecycle_tests,resume_tests,turn_target_tests,snapshot_journal_tests}.rs`
 were bound to `lattice-workspace::promotion::ManagedLower` / retained
 snapshots / the snapshot journal, all removed).
 
-**Residual (deferred to #40):** `SessionApi::commit_prepared_turn` /
+**Residual (deferred to #62):** `SessionApi::commit_prepared_turn` /
 `get_turn_commit` / `get_snapshot_lost` are now unused (`#[allow(dead_code)]`
-with #40 pointers); `get_snapshot_lost` and the `lattice-session` snapshot /
-promotion contract are removed in #40. The `lattice-workspace` crate itself,
+with #62 pointers); `get_snapshot_lost` and the `lattice-session` snapshot /
+promotion contract are removed in #62. The `lattice-workspace` crate itself,
 its `microsandbox` dependency, and the MSB/KVM harness scenarios are removed
-in #40. `lancet-native::NullExecutionBackend` and the
-`ExecutionRouting` / `UpperContext` carrier survive until #38 retires the
+in #62. `lancet-native::NullExecutionBackend` and the
+`ExecutionRouting` / `UpperContext` carrier survive until #60 retires the
 `ExecutionBackend` trait.
 
 **Verification:**
@@ -3475,7 +3475,7 @@ in #40. `lancet-native::NullExecutionBackend` and the
 - `cargo build --workspace --all-targets` — clean (0 warnings, 0 errors).
 - `cargo test -p lancet-native --lib -- --test-threads=1 --skip fetch` —
   102 passed, 0 failed (6 network fetch tests skipped; they hit
-  `https://evil.example.com` and are pre-existing flakes unrelated to #37).
+  `https://evil.example.com` and are pre-existing flakes unrelated to #59).
 - `cargo test -p lancet-api --lib` — 17 passed.
 - `cargo test -p lattice-api` (lib + all integration tests) — 143 passed,
   0 failed.
@@ -3487,7 +3487,7 @@ in #40. `lancet-native::NullExecutionBackend` and the
   118, `lattice-profile` 96, `lattice-session` 67, `lattice-agent` 8,
   `lattice-llm` 133, `lattice-workspace --features test-utils` unchanged) —
   all green.
-- Pre-existing failure unrelated to #37: `lancet-native --test cep_warn_harness`
+- Pre-existing failure unrelated to #59: `lancet-native --test cep_warn_harness`
   expects `docs/lancet-warn-report.md`, which was removed in `59d4c44c`
   (docs organization commit, before this work).
 
@@ -3514,7 +3514,7 @@ snapshot_journal_tests}.rs`.
 
 ## Codeberg #37 review correction: no-replace create install + audit evidence — 2026-07-17
 
-Post-review fixes to the #37 commit (9a20dedf) before push.
+Post-review fixes to the #59 commit (9a20dedf) before push.
 
 **Problem:** The /review spec sub-agent found that production `mutate.create`
 routed through `EditStorage::write_edit_target` →
@@ -3550,7 +3550,7 @@ real Local path / Local Revision / install-result evidence.
   stale docstrings updated; `lancet-native/AGENTS.md` Sub-Architecture lists
   `src/workspace/`; grep/find `1000` magic numbers documented as
   handler-overridden safety caps; `workspace/mod.rs` `#[allow(unused_imports)]`
-  annotated with the #38 pointer.
+  annotated with the #60 pointer.
 - Acceptance tests expanded to 10: added `create_install_is_no_replace_not_overwrite`
   (second create on existing target → ReplanRequired + original preserved),
   `observe_list_sees_external_addition_between_tool_calls` (list_directory
@@ -3584,7 +3584,7 @@ real Local path / Local Revision / install-result evidence.
 
 Severity: FEATURE (Direct-Local migration step 2 + step 3 deletion half; architecture closure, no compat seams).
 
-**Problem:** After #37's production cutover, the migration scaffolding was
+**Problem:** After #59's production cutover, the migration scaffolding was
 still live: the `ExecutionBackend` trait, `ExecutionRouting`/`UpperContext`
 carrier, `RoutingInvocationState` flags, `NullExecutionBackend`, the
 `direct_local_routing` adapter, backend spy/null test implementations, and
@@ -3633,7 +3633,7 @@ routing state through the shared call context.
   `after` content — the hashline apply re-verifies the old hash before
   writing, so no re-read and no race window). `backend_invoked` keys
   removed from observation/mutation/fetch/todo/guard metadata, transport
-  compact metadata, and `CallAuditMetadata`; historical pre-#38 rows keep
+  compact metadata, and `CallAuditMetadata`; historical pre-#60 rows keep
   old stage labels (alpha no-compat, no migration). Assertions updated in
   the same commit, including the provenance projector fixture.
 - Spies deleted (`registry.rs::SpyBackend`, `observation.rs::ObsSpyBackend`
@@ -3741,9 +3741,9 @@ runtime rule on the observation path.
 
 ## Codeberg #40: removed Upper configuration, Microsandbox, and lattice-workspace residue — 2026-07-17
 
-Severity: FEATURE (ADR 0003 Migration Sequence steps 4–6 / Workstream A; closes M-LOCAL-01 with #37–#39).
+Severity: FEATURE (ADR 0003 Migration Sequence steps 4–6 / Workstream A; closes M-LOCAL-01 with #59–#61).
 
-**Problem:** After the Direct-Local runtime (#37–#39) stabilized, the repo
+**Problem:** After the Direct-Local runtime (#59–#61) stabilized, the repo
 still carried the retired Upper/MSB surface: the mandatory `[workspace]`
 profile section (egress/credentials/image/lifecycle limits), the
 `lattice-workspace` crate and `microsandbox` dependency, MSB/KVM harness
@@ -3788,7 +3788,7 @@ stale active documentation describing the sandbox path.
   `LATTICE_HARNESS_MSB` gate), and the missing-credential scenario
   deleted; `ScenarioLayer::Microsandbox` removed. `pty_tui_smoke` now
   runs Direct-Local in the ordinary lane (no KVM, no `#[ignore]`).
-  New `tests/direct_local_turn.rs` skeletons (#24 owns the full matrix):
+  New `tests/direct_local_turn.rs` skeletons (#46 owns the full matrix):
   plain-text turn commits + exit 0, session reopen after an external
   (non-LATTICE) edit+commit with transcript continuity, and
   `mutate.create` denied by `[lancet.workspace].denied_write_patterns`
@@ -3801,14 +3801,14 @@ stale active documentation describing the sandbox path.
   graph, data flow, abstractions, removed-subsystems), `docs/CONFIGURATION.md`
   (schema tables, examples, env vars; also drops stale `[lancet.command]` /
   `[lancet.verify]` sections that no longer deserialize), `docs/GETTING-STARTED.md`,
-  `docs/TESTING.md`, `docs/TEST-TRIAGE.md` (MSB lane re-targeted to #24),
+  `docs/TESTING.md`, `docs/TEST-TRIAGE.md` (MSB lane re-targeted to #46),
   `docs/LANCET.md` transition notice, crate `AGENTS.md` files. Historical
   ADR/FIX records untouched.
 
 **Verification:**
 
 - `cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` — clean
-  (two pre-existing #39 breakages fixed in separate commits first: rustfmt
+  (two pre-existing #61 breakages fixed in separate commits first: rustfmt
   drift in 14 files, 3 clippy lints in lancet-native).
 - `cargo build --workspace --all-targets` — clean.
 - Per-crate `timeout 600 cargo test -p <c> -- --test-threads=1` for all 16
@@ -3827,7 +3827,7 @@ stale active documentation describing the sandbox path.
 - Agent-visible catalog remains exactly the five methods
   (`direct_local_runtime_exposes_closed_five_method_catalog`).
 - Residue scan `rg -i "microsandbox|upper|msb" crates --type rust`:
-  only historical `#37/#40` comments, negative assertions
+  only historical `#59/#40` comments, negative assertions
   (`upper_workspace_id` must not appear in audit metadata), and unrelated
   `uppercase` matches remain.
 
@@ -3844,7 +3844,7 @@ stale active documentation describing the sandbox path.
 
 **FINDINGS ledger:** M-LOCAL-01 closed (Workstream A complete); M-33-01/02/03/04/06,
 L-21-02, L-34-02 closed as moot with the deleted adapter/probe/porcelain;
-T-23-01 re-targeted — 54 ex-MSB elevations now owned by #24 Direct-Local
+T-23-01 re-targeted — 54 ex-MSB elevations now owned by #46 Direct-Local
 scenarios; T-23-02 residual note updated.
 
 ## Codeberg #39 follow-up: visibility traversal separation and durable evidence — 2026-07-17
@@ -3911,7 +3911,7 @@ passed.
 
 Severity: LOW (behavior-preserving simplification and review-record hygiene).
 
-**Problem:** The completed #24 series left two unused public harness wrappers,
+**Problem:** The completed #46 series left two unused public harness wrappers,
 configurable HTTP fixture fields that every caller fixed to `200 text/plain`, an
 impossible `cancel_poll` fallback branch, duplicated timeout error construction,
 stale crate-local change records, and a closed T-23-01 entry in the open section
@@ -3926,7 +3926,7 @@ of `FINDINGS.md`.
 - Shared one `InvalidField` construction for timeout validation while preserving
   the zero and upper-bound diagnostic text.
 - Updated affected crate guidance, moved T-23-01 to `OBSOLETE / CLOSED`, and
-  recorded the three residual #24 review gaps as T-24-01, T-24-02, and L-24-03.
+  recorded the three residual #46 review gaps as T-24-01, T-24-02, and L-24-03.
 - Rust source/harness diff: 30 insertions, 86 deletions (net `-56` lines).
 
 **Verification:**

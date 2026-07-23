@@ -20,7 +20,7 @@ release records.
   test-suite rewrite decisions.
 - [`agents/`](agents/) contains repository configuration consumed by engineering
   skills.
-- [`specs/`](specs/) contains active design contracts. The issue #5
+- [`specs/`](specs/) contains active design contracts. The Issue #27
   effect-model and tool-context specification remains authoritative while the
   migrated GitHub issue #27 (formerly Codeberg #5) is open.
 - [`plans/`](plans/) contains per-issue implementation plans for active work.

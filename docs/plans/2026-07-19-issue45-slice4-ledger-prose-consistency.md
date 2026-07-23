@@ -1,7 +1,7 @@
-# #23 切片 4：TEST-TRIAGE prose ↔ machine ledger 原子同步
+# #45 切片 4：TEST-TRIAGE prose ↔ machine ledger 原子同步
 
-- 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #23 slice 3/4）
-- 父计划：`2026-07-19-issue23-fast-residual-ledger-closeout.md` §4
+- 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #45 slice 3/4）
+- 父计划：`2026-07-19-issue45-fast-residual-ledger-closeout.md` §4
 - 前置：切片 3 已在同一 PR 的前一 commit 改完 JSON；本切片不得改变测试身份或新增场景实现。
 - 目标：`docs/TEST-TRIAGE.md` 成为 JSON 判决书的可读、可复核投影。
 
@@ -42,12 +42,12 @@ print("replacement atoms", replacements)
 
 ```markdown
 | 场景 ID | Layer | 状态/归属 |
-| `direct_local_plain_text_turn_commits_and_exit_zero` | `direct_local_binary` | #40 已落地 |
-| `planned_direct_message_assembly` | `direct_local_binary` | #24 精确断言 message order/content |
-| `planned_direct_tool_error_payload` | `direct_local_binary` | #24 精确断言 CEP payload |
-| `planned_direct_audit_query_seeded` | `direct_local_binary` | #24 query seeded DB |
-| `planned_direct_audit_tail_seeded` | `direct_local_binary` | #24 tail seeded DB |
-| `planned_direct_branch_create_isolation` | `direct_local_binary` | #24 branch-create cross-session isolation |
+| `direct_local_plain_text_turn_commits_and_exit_zero` | `direct_local_binary` | #62 已落地 |
+| `planned_direct_message_assembly` | `direct_local_binary` | #46 精确断言 message order/content |
+| `planned_direct_tool_error_payload` | `direct_local_binary` | #46 精确断言 CEP payload |
+| `planned_direct_audit_query_seeded` | `direct_local_binary` | #46 query seeded DB |
+| `planned_direct_audit_tail_seeded` | `direct_local_binary` | #46 tail seeded DB |
+| `planned_direct_branch_create_isolation` | `direct_local_binary` | #46 branch-create cross-session isolation |
 ```
 
 目录必须逐行登记切片 3 §3.4 的 **44 个 exact ID**（不能只登记 family），并覆盖 JSON
@@ -59,21 +59,21 @@ print("replacement atoms", replacements)
 结构固定为：
 
 ```markdown
-## 1.5 #23 最终执行状态（2026-07-19）
+## 1.5 #45 最终执行状态（2026-07-19）
 
 ### Fast residual：0
 - 切片 1：`fast_lancet_cli` 接管 1 条并删除原内部测试。
 - 切片 2：branch create/reopen 接管 2 条；另删 2 条已接管 smoke。
 
-### #40 骨架已完成接管
+### #62 骨架已完成接管
 | replacement scenario | 删除的内部测试 | superset 依据 |
 
-### 精确移交 #24（44 行）
+### 精确移交 #46（44 行）
 | exact planned scenario ID | ledger identity | assertion bundle |
 | ...从切片 3 §3.4 逐行投影，不按大类聚合... | ... | ... |
 
 ### MSB 词汇退役
-#40 删除 Upper / KVM lane；active ledger 只使用 `direct_local_binary` / `*_direct`。
+#62 删除 Upper / KVM lane；active ledger 只使用 `direct_local_binary` / `*_direct`。
 ```
 
 旧的「退役 lane 项需 KVM」表保留为历史时必须明确标 obsolete，不得与当前状态并列成 active 延期表。
@@ -136,11 +136,11 @@ assert not any(re.search(r"(?:^|_)msb(?:_|$)", atom) for atom in atoms)
 遵循根 AGENTS：只在切片 1–4 全部 landing 且门禁通过后追加，不提前写。模板：
 
 ```markdown
-## #23 — fast residual 与 Direct-Local triage ledger 收口
+## #45 — fast residual 与 Direct-Local triage ledger 收口
 
-- Severity/ID: testing / #23
+- Severity/ID: testing / #45
 - Problem: 5 条 fast residual；57 条 active 退役 KVM-lane layer（55 elevate + 2 keep）。
-- Fix: external-binary takeover；11 条退役契约补记 delete；其余逐条映射 #40 场景或 44 个 assertion-level #24 ID。
+- Fix: external-binary takeover；11 条退役契约补记 delete；其余逐条映射 #62 场景或 44 个 assertion-level #46 ID。
 - Verification: <实际命令与通过结果>
 - Changed files: <实际清单>
 ```

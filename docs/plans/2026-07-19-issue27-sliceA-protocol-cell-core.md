@@ -1,8 +1,8 @@
-# #5 切片 A：`lancet-protocol` Cell effect 封闭核
+# #27 切片 A：`lancet-protocol` Cell effect 封闭核
 
-- 父计划：`2026-07-19-issue5-wasm-component-tool-substrate.md` §2
+- 父计划：`2026-07-19-issue27-wasm-component-tool-substrate.md` §2
 - add-only：新模块 `cell.rs` 与 `effect_types.rs` 并存；旧 `ImpactKind` 族本切片零改动
-  （production handler 仍消费，删除归 #6/#12）。
+  （production handler 仍消费，删除归 #28/#34）。
 
 ## 新文件 `crates/lancet-protocol/src/cell.rs`（核心类型示例）
 
@@ -14,7 +14,7 @@
 //!
 //! Closed core: `CtxOp` × `ExtImpact` over tool-declared scopes with
 //! fail-closed trust. This vocabulary is additive; the legacy
-//! `ImpactKind` machinery in `effect_types.rs` is retired by #6/#12.
+//! `ImpactKind` machinery in `effect_types.rs` is retired by #28/#34.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CtxOp {
-    /// Result enters context (charged against the context budget by #6).
+    /// Result enters context (charged against the context budget by #28).
     Alloc,
     /// Context release. Vocabulary only this cycle (PRD R10): no ToolHost seam.
     Free,
@@ -207,7 +207,7 @@ impl ToolDescriptor {
     }
 }
 
-/// A tool call's reported output cell + value (budget seam lands in #6).
+/// A tool call's reported output cell + value (budget seam lands in #28).
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolOutput {

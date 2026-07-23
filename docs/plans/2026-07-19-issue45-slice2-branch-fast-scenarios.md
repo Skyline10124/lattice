@@ -1,6 +1,6 @@
-# #23 切片 2：project branch fast 场景 + 删 4 条冗余测试 + 孤儿夹具清理
+# #45 切片 2：project branch fast 场景 + 删 4 条冗余测试 + 孤儿夹具清理
 
-- 父计划：`2026-07-19-issue23-fast-residual-ledger-closeout.md` §2
+- 父计划：`2026-07-19-issue45-fast-residual-ledger-closeout.md` §2
 - 接管目标（4 条，全部 `lattice-cli`）：
   - `project_branch_creation_json_output_includes_branch`（`session.rs:1284`，经 `SessionApi` 直调）
   - `project_branch_persists_through_reopen`（`session.rs:1345`，经 `SessionApi` 直调）

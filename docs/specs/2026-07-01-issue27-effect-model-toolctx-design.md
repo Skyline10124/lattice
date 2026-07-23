@@ -1,14 +1,14 @@
-# Issue #5 模型设计 —— Effect 模型(R7a/R8)+ 工具 substrate + 通道模型 + ToolHost
+# Issue #27 模型设计 —— Effect 模型(R7a/R8)+ 工具 substrate + 通道模型 + ToolHost
 
 日期:2026-07-01;第四轮修订 2026-07-02(工具后端结构规范讨论,原 4 项待拍全部落定);
 GitHub #65(原 Codeberg #43)词汇对齐修订 2026-07-22(物理假设对齐 ADR 0003 Direct-Local + ADR 0004 Tool Host / WASM Component)。
 
 状态:由 brainstorming 讨论产出(2026-07-01),2026-07-02 与用户逐项拍板后第四轮修订;**待用户复审定稿**。
-取代现 issue #5 正文的模型部分(该票被标 `need-major-revision`)。派生自 PRD #2(crate 边界重构)及其
+取代现 Issue #27 正文的模型部分(该票被标 `need-major-revision`)。派生自 PRD #24(crate 边界重构)及其
 R3/R7/R8/R9 处置;现行物理与承载边界以 **ADR 0003(Direct-Local)** 与 **ADR 0004(Tool Host /
-WASM Component)** 为准。本文档只覆盖 issue #5 所立的**模型**:effect 类型核、工具 substrate
-类型、通道模型、`ToolHost` 宿主面。不迁移生产工具(#7–#10)、不退役 authority 里的 `ImpactKind` 机器
-(#6)、不合并 crate(#12)、不建工具 CLI(#13)。
+WASM Component)** 为准。本文档只覆盖 Issue #27 所立的**模型**:effect 类型核、工具 substrate
+类型、通道模型、`ToolHost` 宿主面。不迁移生产工具(#29–#32)、不退役 authority 里的 `ImpactKind` 机器
+(#28)、不合并 crate(#34)、不建工具 CLI(#35)。
 
 > **核心:工具从框架解耦、可单独维护;框架只保留小而精的数据流控制。**
 > 框架不理解工具的领域语义,只拥有三样:准入(capability)、通道(数据流的物理路径)、记账
@@ -16,13 +16,13 @@ WASM Component)** 为准。本文档只覆盖 issue #5 所立的**模型**:effec
 
 ## 1. 摘要
 
-Issue #5 给 LATTICE 的源码 crate 工具系统铺横向地基:封闭 effect 核、
+Issue #27 给 LATTICE 的源码 crate 工具系统铺横向地基:封闭 effect 核、
 `Tool`/`ToolDescriptor`/`ToolHost` substrate、由 manifest 生成的 host 侧 `inventory` 注册、
 `lattice-tool-prelude`,以及一个吸收 dispatch registry 与 transport 的新 crate `lancet-runtime`。
 本切片不迁移任何生产工具;substrate 由一个 **no-op 测试工具**打穿验证(PRD 测试决策),而不是抽取
 真实 handler。
 
-两条轴已被 PRD #2 敲定,这里作为"已定背景"重述:**effect 类型核**(封闭 `ctx-op × ext-impact` + 开放的工具定义 scope + fail-closed 的 `in`/`ex`,单轴 capability 准入,cell-key 表示)与 **R8 的 `FailureSemantics` 清理**(§5.4,删整个枚举)。真正待设计、也正是 #5 被判 major-revision
+两条轴已被 PRD #24 敲定,这里作为"已定背景"重述:**effect 类型核**(封闭 `ctx-op × ext-impact` + 开放的工具定义 scope + fail-closed 的 `in`/`ex`,单轴 capability 准入,cell-key 表示)与 **R8 的 `FailureSemantics` 清理**(§5.4,删整个枚举)。真正待设计、也正是 #27 被判 major-revision
 的原因,是**`ToolHost` 宿主面**:工具能碰什么、强制怎么中介、以及怎么把 agent 工具面跟系统其余
 API 分开。这些是本文档的实质贡献(§6–§8),外加一条贯穿后续 issue 的结构性纠正:**audit 是运维
 基础设施,不是 agent 工具**(§7、§10)。
@@ -49,16 +49,16 @@ API 分开。这些是本文档的实质贡献(§6–§8),外加一条贯穿后�
 5. 用一个 no-op 测试工具打穿 substrate:生成注册 → raw 注册 → `CepClient` round-trip →
    `ToolHost` → audit 行。
 6. 定义 `ToolDescriptor` ↔ `manifest.toml` 一致性(格式 + drift 测试),让工具迁移票
-   (#7–#10)能满足各自"manifest drift check 通过"的验收。
+   (#29–#32)能满足各自"manifest drift check 通过"的验收。
 
 ## 3. 非目标
 
-1. 迁移任何生产工具(`session`/`observe`/`mutate`/`fetch`)—— 见 #7–#10。
-2. 删除 `lancet-native` 或 `register_native_*` handler —— 它们留作过渡;彻底删除是 #12。
+1. 迁移任何生产工具(`session`/`observe`/`mutate`/`fetch`)—— 见 #29–#32。
+2. 删除 `lancet-native` 或 `register_native_*` handler —— 它们留作过渡;彻底删除是 #34。
 3. 重写 `ImpactKind`-keyed 的 authority 机器(`effect/region.rs`、`authorized_region_for`)——
-   那是 #6 里的 R7b。
+   那是 #28 里的 R7b。
 4. 真正的 `ContextStore` 或任何 `Free` 执行机制 —— `Free` 本期只到词汇(PRD R10)。
-5. `lattice tool install/list/uninstall` CLI 与 release-gate 接线 —— #13(本期只落 manifest
+5. `lattice tool install/list/uninstall` CLI 与 release-gate 接线 —— #35(本期只落 manifest
    **格式** + drift **测试**;见 §9)。
 6. 重新引入 hosted backend processes / 任意进程执行 —— ADR 0003/0004 明确禁止;若再引入需新 ADR
    (§6.2)。WASM Component 承载与零 ambient WASI 是 ADR 0004 的现行目标,不在本切片排期细节,
@@ -83,9 +83,9 @@ API 分开。这些是本文档的实质贡献(§6–§8),外加一条贯穿后�
   经 `inventory` 注册的工具目前 agent 触达不到。
 - `lancet-runtime` 与 `lattice-tool-*` crate 不存在。工具知识仍在框架里:
   `lancet-authority/src/policy/network.rs`(fetch)与 `observation.rs`(observe)。command 知识
-  已随 #4 删除。
+  已随 #26 删除。
 - 物理执行已切到 Direct-Local(ADR 0003):LANCET 直接操作 Local Workspace;turn-scoped 隔离镜像 /
-  Upper 生命周期 / egress 网关路径已随 #40 删除。网络策略留在 `[lancet.network]` + `net-guard`。
+  Upper 生命周期 / egress 网关路径已随 #62 删除。网络策略留在 `[lancet.network]` + `net-guard`。
 
 ## 5. Effect 模型核心(R7a / R8)—— 已定(PRD),重述
 
@@ -107,7 +107,7 @@ API 分开。这些是本文档的实质贡献(§6–§8),外加一条贯穿后�
 > `(Mutate, …, scope)` cell(操作侧,**不扣 budget**);若释放,另记 `(Free, …, scope)`。例:
 > `session.todo_write` 产生 `(Mutate, None, session/in)`(改 todo 状态)+ `(Alloc, None,
 > session/in)`(返回的 `TodoWriteResult` 进 context,扣 budget)——这与现状
-> `session_state.rs:95` 的 `budget_charged: 0` 一致(操作侧不扣),返回值 Alloc 扣费是 #5
+> `session_state.rs:95` 的 `budget_charged: 0` 一致(操作侧不扣),返回值 Alloc 扣费是 #27
 > 要补的(budget 上移到 runtime 事后量返回值,§6.5 第 3 层)。读 workspace 是
 > `(Alloc, Read, workspace/in)`(读即 Alloc,无独立 Mutate)。`fetch` 是
 > `(Alloc, Read, external-host/ex)`。每个 cell 两个轴都填;一次调用是若干个这种 cell 的集合,
@@ -116,8 +116,8 @@ API 分开。这些是本文档的实质贡献(§6–§8),外加一条贯穿后�
 > **budget 只记 `Alloc`,不是 token 预算。** 现状(`ObservationBudgetTracker`,
 > `lancet-authority/src/policy/budget.rs`)按返回字节 + op 计数(`max_grep_matches`/
 > `max_list_entries`/`max_find_paths`/`max_todo_ops`)+ 单读上限(`max_single_read_bytes`)扣费——
-> 本质都是 `Alloc` 的字节日代理,而且框架替每个工具各定一种量,没有统一口径(PRD problem #2 的
-> budget 版)。#5 改成 **CtxOp 轴上的单一 context 预算标量**:`Alloc` 扣、`Free` 退;每个工具把
+> 本质都是 `Alloc` 的字节日代理,而且框架替每个工具各定一种量,没有统一口径(PRD problem #24 的
+> budget 版)。#27 改成 **CtxOp 轴上的单一 context 预算标量**:`Alloc` 扣、`Free` 退;每个工具把
 > 自己的输出裁到该裁的大小是工具的 mechanism,不是框架 policy。ExtImpact 那条轴不走预算,走
 > 准入(capability + `in`/`ex` + `ObservedScope`)。框架因此只剩两样:一把 context 度量 + 一条
 > 准入轴。**度量由 runtime 在事后量返回值的大小**(不信工具自报)——量的是进了共享 context 的那
@@ -173,7 +173,7 @@ Workspace),cell 记 `(Mutate, Write, sqlite-db/in)`——审计词汇是工具�
     不记 capability 名(§6.3:多 capability 同 cell 时归因无歧义)。
   + **attestation**:分字段含两者——cell 字段(发生了什么)+ capability 字段(凭什么授权)。
   + **profile**:用 capability 名(人写配置自然用名字)。
-  #6 body 的 effect 记录机器重表达要同步这个口径(effect ledger 记 cell 不记 capability 名;
+  #28 body 的 effect 记录机器重表达要同步这个口径(effect ledger 记 cell 不记 capability 名;
   capability 名只留在准入/attestation/profile)。
 - `ToolDescriptor` 带 `capabilities` + `scopes`(**就等于旧 `EffectDecl` 的角色,不再有独立的
   `EffectDecl` 类型**;旧 catalog 的 `const EFFECT` 由 `const DESCRIPTOR` 取代)。`ScopeDecl`(scope
@@ -193,22 +193,22 @@ effect 记 cell 不记 capability 名),不做静态 failure 承诺。依据:
    + `validate_complete` 一条注册自检(它检查的 `PartialEffectsAudited` 本身就在删除清单里)。没有
    任何运行时逻辑读 `.failure` 改变行为——PRD R8"纯声明元数据"判断成立。
 2. **名不符实**:Direct-Local 下的非原子写路径(例如历史 guest 写助手的两步 `mkdir` + 重定向)
-   已说明「失败时无后端效果」类静态标签配不上真实残留语义;#15 删 `mutate.batch` 只消掉多操作
+   已说明「失败时无后端效果」类静态标签配不上真实残留语义;#37 删 `mutate.batch` 只消掉多操作
    partial failure,没证明单文件无残留。Atomic Local Mutation(ADR 0003)用安装前失败保持目标不变
    来处理,而不是用枚举承诺。
 3. **跟效果观察模型矛盾**:效果以观察为准,不以声明为准;失败后的残留由第 3 层事后校验看见,
    而不是由枚举承诺它不存在。原模式 B「事后 diff」叙事亦同此理(该模式已 superseded,§6.2)。
 
-`RetainDiffOnVerifyFailure` 随 #4 已死,`PartialEffectsAudited` 随 command 退役,其余两变体随枚举
+`RetainDiffOnVerifyFailure` 随 #26 已死,`PartialEffectsAudited` 随 command 退役,其余两变体随枚举
 整体删除。
 
 ### 5.5 删除项
 
 删 `ImpactKind`、`EffectScopeKind`、`OverlayBehavior`、`FailureSemantics`(§5.4);
 `CepMethod::IMPACT` 与 `BASE_AUTHORITY`;`MethodDescriptor.impact`。(`ImpactKind`-keyed 的 authority
-机器的下游重表达是 #6,不是 #5。)
+机器的下游重表达是 #28,不是 #27。)
 
-### 5.6 #5 精化 —— agent scope 集排除 `audit`
+### 5.6 #27 精化 —— agent scope 集排除 `audit`
 
 **已确认**(对 PRD 五工具集唯一的实质偏离,扫描证实 audit 是唯一被非 agent 消费的方法):agent 面
 的 scope 集是 **`{ workspace, session, external-host }`**。**不**含 `audit`;agent 词汇里没有
@@ -244,11 +244,11 @@ hosted backend processes。逐操作中介(模式 A)是公共高频路径上对�
 - **`session`** —— session 状态存取(host 侧 store)。**现状:当前 `session.todo_write` handler
   没有 store,只验证 + 回显**(`handlers/session_state.rs:24-53`:`validate_todos` 后直接返回
   `TodoWriteResult { todos: params.todos }`,无持久化,`budget_charged: 0`)。host 侧 session
-  store 在 #7(session tracer)落地时建;本切片只定 session 通道的**契约形状**与 CtxOp 语义
+  store 在 #29(session tracer)落地时建;本切片只定 session 通道的**契约形状**与 CtxOp 语义
   (操作 `Mutate` + 返回值 `Alloc`,§5.1),不假装 store 已经在。当前 effect 记的
-  `(Mutate, None, session/in)` 描述的是**目标语义**(#7 兑现:验证通过 → 写 store),现状是"通过
+  `(Mutate, None, session/in)` 描述的是**目标语义**(#29 兑现:验证通过 → 写 store),现状是"通过
   验证、拟写入"的证据。这跟 `CtxOp::Free` 的"本切片只到词汇级"是对称的——通道契约先定,
-  实现归迁移票(#7)。
+  实现归迁移票(#29)。
 
   > **关于 workspace 9 方法的粒度(不是最小集,但模型层零冗余):** 这是**继承下来的 I/O
   > substrate**(PRD 只删了 `exec`,保留其余 9 个)。方法层确实有重叠(`list_dir` 是 `find_files`
@@ -263,7 +263,7 @@ hosted backend processes。逐操作中介(模式 A)是公共高频路径上对�
   而且没法用既有原语安全又经济地组合出来。** 标定例:`grep` 进通道(组合实现要把每个文件拖过
   Component 边界,不经济到不可用);fetch 在 HTTP 之上的语义(参数→请求构造、响应整形、
   truncation)留给工具,"发一个受控请求"进通道。新工具默认组合既有通道;要扩通道 trait 必须过这条
-  准则——否则框架又会重新累积工具领域知识(PRD problem #2 的 backend 版)。
+  准则——否则框架又会重新累积工具领域知识(PRD problem #24 的 backend 版)。
 
 **模式 B — 域宿养(域级收口)。状态:superseded(ADR 0004)。**
 
@@ -372,15 +372,15 @@ SSRF 防护),**不是**已删除的 turn-scoped workspace egress 网关,也不�
 **角色划分:**
 
 - `net-guard` + `validate_fetch_url`(`lancet-authority/src/policy/network.rs`):CEP / 宿主侧预检
-  与强制(第 1 道);`validate_fetch_url` 等领域 policy 随 #10 迁入 fetch 工具 crate,传输与
+  与强制(第 1 道);`validate_fetch_url` 等领域 policy 随 #32 迁入 fetch 工具 crate,传输与
   allowlist 强制留在 Tool Host `network` 通道实现。
 - **effect 记账取通道调用参数**(请求的 url/host),与 workspace 轴取 path 对称(§6.5 第 2 层)。
   强制跟记账分开:host 执行 allow/deny,记账取参数。
 - **allowlist 唯一事实源**:`[lancet.network].allowed_hosts`。`[workspace].allowed_egress_*`
-  已随 #40 删除,不再存在第二份 egress 表。
+  已随 #62 删除,不再存在第二份 egress 表。
 - **credential**:不把真值注入工具 ambient 环境;若需密钥,经宿主侧受控注入 / 占位机制(独立
   issue),effect 证据仍取通道调用参数。
-- **定性区分:**#4 删的是 agent 面的自由命令执行;通道实现内部的固定传输 helper 是设施,不是
+- **定性区分:**#26 删的是 agent 面的自由命令执行;通道实现内部的固定传输 helper 是设施,不是
   agent 可编程的命令面。
 
 ### 6.7 承载面:WASM Component(ADR 0004 现行目标)
@@ -414,11 +414,11 @@ trusted-plugin 写成 ADR 0004 之后的长期生产模型。
 
 ## 7. 结构性原则:agent 工具面 ≠ 系统 API
 
-工具跟框架在**三根轴**上纠缠。PRD #2 点了前两根;audit 调查撞出了第三根:
+工具跟框架在**三根轴**上纠缠。PRD #24 点了前两根;audit 调查撞出了第三根:
 
-1. **实现位置**(PRD problem #1)—— handler 编进框架 crate → 抽成工具 crate(#7–#10)。
-2. **知识位置**(PRD problem #2)—— 工具 policy 在 `lancet-authority` → 搬进工具 crate(比如
-   `observation.rs` → `lattice-tool-observe`,见 #8)。
+1. **实现位置**(PRD problem #23)—— handler 编进框架 crate → 抽成工具 crate(#29–#32)。
+2. **知识位置**(PRD problem #24)—— 工具 policy 在 `lancet-authority` → 搬进工具 crate(比如
+   `observation.rs` → `lattice-tool-observe`,见 #30)。
 3. **消费绑定**(本设计)—— 工具的能力*同时*是 operator/CLI 的 API。crate 拆分**修不了**这根:
    就算抽出 `lattice-tool-audit`,CLI 还是会把它当工具调。
 
@@ -430,7 +430,7 @@ trusted-plugin 写成 ADR 0004 之后的长期生产模型。
 CLI —— 起一整个 CEP 客户端、过策略准入、过事件总线,只为了读一个连它自己测试都直接开的 SQLite 库。
 audit-read 是一个穿着 agent-tool 外衣的 operator 查询。
 
-## 8. Substrate 类型(#5 骨架)
+## 8. Substrate 类型(#27 骨架)
 
 - `trait Tool: Send + Sync`(经 `#[async_trait]` async,对象安全;过渡 native / 测试面可用):
   `fn descriptor(&self) -> &'static ToolDescriptor`;
@@ -447,7 +447,7 @@ audit-read 是一个穿着 agent-tool 外衣的 operator 查询。
   多个 capability 可共享同一个 cell(§5.3) */, scopes: &[ScopeDecl], hosted_backend: Option<HostedBackendDecl>,
   params_schema: fn() -> Value, description: &str, version: &str }` —— 编译期 / generated 事实源。
   **就顶替了旧 `EffectDecl`**(没有独立的 `EffectDecl` 类型;旧 catalog 的 `const EFFECT` →
-  `DESCRIPTOR` / generated descriptor)。**新增 `description` + `version`**(投影 LLM tool definition 和满足 #13 的
+  `DESCRIPTOR` / generated descriptor)。**新增 `description` + `version`**(投影 LLM tool definition 和满足 #35 的
   `list` 都需要)、**`scopes`**(`ScopeDecl { name, trust, channel }`,§5.2;`channel` = 模式 A 的
   `ChannelKind`——capability↔通道绑定链的锚点,工具的通道集由它派生,没有独立
   的 `channels` 字段)、**`hosted_backend`**(reserved / superseded;模式 B 已废止,§6.2;
@@ -464,7 +464,7 @@ audit-read 是一个穿着 agent-tool 外衣的 operator 查询。
 - `lancet-runtime`(新)—— 吸收 `lancet-dispatch`(registry + transport)与 `lancet-native` 的
   框架部分;拥有 Component 执行、生成 catalog 注册、Tool Host 强制、Local Workspace /
   network / session 通道(ADR 0004);**不依赖任何工具 crate**。彻底删除
-  `lancet-native`/`lancet-cep`/`lancet-dispatch` 是 #12。
+  `lancet-native`/`lancet-cep`/`lancet-dispatch` 是 #34。
 
 ### 8.1 注册可达 + 动态 adapter + force-link / composition 契约(直修 major-revision item 2)
 
@@ -493,7 +493,7 @@ runtime 就看不到它。这不是工具作者能控制的(他们写 `submit!` 
   或提供一个**聚合 crate** `lattice-tools-default`(把全部一等公民工具 re-export 成 `_`),root 只
   要 `use lattice_tools_default as _;` 一行。两者择一,实现期定;**spec 在此写明组合层的这个义务**。
 - **过渡期**:`register_native_*` handler 编进 `lancet-native`(同 binary),不经 `inventory`;
-  迁移票(#7–#10)把各 handler 抽成工具 / Component 后,组合层补上对应的 generated registration。
+  迁移票(#29–#32)把各 handler 抽成工具 / Component 后,组合层补上对应的 generated registration。
 - **release-gate 校验(不依赖链接器内部行为):** 链接器是否保留无引用静态项会随 LTO/codegen-unit/
   平台漂移,不能作测试基准。改成 **组合清单 == runtime 注册集** 的等价校验:维护一份
   `tools.enabled` 组合清单(profile/lockfile 级),release gate 断言注册返回的工具
@@ -507,13 +507,13 @@ runtime 就看不到它。这不是工具作者能控制的(他们写 `submit!` 
 
 `ToolDescriptor`(源 const / generated)是运行时的事实源。每个工具 crate / Source Tool 带一个
 `manifest.toml`(name、version、声明的 cell/capability/scope、依赖),**机器镜像**这个 descriptor;
-一个测试断言两者一致。**本切片定义 manifest 格式与 descriptor↔manifest drift 测试**,好让 #7–#10
+一个测试断言两者一致。**本切片定义 manifest 格式与 descriptor↔manifest drift 测试**,好让 #29–#32
 能满足各自"manifest drift check 通过"的验收。`install/list/uninstall` CLI 与 release-gate 接线仍归
-\#13。(这解掉 #7–#10 当前依赖一个排在它们下游 #13 才建的 drift 检查器的倒挂。)
+\#35。(这解掉 #29–#32 当前依赖一个排在它们下游 #35 才建的 drift 检查器的倒挂。)
 
 ### 9.1 manifest 结构(prototype,可演进)
 
-下面这版按 **prototype** 级别定下 —— 够本切片与 #7–#10 跑通 drift check 即可,不上锁;真有多个
+下面这版按 **prototype** 级别定下 —— 够本切片与 #29–#32 跑通 drift check 即可,不上锁;真有多个
 工具 manifest、或发现表达力不够时(比如 `params` 内联 JSON schema vs 文件 ref、capability 内联表
 形态)再演进。格式 = TOML(PRD 点名 `manifest.toml`);放工具 crate / Source Tool **仓库根**;跟组合
 binary 的 `Cargo.toml` 各管各的(rev-lock 依赖归 `Cargo.toml`,manifest 不重复)。
@@ -570,40 +570,40 @@ drift check = 解析 `manifest.toml` + 读 `ToolDescriptor`,逐字段比对镜�
 
 这里的决策动了兄弟票的边界:
 
-- **#5** —— agent scope 集排除 `audit`;从 #13 前移 manifest **格式** + drift **测试**;承载面以
-  ADR 0004 WASM Component 为准(实现计划见 `docs/plans/2026-07-19-issue5-wasm-component-tool-substrate.md`)。
-- **#7**(session tracer)—— 改 `Blocked by`,从 `#3`/`#4` 改成 **`#5`(substrate)/ `#6`
-  (capability 准入)**;去掉不存在的 `#10a` 引用。host 侧 session store 在这票建(§6.2)。
-- **#11**(audit)—— 从"把 audit 迁成 agent `Tool` crate"换形为"把 audit-read 抽成 **operator
+- **#27** —— agent scope 集排除 `audit`;从 #35 前移 manifest **格式** + drift **测试**;承载面以
+  ADR 0004 WASM Component 为准(实现计划见 `docs/plans/2026-07-19-issue27-wasm-component-tool-substrate.md`)。
+- **#29**(session tracer)—— 改 `Blocked by`,从 `#25`/`#26` 改成 **`#27`(substrate)/ `#28`
+  (capability 准入)**;去掉不存在的 `#32a` 引用。host 侧 session store 在这票建(§6.2)。
+- **#33**(audit)—— 从"把 audit 迁成 agent `Tool` crate"换形为"把 audit-read 抽成 **operator
   store 库**;不进 agent 面"。删掉作为 agent 工具的 `lattice-tool-audit`、`audit` scope、
   `(Alloc,Read,audit)` cell。`observe.audit`/`observe.audit_replay` 退出 catalog;
   `query_audit`/`tail_audit` 直接读 store(或一个 runtime audit service)。**已确认。**
   扫描证实 audit 是唯一有非 agent 消费者的催化方法(仅 `lancet-api::{query_audit,tail_audit}` →
-  CLI);observe/mutate/fetch/session 没有任何 operator/程序化消费者,所以 #7–#10 无需换形。
-- **#10**(fetch)—— 按 §6.6 切分:`validate_fetch_url` 等领域 policy(URL 规范化/scheme 白名单/
+  CLI);observe/mutate/fetch/session 没有任何 operator/程序化消费者,所以 #29–#32 无需换形。
+- **#32**(fetch)—— 按 §6.6 切分:`validate_fetch_url` 等领域 policy(URL 规范化/scheme 白名单/
   response 整形)从 `lancet-authority/policy/network.rs` 迁入 fetch 工具 crate;**传输 +
   `net-guard` / `[lancet.network].allowed_hosts` 强制**进 Tool Host `network` 通道实现。
   `fetch.web` 字节走宿主侧 network 通道(已拍)。
-- **#12**(删旧 crate)—— `lancet-runtime` 吸收边界清单(可证伪验收,按北极星定):
+- **#34**(删旧 crate)—— `lancet-runtime` 吸收边界清单(可证伪验收,按北极星定):
   + **进 runtime(框架 = 小而精数据流控制)**:dispatch registry + transport(吸收
     `lancet-dispatch`)、server 侧 audit lifecycle(`transport.rs:130/199`)、三层强制(§6.5:
     准入 / 通道装饰器 / 事后 `measure` + effect 校验)、events/cancellation、durable metadata、
     通道 trait + 强制装饰器 + 供需校验(`ChannelKind` 纯数据类型归 `lancet-protocol`,§12)、
     统一 context 预算与 `measure()` 模块(§11.8 决议记录)、Component 执行与 generated 注册
     (ADR 0004)。
-  + **不进 runtime**:工具领域 policy(`observation.rs` → #8、`network.rs` → #10 工具 crate)、
+  + **不进 runtime**:工具领域 policy(`observation.rs` → #30、`network.rs` → #32 工具 crate)、
     通道实现细节(留 Direct-Local Local Workspace / `net-guard` 等宿主模块)、audit 读库
-    (operator 库,#11)、tokenizer 词表(随 `bpe-openai` 依赖编译进二进制,可换,§11.8 决议记录)。
-  + #12 验收 = 上述"进"清单全部搬迁完成 + `lancet-native`/`lancet-cep`/`lancet-dispatch` 删掉后
+    (operator 库,#33)、tokenizer 词表(随 `bpe-openai` 依赖编译进二进制,可换,§11.8 决议记录)。
+  + #34 验收 = 上述"进"清单全部搬迁完成 + `lancet-native`/`lancet-cep`/`lancet-dispatch` 删掉后
     workspace 构建/测试全绿。
-- **#13** —— manifest **格式**移到 #5;#13 保留 CLI + release gate。
-- **#6/#8** —— 实质不受影响;#8 已声明正确的 `(alloc, read, workspace)` cell,也已计划把
+- **#35** —— manifest **格式**移到 #27;#35 保留 CLI + release gate。
+- **#28/#30** —— 实质不受影响;#30 已声明正确的 `(alloc, read, workspace)` cell,也已计划把
   `observation.rs` 搬进工具 crate。
 - **待开 / 已落地相关**(定稿后由用户决定是否另立票):
-  1. **credential 受控注入**(跟 #5 正交):真值不进工具 ambient;`[lancet.network].allowed_hosts`
-     已是唯一 allowlist 事实源(§6.6;`[workspace].allowed_egress_*` 已随 #40 删除)。
+  1. **credential 受控注入**(跟 #27 正交):真值不进工具 ambient;`[lancet.network].allowed_hosts`
+     已是唯一 allowlist 事实源(§6.6;`[workspace].allowed_egress_*` 已随 #62 删除)。
   2. **模式 B 不再落地**(§6.2 superseded)。若再引入 hosted backend processes,先写新 ADR。
-  3. **WASM Component 工具平台** —— ADR 0004 已定为现行目标;#5 实现计划跟踪落地,不另作「遥远终局」。
+  3. **WASM Component 工具平台** —— ADR 0004 已定为现行目标;#27 实现计划跟踪落地,不另作「遥远终局」。
 
 ## 11. 决议记录(原"待决";4 项待拍已于第四轮全部落定)
 
@@ -613,10 +613,10 @@ drift check = 解析 `manifest.toml` + 读 `ToolDescriptor`,逐字段比对镜�
    单一 `backend()`;`events`/`cancellation` 暴露,`budget` 藏在 facade 后,不含 audit query。见 §6.3。
 2. **逐操作强制** —— 每条通道一个强制装饰器(不是单一 `EnforcingBackend`),不碰 budget。见 §6.5
    第 2 层。
-3. **manifest 格式 + drift 入 #5** —— TOML prototype(`[[scopes]]` 含 `trust`+`channel`、
+3. **manifest 格式 + drift 入 #27** —— TOML prototype(`[[scopes]]` 含 `trust`+`channel`、
    `[hosted_backend]` reserved、`[[capabilities]]`),没有独立的 `channels` 字段;注册期校验
    cell.scope↔`[[scopes]]`。见 §9。
-4. **audit 换形** —— 移出 agent 面,#11 重塑成 operator store 读库。见 §7、§10。
+4. **audit 换形** —— 移出 agent 面,#33 重塑成 operator store 读库。见 §7、§10。
 5. **`CtxOp::Free`** —— 本期只到枚举变体、没有 `ToolHost` 接缝(PRD R10);一次调用多 cell 表示
    见 §5.1。
 6. **R8 `FailureSemantics`** —— 删整个枚举和 `EffectDecl.failure` 字段。见 §5.4。
@@ -629,7 +629,7 @@ drift check = 解析 `manifest.toml` + 读 `ToolDescriptor`,逐字段比对镜�
    o200k_base 后无运行时资产:pin 坍缩为 `Cargo.lock`,原资产验收(revision+sha256、许可随资产、
    确定性离线加载、加载失败 fail-closed)全部作废——fail-closed 构造性成立。o200k 为 200k 多语
    词表,中文压缩率可接受;这把尺只是内部记账货币,绝对精度由 provider `usage` 回校承担。
-   实现归属 #6(#5 不含 budget/measure)。〕见 §6.5 第 3 层。
+   实现归属 #28(#27 不含 budget/measure)。〕见 §6.5 第 3 层。
 9. **通道模型 + capability↔通道绑定;模式 B superseded** —— 绑定链
    `capability → cell → scope → channel`,通道集派生自 `[[scopes]]`、无独立字段;生产只认模式 A
    三条通道。原模式 B(域宿养 / hosted backend processes)与 ADR 0004 冲突,**标为 superseded**;
@@ -637,14 +637,14 @@ drift check = 解析 `manifest.toml` + 读 `ToolDescriptor`,逐字段比对镜�
 10. **网络轴** —— `fetch.web` 走宿主 Tool Host `network` 通道;强制面 = `net-guard` +
     `[lancet.network].allowed_hosts`(URL/DNS/redirect/SSRF);effect 记账取通道调用参数(url/host),
     与 workspace path 对称;allowlist 唯一事实源为 `[lancet.network].allowed_hosts`
-    (`[workspace].allowed_egress_*` 已随 #40 删除)。见 §6.6。
+    (`[workspace].allowed_egress_*` 已随 #62 删除)。见 §6.6。
 11. **承载面** —— 逻辑规范跟平台无关、写死;ADR 0004 已定 WASM Component 为现行目标(WIT import
     = capability/通道权威、host function = 通道);`inventory` 保留为 generated host 注册。
     过渡 native ambient I/O 风险由 Component 无 ambient WASI 关闭。排除自研 effect-typed 语言。
     见 §6.7–§6.8。
 12. **`lancet-runtime` 吸收边界** —— 框架收 dispatch/transport、audit lifecycle、三层强制、
     events/cancellation、durable metadata、通道契约 + 供需校验、budget/`measure`、Component 执行;
-    工具领域 policy、通道实现细节、audit 读库全部外置。清单见 §10 #12 条。
+    工具领域 policy、通道实现细节、audit 读库全部外置。清单见 §10 #34 条。
 
 ## 12. 验收(模型地基)
 
@@ -685,8 +685,8 @@ drift check = 解析 `manifest.toml` + 读 `ToolDescriptor`,逐字段比对镜�
 - **通道门控 + 供需 fail-closed**:没声明对应 scope/capability 的工具取通道句柄失败;声明了 runtime
   不供给的通道的工具在该 turn dispatch 报 `Unavailable`(断言无宿主兜底路径,§6.4)。
 - **处处无 exec / 无 ambient I/O**:`workspace` 通道 trait 无 `exec` 方法、`ToolHost` 触达不到命令
-  执行、`exec.command_run` 不在 catalog(指 agent/通道面,#4 后已成立);ADR 0004 下 Component 无
+  执行、`exec.command_run` 不在 catalog(指 agent/通道面,#26 后已成立);ADR 0004 下 Component 无
   ambient WASI filesystem/network/process imports。
-- **network 强制验收(#10 落地时,integration lane)**:`[lancet.network].allowed_hosts` allowlist
+- **network 强制验收(#32 落地时,integration lane)**:`[lancet.network].allowed_hosts` allowlist
   生效;DNS / redirect / SSRF 防护生效;**effect 记账取参数(url/host),与 workspace path 对称**
   (§6.6)。

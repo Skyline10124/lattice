@@ -1,4 +1,4 @@
-# Issue #24 Slice 6 — Operator audit paths and secret discipline
+# Issue #46 Slice 6 — Operator audit paths and secret discipline
 
 ## Goal
 

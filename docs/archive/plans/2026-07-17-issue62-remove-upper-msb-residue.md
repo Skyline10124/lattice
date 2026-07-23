@@ -1,4 +1,4 @@
-# [Archived] #40 实现计划：删除 Upper 配置与 lattice-workspace 残留
+# [Archived] #62 实现计划：删除 Upper 配置与 lattice-workspace 残留
 
 > Archived 2026-07-22 under GitHub #65 (formerly Codeberg #43). Completed work; historical
 > migration detail lives in FIX.md. Do not treat retired lane names in the
@@ -6,10 +6,10 @@
 > (Direct-Local) + ADR 0004 (Tool Host).
 
 - 票：<https://github.com/Skyline10124/lattice/issues/62>（原 Codeberg #40）
-- 前置依赖：#39（[计划](../../plans/2026-07-17-issue39-policy-visible-read.md)）。全局约束
+- 前置依赖：#61（[计划](../../plans/2026-07-17-issue61-policy-visible-read.md)）。全局约束
   与验证矩阵见 [总览](../../plans/2026-07-17-direct-local-overview.md)。
 - 对应 ADR 0003 Migration Sequence step 4 的 `[workspace]` 删除 + step 5 +
-  step 6 的骨架部分（完整 direct-Local 场景覆盖归 #24）。
+  step 6 的骨架部分（完整 direct-Local 场景覆盖归 #46）。
 
 按依赖方向从外向内删，每步保持编译：
 
@@ -24,7 +24,7 @@ profile 现在**解析失败**——这是 strict schema 的预期终态（票�
 ## 2. lattice-api / lattice-session 残余 snapshot 面
 
 > `turn/{resume,snapshot_journal,promotion}.rs` 模块与 `resume_tests.rs`
-> 等测试已在 #37 因编译连锁一并删除（见 #37 计划 4.1/4.4）。本票剩余：
+> 等测试已在 #59 因编译连锁一并删除（见 #59 计划 4.1/4.4）。本票剩余：
 
 - `resolve_turn_target` 的 baseline 注入注释与残留参数。
 - `lattice-session` graph 契约的 `set_snapshot_lost`/`get_snapshot_lost`
@@ -44,14 +44,14 @@ profile 现在**解析失败**——这是 strict schema 的预期终态（票�
 - 根 `Cargo.toml`：members 与 `workspace.dependencies` 移除 `lattice-workspace`、
   `microsandbox`。
 - `lattice-api`/`lattice-cli` 对 `lattice-workspace` 的依赖与
-  `run_tests.rs` 内嵌测试已在 #37 清理（见 #37 计划 4.3），此处仅
+  `run_tests.rs` 内嵌测试已在 #59 清理（见 #59 计划 4.3），此处仅
   `cargo tree -i lattice-workspace` 验证为零后删 crate。
 
 ## 5. harness
 
 `lattice-system-harness` 删 MSB/KVM 场景（含 no-tool MSB egress 场景）、
 `layer_guard` 更新层图；补 direct-Local 场景骨架（外部竞争、policy denial、
-session reopen——完整覆盖归 #24）。
+session reopen——完整覆盖归 #46）。
 
 ## 6. docs
 
@@ -67,4 +67,4 @@ records 不重写。
   引语与注释中的历史表述）。
 - 网络 policy 回归：`[lancet.network]` 与 `fetch.web` 的 URL/DNS safety
   行为不变（删除的是 workspace egress，不是 lancet.network）。
-- #24 与 #25 自此可开工。
+- #46 与 #25 自此可开工。

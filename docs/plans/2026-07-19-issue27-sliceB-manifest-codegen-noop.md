@@ -1,6 +1,6 @@
-# #5 切片 B：manifest + 确定性 codegen + WIT + prelude + no-op guest
+# #27 切片 B：manifest + 确定性 codegen + WIT + prelude + no-op guest
 
-- 父计划：`2026-07-19-issue5-wasm-component-tool-substrate.md` §3
+- 父计划：`2026-07-19-issue27-wasm-component-tool-substrate.md` §3
 - 前置：切片 A 类型已合入。本切片首个 commit 落 `rust-toolchain.toml`
   （rustc 1.96.0 + `wasm32-unknown-unknown`）并把 workspace `rust-version` 升至 1.94（wasmtime 46 MSRV）。
 
@@ -77,8 +77,8 @@ world tool {
 }
 ```
 
-约束：#5 no-op **不导入任何 domain operation channel**；只导入无领域权限的 `host-control`，
-避免在 #6 admission 落地前形成“声明即授权”的旁路。`tool-api` export 的 result sink 是 host-owned
+约束：#27 no-op **不导入任何 domain operation channel**；只导入无领域权限的 `host-control`，
+避免在 #28 admission 落地前形成“声明即授权”的旁路。`tool-api` export 的 result sink 是 host-owned
 Session result adapter：它只接收/验证 ToolOutput，不向 guest 暴露 session operation，因而可满足
 descriptor 派生的 Session channel。`result-cell` 由 host 校验并记 `(Alloc,None,session/in)` evidence。
 world 不出现任何 `wasi:*`；guest target 为 `wasm32-unknown-unknown`，import 白名单恰等于 host-control。
@@ -160,7 +160,7 @@ impl Guest for NoopEcho {
             return Err(String::from("cancelled"));
         }
         // ToolHost control is exercised, but no workspace/network/session
-        // domain operation is available before #6 capability admission.
+        // domain operation is available before #28 capability admission.
         host_control::emit_event("{\"phase\":\"probed\"}");
         let message = extract_message(&params_json)?;
         Ok(ToolOutput {

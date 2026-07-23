@@ -1,16 +1,16 @@
-# #5 实现计划：WASM Component Tool 基础 + Cell effect 模型贯通
+# #27 实现计划：WASM Component Tool 基础 + Cell effect 模型贯通
 
 - 票：<https://github.com/Skyline10124/lattice/issues/27>（原 Codeberg #5；`ready-for-agent`，minor-revision 遗留点见 §9）
-- 事实源优先级：issue 正文（2026-07-16 按 ADR 0004 重写）> ADR 0004 > `docs/specs/2026-07-01-issue5-effect-model-toolctx-design.md`
+- 事实源优先级：issue 正文（2026-07-16 按 ADR 0004 重写）> ADR 0004 > `docs/specs/2026-07-01-issue27-effect-model-toolctx-design.md`
   （spec 的逻辑模型继续有效：Cell 核、通道模型、ToolHost 面、fail-closed 供需校验；
   spec §6.7 "v1 = 进程内 trait" 的分代方案已被 ADR 0004 取代——本票直接落 WASM Component）。
-- 前置依赖：#4 ✅、#11 ✅、#15 ✅、#40 ✅。
-- 维护者既定顺序：#23（测试收口）应先于本票开工（roadmap #16 评论 7/4、7/5）。
+- 前置依赖：#26 ✅、#33 ✅、#37 ✅、#62 ✅。
+- 维护者既定顺序：#45（测试收口）应先于本票开工（roadmap #38 评论 7/4、7/5）。
 - 独立切片计划（均含示例代码）：
-  [A：protocol Cell 核](2026-07-19-issue5-sliceA-protocol-cell-core.md) →
-  [B：manifest/codegen/no-op](2026-07-19-issue5-sliceB-manifest-codegen-noop.md) →
-  [C：Component engine/gate](2026-07-19-issue5-sliceC-component-engine-composition-gate.md) →
-  [D：CEP adapter/round-trip](2026-07-19-issue5-sliceD-cep-adapter-roundtrip.md)。
+  [A：protocol Cell 核](2026-07-19-issue27-sliceA-protocol-cell-core.md) →
+  [B：manifest/codegen/no-op](2026-07-19-issue27-sliceB-manifest-codegen-noop.md) →
+  [C：Component engine/gate](2026-07-19-issue27-sliceC-component-engine-composition-gate.md) →
+  [D：CEP adapter/round-trip](2026-07-19-issue27-sliceD-cep-adapter-roundtrip.md)。
 
 ## 0. 现状锚点（已核验 2026-07-19）
 
@@ -33,11 +33,11 @@
 | `xtask tool-codegen` | manifest → WIT/descriptor/LLM projection/hash/inventory registration 的确定性生成器 |
 | `lancet-protocol` 新类型 | Cell effect 封闭核（add-only，不删旧类型） |
 
-不删除 `lancet-native`/`lancet-dispatch`/`lancet-catalog`（#12 收口）；不迁移 5 个 production Tool（#7–#10）。
+不删除 `lancet-native`/`lancet-dispatch`/`lancet-catalog`（#34 收口）；不迁移 5 个 production Tool（#29–#32）。
 
 ## 2. 切片 A：`lancet-protocol` Cell effect 核
 
-新模块 `cell.rs`（与 `effect_types.rs` 并存，旧类型本票不动——production handler 仍在用，删除归 #6/#12）：
+新模块 `cell.rs`（与 `effect_types.rs` 并存，旧类型本票不动——production handler 仍在用，删除归 #28/#34）：
 
 - `CtxOp { Alloc, Free, Mutate }`、`ExtImpact { None, Read, Write }`（封闭枚举）。
 - `Trust { In, Ex }`：只能显式声明 `in`，缺省 = `ex`（fail-closed）。
@@ -69,10 +69,10 @@
 
 从 manifest 生成（全部带 `@generated` 头、可重复生成、byte-identical）：
 
-1. WIT world `lattice:tool-host@0.1.0`：guest export structured ToolOutput；#5 no-op 只导入
+1. WIT world `lattice:tool-host@0.1.0`：guest export structured ToolOutput；#27 no-op 只导入
    无领域权限的 `host-control`（events/cancellation），不导入 workspace/network/session operation。
-#6 与 capability admission 同票定义 handle-per-capability domain WIT，避免“声明即授权”旁路；
-#7–#10 再扩展真实通道操作。
+#28 与 capability admission 同票定义 handle-per-capability domain WIT，避免“声明即授权”旁路；
+#29–#32 再扩展真实通道操作。
 2. canonical host descriptor JSON（`ToolDescriptor` owning 值；registration 以 `include_bytes!` 嵌入，
    避免把含 `String`/`Value` 的 descriptor 伪装成不可实现的 Rust `const`）。
 3. LLM projection metadata（tool definition JSON）。
@@ -81,7 +81,7 @@
    由 trusted host composition 选择后私有 pin descriptor/artifact digest、ABI 与 imports（Tool 不可自批）。
 
 确定性门：`xtask ci` 内重跑 codegen + `git diff --exit-code`；manifest↔descriptor drift 测试
-（#7–#11 验收依赖的机制，前移进本票，spec §9）。
+（#29–#33 验收依赖的机制，前移进本票，spec §9）。
 
 ### 3.3 `lattice-tool-prelude` + no-op guest
 
@@ -92,7 +92,7 @@
   门的实现变得平凡）。经 prelude 实现 `run`，声明一个 session `in` result capability，
   只调用 host-control 后返回 trust-free result CellRef；host 验证并产生 Cell/audit evidence，
   不提前迁移任何 domain behavior。
-  #7–#10 若需 clocks/random，以版本化 host import 显式供给，不回退 wasip2。prelude 封装该选择。
+  #29–#32 若需 clocks/random，以版本化 host import 显式供给，不回退 wasip2。prelude 封装该选择。
 - 构建产物 `.wasm` + sha256 入库（committed，视作生成物）；`xtask` 提供 rebuild-verify（依赖 §9.1 pin）。
 
 ## 4. 切片 C：`lancet-runtime` Component engine + composition gate
@@ -103,7 +103,7 @@
   - limits：`StoreLimits`（memory）+ epoch deadline（timeout/cancellation）+ fuel；
     trap/timeout/exhaustion → 结构化 `CepError`，server 不退出。
 - `ToolHost`（call-scoped）：本票仅实现无领域 authority 的 events/cancellation control；
-  result CellRef 在 host 侧验证并派生 trust。domain operation + capability admission 同归 #6/#7–#10；
+  result CellRef 在 host 侧验证并派生 trust。domain operation + capability admission 同归 #28/#29–#32；
   不暴露 policy_hook/raw budget/effect_ledger/authorized_region（spec §6.3）。
 - composition gate（启动时、serve 前，逐项 fail closed）：
   missing / duplicate / unapproved name + identity（inventory registration 必须匹配 host-pinned composition）/
@@ -152,11 +152,11 @@ A（protocol 类型）→ B（manifest/codegen/WIT/prelude/noop）→ C（runtim
 
 ## 8. 边界（本票不做）
 
-- 不迁移 5 个 production Tool（#7–#10）；不删 `lancet-native`/`register_native_*`（#12）。
-- 不动 `ImpactKind`-keyed authority 机器（#6 R7b）；旧 effect 类型 add-only 并存。
+- 不迁移 5 个 production Tool（#29–#32）；不删 `lancet-native`/`register_native_*`（#34）。
+- 不动 `ImpactKind`-keyed authority 机器（#28 R7b）；旧 effect 类型 add-only 并存。
 - 无 `ContextStore`/`Free` 执行机制（PRD R10，仅枚举变体）。
-- 无 Tool Bundle install/list/uninstall CLI 与 release gate（#13）。
-- 完整 workspace/network/session domain operations 与 capability admission（#6/#8/#10/#7）；本票只有 control tracer。
+- 无 Tool Bundle install/list/uninstall CLI 与 release gate（#35）。
+- 完整 workspace/network/session domain operations 与 capability admission（#28/#30/#32/#29）；本票只有 control tracer。
 
 ## 9. 决议记录（原"待决点"，全部已决 2026-07-19）
 
@@ -165,10 +165,10 @@ A（protocol 类型）→ B（manifest/codegen/WIT/prelude/noop）→ C（runtim
    `cargo build/test` 只 `include_bytes!` 现成产物（贡献者无需 wasm 工具链）；`xtask ci` 增
    rebuild-and-compare lane，**先 warn-only**，验证 bit-for-bit 可复现后升级为硬门。
 2. **budget/measure 归属与 tokenizer 选型**：本票只做 `result_cell` ∈ descriptor cell 集校验；
-   `measure()`/context 记账推迟到 #6。canonical 尺 = **o200k_base，经 `bpe-openai` crate**
+   `measure()`/context 记账推迟到 #28。canonical 尺 = **o200k_base，经 `bpe-openai` crate**
    （纯 Rust，词表编译进二进制，零运行时资产），取代原 DeepSeek HF 资产方案；spec 决议 8 已修订。
-3. **capability 归因粒度**：#5 只做 result CellRef ⊆ descriptor 上界检查且 guest 无权提供 trust；
-   domain handle-per-capability WIT 与 admission 同归 #6，防止在 admission 前形成声明即授权。
+3. **capability 归因粒度**：#27 只做 result CellRef ⊆ descriptor 上界检查且 guest 无权提供 trust；
+   domain handle-per-capability WIT 与 admission 同归 #28，防止在 admission 前形成声明即授权。
 4. **wasmtime 选型**：当前 stable 主版本 **46.x**，`Cargo.toml` 精确 pin。deadline/cancellation 走
    epoch interruption（共享 ticker + 每 Store callback 判 cancellation/deadline；取消不直接 bump 全局 epoch），
    memory 走 `StoreLimits`，fuel 作粗粒度 CPU 上界。
@@ -181,5 +181,5 @@ A（protocol 类型）→ B（manifest/codegen/WIT/prelude/noop）→ C（runtim
   warn-only 阶段收集数据，不阻塞切片 B。
 - `bpe-openai` 含一方 build.rs（构建期解压词表）：不属 ADR 0004 "Tool Bundle 安装不执行第三方
   build code" 范畴，但若后续建 build-script 审计门需列入白名单。
-- 切片 C（wasmtime 集成）是最高风险点：可在 #23 期间以 spike 分支先行验证
+- 切片 C（wasmtime 集成）是最高风险点：可在 #45 期间以 spike 分支先行验证
   unknown-unknown → component → 实例化链路，泄压后按序合入。

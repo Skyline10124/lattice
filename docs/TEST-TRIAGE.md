@@ -1,9 +1,9 @@
-# 全量旧测试 Triage 清单（issue #22 / 测试重构 3/6）
+# 全量旧测试 Triage 清单（issue #44 / 测试重构 3/6）
 
 > **性质**：判决书与人工闸口。**本文件不删除、不修改任何测试代码。**
 > 供 4/6 分批执行时直接引用。
 >
-> **判决标准**：RFC #19 决定二（四层）、决定六（旧测试不保证迁移）；父 PRD #18。
+> **判决标准**：RFC #41 决定二（四层）、决定六（旧测试不保证迁移）；父 PRD #40。
 >
 > **枚举快照**：2026-07-09，workspace 内 `crates/**` + `xtask/**` 的 `#[test]` / `#[tokio::test]` 共 **1449** 条。
 
@@ -17,7 +17,7 @@
 | 替代场景 | 提升或「删除且行为已被覆盖」时指向的已落地或 planned 场景；弱断言/源码扫描删除写 `n/a` |
 | 理由 | 一句话判决依据 |
 
-### 判决口径（复述 RFC #19 决定六）
+### 判决口径（复述 RFC #41 决定六）
 
 - 保护**局部不变量** → **保留**
 - 保护**产品行为**但从内部测 → **提升**到二进制/Direct-Local 场景
@@ -127,7 +127,7 @@
 
 ## 1.5 #23 最终执行状态（2026-07-19）
 
-> #22 的判决书在 #23 按产品面分批执行。本节是 **最终状态**：fast residual 归零、
+> #44 的判决书在 #23 按产品面分批执行。本节是 **最终状态**：fast residual 归零、
 > MSB 词汇退役、44 个 assertion-level #24 场景 ID 精确登记（#24 slice 1 将其中 7 条
 > 改判保留，精确移交表现为 37 行）。历史执行批次
 > （round-1..6、#40 状态更新）已折叠为下表的「已执行」与「精确移交 #24」两段；
@@ -364,7 +364,7 @@ codeberg issue 跟踪重写。
 | `replay_audit_matches_stored_attestation` | `crates/lancet-api/src/audit.rs:529` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `query_audit_excludes_unfinalized_rows_during_active_turn` | `crates/lancet-api/src/audit.rs:580` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `operator_audit_reads_concurrent_with_active_writer` | `crates/lancet-api/src/audit.rs:630` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `operator_audit_module_does_not_reference_cep_server_types` | `crates/lancet-api/src/audit.rs:745` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
+| `operator_audit_module_does_not_reference_cep_server_types` | `crates/lancet-api/src/audit.rs:745` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
 | `query_audit_reads_legacy_table_missing_optional_columns` | `crates/lancet-api/src/audit.rs:768` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `query_audit_reads_legacy_table_without_attestation_records` | `crates/lancet-api/src/audit.rs:830` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `external_audit_distinct_project_keys` | `crates/lancet-api/src/config.rs:176` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
@@ -1008,7 +1008,7 @@ codeberg issue 跟踪重写。
 | `temporarily_blocked_pins_candidate_before_returning` | `crates/lattice-api/tests/promotion_wiring.rs:734` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `retry_pinned_candidate_succeeds_after_temporary_block` | `crates/lattice-api/tests/promotion_wiring.rs:799` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `stream_turn_sources_do_not_reference_promotion_apis` | `crates/lattice-api/tests/promotion_wiring.rs:848` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `production_code_does_not_fabricate_passing_verification` | `crates/lattice-api/tests/promotion_wiring.rs:866` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
+| `production_code_does_not_fabricate_passing_verification` | `crates/lattice-api/tests/promotion_wiring.rs:866` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
 | `promotion_module_documents_activation_requirement` | `crates/lattice-api/tests/promotion_wiring.rs:893` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `deterministic_embedder_path_remains_primary` | `crates/lattice-api/tests/promotion_wiring.rs:900` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `workspace_type_checks_with_public_promotion_api` | `crates/lattice-api/tests/promotion_wiring.rs:911` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -1118,8 +1118,8 @@ codeberg issue 跟踪重写。
 | `audit_replay_reconstructs_turn_trace_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:389` | 提升 | Direct-Local 外部二进制 | `planned_direct_audit_replay_trace` | 原内部测试断言集合由 #24 精确场景 `planned_direct_audit_replay_trace` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `audit_replay_reports_stored_attestation_match` | `crates/lattice-cli/src/commands/audit.rs:401` | 提升 | Direct-Local 外部二进制 | `planned_direct_audit_attestation_match` | 原内部测试断言集合由 #24 精确场景 `planned_direct_audit_attestation_match` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `audit_replay_errors_for_unknown_turn` | `crates/lattice-cli/src/commands/audit.rs:441` | 提升 | Direct-Local 外部二进制 | `planned_direct_audit_replay_unknown_turn` | 原内部测试断言集合由 #24 精确场景 `planned_direct_audit_replay_unknown_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `audit_command_source_does_not_reference_cep_server` | `crates/lattice-cli/src/commands/audit.rs:458` | 删除 | 局部不变量 | n/a | 扫描源码禁止字符串；删除（RFC #19 决定六） |
-| `audit_query_reads_legacy_schema_store` | `crates/lattice-cli/src/commands/audit.rs:481` | 保留 | 局部不变量 | - | #23 review-fix round-3 复审判偏差：手工植入旧 SQLite schema 测向后兼容；RFC #19 harness 边界禁止直接打开/植入内部 audit DB，#24 audit scenarios 永远无法覆盖（真实 turn 只生成当前 schema）；改记保留为局部不变量。 |
+| `audit_command_source_does_not_reference_cep_server` | `crates/lattice-cli/src/commands/audit.rs:458` | 删除 | 局部不变量 | n/a | 扫描源码禁止字符串；删除（RFC #41 决定六） |
+| `audit_query_reads_legacy_schema_store` | `crates/lattice-cli/src/commands/audit.rs:481` | 保留 | 局部不变量 | - | #23 review-fix round-3 复审判偏差：手工植入旧 SQLite schema 测向后兼容；RFC #41 harness 边界禁止直接打开/植入内部 audit DB，#24 audit scenarios 永远无法覆盖（真实 turn 只生成当前 schema）；改记保留为局部不变量。 |
 | `doctor_report_contains_expected_keys` | `crates/lattice-cli/src/commands/doctor.rs:162` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `doctor_json_output_has_expected_structure` | `crates/lattice-cli/src/commands/doctor.rs:172` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `doctor_text_output_includes_credential_env_var_names` | `crates/lattice-cli/src/commands/doctor.rs:187` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
@@ -1154,7 +1154,7 @@ codeberg issue 跟踪重写。
 | `run_integration_commits_existing_session` | `crates/lattice-cli/src/commands/run_tests.rs:148` | 提升 | Direct-Local 外部二进制 | `planned_direct_existing_session_run_result` | 原内部测试断言集合由 #24 精确场景 `planned_direct_existing_session_run_result` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `run_integration_missing_session_returns_not_found` | `crates/lattice-cli/src/commands/run_tests.rs:218` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session send <missing-id> 黑盒：open_session 在 workspace 前失败，exit 2 + stderr not found）接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `tool_executor_uses_workspace_root_not_profile_package_dir` | `crates/lattice-cli/src/commands/run_tests.rs:246` | 删除 | Direct-Local 外部二进制 | 已删除原测试，由 `planned_direct_canonical_workspace_root` 接管 | #24 slice 2 assertion-level superset review：direct_observation.rs profile 位于 .lattice/agents/dl-obs/，读取 project-root tracked.txt/notes.txt 并断言内容；若 executor 使用 profile package dir 则路径不存在。严格强于原内部测试仅断言 ok=true。已删除原测试。 |
-| `run_source_has_no_old_crate_imports` | `crates/lattice-cli/src/commands/run_tests.rs:369` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
+| `run_source_has_no_old_crate_imports` | `crates/lattice-cli/src/commands/run_tests.rs:369` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
 | `render_json_event_emits_single_line_with_trailing_newline` | `crates/lattice-cli/src/commands/run_tests.rs:391` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
 | `render_json_event_roundtrips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:402` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
 | `render_json_event_emits_no_ansi_escapes` | `crates/lattice-cli/src/commands/run_tests.rs:479` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
@@ -1225,22 +1225,22 @@ codeberg issue 跟踪重写。
 | `display_id_short_unchanged` | `crates/lattice-cli/src/commands/session.rs:1265` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
 | `display_id_long_truncated` | `crates/lattice-cli/src/commands/session.rs:1270` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
 | `session_resume_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1297` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `session_prune_snapshots_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1306` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
-| `session_resume_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1315` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains fn cmd_resume_api）的架构检查；删除（RFC #19 决定六）。 |
+| `session_prune_snapshots_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1306` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
+| `session_resume_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1315` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains fn cmd_resume_api）的架构检查；删除（RFC #41 决定六）。 |
 | `session_prune_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1324` | 保留 | 局部不变量 | - | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
-| `session_resume_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1333` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains resume_turn()）的架构检查；删除（RFC #19 决定六）。 |
+| `session_resume_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1333` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains resume_turn()）的架构检查；删除（RFC #41 决定六）。 |
 | `session_prune_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1342` | 保留 | 局部不变量 | - | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
 | `project_branch_new_without_required_flag_fails` | `crates/lattice-cli/src/commands/session.rs:1353` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `project_branch_new_with_required_flag_is_accepted` | `crates/lattice-cli/src/commands/session.rs:1364` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `project_branch_send_has_no_branch_override` | `crates/lattice-cli/src/commands/session.rs:1385` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `project_branch_send_source_has_no_branch_flag` | `crates/lattice-cli/src/commands/session.rs:1395` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
-| `project_branch_new_source_defines_field` | `crates/lattice-cli/src/commands/session.rs:1410` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查（include_str! 扫描 SessionAction::New 字段）；删除（RFC #19 决定六）。 |
+| `project_branch_send_source_has_no_branch_flag` | `crates/lattice-cli/src/commands/session.rs:1395` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
+| `project_branch_new_source_defines_field` | `crates/lattice-cli/src/commands/session.rs:1410` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查（include_str! 扫描 SessionAction::New 字段）；删除（RFC #41 决定六）。 |
 | `branch_listing_reads_only_addressed_session_refs` | `crates/lattice-cli/src/commands/session.rs:1511` | 提升 | Direct-Local 外部二进制 | `planned_direct_branch_listing_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_branch_listing_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `checkout_changes_only_addressed_session_head` | `crates/lattice-cli/src/commands/session.rs:1556` | 提升 | Direct-Local 外部二进制 | `planned_direct_checkout_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_checkout_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `branch_create_affects_only_addressed_session` | `crates/lattice-cli/src/commands/session.rs:1586` | 提升 | Direct-Local 外部二进制 | `planned_direct_branch_create_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_branch_create_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `reset_changes_only_addressed_session_branch_pointer` | `crates/lattice-cli/src/commands/session.rs:1613` | 提升 | Direct-Local 外部二进制 | `planned_direct_reset_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_reset_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
 | `diff_resolves_refs_inside_addressed_session_only` | `crates/lattice-cli/src/commands/session.rs:1650` | 提升 | Direct-Local 外部二进制 | `planned_direct_diff_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_diff_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `boundary_no_legacy_session_store_patterns` | `crates/lattice-cli/src/commands/session.rs:1691` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
+| `boundary_no_legacy_session_store_patterns` | `crates/lattice-cli/src/commands/session.rs:1691` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
 | `project_branch_creation_json_output_includes_branch` | `crates/lattice-cli/src/commands/session.rs:1755` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_new_json_reports_requested_project_branch：session new --project-branch feature/test --json 输出 project_branch=feature/test）黑盒接管 |
 | `project_branch_status_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1775` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `project_branch_list_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1794` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
@@ -1278,7 +1278,7 @@ codeberg issue 跟踪重写。
 | `cli_cutover_resolve_json_excludes_secret_value` | `crates/lattice-cli/tests/cli_cutover.rs:111` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `cli_cutover_models_auth_one_alias_per_line_without_icons_or_secrets` | `crates/lattice-cli/tests/cli_cutover.rs:148` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `cli_cutover_session_log_missing_session_fails_with_id_in_message` | `crates/lattice-cli/tests/cli_cutover.rs:197` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session new/list/status/log/branch --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `focused_tests_import_no_removed_crate_names` | `crates/lattice-cli/tests/cli_cutover.rs:224` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
+| `focused_tests_import_no_removed_crate_names` | `crates/lattice-cli/tests/cli_cutover.rs:224` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
 | `cli_cutover_run_command_is_removed` | `crates/lattice-cli/tests/cli_cutover.rs:328` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `fast_cli_help` 接管 | 已删除原内部测试，由已落地 fast_cli_help（CLI help 表面） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_models_auth_lists_aliases_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:100` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_resolve_sonnet_json_shows_env_var_not_secret` | `crates/lattice-cli/tests/release_smoke.rs:131` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
@@ -1522,7 +1522,7 @@ codeberg issue 跟踪重写。
 | `lancet_verify_section_is_not_a_typed_field` | `crates/lattice-profile/src/schema.rs:1170` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `workspace_image_optional_without_provisioner_default` | `crates/lattice-profile/src/schema.rs:1188` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `workspace_roundtrip` | `crates/lattice-profile/src/schema.rs:1204` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
-| `source_free_of_forbidden_symbols` | `crates/lattice-profile/src/schema.rs:1245` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
+| `source_free_of_forbidden_symbols` | `crates/lattice-profile/src/schema.rs:1245` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
 | `cep_policy_section_parses_path` | `crates/lattice-profile/src/schema.rs:1276` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `cep_section_without_policy_defaults_to_none` | `crates/lattice-profile/src/schema.rs:1293` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `cep_policy_section_rejects_unknown_fields` | `crates/lattice-profile/src/schema.rs:1299` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
@@ -1610,8 +1610,8 @@ codeberg issue 跟踪重写。
 | `verify_only_errors_when_target_absent` | `crates/lattice-session/src/migrate/tests.rs:869` | 保留 | 局部不变量 | — | session graph/Git 事务/并发/恢复/原子性局部不变量；保留 |
 | `session_commit_object_is_deterministic_and_ref_neutral` | `crates/lattice-session/tests/promotion_commit.rs:107` | 保留 | 局部不变量 | — | session graph/Git 事务/并发/恢复/原子性局部不变量；保留 |
 | `session_commit_object_links_optional_parent` | `crates/lattice-session/tests/promotion_commit.rs:146` | 保留 | 局部不变量 | — | session graph/Git 事务/并发/恢复/原子性局部不变量；保留 |
-| `promotion_crate_has_no_workspace_or_api_dependency` | `crates/lattice-session/tests/promotion_commit.rs:178` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
-| `promotion_module_is_object_only` | `crates/lattice-session/tests/promotion_commit.rs:191` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
+| `promotion_crate_has_no_workspace_or_api_dependency` | `crates/lattice-session/tests/promotion_commit.rs:178` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
+| `promotion_module_is_object_only` | `crates/lattice-session/tests/promotion_commit.rs:191` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
 
 ### `lattice-system-harness`（保留 56 / 提升 1 / 删除 0）
 
@@ -1904,7 +1904,7 @@ codeberg issue 跟踪重写。
 同目录 `test-triage-decisions.json`：每条含 `crate` / `file` / `line` / `name` / `decision` / `target_layer` / `replacement` / `reason` / `ignored`。
 4/6 可用脚本按 `decision` 过滤后分批改代码。
 
-## 4. 验收对照（issue #22）
+## 4. 验收对照（issue #44）
 
 - [x] 清单覆盖枚举到的全部现存测试，无遗漏条目（`docs/test-triage-decisions.json` 共 1449 条，与枚举键集合一致）
 - [x] 每条都有决定、理由、目标层；提升/删除条目标明替代场景（或显式 `n/a`）

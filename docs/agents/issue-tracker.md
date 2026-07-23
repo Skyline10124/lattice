@@ -18,7 +18,7 @@ External pull requests are not an issue-triage surface. The `triage` skill proce
 
 ## Migrated Issue Numbers
 
-The Codeberg tracker was migrated on 2026-07-24. Codeberg issue #1 reuses its original GitHub issue #23; Codeberg issues #2–#50 map to GitHub issues #24–#72 respectively (`github = codeberg + 22`). Historical plans, `FIX.md` entries, and commit messages may retain Codeberg numbers; translate them with this mapping instead of treating them as same-number GitHub references.
+The Codeberg tracker was migrated on 2026-07-24. Codeberg issue #1 reuses its original GitHub issue #23; Codeberg issues #2–#50 map to GitHub issues #24–#72 respectively (`github = codeberg + 22`). Active `docs/plans/` and `docs/specs/` filenames and references use GitHub numbers. `FINDINGS.md`, labeled `FIX.md` historical headings, and commit messages may still mention Codeberg numbers — translate those with this mapping instead of treating them as same-number GitHub references.
 
 ## Skill Vocabulary
 

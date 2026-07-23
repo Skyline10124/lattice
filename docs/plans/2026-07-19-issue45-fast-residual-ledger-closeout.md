@@ -1,14 +1,14 @@
-# #23 实现计划：快速测试残留与分类账收口（测试重构 4/6）
+# #45 实现计划：快速测试残留与分类账收口（测试重构 4/6）
 
-- 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #23）
+- 状态：已完成（2026-07-19；ledger/prose 已落地，见 FIX.md #45）
 - 票：<https://github.com/Skyline10124/lattice/issues/45>（原 Codeberg #23）
-- 上级：#18（PRD）/ #19（RFC，已接受）。判决书 = `docs/TEST-TRIAGE.md` + `docs/test-triage-decisions.json`（1449 条，身份不变）。
-- 排序依据：roadmap #16 既定顺序，#23 先于 #5 开工。
+- 上级：#40（PRD）/ #41（RFC，已接受）。判决书 = `docs/TEST-TRIAGE.md` + `docs/test-triage-decisions.json`（1449 条，身份不变）。
+- 排序依据：roadmap #38 既定顺序，#45 先于 #27 开工。
 - 独立切片计划（均含示例代码）：
-  [1：fast lancet CLI](2026-07-19-issue23-slice1-fast-lancet-cli.md) →
-  [2：branch fast scenarios](2026-07-19-issue23-slice2-branch-fast-scenarios.md) →
-  [3：退役 KVM-lane 词汇/映射](2026-07-19-issue23-slice3-retired-lane-vocabulary.md) →
-  [4：prose/ledger 一致性](2026-07-19-issue23-slice4-ledger-prose-consistency.md)。
+  [1：fast lancet CLI](2026-07-19-issue45-slice1-fast-lancet-cli.md) →
+  [2：branch fast scenarios](2026-07-19-issue45-slice2-branch-fast-scenarios.md) →
+  [3：退役 KVM-lane 词汇/映射](2026-07-19-issue45-slice3-retired-lane-vocabulary.md) →
+  [4：prose/ledger 一致性](2026-07-19-issue45-slice4-ledger-prose-consistency.md)。
   切片 3/4 文档独立，但当时必须同一 PR 相邻 commit（账本原子性）。
 
 ## 0. 收口前锚点（已核验 2026-07-19；现已清零）
@@ -22,9 +22,9 @@
   3. `project_branch_persists_through_reopen`（`session.rs:1345`）→ 部分覆盖，缺 reopen 持久化场景。
   4. `smoke_session_status_list_shows_seeded_session`（`release_smoke.rs:185`）→ 已完整接管，冗余待删。
   5. `smoke_session_status_specific_session`（`release_smoke.rs:210`）→ 已完整接管，冗余待删。
-- #40 已删 Upper 与退役 KVM-lane harness 门禁通道：ledger 里带退役 lane 后缀的 replacement 名与
+- #62 已删 Upper 与退役 KVM-lane harness 门禁通道：ledger 里带退役 lane 后缀的 replacement 名与
   退役 KVM-lane `target_layer` 全部成为**死词汇**（TEST-TRIAGE §1.5 已声明延期理由失效）。
-- #40 落地 `tests/direct_local_turn.rs` 骨架（ordinary lane，非 ignore）：plain-text turn commit、
+- #62 落地 `tests/direct_local_turn.rs` 骨架（ordinary lane，非 ignore）：plain-text turn commit、
   session reopen、mutate policy denial 三场景已通过。
 - harness 契约：仅 `LATTICE_BIN` + 公开接口（`driver.rs:14`，AGENTS.md）；无产品 crate 依赖。
 
@@ -60,25 +60,25 @@ ledger：该条 reason 改「已删除原内部测试，由已落地 fast_lancet
 夹具收口（票文「仅由测试重复造成的 fixtures」）：删除后检查 `release_smoke.rs` 的
 `seed_session` 类 helper 是否成为孤儿，孤儿即删；**不为已删 Upper / 退役 KVM-lane API 新增 shared helper**。
 
-## 3. 切片 3：退役 KVM-lane 词汇 + #24 精确映射
+## 3. 切片 3：退役 KVM-lane 词汇 + #46 精确映射
 
 ### 3.1 精确处置（不做大类正则替换）
 
 当时 57 条 stale layer 逐一分成：
 
-- 1 条历史 harness identity 已由 #40 plain-text scenario 接管；
-- 44 条映射到 **44 个 assertion-level #24 scenario ID**（例如 basic event contract、existing-session
+- 1 条历史 harness identity 已由 #62 plain-text scenario 接管；
+- 44 条映射到 **44 个 assertion-level #46 scenario ID**（例如 basic event contract、existing-session
   RunTurnResult、message assembly、audit query/tail/replay、五种 session graph isolation 分别命名），
   禁止 `planned_mutate_direct` 一类 family fallback；
-- 11 条绑定已删除 Upper/promotion/prune 产品面的历史测试补记为 delete，不向 #24 虚构场景；
+- 11 条绑定已删除 Upper/promotion/prune 产品面的历史测试补记为 delete，不向 #46 虚构场景；
 - 1 条现存 PTY smoke 只把 layer 改为 `direct_local_binary`，decision=keep。
 
 精确 57 条 identity、44 个 scenario ID 与预期 decision delta 见
-[切片 3 独立计划](2026-07-19-issue23-slice3-retired-lane-vocabulary.md)。
+[切片 3 独立计划](2026-07-19-issue45-slice3-retired-lane-vocabulary.md)。
 
 ### 3.2 范围红线
 
-- 不实现任何 Direct-Local runtime 行为（#24 范围）。
+- 不实现任何 Direct-Local runtime 行为（#46 范围）。
 - 语义核未被已落地场景形成 assertion superset 的内部测试一律保留。
 - `crate/file/line/name/async/ignored` identity 字段不变；decision 只允许独立计划列出的显式 delta。
 
@@ -94,7 +94,7 @@ ledger：该条 reason 改「已删除原内部测试，由已落地 fast_lancet
 | 票文验收 | 对应切片 |
 | fast residual 为零；`lancet status` + branch create/reopen 有 external-binary 覆盖 | 切片 1 + 2 |
 | 已接管的内部测试删除；未接管的不提前删 | 切片 1 + 2 + 切片 3 assertion-superset 表 |
-| 退役 KVM-lane replacement 全部分成「本票完成」或「#24 精确接管」，无含糊兜底 | 切片 3 |
+| 退役 KVM-lane replacement 全部分成「本票完成」或「#46 精确接管」，无含糊兜底 | 切片 3 |
 | prose 与 ledger 计数/layer/replacement/状态一致 | 切片 4 |
 | harness 只依赖 `LATTICE_BIN` 与公开接口 | 切片 1 + 2 不加产品 crate 依赖（`cargo xtask harness-boundary` 门） |
 | fmt、clippy、workspace tests、fast harness 通过 | 下方门禁 |

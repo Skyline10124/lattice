@@ -1,6 +1,6 @@
-# #5 切片 C：`lancet-runtime` Component engine、ToolHost 与 composition gate
+# #27 切片 C：`lancet-runtime` Component engine、ToolHost 与 composition gate
 
-- 父计划：`2026-07-19-issue5-wasm-component-tool-substrate.md` §4
+- 父计划：`2026-07-19-issue27-wasm-component-tool-substrate.md` §4
 - 前置：切片 A（Cell/descriptor wire types）+ B（generated WIT、descriptor JSON、artifact、inventory registration）。
 - 本切片只建 Component 承载和最小 tracer ToolHost；不接 LLM/CEP registry（切片 D）。
 
@@ -72,7 +72,7 @@ pub static NOOP_ECHO: EmbeddedTool = EmbeddedTool {
 };
 inventory::submit!(&NOOP_ECHO);
 
-// Host-side generated identity exists only in fixed test fixture for #5;
+// Host-side generated identity exists only in fixed test fixture for #27;
 // production EXPECTED_COMPONENTS is empty until a production Tool migrates.
 const NOOP_EXPECTED: ExpectedToolIdentity = ExpectedToolIdentity {
     name: "noop.echo",
@@ -285,10 +285,10 @@ fn spawn_epoch_ticker(engine: wasmtime::Engine, stop: tokio::sync::watch::Receiv
 `RecordingLimits` 以 `StoreLimitsBuilder::memory_size/tables/memories/instances` 为底，
 在拒绝增长时写 `AbortReason::Memory/Instances`，使错误映射不依赖字符串匹配。
 
-## C.5 最小 ToolHost：control-only，不抢 #6 admission
+## C.5 最小 ToolHost：control-only，不抢 #28 admission
 
-#5 no-op 只导入 `host-control`（event + cooperative cancellation），**不导入任何
-workspace/network/session domain operation**。理由：#6 才统一 capability admission；如果 #5
+#27 no-op 只导入 `host-control`（event + cooperative cancellation），**不导入任何
+workspace/network/session domain operation**。理由：#28 才统一 capability admission；如果 #27
 先做 `session_context::open` 且只检查“descriptor 已声明”，就会形成声明即授权的旁路。
 
 ```rust
@@ -315,7 +315,7 @@ impl bindings::lattice::tool_host::host_control::Host for StoreState {
 
 `(Alloc,None,session/in)` evidence 由 Tool 的 **result CellRef** 在 call 返回后产生，不由
 domain host operation 产生；host 从 descriptor 派生 trust。这样仍贯通 ToolHost control、event、
-cancellation、Cell、audit，同时不存在任何领域 authority。#6 落 admission 后，#7–#10 再以
+cancellation、Cell、audit，同时不存在任何领域 authority。#28 落 admission 后，#29–#32 再以
 handle-per-capability WIT 形状增加真实通道。
 
 ## C.6 call + result/effect/error validation

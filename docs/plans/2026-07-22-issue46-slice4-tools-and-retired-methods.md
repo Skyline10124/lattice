@@ -1,4 +1,4 @@
-# Issue #24 Slice 4 — Fetch, todo, default catalog, and retired methods
+# Issue #46 Slice 4 — Fetch, todo, default catalog, and retired methods
 
 ## Goal
 
