@@ -68,7 +68,7 @@ pub fn load_agent_profile(path: impl AsRef<Path>) -> Result<LoadedAgentProfile, 
     // Validate prompt mutual exclusivity.
     let system_prompt = resolve_system_prompt(&path, &profile)?;
     validate_llm_retry(&path, &profile)?;
-
+    validate_llm_timeout(&path, &profile)?;
     let package_dir = path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -122,6 +122,33 @@ fn validate_llm_retry(path: &Path, profile: &AgentProfile) -> Result<(), Profile
             value: retry.initial_delay_ms.to_string().into_boxed_str(),
             reason: "initial delay exceeds max delay".into(),
             expected: "initial_delay_ms must be <= max_delay_ms".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_llm_timeout(path: &Path, profile: &AgentProfile) -> Result<(), ProfileError> {
+    let Some(secs) = profile.llm.timeout_secs else {
+        return Ok(());
+    };
+    if secs == 0 {
+        return Err(ProfileError::InvalidField {
+            path: path.to_path_buf(),
+            section: "llm".into(),
+            field: "timeout_secs".into(),
+            value: secs.to_string().into_boxed_str(),
+            reason: "timeout must be nonzero".into(),
+            expected: "timeout_secs must be > 0".into(),
+        });
+    }
+    if secs > 3600 {
+        return Err(ProfileError::InvalidField {
+            path: path.to_path_buf(),
+            section: "llm".into(),
+            field: "timeout_secs".into(),
+            value: secs.to_string().into_boxed_str(),
+            reason: "timeout is too large".into(),
+            expected: "timeout_secs must be <= 3600".into(),
         });
     }
     Ok(())
@@ -638,6 +665,69 @@ system = "hi"
                 "expected {field} in error, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn llm_timeout_secs_zero_rejected() {
+        let (_dir, path) = temp_profile(
+            r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[llm]
+timeout_secs = 0
+"#,
+        );
+        let err = load_agent_profile(&path).unwrap_err();
+        assert!(err.to_string().contains("timeout_secs"), "got: {err}");
+    }
+
+    #[test]
+    fn llm_timeout_secs_over_upper_bound_rejected() {
+        let (_dir, path) = temp_profile(
+            r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[llm]
+timeout_secs = 3601
+"#,
+        );
+        let err = load_agent_profile(&path).unwrap_err();
+        assert!(err.to_string().contains("timeout_secs"), "got: {err}");
+    }
+
+    #[test]
+    fn llm_timeout_secs_upper_bound_accepted() {
+        let (_dir, path) = temp_profile(
+            r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[llm]
+timeout_secs = 3600
+"#,
+        );
+        let loaded = load_agent_profile(&path).unwrap();
+        assert_eq!(loaded.profile.llm.timeout_secs, Some(3600));
     }
 
     #[test]

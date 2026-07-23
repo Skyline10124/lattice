@@ -37,6 +37,14 @@ const MAX_TURN_ROUNDS: u32 = 200;
 /// CJK characters are 2 columns wide, so 200 columns ≈ 100 CJK chars.
 const ERROR_SUMMARY_MAX_COLS: usize = 200;
 
+/// Polling interval for cooperative cancellation while a provider stream is
+/// stalled (no events arriving). The agent loop races `stream.next()` and
+/// `stream_chat()` against both the deadline and this poll so a SIGINT during
+/// a stall is observed within this bound even when no deadline is configured.
+// ponytail: bounded poll of an AtomicBool; a tokio_util CancellationToken
+// would make this wake-driven, but avoids adding a workspace dependency.
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Truncate `s` to at most `max_width` display columns, appending `…` if cut.
 ///
 /// NOTE: `lattice-cli/src/commands/session.rs::summarize` contains a similar
@@ -304,9 +312,10 @@ impl AgentLoop {
                     };
                 }
 
-                match await_with_deadline(
+                match await_with_deadline_and_cancel(
                     self.config.llm.stream_chat(chat_request.clone()),
                     deadline,
+                    request.cancel_flag.as_ref(),
                 )
                 .await
                 {
@@ -383,7 +392,7 @@ impl AgentLoop {
                             }
                         }
                     }
-                    Err(DeadlineElapsed) => {
+                    Err(StallOutcome::DeadlineElapsed) => {
                         // Timeout before stream creation — preserve accumulated state.
                         return AgentTurnResult {
                             messages: all_messages,
@@ -392,6 +401,19 @@ impl AgentLoop {
                             tool_results: tool_summaries,
                             status: AgentTurnStatus::Error,
                             terminal_reason: Some("timeout".to_string()),
+                            events: all_events,
+                            cleanup_exhausted: false,
+                        };
+                    }
+                    Err(StallOutcome::Cancelled) => {
+                        // Cancel observed while stream creation was stalled.
+                        return AgentTurnResult {
+                            messages: all_messages,
+                            assistant_output: String::new(),
+                            usage: accumulated_usage,
+                            tool_results: tool_summaries,
+                            status: AgentTurnStatus::Cancelled,
+                            terminal_reason: Some("cancelled by caller".to_string()),
                             events: all_events,
                             cleanup_exhausted: false,
                         };
@@ -979,21 +1001,35 @@ impl AgentLoop {
         let mut finish_reason: Option<String> = None;
 
         loop {
-            // Fetch the next event, racing against the deadline when configured.
-            let next_event = match await_with_deadline(stream.next(), deadline).await {
-                Ok(event) => event,
-                Err(DeadlineElapsed) => {
-                    // Deadline fired — return with accumulated partial state.
-                    return StreamResult {
-                        assistant_content,
-                        reasoning_content,
-                        tool_calls: pending_calls,
-                        usage,
-                        finish_reason,
-                        outcome: StreamOutcome::Timeout,
-                    };
-                }
-            };
+            // Fetch the next event, racing against the deadline and cancel flag.
+            // A stalled provider (no events) is observed via the cancel poll
+            // even when no deadline is configured.
+            let next_event =
+                match await_with_deadline_and_cancel(stream.next(), deadline, cancel_flag).await {
+                    Ok(event) => event,
+                    Err(StallOutcome::DeadlineElapsed) => {
+                        // Deadline fired — return with accumulated partial state.
+                        return StreamResult {
+                            assistant_content,
+                            reasoning_content,
+                            tool_calls: pending_calls,
+                            usage,
+                            finish_reason,
+                            outcome: StreamOutcome::Timeout,
+                        };
+                    }
+                    Err(StallOutcome::Cancelled) => {
+                        // Cancel observed while the stream was stalled.
+                        return StreamResult {
+                            assistant_content,
+                            reasoning_content,
+                            tool_calls: pending_calls,
+                            usage,
+                            finish_reason,
+                            outcome: StreamOutcome::Cancelled,
+                        };
+                    }
+                };
 
             let event = match next_event {
                 Some(ev) => ev,
@@ -1299,6 +1335,68 @@ async fn await_with_deadline<T>(
             }
         }
         None => Ok(fut.await),
+    }
+}
+
+/// Outcome of a stall race that also observes cooperative cancellation.
+enum StallOutcome {
+    DeadlineElapsed,
+    Cancelled,
+}
+
+/// Race `fut` against both the cooperative deadline and the cancel flag.
+///
+/// Like [`await_with_deadline`] but also returns [`StallOutcome::Cancelled`]
+/// when the flag flips while `fut` is still pending — the case a pure
+/// deadline race misses when no timeout is configured. Used for stream
+/// creation and `stream.next()` so a stalled provider observes SIGINT.
+async fn await_with_deadline_and_cancel<T>(
+    fut: impl Future<Output = T>,
+    deadline: Option<Instant>,
+    cancel_flag: Option<&Arc<AtomicBool>>,
+) -> Result<T, StallOutcome> {
+    if deadline.is_none() && cancel_flag.is_none() {
+        return Ok(fut.await);
+    }
+    if let Some(dl) = deadline
+        && Instant::now() >= dl
+    {
+        return Err(StallOutcome::DeadlineElapsed);
+    }
+    if let Some(flag) = cancel_flag
+        && flag.load(Ordering::Relaxed)
+    {
+        return Err(StallOutcome::Cancelled);
+    }
+    tokio::select! {
+        biased;
+        result = fut => Ok(result),
+        _ = sleep_until_deadline(deadline) => Err(StallOutcome::DeadlineElapsed),
+        cancelled = cancel_poll(cancel_flag) => {
+            if cancelled { Err(StallOutcome::Cancelled) } else { Err(StallOutcome::DeadlineElapsed) }
+        }
+    }
+}
+
+/// Sleep until `deadline`, or never resolve when `None`.
+async fn sleep_until_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(dl) => tokio::time::sleep_until(dl).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Poll the cancel flag every [`CANCEL_POLL_INTERVAL`]; never resolves when
+/// `None`. Returns `true` once the flag is observed set.
+async fn cancel_poll(cancel_flag: Option<&Arc<AtomicBool>>) -> bool {
+    match cancel_flag {
+        Some(flag) => loop {
+            if flag.load(Ordering::Relaxed) {
+                return true;
+            }
+            tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
+        },
+        None => std::future::pending::<bool>().await,
     }
 }
 

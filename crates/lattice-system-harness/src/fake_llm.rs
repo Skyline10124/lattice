@@ -76,8 +76,11 @@ pub enum SseScript {
         tool_name: String,
         arguments_json: String,
     },
+    /// Return a non-SSE HTTP response with a non-2xx status and a JSON error
+    /// body (no `text/event-stream`). Simulates a provider startup failure
+    /// (e.g. 429/500) so the product's retry/error path runs.
+    HttpError { status: u16, body: String },
     /// Drop the connection mid-stream after emitting `chunks_before_drop`
-    /// content chunks, with no terminal chunk and no `[DONE]`. Simulates a
     /// provider disconnect / aborted stream.
     Disconnect { chunks_before_drop: Vec<String> },
     /// Return a non-SSE HTTP 200 body that is not valid JSON per the OpenAI
@@ -408,6 +411,21 @@ fn handle_request(
             other => other.clone(),
         }
     };
+    // HttpError short-circuits with a non-SSE HTTP error response.
+    if let SseScript::HttpError { status, body } = &active {
+        let response = format!(
+            "HTTP/1.1 {status} Error\r\n
+             Content-Type: application/json\r\n
+             Content-Length: {}\r\n
+             Connection: close\r\n
+             \r\n
+             {body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes())?;
+        stream.flush()?;
+        return Ok(());
+    }
     let sse = render_script(&active);
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
@@ -579,8 +597,13 @@ fn render_script(script: &SseScript) -> String {
             out.push_str("\n\n");
             out.push_str("data: [DONE]\n\n");
         }
+        SseScript::HttpError { .. } => {
+            // HttpError is short-circuited by `handle_request` before
+            // rendering; reaching this arm is a harness bug.
+            out.push_str("data: fake_llm: unresolved HttpError script\n\n");
+            out.push_str("data: [DONE]\n\n");
+        }
         SseScript::Sequence { .. } => {
-            // Sequences are resolved per-request by `handle_request` before
             // rendering; reaching this arm is a harness bug. Emit a malformed
             // payload so the turn fails loudly instead of silently passing.
             out.push_str("data: fake_llm: unresolved Sequence script\n\n");

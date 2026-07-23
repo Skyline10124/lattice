@@ -2,6 +2,30 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## Codeberg #24 slice 5: provider failures, SIGINT cancellation, deadline — 2026-07-22
+
+Severity: test refactor + product controls (测试重构 5/6, slice 5 of #24). Plan: `docs/plans/2026-07-22-issue24-slice5-failures-cancel-deadline.md`.
+
+**Problem:** `session send` had no public cooperative cancellation or per-turn deadline; the agent loop only checked the cancel flag after each provider event (a stalled provider would not observe SIGINT); provider failure/disconnect/malformed-SSE/deadline had no external-binary coverage.
+
+**Fix:**
+- Profile: additive `[llm] timeout_secs` (Option<u64>, validated nonzero & <= 3600) in `lattice-profile`.
+- API mapping: `timeout_secs` → `AgentTurnRequest.timeout` (`Duration`) in `lattice-api/turn/mapping.rs`.
+- Agent loop: new `await_with_deadline_and_cancel` races `stream_chat()` and `stream.next()` against *both* the deadline and the cancel flag (bounded 50ms poll); a stalled provider now observes SIGINT without a deadline. New `StallOutcome::{DeadlineElapsed, Cancelled}` split at both call sites. Focused unit test `cancel_during_stalled_stream_terminates_cancelled`.
+- CLI: `run_inner` installs a scoped Tokio SIGINT listener that flips a shared `Arc<AtomicBool>` cancel flag, passed through `RunTurnRequest.cancel_flag`; the listener is aborted after the stream drains.
+- Harness: `SseScript::HttpError` (non-2xx startup); new `tests/direct_failures.rs` (7 scenarios): http-error-no-retry, disconnect-before-output, disconnect-after-partial-token, malformed-sse, sigint-while-stalled, profile-deadline-while-stalled, mutation-survives-provider-failure.
+- Ledger: 4 entries half-covered (event-chain half landed; durable log/transcript/terminal_reason half residual), all retained.
+
+**Verification:**
+- `cargo +1.96.0 test -p lattice-profile` — 85 passed.
+- `cargo +1.96.0 test -p lattice-agent --features test-utils` — all passed (incl. new stall-cancel test).
+- `cargo +1.96.0 test -p lattice-cli` — 128 passed.
+- `LATTICE_BIN=... cargo +1.96.0 test -p lattice-system-harness --test direct_failures -- --test-threads=1` — 7 passed.
+- clippy + harness-boundary — green.
+
+**Changed files:**
+`crates/lattice-profile/src/{schema,load}.rs`, `crates/lattice-api/src/turn/mapping.rs`, `crates/lattice-agent/src/agent_loop/mod.rs`, `crates/lattice-agent/tests/live_sink_and_cancel.rs`, `crates/lattice-cli/src/commands/run.rs`, `crates/lattice-system-harness/src/fake_llm.rs`, `crates/lattice-system-harness/tests/direct_failures.rs` (new), `docs/TEST-TRIAGE.md`, `docs/test-triage-decisions.json`, `FIX.md`.
+
 ## Codeberg #24 slice 4: fetch/todo/catalog/retired tools external coverage — 2026-07-22
 
 Severity: test refactor (测试重构 5/6, slice 4 of #24). Plan: `docs/plans/2026-07-22-issue24-slice4-tools-and-retired-methods.md`.

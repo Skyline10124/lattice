@@ -223,6 +223,14 @@ pub struct ToolsSection {
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LlmSection {
+    /// Optional cooperative per-turn deadline in seconds.
+    ///
+    /// When set, the agent loop races LLM stream consumption and stream
+    /// creation against `now + timeout_secs`. The default is `None` (no
+    /// deadline); the CLI's observer idle timeout remains a separate
+    /// last-resort guard. Validated nonzero and <= 3600 at load time.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub retry: LlmRetrySection,
 }
@@ -911,6 +919,27 @@ argv = ["cargo", "test"]
         );
         let profile: AgentProfile = parse(&toml).unwrap();
         assert!(profile.lancet.extensions.contains_key("verify"));
+    }
+    // ── [llm.timeout_secs] ────────────────────────────────────────────
+
+    #[test]
+    fn llm_timeout_secs_parses() {
+        let toml = format!(
+            r#"{prefix}
+
+[llm]
+timeout_secs = 1
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert_eq!(profile.llm.timeout_secs, Some(1));
+    }
+
+    #[test]
+    fn llm_timeout_secs_defaults_none_when_absent() {
+        let profile = parse(minimal_profile_prefix()).unwrap();
+        assert!(profile.llm.timeout_secs.is_none());
     }
 
     // ── LancetPolicySection ────────────────────────────────────────────────

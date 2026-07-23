@@ -274,6 +274,29 @@ codeberg issue 跟踪重写。
 | `public_https_policy_requires_fetch_capability` | `planned_direct_fetch_capability_denial` | FetchUrl capability + allow_public_https + CepCallStarted external_observation 标签 |
 
 
+## 1.8 #24 slice 5 执行状态（2026-07-22）
+
+> 外部测试 `crates/lattice-system-harness/tests/direct_failures.rs` 已实现并通过全部 gate（7 场景）。
+> 产品变更：`[llm] timeout_secs` profile 字段 + 校验；API mapping 映射到 `AgentTurnRequest.timeout`；
+> agent loop `await_with_deadline_and_cancel` 在 stall 时同时 race deadline 与 cancel flag；
+> CLI `session send` 安装 scoped SIGINT 监听并传递 cancel flag。
+
+### 半保留（4 条，事件链半已落地，durable log/transcript/terminal_reason 半未覆盖）
+
+| ledger identity | replacement scenario | 已落地半 | 未覆盖半 |
+| --- | --- | --- | --- |
+| `stream_turn_cancelled_commits_cancelled` | `planned_direct_cancelled_commit` | turn_cancelled<turn_committing<turn_committed status=cancelled + exit 1 | durable log status=cancelled |
+| `stream_turn_error_after_partial_commits_error` | `planned_direct_partial_output_error_commit` | partial token + turn_failed + turn_committed status=error + exit 1 | transcript assistant 内容保留 + log status + terminal_reason 内容 |
+| `stream_timeout_fires_after_duration` | `planned_direct_provider_timeout` | 产品 deadline → error commit + exit 1 | 原测试为纯 tokio::timeout 局部不变量（不同层） |
+| `stream_turn_live_with_agent_startup_failure_no_stream` | `planned_direct_provider_startup_failure` | provider HTTP 启动失败 → error commit | 原测试为 session-not-found 启动失败（不同失败模式） |
+
+### 新增不变量（无 ledger 前身）
+
+| scenario | 不变量 |
+| --- | --- |
+| `direct_failure_mutation_survives_provider_failure` | 成功 mutation 后 provider 失败，Local bytes 保留（Direct-Local 无回滚） |
+
+
 ## 2. 逐条清单
 
 ### `lancet-api`（保留 17 / 提升 0 / 删除 1）
@@ -1832,4 +1855,11 @@ codeberg issue 跟踪重写。
 - [x] 清单覆盖枚举到的全部现存测试，无遗漏条目（`docs/test-triage-decisions.json` 共 1449 条，与枚举键集合一致）
 - [x] 每条都有决定、理由、目标层；提升/删除条目标明替代场景（或显式 `n/a`）
 - [x] 以文档形式入库（本文件 + JSON）
-- [x] 本票未删除、未修改任何测试源码
+- [x] 本票未删除、未修改任何测试源码| `direct_failure_http_error_no_retry` | Direct-Local: provider HTTP 启动失败（retry disabled）→ error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_disconnect_before_output` | Direct-Local: 流前断连 → error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_disconnect_after_partial` | Direct-Local: partial token 后断连 → error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_malformed_sse` | Direct-Local: 非法 SSE → error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_sigint_while_stalled` | Direct-Local: SIGINT 协作取消（stall）→ cancelled commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_profile_deadline` | Direct-Local: profile deadline（stall）→ error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_mutation_survives` | Direct-Local: 成功 mutation 后 provider 失败，Local bytes 保留（无回滚） | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+

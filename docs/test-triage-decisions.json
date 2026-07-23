@@ -6117,7 +6117,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_provider_startup_failure",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_provider_startup_failure` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "reason": "#24 slice 5：direct_failure_http_error_no_retry_commits_error 覆盖 provider HTTP 启动失败；原测试为 session-not-found 启动失败（返回 Err，无 stream），不同失败模式，保留原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6321,7 +6321,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_cancelled_commit",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_cancelled_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "reason": "#24 slice 5：direct_failure_sigint_while_stalled_commits_cancelled 落地事件链半（turn_cancelled<turn_committing<turn_committed status=cancelled + exit 1）；durable log status=cancelled 半未覆盖，保留原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6333,7 +6333,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_partial_output_error_commit",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_partial_output_error_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "reason": "#24 slice 5：direct_failure_disconnect_after_partial_token_commits_error 落地 partial token + turn_failed + turn_committed status=error + exit 1 半；transcript assistant 内容保留 + log status + terminal_reason 内容半未覆盖，保留原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8889,7 +8889,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_provider_timeout",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_provider_timeout` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "reason": "#24 slice 5：direct_failure_profile_deadline_while_stalled_commits_error 落地产品 deadline 半（profile timeout_secs → turn_failed → turn_committed error → exit 1）；原测试为纯 tokio::timeout 局部不变量（非产品 turn 路径），保留原测试。"
   },
   {
     "crate": "lattice-cli",

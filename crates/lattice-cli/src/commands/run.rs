@@ -410,11 +410,28 @@ async fn run_inner(
     let git_repo_path = session_dir.join("sessions.git");
     let session_api = lattice_api::SessionApi::git(git_repo_path);
 
+    // Cooperative cancellation: install a scoped SIGINT listener that flips
+    // a shared flag. The agent loop races stalled stream.next() against it
+    // (#24 slice 5); the harness SIGKILL path never counts as coverage.
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sigint_flag = cancel_flag.clone();
+    let sigint_guard = tokio::spawn(async move {
+        if let Ok(mut sigint) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        {
+            // Each SIGINT flips the flag; the listener stays active until
+            // aborted below so it cannot affect later commands.
+            while sigint.recv().await.is_some() {
+                sigint_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+
     let request = RunTurnRequest {
         input: prompt,
         session_id,
         loaded_profile: Some(loaded_profile),
-        cancel_flag: None,
+        cancel_flag: Some(cancel_flag),
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
@@ -476,6 +493,10 @@ async fn run_inner(
 
         apply_event_to_state(&event, &mut state);
     }
+
+    // Abort the scoped SIGINT listener once the stream has drained so it
+    // cannot observe a later command's SIGINT.
+    sigint_guard.abort();
 
     // final stdout newline (human mode only; JSONL already terminates each line)
     if !json && state.tokens_emitted_without_newline {
