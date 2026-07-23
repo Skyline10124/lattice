@@ -7,96 +7,16 @@
 //! completed Turns, then branch/checkout/reset/diff operations scoped to the
 //! addressed session only. No `sessions.git` or sidecar inspection — every
 //! assertion goes through public `--json` commands.
-//!
-//! ponytail: helpers duplicate other Direct-Local tests; later-slice split
-//! owns the dedupe.
 
 #![cfg(unix)]
 
-use std::process::Output;
+mod support;
 
 use lattice_system_harness::{
-    AssertError, CommandOutcome, FAKE_API_KEY, LatticeDriver, ScenarioEvidence, ScenarioSpec,
-    ScenarioWorld, SessionSendDriver, SseScript, failure_dir,
+    LatticeDriver, ScenarioSpec, ScenarioWorld, SessionSendDriver, SseScript,
 };
 use serde_json::Value;
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(AssertError::StdoutMissing {
-            expected: expected.into(),
-        })
-    }
-}
-
-fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
-        .expect("scenario evidence")
-}
-
-fn finish_scenario(
-    mut evidence: ScenarioEvidence,
-    commands: &[(&str, &CommandOutcome)],
-    result: Result<(), AssertError>,
-) {
-    for (summary, outcome) in commands {
-        evidence.record_command(*summary, outcome);
-    }
-    evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
-}
-
-fn wire_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> lattice_system_harness::FakeLlmServer {
-    let server = lattice_system_harness::FakeLlmServer::start(script).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    server
-}
-
-fn isolation_world(prefix: &str, agent: &str) -> (ScenarioWorld, ScenarioSpec) {
-    let spec = ScenarioSpec::direct_local(prefix);
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    let toml = format!(
-        "schema_version = 1\n\n\
-         [agent]\nname = \"{agent}\"\nmodel = \"compat:{agent}\"\n\n\
-         [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = []\n"
-    );
-    world
-        .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
-        .expect("write agent.toml");
-    world.init_git_project().expect("init git");
-    (world, spec)
-}
-
-fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
-    driver()
-        .run(
-            world,
-            &lattice_system_harness::LatticeCommand {
-                args: args.iter().map(|s| s.to_string()).collect(),
-                timeout: Some(spec.step_timeout()),
-            },
-        )
-        .expect("drive lattice")
-        .output
-}
+use support::{cli, direct_world, driver, evidence, finish_scenario, require, wire_fake_llm};
 
 fn cli_json(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Value {
     let out = cli(world, spec, args);
@@ -166,7 +86,7 @@ fn setup_two_sessions<'a>(
 #[test]
 fn direct_session_branch_listing_isolation() {
     let driver = driver();
-    let (world, spec) = isolation_world("direct-iso-branch-list", "dl-iso");
+    let (world, spec) = direct_world("direct-iso-branch-list", "dl-iso", "[]", "");
     let _server = wire_fake_llm(&world, "dl-iso", SseScript::plain("seed"));
     let scenario_evidence = evidence(&world, &spec);
     let (send_a, send_b, commits_a, commits_b) = setup_two_sessions(&driver, &world, &spec);
@@ -258,6 +178,7 @@ fn direct_session_branch_listing_isolation() {
             "branch listing isolation",
             &send_a.send("seed").unwrap().command,
         )],
+        Vec::new(),
         Ok(()),
     );
 }
@@ -267,7 +188,7 @@ fn direct_session_branch_listing_isolation() {
 #[test]
 fn direct_session_checkout_isolation() {
     let driver = driver();
-    let (world, spec) = isolation_world("direct-iso-checkout", "dl-iso");
+    let (world, spec) = direct_world("direct-iso-checkout", "dl-iso", "[]", "");
     let _server = wire_fake_llm(&world, "dl-iso", SseScript::plain("seed"));
     let scenario_evidence = evidence(&world, &spec);
     let (send_a, send_b, commits_a, _commits_b) = setup_two_sessions(&driver, &world, &spec);
@@ -321,6 +242,7 @@ fn direct_session_checkout_isolation() {
     finish_scenario(
         scenario_evidence,
         &[("checkout isolation", &send_a.send("seed").unwrap().command)],
+        Vec::new(),
         Ok(()),
     );
 }
@@ -330,7 +252,7 @@ fn direct_session_checkout_isolation() {
 #[test]
 fn direct_session_branch_create_isolation() {
     let driver = driver();
-    let (world, spec) = isolation_world("direct-iso-branch-create", "dl-iso");
+    let (world, spec) = direct_world("direct-iso-branch-create", "dl-iso", "[]", "");
     let _server = wire_fake_llm(&world, "dl-iso", SseScript::plain("seed"));
     let scenario_evidence = evidence(&world, &spec);
     let (send_a, send_b, commits_a, _commits_b) = setup_two_sessions(&driver, &world, &spec);
@@ -389,6 +311,7 @@ fn direct_session_branch_create_isolation() {
             "branch create isolation",
             &send_a.send("seed").unwrap().command,
         )],
+        Vec::new(),
         Ok(()),
     );
 }
@@ -398,7 +321,7 @@ fn direct_session_branch_create_isolation() {
 #[test]
 fn direct_session_reset_isolation() {
     let driver = driver();
-    let (world, spec) = isolation_world("direct-iso-reset", "dl-iso");
+    let (world, spec) = direct_world("direct-iso-reset", "dl-iso", "[]", "");
     let _server = wire_fake_llm(&world, "dl-iso", SseScript::plain("seed"));
     let scenario_evidence = evidence(&world, &spec);
     let (send_a, send_b, commits_a, _commits_b) = setup_two_sessions(&driver, &world, &spec);
@@ -435,6 +358,7 @@ fn direct_session_reset_isolation() {
     finish_scenario(
         scenario_evidence,
         &[("reset isolation", &send_a.send("seed").unwrap().command)],
+        Vec::new(),
         Ok(()),
     );
 }
@@ -445,7 +369,7 @@ fn direct_session_reset_isolation() {
 #[test]
 fn direct_session_diff_isolation() {
     let driver = driver();
-    let (world, spec) = isolation_world("direct-iso-diff", "dl-iso");
+    let (world, spec) = direct_world("direct-iso-diff", "dl-iso", "[]", "");
     let _server = wire_fake_llm(&world, "dl-iso", SseScript::plain("seed"));
     let scenario_evidence = evidence(&world, &spec);
     let (send_a, send_b, commits_a, commits_b) = setup_two_sessions(&driver, &world, &spec);
@@ -520,6 +444,7 @@ fn direct_session_diff_isolation() {
     finish_scenario(
         scenario_evidence,
         &[("diff isolation", &send_a.send("seed").unwrap().command)],
+        Vec::new(),
         Ok(()),
     );
 }

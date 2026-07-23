@@ -41,6 +41,8 @@ LANCET profile sections, and pure lowering data consumed by API/authority.
 - FIXED M-24-04: profile `tools.enabled` is the method exposure list. Base
   authority requirements come from catalog descriptors for those methods, not
   profile-specific branch logic in `lattice-api`.
+- FIXED #24: optional `[llm].timeout_secs` is validated as `1..=3600`; zero and
+  upper-bound failures retain field-specific diagnostics.
 - WATCH: external policy file schema (`[lancet.policy].path`) is consumed by
   per-turn LANCET composition. Command isolation was retired; do not
   reintroduce `[lancet.isolation]`/`[lancet.command]` typed sections.

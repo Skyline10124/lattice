@@ -40,7 +40,7 @@ pub use pty_tui::{PtyError, PtyTuiDriver};
 pub use scenario::{ScenarioBudget, ScenarioError, ScenarioLayer, ScenarioSpec};
 pub use session_send::{
     MalformedJsonLine, SendExecution, SendExitCode, SendOutcome, SessionSendDriver,
-    SessionSendError, TurnEventLine, assert_event_subsequence, classify_exit, create_session,
-    derive_send_exit_code, parse_event_line, parse_send_stdout, send_prompt,
+    SessionSendError, TurnEventLine, assert_event_subsequence, classify_exit,
+    derive_send_exit_code, parse_event_line, parse_send_stdout,
 };
 pub use world::{ScenarioWorld, WorldError};

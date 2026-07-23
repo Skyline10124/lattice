@@ -36,6 +36,8 @@ integration-test target of any product crate.
   byte-level sentinel scans fail closed on both hits and I/O errors.
 - `ScenarioBudget::cap_timeout` applies `min(step_timeout, remaining_total)`;
   multi-command drivers must use the capped value for every spawned command.
+- Direct-Local integration targets share only generic plumbing through private
+  `tests/support/mod.rs`; scenario-specific fixtures and assertions stay local.
 
 ## Test Layers (RFC #19 decision two / seven, updated by #40)
 

@@ -8,140 +8,20 @@
 //! the real `session send` binary, plus the "mutation survives provider
 //! failure" invariant. A harness step timeout is a test-failure/cleanup
 //! mechanism and is never reported as product cancellation/deadline coverage.
-//!
-//! ponytail: helpers duplicate other Direct-Local tests; later-slice split
-//! owns the dedupe.
+
+mod support;
 
 use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, LatticeDriver, RunningCommand,
-    ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SendExitCode, SessionSendDriver,
-    SseScript, Termination, TurnEventLine, assert_event_subsequence, failure_dir,
+    AssertError, RunningCommand, SendExitCode, SessionSendDriver, SseScript, TurnEventLine,
+    assert_event_subsequence,
 };
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
-    if !matches!(&execution.command.termination, Termination::Exited(Some(_))) {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send did not exit normally: {:?}",
-                execution.command.termination
-            ),
-        });
-    }
-    if !execution.malformed_lines.is_empty() {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send emitted malformed JSONL: {:?}",
-                execution.malformed_lines
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(AssertError::StdoutMissing {
-            expected: expected.into(),
-        })
-    }
-}
-
-fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
-        .expect("scenario evidence")
-}
-
-fn finish_scenario(
-    mut evidence: ScenarioEvidence,
-    commands: &[(&str, &CommandOutcome)],
-    captures: Vec<CapturedRequest>,
-    result: Result<(), AssertError>,
-) {
-    for (summary, outcome) in commands {
-        evidence.record_command(*summary, outcome);
-    }
-    evidence.record_captures(captures);
-    evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
-}
-
-fn wire_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> lattice_system_harness::FakeLlmServer {
-    let server = lattice_system_harness::FakeLlmServer::start(script).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    server
-}
-
-fn wire_gated_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> (
-    lattice_system_harness::FakeLlmServer,
-    lattice_system_harness::ResponseGate,
-) {
-    let (server, gate) =
-        lattice_system_harness::FakeLlmServer::start_gated(script).expect("start gated fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    (server, gate)
-}
-
-fn failure_world(
-    prefix: &str,
-    agent: &str,
-    tools: &str,
-    extra_profile: &str,
-) -> (ScenarioWorld, ScenarioSpec) {
-    let spec = ScenarioSpec::direct_local(prefix);
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    let toml = format!(
-        "schema_version = 1\n\n\
-         [agent]\nname = \"{agent}\"\nmodel = \"compat:{agent}\"\n\n\
-         [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = {tools}\n{extra_profile}"
-    );
-    world
-        .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
-        .expect("write agent.toml");
-    world.init_git_project().expect("init git");
-    (world, spec)
-}
-
-fn tool_call(id: &str, name: &str, args: &str) -> SseScript {
-    SseScript::ToolCall {
-        call_id: id.into(),
-        tool_name: name.into(),
-        arguments_json: args.into(),
-    }
-}
-
-fn sequence(scripts: Vec<SseScript>) -> SseScript {
-    SseScript::Sequence { scripts }
-}
+use support::{
+    assert_clean_send, direct_world, driver, evidence, finish_scenario, require, sequence,
+    tool_call, wire_fake_llm, wire_gated_fake_llm,
+};
 
 /// Non-2xx startup with retry disabled commits an error turn; exit 1.
 /// Expected terminal sequence: turn_started ... turn_failed -> turn_committing
@@ -149,7 +29,7 @@ fn sequence(scripts: Vec<SseScript>) -> SseScript {
 #[test]
 fn direct_failure_http_error_no_retry_commits_error() {
     let driver = driver();
-    let (world, spec) = failure_world(
+    let (world, spec) = direct_world(
         "direct-failure-http-error",
         "dl-fail",
         "[]",
@@ -229,7 +109,7 @@ fn direct_failure_http_error_no_retry_commits_error() {
 #[test]
 fn direct_failure_disconnect_before_output_commits_error() {
     let driver = driver();
-    let (world, spec) = failure_world(
+    let (world, spec) = direct_world(
         "direct-failure-disc-pre",
         "dl-disc-pre",
         "[]",
@@ -297,7 +177,7 @@ fn direct_failure_disconnect_before_output_commits_error() {
 #[test]
 fn direct_failure_disconnect_after_partial_token_commits_error() {
     let driver = driver();
-    let (world, spec) = failure_world(
+    let (world, spec) = direct_world(
         "direct-failure-disc-partial",
         "dl-disc-partial",
         "[]",
@@ -357,7 +237,7 @@ fn direct_failure_disconnect_after_partial_token_commits_error() {
 #[test]
 fn direct_failure_malformed_sse_commits_error() {
     let driver = driver();
-    let (world, spec) = failure_world(
+    let (world, spec) = direct_world(
         "direct-failure-malformed",
         "dl-malformed",
         "[]",
@@ -415,7 +295,7 @@ fn direct_failure_malformed_sse_commits_error() {
 #[test]
 fn direct_failure_sigint_while_stalled_commits_cancelled() {
     let driver = driver();
-    let (world, spec) = failure_world("direct-failure-sigint-stall", "dl-sigint", "[]", "");
+    let (world, spec) = direct_world("direct-failure-sigint-stall", "dl-sigint", "[]", "");
     // Gated server holds the response so the provider is stalled (stream
     // opened, no events). The gate is never released; the SIGINT path must
     // terminate the turn.
@@ -496,7 +376,7 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
 #[test]
 fn direct_failure_profile_deadline_while_stalled_commits_error() {
     let driver = driver();
-    let (world, spec) = failure_world(
+    let (world, spec) = direct_world(
         "direct-failure-deadline-stall",
         "dl-deadline",
         "[]",
@@ -561,7 +441,7 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
 #[test]
 fn direct_failure_mutation_survives_provider_failure() {
     let driver = driver();
-    let (world, spec) = failure_world(
+    let (world, spec) = direct_world(
         "direct-failure-mutation-survives",
         "dl-mut-surv",
         "[\"mutate.create\"]",

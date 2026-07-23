@@ -10,117 +10,22 @@
 //! tool call result is inspected in the **next captured provider request**
 //! (the product feeds the full CEP result back to the LLM as a `tool` role
 //! message); the JSONL stream only exposes result size / error summary.
-//!
-//! ponytail: helpers duplicate `tests/direct_local_turn.rs`; the planned
-//! later-slice split owns the dedupe.
 
 #![cfg(unix)]
 
+mod support;
+
+use std::fs;
+
 use lattice_system_harness::{
-    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, LatticeDriver, ScenarioEvidence,
-    ScenarioSpec, ScenarioWorld, SendExecution, SendExitCode, SessionSendDriver, SseScript,
-    Termination, TurnEventLine, assert_event_subsequence, derive_send_exit_code, failure_dir,
+    AssertError, ScenarioSpec, ScenarioWorld, SendExitCode, SessionSendDriver, SseScript,
+    TurnEventLine, assert_event_subsequence, derive_send_exit_code,
 };
-use serde_json::Value;
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
-    if !matches!(&execution.command.termination, Termination::Exited(Some(_))) {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send did not exit normally: {:?}",
-                execution.command.termination
-            ),
-        });
-    }
-    if !execution.malformed_lines.is_empty() {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send emitted malformed JSONL: {:?}",
-                execution.malformed_lines
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(AssertError::StdoutMissing {
-            expected: expected.into(),
-        })
-    }
-}
-
-fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
-        .expect("scenario evidence")
-}
-
-fn finish_scenario(
-    mut evidence: ScenarioEvidence,
-    commands: &[(&str, &CommandOutcome)],
-    captures: Vec<CapturedRequest>,
-    result: Result<(), AssertError>,
-) {
-    for (summary, outcome) in commands {
-        evidence.record_command(*summary, outcome);
-    }
-    evidence.record_captures(captures);
-    evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
-}
-
-fn wire_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> lattice_system_harness::FakeLlmServer {
-    let server = lattice_system_harness::FakeLlmServer::start(script).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    server
-}
-
-/// The content of the last `tool` role message in a captured request, or
-/// `None` if there is no tool message. Successful `observe.workspace` calls
-/// produce a JSON string starting with `{`; denials produce a plain error
-/// string.
-fn last_tool_content(capture: &CapturedRequest) -> Option<String> {
-    capture
-        .raw
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|msgs| {
-            msgs.iter()
-                .rev()
-                .find(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
-                .and_then(|m| m.get("content").and_then(Value::as_str))
-                .map(str::to_string)
-        })
-}
-
-/// Parsed `observe.workspace` result JSON from the last tool message, or
-/// `None` if the tool call failed (error string) or no tool message exists.
-fn tool_result_value(capture: &CapturedRequest) -> Option<Value> {
-    let content = last_tool_content(capture)?;
-    if content.starts_with('{') {
-        serde_json::from_str(&content).ok()
-    } else {
-        None
-    }
-}
+use serde_json::{Value, json};
+use support::{
+    assert_clean_send, driver, evidence, finish_scenario, last_tool_content, require,
+    tool_result_value, wire_fake_llm,
+};
 
 /// Build the observation fixture world with the full visibility matrix and
 /// bounded observation policy.
@@ -214,6 +119,25 @@ fn tool_sequence(calls: &[(&str, &str)], terminator: &str) -> SseScript {
 fn direct_observation_visibility_and_bounds() {
     let driver = driver();
     let (world, spec) = observation_world("direct-observation");
+    const OUTSIDE_CANARY: &str = "OUTSIDE_ROOT_SECRET_24_01\n";
+    let outside_file = world.root().join("outside-observation.txt");
+    fs::write(&outside_file, OUTSIDE_CANARY).expect("write outside-root canary");
+    let outside_file_path = outside_file.to_string_lossy().into_owned();
+    let outside_root_path = world.root().to_string_lossy().into_owned();
+    let absolute_read = json!({"mode": "read_file", "path": outside_file_path}).to_string();
+    let absolute_list = json!({"mode": "list_directory", "path": outside_root_path}).to_string();
+    let absolute_grep = json!({
+        "mode": "grep",
+        "pattern": "OUTSIDE_ROOT",
+        "path": outside_root_path,
+    })
+    .to_string();
+    let absolute_find = json!({
+        "mode": "find_files",
+        "pattern": "outside-observation.txt",
+        "path": outside_root_path,
+    })
+    .to_string();
     let calls: &[(&str, &str)] = &[
         (
             "observe.workspace",
@@ -255,6 +179,26 @@ fn direct_observation_visibility_and_bounds() {
             "observe.workspace",
             r#"{"mode":"find_files","pattern":"*.txt","path":"."}"#,
         ),
+        (
+            "observe.workspace",
+            r#"{"mode":"read_file","path":"../outside-observation.txt"}"#,
+        ),
+        ("observe.workspace", absolute_read.as_str()),
+        (
+            "observe.workspace",
+            r#"{"mode":"list_directory","path":".."}"#,
+        ),
+        ("observe.workspace", absolute_list.as_str()),
+        (
+            "observe.workspace",
+            r#"{"mode":"grep","pattern":"OUTSIDE_ROOT","path":".."}"#,
+        ),
+        ("observe.workspace", absolute_grep.as_str()),
+        (
+            "observe.workspace",
+            r#"{"mode":"find_files","pattern":"outside-observation.txt","path":".."}"#,
+        ),
+        ("observe.workspace", absolute_find.as_str()),
     ];
     let server = wire_fake_llm(
         &world,
@@ -281,11 +225,11 @@ fn direct_observation_visibility_and_bounds() {
             })
             .collect();
         require(
-            tool_starts.len() == 10 && tool_starts.iter().all(|n| *n == "observe.workspace"),
+            tool_starts.len() == 18 && tool_starts.iter().all(|n| *n == "observe.workspace"),
             format!("tool lifecycle names mismatch: {tool_starts:?}"),
         )?;
 
-        // ok/fail pattern: calls 1-2 ok, 3 fail, 4 ok, 5-7 fail, 8-10 ok
+        // Calls 1-10 retain their visibility/bounds results; all 8 escapes fail.
         let ok_pattern: Vec<bool> = outcome
             .events
             .iter()
@@ -295,7 +239,8 @@ fn direct_observation_visibility_and_bounds() {
             })
             .collect();
         let expected_ok = [
-            true, true, false, true, false, false, false, true, true, true,
+            true, true, false, true, false, false, false, true, true, true, false, false, false,
+            false, false, false, false, false,
         ];
         require(
             ok_pattern == expected_ok,
@@ -319,10 +264,10 @@ fn direct_observation_visibility_and_bounds() {
         )?;
 
         // --- captured tool result inspection ---
-        // 10 tool calls + 1 plain text = 11 captures; result_i in captures[i].
+        // 18 tool calls + 1 plain text = 19 captures; result_i in captures[i].
         require(
-            captures.len() == 11,
-            format!("expected 11 captures, got: {}", captures.len()),
+            captures.len() == 19,
+            format!("expected 19 captures, got: {}", captures.len()),
         )?;
 
         // 1. tracked.txt -> visible, content present
@@ -443,6 +388,65 @@ fn direct_observation_visibility_and_bounds() {
                 .iter()
                 .any(|p| p.contains("private/ignored") || p.contains("denied/")),
             format!("find_files returned hidden/denied paths: {path_strs:?}"),
+        )?;
+
+        // 11-18. Every observation mode rejects traversal and absolute paths.
+        let escape_paths = [
+            ("../outside-observation.txt", true),
+            (outside_file_path.as_str(), false),
+            ("..", true),
+            (outside_root_path.as_str(), false),
+            ("..", true),
+            (outside_root_path.as_str(), false),
+            ("..", true),
+            (outside_root_path.as_str(), false),
+        ];
+        for (offset, (path, traversal)) in escape_paths.iter().enumerate() {
+            let capture = &captures[11 + offset];
+            require(
+                tool_result_value(capture).is_none(),
+                format!("root escape unexpectedly returned JSON for {path:?}"),
+            )?;
+            let expected = if *traversal {
+                format!("path contains '..' traversal: '{path}'")
+            } else {
+                format!("path must be relative: '{path}'")
+            };
+            require(
+                last_tool_content(capture).as_deref() == Some(expected.as_str()),
+                format!(
+                    "root-escape error mismatch for {path:?}: {:?}",
+                    last_tool_content(capture)
+                ),
+            )?;
+        }
+        require(
+            captures
+                .iter()
+                .all(|capture| !capture.raw.to_string().contains(OUTSIDE_CANARY.trim())),
+            "outside-root canary leaked into provider captures",
+        )?;
+        require(
+            fs::read_to_string(&outside_file).unwrap_or_default() == OUTSIDE_CANARY,
+            "outside-root file changed during observation denials",
+        )?;
+        let guard_denied_finishes = outcome
+            .events
+            .iter()
+            .filter(|event| match event {
+                TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
+                    raw.get("ok").and_then(Value::as_bool) == Some(false)
+                        && raw.get("error_code").and_then(Value::as_str) == Some("GuardDenied")
+                }
+                _ => false,
+            })
+            .count();
+        require(
+            guard_denied_finishes == 8,
+            format!(
+                "expected 8 GuardDenied CEP finishes, got {guard_denied_finishes}: {:?}",
+                outcome.events
+            ),
         )?;
 
         Ok(())

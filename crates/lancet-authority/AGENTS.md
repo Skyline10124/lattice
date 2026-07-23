@@ -39,6 +39,8 @@ data, effect checking, effect ledger helpers, and boundary-credit validation.
 - FIXED M-24-04: catalog descriptors declare method-local base authority
   requirements applied through `lancet-cep::BaseAuthorityPlan`; this crate
   remains the policy/guard/effect authority implementation.
+- FIXED #24: declared denied effect kinds are rejected before handler dispatch;
+  observed-effect checks remain post-dispatch defense in depth.
 - WATCH M-24-01: host capability semantics must align with protocol field names
   and native effect-region matching.
 - WATCH: `mode = off` skips effect-region checks only; policy, capability,

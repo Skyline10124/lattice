@@ -10,173 +10,23 @@
 //! `fetch.web` is driven against a harness-only localhost HTTP fixture
 //! (not the OpenAI-compatible fake LLM). Tool results are inspected in the
 //! next captured provider request.
-//!
-//! ponytail: helpers duplicate other Direct-Local tests; later-slice split
-//! owns the dedupe.
 
 #![cfg(unix)]
+
+mod support;
 
 use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FixtureHttpServer, HttpFixture,
-    LatticeDriver, ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SessionSendDriver,
-    SseScript, Termination, TurnEventLine, failure_dir,
+    AssertError, CapturedRequest, FixtureHttpServer, HttpFixture, SessionSendDriver, SseScript,
+    TurnEventLine,
 };
 use serde_json::Value;
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
-    if !matches!(&execution.command.termination, Termination::Exited(Some(_))) {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send did not exit normally: {:?}",
-                execution.command.termination
-            ),
-        });
-    }
-    if !execution.malformed_lines.is_empty() {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send emitted malformed JSONL: {:?}",
-                execution.malformed_lines
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(AssertError::StdoutMissing {
-            expected: expected.into(),
-        })
-    }
-}
-
-fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
-        .expect("scenario evidence")
-}
-
-fn finish_scenario(
-    mut evidence: ScenarioEvidence,
-    commands: &[(&str, &CommandOutcome)],
-    captures: Vec<CapturedRequest>,
-    result: Result<(), AssertError>,
-) {
-    for (summary, outcome) in commands {
-        evidence.record_command(*summary, outcome);
-    }
-    evidence.record_captures(captures);
-    evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
-}
-
-fn wire_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> lattice_system_harness::FakeLlmServer {
-    let server = lattice_system_harness::FakeLlmServer::start(script).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    server
-}
-
-fn last_tool_content(capture: &CapturedRequest) -> Option<String> {
-    capture
-        .raw
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|msgs| {
-            msgs.iter()
-                .rev()
-                .find(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
-                .and_then(|m| m.get("content").and_then(Value::as_str))
-                .map(str::to_string)
-        })
-}
-
-fn tool_result_value(capture: &CapturedRequest) -> Option<Value> {
-    let content = last_tool_content(capture)?;
-    if content.starts_with('{') {
-        serde_json::from_str(&content).ok()
-    } else {
-        None
-    }
-}
-
-fn tool_failed(outcome: &lattice_system_harness::SendOutcome, name: &str) -> bool {
-    outcome.events.iter().any(|event| {
-        matches!(
-            event,
-            TurnEventLine::ToolCallFinished {
-                name: n,
-                ok: false,
-                ..
-            } if n == name
-        )
-    })
-}
-
-fn tool_ok(outcome: &lattice_system_harness::SendOutcome, name: &str) -> bool {
-    outcome.events.iter().any(|event| {
-        matches!(
-            event,
-            TurnEventLine::ToolCallFinished {
-                name: n,
-                ok: true,
-                ..
-            } if n == name
-        )
-    })
-}
-
-fn tool_call(id: &str, name: &str, args: &str) -> SseScript {
-    SseScript::ToolCall {
-        call_id: id.into(),
-        tool_name: name.into(),
-        arguments_json: args.into(),
-    }
-}
-
-fn sequence(scripts: Vec<SseScript>) -> SseScript {
-    SseScript::Sequence { scripts }
-}
-
-fn tools_world(
-    prefix: &str,
-    agent: &str,
-    tools: &str,
-    extra_profile: &str,
-) -> (ScenarioWorld, ScenarioSpec) {
-    let spec = ScenarioSpec::direct_local(prefix);
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    let toml = format!(
-        "schema_version = 1\n\n\
-         [agent]\nname = \"{agent}\"\nmodel = \"compat:{agent}\"\n\n\
-         [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = {tools}\n{extra_profile}"
-    );
-    world
-        .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
-        .expect("write agent.toml");
-    world.init_git_project().expect("init git");
-    (world, spec)
-}
+use support::{
+    assert_clean_send, direct_world, driver, evidence, finish_scenario, last_tool_content, require,
+    sequence, tool_call, tool_failed, tool_ok, tool_result_value, wire_fake_llm,
+};
 
 fn fetch_network_profile(max_bytes: u64) -> String {
     format!(
@@ -194,10 +44,10 @@ fn wire_tool_names(capture: &CapturedRequest) -> Vec<String> {
 #[test]
 fn direct_tools_fetch_web_localhost_success_and_cap() {
     let driver = driver();
-    let web = FixtureHttpServer::start(HttpFixture::plain(200, "fixture body for fetch"))
+    let web = FixtureHttpServer::start(HttpFixture::plain("fixture body for fetch"))
         .expect("fixture http");
     let url = web.url_path("/fixture-path");
-    let (world, spec) = tools_world(
+    let (world, spec) = direct_world(
         "direct-tools-fetch-ok",
         "dl-fetch",
         "[\"fetch.web\"]",
@@ -280,10 +130,10 @@ fn direct_tools_fetch_web_localhost_success_and_cap() {
 #[test]
 fn direct_tools_fetch_disabled_no_dispatch() {
     let driver = driver();
-    let web = FixtureHttpServer::start(HttpFixture::plain(200, "should-not-be-hit")).expect("http");
+    let web = FixtureHttpServer::start(HttpFixture::plain("should-not-be-hit")).expect("http");
     let url = web.url_path("/nope");
     // tools.enabled empty — fetch not advertised / not executable.
-    let (world, spec) = tools_world(
+    let (world, spec) = direct_world(
         "direct-tools-fetch-off",
         "dl-foff",
         "[]",
@@ -352,10 +202,10 @@ fn direct_tools_fetch_disabled_no_dispatch() {
 #[test]
 fn direct_tools_fetch_host_policy_denial() {
     let driver = driver();
-    let web = FixtureHttpServer::start(HttpFixture::plain(200, "blocked")).expect("http");
+    let web = FixtureHttpServer::start(HttpFixture::plain("blocked")).expect("http");
     let url = web.url_path("/secret");
     // allow_localhost false / empty allowlist — host denied.
-    let (world, spec) = tools_world(
+    let (world, spec) = direct_world(
         "direct-tools-fetch-deny",
         "dl-fdeny",
         "[\"fetch.web\"]",
@@ -416,7 +266,7 @@ fn direct_tools_fetch_host_policy_denial() {
 #[test]
 fn direct_tools_todo_write_success() {
     let driver = driver();
-    let (world, spec) = tools_world(
+    let (world, spec) = direct_world(
         "direct-tools-todo-ok",
         "dl-todo",
         "[\"session.todo_write\"]",
@@ -485,7 +335,7 @@ fn direct_tools_todo_write_success() {
 #[test]
 fn direct_tools_todo_write_validation_rejection() {
     let driver = driver();
-    let (world, spec) = tools_world(
+    let (world, spec) = direct_world(
         "direct-tools-todo-bad",
         "dl-todobad",
         "[\"session.todo_write\"]",
@@ -543,7 +393,7 @@ fn direct_tools_todo_write_validation_rejection() {
 #[test]
 fn direct_tools_catalog_exposure_matches_enabled() {
     let driver = driver();
-    let (world, spec) = tools_world(
+    let (world, spec) = direct_world(
         "direct-tools-catalog",
         "dl-cat",
         "[\"observe.workspace\", \"mutate.create\", \"session.todo_write\"]",
@@ -590,7 +440,7 @@ fn direct_tools_catalog_exposure_matches_enabled() {
 #[test]
 fn direct_tools_retired_methods_fail_closed() {
     let driver = driver();
-    let (world, spec) = tools_world(
+    let (world, spec) = direct_world(
         "direct-tools-retired",
         "dl-ret",
         "[\"observe.workspace\"]",

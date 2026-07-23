@@ -16,21 +16,15 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-/// Fixed response the fixture serves for every request.
+/// Fixed plain-text response the fixture serves for every request.
 #[derive(Debug, Clone)]
 pub struct HttpFixture {
-    pub status: u16,
-    pub content_type: String,
-    pub body: String,
+    body: String,
 }
 
 impl HttpFixture {
-    pub fn plain(status: u16, body: impl Into<String>) -> Self {
-        Self {
-            status,
-            content_type: "text/plain".into(),
-            body: body.into(),
-        }
+    pub fn plain(body: impl Into<String>) -> Self {
+        Self { body: body.into() }
     }
 }
 
@@ -207,24 +201,13 @@ fn handle_request(
         wake.notify_all();
     }
 
-    let reason = match fixture.status {
-        200 => "OK",
-        404 => "Not Found",
-        other => {
-            let _ = other;
-            "OK"
-        }
-    };
     let body = fixture.body.as_bytes();
     let response = format!(
-        "HTTP/1.1 {} {}\r\n\
-         Content-Type: {}\r\n\
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/plain\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
          \r\n",
-        fixture.status,
-        reason,
-        fixture.content_type,
         body.len()
     );
     stream.write_all(response.as_bytes())?;
@@ -241,8 +224,7 @@ mod tests {
 
     #[test]
     fn fixture_http_captures_request_and_returns_body() {
-        let server =
-            FixtureHttpServer::start(HttpFixture::plain(200, "fixture body")).expect("start");
+        let server = FixtureHttpServer::start(HttpFixture::plain("fixture body")).expect("start");
         let url = server.url_path("/hello");
         // Parse host/port from base_url — connect via 127.0.0.1.
         let port = server.port();

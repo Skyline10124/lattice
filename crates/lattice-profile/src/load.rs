@@ -131,27 +131,19 @@ fn validate_llm_timeout(path: &Path, profile: &AgentProfile) -> Result<(), Profi
     let Some(secs) = profile.llm.timeout_secs else {
         return Ok(());
     };
-    if secs == 0 {
-        return Err(ProfileError::InvalidField {
-            path: path.to_path_buf(),
-            section: "llm".into(),
-            field: "timeout_secs".into(),
-            value: secs.to_string().into_boxed_str(),
-            reason: "timeout must be nonzero".into(),
-            expected: "timeout_secs must be > 0".into(),
-        });
-    }
-    if secs > 3600 {
-        return Err(ProfileError::InvalidField {
-            path: path.to_path_buf(),
-            section: "llm".into(),
-            field: "timeout_secs".into(),
-            value: secs.to_string().into_boxed_str(),
-            reason: "timeout is too large".into(),
-            expected: "timeout_secs must be <= 3600".into(),
-        });
-    }
-    Ok(())
+    let (reason, expected) = match secs {
+        0 => ("timeout must be nonzero", "timeout_secs must be > 0"),
+        3601.. => ("timeout is too large", "timeout_secs must be <= 3600"),
+        _ => return Ok(()),
+    };
+    Err(ProfileError::InvalidField {
+        path: path.to_path_buf(),
+        section: "llm".into(),
+        field: "timeout_secs".into(),
+        value: secs.to_string().into_boxed_str(),
+        reason: reason.into(),
+        expected: expected.into(),
+    })
 }
 
 /// Check raw TOML content for forbidden top-level sections.

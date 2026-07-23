@@ -31,12 +31,11 @@
 - **升级条件**: 若 jobs=4 cap 在常驻 app 全开时仍 OOM(更重型编译单元、更大 codegen)→ 升为 HIGH,考虑降 jobs 到 2 或加 zram。
 - **计划**: (a) 已落地 xtask ci 改造;(b) 推荐 owner 跑门前关非必要 Electron app(非强制);(c) CI(ubuntu/macos-latest,资源充足无桌面 app)不受影响,无需改 CI 配置。**#27 issue 应补 comment 修正方向**:真凶是环境侧超售,非 lattice 测试 bug,指向本 finding 与 FIX.md `#27` 条目。
 
-### T-23-01: #24 Direct-Local assertion-level replacements 尚待落地 — `test-refactor` / #23 / #24
-- **位置**: `docs/TEST-TRIAGE.md` §1.5（精确移交 #24 表）；`docs/test-triage-decisions.json`（44 条 `planned_direct_*`）。
-- **问题**: #22 triage 的 1449 条中 86 条 `decision=elevate` 需以 external-binary 场景接管产品行为。#23 切片 1–2 已落地 fast-binary takeovers 并删除对应内部测试；切片 3–4 已退役 MSB/KVM 词汇并把 57 条 stale-layer 行精确分成 44 个 #24 assertion-level scenario + 11 条退役 delete + 1 条 #40 plain-text takeover + 1 条 PTY smoke layer 改写。剩余的 44 条 `planned_direct_*` 尚未由 #24 实现与验证。
-- **当前状态**: 2026-07-23 closed — #24 全部落地。44 条 `planned_direct_*` 已由 Direct-Local external-binary scenarios 接管：slice 0–8 落地 `direct_turn_contract`（turn 生命周期 + reopen 上下文）、`direct_observation`（visibility/bounds）、`direct_mutation`（原子 mutation/并发/effect 拒绝）、`direct_tools`（fetch/todo/catalog/退役方法）、`direct_failures`（provider 失败/SIGINT/deadline/无回滚）、`direct_operator`（audit query/replay/tail/lancet status/session status/log 交叉校验）、`direct_secrets`（sentinel 扫描）、`direct_session_isolation`（双 session 图隔离）。20 条严格超集已删除内部测试；20 条半保留条目保留原测试并附明确 residual 理由（durable log/transcript/terminal_reason/attestation 半未覆盖）。最终分布 keep 1186 / elevate 62 / delete 201（总 1449 不变）。所有退役 surface 搜索通过（无 KVM/MSB/OCI/Upper override 活跃代码）。
+
+
 
 ## LOW
+
 
 ### L-5-01: `lancet-protocol` Cell core coexists add-only with legacy `ImpactKind` — `architecture` / #5 / #6 / #12
 - **位置**: `crates/lancet-protocol/src/cell.rs` (new ADR 0004 closed core: `CtxOp`/`ExtImpact`/`Trust`/`ChannelKind`/`ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`/`ToolOutput`); `crates/lancet-protocol/src/effect_types.rs` (`ImpactKind`/`EffectScopeKind`/`OverlayBehavior`/`FailureSemantics`/`EffectDecl`, still consumed by production handlers).
@@ -143,6 +142,20 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### T-24-01: Direct-Local observation root-escape acceptance coverage — `verification` / #24
+- **Current status**: 2026-07-23 closed — `direct_observation` now drives traversal and absolute outside-root paths through read/list/grep/find (8 calls), requires public `GuardDenied` CEP finishes, exact denial text, no canary leakage, unchanged outside bytes, and a completed Turn. Focused and full harness runs passed.
+
+### T-24-02: stale mutation `ReplanRequired` identity — `verification` / #24
+- **Current status**: 2026-07-23 closed — the stale-edit scenario now pins public `cep_call_finished` identity (`method=mutate.edit`, `ok=false`, `error_code=ReplanRequired`) while retaining generic Tool failure, external-byte preservation, and same-session reopen visibility. Focused and full harness runs passed.
+
+### L-24-03: Direct-Local integration-test helper duplication — `maintainability` / #24
+- **Current status**: 2026-07-23 closed — shared harness-only plumbing moved into private `tests/support/mod.rs` across all nine Direct-Local integration targets; scenario-specific assertions remain local, no product/public API or dependency was added, and the full harness plus all-target clippy passed.
+
+### T-23-01: #24 Direct-Local assertion-level replacements 尚待落地 — `test-refactor` / #23 / #24
+- **位置**: `docs/TEST-TRIAGE.md` §1.5（精确移交 #24 表）；`docs/test-triage-decisions.json`（44 条 `planned_direct_*`）。
+- **问题**: #22 triage 的 1449 条中 86 条 `decision=elevate` 需以 external-binary 场景接管产品行为。#23 切片 1–2 已落地 fast-binary takeovers 并删除对应内部测试；切片 3–4 已退役 MSB/KVM 词汇并把 57 条 stale-layer 行精确分成 44 个 #24 assertion-level scenario + 11 条退役 delete + 1 条 #40 plain-text takeover + 1 条 PTY smoke layer 改写。剩余的 44 条 `planned_direct_*` 尚未由 #24 实现与验证。
+- **当前状态**: 2026-07-23 closed — #24 全部落地。44 条 `planned_direct_*` 已由 Direct-Local external-binary scenarios 接管：slice 0–8 落地 `direct_turn_contract`（turn 生命周期 + reopen 上下文）、`direct_observation`（visibility/bounds）、`direct_mutation`（原子 mutation/并发/effect 拒绝）、`direct_tools`（fetch/todo/catalog/退役方法）、`direct_failures`（provider 失败/SIGINT/deadline/无回滚）、`direct_operator`（audit query/replay/tail/lancet status/session status/log 交叉校验）、`direct_secrets`（sentinel 扫描）、`direct_session_isolation`（双 session 图隔离）。20 条严格超集已删除内部测试；20 条半保留条目保留原测试并附明确 residual 理由（durable log/transcript/terminal_reason/attestation 半未覆盖）。最终分布 keep 1186 / elevate 62 / delete 201（总 1449 不变）。所有退役 surface 搜索通过（无 KVM/MSB/OCI/Upper override 活跃代码）。
 
 ### T-23-03: 158 条 `lattice-workspace` keep 行指向已随 #40 删除的 crate — keep 决定待重审 - `test-refactor` / #23 / #24
 - **当前状态**: 2026-07-19 closed — resolved by owner decision (option a)。158 行全部补记 delete（reason 对齐切片 3 的 11 条 OBSOLETE 口径：「#40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete，不向 #24 虚构 replacement」），replacement 置 `n/a`，identity/target_layer(local_invariant) 不变。计数基线 keep 1337→1179 / elevate 86 / delete 26→184（总 1449 不变）；§1 汇总、按 crate 表、§1.5 决定分布与 lattice-workspace 小节 158 行全部同步。全量 1449 行 prose↔ledger 一致性校验零 mismatches，19 个 crate 计数行全对齐。完整记录见 FIX.md 对应条目。

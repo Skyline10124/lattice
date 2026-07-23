@@ -54,6 +54,8 @@ agent loop over `lancet-api`'s CEP runtime.
   `lancet-api` crate. `cep.rs` is now only the LATTICE↔LANCET seam (profile→policy
   translation, `CepExecutorAdapter`, event mapping); `enabled_tools.rs` moved to
   `lancet-api`.
+- FIXED #24: public `TurnStarted` includes `turn_id` for audit replay, and
+  `[llm].timeout_secs` lowers to the agent turn deadline in `turn/mapping.rs`.
 - FIXED H-06: `stream_turn` now streams live instead of replaying buffered
   events after full turn completion.
 - FIXED M-19b: observer backpressure no longer blocks live task drain/commit.

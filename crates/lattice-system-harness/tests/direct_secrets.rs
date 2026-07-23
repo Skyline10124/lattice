@@ -8,116 +8,19 @@
 //! (command stdout/stderr, parsed JSONL, session status/log, audit
 //! query/replay, lancet status, provenance JSON) and asserts no sentinel
 //! leaks. A detected sentinel is an assertion failure.
-//!
-//! ponytail: helpers duplicate other Direct-Local tests; later-slice split
-//! owns the dedupe.
 
 #![cfg(unix)]
 
+mod support;
+
 use std::fs;
-use std::process::Output;
 
 use lattice_system_harness::{
-    AssertError, CommandOutcome, FAKE_API_KEY, LatticeDriver, ScenarioEvidence, ScenarioSpec,
-    ScenarioWorld, SendExecution, SessionSendDriver, SseScript, Termination, failure_dir,
+    AssertError, FAKE_API_KEY, SessionSendDriver, SseScript, failure_dir,
 };
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
-    if !matches!(&execution.command.termination, Termination::Exited(Some(_))) {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send did not exit normally: {:?}",
-                execution.command.termination
-            ),
-        });
-    }
-    if !execution.malformed_lines.is_empty() {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send emitted malformed JSONL: {:?}",
-                execution.malformed_lines
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(AssertError::StdoutMissing {
-            expected: expected.into(),
-        })
-    }
-}
-
-fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
-        .expect("scenario evidence")
-}
-
-fn finish_scenario(
-    mut evidence: ScenarioEvidence,
-    commands: &[(&str, &CommandOutcome)],
-    result: Result<(), AssertError>,
-) {
-    for (summary, outcome) in commands {
-        evidence.record_command(*summary, outcome);
-    }
-    evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
-}
-
-fn wire_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> lattice_system_harness::FakeLlmServer {
-    let server = lattice_system_harness::FakeLlmServer::start(script).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    server
-}
-
-fn secrets_world(prefix: &str, agent: &str, tools: &str) -> (ScenarioWorld, ScenarioSpec) {
-    let spec = ScenarioSpec::direct_local(prefix);
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    let toml = format!(
-        "schema_version = 1\n\n\
-         [agent]\nname = \"{agent}\"\nmodel = \"compat:{agent}\"\n\n\
-         [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = {tools}\n"
-    );
-    world
-        .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
-        .expect("write agent.toml");
-    world.init_git_project().expect("init git");
-    (world, spec)
-}
-
-fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
-    driver()
-        .run(
-            world,
-            &lattice_system_harness::LatticeCommand {
-                args: args.iter().map(|s| s.to_string()).collect(),
-                timeout: Some(spec.step_timeout()),
-            },
-        )
-        .expect("drive lattice")
-        .output
-}
+use support::{
+    assert_clean_send, cli, direct_world, driver, evidence, finish_scenario, require, wire_fake_llm,
+};
 
 /// A unique denied-content sentinel that must never leak into terminal output.
 const DENIED_CONTENT_SENTINEL: &str = "sentinel-denied-content-0xDEADBEEF";
@@ -129,7 +32,7 @@ const DENIED_CONTENT_SENTINEL: &str = "sentinel-denied-content-0xDEADBEEF";
 #[test]
 fn direct_secrets_sentinels_never_leak_into_public_sinks() {
     let driver = driver();
-    let (world, spec) = secrets_world("direct-secrets", "dl-secret", "[]");
+    let (world, spec) = direct_world("direct-secrets", "dl-secret", "[]", "");
     // Seed a file whose content carries the denied-content sentinel. The turn
     // never reads it (no tools enabled), so it must not appear anywhere.
     world
@@ -236,6 +139,7 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
     finish_scenario(
         scenario_evidence,
         &[("secrets sentinels", &turn.command)],
+        Vec::new(),
         result,
     );
 }
@@ -246,7 +150,7 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
 #[test]
 fn direct_secrets_failure_bundle_redacts_sentinels() {
     let driver = driver();
-    let (world, spec) = secrets_world("direct-secrets-bundle", "dl-sec-b", "[]");
+    let (world, spec) = direct_world("direct-secrets-bundle", "dl-sec-b", "[]", "");
     let server = wire_fake_llm(
         &world,
         "dl-sec-b",
@@ -303,6 +207,7 @@ fn direct_secrets_failure_bundle_redacts_sentinels() {
     finish_scenario(
         scenario_evidence,
         &[("secrets bundle", &turn.command)],
+        Vec::new(),
         result,
     );
     let _ = captures;

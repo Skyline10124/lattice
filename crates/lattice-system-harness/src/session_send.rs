@@ -497,18 +497,6 @@ pub enum SessionSendError {
     NewSessionFailed { code: Option<i32> },
 }
 
-/// Create a session via `lattice --json session new` and return the new
-/// session id parsed from the public JSON output.
-pub fn create_session(
-    driver: &LatticeDriver,
-    world: &ScenarioWorld,
-    spec: &ScenarioSpec,
-    agent: &str,
-    project_branch: &str,
-) -> Result<String, SessionSendError> {
-    create_session_with_timeout(driver, world, spec.step_timeout(), agent, project_branch)
-}
-
 fn create_session_with_timeout(
     driver: &LatticeDriver,
     world: &ScenarioWorld,
@@ -548,22 +536,6 @@ fn create_session_with_timeout(
             stdout: stdout.to_string(),
         })?;
     Ok(id.to_string())
-}
-
-/// Drive one full turn: `lattice --json session send <id> <prompt>`.
-///
-/// Returns the captured [`SendOutcome`] (parsed JSONL + classified exit
-/// code). The caller asserts on the outcome; this function does not fail on
-/// a non-zero exit code, because a `1`/`2` exit is a successful *drive* of
-/// an unsuccessful *turn* and is exactly what negative scenarios assert on.
-pub fn send_prompt(
-    driver: &LatticeDriver,
-    world: &ScenarioWorld,
-    spec: &ScenarioSpec,
-    session_id: &str,
-    prompt: &str,
-) -> Result<SendExecution, DriverError> {
-    send_prompt_with_timeout(driver, world, spec.step_timeout(), session_id, prompt)
 }
 
 fn send_prompt_with_timeout(

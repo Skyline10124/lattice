@@ -3906,3 +3906,89 @@ passed.
 **Changed files:**
 `crates/lattice-api/tests/git_store_{branch_checkout,diff,head_transcript,profile_snapshot,reset,session_create_open,session_prefix_resolve}.rs`,
 `FIX.md`.
+
+## Codeberg #24 review cleanup: remove dead flexibility and impossible branches — 2026-07-23
+
+Severity: LOW (behavior-preserving simplification and review-record hygiene).
+
+**Problem:** The completed #24 series left two unused public harness wrappers,
+configurable HTTP fixture fields that every caller fixed to `200 text/plain`, an
+impossible `cancel_poll` fallback branch, duplicated timeout error construction,
+stale crate-local change records, and a closed T-23-01 entry in the open section
+of `FINDINGS.md`.
+
+**Fix summary:**
+- Removed the uncalled `create_session` / `send_prompt` wrappers and root
+  re-exports; `SessionSendDriver` remains the only used session-turn driver.
+- Reduced the HTTP fixture to its used fixed `200 OK` / `text/plain` contract.
+- Made `cancel_poll` resolve as `()` only when cancelled, deleting the unreachable
+  boolean fallback while preserving stalled-stream cancellation.
+- Shared one `InvalidField` construction for timeout validation while preserving
+  the zero and upper-bound diagnostic text.
+- Updated affected crate guidance, moved T-23-01 to `OBSOLETE / CLOSED`, and
+  recorded the three residual #24 review gaps as T-24-01, T-24-02, and L-24-03.
+- Rust source/harness diff: 30 insertions, 86 deletions (net `-56` lines).
+
+**Verification:**
+- `cargo +1.96.0 fmt --all -- --check` — passed.
+- `cargo +1.96.0 test -p lattice-profile llm_timeout_secs` — 5 passed.
+- `cargo +1.96.0 test -p lattice-agent --features test-utils cancel_during_stalled_stream_terminates_cancelled` — 1 passed.
+- `cargo +1.96.0 test -p lattice-system-harness --lib fixture_http` — 1 passed.
+- `cargo +1.96.0 test -p lattice-system-harness --no-run` — all harness targets compiled.
+- `cargo +1.96.0 xtask harness-boundary` — passed.
+- Built `lattice`, then ran Direct-Local `direct_failures` + `direct_tools` with
+  `LATTICE_BIN` and one test thread — 7 + 7 passed.
+- Targeted clippy for `lattice-profile`, `lattice-system-harness`, and
+  `lattice-agent` (test-utils), all targets, `-D warnings` — passed.
+- `git diff --check` and pi-lens diagnostics — passed.
+
+**Changed files:**
+`crates/lattice-agent/{AGENTS.md,src/agent_loop/mod.rs}`,
+`crates/lattice-profile/{AGENTS.md,src/load.rs}`,
+`crates/lancet-authority/AGENTS.md`, `crates/lattice-api/AGENTS.md`,
+`crates/lattice-system-harness/src/{fixture_http,lib,session_send}.rs`,
+`crates/lattice-system-harness/tests/direct_tools.rs`, `FINDINGS.md`, `FIX.md`.
+
+## Codeberg #24 review closures: root escape, replan identity, and private test support — 2026-07-23
+
+Severity: MEDIUM verification gaps (T-24-01/T-24-02) + LOW maintainability
+cleanup (L-24-03).
+
+**Problem:** The Direct-Local matrix lacked explicit external-binary root-escape
+coverage for all observation modes and did not pin stale edits to the public
+`ReplanRequired` identity. Nine integration targets also repeated the same
+harness-only driver/evidence/fake-LLM plumbing.
+
+**Fix summary:**
+- Extended `direct_observation` with traversal and absolute outside-root requests
+  for read/list/grep/find. The scenario requires eight public `GuardDenied` CEP
+  finishes, exact denial text, no outside-canary leakage, unchanged outside bytes,
+  and a completed Turn.
+- Extended stale mutation coverage to require public `cep_call_finished` fields
+  `method=mutate.edit`, `ok=false`, and `error_code=ReplanRequired`, while
+  preserving generic Tool failure, external bytes, and same-session reopen checks.
+- Moved only shared integration-test plumbing into private `tests/support/mod.rs`
+  across all nine Direct-Local targets. Scenario-specific fixtures and assertions
+  remain local; no product/public API, manifest, or dependency changed.
+- Direct-Local test diff including the new support module: 417 insertions, 1072
+  deletions (net `-655` lines).
+
+**Verification:**
+- `cargo +1.96.0 fmt --all -- --check` — passed.
+- `cargo +1.96.0 xtask harness-boundary` — passed.
+- `cargo +1.96.0 build -p lattice-cli --bin lattice` — passed.
+- Focused `direct_observation` — 1 passed. The first run exposed the real public
+  classification as `GuardDenied` rather than the planned `PathContainment`; the
+  assertion was corrected and the rerun passed.
+- Focused `direct_mutation_stale_edit_and_external_visibility` — 1 passed.
+- Full `lattice-system-harness` suite with `LATTICE_BIN` and one test thread —
+  131 passed across unit, Direct-Local, fast CLI, and PTY targets.
+- `cargo +1.96.0 clippy -p lattice-system-harness --all-targets -- -D warnings` — passed.
+- `git diff --check`, no staged files, LSP/pi-lens diagnostics — passed.
+- Independent final subagent review found no blocker/regression and approved closing
+  T-24-01, T-24-02, and L-24-03.
+
+**Changed files:**
+`crates/lattice-system-harness/{AGENTS.md,tests/support/mod.rs}`,
+`crates/lattice-system-harness/tests/direct_{failures,local_turn,mutation,observation,operator,secrets,session_isolation,tools,turn_contract}.rs`,
+`FINDINGS.md`, `FIX.md`.

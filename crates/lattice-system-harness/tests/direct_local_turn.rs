@@ -22,66 +22,13 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use lattice_system_harness::{
-    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, LatticeDriver, ScenarioEvidence,
-    ScenarioSpec, ScenarioWorld, SendExecution, SendExitCode, SessionSendDriver, SseScript,
-    Termination, TurnEventLine, assert_event_subsequence, derive_send_exit_code, failure_dir,
+    AssertError, ScenarioSpec, ScenarioWorld, SendExitCode, SessionSendDriver, SseScript,
+    TurnEventLine, assert_event_subsequence, derive_send_exit_code,
 };
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
-    if !matches!(&execution.command.termination, Termination::Exited(Some(_))) {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send did not exit normally: {:?}",
-                execution.command.termination
-            ),
-        });
-    }
-    if !execution.malformed_lines.is_empty() {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send emitted malformed JSONL: {:?}",
-                execution.malformed_lines
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(AssertError::StdoutMissing {
-            expected: expected.into(),
-        })
-    }
-}
-
-fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
-        .expect("scenario evidence")
-}
-
-fn finish_scenario(
-    mut evidence: ScenarioEvidence,
-    commands: &[(&str, &CommandOutcome)],
-    captures: Vec<CapturedRequest>,
-    result: Result<(), AssertError>,
-) {
-    for (summary, outcome) in commands {
-        evidence.record_command(*summary, outcome);
-    }
-    evidence.record_captures(captures);
-    evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
-}
+use support::{assert_clean_send, driver, evidence, finish_scenario, require, wire_fake_llm};
 
 /// A Direct-Local project world with a fake-LLM-backed agent profile.
 ///
@@ -104,23 +51,6 @@ fn turn_world(
         .expect("write agent.toml");
     world.init_git_project().expect("init git project");
     (world, spec)
-}
-
-/// Point the world at a fake LLM through the formal `OPENAI_COMPATIBLE_*`
-/// configuration (RFC #19 decision four: no test-only provider).
-fn wire_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> lattice_system_harness::FakeLlmServer {
-    let server = lattice_system_harness::FakeLlmServer::start(script).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    server
 }
 
 /// Minimal complete turn over the Direct-Local runtime: the fake LLM

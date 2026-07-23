@@ -11,159 +11,24 @@
 //!
 //! Tool results are inspected in the next captured provider request (the
 //! product feeds the CEP result back as a `tool` role message).
-//!
-//! ponytail: helpers duplicate other Direct-Local tests; later-slice split
-//! owns the dedupe.
 
 #![cfg(unix)]
+
+mod support;
 
 use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, LatticeDriver, ScenarioEvidence,
-    ScenarioSpec, ScenarioWorld, SendExecution, SendExitCode, SessionSendDriver, SseScript,
-    Termination, TurnEventLine, assert_event_subsequence, failure_dir,
+    AssertError, SendExitCode, SessionSendDriver, SseScript, TurnEventLine,
+    assert_event_subsequence,
 };
 use serde_json::Value;
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
-    if !matches!(&execution.command.termination, Termination::Exited(Some(_))) {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send did not exit normally: {:?}",
-                execution.command.termination
-            ),
-        });
-    }
-    if !execution.malformed_lines.is_empty() {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send emitted malformed JSONL: {:?}",
-                execution.malformed_lines
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(AssertError::StdoutMissing {
-            expected: expected.into(),
-        })
-    }
-}
-
-fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
-        .expect("scenario evidence")
-}
-
-fn finish_scenario(
-    mut evidence: ScenarioEvidence,
-    commands: &[(&str, &CommandOutcome)],
-    captures: Vec<CapturedRequest>,
-    result: Result<(), AssertError>,
-) {
-    for (summary, outcome) in commands {
-        evidence.record_command(*summary, outcome);
-    }
-    evidence.record_captures(captures);
-    evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
-}
-
-fn wire_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> lattice_system_harness::FakeLlmServer {
-    let server = lattice_system_harness::FakeLlmServer::start(script).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    server
-}
-
-fn wire_gated_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> (
-    lattice_system_harness::FakeLlmServer,
-    lattice_system_harness::ResponseGate,
-) {
-    let (server, gate) =
-        lattice_system_harness::FakeLlmServer::start_gated(script).expect("start gated fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    (server, gate)
-}
-
-fn last_tool_content(capture: &CapturedRequest) -> Option<String> {
-    capture
-        .raw
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|msgs| {
-            msgs.iter()
-                .rev()
-                .find(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
-                .and_then(|m| m.get("content").and_then(Value::as_str))
-                .map(str::to_string)
-        })
-}
-
-fn tool_result_value(capture: &CapturedRequest) -> Option<Value> {
-    let content = last_tool_content(capture)?;
-    if content.starts_with('{') {
-        serde_json::from_str(&content).ok()
-    } else {
-        None
-    }
-}
-
-fn tool_failed(outcome: &lattice_system_harness::SendOutcome, name: &str) -> bool {
-    outcome.events.iter().any(|event| {
-        matches!(
-            event,
-            TurnEventLine::ToolCallFinished {
-                name: n,
-                ok: false,
-                ..
-            } if n == name
-        )
-    })
-}
-
-fn tool_ok(outcome: &lattice_system_harness::SendOutcome, name: &str) -> bool {
-    outcome.events.iter().any(|event| {
-        matches!(
-            event,
-            TurnEventLine::ToolCallFinished {
-                name: n,
-                ok: true,
-                ..
-            } if n == name
-        )
-    })
-}
+use support::{
+    assert_clean_send, direct_world, driver, evidence, finish_scenario, last_tool_content, require,
+    sequence, tool_call, tool_failed, tool_ok, tool_result_value, wire_fake_llm,
+    wire_gated_fake_llm,
+};
 
 fn is_non_completed_terminal(outcome: &lattice_system_harness::SendOutcome) -> bool {
     outcome.events.iter().any(|e| match e {
@@ -175,45 +40,12 @@ fn is_non_completed_terminal(outcome: &lattice_system_harness::SendOutcome) -> b
     }) || outcome.exit_code == Some(SendExitCode::Failed)
 }
 
-fn mutation_world(
-    prefix: &str,
-    agent: &str,
-    tools: &str,
-    extra_profile: &str,
-) -> (ScenarioWorld, ScenarioSpec) {
-    let spec = ScenarioSpec::direct_local(prefix);
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    let toml = format!(
-        "schema_version = 1\n\n\
-         [agent]\nname = \"{agent}\"\nmodel = \"compat:{agent}\"\n\n\
-         [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = {tools}\n{extra_profile}"
-    );
-    world
-        .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
-        .expect("write agent.toml");
-    world.init_git_project().expect("init git");
-    (world, spec)
-}
-
-fn tool_call(id: &str, name: &str, args: &str) -> SseScript {
-    SseScript::ToolCall {
-        call_id: id.into(),
-        tool_name: name.into(),
-        arguments_json: args.into(),
-    }
-}
-
-fn sequence(scripts: Vec<SseScript>) -> SseScript {
-    SseScript::Sequence { scripts }
-}
-
 /// `mutate.create` succeeds only while the target is absent; bytes appear
 /// immediately. A second create of the same path fails and preserves bytes.
 #[test]
 fn direct_mutation_create_atomic_and_existing_target() {
     let driver = driver();
-    let (world, spec) = mutation_world("direct-mut-create", "dl-create", "[\"mutate.create\"]", "");
+    let (world, spec) = direct_world("direct-mut-create", "dl-create", "[\"mutate.create\"]", "");
     let server = wire_fake_llm(
         &world,
         "dl-create",
@@ -296,7 +128,7 @@ fn direct_mutation_create_atomic_and_existing_target() {
 #[test]
 fn direct_mutation_edit_hash_and_anchor() {
     let driver = driver();
-    let (world, spec) = mutation_world(
+    let (world, spec) = direct_world(
         "direct-mut-edit",
         "dl-edit",
         "[\"observe.workspace\", \"mutate.edit\"]",
@@ -424,7 +256,7 @@ fn direct_mutation_edit_hash_and_anchor() {
 #[test]
 fn direct_mutation_stale_edit_and_external_visibility() {
     let driver = driver();
-    let (world, spec) = mutation_world(
+    let (world, spec) = direct_world(
         "direct-mut-stale",
         "dl-stale",
         "[\"observe.workspace\", \"mutate.edit\"]",
@@ -495,6 +327,21 @@ fn direct_mutation_stale_edit_and_external_visibility() {
             tool_failed(&stale.parsed, "mutate.edit"),
             "stale edit must fail",
         )?;
+        let replan_required = stale.parsed.events.iter().any(|event| match event {
+            TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
+                raw.get("method").and_then(Value::as_str) == Some("mutate.edit")
+                    && raw.get("ok").and_then(Value::as_bool) == Some(false)
+                    && raw.get("error_code").and_then(Value::as_str) == Some("ReplanRequired")
+            }
+            _ => false,
+        });
+        require(
+            replan_required,
+            format!(
+                "stale edit must emit ReplanRequired: {:?}",
+                stale.parsed.events
+            ),
+        )?;
         require(
             fs::read_to_string(world.project_dir().join("tracked.txt")).unwrap_or_default()
                 == "external\n",
@@ -535,7 +382,7 @@ fn direct_mutation_stale_edit_and_external_visibility() {
 #[test]
 fn direct_mutation_no_rollback_after_provider_failure() {
     let driver = driver();
-    let (world, spec) = mutation_world(
+    let (world, spec) = direct_world(
         "direct-mut-norollback",
         "dl-noroll",
         "[\"mutate.create\"]",
@@ -600,7 +447,7 @@ fn direct_mutation_no_rollback_after_provider_failure() {
 fn direct_mutation_denials_have_no_side_effect() {
     let driver = driver();
 
-    let (world, spec) = mutation_world(
+    let (world, spec) = direct_world(
         "direct-mut-deny-write",
         "dl-dwrite",
         "[\"mutate.create\"]",
@@ -625,8 +472,7 @@ fn direct_mutation_denials_have_no_side_effect() {
     let caps1 = server.captured_requests();
     drop(server);
 
-    let (world2, spec2) =
-        mutation_world("direct-mut-deny-sys", "dl-dsys", "[\"mutate.create\"]", "");
+    let (world2, spec2) = direct_world("direct-mut-deny-sys", "dl-dsys", "[\"mutate.create\"]", "");
     let server2 = wire_fake_llm(
         &world2,
         "dl-dsys",
@@ -646,7 +492,7 @@ fn direct_mutation_denials_have_no_side_effect() {
     let caps2 = server2.captured_requests();
     drop(server2);
 
-    let (world3, spec3) = mutation_world(
+    let (world3, spec3) = direct_world(
         "direct-mut-deny-effect",
         "dl-deff",
         "[\"mutate.create\"]",
@@ -730,7 +576,7 @@ fn direct_mutation_denials_have_no_side_effect() {
 #[test]
 fn direct_mutation_concurrent_commit_race() {
     let driver = driver();
-    let (world, spec) = mutation_world("direct-mut-race", "dl-race", "[\"mutate.create\"]", "");
+    let (world, spec) = direct_world("direct-mut-race", "dl-race", "[\"mutate.create\"]", "");
 
     let (server, gate) = wire_gated_fake_llm(
         &world,
@@ -815,7 +661,7 @@ fn direct_mutation_concurrent_commit_race() {
 #[test]
 fn direct_mutation_tool_activity_before_commit() {
     let driver = driver();
-    let (world, spec) = mutation_world("direct-mut-order", "dl-order", "[\"mutate.create\"]", "");
+    let (world, spec) = direct_world("direct-mut-order", "dl-order", "[\"mutate.create\"]", "");
     let server = wire_fake_llm(
         &world,
         "dl-order",

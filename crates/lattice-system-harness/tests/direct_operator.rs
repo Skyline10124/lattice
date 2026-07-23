@@ -8,135 +8,21 @@
 //! commands and assert row counts, methods, impacts, verdicts, activity
 //! order, and stored attestation match. Unknown session/turn are explicit
 //! nonzero failures.
-//!
-//! ponytail: helpers duplicate other Direct-Local tests; later-slice split
-//! owns the dedupe.
 
 #![cfg(unix)]
+
+mod support;
 
 use std::process::Output;
 
 use lattice_system_harness::{
-    AssertError, CommandOutcome, FAKE_API_KEY, LatticeDriver, ScenarioEvidence, ScenarioSpec,
-    ScenarioWorld, SendExecution, SessionSendDriver, SseScript, Termination, TurnEventLine,
-    failure_dir,
+    AssertError, SendExecution, SessionSendDriver, SseScript, TurnEventLine,
 };
 use serde_json::Value;
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
-    if !matches!(&execution.command.termination, Termination::Exited(Some(_))) {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send did not exit normally: {:?}",
-                execution.command.termination
-            ),
-        });
-    }
-    if !execution.malformed_lines.is_empty() {
-        return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send emitted malformed JSONL: {:?}",
-                execution.malformed_lines
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(AssertError::StdoutMissing {
-            expected: expected.into(),
-        })
-    }
-}
-
-fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, failure_dir(&spec.name), [FAKE_API_KEY.to_string()])
-        .expect("scenario evidence")
-}
-
-fn finish_scenario(
-    mut evidence: ScenarioEvidence,
-    commands: &[(&str, &CommandOutcome)],
-    result: Result<(), AssertError>,
-) {
-    for (summary, outcome) in commands {
-        evidence.record_command(*summary, outcome);
-    }
-    evidence
-        .finish(result.is_err())
-        .unwrap_or_else(|error| panic!("scenario evidence failed: {error}"));
-    result.unwrap_or_else(|error| panic!("{error}"));
-}
-
-fn wire_fake_llm(
-    world: &ScenarioWorld,
-    agent: &str,
-    script: SseScript,
-) -> lattice_system_harness::FakeLlmServer {
-    let server = lattice_system_harness::FakeLlmServer::start(script).expect("start fake llm");
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_MODEL", agent);
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
-    );
-    server
-}
-
-fn operator_world(
-    prefix: &str,
-    agent: &str,
-    tools: &str,
-    extra_profile: &str,
-) -> (ScenarioWorld, ScenarioSpec) {
-    let spec = ScenarioSpec::direct_local(prefix);
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    let toml = format!(
-        "schema_version = 1\n\n\
-         [agent]\nname = \"{agent}\"\nmodel = \"compat:{agent}\"\n\n\
-         [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = {tools}\n{extra_profile}"
-    );
-    world
-        .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
-        .expect("write agent.toml");
-    world.init_git_project().expect("init git");
-    (world, spec)
-}
-
-fn tool_call(id: &str, name: &str, args: &str) -> SseScript {
-    SseScript::ToolCall {
-        call_id: id.into(),
-        tool_name: name.into(),
-        arguments_json: args.into(),
-    }
-}
-
-fn sequence(scripts: Vec<SseScript>) -> SseScript {
-    SseScript::Sequence { scripts }
-}
-
-/// Run a lattice CLI command under the scenario budget and return its output.
-fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
-    driver()
-        .run(
-            world,
-            &lattice_system_harness::LatticeCommand {
-                args: args.iter().map(|s| s.to_string()).collect(),
-                timeout: Some(spec.step_timeout()),
-            },
-        )
-        .expect("drive lattice")
-        .output
-}
+use support::{
+    assert_clean_send, cli, direct_world, driver, evidence, finish_scenario, require, sequence,
+    tool_call, wire_fake_llm,
+};
 
 /// Parse JSON output (one object per command, not JSONL).
 fn parse_json(out: &Output) -> Value {
@@ -178,7 +64,7 @@ fn turn_id_of(outcome: &SendExecution) -> Option<String> {
 #[test]
 fn direct_operator_audit_session_lancet_cross_validate() {
     let driver = driver();
-    let (world, spec) = operator_world(
+    let (world, spec) = direct_world(
         "direct-operator-cross",
         "dl-op",
         "[\"observe.workspace\",\"mutate.create\"]",
@@ -414,6 +300,7 @@ fn direct_operator_audit_session_lancet_cross_validate() {
     finish_scenario(
         scenario_evidence,
         &[("turn 1", &t1.command), ("turn 2", &t2.command)],
+        Vec::new(),
         result,
     );
     let _ = captures;
@@ -423,7 +310,7 @@ fn direct_operator_audit_session_lancet_cross_validate() {
 #[test]
 fn direct_operator_audit_query_unknown_session_empty() {
     let driver = driver();
-    let (world, spec) = operator_world("direct-operator-unknown-sess", "dl-op-unk", "[]", "");
+    let (world, spec) = direct_world("direct-operator-unknown-sess", "dl-op-unk", "[]", "");
     // Seed the audit store with one real turn so the store exists, then query
     // a different (unknown) session.
     let _server = wire_fake_llm(&world, "dl-op-unk", SseScript::plain("seed"));
@@ -467,6 +354,7 @@ fn direct_operator_audit_query_unknown_session_empty() {
     finish_scenario(
         scenario_evidence,
         &[("audit query unknown session", &seed.command)],
+        Vec::new(),
         result,
     );
 }
@@ -475,7 +363,7 @@ fn direct_operator_audit_query_unknown_session_empty() {
 #[test]
 fn direct_operator_audit_replay_unknown_turn_fails() {
     let driver = driver();
-    let (world, spec) = operator_world("direct-operator-unknown-turn", "dl-op-ut", "[]", "");
+    let (world, spec) = direct_world("direct-operator-unknown-turn", "dl-op-ut", "[]", "");
     let _server = wire_fake_llm(&world, "dl-op-ut", SseScript::plain("seed"));
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-op-ut", "main").expect("session");
     let seed = send.send("seed turn").expect("seed");
@@ -512,6 +400,7 @@ fn direct_operator_audit_replay_unknown_turn_fails() {
     finish_scenario(
         scenario_evidence,
         &[("audit replay unknown turn", &seed.command)],
+        Vec::new(),
         result,
     );
 }

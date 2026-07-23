@@ -1372,9 +1372,7 @@ async fn await_with_deadline_and_cancel<T>(
         biased;
         result = fut => Ok(result),
         _ = sleep_until_deadline(deadline) => Err(StallOutcome::DeadlineElapsed),
-        cancelled = cancel_poll(cancel_flag) => {
-            if cancelled { Err(StallOutcome::Cancelled) } else { Err(StallOutcome::DeadlineElapsed) }
-        }
+        _ = cancel_poll(cancel_flag) => Err(StallOutcome::Cancelled),
     }
 }
 
@@ -1387,16 +1385,16 @@ async fn sleep_until_deadline(deadline: Option<Instant>) {
 }
 
 /// Poll the cancel flag every [`CANCEL_POLL_INTERVAL`]; never resolves when
-/// `None`. Returns `true` once the flag is observed set.
-async fn cancel_poll(cancel_flag: Option<&Arc<AtomicBool>>) -> bool {
+/// `None`, and resolves only after the flag is observed set.
+async fn cancel_poll(cancel_flag: Option<&Arc<AtomicBool>>) {
     match cancel_flag {
         Some(flag) => loop {
             if flag.load(Ordering::Relaxed) {
-                return true;
+                return;
             }
             tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
         },
-        None => std::future::pending::<bool>().await,
+        None => std::future::pending::<()>().await,
     }
 }
 
