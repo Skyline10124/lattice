@@ -6150,10 +6150,10 @@
     "name": "stream_turn_live_with_agent_commit_failure_deterministic",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_commit_failure",
-    "reason": "#72 final review：现有 external scenarios 覆盖正常 commit 且 harness 可解析 CommitFailed；未覆盖同 session stale-parent race、TokenDelta/TurnCommitting→CommitFailed、无 TurnCommitted 与 durable log 不增第三条。后续 owner：lattice-system-harness Direct-Local turn-conflict scenario。"
+    "replacement": "direct_failure_stale_parent_commit_failed",
+    "reason": "#46 residual elevate closeout：direct_failure_stale_parent_commit_failed 通过 baseline+gated A+retargeted racer B 断言 token_delta→turn_committing→commit_failed（非空 reason）、无 turn_committed、public session log 长度=2（baseline+racer）；严格超集。已删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8394,10 +8394,10 @@
     "name": "usage_stream_turn_model_started_includes_routed_provider",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_routed_provider_event",
-    "reason": "#72 final review：direct_turn_completed_reopen_contract 已覆盖 openai_compatible/compat 路由事件与 wire model；尚未覆盖默认 sonnet→anthropic 路由分支。后续 owner：lattice-system-harness provider-routing scenario；保留明确 planned behavior。"
+    "replacement": "direct_turn_sonnet_routed_provider_event",
+    "reason": "#46 residual elevate closeout：direct_turn_sonnet_routed_provider_event 断言默认 sonnet→anthropic 的 public model_started（缺 ANTHROPIC_API_KEY，不接触 api.anthropic.com），并断言 credential-class terminal、非 completed、exit Failed；严格超集。已删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -8430,10 +8430,10 @@
     "name": "public_https_policy_requires_fetch_capability",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_fetch_capability_denial",
-    "reason": "#72 final review：direct_tools 已覆盖 disabled fetch 与 localhost host-policy denial；尚未覆盖 allow_public_https=true 且缺 FetchUrl capability 的拒绝，以及 fetch.web CepCallStarted external_observation/cep_native 标签。后续 owner：lattice-system-harness fetch capability scenario。"
+    "replacement": "direct_tools_fetch_capability_denial_with_public_https",
+    "reason": "#46 residual elevate closeout：direct_tools_fetch_capability_denial_with_public_https 断言 allow_public_https=true + empty allowed_hosts 下 fetch.web 以 EffectViolation/authorized-region 失败（Enforce 下出站前拒绝）、cep_call_started impact_kind=external_observation/semantic_stage=cep_native、turn_committed completed；严格超集。已删除原测试。"
   },
   {
     "crate": "lattice-api",

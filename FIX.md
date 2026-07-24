@@ -2,6 +2,54 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #46 residual finalization: fetch capability pre-outbound + scenario tighten — 2026-07-24
+
+Severity: test refactor / product fail-closed / review closeout.
+
+**Problem:** Independent reviews of the #46 residual elevate closeout found `direct_tools_fetch_capability_denial_with_public_https` was not a faithful FetchUrl-hosts denial: with `allow_public_https=true` + empty `allowed_hosts`, URL validation still allowed public HTTPS, `fetch.web` performed ambient outbound I/O first, and post-dispatch effect checking ran only after a successful handler — so `tool_failed` also passed on DNS/HTTP failure. Comments claimed pre-network denial. The sonnet routed-provider scenario under-asserted the credential failure half it relied on.
+
+**Fix:**
+- In `lancet-native` `fetch.web`, Enforce mode now checks the authorized FetchUrl host region after URL validation and before outbound HTTP; empty/mismatched hosts return `EffectViolation` with authorized-region language and no backend effect.
+- Strengthened `direct_tools_fetch_capability_denial_with_public_https` to require effect/authorized-region tool error text, restore `turn_committed(status=completed)`, and correct comments.
+- Tightened `direct_turn_sonnet_routed_provider_event` to require credential-class terminal, non-completed turn, and Failed exit alongside `model_started` anthropic/sonnet.
+- Added native unit proof `native_web_fetch_empty_hosts_denies_before_outbound_in_enforce`.
+
+**Verification:**
+- `cargo +1.96.0 fmt --all --check` — passed.
+- `cargo +1.96.0 clippy --workspace --all-targets -- -D warnings` — passed.
+- `cargo +1.96.0 xtask harness-boundary` / `lancet-boundary` — passed.
+- `native_web_fetch_empty_hosts_denies_before_outbound_in_enforce` — passed (~0.00s).
+- Focused residual harness scenarios (fetch/sonnet/stale-parent) — passed; fetch ~0.33s (no ambient egress).
+- `cargo +1.96.0 test -p lattice-api --test usage_turn` / `--lib turn::live_tests` — passed.
+- `LATTICE_BIN=... cargo +1.96.0 test -p lattice-system-harness --test 'direct_*'` — 39 scenarios passed.
+- Ledger recount: 1449 / keep 1193 / elevate 42 / delete 214; no `planned_direct_*` replacements.
+- `cargo +1.96.0 xtask ci` — All checks passed.
+- `lens_diagnostics mode=all` — not available in this workspace; compensated via fmt/clippy/boundaries/focused+harness/`xtask ci`.
+
+**Changed files:**
+`crates/lancet-native/src/handlers/external.rs`; `crates/lattice-system-harness/tests/{direct_tools,direct_turn_contract}.rs`; `docs/TEST-TRIAGE.md`; `docs/test-triage-decisions.json`; `FIX.md`.
+
+## GitHub #46 residual: land 3 elevate Direct-Local scenarios — 2026-07-24
+
+Severity: test refactor / ledger closeout.
+
+**Problem:** After #72, three Direct-Local handoff identities remained `elevate` with planned replacements: stale-parent `CommitFailed`, default `sonnet`→Anthropic `model_started`, and `allow_public_https` + empty FetchUrl hosts denial with CEP labels.
+
+**Fix:**
+- Added exact external scenarios: `direct_tools_fetch_capability_denial_with_public_https`, `direct_turn_sonnet_routed_provider_event`, `direct_failure_stale_parent_commit_failed`.
+- Deleted superseded internals only after green supersets: `public_https_policy_requires_fetch_capability`, `usage_stream_turn_model_started_includes_routed_provider`, `stream_turn_live_with_agent_commit_failure_deterministic` (+ unused `BlockingLlmClient` / CEP network helper).
+- Synced machine/prose ledger: elevate→delete for the three identities; totals keep 1193 / elevate 42 / delete 214 (1449 unchanged). Handoff partition now keep 14 / elevate 0 / delete 30.
+
+**Verification:**
+- `cargo +1.96.0 xtask harness-boundary` — passed.
+- Focused harness scenarios for the three new names — passed.
+- `cargo +1.96.0 test -p lattice-api --test usage_turn` and `--lib turn::live_tests` — run after deletes.
+- Ledger invariant: 1449 identities; no remaining `planned_direct_*` replacements.
+
+**Changed files:**
+`crates/lattice-system-harness/tests/{direct_tools,direct_turn_contract,direct_failures}.rs`; `crates/lattice-api/tests/usage_turn.rs`; `crates/lattice-api/src/turn/live_tests.rs`; `docs/TEST-TRIAGE.md`; `docs/test-triage-decisions.json`; `FINDINGS.md`; `FIX.md`.
+
+
 ## GitHub #72: reconcile #45→#46 assertion-level test handoff — 2026-07-24
 
 Severity: test refactor / ledger correctness.

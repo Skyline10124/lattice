@@ -29,7 +29,7 @@
 
 > Active 场景 ID 登记在此表。#40 退役的 KVM-lane 场景词汇已从 machine ledger
 > 与本目录中完全移除；其语义由已落地的 `direct_*` exact scenarios 接管。
-> `planned_direct_*` 仅保留 #72 复核后仍明确未完成的 3 个产品行为。退役词汇的迁移记录见 FIX.md。
+> #46 residual closeout 已将 #72 遗留的 3 个 `planned_direct_*` 落地为 exact external scenarios 并删除对应内部测试；场景目录不再保留 planned residual。退役词汇的迁移记录见 FIX.md。
 
 | ID | 说明 | 状态 |
 | --- | --- | --- |
@@ -52,24 +52,24 @@
 | `direct_operator_audit_query_unknown_session_empty` | Direct-Local: unknown-session audit query empty success | **已落地** `tests/direct_operator.rs` |
 | `direct_operator_audit_replay_unknown_turn_fails` | Direct-Local: unknown-turn replay exact diagnostic | **已落地** `tests/direct_operator.rs`；#72 补齐 exact assertion |
 | `direct_session_*_isolation` | Direct-Local: branch/checkout/create/reset/diff session isolation | **已落地** `tests/direct_session_isolation.rs` |
-| `planned_direct_commit_failure` | Direct-Local: stale-parent race emits CommitFailed without durable extra commit | **planned**；owner `lattice-system-harness` turn-conflict scenario |
-| `planned_direct_routed_provider_event` | Direct-Local: default `sonnet`→Anthropic routed provider event | **planned**；owner `lattice-system-harness` provider-routing scenario |
-| `planned_direct_fetch_capability_denial` | Direct-Local: public HTTPS allowed but missing FetchUrl capability | **planned**；owner `lattice-system-harness` fetch-capability scenario |
+| `direct_failure_stale_parent_commit_failed` | Direct-Local: stale-parent race emits CommitFailed without durable extra commit | **已落地** `tests/direct_failures.rs`（#46 residual） |
+| `direct_turn_sonnet_routed_provider_event` | Direct-Local: default `sonnet`→Anthropic routed provider event | **已落地** `tests/direct_turn_contract.rs`（#46 residual） |
+| `direct_tools_fetch_capability_denial_with_public_https` | Direct-Local: public HTTPS URL-shape allowed but empty FetchUrl hosts deny pre-outbound with EffectViolation + CEP labels | **已落地** `tests/direct_tools.rs`（#46 residual） |
 
 ### 汇总
 
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1193 |
-| 提升 | 45 |
-| 删除 | 211 |
+| 提升 | 42 |
+| 删除 | 214 |
 | **合计** | **1449** |
 
 #### 按 crate
 
 | crate | 保留 | 提升 | 删除 | 合计 |
 | --- | ---: | ---: | ---: | ---: |
-| `lattice-api` | 234 | 3 | 23 | 260 |
+| `lattice-api` | 234 | 0 | 26 | 260 |
 | `lattice-cli` | 119 | 41 | 25 | 185 |
 | `lattice-workspace` | 0 | 0 | 158 | 158 |
 | `lancet-authority` | 135 | 0 | 0 | 135 |
@@ -138,9 +138,11 @@
 
 ### #72 final assertion-level disposition（44 条）
 
-#72 对原始 handoff 逐条复核并运行新增/增强的 exact scenarios 后，最终分区为
+#72 对原始 handoff 逐条复核并运行新增/增强的 exact scenarios 后，当时分区为
 **keep 14 / elevate 3 / delete 27 = 44**。其中 7 条 keep 是 #24 slice 1 已批准的
-API-only invariants；本次对剩余 20 条判为 keep 7 / elevate 3 / delete 10。
+API-only invariants；当时对剩余 20 条判为 keep 7 / elevate 3 / delete 10。
+#46 residual closeout 将残余 3 条 elevate 落地为 exact external scenarios 并删除内部测试后，
+handoff 终态为 **keep 14 / elevate 0 / delete 30 = 44**。
 
 #### keep / local_invariant（14）
 
@@ -158,15 +160,11 @@ API-only invariants；本次对剩余 20 条判为 keep 7 / elevate 3 / delete 1
 `run_integration_commits_existing_session`。逐条 residual 见 §2；均为 binary 无法忠实观察的
 trait/API return、raw graph/transcript、store/projection 或 collector parity seam。
 
-#### elevate / explicit unfinished behavior（3）
+#### elevate / explicit unfinished behavior（0）
 
-| ledger identity | planned scenario | 已覆盖 / 未覆盖 / owner |
-| --- | --- | --- |
-| `stream_turn_live_with_agent_commit_failure_deterministic` | `planned_direct_commit_failure` | 已覆盖正常 commit/CommitFailed parser；未覆盖 stale-parent race、CommitFailed 顺序与 durable log 不增；owner：Direct-Local turn-conflict scenario |
-| `usage_stream_turn_model_started_includes_routed_provider` | `planned_direct_routed_provider_event` | 已覆盖 OpenAI-compatible 路由；未覆盖默认 `sonnet`→Anthropic 分支；owner：provider-routing scenario |
-| `public_https_policy_requires_fetch_capability` | `planned_direct_fetch_capability_denial` | 已覆盖 disabled/host-policy denial；未覆盖 allow-public-HTTPS + missing FetchUrl capability 与 exact CEP labels；owner：fetch-capability scenario |
+#46 residual closeout 已关闭原 3 条 elevate；无剩余 unfinished Direct-Local handoff。
 
-#### delete / exact external assertion superset（27）
+#### delete / exact external assertion superset（30）
 
 | ledger identity | exact replacement |
 | --- | --- |
@@ -197,6 +195,9 @@ trait/API return、raw graph/transcript、store/projection 或 collector parity 
 | `reset_changes_only_addressed_session_branch_pointer` | `direct_session_reset_isolation` |
 | `diff_resolves_refs_inside_addressed_session_only` | `direct_session_diff_isolation` |
 | `smoke_session_log_shows_seeded_turn` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_live_with_agent_commit_failure_deterministic` | `direct_failure_stale_parent_commit_failed` |
+| `usage_stream_turn_model_started_includes_routed_provider` | `direct_turn_sonnet_routed_provider_event` |
+| `public_https_policy_requires_fetch_capability` | `direct_tools_fetch_capability_denial_with_public_https` |
 
 ### MSB 词汇退役
 
@@ -222,8 +223,8 @@ codeberg issue 跟踪重写。
 | 决定 | 条数 |
 | --- | ---: |
 | 保留 | 1193 |
-| 提升 | 45 |
-| 删除 | 211 |
+| 提升 | 42 |
+| 删除 | 214 |
 | **合计** | **1449** |
 
 ## 1.6 #24 slice 2 执行状态（2026-07-22）
@@ -263,11 +264,11 @@ codeberg issue 跟踪重写。
 | --- | --- | --- |
 | `rejects_profile_disabled_web_fetch` | `direct_tools_fetch_disabled_no_dispatch` | 失败 tool + fixture 零请求 + 无 cep_call_started |
 
-### 半保留（1 条）
+### 原半保留（1 条；#46 residual 已关闭）
 
-| ledger identity | replacement scenario | 未覆盖半 |
+| ledger identity | replacement scenario | 关闭依据 |
 | --- | --- | --- |
-| `public_https_policy_requires_fetch_capability` | `planned_direct_fetch_capability_denial` | FetchUrl capability + allow_public_https + CepCallStarted external_observation 标签 |
+| `public_https_policy_requires_fetch_capability` | `direct_tools_fetch_capability_denial_with_public_https` | #46 residual exact scenario 通过后 elevate→delete |
 
 
 ## 1.8 #24 slice 5 执行状态（2026-07-22）
@@ -346,8 +347,26 @@ codeberg issue 跟踪重写。
 
 slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 final review 将该 20 条
 判为 **keep 7 / elevate 3 / delete 10**；与 slice 1 已确认的 7 keep、此前 17 delete
-合并后，44 条 handoff 的最终分区为 **keep 14 / elevate 3 / delete 27**。逐条结果见
-§1.5 与 §2。
+合并后，#72 当时的最终分区为 **keep 14 / elevate 3 / delete 27**。
+#46 residual closeout 后为 **keep 14 / elevate 0 / delete 30**。逐条结果见 §1.5 与 §2。
+
+## 1.9 #46 residual elevate closeout（2026-07-24）
+
+> 关闭 #72 遗留的 3 条 Direct-Local elevate：新增 exact external scenarios，通过后删除内部测试并同步 machine/prose ledger。
+
+### 已删除（3 条，提升->删除）
+
+| ledger identity | replacement scenario | superset 依据 |
+| --- | --- | --- |
+| `public_https_policy_requires_fetch_capability` | `direct_tools_fetch_capability_denial_with_public_https` | tool_call_finished ok=false + EffectViolation/authorized-region + cep_call_started external_observation/cep_native + turn_committed completed |
+| `usage_stream_turn_model_started_includes_routed_provider` | `direct_turn_sonnet_routed_provider_event` | model_started provider=anthropic model=sonnet（无 Anthropic 出站） |
+| `stream_turn_live_with_agent_commit_failure_deterministic` | `direct_failure_stale_parent_commit_failed` | token_delta→turn_committing→commit_failed、无 turn_committed、session log 长度=2 |
+
+### counts 变更
+
+- lattice-api：提升 3->0，删除 23->26
+- handoff：elevate 3->0，delete 27->30（keep 14 不变）
+- 全量：提升 45->42，删除 211->214（总 identity 1449 不变；layer 仍为 local 1372 / fast 45 / Direct-Local 32）
 
 
 ## 2. 逐条清单
@@ -841,7 +860,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `fake_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:473` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `fake_stream_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:486` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 
-### `lattice-api`（保留 234 / 提升 3 / 删除 23）
+### `lattice-api`（保留 234 / 提升 0 / 删除 26）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -913,7 +932,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `stream_turn_live_with_agent_startup_failure_no_stream` | `crates/lattice-api/src/turn/live_tests.rs:492` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已覆盖 missing-session exit 2 + 零 Turn events，但 binary 无法区分 Rust API 在 prepare 阶段立即返回 Err 与返回 Ok(empty stream)；保留该 startup return contract 为 local invariant。 |
 | `stream_turn_live_with_agent_commit_stores_delta_only` | `crates/lattice-api/src/turn/live_tests.rs:513` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已覆盖两轮 reopen/log/status 与首条 log 稳定；原测试仍直接断言 graph commit delta、HEAD transcript 精确四消息及 commit-message 长度，这些存储表示不由 public binary 忠实暴露，改判 keep/local_invariant。 |
 | `stream_turn_live_with_agent_branch_populated` | `crates/lattice-api/src/turn/live_tests.rs:644` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（branch == main）。已删除原测试。 |
-| `stream_turn_live_with_agent_commit_failure_deterministic` | `crates/lattice-api/src/turn/live_tests.rs:675` | 提升 | Direct-Local 外部二进制 | `planned_direct_commit_failure` | #72 final review：现有 external scenarios 覆盖正常 commit 且 harness 可解析 CommitFailed；未覆盖同 session stale-parent race、TokenDelta/TurnCommitting→CommitFailed、无 TurnCommitted 与 durable log 不增第三条。后续 owner：lattice-system-harness Direct-Local turn-conflict scenario。 |
+| `stream_turn_live_with_agent_commit_failure_deterministic` | `crates/lattice-api/src/turn/live_tests.rs:675` | 删除 | Direct-Local 外部二进制 | `direct_failure_stale_parent_commit_failed` | #46 residual elevate closeout：direct_failure_stale_parent_commit_failed 通过 baseline+gated A+retargeted racer B 断言 token_delta→turn_committing→commit_failed（非空 reason）、无 turn_committed、public session log 长度=2；严格超集。已删除原测试。 |
 | `stream_turn_live_with_agent_receiver_drop_does_not_cancel` | `crates/lattice-api/src/turn/live_tests.rs:836` | 保留 | 局部不变量 | — | API observer 行为（receiver drop 不取消 commit）无忠实的外部二进制触发；保留为局部不变量 |
 | `stream_turn_live_with_agent_slow_observer_still_commits` | `crates/lattice-api/src/turn/live_tests.rs:896` | 保留 | 局部不变量 | — | API observer 行为（慢 observer 仍 commit）无忠实的外部二进制触发；保留为局部不变量 |
 | `run_turn_uses_required_session_and_returns_session_id` | `crates/lattice-api/src/turn/run_tests.rs:17` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -1100,10 +1119,10 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `generated_profiles_are_executable_host_only` | `crates/lattice-api/tests/upper_routing.rs:699` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `retired_upper_routing_lane` | `crates/lattice-api/tests/upper_routing.rs:787` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `usage_run_turn_can_read_workspace_file_with_default_profile` | `crates/lattice-api/tests/usage_turn.rs:175` | 删除 | Direct-Local 外部二进制 | `direct_observation_visibility_and_bounds` | #24 slice 2 assertion-level superset review：direct_observation.rs 通过 .lattice/agents/ 配置的 profile 读取 tracked.txt/notes.txt 并断言 content present，为原内部测试 default-profile-reads-workspace-file 的严格超集。已删除原测试。 |
-| `usage_stream_turn_model_started_includes_routed_provider` | `crates/lattice-api/tests/usage_turn.rs:237` | 提升 | Direct-Local 外部二进制 | `planned_direct_routed_provider_event` | #72 final review：direct_turn_completed_reopen_contract 已覆盖 openai_compatible/compat 路由事件与 wire model；尚未覆盖默认 sonnet→anthropic 路由分支。后续 owner：lattice-system-harness provider-routing scenario；保留明确 planned behavior。 |
+| `usage_stream_turn_model_started_includes_routed_provider` | `crates/lattice-api/tests/usage_turn.rs:237` | 删除 | Direct-Local 外部二进制 | `direct_turn_sonnet_routed_provider_event` | #46 residual elevate closeout：direct_turn_sonnet_routed_provider_event 断言默认 sonnet→anthropic 的 public model_started（缺 ANTHROPIC_API_KEY，不接触 api.anthropic.com），并断言 credential-class terminal、非 completed、exit Failed；严格超集。已删除原测试。 |
 | `usage_run_turn_can_edit_workspace_file_and_commit` | `crates/lattice-api/tests/usage_turn.rs:274` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `usage_resume_session_includes_previous_turn_context` | `crates/lattice-api/tests/usage_turn.rs:340` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已精确覆盖 reopen provider context、两 commit 与 HEAD main；原测试仍直接断言 raw HeadTranscript 与第二 commit parent_ids 关系，属于 SessionApi/graph seam，改判 keep/local_invariant。 |
-| `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 提升 | Direct-Local 外部二进制 | `planned_direct_fetch_capability_denial` | #72 final review：direct_tools 已覆盖 disabled fetch 与 localhost host-policy denial；尚未覆盖 allow_public_https=true 且缺 FetchUrl capability 的拒绝，以及 fetch.web CepCallStarted external_observation/cep_native 标签。后续 owner：lattice-system-harness fetch capability scenario。 |
+| `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 删除 | Direct-Local 外部二进制 | `direct_tools_fetch_capability_denial_with_public_https` | #46 residual elevate closeout：direct_tools_fetch_capability_denial_with_public_https 断言 allow_public_https=true + empty allowed_hosts 下 fetch.web 以 EffectViolation/authorized-region 失败（Enforce 下出站前拒绝）、cep_call_started external_observation/cep_native、turn_committed completed；严格超集。已删除原测试。 |
 | `rejects_profile_disabled_web_fetch` | `crates/lattice-api/tests/usage_turn.rs:519` | 删除 | Direct-Local 外部二进制 | `direct_tools_fetch_disabled_no_dispatch` | #24 slice 4 assertion-level superset review：direct_tools_fetch_disabled_no_dispatch 断言 disabled fetch.web 失败、fixture 零请求、无 cep_call_started；严格超集。已删除原测试。 |
 
 ### `lattice-cli`（保留 119 / 提升 41 / 删除 25）
