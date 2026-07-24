@@ -7,17 +7,14 @@
 //! real AgentLoop with FakeStreamingLlmClient, and the live stream_turn_live_with_agent
 //! function. No internal boundaries are mocked.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
-
-use futures::StreamExt;
-use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
-use lattice_llm::{LlmEvent, TokenUsage};
-use lattice_session::WorkspaceDisposition;
 
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
 use crate::session::SessionApi;
+use futures::StreamExt;
+use lattice_agent::testing::FakeStreamingLlmClient;
+use lattice_agent::{AgentLoop, AgentLoopConfig};
+use lattice_llm::{LlmEvent, TokenUsage};
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -142,95 +139,6 @@ fn happy_events() -> Vec<LlmEvent> {
             }),
         },
     ]
-}
-
-// ── BlockingLlmClient ─────────────────────────────────────────────────
-//
-// A streaming LLM fake that yields initial events, then blocks on a
-// `tokio::sync::Notify` before emitting the remaining events. This gives
-// the test thread deterministic control over when the agent loop progresses
-// past model consumption.
-
-struct BlockingLlmClient {
-    pre_block_events: std::sync::Mutex<Option<Vec<LlmEvent>>>,
-    resume: Arc<tokio::sync::Notify>,
-    post_resume_events: std::sync::Mutex<Option<Vec<LlmEvent>>>,
-}
-
-impl BlockingLlmClient {
-    fn new(
-        pre_block_events: Vec<LlmEvent>,
-        resume: Arc<tokio::sync::Notify>,
-        post_resume_events: Vec<LlmEvent>,
-    ) -> Self {
-        Self {
-            pre_block_events: std::sync::Mutex::new(Some(pre_block_events)),
-            resume,
-            post_resume_events: std::sync::Mutex::new(Some(post_resume_events)),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl LlmClient for BlockingLlmClient {
-    async fn chat(
-        &self,
-        _request: lattice_llm::ChatRequest,
-    ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-        unreachable!("stream-only fake")
-    }
-
-    async fn stream_chat(
-        &self,
-        _request: lattice_llm::ChatRequest,
-    ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        let pre = self
-            .pre_block_events
-            .lock()
-            .unwrap()
-            .take()
-            .expect("BlockingLlmClient only supports a single round");
-        let post = self
-            .post_resume_events
-            .lock()
-            .unwrap()
-            .take()
-            .expect("BlockingLlmClient only supports a single round");
-        let resume = self.resume.clone();
-
-        // State machine: Pre -> (await notify) -> Post
-        enum StreamState {
-            Pre(
-                VecDeque<LlmEvent>,
-                Arc<tokio::sync::Notify>,
-                VecDeque<LlmEvent>,
-            ),
-            Post(VecDeque<LlmEvent>),
-        }
-
-        let initial = StreamState::Pre(VecDeque::from(pre), resume, VecDeque::from(post));
-
-        let stream = futures::stream::unfold(initial, |state| async move {
-            match state {
-                StreamState::Pre(mut queue, notify, mut post) => {
-                    if let Some(event) = queue.pop_front() {
-                        Some((event, StreamState::Pre(queue, notify, post)))
-                    } else {
-                        // All pre-block events emitted; block until notified
-                        notify.notified().await;
-                        // Transition to Post state
-                        post.pop_front()
-                            .map(|event| (event, StreamState::Post(post)))
-                    }
-                }
-                StreamState::Post(mut queue) => queue
-                    .pop_front()
-                    .map(|event| (event, StreamState::Post(queue))),
-            }
-        });
-
-        Ok(Box::pin(stream))
-    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -384,167 +292,6 @@ async fn stream_turn_live_with_agent_commit_stores_delta_only() {
 
     // The first turn's messages are unchanged at positions 0-1
     assert_eq!(all_messages[0].content, "What is 2+2?");
-}
-
-#[tokio::test]
-async fn stream_turn_live_with_agent_commit_failure_deterministic() {
-    // Deterministic commit failure using BlockingLlmClient.
-    // and a real git-backed session parent conflict.
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-
-    // Create a session manually so we can manipulate it
-    let create_req = crate::session::CreateSessionRequest {
-        label: None,
-        active_agent: "test".to_string(),
-        project_branch: "main".to_string(),
-    };
-    let created = session.create_session(create_req).expect("create session");
-    let session_id = created.session_id.clone();
-
-    // First turn: establish a commit (so we have a parent)
-    let client1 = FakeStreamingLlmClient::builder()
-        .push_events(happy_events())
-        .build();
-    let agent_loop1 = make_agent_loop(client1);
-    let request1 = make_request_with_session("first turn", &session_id);
-    let stream1 = stream_turn_live_with_agent(session, agent_loop1, request1, vec![])
-        .await
-        .expect("first turn should succeed");
-    let events1: Vec<TurnEvent> = stream1.collect().await;
-    assert!(
-        events1
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnCommitted { .. })),
-        "first turn should commit"
-    );
-
-    // Build BlockingLlmClient: yields tokens, then blocks until resumed
-    let resume = Arc::new(tokio::sync::Notify::new());
-    let blocking_client = BlockingLlmClient::new(
-        vec![
-            LlmEvent::Token {
-                content: "partial".to_string(),
-            },
-            LlmEvent::Token {
-                content: " response".to_string(),
-            },
-        ],
-        resume.clone(),
-        vec![LlmEvent::Done {
-            finish_reason: "stop".to_string(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-            }),
-        }],
-    );
-
-    // Start second turn with BlockingLlmClient
-    let session2 = make_session(dir.path());
-    let agent_loop2 = Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm: Arc::new(blocking_client),
-        tool_executor: Arc::new(NoOpToolExecutor),
-    }));
-    let request2 = make_request_with_session("second turn", &session_id);
-
-    // stream_turn_live_with_agent returning Ok guarantees prepare_live_turn completed
-    // with the stale parent.
-    let stream2 = stream_turn_live_with_agent(session2, agent_loop2, request2, vec![])
-        .await
-        .expect("second turn prepare should succeed");
-
-    // Insert racing commit while BlockingLlmClient is paused.
-    let session3 = make_session(dir.path());
-    let log = session3.log(&session_id).expect("log");
-    let current_head = log.last().unwrap().commit_id.clone();
-
-    let racing_input = lattice_session::TurnCommitInput {
-        session_id: session_id.clone(),
-        parent_ids: vec![current_head],
-        messages: vec![lattice_session::GraphMessage {
-            role: "user".to_string(),
-            content: "racing turn".to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }],
-        agent_name: "coder".to_string(),
-        profile_snapshot_hash: "test-profile".to_string(),
-        profile_snapshot_json: "{}".to_string(),
-        model: "sonnet".to_string(),
-        provider: "anthropic".to_string(),
-        status: lattice_session::TurnCommitStatus::Completed,
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
-        commit_message: "Racing commit".to_string(),
-        usage: None,
-        terminal_reason: None,
-    };
-    session3
-        .store()
-        .commit_turn(racing_input)
-        .expect("racing commit should succeed");
-
-    // Resume BlockingLlmClient — agent finishes, commit_turn_inner finds
-    // parent mismatch.
-    resume.notify_one();
-
-    // Collect second turn's events
-    let events2: Vec<TurnEvent> = stream2.collect().await;
-
-    // Assert: TokenDelta events present before CommitFailed (proves live
-    // activity before commit)
-    let token_pos = events2
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TokenDelta { .. }));
-    assert!(
-        token_pos.is_some(),
-        "should have TokenDelta events (live activity before commit)"
-    );
-
-    // Assert: TurnCommitting present
-    assert!(
-        events2
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnCommitting)),
-        "should have TurnCommitting event"
-    );
-
-    // Assert: CommitFailed present with non-empty reason
-    let commit_failed = events2
-        .iter()
-        .find(|e| matches!(e, TurnEvent::CommitFailed { .. }));
-    assert!(
-        commit_failed.is_some(),
-        "should have CommitFailed event when parent is stale. Events: {events2:?}"
-    );
-    if let Some(TurnEvent::CommitFailed { reason }) = commit_failed {
-        assert!(
-            !reason.is_empty(),
-            "CommitFailed reason should not be empty"
-        );
-    }
-
-    // Assert: TurnCommitted absent
-    assert!(
-        !events2
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnCommitted { .. })),
-        "should not contain TurnCommitted when commit fails"
-    );
-
-    // Assert: HEAD = 2 commits (first turn + racing), not 3
-    let session4 = make_session(dir.path());
-    let log_after = session4.log(&session_id).expect("log after failed commit");
-    assert_eq!(
-        log_after.len(),
-        2,
-        "HEAD should have exactly 2 commits (first + racing), got {}",
-        log_after.len()
-    );
 }
 
 #[tokio::test]

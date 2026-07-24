@@ -261,6 +261,99 @@ fn direct_tools_fetch_host_policy_denial() {
     );
 }
 
+/// Enabled fetch with `allow_public_https=true` but empty `allowed_hosts`:
+/// URL-shape validation may allow public HTTPS, yet FetchUrl authorized hosts
+/// still come from `allowed_hosts`, so `https://example.com/` is rejected with
+/// an EffectViolation / authorized-region denial before outbound I/O. Distinct
+/// from host-policy denial (`allow_localhost=false` against a localhost URL).
+#[test]
+fn direct_tools_fetch_capability_denial_with_public_https() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-tools-fetch-cap",
+        "dl-fcap",
+        "[\"fetch.web\"]",
+        "\n[lancet.network]\nallow_public_https = true\nallow_localhost = false\nallowed_hosts = []\n",
+    );
+    let server = wire_fake_llm(
+        &world,
+        "dl-fcap",
+        sequence(vec![
+            tool_call("f1", "fetch.web", r#"{"url":"https://example.com/"}"#),
+            SseScript::plain("denied without fetch capability"),
+        ]),
+    );
+    let scenario_evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-fcap", "main").expect("session");
+    let outcome = send.send("fetch example.com").expect("turn");
+    let captures = server.captured_requests();
+
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&outcome)?;
+        require(
+            tool_failed(&outcome.parsed, "fetch.web"),
+            "fetch.web must fail when FetchUrl hosts are empty despite allow_public_https",
+        )?;
+        let cep_started_raw = outcome.events.iter().find_map(|event| match event {
+            TurnEventLine::Unknown { type_name, raw }
+                if type_name == "cep_call_started"
+                    && raw.get("method").and_then(Value::as_str) == Some("fetch.web") =>
+            {
+                Some(raw)
+            }
+            _ => None,
+        });
+        require(
+            cep_started_raw.is_some_and(|raw| {
+                raw.get("impact_kind").and_then(Value::as_str) == Some("external_observation")
+                    && raw.get("semantic_stage").and_then(Value::as_str) == Some("cep_native")
+            }),
+            format!(
+                "fetch.web cep_call_started must carry external_observation/cep_native: {cep_started_raw:?}"
+            ),
+        )?;
+        // Enforce-mode empty FetchUrl hosts deny before outbound I/O. The tool
+        // error must name the effect/authorized-region class so DNS/HTTP failure
+        // cannot satisfy this scenario.
+        require(
+            captures.len() >= 2,
+            "capability denial needs tool result capture",
+        )?;
+        let err_text = last_tool_content(&captures[1]).unwrap_or_default();
+        let err_lower = err_text.to_lowercase();
+        require(
+            err_lower.contains("authorized region")
+                || err_lower.contains("effect")
+                || err_lower.contains("exceeds"),
+            format!("capability denial must cite effect/authorized-region: {err_text}"),
+        )?;
+        require(
+            !tool_ok(&outcome.parsed, "fetch.web"),
+            "capability denial must not succeed fetch.web",
+        )?;
+        require(
+            outcome.events.iter().any(|event| {
+                matches!(
+                    event,
+                    TurnEventLine::TurnCommitted { status, .. } if status == "completed"
+                )
+            }),
+            format!(
+                "turn must still complete after capability-denied tool: {:?}",
+                outcome.type_sequence()
+            ),
+        )?;
+        Ok(())
+    })();
+
+    finish_scenario(
+        scenario_evidence,
+        &[("fetch capability denial", &outcome.command)],
+        captures,
+        result,
+    );
+}
+
 /// `session.todo_write` success echoes canonical todo JSON into the next model
 /// request.
 #[test]

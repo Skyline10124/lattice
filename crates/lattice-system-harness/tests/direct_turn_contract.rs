@@ -14,7 +14,8 @@
 //!   commit-failed events; branch populated on `turn_started`.
 //! - **routed provider/model** — `model_started` carries the routed provider
 //!   (`openai_compatible`) and profile model; the fake LLM receives the
-//!   provider model on the wire.
+//!   provider model on the wire. A separate scenario covers default `sonnet`
+//!   → Anthropic routing without contacting `api.anthropic.com`.
 //! - **message assembly / reopen context** — request one is system + current
 //!   user input; request two contains exactly the prior user/assistant pair
 //!   before the new user message.
@@ -371,6 +372,103 @@ fn direct_turn_completed_reopen_contract() {
             ("missing-session send", &missing),
         ],
         captures,
+        result,
+    );
+}
+
+/// Default alias `sonnet` routes to Anthropic on the public `model_started`
+/// event. The agent loop emits that event before provider I/O, so missing
+/// `ANTHROPIC_API_KEY` still surfaces the routed provider without contacting
+/// `api.anthropic.com`, then fails closed on the credential-class terminal.
+#[test]
+fn direct_turn_sonnet_routed_provider_event() {
+    let driver = driver();
+    let spec = ScenarioSpec::direct_local("direct-turn-sonnet-route");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let toml = "schema_version = 1\n\n\
+[agent]\nname = \"dl-sonnet\"\nmodel = \"sonnet\"\n\n\
+[prompt]\nsystem = \"You are a concise test agent.\"\n\n\
+[tools]\nenabled = []\n\n\
+[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n";
+    world
+        .write_project_file(".lattice/agents/dl-sonnet/agent.toml", toml)
+        .expect("write agent.toml");
+    world.init_git_project().expect("init git project");
+
+    let scenario_evidence = evidence(&world, &spec);
+    let send =
+        SessionSendDriver::new(&driver, &world, &spec, "dl-sonnet", "main").expect("session");
+    let outcome = send.send("route sonnet").expect("turn");
+
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&outcome)?;
+        let model_started = outcome.events.iter().find_map(|event| match event {
+            TurnEventLine::ModelStarted { provider, model } => {
+                Some((provider.clone(), model.clone()))
+            }
+            _ => None,
+        });
+        require(
+            model_started.is_some(),
+            format!(
+                "model_started missing before provider failure: {:?}",
+                outcome.type_sequence()
+            ),
+        )?;
+        let (provider, model) = model_started.expect("checked");
+        require(
+            provider.as_deref() == Some("anthropic"),
+            format!("sonnet must route provider=anthropic, got {provider:?}"),
+        )?;
+        require(
+            model == "sonnet",
+            format!("sonnet model_started model mismatch: {model}"),
+        )?;
+        let credential_terminal = outcome.events.iter().any(|event| match event {
+            TurnEventLine::LlmRequestError { message, .. } => {
+                let lower = message.to_lowercase();
+                lower.contains("api key")
+                    || lower.contains("credential")
+                    || lower.contains("anthropic_api_key")
+            }
+            TurnEventLine::TurnFailed { reason } => {
+                let lower = reason.to_lowercase();
+                lower.contains("api key")
+                    || lower.contains("credential")
+                    || lower.contains("anthropic_api_key")
+            }
+            _ => false,
+        });
+        require(
+            credential_terminal,
+            format!(
+                "missing ANTHROPIC_API_KEY must surface credential-class terminal: {:?}",
+                outcome.type_sequence()
+            ),
+        )?;
+        require(
+            !outcome.events.iter().any(|event| {
+                matches!(
+                    event,
+                    TurnEventLine::TurnCommitted { status, .. } if status == "completed"
+                )
+            }),
+            "credential failure must not complete the turn",
+        )?;
+        require(
+            outcome.exit_code == Some(SendExitCode::Failed),
+            format!(
+                "credential failure exit must be Failed, got {:?}",
+                outcome.exit_code
+            ),
+        )?;
+        Ok(())
+    })();
+
+    finish_scenario(
+        scenario_evidence,
+        &[("sonnet routed model_started", &outcome.command)],
+        Vec::new(),
         result,
     );
 }

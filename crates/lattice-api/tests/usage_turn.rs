@@ -11,10 +11,9 @@ mod support;
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
+use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{GitSessionGraphStore, SessionGraphStore};
@@ -141,10 +140,6 @@ fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String
     name.to_string()
 }
 
-fn create_default_session(sessions_path: &std::path::Path) -> String {
-    create_session_with_branch(sessions_path, "main")
-}
-
 fn create_session_with_branch(sessions_path: &std::path::Path, branch: &str) -> String {
     lattice_api::SessionApi::git(sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
@@ -172,41 +167,6 @@ fn make_request(
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
         test_persist_audit: None,
     }
-}
-
-#[tokio::test]
-async fn usage_stream_turn_model_started_includes_routed_provider() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &[]);
-
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(final_response_events("Done."))
-            .build(),
-    );
-
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_default_session(&sessions_path);
-
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::git(&sessions_path),
-        make_request(&ws, "Hello", &session_id, fake_llm),
-    )
-    .await
-    .expect("stream_turn must start")
-    .collect()
-    .await;
-
-    let model_started = events
-        .iter()
-        .find_map(|event| match event {
-            TurnEvent::ModelStarted { provider, model } => Some((provider, model)),
-            _ => None,
-        })
-        .expect("stream should include ModelStarted");
-
-    assert_eq!(model_started.0.as_deref(), Some("anthropic"));
-    assert_eq!(model_started.1, "sonnet");
 }
 
 // ── Test 2: edit workspace file and commit ──────────────────────────────────
@@ -340,118 +300,5 @@ async fn usage_resume_session_includes_previous_turn_context() {
     assert!(
         matches!(status.head, lattice_session::GraphHead::Branch { name } if name == "main"),
         "HEAD should be on main branch"
-    );
-}
-
-// ── CEP: network policy without FetchUrl("*") ──────────────────────────
-
-fn setup_workspace_with_cep_network(
-    src_content: &str,
-    enabled_tools: &[&str],
-    network_toml: &str,
-) -> Workspace {
-    let ws = tempfile::tempdir().unwrap();
-    let root = ws.path().to_path_buf();
-
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/lib.rs"), src_content).unwrap();
-    support::init_git_repo(&root);
-
-    let profile_dir = root.join(".lattice/agents/default");
-    std::fs::create_dir_all(&profile_dir).unwrap();
-    let enabled: Vec<String> = enabled_tools.iter().map(|s| s.to_string()).collect();
-    let toml_content = format!(
-        r#"schema_version = 1
-[agent]
-name = "default"
-model = "sonnet"
-[prompt]
-system = "You are a test agent."
-[tools]
-enabled = {enabled:?}{workspace}
-{network_toml}
-"#,
-        workspace = workspace_toml_suffix(enabled_tools),
-    );
-    std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
-
-    let global_agents = tempfile::tempdir().unwrap();
-    let paths = DiscoveryPaths {
-        project_root: root.clone(),
-        global_agents_dir: global_agents.path().to_path_buf(),
-    };
-    let loaded = lattice_profile::resolve_agent_profile(ProfileSource::Default, &paths)
-        .expect("profile must load");
-
-    Workspace {
-        _dir: ws,
-        _global_agents: global_agents,
-        root,
-        loaded,
-    }
-}
-
-#[tokio::test]
-async fn public_https_policy_requires_fetch_capability() {
-    let ws = setup_workspace_with_cep_network(
-        "fn main() {}",
-        &["fetch.web"],
-        "[lancet.network]\nallow_public_https = true\nallow_localhost = false\n",
-    );
-
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(tool_call_events(
-                "call_1",
-                "fetch.web",
-                r#"{"url":"https://example.com/"}"#,
-            ))
-            .push_events(final_response_events("Fetched public HTTPS."))
-            .build(),
-    );
-
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_default_session(&sessions_path);
-
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::git(&sessions_path),
-        make_request(&ws, "Fetch example.com", &session_id, fake_llm),
-    )
-    .await
-    .expect("stream_turn must start")
-    .collect()
-    .await;
-
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, TurnEvent::TurnCommitted { status, .. } if *status == RunTurnStatus::Completed)),
-        "turn must complete"
-    );
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            TurnEvent::ToolCallFinished {
-                name,
-                ok: false,
-                ..
-            } if name == "fetch.web"
-        )),
-        "fetch.web must be denied without FetchUrl capability even with allow_public_https"
-    );
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            TurnEvent::CepCallStarted {
-                method,
-                impact_kind,
-                semantic_stage,
-                ..
-            } if method == "fetch.web"
-                && impact_kind == "external_observation"
-                && semantic_stage == "cep_native"
-        )),
-        "native fetch.web must emit CEP lifecycle with external_observation impact"
     );
 }

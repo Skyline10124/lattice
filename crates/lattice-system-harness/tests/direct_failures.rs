@@ -15,8 +15,8 @@ use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, RunningCommand, SendExitCode, SessionSendDriver, SseScript, TurnEventLine,
-    assert_event_subsequence,
+    AssertError, FAKE_API_KEY, FakeLlmServer, RunningCommand, SendExitCode, SessionSendDriver,
+    SseScript, TurnEventLine, assert_event_subsequence,
 };
 use serde_json::Value;
 use support::{
@@ -575,6 +575,162 @@ fn direct_failure_mutation_survives_provider_failure() {
         scenario_evidence,
         &[("mutation survives failure", &outcome.command)],
         Vec::new(),
+        result,
+    );
+}
+
+/// Same-session stale-parent race: turn A prepares against baseline, turn B
+/// commits while A is gated on the fake LLM, then A resumes and fails commit.
+/// Public sequence: `token_delta*` → `turn_committing` → `commit_failed`
+/// (nonempty reason); no `turn_committed`; durable session log length remains
+/// baseline + racer (2).
+#[test]
+fn direct_failure_stale_parent_commit_failed() {
+    let driver = driver();
+    let (world, spec) = direct_world("direct-failure-stale-parent", "dl-stale", "[]", "");
+
+    // (1) Commit a baseline turn so the session has a durable parent.
+    let baseline_server = wire_fake_llm(&world, "dl-stale", SseScript::plain("baseline done"));
+    let scenario_evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-stale", "main").expect("session");
+    let baseline = send.send("baseline turn").expect("baseline");
+    let baseline_captures = baseline_server.captured_requests();
+
+    // (2) Stall turn A on a gated fake LLM after prepare/request.
+    let (gated_server, gate) =
+        wire_gated_fake_llm(&world, "dl-stale", SseScript::plain("stale turn tokens"));
+    let running_a = send.spawn("stalled turn A").expect("spawn A");
+    gated_server
+        .wait_for_requests(1, Duration::from_secs(10))
+        .expect("turn A must reach the gated fake LLM");
+
+    // (3) Retarget world env to a second non-gated fake LLM and complete turn B
+    // on the same session. ScenarioWorld::command reads env at spawn time, so
+    // already-running A keeps the gated server while B uses the new one.
+    let racer_server = FakeLlmServer::start(SseScript::plain("racing commit")).expect("racer llm");
+    world.set_env("OPENAI_COMPATIBLE_BASE_URL", racer_server.base_url());
+    world.set_env("OPENAI_COMPATIBLE_MODEL", "dl-stale");
+    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
+    let racer = send.send("racing turn B").expect("racer");
+
+    // (4) Release A so it finishes live activity against the now-stale parent.
+    gate.release();
+    let stalled = send.wait_spawned(running_a).expect("wait A");
+
+    let log = send
+        .run_command(&["--json", "session", "log", send.session_id()])
+        .expect("session log after stale-parent race");
+    let mut captures = baseline_captures;
+    captures.extend(gated_server.captured_requests());
+    captures.extend(racer_server.captured_requests());
+
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&baseline)?;
+        require(
+            baseline.has_committed_completed(),
+            "baseline turn must commit completed",
+        )?;
+        assert_clean_send(&racer)?;
+        require(
+            racer.has_committed_completed(),
+            format!(
+                "racing turn B must commit completed: {:?}",
+                racer.type_sequence()
+            ),
+        )?;
+        assert_clean_send(&stalled)?;
+
+        let token_pos = stalled
+            .events
+            .iter()
+            .position(|e| matches!(e, TurnEventLine::TokenDelta { .. }));
+        let committing_pos = stalled
+            .events
+            .iter()
+            .position(|e| matches!(e, TurnEventLine::TurnCommitting));
+        let failed_pos = stalled
+            .events
+            .iter()
+            .position(|e| matches!(e, TurnEventLine::CommitFailed { .. }));
+        require(
+            token_pos.is_some(),
+            format!(
+                "stale turn must emit token_delta before commit failure: {:?}",
+                stalled.type_sequence()
+            ),
+        )?;
+        require(
+            committing_pos.is_some(),
+            format!(
+                "stale turn must emit turn_committing: {:?}",
+                stalled.type_sequence()
+            ),
+        )?;
+        require(
+            failed_pos.is_some(),
+            format!(
+                "stale turn must emit commit_failed: {:?}",
+                stalled.type_sequence()
+            ),
+        )?;
+        require(
+            token_pos < committing_pos && committing_pos < failed_pos,
+            format!(
+                "expected token_delta -> turn_committing -> commit_failed, got {:?}",
+                stalled.type_sequence()
+            ),
+        )?;
+        let reason = stalled.events.iter().find_map(|event| match event {
+            TurnEventLine::CommitFailed { reason } => Some(reason.as_str()),
+            _ => None,
+        });
+        require(
+            reason.is_some_and(|r| !r.is_empty()),
+            "commit_failed reason must be nonempty",
+        )?;
+        require(
+            !stalled
+                .events
+                .iter()
+                .any(|e| matches!(e, TurnEventLine::TurnCommitted { .. })),
+            "stale-parent race must not emit turn_committed",
+        )?;
+        require(
+            stalled.exit_code == Some(SendExitCode::Failed),
+            format!(
+                "commit_failed turn must exit 1, got {:?}",
+                stalled.exit_code
+            ),
+        )?;
+
+        let log_json: Value =
+            serde_json::from_slice(&log.stdout).map_err(|error| AssertError::StdoutMissing {
+                expected: format!("session log --json not JSON: {error}"),
+            })?;
+        let turns = log_json
+            .get("turns")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        require(
+            turns.len() == 2,
+            format!(
+                "durable session log must stay at baseline+racer (2), got {}: {log_json}",
+                turns.len()
+            ),
+        )?;
+        Ok(())
+    })();
+
+    finish_scenario(
+        scenario_evidence,
+        &[
+            ("baseline turn", &baseline.command),
+            ("racing turn B", &racer.command),
+            ("stalled turn A", &stalled.command),
+            ("session log after race", &log),
+        ],
+        captures,
         result,
     );
 }
