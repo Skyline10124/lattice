@@ -49,6 +49,24 @@ Severity: test refactor / ledger closeout.
 **Changed files:**
 `crates/lattice-system-harness/tests/{direct_tools,direct_turn_contract,direct_failures}.rs`; `crates/lattice-api/tests/usage_turn.rs`; `crates/lattice-api/src/turn/live_tests.rs`; `docs/TEST-TRIAGE.md`; `docs/test-triage-decisions.json`; `FINDINGS.md`; `FIX.md`.
 
+## GitHub #66: translate M-TOOL-01 residual to GitHub issue numbers — 2026-07-24
+
+Severity: docs / review-record correctness.
+
+**Problem:** After the Codeberg→GitHub migration, `M-TOOL-01` still listed REMAINING/Plan as Codeberg `#6/#7–#10/#12–#14`. Those bare numbers collide with unrelated MERGED/CLOSED GitHub issues and fail #66's residual consistency criterion (must be `#28/#29–#32/#34–#36`). The ledger note says new references use GitHub numbers.
+
+**Fix:**
+- Updated `FINDINGS.md` `M-TOOL-01` REMAINING/Plan to GitHub `#28` (capability admission), `#29–#32` (Tool migration), `#34` (delete migration crates), `#35` (Bundle), `#36` (docs).
+- Translated the mutation dependency `#42` → `#64` (explicit Rewind) in the same Plan line.
+- Left historical Codeberg-numbered findings elsewhere untouched; did not rewrite append-only FIX history.
+
+**Verification:**
+- `rg -n "slices A|slice D|REMAINING|Execute slice D" FINDINGS.md FIX.md` — M-TOOL-01 uses past-tense A–D landed; no active "Execute slice D".
+- `rg -n "REMAINING: #6|#7–#10|#12 \(delete|Execute #6" FINDINGS.md` — zero hits in M-TOOL-01.
+- `gh issue view` for `#28/#29–#32/#34–#36/#64` — all OPEN with matching ADR 0004 / Rewind titles.
+
+**Changed files:**
+`FINDINGS.md`; `FIX.md`.
 
 ## GitHub #72: reconcile #45→#46 assertion-level test handoff — 2026-07-24
 
