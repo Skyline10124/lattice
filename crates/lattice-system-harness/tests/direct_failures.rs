@@ -18,6 +18,7 @@ use lattice_system_harness::{
     AssertError, RunningCommand, SendExitCode, SessionSendDriver, SseScript, TurnEventLine,
     assert_event_subsequence,
 };
+use serde_json::Value;
 use support::{
     assert_clean_send, direct_world, driver, evidence, finish_scenario, require, sequence,
     tool_call, wire_fake_llm, wire_gated_fake_llm,
@@ -127,6 +128,9 @@ fn direct_failure_disconnect_before_output_commits_error() {
         SessionSendDriver::new(&driver, &world, &spec, "dl-disc-pre", "main").expect("session");
 
     let outcome = send.send("trigger early disconnect").expect("turn");
+    let log = send
+        .run_command(&["--json", "session", "log", send.session_id()])
+        .expect("session log after early disconnect");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
@@ -141,12 +145,20 @@ fn direct_failure_disconnect_before_output_commits_error() {
             ],
         )
         .map_err(|e| AssertError::StdoutMissing { expected: e })?;
+        let failure_reason = outcome.events.iter().find_map(|event| match event {
+            TurnEventLine::TurnFailed { reason } => Some(reason.as_str()),
+            _ => None,
+        });
         require(
-            outcome
+            failure_reason.is_some_and(|reason| !reason.is_empty()),
+            "turn_failed must carry a nonempty reason on early disconnect",
+        )?;
+        require(
+            !outcome
                 .events
                 .iter()
-                .any(|e| matches!(e, TurnEventLine::TurnFailed { .. })),
-            "turn_failed must surface on early disconnect",
+                .any(|event| matches!(event, TurnEventLine::CommitFailed { .. })),
+            "stream failure must commit an error turn, not emit commit_failed",
         )?;
         require(
             outcome.events.iter().any(
@@ -162,12 +174,34 @@ fn direct_failure_disconnect_before_output_commits_error() {
             outcome.assistant_text().is_empty(),
             "no assistant text before disconnect",
         )?;
+        let log_json: Value =
+            serde_json::from_slice(&log.stdout).map_err(|error| AssertError::StdoutMissing {
+                expected: format!("session log --json not JSON: {error}"),
+            })?;
+        let persisted = log_json
+            .get("turns")
+            .and_then(Value::as_array)
+            .and_then(|turns| turns.last());
+        require(
+            persisted
+                .and_then(|turn| turn.get("status"))
+                .and_then(Value::as_str)
+                == Some("error")
+                && persisted
+                    .and_then(|turn| turn.get("terminal_reason"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.is_empty()),
+            format!("stream failure was not durably logged as error: {log_json}"),
+        )?;
         Ok(())
     })();
 
     finish_scenario(
         scenario_evidence,
-        &[("disconnect before output", &outcome.command)],
+        &[
+            ("disconnect before output", &outcome.command),
+            ("session log after disconnect", &log),
+        ],
         captures,
         result,
     );
@@ -312,6 +346,9 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
     running.interrupt().expect("deliver SIGINT");
 
     let outcome = send.wait_spawned(running).expect("wait spawned");
+    let log = send
+        .run_command(&["--json", "session", "log", send.session_id()])
+        .expect("session log after cancellation");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
@@ -331,11 +368,14 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
         )
         .map_err(|e| AssertError::StdoutMissing { expected: e })?;
         require(
-            outcome
-                .events
-                .iter()
-                .any(|e| matches!(e, TurnEventLine::TurnCancelled { .. })),
-            "turn_cancelled must surface on SIGINT",
+            outcome.events.iter().any(|event| {
+                matches!(
+                    event,
+                    TurnEventLine::TurnCancelled { reason }
+                        if reason.as_deref().is_some_and(|text| text.contains("cancelled"))
+                )
+            }),
+            "turn_cancelled must carry a cancellation reason on SIGINT",
         )?;
         require(
             outcome
@@ -359,12 +399,29 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
             outcome.assistant_text().is_empty(),
             "no assistant text while stalled",
         )?;
+        let log_json: Value =
+            serde_json::from_slice(&log.stdout).map_err(|error| AssertError::StdoutMissing {
+                expected: format!("session log --json not JSON: {error}"),
+            })?;
+        require(
+            log_json
+                .get("turns")
+                .and_then(Value::as_array)
+                .and_then(|turns| turns.last())
+                .and_then(|turn| turn.get("status"))
+                .and_then(Value::as_str)
+                == Some("cancelled"),
+            format!("cancelled turn was not durably logged: {log_json}"),
+        )?;
         Ok(())
     })();
 
     finish_scenario(
         scenario_evidence,
-        &[("sigint while stalled", &outcome.command)],
+        &[
+            ("sigint while stalled", &outcome.command),
+            ("session log after cancellation", &log),
+        ],
         captures,
         result,
     );

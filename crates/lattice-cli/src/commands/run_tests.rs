@@ -12,35 +12,6 @@ fn stream_timeout_constant_is_5_minutes() {
     const EXPECTED_TIMEOUT: u64 = 300;
     assert_eq!(EXPECTED_TIMEOUT, STREAM_TIMEOUT_SECS);
 }
-
-#[tokio::test]
-async fn stream_timeout_fires_after_duration() {
-    use futures::StreamExt;
-    use std::time::Duration;
-    use tokio::time;
-
-    // Create a stream that never yields
-    struct NeverStream;
-    impl futures::Stream for NeverStream {
-        type Item = TurnEvent;
-        fn poll_next(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            std::task::Poll::Pending
-        }
-    }
-
-    let mut stream = NeverStream;
-    let timeout_duration = Duration::from_millis(50); // very short for test
-
-    let result = time::timeout(timeout_duration, stream.next()).await;
-    assert!(
-        result.is_err(),
-        "timeout should fire when stream never yields"
-    );
-}
-
 #[test]
 fn run_validate_agents_dir_rejects_parent_components() {
     let err = validate_agents_dir(Path::new(".lattice/../agents")).unwrap_err();

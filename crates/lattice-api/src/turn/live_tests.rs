@@ -16,7 +16,7 @@ use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_session::WorkspaceDisposition;
 
-use super::types::{RunTurnRequest, RunTurnStatus, TurnEvent, TurnEventStream};
+use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
 use crate::session::SessionApi;
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -234,64 +234,6 @@ impl LlmClient for BlockingLlmClient {
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn stream_turn_live_with_agent_error_commits_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-    // Push an error event that will cause the agent loop to fail
-    let client = FakeStreamingLlmClient::builder()
-        .push_error("provider unavailable")
-        .build();
-    let agent_loop = make_agent_loop(client);
-    let request = make_request("hello");
-
-    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
-        .await
-        .expect("stream_turn_live_with_agent should succeed (error is in-stream)");
-    let events: Vec<TurnEvent> = stream.collect().await;
-
-    // Contains TurnFailed with non-empty reason
-    let failed = events
-        .iter()
-        .find(|e| matches!(e, TurnEvent::TurnFailed { .. }))
-        .expect("should have TurnFailed event");
-    if let TurnEvent::TurnFailed { reason } = failed {
-        assert!(!reason.is_empty(), "TurnFailed reason should not be empty");
-    }
-
-    // TurnFailed appears before TurnCommitting
-    let failed_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnFailed { .. }))
-        .unwrap();
-    let committing_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitting))
-        .expect("should have TurnCommitting");
-    assert!(
-        failed_pos < committing_pos,
-        "TurnFailed must appear before TurnCommitting"
-    );
-
-    // Contains TurnCommitted with status Error
-    let committed = events
-        .iter()
-        .find(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
-        .expect("should have TurnCommitted event");
-    if let TurnEvent::TurnCommitted { status, .. } = committed {
-        assert_eq!(*status, RunTurnStatus::Error);
-    }
-
-    // No CommitFailed event
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::CommitFailed { .. })),
-        "should not contain CommitFailed"
-    );
-}
-
 #[tokio::test]
 async fn stream_turn_live_with_agent_startup_failure_no_stream() {
     let dir = tempfile::tempdir().unwrap();
@@ -447,7 +389,7 @@ async fn stream_turn_live_with_agent_commit_stores_delta_only() {
 #[tokio::test]
 async fn stream_turn_live_with_agent_commit_failure_deterministic() {
     // Deterministic commit failure using BlockingLlmClient.
-    // and real SQLite parent conflict.
+    // and a real git-backed session parent conflict.
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
 

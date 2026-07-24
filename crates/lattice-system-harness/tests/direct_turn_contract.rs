@@ -18,8 +18,9 @@
 //! - **message assembly / reopen context** — request one is system + current
 //!   user input; request two contains exactly the prior user/assistant pair
 //!   before the new user message.
-//! - **log/status** — both commit IDs reported, count two, HEAD `main`; the
-//!   first turn's log entry is unchanged after the second delta commit.
+//! - **log/status** — JSON reports both commit IDs, count two, HEAD `main`; the
+//!   first turn's log entry is unchanged after the second delta commit; human
+//!   log output renders the committed turn.
 //! - **missing session** — `session send` on an unknown session exits 2 with
 //!   no JSONL Turn events on stdout.
 //!
@@ -222,6 +223,9 @@ fn direct_turn_completed_reopen_contract() {
     let log_after_second = send
         .run_command(&["--json", "session", "log", sid])
         .expect("session log after second turn");
+    let human_log = send
+        .run_command(&["session", "log", sid])
+        .expect("human session log after second turn");
     let status_output = send
         .run_command(&["--json", "session", "status", sid])
         .expect("session status --json");
@@ -291,6 +295,13 @@ fn direct_turn_completed_reopen_contract() {
                 && logged_ids.contains(&second_commit.as_str()),
             format!("session log did not report both commits: {logged_ids:?}"),
         )?;
+        let human_log_stdout = String::from_utf8_lossy(&human_log.stdout);
+        require(
+            human_log.status.success()
+                && human_log_stdout.contains("turn 0")
+                && human_log_stdout.contains("first prompt"),
+            format!("human session log omitted committed turn: {human_log_stdout}"),
+        )?;
 
         let status_stdout = String::from_utf8_lossy(&status_output.stdout);
         let status_json: Value = serde_json::from_str(status_stdout.trim()).map_err(|error| {
@@ -355,6 +366,7 @@ fn direct_turn_completed_reopen_contract() {
             ("session log after first turn", &log_after_first),
             ("second session send", &second.command),
             ("session log after second turn", &log_after_second),
+            ("human session log after second turn", &human_log),
             ("session status --json", &status_output),
             ("missing-session send", &missing),
         ],

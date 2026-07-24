@@ -249,8 +249,25 @@ fn direct_operator_audit_session_lancet_cross_validate() {
             .and_then(Value::as_str)
             .unwrap_or("");
         require(
-            !replay_turn.is_empty(),
-            format!("replay trace.turn_id must be non-empty: {replay}"),
+            replay_turn == turn_id_1.as_str(),
+            format!(
+                "replay trace.turn_id mismatch: expected {turn_id_1}, got {replay_turn:?}: {replay}"
+            ),
+        )?;
+        let replay_activities = replay
+            .get("trace")
+            .map(fragment_activities)
+            .unwrap_or_default();
+        require(
+            replay_activities.contains(&"observe.workspace"),
+            format!("replay trace must include observe.workspace activity: {replay_activities:?}"),
+        )?;
+        require(
+            replay
+                .get("stored_statement_match")
+                .and_then(Value::as_bool)
+                == Some(true),
+            format!("replay must report matching stored attestation: {replay}"),
         )?;
 
         // lancet status --json reports recent calls.
@@ -391,8 +408,8 @@ fn direct_operator_audit_replay_unknown_turn_fails() {
         )?;
         let err = String::from_utf8_lossy(&rp.stderr);
         require(
-            !err.is_empty(),
-            "audit replay unknown turn must report an error on stderr",
+            err.contains("no audit rows for turn_id"),
+            format!("audit replay unknown-turn diagnostic mismatch: {err}"),
         )?;
         Ok(())
     })();

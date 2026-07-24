@@ -83,21 +83,9 @@ pub async fn run(cmd: AuditCmd, global_json: bool) -> Result<()> {
     // it must NOT build its own runtime and `block_on` - that nests a runtime
     // and panics with "Cannot start a runtime from within a runtime" (surfaced
     // by the `planned_audit_cli` black-box scenario on a missing/empty store).
-    // Await `run_async` on the existing runtime instead. `run_at` (below) keeps
-    // its own runtime for the crate-internal unit tests, which call it outside
-    // any runtime context.
+    // Await `run_async` on the existing runtime instead.
     let project_root = std::env::current_dir().context("current working directory")?;
     run_async(cmd, global_json, &project_root).await
-}
-
-/// Run audit against an explicit project root (tests — avoids `set_current_dir` races).
-#[cfg(test)]
-pub fn run_at(project_root: &Path, cmd: AuditCmd, global_json: bool) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("tokio runtime")?;
-    rt.block_on(run_async(cmd, global_json, project_root))
 }
 
 async fn run_async(cmd: AuditCmd, global_json: bool, project_root: &Path) -> Result<()> {
@@ -255,42 +243,9 @@ mod tests {
     use super::*;
     use crate::commands::test_env::ScopedXdgStateHome;
     use lancet_api::audit_db_path_for_project;
-    use lancet_api::store_turn_attestation;
     use lancet_catalog::CepMethod;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
-    use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
     use tempfile::TempDir;
-
-    fn seed_audit_db(dir: &Path, session_id: &str) {
-        let db_path = audit_db_path_for_project(dir).expect("resolve external audit path");
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let audit = CepAuditStore::open(&db_path).expect("open audit db");
-        let ctx = CepAuditContext {
-            turn_id: "turn-cli".into(),
-            session_id: session_id.into(),
-            model_id: "cli-model".into(),
-            runtime_version: "test".into(),
-        };
-        let start = audit
-            .start_call(
-                &ctx,
-                1,
-                ObserveWorkspace::NAME,
-                &CallAuditMetadata::native_policy_enforced(Some("started")),
-            )
-            .unwrap();
-        audit
-            .finalize_call(
-                start,
-                lancet_native::audit::AuditOutcome::Success {
-                    summary: "read ok".into(),
-                },
-                Some("native_handler"),
-                Some(r#"{"required_capability":"read_path","content_hash":"sha256:abc"}"#),
-            )
-            .unwrap();
-    }
-
     fn query_cmd(session: &str, json: bool) -> AuditCmd {
         AuditCmd {
             action: None,
@@ -306,82 +261,6 @@ mod tests {
                 json,
             },
         }
-    }
-
-    fn replay_cmd(session: &str, turn: &str, json: bool) -> AuditCmd {
-        AuditCmd {
-            action: Some(AuditAction::Replay(AuditReplayArgs {
-                session: Some(session.to_string()),
-                turn: turn.to_string(),
-                json,
-            })),
-            query: AuditQueryArgs {
-                session: None,
-                turn: None,
-                method: None,
-                impact: None,
-                capability: None,
-                verdict: None,
-                tail: false,
-                since: None,
-                json: false,
-            },
-        }
-    }
-
-    #[tokio::test]
-    async fn audit_replay_reports_stored_attestation_match() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        let session = "sess-cli-replay-match";
-        let db_path = audit_db_path_for_project(dir.path()).expect("audit path");
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let audit = CepAuditStore::open(&db_path).expect("open audit db");
-        let turn_id = "turn-cli-match";
-        let ctx = CepAuditContext {
-            turn_id: turn_id.into(),
-            session_id: session.into(),
-            model_id: "cli-model".into(),
-            runtime_version: "test".into(),
-        };
-        let start = audit
-            .start_call(
-                &ctx,
-                1,
-                ObserveWorkspace::NAME,
-                &CallAuditMetadata::native_policy_enforced(Some("started")),
-            )
-            .unwrap();
-        audit
-            .finalize_call(
-                start,
-                lancet_native::audit::AuditOutcome::Success {
-                    summary: "read ok".into(),
-                },
-                Some("native_handler"),
-                Some(r#"{"required_capability":"read_path"}"#),
-            )
-            .unwrap();
-        store_turn_attestation(&audit, &ctx, turn_id).expect("store attestation");
-
-        run_async(replay_cmd(session, turn_id, true), false, dir.path())
-            .await
-            .expect("replay with stored attestation should succeed");
-    }
-
-    #[test]
-    fn audit_replay_errors_for_unknown_turn() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        let session = "sess-cli-replay-empty";
-        seed_audit_db(dir.path(), session);
-        let err = run_at(
-            dir.path(),
-            replay_cmd(session, "turn-nonexistent", true),
-            false,
-        )
-        .expect_err("unknown turn should error");
-        assert!(err.to_string().contains("no audit rows for turn_id"));
     }
     /// Legacy audit SQLite (no `model_id` / `runtime_version` columns) remains readable.
     #[tokio::test]

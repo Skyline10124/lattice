@@ -287,6 +287,9 @@ fn direct_tools_todo_write_success() {
     let scenario_evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-todo", "main").expect("session");
     let outcome = send.send("write todos").expect("turn");
+    let status = send
+        .run_command(&["--json", "lancet", "status"])
+        .expect("lancet status after todo");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
@@ -296,6 +299,53 @@ fn direct_tools_todo_write_success() {
             "todo_write ok",
         )?;
         require(outcome.has_committed_completed(), "turn completed")?;
+        let cep_started = outcome.events.iter().position(|event| match event {
+            TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_started" => {
+                raw.get("method").and_then(Value::as_str) == Some("session.todo_write")
+            }
+            _ => false,
+        });
+        let cep_finished = outcome.events.iter().position(|event| match event {
+            TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
+                raw.get("method").and_then(Value::as_str) == Some("session.todo_write")
+            }
+            _ => false,
+        });
+        let tool_finished = outcome.events.iter().position(|event| {
+            matches!(
+                event,
+                TurnEventLine::ToolCallFinished { name, .. } if name == "session.todo_write"
+            )
+        });
+        require(
+            cep_started
+                .zip(cep_finished)
+                .zip(tool_finished)
+                .is_some_and(|((started, finished), tool)| started < finished && finished < tool),
+            format!(
+                "todo CEP/tool lifecycle ordering missing: {:?}",
+                outcome.events
+            ),
+        )?;
+        let cep_started_raw = outcome.events.iter().find_map(|event| match event {
+            TurnEventLine::Unknown { type_name, raw }
+                if type_name == "cep_call_started"
+                    && raw.get("method").and_then(Value::as_str) == Some("session.todo_write") =>
+            {
+                Some(raw)
+            }
+            _ => None,
+        });
+        require(
+            cep_started_raw.is_some_and(|raw| {
+                raw.get("semantic_stage").and_then(Value::as_str) == Some("cep_native")
+                    && raw.get("guard_stage").and_then(Value::as_str)
+                        == Some("cep_policy_lifecycle")
+                    && raw.get("impact_kind").and_then(Value::as_str)
+                        == Some("session_state_mutation")
+            }),
+            format!("todo cep_call_started metadata mismatch: {cep_started_raw:?}"),
+        )?;
         require(captures.len() >= 2, "need tool result in next request")?;
         let todos = tool_result_value(&captures[1]).expect("todo result JSON");
         let list = todos
@@ -319,12 +369,39 @@ fn direct_tools_todo_write_success() {
             body.contains("step one") && body.contains("in_progress"),
             format!("next request lacked todo JSON: {body}"),
         )?;
+        require(
+            status.status.success(),
+            format!(
+                "lancet status failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            ),
+        )?;
+        let status_json: Value =
+            serde_json::from_slice(&status.stdout).map_err(|error| AssertError::StdoutMissing {
+                expected: format!("lancet status --json not JSON: {error}"),
+            })?;
+        let recent_calls = status_json
+            .get("recent_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        require(
+            recent_calls.iter().any(|call| {
+                call.get("method").and_then(Value::as_str) == Some("session.todo_write")
+            }) && status_json
+                .get("last_guard_verdict")
+                .is_some_and(|value| !value.is_null()),
+            format!("lancet status omitted todo/verdict: {status_json}"),
+        )?;
         Ok(())
     })();
 
     finish_scenario(
         scenario_evidence,
-        &[("todo_write success", &outcome.command)],
+        &[
+            ("todo_write success", &outcome.command),
+            ("lancet status after todo", &status),
+        ],
         captures,
         result,
     );

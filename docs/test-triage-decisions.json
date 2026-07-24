@@ -4578,10 +4578,10 @@
     "name": "agent_loop_builds_messages_from_transcript_and_user_input",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_message_assembly",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_message_assembly` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "direct_turn_completed_reopen_contract",
+    "reason": "#72 assertion-level superset：direct_turn_completed_reopen_contract 通过真实 binary 两轮 Turn 精确断言 [system,user,assistant,user] 角色序列与 prior/current 内容，并验证 commit/reopen；exact scenario 已通过后删除原测试。"
   },
   {
     "crate": "lattice-agent",
@@ -4626,10 +4626,10 @@
     "name": "tool_execution_error_structured_payload_preserved",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_tool_error_payload",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_tool_error_payload` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#72 final review：AgentLoop 将 code/message/data/retriability 的 CepErrorPayload 原样保存在 AgentTurnResult；当前 binary TurnEvent/RunTurnResult 只公开 error summary，无法忠实外部观察，改判 keep/local_invariant。"
   },
   {
     "crate": "lattice-agent",
@@ -6080,7 +6080,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 direct_turn_completed_reopen_contract（完整生命周期 + session_id/branch/exit code） 接管",
+    "replacement": "direct_turn_completed_reopen_contract",
     "reason": "#24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（完整生命周期 + session_id/branch/exit code）。已删除原测试。"
   },
   {
@@ -6090,10 +6090,10 @@
     "name": "stream_turn_live_with_agent_error_commits_error",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_live_error_commit",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_live_error_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "direct_failure_disconnect_before_output_commits_error",
+    "reason": "#72 assertion-level superset：direct_failure_disconnect_before_output_commits_error 断言非空 TurnFailed.reason、failed→committing→committed(error)、无 CommitFailed、exit 1 与 durable error log；exact scenario 已通过后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6104,7 +6104,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 direct_turn_completed_reopen_contract（相同事件子序列） 接管",
+    "replacement": "direct_turn_completed_reopen_contract",
     "reason": "#24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（相同事件子序列）。已删除原测试。"
   },
   {
@@ -6114,10 +6114,10 @@
     "name": "stream_turn_live_with_agent_startup_failure_no_stream",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_provider_startup_failure",
-    "reason": "#24 slice 5：direct_failure_http_error_no_retry_commits_error 覆盖 provider HTTP 启动失败；原测试为 session-not-found 启动失败（返回 Err，无 stream），不同失败模式，保留原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#72 final review：direct_turn_completed_reopen_contract 已覆盖 missing-session exit 2 + 零 Turn events，但 binary 无法区分 Rust API 在 prepare 阶段立即返回 Err 与返回 Ok(empty stream)；保留该 startup return contract 为 local invariant。"
   },
   {
     "crate": "lattice-api",
@@ -6126,10 +6126,10 @@
     "name": "stream_turn_live_with_agent_commit_stores_delta_only",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_delta_only_commit",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_delta_only_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#72 final review：direct_turn_completed_reopen_contract 已覆盖两轮 reopen/log/status 与首条 log 稳定；原测试仍直接断言 graph commit delta、HEAD transcript 精确四消息及 commit-message 长度，这些存储表示不由 public binary 忠实暴露，改判 keep/local_invariant。"
   },
   {
     "crate": "lattice-api",
@@ -6140,7 +6140,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 direct_turn_completed_reopen_contract（branch == main） 接管",
+    "replacement": "direct_turn_completed_reopen_contract",
     "reason": "#24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（branch == main）。已删除原测试。"
   },
   {
@@ -6153,7 +6153,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_commit_failure",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_commit_failure` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "reason": "#72 final review：现有 external scenarios 覆盖正常 commit 且 harness 可解析 CommitFailed；未覆盖同 session stale-parent race、TokenDelta/TurnCommitting→CommitFailed、无 TurnCommitted 与 durable log 不增第三条。后续 owner：lattice-system-harness Direct-Local turn-conflict scenario。"
   },
   {
     "crate": "lattice-api",
@@ -6296,7 +6296,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 planned_direct_tool_activity_before_commit 接管",
+    "replacement": "direct_observation_visibility_and_bounds",
     "reason": "#24 slice 2 assertion-level superset review：direct_observation.rs 断言 tool_call_started<turn_committed（10 次 observe.workspace）+ 全部 tool_call_finished（ok_pattern）+ completed commit；tool_call_finished<committed 为 agent loop 结构不变量（commit 为终步）。已删除原测试。"
   },
   {
@@ -6306,10 +6306,10 @@
     "name": "stream_turn_error_still_commits_error",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_stream_error_commit",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_stream_error_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "direct_failure_disconnect_before_output_commits_error",
+    "reason": "#72 assertion-level superset：direct_failure_disconnect_before_output_commits_error 断言 stream failure 事件顺序、committed error、exit 1，并通过 public session log 断言 durable status=error 与非空 terminal_reason；exact scenario 已通过后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6318,10 +6318,10 @@
     "name": "stream_turn_cancelled_commits_cancelled",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_cancelled_commit",
-    "reason": "#24 slice 5：direct_failure_sigint_while_stalled_commits_cancelled 落地事件链半（turn_cancelled<turn_committing<turn_committed status=cancelled + exit 1）；durable log status=cancelled 半未覆盖，保留原测试。"
+    "replacement": "direct_failure_sigint_while_stalled_commits_cancelled",
+    "reason": "#72 assertion-level superset：direct_failure_sigint_while_stalled_commits_cancelled 断言 cancellation reason、cancelled→committing→committed(cancelled)、exit 1、零 assistant 输出与 public log status=cancelled；exact scenario 已通过后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6330,10 +6330,10 @@
     "name": "stream_turn_error_after_partial_commits_error",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_partial_output_error_commit",
-    "reason": "#24 slice 5：direct_failure_disconnect_after_partial_token_commits_error 落地 partial token + turn_failed + turn_committed status=error + exit 1 半；transcript assistant 内容保留 + log status + terminal_reason 内容半未覆盖，保留原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#72 final review：direct_failure_disconnect_after_partial_token_commits_error 已覆盖 partial token、TurnFailed、committed error 与 exit 1；原测试仍直接断言 Session History 中 assistant delta 精确内容及 terminal_reason 映射，public CLI 无 transcript read surface，改判 keep/local_invariant。"
   },
   {
     "crate": "lattice-api",
@@ -6342,10 +6342,10 @@
     "name": "stream_turn_emits_cep_lifecycle_events",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_cep_lifecycle",
-    "reason": "#24 slice 2 assertion-level review：半个覆盖--direct_observation.rs 覆盖 observation 半（tool_call_started/finished 事件 + canonical tool name），但不断言 CepCallStarted/Finished 的 semantic_stage/guard_stage/impact_kind；CEP lifecycle 半未覆盖，保留原测试。"
+    "replacement": "direct_tools_todo_write_success",
+    "reason": "#72 assertion-level superset：direct_tools_todo_write_success 通过 public JSONL 精确断言 session.todo_write 的 cep_native/cep_policy_lifecycle/session_state_mutation 及 CepStarted<CepFinished<ToolFinished；exact scenario 已通过后删除原测试。"
   },
   {
     "crate": "lattice-api",
@@ -6630,10 +6630,10 @@
     "name": "full_turn_audit_rows_and_replay_fragment",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_turn_audit_replay",
-    "reason": "#24 slice 2 assertion-level review：半个覆盖--direct_observation.rs 覆盖 observation 半（observe.workspace 经完整 turn 执行），但不查询 audit rows/replay fragment；audit 半未覆盖，保留原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#72 final review：direct_operator_audit_session_lancet_cross_validate 已覆盖 public query/filter/tail/replay；原测试仍直接断言 audit DB 持久化、逐 row call/method/impact/turn/session/model 字段与 replay activity 精确计数，这些 store/projection seam 不由 binary 完整暴露，改判 keep/local_invariant。"
   },
   {
     "crate": "lattice-api",
@@ -6836,7 +6836,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 planned_direct_activity_commit_order 接管",
+    "replacement": "direct_turn_completed_reopen_contract",
     "reason": "#24 slice 2 assertion-level superset review：slice-1 direct_turn_contract.rs（direct_turn_completed_reopen_contract）断言完整生命周期子序列 [turn_started, model_started, token_delta, model_finished, turn_committing, turn_committed]，为原内部测试 ModelStarted<TokenDelta<TurnCommitting<TurnCommitted 排序的严格超集。已删除原测试。"
   },
   {
@@ -8384,7 +8384,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 planned_direct_workspace_read_turn 接管",
+    "replacement": "direct_observation_visibility_and_bounds",
     "reason": "#24 slice 2 assertion-level superset review：direct_observation.rs 通过 .lattice/agents/ 配置的 profile 读取 tracked.txt/notes.txt 并断言 content present，为原内部测试 default-profile-reads-workspace-file 的严格超集。已删除原测试。"
   },
   {
@@ -8397,7 +8397,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_routed_provider_event",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_routed_provider_event` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "reason": "#72 final review：direct_turn_completed_reopen_contract 已覆盖 openai_compatible/compat 路由事件与 wire model；尚未覆盖默认 sonnet→anthropic 路由分支。后续 owner：lattice-system-harness provider-routing scenario；保留明确 planned behavior。"
   },
   {
     "crate": "lattice-api",
@@ -8418,10 +8418,10 @@
     "name": "usage_resume_session_includes_previous_turn_context",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_reopen_previous_context",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_reopen_previous_context` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#72 final review：direct_turn_completed_reopen_contract 已精确覆盖 reopen provider context、两 commit 与 HEAD main；原测试仍直接断言 raw HeadTranscript 与第二 commit parent_ids 关系，属于 SessionApi/graph seam，改判 keep/local_invariant。"
   },
   {
     "crate": "lattice-api",
@@ -8433,7 +8433,7 @@
     "decision": "elevate",
     "target_layer": "direct_local_binary",
     "replacement": "planned_direct_fetch_capability_denial",
-    "reason": "#24 slice 4：direct_tools 落地 host-policy/disabled fetch 半；FetchUrl capability + allow_public_https 半与 CepCallStarted external_observation 标签仍依赖 API 级断言，保留原测试。"
+    "reason": "#72 final review：direct_tools 已覆盖 disabled fetch 与 localhost host-policy denial；尚未覆盖 allow_public_https=true 且缺 FetchUrl capability 的拒绝，以及 fetch.web CepCallStarted external_observation/cep_native 标签。后续 owner：lattice-system-harness fetch capability scenario。"
   },
   {
     "crate": "lattice-api",
@@ -8444,7 +8444,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 planned_direct_disabled_fetch_denial 接管",
+    "replacement": "direct_tools_fetch_disabled_no_dispatch",
     "reason": "#24 slice 4 assertion-level superset review：direct_tools_fetch_disabled_no_dispatch 断言 disabled fetch.web 失败、fixture 零请求、无 cep_call_started；严格超集。已删除原测试。"
   },
   {
@@ -8456,7 +8456,7 @@
     "async": false,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 planned_direct_audit_query_seeded 接管",
+    "replacement": "direct_operator_audit_session_lancet_cross_validate",
     "reason": "#24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：row_count>0 + 两个方法 + method/verdict 过滤 + tail rows + session status/log。已删除原测试。"
   },
   {
@@ -8468,7 +8468,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 planned_direct_audit_tail_seeded 接管",
+    "replacement": "direct_operator_audit_session_lancet_cross_validate",
     "reason": "#24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：tail 返回非零 rows。已删除原测试。"
   },
   {
@@ -8492,7 +8492,7 @@
     "async": false,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 planned_direct_audit_query_unknown_session 接管",
+    "replacement": "direct_operator_audit_query_unknown_session_empty",
     "reason": "#24 slice 6 assertion-level superset review：direct_operator_audit_query_unknown_session_empty：exit 0 + row_count==0。已删除原测试。"
   },
   {
@@ -8504,7 +8504,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 planned_direct_audit_replay_trace 接管",
+    "replacement": "direct_operator_audit_session_lancet_cross_validate",
     "reason": "#24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：replay trace.turn_id 非空 + 引用 observe.workspace。已删除原测试。"
   },
   {
@@ -8514,10 +8514,10 @@
     "name": "audit_replay_reports_stored_attestation_match",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_audit_attestation_match",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_attestation_match` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "direct_operator_audit_session_lancet_cross_validate",
+    "reason": "#72 assertion-level superset：direct_operator_audit_session_lancet_cross_validate 以真实 Turn 生成 attestation，public audit replay 成功且 JSON stored_statement_match=true；exact scenario 已通过后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8526,10 +8526,10 @@
     "name": "audit_replay_errors_for_unknown_turn",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_audit_replay_unknown_turn",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_audit_replay_unknown_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "direct_operator_audit_replay_unknown_turn_fails",
+    "reason": "#72 assertion-level superset：direct_operator_audit_replay_unknown_turn_fails 在真实 seeded audit store 上断言非零退出与 stderr 精确包含 no audit rows for turn_id；exact scenario 已通过后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8718,10 +8718,10 @@
     "name": "cep_status_seeded_audit_json",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_lancet_status_seeded",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_lancet_status_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "direct_tools_todo_write_success",
+    "reason": "#72 assertion-level superset：direct_tools_todo_write_success 在真实 todo Tool Turn 后运行 public lancet status --json，断言 recent_calls 含 session.todo_write 且 last_guard_verdict 非空；exact scenario 已通过后删除原测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8886,10 +8886,10 @@
     "name": "stream_timeout_fires_after_duration",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_provider_timeout",
-    "reason": "#24 slice 5：direct_failure_profile_deadline_while_stalled_commits_error 落地产品 deadline 半（profile timeout_secs → turn_failed → turn_committed error → exit 1）；原测试为纯 tokio::timeout 局部不变量（非产品 turn 路径），保留原测试。"
+    "replacement": "direct_failure_profile_deadline_while_stalled_commits_error",
+    "reason": "#72 assertion-level superset：原测试只断言 never-yield stream 会 timeout；direct_failure_profile_deadline_while_stalled_commits_error 通过真实 binary/provider stall 断言产品 deadline、TurnFailed→committed error、exit 1 与零 assistant 输出，exact scenario 已通过后删除原 Tokio-only 测试。"
   },
   {
     "crate": "lattice-cli",
@@ -8934,10 +8934,10 @@
     "name": "run_integration_commits_existing_session",
     "ignored": false,
     "async": true,
-    "decision": "elevate",
-    "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_existing_session_run_result",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_existing_session_run_result` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "decision": "keep",
+    "target_layer": "local_invariant",
+    "replacement": null,
+    "reason": "#72 final review：direct_turn_completed_reopen_contract 已覆盖 existing session 的 public commit/reopen；原测试仍直接断言 RunTurnResult.assistant_output/status/session_id/commit_id 返回契约，该 Rust API 结果不由 binary 独立暴露，改判 keep/local_invariant。"
   },
   {
     "crate": "lattice-cli",
@@ -8960,7 +8960,7 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 planned_direct_canonical_workspace_root 接管",
+    "replacement": "direct_observation_visibility_and_bounds",
     "reason": "#24 slice 2 assertion-level superset review：direct_observation.rs profile 位于 .lattice/agents/dl-obs/，读取 project-root tracked.txt/notes.txt 并断言内容；若 executor 使用 profile package dir 则路径不存在。严格强于原内部测试仅断言 ok=true。已删除原测试。"
   },
   {
@@ -9944,7 +9944,7 @@
     "async": false,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 direct_session_branch_listing_isolation 接管",
+    "replacement": "direct_session_branch_listing_isolation",
     "reason": "#24 slice 7 assertion-level superset review：direct_session_branch_listing_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
@@ -9956,7 +9956,7 @@
     "async": false,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 direct_session_checkout_isolation 接管",
+    "replacement": "direct_session_checkout_isolation",
     "reason": "#24 slice 7 assertion-level superset review：direct_session_checkout_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
@@ -9968,7 +9968,7 @@
     "async": false,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 direct_session_branch_create_isolation 接管",
+    "replacement": "direct_session_branch_create_isolation",
     "reason": "#24 slice 7 assertion-level superset review：direct_session_branch_create_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
@@ -9980,7 +9980,7 @@
     "async": false,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 direct_session_reset_isolation 接管",
+    "replacement": "direct_session_reset_isolation",
     "reason": "#24 slice 7 assertion-level superset review：direct_session_reset_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
@@ -9992,7 +9992,7 @@
     "async": false,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "已删除原测试，由 direct_session_diff_isolation 接管",
+    "replacement": "direct_session_diff_isolation",
     "reason": "#24 slice 7 assertion-level superset review：direct_session_diff_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。"
   },
   {
@@ -10542,10 +10542,10 @@
     "name": "smoke_session_log_shows_seeded_turn",
     "ignored": false,
     "async": false,
-    "decision": "elevate",
+    "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "planned_direct_session_log_turn",
-    "reason": "原内部测试断言集合由 #24 精确场景 `planned_direct_session_log_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。"
+    "replacement": "direct_turn_completed_reopen_contract",
+    "reason": "#72 assertion-level superset：direct_turn_completed_reopen_contract 在真实两轮 Turn 后同时验证 session log JSON durability 与 human 输出含 turn 0/首轮 commit message；exact scenario 已通过后删除内部 seed smoke。"
   },
   {
     "crate": "lattice-cli",

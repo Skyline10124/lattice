@@ -2,6 +2,30 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #72: reconcile #45→#46 assertion-level test handoff — 2026-07-24
+
+Severity: test refactor / ledger correctness.
+
+**Problem:** The #46 completion record described the 44-row Direct-Local handoff as both 20 strict-superset deletions and 20 half-retained rows. The machine ledger still had 20 `planned_direct_*` residuals without final assertion-level dispositions.
+
+**Fix:**
+- Re-audited all 44 handoff identities. Final disposition is **keep 14 / elevate 3 / delete 27**; the newly reviewed residual 20 split is **keep 7 / elevate 3 / delete 10**.
+- Strengthened existing public-binary scenarios with exact durable log/error/cancellation assertions, CEP lifecycle metadata/order, seeded LANCET status, requested replay turn/activity plus stored-attestation match, unknown-turn diagnostic, and human session-log rendering.
+- Deleted 10 newly superseded internal tests only after their exact external scenarios passed. Reclassified API return, raw graph/transcript, and audit-store/projection seams as `keep/local_invariant`.
+- Retained only `planned_direct_commit_failure`, `planned_direct_routed_provider_event`, and `planned_direct_fetch_capability_denial`, each with explicit covered/uncovered halves and an owner.
+- Preserved the 1449-row identity snapshot and synchronized machine/prose totals to keep 1193 / elevate 45 / delete 211 and local 1372 / fast-binary 45 / Direct-Local 32. Corrected `FINDINGS.md` T-23-01.
+
+**Verification:**
+- `cargo +1.96.0 fmt --all -- --check` — passed.
+- `cargo +1.96.0 test -p lattice-agent --features test-utils`; `cargo +1.96.0 test -p lattice-api`; `cargo +1.96.0 test -p lattice-cli` — passed.
+- `LATTICE_BIN=target/debug/lattice cargo +1.96.0 test -p lattice-system-harness --test direct_turn_contract --test direct_failures --test direct_operator --test direct_tools -- --test-threads=1` — 18 passed.
+- `cargo +1.96.0 clippy --workspace --all-targets -- -D warnings` — passed.
+- `LATTICE_BIN=target/debug/lattice cargo +1.96.0 test --workspace --all-targets -- --test-threads=1` — full workspace passed.
+- Ledger invariant check — 1449 unique identities, expected decision/layer totals, and exactly three remaining `planned_direct_*` IDs.
+
+**Changed files:**
+`crates/lattice-agent/tests/agent_loop.rs`; `crates/lattice-api/src/turn/{live_tests,stream_tests}.rs`; `crates/lattice-cli/src/commands/{audit,lancet,run_tests}.rs`; `crates/lattice-cli/tests/release_smoke.rs`; `crates/lattice-system-harness/tests/{direct_failures,direct_operator,direct_tools,direct_turn_contract}.rs`; `docs/TEST-TRIAGE.md`; `docs/test-triage-decisions.json`; `FINDINGS.md`; `FIX.md`.
+
 ## Codeberg #24 slice 7: public session graph isolation — 2026-07-22
 
 Severity: test refactor (测试重构 5/6, slice 7 of #46). Plan: `docs/plans/2026-07-22-issue46-slice7-session-isolation.md`.

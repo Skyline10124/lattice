@@ -28,79 +28,55 @@
 ### 场景目录（替代场景 ID）
 
 > Active 场景 ID 登记在此表。#40 退役的 KVM-lane 场景词汇已从 machine ledger
-> 与本目录中完全移除；其语义由 `direct_local_*` / `planned_direct_*`
-> assertion-level #24 ID 接管。退役词汇的迁移记录见 FIX.md。
+> 与本目录中完全移除；其语义由已落地的 `direct_*` exact scenarios 接管。
+> `planned_direct_*` 仅保留 #72 复核后仍明确未完成的 3 个产品行为。退役词汇的迁移记录见 FIX.md。
 
 | ID | 说明 | 状态 |
 | --- | --- | --- |
 | `fast_cli_help` | fast-binary: CLI help 表面 | 已落地 |
 | `pty_tui_smoke` | fast-binary: TUI 入口 smoke（#40 起 Direct-Local ordinary lane，无 KVM/MSB 依赖） | 已落地 |
 | `planned_session_cli` | fast-binary: `session new/list/status/log/branch --json`（no-turn 子集） | **已落地** `tests/fast_session_cli.rs`（#23 切片 1/2） |
-| `planned_audit_cli` | fast-binary: `audit query/replay/tail` 缺失 store 错误态 `--json` | **已落地（部分）** `tests/fast_audit_cli.rs`（#23 批次 2；seeded 态归 `planned_direct_audit_*`） |
+| `planned_audit_cli` | fast-binary: `audit query/replay/tail` 缺失 store 错误态 `--json` | **已落地** `tests/fast_audit_cli.rs`；seeded/turn 态由 `direct_operator_*` 接管 |
 | `planned_config_cli` | fast-binary: `models`/`resolve`/`doctor` + secret redaction + HOME/XDG | **已落地** `tests/fast_config_cli.rs`（#23 批次 1） |
-| `planned_lancet_cli` | fast-binary: `lattice lancet status/doctor` 空态/不变量 | **已落地** `tests/fast_lancet_cli.rs`（#23 切片 1，空态；seeded 态归 `planned_direct_lancet_status_seeded`） |
+| `planned_lancet_cli` | fast-binary: `lattice lancet status/doctor` 空态/不变量 | **已落地** `tests/fast_lancet_cli.rs`；seeded status 由 `direct_tools_todo_write_success` 接管 |
 | `direct_local_turn` | Direct-Local: plain-text turn / session reopen / policy denial | **已落地（骨架）** `tests/direct_local_turn.rs`（#40；完整矩阵归 #24） |
 | `direct_local_plain_text_turn_commits_and_exit_zero` | Direct-Local: plain-text 完整 turn + exit 0 + session log commit | **已落地** `tests/direct_local_turn.rs:108`（#40；接管旧 KVM-lane plain-turn 场景语义核心） |
 | `direct_turn_completed_reopen_contract` | Direct-Local: completed-Turn/reopen 契约（事件序、session/commit ID、transcript 重组、log/status、missing-session exit 2） | **已落地** `tests/direct_turn_contract.rs`（#24 slice 1） |
-| `planned_direct_message_assembly` | Direct-Local: AgentLoop 从 transcript + user input 组装消息顺序/内容 | planned（#24 assertion-level） |
-| `planned_direct_tool_error_payload` | Direct-Local: CEP tool error 结构化 payload 保留 | planned（#24 assertion-level） |
-| `planned_direct_basic_completed_event_contract` | Direct-Local: TurnStarted/TurnCommitting 事件序 + started/committed session ID 相等 + 无 failed/cancelled | planned（#24 assertion-level） |
-| `planned_direct_live_error_commit` | Direct-Local: live turn error 提交 error commit | planned（#24 assertion-level） |
-| `planned_direct_live_event_order` | Direct-Local: live turn 事件顺序 | planned（#24 assertion-level） |
-| `planned_direct_provider_startup_failure` | Direct-Local: provider 启动失败不产生 stream | planned（#24 assertion-level） |
-| `planned_direct_delta_only_commit` | Direct-Local: commit 只存储 delta | planned（#24 assertion-level） |
-| `planned_direct_branch_population` | Direct-Local: branch 在 turn 后被填充 | planned（#24 assertion-level） |
-| `planned_direct_commit_failure` | Direct-Local: commit 失败确定性（取代旧 KVM-lane resume 场景） | planned（#24 assertion-level） |
-| `planned_direct_tool_activity_before_commit` | Direct-Local: tool activity 在 committed 前发出 | **已落地** `tests/direct_observation.rs`（#24 slice 2） |
-| `planned_direct_stream_error_commit` | Direct-Local: stream error 仍 commit error | planned（#24 assertion-level） |
-| `planned_direct_cancelled_commit` | Direct-Local: cancelled commit 提交 cancelled | planned（#24 assertion-level） |
-| `planned_direct_partial_output_error_commit` | Direct-Local: partial output 后 error 仍 commit error | planned（#24 assertion-level） |
-| `planned_direct_cep_lifecycle` | Direct-Local: CEP lifecycle 事件 | planned（#24 assertion-level；observation 半已落地 direct_observation.rs slice 2，CEP-stage 半待落地） |
-| `planned_direct_turn_audit_replay` | Direct-Local: 完整 turn audit rows + replay fragment | planned（#24 assertion-level；observation 半已落地 direct_observation.rs slice 2，audit 半待落地） |
-| `planned_direct_activity_commit_order` | Direct-Local: activity 在 commit 前发出 | **已落地** `tests/direct_turn_contract.rs`（#24 slice 1；direct_observation.rs slice 2 reinforcing） |
-| `planned_direct_workspace_read_turn` | Direct-Local: default profile run_turn 读取 workspace 文件 | **已落地** `tests/direct_observation.rs`（#24 slice 2） |
-| `planned_direct_routed_provider_event` | Direct-Local: model_started 含 routed provider | planned（#24 assertion-level） |
-| `planned_direct_reopen_previous_context` | Direct-Local: resume session 含 previous turn context（取代旧 KVM-lane resume 场景的 reopen 半） | planned（#24 assertion-level） |
-| `planned_direct_fetch_capability_denial` | Direct-Local: https public fetch 需 fetch capability，拒绝缺 capability | planned（#24 assertion-level；host-policy/disabled 半已落地 direct_tools.rs slice 4，capability 半待落地） |
-| `planned_direct_disabled_fetch_denial` | Direct-Local: profile 禁用 web fetch 时拒绝 | **已落地** `tests/direct_tools.rs`（#24 slice 4） |
-| `planned_direct_audit_query_seeded` | Direct-Local: audit query seeded DB fragment | planned（#24 assertion-level） |
-| `planned_direct_audit_tail_seeded` | Direct-Local: audit tail seeded DB rows | planned（#24 assertion-level） |
-| `planned_direct_audit_query_unknown_session` | Direct-Local: audit query unknown session 空结果 | planned（#24 assertion-level） |
-| `planned_direct_audit_replay_trace` | Direct-Local: audit replay 重构 turn trace（seeded DB） | planned（#24 assertion-level） |
-| `planned_direct_audit_attestation_match` | Direct-Local: audit replay 报告 stored attestation 匹配 | planned（#24 assertion-level） |
-| `planned_direct_audit_replay_unknown_turn` | Direct-Local: audit replay unknown turn 报错 | planned（#24 assertion-level） |
-| `planned_direct_lancet_status_seeded` | Direct-Local: lancet status seeded audit JSON | planned（#24 assertion-level） |
-| `planned_direct_provider_timeout` | Direct-Local: provider stream timeout 触发 | planned（#24 assertion-level） |
-| `planned_direct_existing_session_run_result` | Direct-Local: run_integration commits existing session 的 RunTurnResult.assistant_output/status | planned（#24 assertion-level） |
-| `planned_direct_canonical_workspace_root` | Direct-Local: tool executor 使用 workspace root 而非 profile package dir | **已落地** `tests/direct_observation.rs`（#24 slice 2） |
-| `planned_direct_branch_listing_isolation` | Direct-Local: branch listing 只读 addressed session refs | planned（#24 assertion-level） |
-| `planned_direct_checkout_isolation` | Direct-Local: checkout 只改 addressed session HEAD | planned（#24 assertion-level） |
-| `planned_direct_branch_create_isolation` | Direct-Local: branch create 只影响 addressed session | planned（#24 assertion-level） |
-| `planned_direct_reset_isolation` | Direct-Local: reset 只移动 addressed session branch pointer | planned（#24 assertion-level） |
-| `planned_direct_diff_isolation` | Direct-Local: diff refs 在 addressed session 内解析 | planned（#24 assertion-level） |
-| `planned_direct_session_log_turn` | Direct-Local: session log 显示 seeded turn | planned（#24 assertion-level） |
+| `direct_observation_visibility_and_bounds` | Direct-Local: visibility/bounds + canonical workspace root + tool activity | **已落地** `tests/direct_observation.rs` |
+| `direct_tools_fetch_disabled_no_dispatch` | Direct-Local: disabled fetch fail-closed/no dispatch | **已落地** `tests/direct_tools.rs` |
+| `direct_tools_todo_write_success` | Direct-Local: todo result + CEP lifecycle metadata + seeded `lancet status` | **已落地** `tests/direct_tools.rs`；#72 补齐 exact assertions |
+| `direct_failure_disconnect_before_output_commits_error` | Direct-Local: stream failure event order + durable error log | **已落地** `tests/direct_failures.rs`；#72 补齐 exact assertions |
+| `direct_failure_sigint_while_stalled_commits_cancelled` | Direct-Local: cooperative cancellation + durable cancelled log | **已落地** `tests/direct_failures.rs`；#72 补齐 exact assertions |
+| `direct_failure_profile_deadline_while_stalled_commits_error` | Direct-Local: product deadline on stalled provider | **已落地** `tests/direct_failures.rs` |
+| `direct_operator_audit_session_lancet_cross_validate` | Direct-Local: audit query/tail/replay + stored attestation match | **已落地** `tests/direct_operator.rs`；#72 补齐 exact assertion |
+| `direct_operator_audit_query_unknown_session_empty` | Direct-Local: unknown-session audit query empty success | **已落地** `tests/direct_operator.rs` |
+| `direct_operator_audit_replay_unknown_turn_fails` | Direct-Local: unknown-turn replay exact diagnostic | **已落地** `tests/direct_operator.rs`；#72 补齐 exact assertion |
+| `direct_session_*_isolation` | Direct-Local: branch/checkout/create/reset/diff session isolation | **已落地** `tests/direct_session_isolation.rs` |
+| `planned_direct_commit_failure` | Direct-Local: stale-parent race emits CommitFailed without durable extra commit | **planned**；owner `lattice-system-harness` turn-conflict scenario |
+| `planned_direct_routed_provider_event` | Direct-Local: default `sonnet`→Anthropic routed provider event | **planned**；owner `lattice-system-harness` provider-routing scenario |
+| `planned_direct_fetch_capability_denial` | Direct-Local: public HTTPS allowed but missing FetchUrl capability | **planned**；owner `lattice-system-harness` fetch-capability scenario |
 
 ### 汇总
 
 | 决定 | 条数 |
 | --- | ---: |
-| 保留 | 1186 |
-| 提升 | 62 |
-| 删除 | 201 |
+| 保留 | 1193 |
+| 提升 | 45 |
+| 删除 | 211 |
 | **合计** | **1449** |
 
 #### 按 crate
 
 | crate | 保留 | 提升 | 删除 | 合计 |
 | --- | ---: | ---: | ---: | ---: |
-| `lattice-api` | 229 | 15 | 16 | 260 |
-| `lattice-cli` | 118 | 56 | 11 | 185 |
+| `lattice-api` | 234 | 3 | 23 | 260 |
+| `lattice-cli` | 119 | 41 | 25 | 185 |
 | `lattice-workspace` | 0 | 0 | 158 | 158 |
 | `lancet-authority` | 135 | 0 | 0 | 135 |
 | `lattice-llm` | 133 | 0 | 0 | 133 |
 | `lancet-native` | 107 | 0 | 0 | 107 |
 | `lattice-profile` | 96 | 0 | 1 | 97 |
-| `lattice-agent` | 69 | 2 | 0 | 71 |
+| `lattice-agent` | 70 | 0 | 1 | 71 |
 | `lattice-session` | 69 | 0 | 2 | 71 |
 | `lattice-system-harness` | 56 | 1 | 0 | 57 |
 | `lancet-protocol` | 36 | 0 | 0 | 36 |
@@ -160,47 +136,67 @@
 | `generated_profiles_are_executable_host_only` | #37–#40 删除 host-only profile 面 |
 | `retired_upper_routing_lane` | #37–#40 删除 Upper routing 面 |
 
-### 精确移交 #24（31 planned + 4 已落地 + 2 半保留 assertion-level scenario ID；禁止 family fallback）
+### #72 final assertion-level disposition（44 条）
 
-| exact planned scenario ID | ledger identity | assertion bundle |
+#72 对原始 handoff 逐条复核并运行新增/增强的 exact scenarios 后，最终分区为
+**keep 14 / elevate 3 / delete 27 = 44**。其中 7 条 keep 是 #24 slice 1 已批准的
+API-only invariants；本次对剩余 20 条判为 keep 7 / elevate 3 / delete 10。
+
+#### keep / local_invariant（14）
+
+`streaming_backward_compat_fake_llm_chat_only_still_works`、
+`stream_turn_live_with_agent_receiver_drop_does_not_cancel`、
+`stream_turn_live_with_agent_slow_observer_still_commits`、
+`consistency_error_after_partial_token`、`consistency_tool_call_path`、
+`consistency_completed_disposition_parity`、`consistency_error_disposition_parity`、
+`tool_execution_error_structured_payload_preserved`、
+`stream_turn_live_with_agent_startup_failure_no_stream`、
+`stream_turn_live_with_agent_commit_stores_delta_only`、
+`stream_turn_error_after_partial_commits_error`、
+`full_turn_audit_rows_and_replay_fragment`、
+`usage_resume_session_includes_previous_turn_context`、
+`run_integration_commits_existing_session`。逐条 residual 见 §2；均为 binary 无法忠实观察的
+trait/API return、raw graph/transcript、store/projection 或 collector parity seam。
+
+#### elevate / explicit unfinished behavior（3）
+
+| ledger identity | planned scenario | 已覆盖 / 未覆盖 / owner |
 | --- | --- | --- |
-| `planned_direct_message_assembly` | `agent_loop_builds_messages_from_transcript_and_user_input` | AgentLoop 从 transcript + user input 组装消息顺序/内容 |
-| `planned_direct_tool_error_payload` | `tool_execution_error_structured_payload_preserved` | CEP tool error 结构化 payload 保留 |
-| `planned_direct_basic_completed_event_contract` | `stream_turn_live_with_agent_basic_completed` | TurnStarted/TurnCommitting 事件序 + started/committed session ID 相等 + 无 failed/cancelled |
-| `planned_direct_live_error_commit` | `stream_turn_live_with_agent_error_commits_error` | live turn error 提交 error commit |
-| `planned_direct_live_event_order` | `stream_turn_live_with_agent_event_ordering` | live turn 事件顺序 |
-| `planned_direct_provider_startup_failure` | `stream_turn_live_with_agent_startup_failure_no_stream` | provider 启动失败不产生 stream |
-| `planned_direct_delta_only_commit` | `stream_turn_live_with_agent_commit_stores_delta_only` | commit 只存储 delta |
-| `planned_direct_branch_population` | `stream_turn_live_with_agent_branch_populated` | branch 在 turn 后被填充 |
-| `planned_direct_commit_failure` | `stream_turn_live_with_agent_commit_failure_deterministic` | commit 失败确定性（取代旧 KVM-lane resume 场景的 commit-failure 半） |
-| `planned_direct_tool_activity_before_commit` | `stream_turn_emits_tool_activity_before_committed` | tool activity 在 committed 前发出 ✓已删除（#24 slice 2） |
-| `planned_direct_stream_error_commit` | `stream_turn_error_still_commits_error` | stream error 仍 commit error |
-| `planned_direct_cancelled_commit` | `stream_turn_cancelled_commits_cancelled` | cancelled commit 提交 cancelled |
-| `planned_direct_partial_output_error_commit` | `stream_turn_error_after_partial_commits_error` | partial output 后 error 仍 commit error |
-| `planned_direct_cep_lifecycle` | `stream_turn_emits_cep_lifecycle_events` | CEP lifecycle 事件 半保留（#24 slice 2：observation 半已落地，CEP-stage 半待落地） |
-| `planned_direct_turn_audit_replay` | `full_turn_audit_rows_and_replay_fragment` | 完整 turn audit rows + replay fragment 半保留（#24 slice 2：observation 半已落地，audit 半待落地） |
-| `planned_direct_activity_commit_order` | `stream_turn_emits_activity_before_commit` | activity 在 commit 前发出 ✓已删除（#24 slice 1 超集覆盖） |
-| `planned_direct_workspace_read_turn` | `usage_run_turn_can_read_workspace_file_with_default_profile` | default profile run_turn 读取 workspace 文件 ✓已删除（#24 slice 2） |
-| `planned_direct_routed_provider_event` | `usage_stream_turn_model_started_includes_routed_provider` | model_started 含 routed provider |
-| `planned_direct_reopen_previous_context` | `usage_resume_session_includes_previous_turn_context` | resume session 含 previous turn context（取代旧 KVM-lane resume 场景的 reopen 半） |
-| `planned_direct_fetch_capability_denial` | `public_https_policy_requires_fetch_capability` | https public fetch 需 fetch capability，拒绝缺 capability 半保留（#24 slice 4：host/disabled 半已落地，capability 半待落地） |
-| `planned_direct_disabled_fetch_denial` | `rejects_profile_disabled_web_fetch` | profile 禁用 web fetch 时拒绝 ✓已删除（#24 slice 4） |
-| `planned_direct_audit_query_seeded` | `audit_query_prints_fragment_for_seeded_db` | audit query seeded DB fragment |
-| `planned_direct_audit_tail_seeded` | `audit_tail_streams_rows_for_seeded_db` | audit tail seeded DB rows |
-| `planned_direct_audit_query_unknown_session` | `audit_query_empty_result_for_unknown_session` | audit query unknown session 空结果 |
-| `planned_direct_audit_replay_trace` | `audit_replay_reconstructs_turn_trace_for_seeded_db` | audit replay 重构 turn trace（seeded DB） |
-| `planned_direct_audit_attestation_match` | `audit_replay_reports_stored_attestation_match` | audit replay 报告 stored attestation 匹配 |
-| `planned_direct_audit_replay_unknown_turn` | `audit_replay_errors_for_unknown_turn` | audit replay unknown turn 报错 |
-| `planned_direct_lancet_status_seeded` | `cep_status_seeded_audit_json` | lancet status seeded audit JSON |
-| `planned_direct_provider_timeout` | `stream_timeout_fires_after_duration` | provider stream timeout 触发 |
-| `planned_direct_existing_session_run_result` | `run_integration_commits_existing_session` | RunTurnResult.assistant_output/status（existing session） |
-| `planned_direct_canonical_workspace_root` | `tool_executor_uses_workspace_root_not_profile_package_dir` | tool executor 使用 workspace root 而非 profile package dir ✓已删除（#24 slice 2） |
-| `planned_direct_branch_listing_isolation` | `branch_listing_reads_only_addressed_session_refs` | branch listing 只读 addressed session refs |
-| `planned_direct_checkout_isolation` | `checkout_changes_only_addressed_session_head` | checkout 只改 addressed session HEAD |
-| `planned_direct_branch_create_isolation` | `branch_create_affects_only_addressed_session` | branch create 只影响 addressed session |
-| `planned_direct_reset_isolation` | `reset_changes_only_addressed_session_branch_pointer` | reset 只移动 addressed session branch pointer |
-| `planned_direct_diff_isolation` | `diff_resolves_refs_inside_addressed_session_only` | diff refs 在 addressed session 内解析 |
-| `planned_direct_session_log_turn` | `smoke_session_log_shows_seeded_turn` | session log 显示 seeded turn |
+| `stream_turn_live_with_agent_commit_failure_deterministic` | `planned_direct_commit_failure` | 已覆盖正常 commit/CommitFailed parser；未覆盖 stale-parent race、CommitFailed 顺序与 durable log 不增；owner：Direct-Local turn-conflict scenario |
+| `usage_stream_turn_model_started_includes_routed_provider` | `planned_direct_routed_provider_event` | 已覆盖 OpenAI-compatible 路由；未覆盖默认 `sonnet`→Anthropic 分支；owner：provider-routing scenario |
+| `public_https_policy_requires_fetch_capability` | `planned_direct_fetch_capability_denial` | 已覆盖 disabled/host-policy denial；未覆盖 allow-public-HTTPS + missing FetchUrl capability 与 exact CEP labels；owner：fetch-capability scenario |
+
+#### delete / exact external assertion superset（27）
+
+| ledger identity | exact replacement |
+| --- | --- |
+| `agent_loop_builds_messages_from_transcript_and_user_input` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_live_with_agent_basic_completed` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_live_with_agent_error_commits_error` | `direct_failure_disconnect_before_output_commits_error` |
+| `stream_turn_live_with_agent_event_ordering` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_live_with_agent_branch_populated` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_emits_tool_activity_before_committed` | `direct_observation_visibility_and_bounds` |
+| `stream_turn_error_still_commits_error` | `direct_failure_disconnect_before_output_commits_error` |
+| `stream_turn_cancelled_commits_cancelled` | `direct_failure_sigint_while_stalled_commits_cancelled` |
+| `stream_turn_emits_cep_lifecycle_events` | `direct_tools_todo_write_success` |
+| `stream_turn_emits_activity_before_commit` | `direct_turn_completed_reopen_contract` |
+| `usage_run_turn_can_read_workspace_file_with_default_profile` | `direct_observation_visibility_and_bounds` |
+| `rejects_profile_disabled_web_fetch` | `direct_tools_fetch_disabled_no_dispatch` |
+| `audit_query_prints_fragment_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` |
+| `audit_tail_streams_rows_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` |
+| `audit_query_empty_result_for_unknown_session` | `direct_operator_audit_query_unknown_session_empty` |
+| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` |
+| `audit_replay_reports_stored_attestation_match` | `direct_operator_audit_session_lancet_cross_validate` |
+| `audit_replay_errors_for_unknown_turn` | `direct_operator_audit_replay_unknown_turn_fails` |
+| `cep_status_seeded_audit_json` | `direct_tools_todo_write_success` |
+| `stream_timeout_fires_after_duration` | `direct_failure_profile_deadline_while_stalled_commits_error` |
+| `tool_executor_uses_workspace_root_not_profile_package_dir` | `direct_observation_visibility_and_bounds` |
+| `branch_listing_reads_only_addressed_session_refs` | `direct_session_branch_listing_isolation` |
+| `checkout_changes_only_addressed_session_head` | `direct_session_checkout_isolation` |
+| `branch_create_affects_only_addressed_session` | `direct_session_branch_create_isolation` |
+| `reset_changes_only_addressed_session_branch_pointer` | `direct_session_reset_isolation` |
+| `diff_resolves_refs_inside_addressed_session_only` | `direct_session_diff_isolation` |
+| `smoke_session_log_shows_seeded_turn` | `direct_turn_completed_reopen_contract` |
 
 ### MSB 词汇退役
 
@@ -216,18 +212,18 @@ codeberg issue 跟踪重写。
 
 | 目标层 | 条数 |
 | --- | ---: |
-| 局部不变量 | 1365 |
+| 局部不变量 | 1372 |
 | 快速二进制黑盒 | 45 |
-| Direct-Local 外部二进制 | 39 |
+| Direct-Local 外部二进制 | 32 |
 | **合计** | **1449** |
 
 ### 决定分布（最终）
 
 | 决定 | 条数 |
 | --- | ---: |
-| 保留 | 1186 |
-| 提升 | 62 |
-| 删除 | 201 |
+| 保留 | 1193 |
+| 提升 | 45 |
+| 删除 | 211 |
 | **合计** | **1449** |
 
 ## 1.6 #24 slice 2 执行状态（2026-07-22）
@@ -239,17 +235,17 @@ codeberg issue 跟踪重写。
 
 | ledger identity | replacement scenario | superset 依据 |
 | --- | --- | --- |
-| `usage_run_turn_can_read_workspace_file_with_default_profile` | `planned_direct_workspace_read_turn` | direct_observation.rs 通过 .lattice/agents/ profile 读取 tracked.txt/notes.txt 并断言 content present |
-| `tool_executor_uses_workspace_root_not_profile_package_dir` | `planned_direct_canonical_workspace_root` | direct_observation.rs profile 位于 .lattice/agents/dl-obs/，读取 project-root 文件并断言内容；严格强于原仅断言 ok=true |
-| `stream_turn_emits_tool_activity_before_committed` | `planned_direct_tool_activity_before_commit` | direct_observation.rs 断言 tool_call_started<turn_committed（10 次）+ 全部 tool_call_finished + completed commit；tool_call_finished<committed 为 agent loop 结构不变量 |
-| `stream_turn_emits_activity_before_commit` | `planned_direct_activity_commit_order` | slice-1 direct_turn_contract.rs 断言完整生命周期子序列 [turn_started, model_started, token_delta, model_finished, turn_committing, turn_committed]，严格超集 |
+| `usage_run_turn_can_read_workspace_file_with_default_profile` | `direct_observation_visibility_and_bounds` | direct_observation.rs 通过 .lattice/agents/ profile 读取 tracked.txt/notes.txt 并断言 content present |
+| `tool_executor_uses_workspace_root_not_profile_package_dir` | `direct_observation_visibility_and_bounds` | profile 位于 .lattice/agents/dl-obs/ 且读取 project-root 内容，严格强于原仅断言 ok=true |
+| `stream_turn_emits_tool_activity_before_committed` | `direct_observation_visibility_and_bounds` | tool_call_started/finished 在 completed commit 前，严格超集 |
+| `stream_turn_emits_activity_before_commit` | `direct_turn_completed_reopen_contract` | 完整生命周期子序列严格覆盖原排序断言 |
 
-### 半保留（2 条，保持提升）
+### #72 复核后的 residual（1 keep / 1 delete）
 
 | ledger identity | replacement scenario | 未覆盖半 |
 | --- | --- | --- |
-| `full_turn_audit_rows_and_replay_fragment` | `planned_direct_turn_audit_replay` | direct_observation.rs 覆盖 observation 半；audit rows/replay fragment 未覆盖 |
-| `stream_turn_emits_cep_lifecycle_events` | `planned_direct_cep_lifecycle` | direct_observation.rs 覆盖 observation 半（tool_call 事件）；CepCallStarted/Finished 的 semantic_stage/guard_stage/impact_kind 未覆盖 |
+| `full_turn_audit_rows_and_replay_fragment` | — `keep/local_invariant` | public operator scenario 已覆盖 query/replay；raw DB row 字段与 exact activity count 仅 API/store seam 可见 |
+| `stream_turn_emits_cep_lifecycle_events` | `direct_tools_todo_write_success` | #72 补齐 exact CEP metadata/order，scenario 通过后删除原测试 |
 
 ### counts 变更
 
@@ -265,7 +261,7 @@ codeberg issue 跟踪重写。
 
 | ledger identity | replacement scenario | superset 依据 |
 | --- | --- | --- |
-| `rejects_profile_disabled_web_fetch` | `planned_direct_disabled_fetch_denial` | direct_tools_fetch_disabled_no_dispatch：失败 tool + fixture 零请求 + 无 cep_call_started |
+| `rejects_profile_disabled_web_fetch` | `direct_tools_fetch_disabled_no_dispatch` | 失败 tool + fixture 零请求 + 无 cep_call_started |
 
 ### 半保留（1 条）
 
@@ -281,14 +277,14 @@ codeberg issue 跟踪重写。
 > agent loop `await_with_deadline_and_cancel` 在 stall 时同时 race deadline 与 cancel flag；
 > CLI `session send` 安装 scoped SIGINT 监听并传递 cancel flag。
 
-### 半保留（4 条，事件链半已落地，durable log/transcript/terminal_reason 半未覆盖）
+### #72 复核后的终态（2 delete / 2 keep）
 
 | ledger identity | replacement scenario | 已落地半 | 未覆盖半 |
 | --- | --- | --- | --- |
-| `stream_turn_cancelled_commits_cancelled` | `planned_direct_cancelled_commit` | turn_cancelled<turn_committing<turn_committed status=cancelled + exit 1 | durable log status=cancelled |
-| `stream_turn_error_after_partial_commits_error` | `planned_direct_partial_output_error_commit` | partial token + turn_failed + turn_committed status=error + exit 1 | transcript assistant 内容保留 + log status + terminal_reason 内容 |
-| `stream_timeout_fires_after_duration` | `planned_direct_provider_timeout` | 产品 deadline → error commit + exit 1 | 原测试为纯 tokio::timeout 局部不变量（不同层） |
-| `stream_turn_live_with_agent_startup_failure_no_stream` | `planned_direct_provider_startup_failure` | provider HTTP 启动失败 → error commit | 原测试为 session-not-found 启动失败（不同失败模式） |
+| `stream_turn_cancelled_commits_cancelled` | `direct_failure_sigint_while_stalled_commits_cancelled` | #72 补齐 reason + durable cancelled log | exact scenario 通过后删除 |
+| `stream_turn_error_after_partial_commits_error` | — `keep/local_invariant` | external 覆盖 partial/error events | raw transcript assistant + terminal_reason 映射仅 API/graph seam 可见 |
+| `stream_timeout_fires_after_duration` | `direct_failure_profile_deadline_while_stalled_commits_error` | 真实 stalled provider 产品 deadline | exact scenario 通过后删除 Tokio-only test |
+| `stream_turn_live_with_agent_startup_failure_no_stream` | — `keep/local_invariant` | binary 覆盖 missing-session exit 2/零事件 | 无法区分 Rust API immediate Err 与 Ok(empty stream) |
 
 ### 新增不变量（无 ledger 前身）
 
@@ -306,17 +302,17 @@ codeberg issue 跟踪重写。
 
 | ledger identity | replacement scenario | superset 依据 |
 | --- | --- | --- |
-| `audit_query_prints_fragment_for_seeded_db` | `planned_direct_audit_query_seeded` | row_count>0 + 两个方法 + method/verdict 过滤 + tail rows + session status/log |
-| `audit_tail_streams_rows_for_seeded_db` | `planned_direct_audit_tail_seeded` | tail 返回非零 rows |
-| `audit_query_empty_result_for_unknown_session` | `planned_direct_audit_query_unknown_session` | exit 0 + row_count==0 |
-| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `planned_direct_audit_replay_trace` | replay trace.turn_id 非空 + 引用 observe.workspace |
+| `audit_query_prints_fragment_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` | row_count>0 + methods + method/verdict filters + tail + session status/log |
+| `audit_tail_streams_rows_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` | tail 返回非零 rows |
+| `audit_query_empty_result_for_unknown_session` | `direct_operator_audit_query_unknown_session_empty` | exit 0 + row_count==0 |
+| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` | replay trace.turn_id 非空 + observe.workspace activity |
 
-### 半保留（2 条）
+### #72 补齐并删除（2 条）
 
 | ledger identity | replacement scenario | 未覆盖半 |
 | --- | --- | --- |
-| `audit_replay_reports_stored_attestation_match` | `planned_direct_audit_attestation_match` | stored attestation 匹配由 API 级断言；外部仅断言 replay 引用 observe.workspace |
-| `cep_status_seeded_audit_json` | `planned_direct_lancet_status_seeded` | recent_calls 含 todo_write + last_guard_verdict 为 API 级；外部仅断言 recent_calls 非空 |
+| `audit_replay_reports_stored_attestation_match` | `direct_operator_audit_session_lancet_cross_validate` | #72 补齐 public replay JSON stored_statement_match=true |
+| `cep_status_seeded_audit_json` | `direct_tools_todo_write_success` | #72 真实 todo Turn 后断言 recent_calls 含 todo_write + last_guard_verdict 非空 |
 
 
 ## 1.10 #24 slice 7 执行状态（2026-07-22）
@@ -346,9 +342,12 @@ codeberg issue 跟踪重写。
 | `stream_turn_live_with_agent_event_ordering` | `direct_turn_completed_reopen_contract`（相同事件子序列） |
 | `stream_turn_live_with_agent_branch_populated` | `direct_turn_completed_reopen_contract`（branch == main） |
 
-### 半保留（20 条，事件链半已落地，durable log/transcript/terminal_reason/attestation 半未覆盖）
+### #72 最终更正
 
-详见各 slice 部分。所有半保留条目保留原测试并附明确 residual 理由。
+slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 final review 将该 20 条
+判为 **keep 7 / elevate 3 / delete 10**；与 slice 1 已确认的 7 keep、此前 17 delete
+合并后，44 条 handoff 的最终分区为 **keep 14 / elevate 3 / delete 27**。逐条结果见
+§1.5 与 §2。
 
 
 ## 2. 逐条清单
@@ -766,7 +765,7 @@ codeberg issue 跟踪重写。
 | `prov_activity_attributes_default_for_legacy_fragments` | `crates/lancet-protocol/src/provenance.rs:203` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `in_toto_statement_deserializes_with_unknown_fields` | `crates/lancet-protocol/src/provenance.rs:218` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
 
-### `lattice-agent`（保留 69 / 提升 2 / 删除 0）
+### `lattice-agent`（保留 70 / 提升 0 / 删除 1）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -778,11 +777,11 @@ codeberg issue 跟踪重写。
 | `truncate_mixed_ascii_cjk` | `crates/lattice-agent/src/agent_loop/mod.rs:1375` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `truncate_exact_width_noop` | `crates/lattice-agent/src/agent_loop/mod.rs:1383` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `truncate_empty` | `crates/lattice-agent/src/agent_loop/mod.rs:1389` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
-| `agent_loop_builds_messages_from_transcript_and_user_input` | `crates/lattice-agent/tests/agent_loop.rs:114` | 提升 | Direct-Local 外部二进制 | `planned_direct_message_assembly` | 原内部测试断言集合由 #24 精确场景 `planned_direct_message_assembly` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `agent_loop_builds_messages_from_transcript_and_user_input` | `crates/lattice-agent/tests/agent_loop.rs:114` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #72 assertion-level superset：direct_turn_completed_reopen_contract 通过真实 binary 两轮 Turn 精确断言 [system,user,assistant,user] 角色序列与 prior/current 内容，并验证 commit/reopen；exact scenario 已通过后删除原测试。 |
 | `agent_loop_prepends_system_prompt_when_present` | `crates/lattice-agent/tests/agent_loop.rs:194` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `agent_loop_terminates_at_hard_cap_when_llm_loops_forever` | `crates/lattice-agent/tests/agent_loop.rs:282` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `agent_loop_second_llm_round_includes_tool_result_in_request` | `crates/lattice-agent/tests/agent_loop.rs:305` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
-| `tool_execution_error_structured_payload_preserved` | `crates/lattice-agent/tests/agent_loop.rs:397` | 提升 | Direct-Local 外部二进制 | `planned_direct_tool_error_payload` | 原内部测试断言集合由 #24 精确场景 `planned_direct_tool_error_payload` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `tool_execution_error_structured_payload_preserved` | `crates/lattice-agent/tests/agent_loop.rs:397` | 保留 | 局部不变量 | — | #72 final review：AgentLoop 将 code/message/data/retriability 的 CepErrorPayload 原样保存在 AgentTurnResult；当前 binary TurnEvent/RunTurnResult 只公开 error summary，无法忠实外部观察，改判 keep/local_invariant。 |
 | `scenario_01_cancel_before_tool_execution` | `crates/lattice-agent/tests/live_sink_and_cancel.rs:258` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `scenario_06_cancel_after_first_tool_in_multi_tool_batch` | `crates/lattice-agent/tests/live_sink_and_cancel.rs:355` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `scenario_02_cancel_during_tool_execution` | `crates/lattice-agent/tests/live_sink_and_cancel.rs:483` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
@@ -842,7 +841,7 @@ codeberg issue 跟踪重写。
 | `fake_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:473` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `fake_stream_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:486` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 
-### `lattice-api`（保留 229 / 提升 15 / 删除 16）
+### `lattice-api`（保留 234 / 提升 3 / 删除 23）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -908,13 +907,13 @@ codeberg issue 跟踪重写。
 | `live_activation_cancelled_classifies_as_aborted` | `crates/lattice-api/src/turn/live.rs:612` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `live_activation_outcome_messages_are_typed` | `crates/lattice-api/src/turn/live.rs:628` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `live_activation_no_candidate_exported_flag` | `crates/lattice-api/src/turn/live.rs:647` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `stream_turn_live_with_agent_basic_completed` | `crates/lattice-api/src/turn/live_tests.rs:273` | 提升 | Direct-Local 外部二进制 | `planned_direct_basic_completed_event_contract` | 原内部测试断言集合由 #24 精确场景 `planned_direct_basic_completed_event_contract` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `stream_turn_live_with_agent_error_commits_error` | `crates/lattice-api/src/turn/live_tests.rs:364` | 提升 | Direct-Local 外部二进制 | `planned_direct_live_error_commit` | 原内部测试断言集合由 #24 精确场景 `planned_direct_live_error_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `stream_turn_live_with_agent_event_ordering` | `crates/lattice-api/src/turn/live_tests.rs:421` | 提升 | Direct-Local 外部二进制 | `planned_direct_live_event_order` | 原内部测试断言集合由 #24 精确场景 `planned_direct_live_event_order` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `stream_turn_live_with_agent_startup_failure_no_stream` | `crates/lattice-api/src/turn/live_tests.rs:492` | 提升 | Direct-Local 外部二进制 | `planned_direct_provider_startup_failure` | 原内部测试断言集合由 #24 精确场景 `planned_direct_provider_startup_failure` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `stream_turn_live_with_agent_commit_stores_delta_only` | `crates/lattice-api/src/turn/live_tests.rs:513` | 提升 | Direct-Local 外部二进制 | `planned_direct_delta_only_commit` | 原内部测试断言集合由 #24 精确场景 `planned_direct_delta_only_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `stream_turn_live_with_agent_branch_populated` | `crates/lattice-api/src/turn/live_tests.rs:644` | 提升 | Direct-Local 外部二进制 | `planned_direct_branch_population` | 原内部测试断言集合由 #24 精确场景 `planned_direct_branch_population` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `stream_turn_live_with_agent_commit_failure_deterministic` | `crates/lattice-api/src/turn/live_tests.rs:675` | 提升 | Direct-Local 外部二进制 | `planned_direct_commit_failure` | 原内部测试断言集合由 #24 精确场景 `planned_direct_commit_failure` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `stream_turn_live_with_agent_basic_completed` | `crates/lattice-api/src/turn/live_tests.rs:273` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（完整生命周期 + session_id/branch/exit code）。已删除原测试。 |
+| `stream_turn_live_with_agent_error_commits_error` | `crates/lattice-api/src/turn/live_tests.rs:364` | 删除 | Direct-Local 外部二进制 | `direct_failure_disconnect_before_output_commits_error` | #72 assertion-level superset：direct_failure_disconnect_before_output_commits_error 断言非空 TurnFailed.reason、failed→committing→committed(error)、无 CommitFailed、exit 1 与 durable error log；exact scenario 已通过后删除原测试。 |
+| `stream_turn_live_with_agent_event_ordering` | `crates/lattice-api/src/turn/live_tests.rs:421` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（相同事件子序列）。已删除原测试。 |
+| `stream_turn_live_with_agent_startup_failure_no_stream` | `crates/lattice-api/src/turn/live_tests.rs:492` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已覆盖 missing-session exit 2 + 零 Turn events，但 binary 无法区分 Rust API 在 prepare 阶段立即返回 Err 与返回 Ok(empty stream)；保留该 startup return contract 为 local invariant。 |
+| `stream_turn_live_with_agent_commit_stores_delta_only` | `crates/lattice-api/src/turn/live_tests.rs:513` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已覆盖两轮 reopen/log/status 与首条 log 稳定；原测试仍直接断言 graph commit delta、HEAD transcript 精确四消息及 commit-message 长度，这些存储表示不由 public binary 忠实暴露，改判 keep/local_invariant。 |
+| `stream_turn_live_with_agent_branch_populated` | `crates/lattice-api/src/turn/live_tests.rs:644` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（branch == main）。已删除原测试。 |
+| `stream_turn_live_with_agent_commit_failure_deterministic` | `crates/lattice-api/src/turn/live_tests.rs:675` | 提升 | Direct-Local 外部二进制 | `planned_direct_commit_failure` | #72 final review：现有 external scenarios 覆盖正常 commit 且 harness 可解析 CommitFailed；未覆盖同 session stale-parent race、TokenDelta/TurnCommitting→CommitFailed、无 TurnCommitted 与 durable log 不增第三条。后续 owner：lattice-system-harness Direct-Local turn-conflict scenario。 |
 | `stream_turn_live_with_agent_receiver_drop_does_not_cancel` | `crates/lattice-api/src/turn/live_tests.rs:836` | 保留 | 局部不变量 | — | API observer 行为（receiver drop 不取消 commit）无忠实的外部二进制触发；保留为局部不变量 |
 | `stream_turn_live_with_agent_slow_observer_still_commits` | `crates/lattice-api/src/turn/live_tests.rs:896` | 保留 | 局部不变量 | — | API observer 行为（慢 observer 仍 commit）无忠实的外部二进制触发；保留为局部不变量 |
 | `run_turn_uses_required_session_and_returns_session_id` | `crates/lattice-api/src/turn/run_tests.rs:17` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -926,11 +925,11 @@ codeberg issue 跟踪重写。
 | `run_cutover_uses_loaded_profile_model` | `crates/lattice-api/src/turn/run_tests.rs:214` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata` | `crates/lattice-api/src/turn/run_tests.rs:240` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `run_turn_commits_parent_from_initial_transcript` | `crates/lattice-api/src/turn/run_tests.rs:269` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `stream_turn_emits_tool_activity_before_committed` | `crates/lattice-api/src/turn/stream_tests.rs:17` | 删除 | Direct-Local 外部二进制 | 已删除原测试，由 `planned_direct_tool_activity_before_commit` 接管 | #24 slice 2 assertion-level superset review：direct_observation.rs 断言 tool_call_started<turn_committed（10 次 observe.workspace）+ 全部 tool_call_finished（ok_pattern）+ completed commit；tool_call_finished<committed 为 agent loop 结构不变量（commit 为终步）。已删除原测试。 |
-| `stream_turn_error_still_commits_error` | `crates/lattice-api/src/turn/stream_tests.rs:89` | 提升 | Direct-Local 外部二进制 | `planned_direct_stream_error_commit` | 原内部测试断言集合由 #24 精确场景 `planned_direct_stream_error_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `stream_turn_cancelled_commits_cancelled` | `crates/lattice-api/src/turn/stream_tests.rs:142` | 提升 | Direct-Local 外部二进制 | `planned_direct_cancelled_commit` | 原内部测试断言集合由 #24 精确场景 `planned_direct_cancelled_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `stream_turn_error_after_partial_commits_error` | `crates/lattice-api/src/turn/stream_tests.rs:217` | 提升 | Direct-Local 外部二进制 | `planned_direct_partial_output_error_commit` | 原内部测试断言集合由 #24 精确场景 `planned_direct_partial_output_error_commit` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `stream_turn_emits_cep_lifecycle_events` | `crates/lattice-api/src/turn/stream_tests.rs:282` | 提升 | Direct-Local 外部二进制 | `planned_direct_cep_lifecycle` | #24 slice 2 assertion-level review：半个覆盖——direct_observation.rs 覆盖 observation 半（tool_call_started/finished 事件 + canonical tool name），但不断言 CepCallStarted/Finished 的 semantic_stage/guard_stage/impact_kind；CEP lifecycle 半未覆盖，保留原测试。 |
+| `stream_turn_emits_tool_activity_before_committed` | `crates/lattice-api/src/turn/stream_tests.rs:17` | 删除 | Direct-Local 外部二进制 | `direct_observation_visibility_and_bounds` | #24 slice 2 assertion-level superset review：direct_observation.rs 断言 tool_call_started<turn_committed（10 次 observe.workspace）+ 全部 tool_call_finished（ok_pattern）+ completed commit；tool_call_finished<committed 为 agent loop 结构不变量（commit 为终步）。已删除原测试。 |
+| `stream_turn_error_still_commits_error` | `crates/lattice-api/src/turn/stream_tests.rs:89` | 删除 | Direct-Local 外部二进制 | `direct_failure_disconnect_before_output_commits_error` | #72 assertion-level superset：direct_failure_disconnect_before_output_commits_error 断言 stream failure 事件顺序、committed error、exit 1，并通过 public session log 断言 durable status=error 与非空 terminal_reason；exact scenario 已通过后删除原测试。 |
+| `stream_turn_cancelled_commits_cancelled` | `crates/lattice-api/src/turn/stream_tests.rs:142` | 删除 | Direct-Local 外部二进制 | `direct_failure_sigint_while_stalled_commits_cancelled` | #72 assertion-level superset：direct_failure_sigint_while_stalled_commits_cancelled 断言 cancellation reason、cancelled→committing→committed(cancelled)、exit 1、零 assistant 输出与 public log status=cancelled；exact scenario 已通过后删除原测试。 |
+| `stream_turn_error_after_partial_commits_error` | `crates/lattice-api/src/turn/stream_tests.rs:217` | 保留 | 局部不变量 | — | #72 final review：direct_failure_disconnect_after_partial_token_commits_error 已覆盖 partial token、TurnFailed、committed error 与 exit 1；原测试仍直接断言 Session History 中 assistant delta 精确内容及 terminal_reason 映射，public CLI 无 transcript read surface，改判 keep/local_invariant。 |
+| `stream_turn_emits_cep_lifecycle_events` | `crates/lattice-api/src/turn/stream_tests.rs:282` | 删除 | Direct-Local 外部二进制 | `direct_tools_todo_write_success` | #72 assertion-level superset：direct_tools_todo_write_success 通过 public JSONL 精确断言 session.todo_write 的 cep_native/cep_policy_lifecycle/session_state_mutation 及 CepStarted<CepFinished<ToolFinished；exact scenario 已通过后删除原测试。 |
 | `turn_usage_summary_from_turn_usage` | `crates/lattice-api/src/turn/types_tests.rs:8` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `status_error_maps_to_commit_error` | `crates/lattice-api/src/turn/types_tests.rs:21` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `turn_event_serializes_with_type_discriminator` | `crates/lattice-api/src/turn/types_tests.rs:29` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
@@ -954,7 +953,7 @@ codeberg issue 跟踪重写。
 | `upper_lease_destroy_consumes_handle_once` | `crates/lattice-api/src/turn/upper.rs:516` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `workspace_execution_backend_changed_paths_from_typed_entries` | `crates/lattice-api/src/turn/workspace_backend.rs:447` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `workspace_execution_backend_maps_content_too_large` | `crates/lattice-api/src/turn/workspace_backend.rs:482` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `full_turn_audit_rows_and_replay_fragment` | `crates/lattice-api/tests/audit_turn_provenance.rs:145` | 提升 | Direct-Local 外部二进制 | `planned_direct_turn_audit_replay` | #24 slice 2 assertion-level review：半个覆盖——direct_observation.rs 覆盖 observation 半（observe.workspace 经完整 turn 执行），但不查询 audit rows/replay fragment；audit 半未覆盖，保留原测试。 |
+| `full_turn_audit_rows_and_replay_fragment` | `crates/lattice-api/tests/audit_turn_provenance.rs:145` | 保留 | 局部不变量 | — | #72 final review：direct_operator_audit_session_lancet_cross_validate 已覆盖 public query/filter/tail/replay；原测试仍直接断言 audit DB 持久化、逐 row call/method/impact/turn/session/model 字段与 replay activity 精确计数，这些 store/projection seam 不由 binary 完整暴露，改判 keep/local_invariant。 |
 | `cep_mode_enforce_effect_overreach_denied` | `crates/lattice-api/tests/cep_mode_integration.rs:100` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `cep_mode_warn_effect_overreach_ok_with_audit_warning` | `crates/lattice-api/tests/cep_mode_integration.rs:143` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `effect_deny_rejects_in_warn_mode` | `crates/lattice-api/tests/cep_mode_integration.rs:169` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -971,7 +970,7 @@ codeberg issue 跟踪重写。
 | `consistency_completed_content_only` | `crates/lattice-api/tests/consistency.rs:274` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `consistency_error_after_partial_token` | `crates/lattice-api/tests/consistency.rs:294` | 保留 | 局部不变量 | — | `run_turn`/collector parity（partial token 后 error）无忠实的外部二进制触发；保留为局部不变量 |
 | `consistency_tool_call_path` | `crates/lattice-api/tests/consistency.rs:357` | 保留 | 局部不变量 | — | `run_turn`/collector parity（tool call path）无忠实的外部二进制触发；保留为局部不变量 |
-| `stream_turn_emits_activity_before_commit` | `crates/lattice-api/tests/consistency.rs:438` | 删除 | Direct-Local 外部二进制 | 已删除原测试，由 `planned_direct_activity_commit_order` 接管 | #24 slice 2 assertion-level superset review：slice-1 direct_turn_contract.rs（direct_turn_completed_reopen_contract）断言完整生命周期子序列 [turn_started, model_started, token_delta, model_finished, turn_committing, turn_committed]，为原内部测试 ModelStarted<TokenDelta<TurnCommitting<TurnCommitted 排序的严格超集。已删除原测试。 |
+| `stream_turn_emits_activity_before_commit` | `crates/lattice-api/tests/consistency.rs:438` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #24 slice 2 assertion-level superset review：slice-1 direct_turn_contract.rs（direct_turn_completed_reopen_contract）断言完整生命周期子序列 [turn_started, model_started, token_delta, model_finished, turn_committing, turn_committed]，为原内部测试 ModelStarted<TokenDelta<TurnCommitting<TurnCommitted 排序的严格超集。已删除原测试。 |
 | `consistency_completed_disposition_parity` | `crates/lattice-api/tests/consistency.rs:492` | 保留 | 局部不变量 | — | `run_turn`/collector parity（completed disposition）无忠实的外部二进制触发；保留为局部不变量 |
 | `consistency_error_disposition_parity` | `crates/lattice-api/tests/consistency.rs:566` | 保留 | 局部不变量 | — | `run_turn`/collector parity（error disposition）无忠实的外部二进制触发；保留为局部不变量 |
 | `dogfood_impact_matrix_five_production_classes` | `crates/lattice-api/tests/dogfood_impact_matrix.rs:248` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
@@ -1100,24 +1099,24 @@ codeberg issue 跟踪重写。
 | `adapter_failure_has_no_lower_fallback` | `crates/lattice-api/tests/upper_routing.rs:609` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `generated_profiles_are_executable_host_only` | `crates/lattice-api/tests/upper_routing.rs:699` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `retired_upper_routing_lane` | `crates/lattice-api/tests/upper_routing.rs:787` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
-| `usage_run_turn_can_read_workspace_file_with_default_profile` | `crates/lattice-api/tests/usage_turn.rs:180` | 删除 | Direct-Local 外部二进制 | 已删除原测试，由 `planned_direct_workspace_read_turn` 接管 | #24 slice 2 assertion-level superset review：direct_observation.rs 通过 .lattice/agents/ 配置的 profile 读取 tracked.txt/notes.txt 并断言 content present，为原内部测试 default-profile-reads-workspace-file 的严格超集。已删除原测试。 |
-| `usage_stream_turn_model_started_includes_routed_provider` | `crates/lattice-api/tests/usage_turn.rs:237` | 提升 | Direct-Local 外部二进制 | `planned_direct_routed_provider_event` | 原内部测试断言集合由 #24 精确场景 `planned_direct_routed_provider_event` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `usage_run_turn_can_read_workspace_file_with_default_profile` | `crates/lattice-api/tests/usage_turn.rs:175` | 删除 | Direct-Local 外部二进制 | `direct_observation_visibility_and_bounds` | #24 slice 2 assertion-level superset review：direct_observation.rs 通过 .lattice/agents/ 配置的 profile 读取 tracked.txt/notes.txt 并断言 content present，为原内部测试 default-profile-reads-workspace-file 的严格超集。已删除原测试。 |
+| `usage_stream_turn_model_started_includes_routed_provider` | `crates/lattice-api/tests/usage_turn.rs:237` | 提升 | Direct-Local 外部二进制 | `planned_direct_routed_provider_event` | #72 final review：direct_turn_completed_reopen_contract 已覆盖 openai_compatible/compat 路由事件与 wire model；尚未覆盖默认 sonnet→anthropic 路由分支。后续 owner：lattice-system-harness provider-routing scenario；保留明确 planned behavior。 |
 | `usage_run_turn_can_edit_workspace_file_and_commit` | `crates/lattice-api/tests/usage_turn.rs:274` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
-| `usage_resume_session_includes_previous_turn_context` | `crates/lattice-api/tests/usage_turn.rs:340` | 提升 | Direct-Local 外部二进制 | `planned_direct_reopen_previous_context` | 原内部测试断言集合由 #24 精确场景 `planned_direct_reopen_previous_context` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 提升 | Direct-Local 外部二进制 | `planned_direct_fetch_capability_denial` | #24 slice 4：direct_tools 落地 host-policy/disabled fetch 半；FetchUrl capability + allow_public_https 半与 CepCallStarted external_observation 标签仍依赖 API 级断言，保留原测试。 |
-| `rejects_profile_disabled_web_fetch` | `crates/lattice-api/tests/usage_turn.rs:519` | 删除 | Direct-Local 外部二进制 | 已删除原测试，由 `planned_direct_disabled_fetch_denial` 接管 | #24 slice 4 assertion-level superset review：direct_tools_fetch_disabled_no_dispatch 断言 disabled fetch.web 失败、fixture 零请求、无 cep_call_started。已删除原测试。 |
+| `usage_resume_session_includes_previous_turn_context` | `crates/lattice-api/tests/usage_turn.rs:340` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已精确覆盖 reopen provider context、两 commit 与 HEAD main；原测试仍直接断言 raw HeadTranscript 与第二 commit parent_ids 关系，属于 SessionApi/graph seam，改判 keep/local_invariant。 |
+| `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 提升 | Direct-Local 外部二进制 | `planned_direct_fetch_capability_denial` | #72 final review：direct_tools 已覆盖 disabled fetch 与 localhost host-policy denial；尚未覆盖 allow_public_https=true 且缺 FetchUrl capability 的拒绝，以及 fetch.web CepCallStarted external_observation/cep_native 标签。后续 owner：lattice-system-harness fetch capability scenario。 |
+| `rejects_profile_disabled_web_fetch` | `crates/lattice-api/tests/usage_turn.rs:519` | 删除 | Direct-Local 外部二进制 | `direct_tools_fetch_disabled_no_dispatch` | #24 slice 4 assertion-level superset review：direct_tools_fetch_disabled_no_dispatch 断言 disabled fetch.web 失败、fixture 零请求、无 cep_call_started；严格超集。已删除原测试。 |
 
-### `lattice-cli`（保留 118 / 提升 56 / 删除 11）
+### `lattice-cli`（保留 119 / 提升 41 / 删除 25）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
-| `audit_query_prints_fragment_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:351` | 提升 | Direct-Local 外部二进制 | `planned_direct_audit_query_seeded` | 原内部测试断言集合由 #24 精确场景 `planned_direct_audit_query_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `audit_tail_streams_rows_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:361` | 提升 | Direct-Local 外部二进制 | `planned_direct_audit_tail_seeded` | 原内部测试断言集合由 #24 精确场景 `planned_direct_audit_tail_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `audit_query_prints_fragment_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:351` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_session_lancet_cross_validate` | #24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：row_count>0 + 两个方法 + method/verdict 过滤 + tail rows + session status/log。已删除原测试。 |
+| `audit_tail_streams_rows_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:361` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_session_lancet_cross_validate` | #24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：tail 返回非零 rows。已删除原测试。 |
 | `audit_query_errors_when_store_missing` | `crates/lattice-cli/src/commands/audit.rs:373` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_audit_cli` 接管 | 已删除原内部测试，由已落地 fast_audit_cli（audit query/replay/tail 空态/错误态 --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `audit_query_empty_result_for_unknown_session` | `crates/lattice-cli/src/commands/audit.rs:381` | 提升 | Direct-Local 外部二进制 | `planned_direct_audit_query_unknown_session` | 原内部测试断言集合由 #24 精确场景 `planned_direct_audit_query_unknown_session` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:389` | 提升 | Direct-Local 外部二进制 | `planned_direct_audit_replay_trace` | 原内部测试断言集合由 #24 精确场景 `planned_direct_audit_replay_trace` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `audit_replay_reports_stored_attestation_match` | `crates/lattice-cli/src/commands/audit.rs:401` | 提升 | Direct-Local 外部二进制 | `planned_direct_audit_attestation_match` | 原内部测试断言集合由 #24 精确场景 `planned_direct_audit_attestation_match` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `audit_replay_errors_for_unknown_turn` | `crates/lattice-cli/src/commands/audit.rs:441` | 提升 | Direct-Local 外部二进制 | `planned_direct_audit_replay_unknown_turn` | 原内部测试断言集合由 #24 精确场景 `planned_direct_audit_replay_unknown_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `audit_query_empty_result_for_unknown_session` | `crates/lattice-cli/src/commands/audit.rs:381` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_query_unknown_session_empty` | #24 slice 6 assertion-level superset review：direct_operator_audit_query_unknown_session_empty：exit 0 + row_count==0。已删除原测试。 |
+| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:389` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_session_lancet_cross_validate` | #24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：replay trace.turn_id 非空 + 引用 observe.workspace。已删除原测试。 |
+| `audit_replay_reports_stored_attestation_match` | `crates/lattice-cli/src/commands/audit.rs:401` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_session_lancet_cross_validate` | #72 assertion-level superset：direct_operator_audit_session_lancet_cross_validate 以真实 Turn 生成 attestation，public audit replay 成功且 JSON stored_statement_match=true；exact scenario 已通过后删除原测试。 |
+| `audit_replay_errors_for_unknown_turn` | `crates/lattice-cli/src/commands/audit.rs:441` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_replay_unknown_turn_fails` | #72 assertion-level superset：direct_operator_audit_replay_unknown_turn_fails 在真实 seeded audit store 上断言非零退出与 stderr 精确包含 no audit rows for turn_id；exact scenario 已通过后删除原测试。 |
 | `audit_command_source_does_not_reference_cep_server` | `crates/lattice-cli/src/commands/audit.rs:458` | 删除 | 局部不变量 | n/a | 扫描源码禁止字符串；删除（RFC #41 决定六） |
 | `audit_query_reads_legacy_schema_store` | `crates/lattice-cli/src/commands/audit.rs:481` | 保留 | 局部不变量 | - | #23 review-fix round-3 复审判偏差：手工植入旧 SQLite schema 测向后兼容；RFC #41 harness 边界禁止直接打开/植入内部 audit DB，#24 audit scenarios 永远无法覆盖（真实 turn 只生成当前 schema）；改记保留为局部不变量。 |
 | `doctor_report_contains_expected_keys` | `crates/lattice-cli/src/commands/doctor.rs:162` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
@@ -1133,7 +1132,7 @@ codeberg issue 跟踪重写。
 | `lancet_status_no_args_parses` | `crates/lattice-cli/src/commands/lancet.rs:218` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `lancet_doctor_parses` | `crates/lattice-cli/src/commands/lancet.rs:228` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `cep_status_missing_db_returns_empty_state` | `crates/lattice-cli/src/commands/lancet.rs:288` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_lancet_cli` 接管 | 已删除原内部测试，由已落地 fast_lancet_cli（lancet status 空态 JSON/text）黑盒接管 |
-| `cep_status_seeded_audit_json` | `crates/lattice-cli/src/commands/lancet.rs:297` | 提升 | Direct-Local 外部二进制 | `planned_direct_lancet_status_seeded` | 原内部测试断言集合由 #24 精确场景 `planned_direct_lancet_status_seeded` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `cep_status_seeded_audit_json` | `crates/lattice-cli/src/commands/lancet.rs:297` | 删除 | Direct-Local 外部二进制 | `direct_tools_todo_write_success` | #72 assertion-level superset：direct_tools_todo_write_success 在真实 todo Tool Turn 后运行 public lancet status --json，断言 recent_calls 含 session.todo_write 且 last_guard_verdict 非空；exact scenario 已通过后删除原测试。 |
 | `cep_doctor_passes_on_repo_root` | `crates/lattice-cli/src/commands/lancet.rs:345` | 保留 | 局部不变量 | - | #23 复审偏差：测试 run_doctor_inner_for_project_root（LANCET doctor catalog 方法数 + registry 注册检查）是编译期不变量检查，经 #[cfg(test)] helper 驱动，非公开黑盒行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
 | `cli_diagnostics_models_auth_text_lists_aliases_one_per_line` | `crates/lattice-cli/src/commands/models.rs:37` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `cli_diagnostics_models_auth_text_excludes_secret_values` | `crates/lattice-cli/src/commands/models.rs:45` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
@@ -1147,13 +1146,13 @@ codeberg issue 跟踪重写。
 | `cli_diagnostics_resolve_unknown_model_returns_error` | `crates/lattice-cli/src/commands/resolve.rs:95` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `cli_diagnostics_resolve_no_provider_override` | `crates/lattice-cli/src/commands/resolve.rs:109` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `stream_timeout_constant_is_5_minutes` | `crates/lattice-cli/src/commands/run_tests.rs:9` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
-| `stream_timeout_fires_after_duration` | `crates/lattice-cli/src/commands/run_tests.rs:16` | 提升 | Direct-Local 外部二进制 | `planned_direct_provider_timeout` | 原内部测试断言集合由 #24 精确场景 `planned_direct_provider_timeout` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `stream_timeout_fires_after_duration` | `crates/lattice-cli/src/commands/run_tests.rs:16` | 删除 | Direct-Local 外部二进制 | `direct_failure_profile_deadline_while_stalled_commits_error` | #72 assertion-level superset：原测试只断言 never-yield stream 会 timeout；direct_failure_profile_deadline_while_stalled_commits_error 通过真实 binary/provider stall 断言产品 deadline、TurnFailed→committed error、exit 1 与零 assistant 输出，exact scenario 已通过后删除原 Tokio-only 测试。 |
 | `run_validate_agents_dir_rejects_parent_components` | `crates/lattice-cli/src/commands/run_tests.rs:44` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
 | `run_validate_agents_dir_resolves_symlink_prefix_before_safety_check` | `crates/lattice-cli/src/commands/run_tests.rs:78` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
 | `run_default_session_dir_under_lattice_sessions` | `crates/lattice-cli/src/commands/run_tests.rs:98` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
-| `run_integration_commits_existing_session` | `crates/lattice-cli/src/commands/run_tests.rs:148` | 提升 | Direct-Local 外部二进制 | `planned_direct_existing_session_run_result` | 原内部测试断言集合由 #24 精确场景 `planned_direct_existing_session_run_result` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `run_integration_commits_existing_session` | `crates/lattice-cli/src/commands/run_tests.rs:148` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已覆盖 existing session 的 public commit/reopen；原测试仍直接断言 RunTurnResult.assistant_output/status/session_id/commit_id 返回契约，该 Rust API 结果不由 binary 独立暴露，改判 keep/local_invariant。 |
 | `run_integration_missing_session_returns_not_found` | `crates/lattice-cli/src/commands/run_tests.rs:218` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session send <missing-id> 黑盒：open_session 在 workspace 前失败，exit 2 + stderr not found）接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `tool_executor_uses_workspace_root_not_profile_package_dir` | `crates/lattice-cli/src/commands/run_tests.rs:246` | 删除 | Direct-Local 外部二进制 | 已删除原测试，由 `planned_direct_canonical_workspace_root` 接管 | #24 slice 2 assertion-level superset review：direct_observation.rs profile 位于 .lattice/agents/dl-obs/，读取 project-root tracked.txt/notes.txt 并断言内容；若 executor 使用 profile package dir 则路径不存在。严格强于原内部测试仅断言 ok=true。已删除原测试。 |
+| `tool_executor_uses_workspace_root_not_profile_package_dir` | `crates/lattice-cli/src/commands/run_tests.rs:246` | 删除 | Direct-Local 外部二进制 | `direct_observation_visibility_and_bounds` | #24 slice 2 assertion-level superset review：direct_observation.rs profile 位于 .lattice/agents/dl-obs/，读取 project-root tracked.txt/notes.txt 并断言内容；若 executor 使用 profile package dir 则路径不存在。严格强于原内部测试仅断言 ok=true。已删除原测试。 |
 | `run_source_has_no_old_crate_imports` | `crates/lattice-cli/src/commands/run_tests.rs:369` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
 | `render_json_event_emits_single_line_with_trailing_newline` | `crates/lattice-cli/src/commands/run_tests.rs:391` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
 | `render_json_event_roundtrips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:402` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
@@ -1235,11 +1234,11 @@ codeberg issue 跟踪重写。
 | `project_branch_send_has_no_branch_override` | `crates/lattice-cli/src/commands/session.rs:1385` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `project_branch_send_source_has_no_branch_flag` | `crates/lattice-cli/src/commands/session.rs:1395` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
 | `project_branch_new_source_defines_field` | `crates/lattice-cli/src/commands/session.rs:1410` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查（include_str! 扫描 SessionAction::New 字段）；删除（RFC #41 决定六）。 |
-| `branch_listing_reads_only_addressed_session_refs` | `crates/lattice-cli/src/commands/session.rs:1511` | 提升 | Direct-Local 外部二进制 | `planned_direct_branch_listing_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_branch_listing_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `checkout_changes_only_addressed_session_head` | `crates/lattice-cli/src/commands/session.rs:1556` | 提升 | Direct-Local 外部二进制 | `planned_direct_checkout_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_checkout_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `branch_create_affects_only_addressed_session` | `crates/lattice-cli/src/commands/session.rs:1586` | 提升 | Direct-Local 外部二进制 | `planned_direct_branch_create_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_branch_create_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `reset_changes_only_addressed_session_branch_pointer` | `crates/lattice-cli/src/commands/session.rs:1613` | 提升 | Direct-Local 外部二进制 | `planned_direct_reset_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_reset_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
-| `diff_resolves_refs_inside_addressed_session_only` | `crates/lattice-cli/src/commands/session.rs:1650` | 提升 | Direct-Local 外部二进制 | `planned_direct_diff_isolation` | 原内部测试断言集合由 #24 精确场景 `planned_direct_diff_isolation` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `branch_listing_reads_only_addressed_session_refs` | `crates/lattice-cli/src/commands/session.rs:1511` | 删除 | Direct-Local 外部二进制 | `direct_session_branch_listing_isolation` | #24 slice 7 assertion-level superset review：direct_session_branch_listing_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
+| `checkout_changes_only_addressed_session_head` | `crates/lattice-cli/src/commands/session.rs:1556` | 删除 | Direct-Local 外部二进制 | `direct_session_checkout_isolation` | #24 slice 7 assertion-level superset review：direct_session_checkout_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
+| `branch_create_affects_only_addressed_session` | `crates/lattice-cli/src/commands/session.rs:1586` | 删除 | Direct-Local 外部二进制 | `direct_session_branch_create_isolation` | #24 slice 7 assertion-level superset review：direct_session_branch_create_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
+| `reset_changes_only_addressed_session_branch_pointer` | `crates/lattice-cli/src/commands/session.rs:1613` | 删除 | Direct-Local 外部二进制 | `direct_session_reset_isolation` | #24 slice 7 assertion-level superset review：direct_session_reset_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
+| `diff_resolves_refs_inside_addressed_session_only` | `crates/lattice-cli/src/commands/session.rs:1650` | 删除 | Direct-Local 外部二进制 | `direct_session_diff_isolation` | #24 slice 7 assertion-level superset review：direct_session_diff_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
 | `boundary_no_legacy_session_store_patterns` | `crates/lattice-cli/src/commands/session.rs:1691` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
 | `project_branch_creation_json_output_includes_branch` | `crates/lattice-cli/src/commands/session.rs:1755` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_new_json_reports_requested_project_branch：session new --project-branch feature/test --json 输出 project_branch=feature/test）黑盒接管 |
 | `project_branch_status_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1775` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
@@ -1285,7 +1284,7 @@ codeberg issue 跟踪重写。
 | `smoke_resolve_missing_credential_names_env_var` | `crates/lattice-cli/tests/release_smoke.rs:159` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_session_status_list_shows_seeded_session` | `crates/lattice-cli/tests/release_smoke.rs:185` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_new_creates_session_and_appears_in_list：session new 后 session list --json 含 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象 |
 | `smoke_session_status_specific_session` | `crates/lattice-cli/tests/release_smoke.rs:210` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_status_new_session_shows_zero_commits_and_agent + fast_session_status_json_stable_contract：session status <id> 文本/JSON 双模断言 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象 |
-| `smoke_session_log_shows_seeded_turn` | `crates/lattice-cli/tests/release_smoke.rs:242` | 提升 | Direct-Local 外部二进制 | `planned_direct_session_log_turn` | 原内部测试断言集合由 #24 精确场景 `planned_direct_session_log_turn` 接管（assertion-level，非 family fallback）；待 #24 落地后删除原测试。 |
+| `smoke_session_log_shows_seeded_turn` | `crates/lattice-cli/tests/release_smoke.rs:242` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #72 assertion-level superset：direct_turn_completed_reopen_contract 在真实两轮 Turn 后同时验证 session log JSON durability 与 human 输出含 turn 0/首轮 commit message；exact scenario 已通过后删除内部 seed smoke。 |
 | `smoke_doctor_runs_without_leaking_secrets` | `crates/lattice-cli/tests/release_smoke.rs:269` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_doctor_json_does_not_leak_secrets` | `crates/lattice-cli/tests/release_smoke.rs:299` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_session_send_missing_credentials_fails_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:329` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原弱 smoke，由已落地 fast_session_send_missing_credential_is_redacted_input_error 接管：凭据解析早于 prepare_upper，无需 KVM；精确断言 exit 2、缺失 env-var 名与 stdout/stderr 无 secret 泄漏（#23 review-fix round-6）。 |
