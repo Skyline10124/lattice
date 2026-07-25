@@ -10610,26 +10610,26 @@
   {
     "crate": "lattice-cli",
     "file": "crates/lattice-cli/tests/release_smoke.rs",
-    "line": 407,
+    "line": null,
     "name": "release_smoke_release_gate_sh_is_retired",
     "ignored": false,
     "async": false,
-    "decision": "keep",
-    "target_layer": "local_invariant",
+    "decision": "delete",
+    "target_layer": null,
     "replacement": null,
-    "reason": "#23 复审偏差：运行 release-gate.sh 并断言 nonzero exit + retired stderr，是脚本退役 smoke，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。"
+    "reason": "#47：遗留 shell release gate（scripts/release-gate*.sh）已删除，钉住脚本存在性/内容的 smoke 随 crates/lattice-cli/tests/release_smoke.rs 整文件移除；不虚构 replacement。"
   },
   {
     "crate": "lattice-cli",
     "file": "crates/lattice-cli/tests/release_smoke.rs",
-    "line": 432,
+    "line": null,
     "name": "release_smoke_release_gate_v1_4_includes_lancet_boundary_check",
     "ignored": false,
     "async": false,
-    "decision": "keep",
-    "target_layer": "local_invariant",
+    "decision": "delete",
+    "target_layer": null,
     "replacement": null,
-    "reason": "#23 复审偏差：源码扫描 release-gate-v1.4.sh 脚本文件内容（asserts contains lancet-boundary 等），是 repo tooling 局部不变量，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。"
+    "reason": "#47：遗留 shell release gate（scripts/release-gate*.sh）已删除，钉住脚本存在性/内容的 smoke 随 crates/lattice-cli/tests/release_smoke.rs 整文件移除；不虚构 replacement。"
   },
   {
     "crate": "lattice-cli",

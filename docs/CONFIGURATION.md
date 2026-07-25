@@ -12,12 +12,11 @@ All schema details below are grounded in the strict profile schema
 (`crates/lattice-llm/src/router.rs`, `endpoints.rs`), and the profile→policy
 translation (`crates/lattice-api/src/turn/cep.rs`).
 
-> **Drift note:** `docs/LANCET.md` documents a `[lancet.isolation]` profile
-> section, landlock, and netns command isolation. Those were **removed**
-> (commit `a29072e2`); there is no `LancetIsolationSection`,
-> `landlock`, `required_boundaries`, or `netns` in
-> `crates/lattice-profile/src/schema.rs`. This document reflects the current
-> schema and omits removed isolation features.
+> **Removed isolation features:** Landlock/netns command isolation and the
+> `[lancet.isolation]` profile section were removed (commit `a29072e2`); there
+> is no `LancetIsolationSection`, `landlock`, `required_boundaries`, or `netns`
+> in `crates/lattice-profile/src/schema.rs`. See
+> [docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed subsystems".
 
 ---
 
@@ -30,13 +29,14 @@ LATTICE configuration is driven by two mechanisms:
    retry policy, and LANCET execution policy.
 2. **Environment variables** — LLM provider API keys, the OpenAI-compatible
    gateway endpoint/model, logging level, and the global agents directory.
+
 ### Where configuration lives
 
 Profile discovery is owned by `crates/lattice-profile/src/discovery.rs`. A
 profile is resolved from a `ProfileSource`, which is one of:
 
 | `ProfileSource` | Meaning |
-|---|---|
+| --- | --- |
 | `Path(PathBuf)` | An exact filesystem path to an `agent.toml`. |
 | `Name(String)` | A named agent looked up project-local, then user-global. |
 | `Default` | The `default` agent (equivalent to `Name("default")`). |
@@ -45,7 +45,7 @@ Lookup order: **explicit path > project-local > user-global**. The discovery
 paths are:
 
 | Location | Path |
-|---|---|
+| --- | --- |
 | Project-local | `<project_root>/.lattice/agents/<name>/agent.toml` |
 | User-global | `~/.lattice/agents/<name>/agent.toml` |
 
@@ -78,7 +78,7 @@ rejected; `[tools]` only supports `enabled` (no `bundles`).
 ### Top-level sections
 
 | Section | Required | Struct | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `schema_version` | yes | `u64` | Must be `1`. |
 | `[agent]` | yes | `AgentSection` | Agent identity (name, model, optional description). |
 | `[prompt]` | yes | `PromptSection` | System prompt — inline `system` or file `system_path`. |
@@ -90,6 +90,7 @@ The Upper microVM `[workspace]` section was removed in #40: turns run
 Direct-Local against the canonical Local Workspace, so the schema neither
 declares nor requires `[workspace]`. Legacy profiles that still contain it
 fail to parse (the loader names `[workspace]` as a retired section).
+
 ### `[lancet]` sub-sections
 
 The `[lancet]` table has a `mode` field plus typed sub-tables. Unknown scalar
@@ -97,7 +98,7 @@ fields under `[lancet]` are rejected; unrecognized sub-tables are preserved in
 an `extensions` map. The real sub-sections are:
 
 | Sub-section | Struct | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `mode` | `CepMode` | Effect-region enforcement mode. |
 | `[lancet.project_root]` | `LancetProjectRootSection` | Effective workspace scope for observation. |
 | `[lancet.observation]` | `LancetObservationSection` | Path allow-roots and observation/todo budget limits. |
@@ -105,6 +106,7 @@ an `extensions` map. The real sub-sections are:
 | `[lancet.policy]` | `LancetPolicySection` | Pointer to an external structured TOML policy file. |
 | `[lancet.effects]` | `LancetEffectsSection` | Runtime effect-kind deny switch. |
 | `[lancet.workspace]` | `LancetWorkspacePolicySection` | Local Workspace write-deny and read-visibility policy (blacklist). |
+
 > **Removed:** `[lancet.isolation]` does not exist. There is no
 > `LancetIsolationSection`, landlock, `required_boundaries`, or netns in the
 > profile schema.
@@ -116,7 +118,7 @@ catalog (`lancet-catalog::CATALOG`), which contains exactly **5**
 agent-visible methods:
 
 | Method | Impact |
-|---|---|
+| --- | --- |
 | `observe.workspace` | `workspace_observation` |
 | `mutate.create` | `workspace_mutation` |
 | `mutate.edit` | `workspace_mutation` |
@@ -138,7 +140,7 @@ the production catalog.
 ### `[agent]` — `AgentSection`
 
 | Field | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `name` | `String` | *(required)* | Agent name. |
 | `model` | `String` | *(required)* | Model alias (resolved by the router; see Model Aliases). |
 | `description` | `Option<String>` | `None` | Optional human description. |
@@ -146,7 +148,7 @@ the production catalog.
 ### `[prompt]` — `PromptSection`
 
 | Field | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `system` | `Option<String>` | `None` | Inline system prompt. |
 | `system_path` | `Option<String>` | `None` | Path to a system prompt file. Use `system` **or** `system_path`, not both. |
 
@@ -161,7 +163,7 @@ the production catalog.
 The `[llm]` section only contains `[llm.retry]`.
 
 | Field | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `max_retries` | `u32` | `3` | Max retries when opening a provider stream. |
 | `initial_delay_ms` | `u64` | `500` | Initial backoff delay in ms. |
 | `max_delay_ms` | `u64` | `3000` | Maximum backoff delay in ms. |
@@ -188,7 +190,7 @@ All `max_*` fields are `Option`; when `None`, the authority defaults
 (`ObservationPolicyConfig::defaults_for_root`) apply.
 
 | Field | Type | Default (authority) | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `allowed_roots` | `Vec<String>` | `[project_root]` | Canonicalized path allow-roots; each must be inside the effective project root. |
 | `max_single_read_bytes` | `Option<usize>` | `10485760` (10 MiB) | Max bytes per single read. |
 | `max_turn_observation_bytes` | `Option<usize>` | `10485760` (10 MiB) | Max observation bytes per turn. |
@@ -200,7 +202,7 @@ All `max_*` fields are `Option`; when `None`, the authority defaults
 ### `[lancet.network]` — `LancetNetworkSection`
 
 | Field | Type | Default (authority) | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `allow_public_https` | `Option<bool>` | `true` | Allow public HTTPS `fetch.web`. |
 | `allow_localhost` | `Option<bool>` | `false` | Allow localhost `fetch.web`. |
 | `allowed_hosts` | `Vec<String>` | `[]` | Explicitly allowed hosts (overrides defaults when non-empty). |
@@ -229,7 +231,7 @@ profile inline `[lancet.*]` < external policy file < test/runtime override**.
 ### `[lancet.workspace]` — `LancetWorkspacePolicySection`
 
 | Field | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `denied_write_patterns` | `Vec<String>` | `[]` | Write-deny glob/exact patterns (blacklist). A path is allowed unless it matches any denied pattern. Patterns must be non-empty, project-root-relative, and contain no `..` or NUL. |
 | `included_ignored_read_patterns` | `Vec<String>` | `[]` | Expose specific Git-ignored paths to observation (read/list/grep/find). |
 | `denied_read_patterns` | `Vec<String>` | `[]` | Hide paths from observation even when tracked or otherwise visible. |
@@ -249,8 +251,9 @@ over profile rules and are not profile-configurable.
 
 These are read by `crates/lattice-llm` (router/client). Providers are
 selected by the profile's `agent.model` alias at turn time.
+
 | Variable | Used by | Description |
-|---|---|---|
+| --- | --- | --- |
 | `ANTHROPIC_API_KEY` | Anthropic aliases (`opus`, `sonnet`, `haiku`) | Anthropic API key. |
 | `OPENAI_API_KEY` | OpenAI aliases (`gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-4o-mini`) | OpenAI API key. |
 | `GEMINI_API_KEY` | `gemini` alias | Google Gemini API key. |
@@ -262,13 +265,14 @@ A credential is reported `Present` only if the env var is set and non-empty;
 otherwise `Missing`. Secrets are never stored in profiles — the profile holds
 only the model alias, and provider keys are read from the environment at
 turn time.
+
 ### Provider base URLs and model aliases
 
 The router (`crates/lattice-llm/src/router.rs`) maps aliases to providers. The
 default model is `sonnet`.
 
 | Alias | Provider | Upstream model | Base URL |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `gpt-5.5` / `gpt-5` | OpenAI | `gpt-5.5` <!-- VERIFY: alias gpt-5.5 maps to upstream OpenAI model gpt-5.5 --> | `https://api.openai.com/v1` <!-- VERIFY: OpenAI API base URL --> |
 | `gpt-5.4` | OpenAI | `gpt-5.4` <!-- VERIFY: alias gpt-5.4 maps to upstream OpenAI model gpt-5.4 --> | `https://api.openai.com/v1` |
 | `gpt-5.3-codex` | OpenAI | `gpt-5.3-codex` <!-- VERIFY: alias gpt-5.3-codex maps to upstream OpenAI model gpt-5.3-codex --> | `https://api.openai.com/v1` |
@@ -287,16 +291,14 @@ empty; a prefix alias (`compat:<model>`) is the alternative.
 ### LATTICE runtime variables
 
 | Variable | Used by | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `LATTICE_LOG` | `lattice-llm` logging (`src/logging.rs`) | `error` (or `debug` with `--verbose`) | Tracing filter. Takes priority over the `--verbose` flag. Supports `RUST_LOG`-style syntax (e.g. `trace`, `lattice_llm=debug`). |
 | `LATTICE_AGENTS_DIR` | `lattice-cli` (`commands/run.rs`) | `$HOME/.lattice/agents` | Overrides the user-global agents directory. Validated against system paths and `/tmp`. |
 
-> **Note on `LATTICE_LINUX_ISOLATION_LIVE`:** this variable appears in test
-> harnesses, `FIX.md`, `docs/LANCET.md`, and release scripts, but is **not**
-> read by any runtime source under `crates/`. It is a test-gate flag for live
-> Linux isolation canaries, not a configuration variable, and is omitted from
-> the configuration surface. Landlock/netns command isolation were removed
-> from the profile schema; do not document them as active configuration.
+> **Removed live-isolation flag:** the live Linux isolation canary lane and its
+> env flag were removed in #47; the flag has no reader anywhere in the tree
+> (not in any `crates/` runtime source). It was never a configuration variable.
+> See [docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed subsystems".
 
 ---
 

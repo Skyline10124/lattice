@@ -60,9 +60,9 @@
 
 | 决定 | 条数 |
 | --- | ---: |
-| 保留 | 1193 |
+| 保留 | 1191 |
 | 提升 | 42 |
-| 删除 | 214 |
+| 删除 | 216 |
 | **合计** | **1449** |
 
 #### 按 crate
@@ -70,7 +70,7 @@
 | crate | 保留 | 提升 | 删除 | 合计 |
 | --- | ---: | ---: | ---: | ---: |
 | `lattice-api` | 234 | 0 | 26 | 260 |
-| `lattice-cli` | 119 | 41 | 25 | 185 |
+| `lattice-cli` | 117 | 41 | 27 | 185 |
 | `lattice-workspace` | 0 | 0 | 158 | 158 |
 | `lancet-authority` | 135 | 0 | 0 | 135 |
 | `lattice-llm` | 133 | 0 | 0 | 133 |
@@ -222,9 +222,9 @@ codeberg issue 跟踪重写。
 
 | 决定 | 条数 |
 | --- | ---: |
-| 保留 | 1193 |
+| 保留 | 1191 |
 | 提升 | 42 |
-| 删除 | 214 |
+| 删除 | 216 |
 | **合计** | **1449** |
 
 ## 1.6 #24 slice 2 执行状态（2026-07-22）
@@ -1125,7 +1125,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 删除 | Direct-Local 外部二进制 | `direct_tools_fetch_capability_denial_with_public_https` | #46 residual elevate closeout：direct_tools_fetch_capability_denial_with_public_https 断言 allow_public_https=true + empty allowed_hosts 下 fetch.web 以 EffectViolation/authorized-region 失败（Enforce 下出站前拒绝）、cep_call_started external_observation/cep_native、turn_committed completed；严格超集。已删除原测试。 |
 | `rejects_profile_disabled_web_fetch` | `crates/lattice-api/tests/usage_turn.rs:519` | 删除 | Direct-Local 外部二进制 | `direct_tools_fetch_disabled_no_dispatch` | #24 slice 4 assertion-level superset review：direct_tools_fetch_disabled_no_dispatch 断言 disabled fetch.web 失败、fixture 零请求、无 cep_call_started；严格超集。已删除原测试。 |
 
-### `lattice-cli`（保留 119 / 提升 41 / 删除 25）
+### `lattice-cli`（保留 117 / 提升 41 / 删除 27）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -1309,8 +1309,8 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `smoke_session_send_missing_credentials_fails_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:329` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原弱 smoke，由已落地 fast_session_send_missing_credential_is_redacted_input_error 接管：凭据解析早于 prepare_upper，无需 KVM；精确断言 exit 2、缺失 env-var 名与 stdout/stderr 无 secret 泄漏（#23 review-fix round-6）。 |
 | `smoke_session_send_no_profile_fails_with_clear_message` | `crates/lattice-cli/tests/release_smoke.rs:354` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_send_no_profile（session send 在 load_agent_checked 失败：创建 session 后删除 .lattice/agents/ 触发 agent profile 缺失错误，exit 2 + stderr 含 profile/agent.toml，不泄 secret）黑盒接管（#23 review-fix round-3）；Upper 前失败，逐条映射。 |
 | `smoke_session_status_nonexistent_returns_error` | `crates/lattice-cli/tests/release_smoke.rs:384` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session new/list/status/log/branch --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `release_smoke_release_gate_sh_is_retired` | `crates/lattice-cli/tests/release_smoke.rs:407` | 保留 | 局部不变量 | - | #23 复审偏差：运行 release-gate.sh 并断言 nonzero exit + retired stderr，是脚本退役 smoke，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
-| `release_smoke_release_gate_v1_4_includes_lancet_boundary_check` | `crates/lattice-cli/tests/release_smoke.rs:432` | 保留 | 局部不变量 | - | #23 复审偏差：源码扫描 release-gate-v1.4.sh 脚本文件内容（asserts contains lancet-boundary 等），是 repo tooling 局部不变量，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
+| `release_smoke_release_gate_sh_is_retired` | `crates/lattice-cli/tests/release_smoke.rs`（已删除） | 删除 | n/a | n/a | #47：遗留 shell release gate（`scripts/release-gate*.sh`）已删除，钉住脚本存在性/退役 stderr 的 smoke 随 `release_smoke.rs` 整文件移除；不虚构 replacement。 |
+| `release_smoke_release_gate_v1_4_includes_lancet_boundary_check` | `crates/lattice-cli/tests/release_smoke.rs`（已删除） | 删除 | n/a | n/a | #47：被扫描的 `scripts/release-gate-v1.4.sh` 已删除，该源码扫描 smoke 随 `release_smoke.rs` 整文件移除；boundary 检查由 `cargo xtask lancet-boundary` 在 ordinary CI 与 rollout gate 中直接执行。 |
 | `smoke_session_resume_without_session_id_fails` | `crates/lattice-cli/tests/release_smoke.rs:459` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_resume_without_id（session resume 缺参数 clap 拒绝，exit 2 + stderr）黑盒接管（#23 review-fix round-3）；Upper 前失败，逐条映射。 |
 | `smoke_session_prune_snapshots_without_session_id_fails` | `crates/lattice-cli/tests/release_smoke.rs:481` | 保留 | 局部不变量 | - | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
 | `smoke_session_resume_nonexistent_session_returns_error` | `crates/lattice-cli/tests/release_smoke.rs:503` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_resume_nonexistent_session（session resume 不存在 session，调用错误 exit 2 + stderr 含 not found 与 session ID）黑盒接管（#23 review-fix round-5）；Upper 前失败，逐条映射。 |
