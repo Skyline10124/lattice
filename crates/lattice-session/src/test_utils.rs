@@ -20,12 +20,34 @@ const FIXTURE_AUTHOR_EMAIL: &str = "test@lattice.local";
 /// if needed). No commits are created.
 pub fn init_empty_repo(dir: &Path) -> gix::Repository {
     fs::create_dir_all(dir).expect("create fixture dir");
-    // gix queries the process CWD even for an absolute target. Recover when a
-    // previous test left CWD inside a TempDir that has already been removed.
-    if std::env::current_dir().is_err() {
-        std::env::set_current_dir(std::env::temp_dir()).expect("restore fixture cwd");
-    }
-    let mut repo = gix::init(dir).expect("gix init empty repo");
+    // gix queries the process CWD even for an absolute target. Tests in other
+    // crates `set_current_dir` into a TempDir (see lattice-api's
+    // consistency/release_e2e/usage_turn fixtures); once that dir is dropped the
+    // process has no valid CWD and `gix::init` fails with
+    // `Init(CurrentDir(NotFound))`.
+    //
+    // Checking `current_dir()` first is a TOCTOU race — the directory can be
+    // removed between the check and gix's own read — so retry once from a
+    // known-good CWD instead of pre-validating.
+    let mut repo = match gix::init(dir) {
+        Ok(repo) => repo,
+        // The variant is `gix::init::Error::Init(gix::create::Error::CurrentDir(_))`;
+        // match on the rendered form so a gix version bump that reshapes the
+        // nesting still recovers instead of hard-failing.
+        Err(err) if format!("{err:?}").contains("CurrentDir") => {
+            std::env::set_current_dir(std::env::temp_dir()).expect("restore fixture cwd");
+            // The failed attempt may already have created `.git` before it
+            // needed the CWD, so accept an existing repo on retry.
+            match gix::init(dir) {
+                Ok(repo) => repo,
+                Err(gix::init::Error::Init(gix::create::Error::DirectoryExists { .. })) => {
+                    gix::open(dir).expect("open fixture repo after cwd recovery")
+                }
+                Err(err) => panic!("gix init empty repo after cwd recovery: {err:?}"),
+            }
+        }
+        Err(err) => panic!("gix init empty repo: {err:?}"),
+    };
     // A fresh repo inherits no identity. Ref writes (e.g. `refs/heads/main` in
     // `commit_fixture`) also write a reflog entry, which requires a committer;
     // on a host without a global git config that fails with
@@ -157,4 +179,29 @@ fn write_commit(
     repo.new_commit_as(sig_ref, sig_ref, message, tree, parents.iter().copied())
         .expect("write fixture commit")
         .id
+}
+
+#[cfg(test)]
+mod cwd_recovery_tests {
+    use super::*;
+
+    /// `gix::init` reads the process CWD even for an absolute target. Other
+    /// crates' tests chdir into a TempDir that later gets dropped, leaving the
+    /// process without a valid CWD; `init_empty_repo` must recover instead of
+    /// panicking (observed as a macos-latest CI failure).
+    #[test]
+    fn init_empty_repo_recovers_from_deleted_cwd() {
+        let doomed = tempfile::TempDir::new().expect("doomed cwd");
+        let doomed_path = doomed.path().to_path_buf();
+        std::env::set_current_dir(&doomed_path).expect("chdir into doomed");
+        drop(doomed);
+        assert!(
+            std::env::current_dir().is_err(),
+            "precondition: process CWD must be invalid"
+        );
+
+        let target = tempfile::TempDir::new().expect("target");
+        let repo = init_empty_repo(&target.path().join("repo"));
+        assert!(repo.git_dir().exists(), "repo initialized after recovery");
+    }
 }
