@@ -12,12 +12,14 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 cargo_metadata = "0.19"
+chrono = { workspace = true }
 clap = { workspace = true }
 lancet-protocol = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+tempfile = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 walkdir = "2"

@@ -5,6 +5,7 @@ mod lancet_boundary;
 mod output;
 mod path_norm;
 mod repo_root;
+mod rollout;
 mod scan_rs_tree;
 mod tool_build;
 mod tool_codegen;
@@ -30,6 +31,9 @@ enum Commands {
     ToolCodegen(tool_codegen::ToolCodegenArgs),
     /// Build a Source Tool's WASM Component and pin its artifact hash.
     ToolBuild(tool_build::ToolBuildArgs),
+    /// Alpha rollout gate: clean-worktree check, locked release build,
+    /// evidence steps, versioned JSON record.
+    Rollout(rollout::RolloutArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -40,5 +44,6 @@ fn main() -> anyhow::Result<()> {
         Commands::LancetBoundary => lancet_boundary::run(),
         Commands::ToolCodegen(args) => tool_codegen::run(args),
         Commands::ToolBuild(args) => tool_build::run(args),
+        Commands::Rollout(args) => rollout::run(args),
     }
 }

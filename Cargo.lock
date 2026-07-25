@@ -5784,6 +5784,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "cargo_metadata",
+ "chrono",
  "clap",
  "lancet-protocol",
  "regex",
