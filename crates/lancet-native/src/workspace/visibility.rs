@@ -215,7 +215,19 @@ mod tests {
     fn init_repo_with_ignore() -> TempDir {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
-        let repo = gix::init(root).expect("gix init");
+        let mut repo = gix::init(root).expect("gix init");
+        // A fresh repo inherits no identity, and on a host without a global git
+        // config (CI runners) writing the `refs/heads/main` reflog below fails
+        // with `MissingCommitter`. Inject a fixture committer, matching the
+        // pattern used by the lattice-api test fixtures and the system harness.
+        {
+            let mut cfg = repo.config_snapshot_mut();
+            cfg.set_raw_value("user.name", "lattice-test")
+                .expect("set name");
+            cfg.set_raw_value("user.email", "test@lattice.local")
+                .expect("set email");
+            let _ = cfg.commit();
+        }
         std::fs::write(root.join(".gitignore"), ".env\nsecret/\n").unwrap();
         std::fs::write(root.join("visible.txt"), "ok\n").unwrap();
 
