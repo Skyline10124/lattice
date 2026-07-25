@@ -25,7 +25,21 @@ pub fn init_empty_repo(dir: &Path) -> gix::Repository {
     if std::env::current_dir().is_err() {
         std::env::set_current_dir(std::env::temp_dir()).expect("restore fixture cwd");
     }
-    gix::init(dir).expect("gix init empty repo")
+    let mut repo = gix::init(dir).expect("gix init empty repo");
+    // A fresh repo inherits no identity. Ref writes (e.g. `refs/heads/main` in
+    // `commit_fixture`) also write a reflog entry, which requires a committer;
+    // on a host without a global git config that fails with
+    // `MissingCommitter`. Every fixture repo in this crate is born here, so
+    // injecting the identity once covers all of them.
+    {
+        let mut cfg = repo.config_snapshot_mut();
+        cfg.set_raw_value("user.name", "lattice-test")
+            .expect("set fixture user.name");
+        cfg.set_raw_value("user.email", "test@lattice.local")
+            .expect("set fixture user.email");
+        let _ = cfg.commit();
+    }
+    repo
 }
 
 /// Initialize a non-bare repository, write `files` into the worktree, and
