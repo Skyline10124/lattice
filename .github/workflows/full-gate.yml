@@ -33,6 +33,8 @@ jobs:
         env:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
+          # See ci.yml: the default job count OOMs the hosted runner's linker.
+          CARGO_BUILD_JOBS: "2"
       - run: cargo xtask harness-boundary
       - run: cargo xtask lancet-boundary
       - run: cargo xtask tool-codegen --check
