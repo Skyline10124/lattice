@@ -20,9 +20,19 @@ pub enum ExternalAuditPathError {
     Canonicalize(String),
 }
 
-/// Platform state-directory root used for external audit storage (`dirs::state_dir()`).
+/// Platform state-directory root used for external audit storage.
+///
+/// `dirs::state_dir()` implements the XDG state spec and is therefore
+/// **Linux-only** — it returns `None` on macOS and Windows, which would make
+/// every project-keyed audit path unresolvable there. Fall back to the
+/// platform's local data directory (`~/Library/Application Support` on macOS,
+/// `%LOCALAPPDATA%` on Windows), which is the conventional home for this kind
+/// of persistent per-user state on those platforms.
+///
+/// Callers that need an explicit root (tests, embedders) should use
+/// [`audit_db_path_for_project_in`] instead of relying on this resolution.
 pub fn audit_state_root() -> Option<PathBuf> {
-    dirs::state_dir()
+    dirs::state_dir().or_else(dirs::data_local_dir)
 }
 
 /// Deterministic SHA-256 project key from the canonical project root identity.
@@ -56,7 +66,7 @@ pub fn audit_db_path_for_project_in(
 
 /// External audit DB path using the platform state directory.
 pub fn audit_db_path_for_project(project_root: &Path) -> Result<PathBuf, ExternalAuditPathError> {
-    let state_root = dirs::state_dir().ok_or(ExternalAuditPathError::MissingStateDir)?;
+    let state_root = audit_state_root().ok_or(ExternalAuditPathError::MissingStateDir)?;
     audit_db_path_for_project_in(&state_root, project_root)
 }
 
