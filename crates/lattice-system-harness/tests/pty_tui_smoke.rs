@@ -112,6 +112,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     tui.send_line("/quit").expect("send /quit");
     std::thread::sleep(Duration::from_millis(500));
 
+    #[cfg(target_os = "linux")]
     let pgid = tui.pgid();
     drop(tui);
 
