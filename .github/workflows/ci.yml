@@ -34,10 +34,10 @@ jobs:
           # Cap link-time parallelism. The workspace links many large test
           # binaries (wasmtime, aws-lc-sys, gix, rusqlite), and at the default
           # job count the hosted runner ran out of memory mid-link:
-          # `ld terminated with signal 7 [Bus error]`, reproduced on two
-          # consecutive ubuntu-latest runs. `cargo xtask ci` caps this the same
-          # way locally (see the module docs in xtask/src/ci.rs).
-          CARGO_BUILD_JOBS: "2"
+          # `ld terminated with signal 7 [Bus error]`; the same failure still
+          # reproduced at 2 jobs on ubuntu-latest during `cargo test --workspace`,
+          # so CI uses a stricter cap here.
+          CARGO_BUILD_JOBS: "1"
       # Dependency / architecture boundary checks (same contracts `cargo
       # xtask ci` runs locally).
       - run: cargo xtask harness-boundary
