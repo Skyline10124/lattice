@@ -27,7 +27,7 @@ use anyhow::Context as _;
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
 use clap::Args;
 
-use crate::{harness_boundary, repo_root, tool_build, tool_codegen};
+use crate::{harness_boundary, lancet_boundary, repo_root, tool_build, tool_codegen};
 
 #[derive(Args, Debug)]
 pub struct CiArgs {}
@@ -76,6 +76,8 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
     })?;
 
     step("system harness boundary", harness_boundary::run)?;
+
+    step("lancet boundary", lancet_boundary::run)?;
 
     step("tool-codegen --check", tool_codegen::check)?;
 

@@ -1,0 +1,60 @@
+name: full-gate
+on:
+  # Triggers: this lane is long (locked release build + the full harness
+  # against the release binary), so it does not gate every PR — the ordinary
+  # CI lane does. It runs nightly for release evidence and on demand.
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  full-gate:
+    # Single OS bounds the long lane's cost; nothing here needs host
+    # virtualization — the rollout gate records host capabilities without
+    # requiring them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+          # wasm32-unknown-unknown: the rollout gate's capability probes
+          # require it (same contract as `cargo xtask ci`'s precheck).
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Everything the ordinary lane does.
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build -p lattice-cli --bin lattice
+      - run: cargo test --workspace
+        env:
+          LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
+          LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
+      - run: cargo xtask harness-boundary
+      - run: cargo xtask lancet-boundary
+      - run: cargo xtask tool-codegen --check
+      # Plus the slots that need explicit network or longer runtime.
+      - name: explicit-network fetch contract
+        # Positive + negative fetch effect contracts; real DNS/HTTP on the
+        # runner (known-hang L-26-01 only affects DNS-blackhole environments).
+        run: cargo test -p lancet-native fetch_effect_contract
+      - name: alpha rollout (locked release binary, JSON record)
+        run: cargo xtask rollout --channel alpha
+      # The rollout record is written even on rejection/failure, so upload
+      # unconditionally: record + harness failure bundles + doctor evidence
+      # all land under target/rollout/.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: rollout-alpha-record
+          path: target/rollout/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: harness-failures-full-gate
+          path: target/harness-failures/
+          if-no-files-found: ignore
