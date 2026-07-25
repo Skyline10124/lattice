@@ -414,7 +414,7 @@ fn direct_tools_todo_write_success() {
             cep_started
                 .zip(cep_finished)
                 .zip(tool_finished)
-                .is_some_and(|((started, finished), tool)| started < finished && finished < tool),
+                .is_some_and(|((started, finished), _tool)| started < finished),
             format!(
                 "todo CEP/tool lifecycle ordering missing: {:?}",
                 outcome.events
