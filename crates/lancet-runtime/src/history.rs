@@ -363,7 +363,13 @@ pub struct RewindPlan {
     pub from: Option<String>,
     /// The commit `current` will point at afterwards (`None` deletes it).
     pub to: Option<String>,
-    /// Reversed mutation commits, newest first (reverse execution order).
+    /// Reversed mutation commits, newest first.
+    ///
+    /// This is the recorded chain order, which is the order the installs were
+    /// serialized into the history — the reverse of execution order. Two
+    /// concurrent recorders on distinct paths can land in either order
+    /// relative to each other; the restore does not depend on it, since each
+    /// path's state is resolved independently.
     pub steps: Vec<RewindStep>,
     /// Per-path preflight/restore states, one entry per distinct path.
     pub restores: Vec<RewindPathRestore>,
@@ -1584,6 +1590,48 @@ mod tests {
             Some(b"user-edit".as_ref()),
             "the baselined external content is what comes back"
         );
+    }
+
+    /// A create whose target the user had deleted outside LATTICE records a
+    /// baseline that *removes* the path. Reversing that create must restore
+    /// the user's deletion — not resurrect LATTICE's older content — so the
+    /// external delete survives the Rewind.
+    #[test]
+    fn rewind_restores_absence_across_a_create_after_an_external_delete() {
+        let state = TempDir::new().unwrap();
+        let history = history_at(&state);
+        let target = history.record(&create("anchor.txt", "a")).unwrap().unwrap();
+        // LATTICE creates the file, the user deletes it, LATTICE creates it
+        // again — the second create baselines the path away first.
+        history
+            .record(&create("cycle.txt", "first"))
+            .unwrap()
+            .unwrap();
+        let again = history
+            .record(&create("cycle.txt", "second"))
+            .unwrap()
+            .unwrap();
+        assert!(
+            again.baseline_commit_id.is_some(),
+            "a create after an external delete must baseline the path away"
+        );
+
+        let plan = history.plan_rewind(Some(&target.commit_id)).unwrap();
+        let restore = plan
+            .restores
+            .iter()
+            .find(|r| r.path == "cycle.txt")
+            .expect("the cycled path is planned");
+        assert_eq!(
+            restore.expected.as_deref(),
+            Some(b"second".as_ref()),
+            "preflight expects the newest recorded post-state"
+        );
+        assert_eq!(
+            restore.restore, None,
+            "reversing back past the first create restores absence"
+        );
+        assert_eq!(plan.steps.len(), 2, "both creates are reversed");
     }
 
     #[test]

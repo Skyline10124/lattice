@@ -415,8 +415,10 @@ fn effective_history_target(
     if let Some(oid) = target.workspace_history_oid.clone() {
         return Ok(Some(oid));
     }
-    // `log` is oldest-first and topological, so everything before the target
-    // is an ancestor of it.
+    // `log` is the oldest-first walk of everything reachable from HEAD. For
+    // the linear turn graphs the session store produces, the entries before
+    // the target are its ancestors; a merge-shaped graph could interleave a
+    // sibling, which only makes this scan stricter, never laxer.
     for entry in log.iter().take(target_index) {
         let ancestor = session.get_turn_commit(session_id, &entry.commit_id)?;
         if let Some(oid) = ancestor.and_then(|commit| commit.workspace_history_oid) {
