@@ -1029,6 +1029,15 @@ async fn rewind_works_after_reopen_on_a_branch_and_from_a_detached_head() {
     let RewindOutcome::Success(success) = outcome else {
         panic!("expected success, got {outcome:?}");
     };
+    // The prefix must have resolved to the full session id inside
+    // `rewind_to_turn` — the audit row is keyed by it, so a leaked prefix
+    // would make the record unfindable.
+    assert_eq!(success.session_id, session_id);
+    assert_eq!(
+        rewind_records(&ws.root, &success.session_id).len(),
+        1,
+        "the reopened rewind is recorded under the resolved session id"
+    );
     assert_eq!(success.session_head.branch.as_deref(), Some("work"));
     assert_eq!(
         success.session_head.previous_commit_id.as_deref(),
@@ -1531,4 +1540,85 @@ async fn a_restore_failure_is_recorded_and_never_reported_as_success() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].outcome, "restore_failure");
     assert!(records[0].steps_json.contains(".lattice/private.toml"));
+}
+
+/// AC2 defence, cross-session shape: the private history is per project, so a
+/// Turn stamped with no identity can coexist with pre-target mutations that
+/// another session installed. Turn ids cannot order those, but the moment
+/// each mutation was recorded can — and a full unwind must not proceed over
+/// work that predates the target.
+#[tokio::test]
+async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the_target() {
+    let ws = setup_turn_workspace(&["mutate.create"]);
+    let scoped = ScopedState::new(&ws.root);
+    let sessions_dir = TempDir::new().unwrap();
+    let sessions = sessions_dir.path().join("sessions");
+    let session_id = new_session(&sessions);
+    let other_session = new_session(&sessions);
+    let api = SessionApi::git(&sessions);
+    let resolved_other = api.status(&other_session).unwrap().session_id;
+
+    // Another session installs a mutation, recorded well before our target
+    // Turn is committed.
+    std::fs::write(ws.root.join("theirs.md"), "theirs\n").unwrap();
+    let history = history_for(scoped.path(), &ws.root);
+    history
+        .record(&lancet_runtime::MutationRecord {
+            method: "mutate.create".into(),
+            turn_id: format!("{resolved_other}:root"),
+            call_id: 1,
+            path: "theirs.md".into(),
+            before: None,
+            after: b"theirs\n".to_vec(),
+            content_hash: content_hash(b"theirs\n"),
+            // Long before any Turn this test commits.
+            recorded_at: 1_600_000_000,
+        })
+        .expect("record")
+        .expect("history is enabled");
+    let tip = history.current().unwrap();
+
+    // Our session's target Turn records no identity — the shape a swallowed
+    // end-of-turn read produces — and has no same-session ancestor to catch.
+    let store = GitSessionGraphStore::new(&sessions);
+    let resolved = api.status(&session_id).unwrap().session_id;
+    let target = store
+        .commit_turn(TurnCommitInput {
+            workspace_history_oid: None,
+            session_id: resolved.clone(),
+            parent_ids: Vec::new(),
+            messages: vec![
+                lattice_session::test_helpers::user_msg("no identity"),
+                lattice_session::test_helpers::assistant_msg("none"),
+            ],
+            agent_name: "default".to_string(),
+            profile_snapshot_hash: "test-profile".to_string(),
+            profile_snapshot_json: "{}".to_string(),
+            model: "sonnet".to_string(),
+            provider: "anthropic".to_string(),
+            status: lattice_session::TurnCommitStatus::Completed,
+            disposition: lattice_session::WorkspaceDisposition::NotApplicable,
+            lifecycle: None,
+            commit_message: "anomalous turn".to_string(),
+            usage: None,
+            terminal_reason: None,
+        })
+        .expect("commit target turn");
+
+    let err = lattice_api::rewind_to_turn(&api, &session_id, &target.commit_id, &ws.root)
+        .expect_err("a full unwind over another session's earlier work must be refused");
+    assert!(
+        matches!(err, lattice_api::ApiError::Conflict(_)),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("theirs.md"),
+        "the refusal names the work it would have reversed: {err}"
+    );
+    assert_eq!(history.current().unwrap(), tip);
+    assert_eq!(
+        std::fs::read(ws.root.join("theirs.md")).unwrap(),
+        b"theirs\n",
+        "another session's earlier work must survive"
+    );
 }

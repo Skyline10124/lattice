@@ -337,6 +337,11 @@ pub struct RewindStep {
     pub path: String,
     /// Post-install Local Revision recorded for the mutation.
     pub recorded_content_hash: Option<String>,
+    /// When the mutation was recorded, in unix seconds.
+    ///
+    /// Written by the recorder from the installer's clock, so it orders
+    /// mutations against Turn timestamps from the same machine.
+    pub recorded_at: Option<i64>,
 }
 
 /// The final on-disk state one path must reach for a Rewind to complete.
@@ -526,7 +531,8 @@ fn plan_rewind_locked(
                     Some(parent_oid) => commit_tree_id(repo, parent_oid)?,
                     None => gix::ObjectId::empty_tree(repo.object_hash()),
                 };
-                if let Some(step) = parse_mutation_step(&oid, &message) {
+                let recorded_at = commit.time().ok().map(|time| time.seconds);
+                if let Some(step) = parse_mutation_step(&oid, &message, recorded_at) {
                     let before = tree_blob(repo, parent_tree, &step.path)?;
                     restores.insert(step.path.clone(), before);
                     steps.push(step);
@@ -624,7 +630,11 @@ fn tree_files(
 ///
 /// Returns `None` for baseline commits (chain plumbing, never reversed on
 /// their own) and for messages without the mutation trailer.
-fn parse_mutation_step(oid: &gix::ObjectId, message: &str) -> Option<RewindStep> {
+fn parse_mutation_step(
+    oid: &gix::ObjectId,
+    message: &str,
+    recorded_at: Option<i64>,
+) -> Option<RewindStep> {
     let mut kind = None;
     let mut method = None;
     let mut turn_id = None;
@@ -663,6 +673,7 @@ fn parse_mutation_step(oid: &gix::ObjectId, message: &str) -> Option<RewindStep>
         call_id,
         path: path?,
         recorded_content_hash: content_hash,
+        recorded_at,
     })
 }
 

@@ -153,6 +153,21 @@ pub fn preflight_and_restore(
             path: restore.path.clone(),
             reason: err.to_string(),
         })?;
+        // The parse must not rename the path. `WorkspacePath::parse` trims
+        // its input, so a recorded path whose first or last character is
+        // whitespace would otherwise be verified and written under a
+        // *different* name — touching a file LATTICE may never have mutated
+        // while leaving the real one unverified. Refuse instead.
+        if path.as_str() != restore.path {
+            return Err(RewindRestoreError::Path {
+                path: restore.path.clone(),
+                reason: format!(
+                    "the recorded path does not round-trip through workspace path resolution \
+                     (resolves to '{}')",
+                    path.as_str()
+                ),
+            });
+        }
         if under_system_exclusion(path.as_str()) {
             return Err(RewindRestoreError::Excluded {
                 path: restore.path.clone(),
@@ -481,6 +496,27 @@ mod tests {
         assert!(
             dir.path().join("was-file.txt").is_dir(),
             "nothing was written"
+        );
+    }
+
+    /// A recorded path that workspace path resolution would rename must be
+    /// refused outright: verifying and writing the renamed path would touch a
+    /// file LATTICE may never have mutated and leave the real one unverified.
+    #[test]
+    fn a_recorded_path_that_does_not_round_trip_is_refused() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "user content").unwrap();
+
+        let err = preflight_and_restore(dir.path(), &[restore(" a.txt", Some("v2"), Some("v1"))])
+            .expect_err("a path that resolution would rename must be refused");
+        assert!(
+            matches!(err, RewindRestoreError::Path { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("a.txt")).unwrap(),
+            b"user content",
+            "the similarly-named user file must be untouched"
         );
     }
 

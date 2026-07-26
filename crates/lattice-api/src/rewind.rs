@@ -212,7 +212,7 @@ pub fn rewind_to_turn(
         guard_full_unwind(
             project_root,
             &resolved_session_id,
-            &target.commit_id,
+            &target,
             &log,
             target_index,
         )?;
@@ -453,10 +453,11 @@ fn effective_history_target(
 fn guard_full_unwind(
     project_root: &Path,
     session_id: &str,
-    target_commit_id: &str,
+    target: &lattice_session::TurnCommit,
     log: &[lattice_session::TurnLogEntry],
     target_index: usize,
 ) -> Result<()> {
+    let target_commit_id = target.commit_id.as_str();
     let backing = workspace_history_backing(project_root)
         .map_err(|err| ApiError::Internal(format!("resolve private workspace history: {err}")))?;
     let plan = match plan_workspace_rewind(backing, None) {
@@ -471,20 +472,42 @@ fn guard_full_unwind(
         .flat_map(|entry| entry.parent_ids.first().map(String::as_str))
         .chain(std::iter::once("root"))
         .collect();
+    // The private history is per project, so a step may belong to another
+    // session entirely. Two independent signals place a step before the
+    // target: this session's own turn ids, and — for every session — the
+    // moment the mutation was recorded against the moment the target Turn was
+    // committed. Both are written by the same machine.
+    let target_recorded_by = parse_rfc3339_seconds(&target.created_at);
     for step in &plan.steps {
-        let Some((step_session, parent)) = step.turn_id.split_once(':') else {
-            continue;
+        let same_session_before =
+            step.turn_id
+                .split_once(':')
+                .is_some_and(|(step_session, parent)| {
+                    step_session == session_id && at_or_before.contains(parent)
+                });
+        let recorded_before = match (step.recorded_at, target_recorded_by) {
+            (Some(recorded), Some(target_at)) => recorded <= target_at,
+            // An unreadable timestamp on either side is ambiguity, and a full
+            // unwind must not proceed on ambiguity.
+            _ => true,
         };
-        if step_session == session_id && at_or_before.contains(parent) {
+        if same_session_before || recorded_before {
             return Err(ApiError::Conflict(format!(
                 "turn '{target_commit_id}' records no workspace-history identity, but the private \
-                 history still holds a mutation this session installed at or before it \
-                 ({} on '{}'); rewinding would reverse work that predates the target",
-                step.method, step.path
+                 history still holds a mutation recorded at or before it ({} on '{}', turn \
+                 '{}'); rewinding would reverse work that predates the target",
+                step.method, step.path, step.turn_id
             )));
         }
     }
     Ok(())
+}
+
+/// Unix seconds from an RFC 3339 timestamp, or `None` if it does not parse.
+fn parse_rfc3339_seconds(raw: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|value| value.timestamp())
 }
 
 /// Pin the head a Rewind abandons under an internal session ref.
