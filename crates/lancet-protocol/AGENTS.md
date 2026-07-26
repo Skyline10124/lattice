@@ -45,10 +45,6 @@ types.
 
 - FIXED M-24-01: `Capability::FetchUrl` uses the explicit `host` field; do not
   reintroduce wildcard/pattern naming unless matching semantics are implemented.
-- FIXED P19: JSON-RPC helper, wire-code, and error-object mapping were made
-  consistent after review of the old CEP core.
-- FIXED P19: catalog sealing doctest coverage was corrected so compile-fail
-  proves the intended trait boundary.
 - WATCH: boundary/provenance wire additions must remain deterministic because
   audit attestations depend on stable serialized shapes.
 
@@ -63,6 +59,9 @@ types.
   host/runtime projection together.
 - ADR 0004 Cell core landed add-only in `src/cell.rs` (#5 slice A); legacy
   `ImpactKind` in `effect_types.rs` coexists, retired by #6/#12 — do not extend.
+  Deleting it requires the four preconditions in root `AGENTS.md` (full record:
+  #28 design §11); `EffectErrorData`'s `Vec<ImpactKind>` fields are one of the
+  serialized surfaces that must be reshaped first.
 - Component Tool execution error codes (`ToolTrap`/`ToolTimeout`/
   `ToolResourceExhausted`/`CallCancelled`) + `ToolExecutionErrorData` landed
   in `src/error.rs` Execution family (#5 slice C). No guest backtrace/host

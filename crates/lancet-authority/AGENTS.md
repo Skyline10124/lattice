@@ -65,7 +65,8 @@ data, effect checking, effect ledger helpers, and boundary-credit validation.
   handling change.
 - Retire legacy envelope/base-authority/effect-region vocabulary only after all
   behavior consumers use the Cell path; do not run permanent dual authority
-  models.
+  models. The four deletion preconditions are in root `AGENTS.md` (full record:
+  #28 design §11).
 
 ## Record Maintenance
 

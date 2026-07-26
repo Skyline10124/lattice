@@ -33,7 +33,11 @@ in-toto attestation construction, and attestation persistence.
   untouched (read-only legacy import stays the migration path). Shape detection
   covers both written tables by column name (`cep_audit_entries` and
   `attestation_records`); matching names with different column types are still
-  adopted. `merge_finalize_metadata` takes `ComponentCallEvidence` and writes
+  adopted. `REQUIRED_AUDIT_COLUMNS` naming the legacy `impact_kind` column is
+  the one recorded exception to #28 §11's "no new consumer of the legacy
+  vocabulary": adopting an unversioned legacy DB must name that DB's columns.
+  It parses no `ImpactKind` value; the constant moves with the column.
+  `merge_finalize_metadata` takes `ComponentCallEvidence` and writes
   `admission_evidence` / `observed_effects` / `denied_operations` separately;
   `component_cells` (4-segment `ctx:ext:scope:trust`, spec §6.3) is derived from
   the effect ledger and `observed_capabilities` is label-ordered.
@@ -48,15 +52,11 @@ in-toto attestation construction, and attestation persistence.
   call. A Cell-governed row has no legacy `ImpactKind`, so the projector marks
   its `ProvActivity::impact_kind` `impact_kind_attributed: false` instead of
   coercing the `unknown` column into a concrete kind.
-- FIXED #38: `RejectionStage` vocabulary de-Uppered — `AdapterPreflight` →
-  `PathGuard`, `BackendExecution` → `LocalIo`, `VerificationFailure` removed;
-  `CallAuditMetadata.backend_invoked` and all routing metadata
-  (`execution_backend`, `upper_workspace_id`, `adapter_preflight_invoked`,
-  `backend_invoked`) are gone from durable audit rows. Mutation preflight
-  evidence renamed `expected_hash_status` → `local_revision` (carries the
-  observed Local Revision on stale-hash replans). Historical rows written
-  before #38 keep the old labels; alpha-stage no-compat means no label
-  migration — `rejection_stage` query filters match new writes only.
+- FIXED #38: `RejectionStage` de-Uppered (`PathGuard`/`LocalIo`, no
+  `VerificationFailure`); routing metadata and `backend_invoked` are gone from
+  durable rows; mutation preflight evidence renamed `expected_hash_status` →
+  `local_revision`. Pre-#38 rows keep the old labels (alpha-stage no-compat),
+  so `rejection_stage` filters match new writes only.
 - FIXED issue #11: agent catalog audit CEP methods removed; operator reads live in
   `lancet-api::audit` and `lattice audit` (direct store, no CEP server).
 - OPEN #17: operator read DTOs, pagination/filter behavior, and contract tests

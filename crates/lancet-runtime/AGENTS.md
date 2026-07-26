@@ -19,7 +19,10 @@ projection, and the per-call admission step.
   `CompositionError`, `ClosedCatalog`, and the `compose` gate. The gate
   verifies descriptor digest, artifact digest, ABI, imports, and channel
   adapters at startup, and refuses a catalog where one capability name maps
-  to different cells (#28 C2). The catalog is immutable after `compose`.
+  to different cells (#28 C2). It cannot see `lancet-catalog`: a Component
+  method name colliding with a native method would arm both vocabularies in
+  one call (#28 design §11 hazard) — unreachable while `EXPECTED_COMPONENTS`
+  is empty. The catalog is immutable after `compose`.
 - `src/admission.rs` owns `admit_tool` (the fixed enabled → deny → boundary
   stage order), `AdmittedTool`, `AdmissionDenial` (which always carries its
   `AdmissionEvidence`), the per-operation `authorize_operation`, host-owned
@@ -85,7 +88,10 @@ projection, and the per-call admission step.
   domain channel can produce them.
 - Admission runs per call, outside this crate (the transport), and is
   handed in through `ComponentCallContext::admitted`. The runtime never
-  admits a tool itself and never consults the legacy effect vocabulary.
+  admits a tool itself, and no legacy effect type takes part in a decision
+  here — `error_map.rs` only fills the legacy `EffectErrorData` wire shape
+  (its `Vec<ImpactKind>` fields stay empty), which is a named error surface,
+  never an authorization input.
 - `call` is `&self`: the epoch ticker is lazily spawned on first call via
   `OnceLock` (requires a tokio runtime context; composition does not).
   `set_limits` remains `&mut self` (tests only).

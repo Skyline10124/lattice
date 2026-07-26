@@ -28,7 +28,7 @@ One unified Cell authorization and evidence path for Component Tools:
 Out of scope (issue): migrating production Tools, adding Tool Host channels,
 changing the accepted Cell model (`CtxOp × ExtImpact × scope × trust`).
 
-## 2. Decisions (settles synthesis §3 items 1–14)
+## 2. Decisions (settles synthesis §3 items 1–14; D15–D17 added post-review)
 
 | # | Decision |
 |---|---|
@@ -46,6 +46,9 @@ changing the accepted Cell model (`CtxOp × ExtImpact × scope × trust`).
 | D12 | Deterministic context measure: `context_measure = len(canonical_json(result_value))` in bytes, computed host-side and recorded on **every** result `ObservedEffect`, whatever `ctx_op` the guest declared. Rationale: branching on the declared `ctx_op` made metering guest-switchable — the shipped `noop.echo` declares an `alloc` *and* a `mutate` capability over one scope and both are normally admitted, so relabelling the result cell passed the ceiling and suppressed the measure. The declared `ctx_op` states charge intent for #6's charge/credit seam only; it never gates measurement. Operation effects stay `None` (they return no value). `Free` remains vocabulary-only (no seam); budget *enforcement* stays in #6 — #28 delivers measurement + recording only. |
 | D13 | Concrete-target matching semantics for Path/Host stay with the future domain channels; the per-op authorizer denies Path/Host targets outright this cycle (fail closed — no channel can legitimately produce them). Session targets must equal the call's `turn_id`. Recorded so the authority-policy suffix-vs-exact host question is a conscious later decision. |
 | D14 | Guest-side cell strings remain duplicated literals this cycle (noop hardcodes its result CellRef); a no_std vocabulary crate is future work. |
+| D15 | C5 offers two remedies; #28 ships **"detect the old shape and fail with an action"**, not "keep the old DB read-only and create a new one". A second database forks one project root's append-only history across two files that no reader joins — `replay_audit`, the attestation range hash, and every operator query take one store path — so the split would trade a loud startup failure for silently incomplete provenance. Failing leaves the file byte-untouched, which is what C5's "不能静默删除审计历史" actually protects; the existing read-only legacy import stays the migration route. |
+| D16 | C1 offers a normalized sub-table or a versioned canonical array for multi-effect calls; #28 ships the **versioned canonical array** (`ObservedEffectsRecord`/`DeniedOperationsRecord` inside `metadata_json`). An audit row is one append-only write and replay reads rows, not joins; a sub-table would add a second write per call inside the same transaction, a join on every read/replay/attestation path, and a second schema to version. C8's "don't collapse to one cell-key scalar" is met by the array + stable `seq` order, and the array is inside the canonicalized statement bytes for free. |
+| D17 | **Scope adjudication (issue's 不在范围内).** #28 modifies `lancet-protocol/src/cell.rs`, which is **not** a change to the accepted Cell model: every model type (`CtxOp`, `ExtImpact`, `Trust`, `ScopeDecl`, `Cell`, `Capability`, `ToolDescriptor`) keeps its exact variants, fields, and serialized form, and `parse_cell_ref`/`audit_key` are untouched. What was added is registration-time **validation**: a new `DescriptorError::InvalidCapabilityName` variant, the capability-name grammar (D7, required by C2's stable-namespace rule), and a fixed per-capability check order. A descriptor accepted before #28 is still accepted unless its capability names carry no namespace. Likewise no Tool Host channel was added: no `.wit` file changed on this branch and `emit-event` remains the only effectful import. |
 
 ## 3. Protocol additions (`lancet-protocol`) — B1, C1, C4
 
@@ -393,9 +396,36 @@ is still the only authorization for the five native methods. Deletion requires
 4. `lancet-cep`/`lancet-catalog` retirement per ADR 0004.
 
 Until then the `transport.rs` dispatch split is the single, documented seam
-between the two vocabularies; Component Tools never consult the legacy types
-(no dual authorization for the same consumer), and no new consumer of the
-legacy vocabulary may be added.
+between the two vocabularies. The isolation claim is about **decisions**: no
+legacy type takes part in any Component authorization decision — admission,
+per-operation authorization, and the result ceiling read Cell/capability/scope
+data only. Component code does still *name* a legacy type on one surface:
+`lancet-runtime/src/error_map.rs` builds `EffectErrorData`, whose
+`declared_effect`/`authorized_effect`/`observed_effects` are `Vec<ImpactKind>`
+and are filled empty for a Cell violation. That is the JSON-RPC error wire
+shape already listed above — a named surface, not a second authorization path;
+it is reshaped when `ImpactKind` is deleted.
+
+**Name-collision hazard** (latent, must be closed by precondition 1). Nothing
+forbids a Component Tool from taking a name the native catalog still owns:
+`ClosedCatalog::compose` rejects duplicates among Component descriptors only,
+and `lancet-runtime` cannot see `lancet_catalog`. `transport.rs` runs the
+legacy pre-dispatch effect-kind deny for *any* method the native catalog knows
+and only afterwards routes the call to the Component branch, so a colliding
+name would arm the legacy deny **and** Cell admission in one call — exactly the
+dual authorization path B9 forbids. Unreachable today (production
+`EXPECTED_COMPONENTS` is empty). Migrating a native method (precondition 1)
+must remove the native descriptor in the same step, or the composition gate
+must gain a cross-catalog name check first.
+
+**"No new consumer of the legacy vocabulary" is prose, not a gate.** No lint,
+deny-list, or test enforces it; it is checked by review only. #28 took one
+conscious exception: `lancet-audit`'s `REQUIRED_AUDIT_COLUMNS` (C5 shape
+detection) hard-requires the `impact_kind` column. Adopting an *unversioned*
+legacy database necessarily names that database's legacy columns — the check
+exists to refuse a shape this binary cannot write, so it must name what the old
+shape has. It parses no `ImpactKind` value and makes no decision; the constant
+moves with the column when precondition 2's schema change lands.
 
 **Residual carried by the gate** (recorded, not fixed this cycle):
 
@@ -412,3 +442,34 @@ legacy vocabulary may be added.
   (`cep_audit_entries`, `attestation_records`). An unversioned database whose
   column names match but whose types differ is still adopted and fails later at
   INSERT; no history is dropped, so C5's "never silently delete" holds.
+
+## 12. Post-review records (adversarial acceptance round)
+
+**Framing-clause check.** The issue body fixes `in` = the operation stays in the
+Tool Host's control and accounting domain, `ex` = it crosses into the external
+world, and states these no longer mean Upper, projection, or rollback
+containment. Checked across `crates/**`, `docs/**` (excluding
+`docs/archive/**`), `tools/**`, and `xtask/**` for `containment`, `rollback`,
+`Upper`, and `projection` near trust/boundary/cell wording, and for every
+`in`/`ex` trust mention: **no surviving use of the retired semantics, nothing to
+fix.** The vocabulary was already retired by #65, which rewrote the #27
+effect-model spec to the current wording; the two live definitions
+(`lancet-protocol/src/cell.rs` `Trust`, `docs/CONFIGURATION.md`
+`[lancet.capabilities]`) both state the issue's semantics. The remaining
+`containment`/`rollback` hits are Local Workspace path containment and edit-apply
+rollback — unrelated vocabulary. The one `upper` left near boundary code is the
+`lattice-profile` fixture `max_boundary = "upper"`, a negative test asserting the
+retired word is *not* a boundary value; it is kept deliberately.
+
+**Audit/replay asymmetries** (low, latent; tracked in `FINDINGS.md`):
+
+- L-28-01 — the attestation store path queries a turn's rows unbounded
+  (`lancet-api/src/attestation.rs:33`) while replay caps at
+  `AUDIT_QUERY_MAX_ROWS` (`lancet-api/src/audit.rs:274`), so B6's
+  statement-byte identity holds only for turns under the cap.
+- L-28-02 — `project_turn_trace` picks the predicate version from row evidence
+  (`projector.rs:95`) while `replay_audit` gives the stored `predicate_type` the
+  last word (`audit.rs:298`); `AuditReplayResult` returns both, so a turn
+  attested by an older binary can show v2 in the trace and v1 in the statement.
+  D8 names the stored type as the single authority — the trace surface does not
+  yet honour it.

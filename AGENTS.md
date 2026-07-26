@@ -124,6 +124,18 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
 - SQLite for CEP audit records belongs in `lancet-audit`; the conversation
   graph is git-backed (git refs under `refs/lattice/sessions/<id>/**`) and
   lives in `lattice-session`. SQLite session graph storage was retired.
+- The legacy effect vocabulary (`ImpactKind`, `EffectScopeKind`,
+  `OverlayBehavior`, `FailureSemantics`, `BaseAuthorityRequirement`) is deleted
+  only when **all four** hold: (1) native methods migrated to Component Tools;
+  (2) audit rows and attestations produced only through the v2 evidence path,
+  v1 kept read-only; (3) profile `[lancet.effects]` replaced by
+  `[lancet.capabilities]` for every consumer; (4) `lancet-cep`/`lancet-catalog`
+  retired per ADR 0004. Until then the `lancet-native` transport dispatch split
+  is the single seam between the two vocabularies, and no new consumer of the
+  legacy vocabulary may be added — a review rule, not an enforced one. Full
+  record, including the recorded exception and the Component/native
+  name-collision hazard: `docs/specs/2026-07-26-issue28-cell-admission-design.md`
+  §11.
 - Explicit `/rewind` reverses only LATTICE mutations recorded after the target
   Turn, preserves unrelated external changes, and conflicts on a changed
   mutation path. Store that history in a private bare gix repository, never the

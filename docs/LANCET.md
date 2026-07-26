@@ -182,10 +182,14 @@ is **not** stored as a graph; it is **projected** at read time into a
 `ProvGraphFragment` wire type (operator `query_audit` / `replay_audit`).
 
 The database carries its schema version in `PRAGMA user_version`. A newer
-version, or an unversioned database whose `cep_audit_entries` shape predates the
-current columns, fails the open with an actionable error naming the path; the
+version, or an unversioned database whose `cep_audit_entries` or
+`attestation_records` shape predates the current columns, fails the open with an
+actionable error naming the path and the missing table-qualified columns; the
 file is never altered, so audit history is neither dropped nor rewritten. The
-read-only legacy import path is unaffected.
+read-only legacy import path is unaffected. Failing with an action is the
+deliberate choice over opening the old database read-only beside a fresh one:
+one project root keeps one append-only history, and no reader joins two files
+for a turn's replay or attestation range.
 
 ### Agent Triple
 

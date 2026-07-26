@@ -230,7 +230,9 @@ profile inline `[lancet.*]` < external policy file < test/runtime override**.
 `audit_observation`.
 
 This section is the **native** authorization path only; Component Tool policy
-lives in `[lancet.capabilities]` and never names method impact identity.
+lives in `[lancet.capabilities]` and never names method impact identity. It is
+retired — together with `ImpactKind` itself — only when the four preconditions
+in the workspace `AGENTS.md` hold.
 
 ### `[lancet.capabilities]` — `LancetCapabilitiesSection`
 
