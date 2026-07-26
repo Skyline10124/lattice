@@ -23,6 +23,8 @@ Severity: feature / data safety.
 - *Every workspace-touching failure needs an audit row.* The ref-move and restore failure paths originally returned before writing anything durable — exactly the partial states an operator most needs recorded. Both now write `history_ref_failure`/`restore_failure` rows carrying the restored paths, and the audit writer moved from `lattice-api` into `lancet-api` to match the `store_turn_attestation` precedent.
 - *Kind divergence is a conflict, not an opaque error.* A path replaced by a directory or a symlink is reported as a structured conflict alongside the other divergent paths (nothing written, nothing followed) instead of aborting on the raw resolution error.
 
+**Post-landing adversarial acceptance (same branch).** An eleven-agent pass over the acceptance criteria — one refuter per criterion — found one further real gap, fixed in `c1a26561`'s successor: a path whose *non-leaf* component the user had replaced with a regular file (`ENOTDIR`), or that could not be read at all, surfaced as `RewindRestoreError::Io` rather than a structured conflict. Safety held (nothing moved either way), but the user learned neither which path was at fault nor that the other affected paths were fine. `observe` now returns a state rather than a `Result`: anything that cannot be verified is a conflict entry with a precise detail, because the verify-before-write rule already forbids writing it. Deleting an already-absent path became idempotent in the same pass — after preflight, absence *is* the goal state.
+
 **Verification:**
 - `cargo fmt --all --check` — passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` — passed.

@@ -15,8 +15,11 @@
 //!    Path Exclusion, resolved through the same symlink-rejecting secure walk
 //!    the mutation path uses, and its on-disk bytes compared against the
 //!    recorded post-state. Any divergence — changed content, deletion, a
-//!    directory or symlink where a file was recorded — makes the whole
-//!    Rewind report a structured conflict. Nothing is written.
+//!    directory or symlink where a file was recorded, a path component the
+//!    user replaced with a file, or a path that cannot be read at all —
+//!    makes the whole Rewind report a structured conflict. A path that
+//!    cannot be verified is never written: that is the same rule, not an
+//!    exception to it. Nothing is written.
 //! 2. **Restore** — only after every path verified: recorded parent-tree
 //!    bytes are installed atomically (same-directory tempfile + fsync +
 //!    rename), and a reversed `mutate.create` deletes its file through the
@@ -156,7 +159,7 @@ pub fn preflight_and_restore(
     let mut conflicts = Vec::new();
     for (path, restore) in &parsed {
         let expected_revision = restore.expected.as_deref().map(content_hash);
-        let observed = observe(&workspace, path)?;
+        let observed = observe(&workspace, path);
         let (observed_revision, detail) = match &observed {
             Observed::File(bytes) => (
                 Some(content_hash(bytes)),
@@ -182,6 +185,7 @@ pub fn preflight_and_restore(
                     kind_label(*kind)
                 )),
             ),
+            Observed::Unverifiable(reason) => (None, Some(reason.clone())),
         };
         let diverged = detail.is_some();
         preflight.push(RewindPathPreflight {
@@ -223,12 +227,17 @@ pub fn preflight_and_restore(
                 });
             }
             None => {
-                workspace
-                    .remove_file_sync(path)
-                    .map_err(|err| RewindRestoreError::Io {
-                        path: path.as_str().to_string(),
-                        detail: err.to_string(),
-                    })?;
+                // Preflight proved the target state; a path that is already
+                // absent is already restored, so deletion is idempotent.
+                match workspace.remove_file_sync(path) {
+                    Ok(()) | Err(LocalWorkspaceError::NotFound { .. }) => {}
+                    Err(err) => {
+                        return Err(RewindRestoreError::Io {
+                            path: path.as_str().to_string(),
+                            detail: err.to_string(),
+                        });
+                    }
+                }
                 restored.push(RestoredPath {
                     path: path.as_str().to_string(),
                     restored_revision: None,
@@ -247,39 +256,43 @@ enum Observed {
     File(Vec<u8>),
     Absent,
     NotAFile(PathKind),
+    /// The recorded regular file could not be observed at all — a path
+    /// component is no longer a directory, the path is unreadable, or
+    /// resolution refused it.
+    Unverifiable(String),
 }
 
-fn observe(
-    workspace: &LocalWorkspace,
-    path: &WorkspacePath,
-) -> Result<Observed, RewindRestoreError> {
+/// Observe one affected path.
+///
+/// Every outcome is a *state*, never an executor failure: a path that cannot
+/// be read is a path that cannot be verified, and the verify-before-write
+/// rule makes that a conflict. Reporting it as an error instead would hide it
+/// among the other affected paths and give the user nothing to act on.
+fn observe(workspace: &LocalWorkspace, path: &WorkspacePath) -> Observed {
     let (full, facts) = match workspace.resolve_secure(path, PathIntent::Read) {
         Ok(resolved) => resolved,
         // A symlink anywhere in the recorded path is a divergence from the
-        // recorded regular-file state, not an executor failure.
+        // recorded regular-file state.
         Err(LocalWorkspaceError::SymlinkRejected { .. }) => {
-            return Ok(Observed::NotAFile(PathKind::Symlink));
+            return Observed::NotAFile(PathKind::Symlink);
+        }
+        Err(LocalWorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotADirectory => {
+            return Observed::Unverifiable("a path component is no longer a directory".to_string());
         }
         Err(err) => {
-            return Err(RewindRestoreError::Io {
-                path: path.as_str().to_string(),
-                detail: err.to_string(),
-            });
+            return Observed::Unverifiable(format!("the path could not be resolved: {err}"));
         }
     };
     if !facts.exists {
-        return Ok(Observed::Absent);
+        return Observed::Absent;
     }
     match facts.kind {
-        Some(PathKind::File) => {
-            let bytes = std::fs::read(&full).map_err(|err| RewindRestoreError::Io {
-                path: path.as_str().to_string(),
-                detail: err.to_string(),
-            })?;
-            Ok(Observed::File(bytes))
-        }
-        Some(other) => Ok(Observed::NotAFile(other)),
-        None => Ok(Observed::Absent),
+        Some(PathKind::File) => match std::fs::read(&full) {
+            Ok(bytes) => Observed::File(bytes),
+            Err(err) => Observed::Unverifiable(format!("the file could not be read: {err}")),
+        },
+        Some(other) => Observed::NotAFile(other),
+        None => Observed::Absent,
     }
 }
 
@@ -478,16 +491,59 @@ mod tests {
         assert!(matches!(err, RewindRestoreError::Path { .. }));
     }
 
+    /// Restoring "absent" onto a path that is already absent is the goal
+    /// state, not a failure.
     #[test]
-    fn restore_failure_surfaces_as_io_error() {
+    fn deleting_an_already_absent_path_is_idempotent() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "v2").unwrap();
-        // Deleting the file between preflight and restore is an executor
-        // failure (the in-process window has no other writers), not a
-        // conflict — prove it surfaces rather than reporting success.
-        // Simulate by expecting absence for a path we then try to delete.
-        let outcome = preflight_and_restore(dir.path(), &[restore("missing.txt", None, None)]);
-        let err = outcome.unwrap_err();
-        assert!(matches!(err, RewindRestoreError::Io { .. }), "got {err:?}");
+        let outcome = preflight_and_restore(dir.path(), &[restore("missing.txt", None, None)])
+            .expect("an already-absent path is not an error");
+        let RewindRestoreOutcome::Applied { restored, .. } = outcome else {
+            panic!("expected Applied, got {outcome:?}");
+        };
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].restored_revision, None);
+    }
+
+    /// A path component the user replaced with a regular file, or a file that
+    /// cannot be read, is a same-path divergence: it must be reported as a
+    /// structured conflict alongside the other affected paths, not as an
+    /// opaque executor error that hides which path is at fault.
+    #[test]
+    fn an_unverifiable_path_conflicts_rather_than_erroring() {
+        let dir = TempDir::new().unwrap();
+        // LATTICE recorded "held/deep.txt"; the user replaced the directory
+        // `held` with a regular file.
+        std::fs::write(dir.path().join("held"), "user replaced the directory").unwrap();
+        std::fs::write(dir.path().join("fine.txt"), "v2").unwrap();
+
+        let outcome = preflight_and_restore(
+            dir.path(),
+            &[
+                restore("fine.txt", Some("v2"), Some("v1")),
+                restore("held/deep.txt", Some("d2"), Some("d1")),
+            ],
+        )
+        .expect("an unverifiable path is a conflict, not an executor error");
+        let RewindRestoreOutcome::Conflict {
+            preflight,
+            conflicts,
+        } = outcome
+        else {
+            panic!("expected Conflict, got {outcome:?}");
+        };
+        assert_eq!(preflight.len(), 2, "every path is still preflighted");
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].path, "held/deep.txt");
+        assert!(
+            conflicts[0].detail.contains("directory"),
+            "detail names the divergence: {}",
+            conflicts[0].detail
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("fine.txt")).unwrap(),
+            b"v2",
+            "the matching path is left alone"
+        );
     }
 }
