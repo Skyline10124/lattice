@@ -20,7 +20,7 @@ pub use discovery::{DiscoveryPaths, ProfileSource, resolve_agent_profile};
 pub use error::ProfileError;
 pub use load::{LoadedAgentProfile, load_agent_profile};
 pub use schema::{
-    AgentProfile, AgentSection, LancetNetworkSection, LancetObservationSection,
-    LancetPolicySection, LancetProjectRootSection, LancetSection, LancetWorkspacePolicySection,
-    LlmRetrySection, LlmSection, PromptSection, ToolsSection,
+    AgentProfile, AgentSection, LancetCapabilitiesSection, LancetNetworkSection,
+    LancetObservationSection, LancetPolicySection, LancetProjectRootSection, LancetSection,
+    LancetWorkspacePolicySection, LlmRetrySection, LlmSection, PromptSection, ToolsSection,
 };
