@@ -101,8 +101,174 @@ impl bindings::lattice::tool_host::host_control::Host for StoreState {
             scope,
             target,
             EffectSource::Operation,
-            // Only a result cell allocates context (D12).
+            // An operation returns no value, so there is nothing to measure
+            // (D12).
             None,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use lancet_dispatch::{Cancellation, EventSink};
+    use lancet_protocol::ToolEvent;
+    use lancet_protocol::cell::{ArtifactIdentity, Capability, ToolDescriptor};
+    use lancet_protocol::evidence::CapabilityAdmissionPolicy;
+    use tokio::sync::{mpsc, watch};
+
+    use crate::admission::admit_tool;
+    use crate::bindings::lattice::tool_host::host_control::Host;
+    use crate::evidence::CellEvidenceLedger;
+    use crate::limits::{ExecutionLimits, RecordingLimits, ResourceFootprint};
+    use crate::runtime::{ComponentCallContext, StoreState};
+
+    fn scope_decl(name: &str, channel: ChannelKind) -> ScopeDecl {
+        ScopeDecl {
+            name: name.into(),
+            trust: Trust::In,
+            channel,
+        }
+    }
+
+    /// A descriptor with exactly `scopes` declared and one admissible
+    /// `mutate:none:<cell_scope>` capability, so admission never masks the
+    /// binding under test.
+    fn descriptor(scopes: Vec<ScopeDecl>, cell_scope: &str) -> Arc<ToolDescriptor> {
+        Arc::new(ToolDescriptor {
+            name: "synthetic.tool".into(),
+            version: "0.1.0".into(),
+            description: "operation-binding fixture".into(),
+            params_schema: serde_json::Value::Null,
+            result_schema: serde_json::Value::Null,
+            scopes,
+            capabilities: vec![Capability {
+                name: "session.events".into(),
+                cell: Cell {
+                    ctx_op: CtxOp::Mutate,
+                    ext_impact: ExtImpact::None,
+                    scope: cell_scope.into(),
+                },
+            }],
+            artifact: ArtifactIdentity {
+                sha256: "0".repeat(64),
+                toolchain: "test".into(),
+            },
+            abi_version: 1,
+        })
+    }
+
+    /// Drive one `emit_event` against a store built from `descriptor`, and
+    /// return the call's evidence plus the client's event receiver.
+    fn emit_event_on(
+        descriptor: Arc<ToolDescriptor>,
+    ) -> (CellEvidenceLedger, mpsc::Receiver<ToolEvent>) {
+        let admitted = admit_tool(
+            descriptor,
+            &CapabilityAdmissionPolicy {
+                enabled_tools: BTreeSet::from(["synthetic.tool".to_string()]),
+                denied_capabilities: BTreeSet::new(),
+                max_boundary: Trust::In,
+            },
+        )
+        .expect("the fixture capability is admitted");
+        let (tx, rx) = mpsc::channel(4);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let evidence = CellEvidenceLedger::new();
+        let mut state = StoreState {
+            call: ComponentCallContext {
+                call_id: 1,
+                turn_id: "turn-1".into(),
+                events: EventSink::new(tx, 1),
+                cancellation: Cancellation::new(cancel_rx),
+                evidence: evidence.clone(),
+                admitted: Arc::new(admitted),
+            },
+            limits: RecordingLimits::new(&ExecutionLimits::default()),
+            deadline: Instant::now() + Duration::from_secs(60),
+            abort: None,
+            count_limits: ResourceFootprint::default(),
+        };
+        state.emit_event(r#"{"phase":"probed"}"#.into());
+        (evidence, rx)
+    }
+
+    fn assert_denied_unbound(
+        evidence: &CellEvidenceLedger,
+        rx: &mut mpsc::Receiver<ToolEvent>,
+        declared: usize,
+    ) {
+        assert!(
+            rx.try_recv().is_err(),
+            "the host facility must never be reached for an unbound operation"
+        );
+        let (_, effects, denied) = evidence.snapshot();
+        assert!(effects.effects.is_empty(), "{:?}", effects.effects);
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].cell.scope, UNBOUND_SCOPE);
+        assert_eq!(denied[0].scope.scope, UNBOUND_SCOPE);
+        assert_eq!(denied[0].scope.trust, Trust::Ex);
+        assert_eq!(
+            denied[0].target,
+            ObservedTarget::Session {
+                turn_id: "turn-1".into()
+            }
+        );
+        assert_eq!(
+            denied[0].reason,
+            format!("emit-event has no unique session-channel scope ({declared} declared)")
+        );
+    }
+
+    /// D2 fail-closed binding: with no session-channel scope the host cannot
+    /// name the event's scope, so the operation is denied under the sentinel.
+    #[test]
+    fn emit_event_without_a_session_scope_is_denied_unbound() {
+        let (evidence, mut rx) = emit_event_on(descriptor(
+            vec![scope_decl("workspace", ChannelKind::Workspace)],
+            "workspace",
+        ));
+        assert_denied_unbound(&evidence, &mut rx, 0);
+    }
+
+    /// The same binding refuses to guess between two session-channel scopes.
+    #[test]
+    fn emit_event_with_two_session_scopes_is_denied_unbound() {
+        let (evidence, mut rx) = emit_event_on(descriptor(
+            vec![
+                scope_decl("session", ChannelKind::Session),
+                scope_decl("chat", ChannelKind::Session),
+            ],
+            "session",
+        ));
+        assert_denied_unbound(&evidence, &mut rx, 2);
+    }
+
+    /// The bound case, for contrast: exactly one session-channel scope binds
+    /// the operation to it, the sink is reached, and the effect is recorded.
+    #[test]
+    fn emit_event_with_one_session_scope_reaches_the_sink() {
+        let (evidence, mut rx) = emit_event_on(descriptor(
+            vec![
+                scope_decl("session", ChannelKind::Session),
+                scope_decl("workspace", ChannelKind::Workspace),
+            ],
+            "session",
+        ));
+
+        assert_eq!(
+            rx.try_recv().expect("the event was forwarded").method,
+            "tool.event"
+        );
+        let (_, effects, denied) = evidence.snapshot();
+        assert!(denied.is_empty(), "{denied:?}");
+        assert_eq!(effects.effects.len(), 1);
+        assert_eq!(effects.effects[0].cell.reference(), "mutate:none:session");
+        assert_eq!(effects.effects[0].context_measure, None);
     }
 }

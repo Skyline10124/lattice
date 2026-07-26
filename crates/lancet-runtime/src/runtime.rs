@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use lancet_dispatch::{Cancellation, EventSink};
 use lancet_protocol::canonical::canonical_json;
-use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ToolDescriptor, parse_cell_ref};
+use lancet_protocol::cell::{Cell, ChannelKind, ToolDescriptor, parse_cell_ref};
 use lancet_protocol::evidence::{EffectSource, ObservedTarget};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use wasmtime::component::Linker;
@@ -167,8 +167,8 @@ impl ComponentRuntime {
     /// 7. Verify the result cell is in the descriptor's capabilities and in
     ///    the call's admitted set (D3: exact membership in both).
     /// 8. Validate the result value against the descriptor's JSON Schema.
-    /// 9. Measure the context allocation host-side (D12) and record the
-    ///    result effect with host-derived trust.
+    /// 9. Measure the returned value host-side (D12) and record the result
+    ///    effect with host-derived trust.
     pub async fn call(
         &self,
         name: &str,
@@ -245,17 +245,13 @@ impl ComponentRuntime {
 
         // Host-derived scope/trust and host-computed measure: the guest has
         // no numeric channel and its scope claim is never trusted.
-        let scope = resolve_scope(&tool.descriptor, &result_cell.scope, ChannelKind::Session);
-        let measure = context_measure(&result_cell, &result_value);
         let state = store.data();
-        state.call.evidence.record_effect(
+        record_result_effect(
+            &tool.descriptor,
+            &state.call.evidence,
+            &state.call.turn_id,
             result_cell,
-            scope,
-            ObservedTarget::Session {
-                turn_id: state.call.turn_id.clone(),
-            },
-            EffectSource::Result,
-            measure,
+            &result_value,
         );
 
         Ok(result_value)
@@ -335,15 +331,40 @@ fn check_result_cell(
     Ok(())
 }
 
-/// Deterministic context measure (D12): an `Alloc` result charges the byte
-/// length of its canonical JSON, computed host-side. `Mutate` and `Free`
-/// carry no measure — a declared `Free` result is accepted and recorded, but
-/// the charge/credit seam stays in #6.
-fn context_measure(result_cell: &Cell, value: &serde_json::Value) -> Option<u64> {
-    match result_cell.ctx_op {
-        CtxOp::Alloc => Some(canonical_json(value).len() as u64),
-        CtxOp::Free | CtxOp::Mutate => None,
-    }
+/// Record the result effect with host-derived scope/trust and the host-computed
+/// measure. The measure is taken for every result cell, so the declared
+/// `ctx_op` cannot reach it.
+fn record_result_effect(
+    descriptor: &ToolDescriptor,
+    evidence: &CellEvidenceLedger,
+    turn_id: &str,
+    result_cell: Cell,
+    value: &serde_json::Value,
+) {
+    let scope = resolve_scope(descriptor, &result_cell.scope, ChannelKind::Session);
+    evidence.record_effect(
+        result_cell,
+        scope,
+        ObservedTarget::Session {
+            turn_id: turn_id.to_owned(),
+        },
+        EffectSource::Result,
+        Some(context_measure(value)),
+    );
+}
+
+/// Deterministic context measure (D12): the byte length of the returned
+/// value's canonical JSON, computed host-side for **every** result effect
+/// whatever `ctx_op` the guest declared.
+///
+/// Branching on the declared `ctx_op` would make metering guest-switchable —
+/// a tool declaring an `alloc` and a `mutate` capability over one scope (the
+/// shipped `noop.echo` does) could relabel its result cell and be recorded
+/// unmeasured. The declared `ctx_op` states charge intent for #6's
+/// charge/credit seam only. Operation effects carry no measure: they return
+/// no value.
+fn context_measure(value: &serde_json::Value) -> u64 {
+    canonical_json(value).len() as u64
 }
 
 /// Map the guest's logical result to the host-visible result (#48).
@@ -420,7 +441,7 @@ mod tests {
 
     use bindings::exports::lattice::tool_host::tool_api::ToolOutput;
     use lancet_protocol::cell::{
-        ArtifactIdentity, Capability, ExtImpact, ScopeDecl, ToolDescriptor, Trust,
+        ArtifactIdentity, Capability, CtxOp, ExtImpact, ScopeDecl, ToolDescriptor, Trust,
     };
     use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 
@@ -433,15 +454,26 @@ mod tests {
         }
     }
 
-    fn cell(ctx_op: CtxOp) -> Cell {
+    fn scoped_cell(ctx_op: CtxOp, scope: &str) -> Cell {
         Cell {
             ctx_op,
             ext_impact: ExtImpact::None,
-            scope: "session".into(),
+            scope: scope.into(),
         }
     }
 
-    /// A synthetic descriptor declaring one capability over `session/in`.
+    fn cell(ctx_op: CtxOp) -> Cell {
+        scoped_cell(ctx_op, "session")
+    }
+
+    /// The value every measure assertion below is taken over:
+    /// `{"echoed":"hello"}` — 18 canonical bytes.
+    fn result_value() -> serde_json::Value {
+        serde_json::json!({"echoed": "hello"})
+    }
+
+    /// A synthetic descriptor declaring one capability over `session/in`. Two
+    /// `in` scopes are declared so scope-crossing cases are expressible.
     fn descriptor(capability: &str, ctx_op: CtxOp) -> Arc<ToolDescriptor> {
         Arc::new(ToolDescriptor {
             name: "synthetic.tool".into(),
@@ -449,11 +481,18 @@ mod tests {
             description: "result-cell fixture".into(),
             params_schema: serde_json::Value::Null,
             result_schema: serde_json::Value::Null,
-            scopes: vec![ScopeDecl {
-                name: "session".into(),
-                trust: Trust::In,
-                channel: ChannelKind::Session,
-            }],
+            scopes: vec![
+                ScopeDecl {
+                    name: "session".into(),
+                    trust: Trust::In,
+                    channel: ChannelKind::Session,
+                },
+                ScopeDecl {
+                    name: "workspace".into(),
+                    trust: Trust::In,
+                    channel: ChannelKind::Workspace,
+                },
+            ],
             capabilities: vec![Capability {
                 name: capability.into(),
                 cell: cell(ctx_op),
@@ -467,52 +506,80 @@ mod tests {
     }
 
     fn admitted(descriptor: Arc<ToolDescriptor>, deny: &[&str]) -> AdmittedTool {
-        admit_tool(
-            descriptor,
-            &CapabilityAdmissionPolicy {
-                enabled_tools: BTreeSet::from(["synthetic.tool".to_string()]),
-                denied_capabilities: deny.iter().map(|s| (*s).to_string()).collect(),
-                max_boundary: Trust::In,
-            },
-        )
-        .expect("fixture admits")
+        let policy = CapabilityAdmissionPolicy {
+            enabled_tools: BTreeSet::from([descriptor.name.clone()]),
+            denied_capabilities: deny.iter().map(|s| (*s).to_string()).collect(),
+            max_boundary: Trust::In,
+        };
+        admit_tool(descriptor, &policy).expect("fixture admits")
     }
 
-    /// §10: a declared `free:none:session` result cell is accepted and
-    /// measured as `None` — #28 records the ledger entry, #6 owns the
-    /// charge/credit seam.
+    /// The measure the result path actually records for `result_cell`, read
+    /// back from the ledger the production seam writes to.
+    fn recorded_measure(descriptor: &ToolDescriptor, result_cell: Cell) -> Option<u64> {
+        let ledger = CellEvidenceLedger::new();
+        record_result_effect(descriptor, &ledger, "turn-1", result_cell, &result_value());
+        let (_, effects, _) = ledger.snapshot();
+        effects.effects[0].context_measure
+    }
+
+    /// §10: a declared `free:none:session` result cell is accepted, and it is
+    /// measured like every other result. `Free`/`Mutate` differ from `Alloc`
+    /// in how #6 charges the number, not in whether the host records one.
     #[test]
-    fn free_result_cell_is_accepted_and_carries_no_measure() {
+    fn free_result_cell_is_accepted_and_still_measured() {
         let descriptor = descriptor("session.free", CtxOp::Free);
         let admitted = admitted(descriptor.clone(), &[]);
-        let value = serde_json::json!({"echoed": "hello"});
         assert_eq!(
             check_result_cell("synthetic.tool", &descriptor, &admitted, &cell(CtxOp::Free)),
             Ok(())
         );
-        assert_eq!(context_measure(&cell(CtxOp::Free), &value), None);
-        assert_eq!(context_measure(&cell(CtxOp::Mutate), &value), None);
+        assert_eq!(recorded_measure(&descriptor, cell(CtxOp::Free)), Some(18));
     }
 
-    /// D12: an `Alloc` result charges the canonical-JSON byte length, and the
-    /// measure is independent of the guest's key order.
+    /// A3: the shipped `noop.echo` declares an `alloc` **and** a `mutate`
+    /// capability over one scope, and both are admitted — so a guest can
+    /// relabel its result cell and still pass the ceiling. Metering is not
+    /// its to switch off: the relabelled result is measured all the same.
     #[test]
-    fn alloc_result_cell_measures_canonical_json_length() {
+    fn a_relabelled_result_cell_is_still_measured() {
+        let descriptor: Arc<ToolDescriptor> = Arc::new(
+            serde_json::from_str(include_str!(
+                "../../../tools/noop/generated/descriptor.json"
+            ))
+            .expect("the committed noop descriptor parses"),
+        );
+        let admitted = admitted(descriptor.clone(), &[]);
+        assert_eq!(
+            admitted.evidence.approved_capabilities,
+            vec!["session.events".to_string(), "session.result".to_string()]
+        );
+
+        let relabelled = cell(CtxOp::Mutate);
+        assert_eq!(
+            check_result_cell("noop.echo", &descriptor, &admitted, &relabelled),
+            Ok(())
+        );
+        assert_eq!(recorded_measure(&descriptor, relabelled), Some(18));
+    }
+
+    /// D12: the measure is the canonical-JSON byte length, so it is
+    /// independent of the guest's key order.
+    #[test]
+    fn context_measure_is_the_canonical_json_byte_length() {
         let value: serde_json::Value =
             serde_json::from_str(r#"{"b":1,"a":"xy"}"#).expect("value parses");
         let reordered: serde_json::Value =
             serde_json::from_str(r#"{"a":"xy","b":1}"#).expect("value parses");
         // `{"a":"xy","b":1}` — 16 bytes.
-        assert_eq!(context_measure(&cell(CtxOp::Alloc), &value), Some(16));
-        assert_eq!(
-            context_measure(&cell(CtxOp::Alloc), &value),
-            context_measure(&cell(CtxOp::Alloc), &reordered)
-        );
+        assert_eq!(context_measure(&value), 16);
+        assert_eq!(context_measure(&value), context_measure(&reordered));
     }
 
     /// The ceiling is an intersection: an undeclared cell is a declaration
     /// violation, a declared-but-denied cell is an admission violation, and
-    /// both fail the call closed.
+    /// both fail the call closed. The two branches are discriminated by their
+    /// message, so neither can stand in for the other.
     #[test]
     fn result_cell_outside_the_ceiling_is_refused() {
         let descriptor = descriptor("session.result", CtxOp::Alloc);
@@ -525,6 +592,11 @@ mod tests {
         )
         .expect_err("undeclared result cell must fail");
         assert_eq!(undeclared.code, CepErrorCode::EffectViolation);
+        assert!(
+            undeclared.message.contains("not in declared capabilities"),
+            "{}",
+            undeclared.message
+        );
 
         // Denying the only capability leaves nothing admitted, so admission
         // itself refuses the tool — build the admitted set from a second
@@ -547,6 +619,33 @@ mod tests {
             not_admitted.message.contains("not in the admitted"),
             "{}",
             not_admitted.message
+        );
+    }
+
+    /// B10/b1: the ceiling is exact on the scope axis. Two capabilities differ
+    /// only by scope and one is denied, so a coverage predicate that ignored
+    /// scope would admit the denied twin's cell.
+    #[test]
+    fn result_cell_on_a_denied_scope_is_not_covered_by_its_twin() {
+        let mut two_scopes = (*descriptor("session.result", CtxOp::Alloc)).clone();
+        two_scopes.capabilities.push(Capability {
+            name: "workspace.result".into(),
+            cell: scoped_cell(CtxOp::Alloc, "workspace"),
+        });
+        let two_scopes = Arc::new(two_scopes);
+
+        let err = check_result_cell(
+            "synthetic.tool",
+            &two_scopes,
+            &admitted(two_scopes.clone(), &["workspace.result"]),
+            &scoped_cell(CtxOp::Alloc, "workspace"),
+        )
+        .expect_err("a declared cell on a denied scope must fail");
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert!(
+            err.message.contains("not in the admitted"),
+            "{}",
+            err.message
         );
     }
 

@@ -246,8 +246,10 @@ mod tests {
         }
     }
 
-    /// A descriptor with an `in` session scope, an `ex` network scope, and an
-    /// undeclared-scope capability (B4's fail-closed case).
+    /// A multi-scope descriptor: two `in` scopes on different channels, an
+    /// `ex` network scope, and room for undeclared-scope capabilities (B4's
+    /// fail-closed case). Two admissible scopes make the scope axis of
+    /// coverage observable.
     fn descriptor(capabilities: Vec<Capability>) -> Arc<ToolDescriptor> {
         Arc::new(ToolDescriptor {
             name: "noop.echo".into(),
@@ -260,6 +262,11 @@ mod tests {
                     name: "session".into(),
                     trust: Trust::In,
                     channel: ChannelKind::Session,
+                },
+                ScopeDecl {
+                    name: "workspace".into(),
+                    trust: Trust::In,
+                    channel: ChannelKind::Workspace,
                 },
                 ScopeDecl {
                     name: "net".into(),
@@ -318,8 +325,47 @@ mod tests {
             vec!["session.echo".to_string(), "session.result".to_string()]
         );
         assert!(admitted.covers(&cell(CtxOp::Alloc, "session")));
-        // The alias set collapses to one cell; nothing else is covered.
+        // The alias set collapses to one cell; nothing else is covered — on
+        // any of the three axes.
         assert!(!admitted.covers(&cell(CtxOp::Mutate, "session")));
+        assert!(!admitted.covers(&cell(CtxOp::Alloc, "workspace")));
+        assert!(!admitted.covers(&Cell {
+            ctx_op: CtxOp::Alloc,
+            ext_impact: ExtImpact::Read,
+            scope: "session".into(),
+        }));
+    }
+
+    /// Coverage is exact on all three axes, in both directions: a capability
+    /// on one scope never covers the same `ctx_op`/`ext_impact` on another,
+    /// and a differing `ext_impact` is a different cell.
+    #[test]
+    fn coverage_never_crosses_scope_or_ext_impact() {
+        let admitted = admit_tool(
+            descriptor(vec![
+                capability("session.result", CtxOp::Alloc, "session"),
+                capability("workspace.events", CtxOp::Mutate, "workspace"),
+            ]),
+            &policy(&[], Trust::In),
+        )
+        .expect("both in-scopes admit");
+
+        assert!(admitted.covers(&cell(CtxOp::Alloc, "session")));
+        assert!(admitted.covers(&cell(CtxOp::Mutate, "workspace")));
+        // Each admitted cell's ctx_op on the *other* admitted scope.
+        assert!(!admitted.covers(&cell(CtxOp::Alloc, "workspace")));
+        assert!(!admitted.covers(&cell(CtxOp::Mutate, "session")));
+        // Same ctx_op and scope, external impact — still a different cell.
+        for ext_impact in [ExtImpact::Read, ExtImpact::Write] {
+            assert!(
+                !admitted.covers(&Cell {
+                    ctx_op: CtxOp::Alloc,
+                    ext_impact,
+                    scope: "session".into(),
+                }),
+                "{ext_impact:?} must not be covered by an ext_impact=none capability"
+            );
+        }
     }
 
     /// Stage 2 subtracts by name: the surviving capability still admits its
@@ -372,6 +418,28 @@ mod tests {
         );
         assert!(admitted.evidence.denied_capabilities.is_empty());
         assert_eq!(admitted.evidence.max_boundary, Trust::In);
+    }
+
+    /// C3 pins the stage order: deny/subtract (stage 2) runs before the
+    /// boundary predicate (stage 3). A capability that is both name-denied and
+    /// `ex`-trust is therefore attributed to the operator's deny list, never
+    /// to the boundary — the evidence names the stage that actually removed it.
+    #[test]
+    fn deny_precedes_the_boundary_predicate_in_the_evidence() {
+        let admitted = admit_tool(
+            descriptor(vec![
+                capability("session.result", CtxOp::Alloc, "session"),
+                capability("net.fetch", CtxOp::Alloc, "net"),
+            ]),
+            &policy(&["net.fetch"], Trust::In),
+        )
+        .expect("the session capability survives");
+
+        assert_eq!(
+            admitted.evidence.denied_capabilities,
+            vec!["net.fetch".to_string()]
+        );
+        assert!(admitted.evidence.boundary_excluded.is_empty());
     }
 
     /// `max_boundary = ex` opts into external-world capabilities; the
@@ -568,6 +636,31 @@ mod tests {
                 "alloc:none:session".into()
             ))
         );
+    }
+
+    /// Scope escape on the cell itself: the admitted capability's `ctx_op`
+    /// and `ext_impact` on another declared scope is a different cell, and so
+    /// is a differing `ext_impact` on the admitted scope. Neither reaches a
+    /// host facility.
+    #[test]
+    fn authorize_operation_denies_a_cell_differing_only_by_scope_or_ext_impact() {
+        let admitted = admitted_session_tool();
+        let target = ObservedTarget::Session {
+            turn_id: "turn-1".into(),
+        };
+        for escape in [
+            cell(CtxOp::Mutate, "workspace"),
+            Cell {
+                ctx_op: CtxOp::Mutate,
+                ext_impact: ExtImpact::Write,
+                scope: "session".into(),
+            },
+        ] {
+            assert_eq!(
+                authorize_operation(&admitted, &escape, &target, "turn-1"),
+                Err(OperationDenial::CellNotAdmitted(escape.reference()))
+            );
+        }
     }
 
     /// Scope escape: a session target naming another turn is refused even

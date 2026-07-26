@@ -43,7 +43,7 @@ changing the accepted Cell model (`CtxOp × ExtImpact × scope × trust`).
 | D9 | New wire types keep the issue vocabulary (`ObservedEffect`, `ObservedTarget`) and live in `lancet_protocol::evidence`. Files that also touch `lancet_authority::effect::ObservedEffect` alias the legacy import (`as LegacyObservedEffect`). Authority types are unchanged this cycle. |
 | D10 | `EffectErrorData` keeps legacy fields untouched; Component-path violations populate `CepError.message` (the struct has no message field) and new **optional** `cell_ref`/`capability` fields (`skip_serializing_if = Option::is_none`, additive; the struct is not `deny_unknown_fields`, and error data is never persisted — audit stores only the code + a message summary). **No new `CepErrorCode` or `PolicyReasonCode` variants**: admission denials (stages 1–3) reuse `CapabilityNotGranted`; result-cell violations keep `EffectViolation`; per-operation denials produce no wire error at all (silent drop + recorded evidence). Both enums stay closed with their pinned unknown-variant rejection tests. |
 | D11 | Capability admission is **unconditional** for Component Tools: `CepMode` warn/off gates only the legacy effect-region checks (per lancet-authority AGENTS.md). Warn mode does not soften Cell admission. |
-| D12 | Deterministic context measure: `context_measure = len(canonical_json(result_value))` in bytes, computed host-side, recorded on the result `ObservedEffect` when `ctx_op == Alloc` (`None` otherwise). `Free` remains vocabulary-only (no seam); budget *enforcement* stays in #6 — #28 delivers measurement + recording only. |
+| D12 | Deterministic context measure: `context_measure = len(canonical_json(result_value))` in bytes, computed host-side and recorded on **every** result `ObservedEffect`, whatever `ctx_op` the guest declared. Rationale: branching on the declared `ctx_op` made metering guest-switchable — the shipped `noop.echo` declares an `alloc` *and* a `mutate` capability over one scope and both are normally admitted, so relabelling the result cell passed the ceiling and suppressed the measure. The declared `ctx_op` states charge intent for #6's charge/credit seam only; it never gates measurement. Operation effects stay `None` (they return no value). `Free` remains vocabulary-only (no seam); budget *enforcement* stays in #6 — #28 delivers measurement + recording only. |
 | D13 | Concrete-target matching semantics for Path/Host stay with the future domain channels; the per-op authorizer denies Path/Host targets outright this cycle (fail closed — no channel can legitimately produce them). Session targets must equal the call's `turn_id`. Recorded so the authority-policy suffix-vs-exact host question is a conscious later decision. |
 | D14 | Guest-side cell strings remain duplicated literals this cycle (noop hardcodes its result CellRef); a no_std vocabulary crate is future work. |
 
@@ -77,7 +77,7 @@ pub struct ObservedEffect {
     pub scope: ObservedScope,
     pub target: ObservedTarget,
     pub source: EffectSource,
-    pub context_measure: Option<u64>,   // D12; host-computed, Alloc only
+    pub context_measure: Option<u64>,   // D12; host-computed on every result effect
 }
 
 /// Versioned canonical container (C1/C8): effects sorted by seq.
@@ -200,11 +200,11 @@ parse trust-free CellRef → declared-membership check (existing) → **admitted
 membership check (new; violation = fail closed: the call errors and the
 **result** effect is never recorded — but operation effects already recorded
 in the ledger survive into audit, as B5 requires) → result-schema validation →
-`context_measure = len(canonical_json(value))` when `ctx_op == Alloc`,
-`None` for `Mutate` and `Free` (a declared `Free` result cell is accepted and
-recorded as an effect with `context_measure: None`; #28 delivers the ledger
-entry, the charge/credit seam stays in #6) → record result `ObservedEffect {
-source: Result, target: Session{turn_id} }` with host-derived trust.
+`context_measure = len(canonical_json(value))` **unconditionally**, whatever
+`ctx_op` the guest declared (D12: a declared `Free` or `Mutate` result cell is
+accepted and recorded as an effect carrying its measure; the declared `ctx_op`
+only tells #6 how to charge it) → record result `ObservedEffect { source:
+Result, target: Session{turn_id} }` with host-derived trust.
 
 The evidence ledger becomes:
 
@@ -321,7 +321,11 @@ max_boundary = "in"          # default "in"; "ex" opts into external-world capab
 | scope escape: authorizer denies Path/Host targets and mismatched session turn ids | admission/authorizer unit tests |
 | result cell drift: undeclared result cell → violation, **no** result evidence recorded (prior operation effects survive) | lancet-runtime |
 | effect ceiling: declared-but-not-admitted result cell → violation | lancet-runtime |
-| `Free`/`Mutate` result cell: synthetic descriptor with `free:none:session` capability → result accepted, effect recorded with `context_measure: None` (#6 boundary) | lancet-runtime unit |
+| `Free`/`Mutate` result cell: synthetic descriptor with `free:none:session` capability → result accepted, effect recorded **with its measure** — `Free`/`Mutate` differ from `Alloc` in how #6 charges the number, not in whether the host records one | lancet-runtime unit |
+| result-cell relabelling: the real `noop.echo` capability set (`alloc` and `mutate` over one scope, both admitted) → a `mutate:none:session` result cell still passes the ceiling **and** is still measured (D12: metering is not guest-switchable) | lancet-runtime unit |
+| `covers` exactness: a capability on one scope never covers the same `ctx_op`/`ext_impact` on another declared scope, nor a differing `ext_impact` — pinned on `covers`, `authorize_operation`, and `check_result_cell` | lancet-runtime unit |
+| C3 stage order: a capability that is both name-denied and `ex`-trust is attributed to `denied_capabilities`, never to `boundary_excluded` | admission unit tests |
+| D2 unbound binding: a descriptor with zero or two session-channel scopes → `emit-event` denied under the `<unbound>` sentinel, sink never reached | lancet-runtime `host.rs` unit |
 | old-shape audit DB (missing NOT NULL column) → actionable open error, data untouched | lancet-audit |
 | audit attribution: `admission_evidence` vs `observed_effects` vs `denied_operations` distinct fields; `component_cells` intact | lancet-audit + lancet-native round trip |
 | attestation determinism: stored vs re-projected v2 statements byte-identical; array order stable; v1 rows still project as v1 | lancet-audit + lattice-api |
