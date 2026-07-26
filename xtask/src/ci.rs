@@ -101,10 +101,10 @@ fn step(name: &str, run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<
 }
 
 /// Assert the Source Tool build prerequisites (#5 slice B decision 1): the
-/// pinned rustc from `rust-toolchain.toml` and the `wasm32-unknown-unknown`
-/// target std. `tool-codegen`/`tool-build` and the guest crate both need the
-/// wasm target installed; a missing target would otherwise surface as an
-/// opaque linker error deep in `tool-build`.
+/// pinned rustc from `rust-toolchain.toml`, the `wasm32-unknown-unknown`
+/// target std, and the `wasm-tools` encoder. `tool-codegen`/`tool-build` and
+/// the guest crate both need the wasm target installed; a missing target would
+/// otherwise surface as an opaque linker error deep in `tool-build`.
 fn check_toolchain() -> anyhow::Result<()> {
     let rustc_out = Command::new("rustc")
         .arg("--version")
@@ -139,7 +139,57 @@ fn check_toolchain() -> anyhow::Result<()> {
             "wasm32-unknown-unknown target not installed; run `rustup target add wasm32-unknown-unknown`"
         );
     }
+
+    // `wasm-tools` is an implicit external build dependency: `tool-build`
+    // shells out to it to encode the core module into a Component and to
+    // validate the import surface. It is not a Cargo dependency, so nothing
+    // installs it for us, and the encoder determines the committed
+    // Component's bytes. Absence is fatal here (the gate's last step would
+    // fail anyway, but ~9 steps later); a version mismatch is a warning
+    // because reproducibility is still warn-only per #5 decision 1 / #73.
+    match wasm_tools_version() {
+        Some(version) => {
+            if version != EXPECTED_WASM_TOOLS {
+                println!(
+                    "warn: wasm-tools {version} installed, expected {EXPECTED_WASM_TOOLS}; \
+                     Component digests may drift (see #73)"
+                );
+            }
+        }
+        None => anyhow::bail!(
+            "wasm-tools not found on PATH; `cargo xtask tool-build` needs it to encode and \
+             validate Source Tool Components. Install {EXPECTED_WASM_TOOLS} (for example \
+             `cargo install wasm-tools --version {EXPECTED_WASM_TOOLS} --locked`)."
+        ),
+    }
+
     Ok(())
+}
+
+/// The `wasm-tools` release the committed Component artifacts were encoded
+/// with. Kept in sync with the `[artifact] toolchain` fingerprint in
+/// `tools/*/manifest.toml` and with the pinned installer in
+/// `.github/workflows/full-gate.yml`.
+pub(crate) const EXPECTED_WASM_TOOLS: &str = "1.254.0";
+
+/// The installed `wasm-tools` version, or `None` when the binary is missing
+/// or exits non-zero.
+pub(crate) fn wasm_tools_version() -> Option<String> {
+    let out = Command::new("wasm-tools")
+        .arg("--version")
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_wasm_tools_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `wasm-tools --version` prints `wasm-tools <semver>`. Split out from the
+/// process call so the parse is unit-testable without the binary installed.
+fn parse_wasm_tools_version(stdout: &str) -> Option<String> {
+    stdout.split_whitespace().nth(1).map(str::to_owned)
 }
 
 fn run_cargo(root: &std::path::Path, args: &[&str], build_jobs: &str) -> anyhow::Result<()> {
@@ -356,6 +406,34 @@ fn ordered_test_crates(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_version_out_of_wasm_tools_version_output() {
+        assert_eq!(
+            parse_wasm_tools_version("wasm-tools 1.254.0\n").as_deref(),
+            Some("1.254.0")
+        );
+    }
+
+    #[test]
+    fn wasm_tools_version_parse_rejects_output_without_a_version_field() {
+        assert_eq!(parse_wasm_tools_version("wasm-tools\n"), None);
+        assert_eq!(parse_wasm_tools_version(""), None);
+    }
+
+    /// The pinned version must stay in step with the installer in
+    /// `.github/workflows/full-gate.yml`; a silent divergence would make the
+    /// local gate warn on exactly the version CI uses (see #80).
+    #[test]
+    fn expected_wasm_tools_matches_the_full_gate_installer_pin() {
+        let root = repo_root::repo_root().unwrap();
+        let workflow =
+            std::fs::read_to_string(root.join(".github/workflows/full-gate.yml")).unwrap();
+        assert!(
+            workflow.contains(&format!("wasm-tools@{EXPECTED_WASM_TOOLS}")),
+            "full-gate.yml must install wasm-tools@{EXPECTED_WASM_TOOLS}"
+        );
+    }
 
     #[test]
     fn ordered_test_crates_is_deterministic_and_excludes_xtask() {

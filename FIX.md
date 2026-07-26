@@ -2,6 +2,37 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #79 / #80: harness repo-root determinism + Component 构建工具链身份 — 2026-07-27
+
+Severity: test correctness (cross-checkout write) / release-evidence gap.
+
+**Problem:**
+- **#79** `crates/lancet-native/tests/cep_warn_harness.rs` 的 `find_repo_root()` 向上搜索 `.planning/` 作为 repo root 标记。`.planning/` 被 `.gitignore:10` 忽略、被 `.githooks/pre-commit` 拦截强制添加，因此在 CI 与全新 clone 里**从不存在**——注释描述的机制只在维护者主检出上生效，其余环境全靠 fallback。更严重的是：`git worktree` 建在 `.claude/worktrees/<name>/` 下且没有 `.planning/`，向上搜索会越过工作树根命中**主检出**。实测从工作树运行时读的是 `/home/astrin/Dev/lattice/docs/lancet-warn-report.md`，`LATTICE_UPDATE_WARN_REPORT=1` 下会写进另一份检出的被跟踪文件。同文件 `:404` 的 doc 注释写 `all 8 CATALOG methods`，封闭目录实为 5 个。
+- **#80** `cargo xtask ci` 第 9 步跑 `tool-build --verify`（唯一把已提交 `.wasm` 绑回其源码的门），但 `.github/workflows/ci.yml` 与 `full-gate.yml` 都不调用它，且两条 lane 都不安装 `wasm-tools`——`#73` 验收标准 A 要求的「CI runner 上的跨机 bit-for-bit 证据」在结构上无法产生。`wasm-tools` 作为决定 Component 字节的编码器，既不在 `check_toolchain()` 的校验里、不在 rollout capability probes 里、也不是任何清单中的依赖。`wit-bindgen` 用 caret `"0.59"` 而非 `=` 精确 pin，与 wasmtime/inventory/jsonschema 的口径不一致。
+
+**Fix:**
+- `cep_warn_harness.rs`：`find_repo_root()` 改为编译期 `env!("CARGO_MANIFEST_DIR")` 上溯两级，删除运行时向上搜索与 fallback；注释写明为何不得再用标记目录。`:404` 的方法数改为 5。
+- `.github/workflows/full-gate.yml`：新增按 SHA 固定的 `taiki-e/install-action` 安装 `wasm-tools@1.254.0`；在 rollout 之后新增 `cargo xtask tool-build --verify` 步骤（warn-only，置于最后以免漂移告警掩盖更早的硬失败）。放 full-gate 而非 ordinary lane，以保持 PR 门轻量，同时让每晚一次的运行持续累积 `#73` 需要的跨机数据。
+- `xtask/src/ci.rs`：`check_toolchain()` 增加 `wasm-tools` 探测——缺失即 fail（早于第 9 步给出可操作错误），版本不符只告警（与 `#5` decision 1 的 warn-only 口径一致）。新增 `EXPECTED_WASM_TOOLS` 常量与可单测的 `parse_wasm_tools_version()` 纯函数。
+- `xtask/src/rollout.rs`：`collect_probes()` 增加非 gating 的 `wasm_tools_version` probe，让 release 记录能回答「这份 release 的 Component 由哪个编码器构建」。
+- `Cargo.toml`：`wit-bindgen = "=0.59.0"` 进 `[workspace.dependencies]`；`crates/lattice-tool-prelude` 与 `tools/noop` 改用 `{ workspace = true }`，单一 pin 源。顺带修正 prelude 中「guest 从不直接依赖 wit-bindgen」的失实注释（`FINDINGS.md` L-5-02 记录的正是相反事实）。
+- `docs/TESTING.md`：登记 `wasm-tools 1.254.0` 为构建 Source Tool 的外部前置依赖；同步 `xtask ci` 第 1 步、rollout capability probes 与 full-gate 步骤清单。
+
+**Verification:**
+- `cargo fmt --all --check` — passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed。
+- `cargo test -p xtask` — 46 passed（新增 3 条：版本解析正/负用例，以及断言 `EXPECTED_WASM_TOOLS` 与 full-gate 安装 pin 一致）。
+- `cargo test -p lancet-native --test cep_warn_harness -- --nocapture` — passed；输出路径由修复前的 `/home/astrin/Dev/lattice/docs/lancet-warn-report.md`（主检出）变为 `/home/astrin/Dev/lattice/.claude/worktrees/code-audit/docs/lancet-warn-report.md`（本工作树）。
+- 反向证明：在本工作树的报告尾部追加一行 `| probe | overreach | NO | fix-now |` 后该测试 FAILED（修复前不会失败，因为断言作用在另一份检出上）；文件已还原，`git diff` 干净。
+- `cargo xtask tool-codegen --check` — passed。
+- `cargo xtask tool-build --verify` — `verify: noop-echo Component reproduces committed digest (6fcc7fc8570be61f887278661f4a5a6353c3ca2c46e249dcc8de843500f73df4)`。该结果同时构成 `#73` 的一份追加证据：本次是在与原构建**不同的绝对路径**（git worktree）下复现的，说明 `--remap-path-prefix` 对路径差异有效；仍缺的是异构机器/CI runner 那一半。
+- `Cargo.lock` 无变化（`=0.59.0` 与既有锁定版本一致），committed `.wasm` digest 未变。
+
+**Residual:** `#80` 的「把 `wasm-tools` 版本写进 `tools/*/manifest.toml` 的 `[artifact] toolchain` 指纹」未在本次落地。原因：该字段进入 canonical descriptor，会改变 `descriptor-sha256`，进而需要手工同步 `crates/lancet-runtime/src/generated/noop_fixture.rs:30` 里手抄的常量（该目录名为 `generated/` 但无任何工具生成，见 #103）。留在 `#80` 内跟进。
+
+**Changed files:**
+`crates/lancet-native/tests/cep_warn_harness.rs`; `.github/workflows/full-gate.yml`; `xtask/src/ci.rs`; `xtask/src/rollout.rs`; `Cargo.toml`; `crates/lattice-tool-prelude/Cargo.toml`; `tools/noop/Cargo.toml`; `docs/TESTING.md`; `FIX.md`.
+
 ## GitHub #46 residual finalization: fetch capability pre-outbound + scenario tighten — 2026-07-24
 
 Severity: test refactor / product fail-closed / review closeout.

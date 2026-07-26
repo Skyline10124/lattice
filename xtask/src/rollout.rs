@@ -623,6 +623,17 @@ fn collect_probes() -> Vec<CapabilityProbe> {
         ok,
     });
 
+    // The Component encoder. Non-gating (rollout builds the CLI, not the
+    // Source Tool Components), but recorded so a release record can answer
+    // "which encoder produced the embedded Components" — the `[artifact]
+    // toolchain` fingerprint does not carry it yet. See #73 / #80.
+    probes.push(CapabilityProbe {
+        name: "wasm_tools_version".into(),
+        value: crate::ci::wasm_tools_version().unwrap_or_else(|| "not installed".to_owned()),
+        gating: false,
+        ok: true,
+    });
+
     let git = Command::new("git").arg("--version").output();
     let (value, ok) = match git {
         Ok(o) if o.status.success() => (String::from_utf8_lossy(&o.stdout).trim().to_owned(), true),
