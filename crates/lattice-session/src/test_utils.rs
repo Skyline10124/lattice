@@ -189,19 +189,34 @@ mod cwd_recovery_tests {
     /// crates' tests chdir into a TempDir that later gets dropped, leaving the
     /// process without a valid CWD; `init_empty_repo` must recover instead of
     /// panicking (observed as a macos-latest CI failure).
+    ///
+    /// Run serially and marked `#[ignore]`: the CWD is process-global, so
+    /// invalidating it races every fixture running in parallel in this binary.
+    /// Verify with
+    /// `cargo test -p lattice-session -- --ignored --test-threads=1`.
     #[test]
+    #[ignore = "mutates the process-global CWD; run with --test-threads=1"]
     fn init_empty_repo_recovers_from_deleted_cwd() {
-        let doomed = tempfile::TempDir::new().expect("doomed cwd");
-        let doomed_path = doomed.path().to_path_buf();
-        std::env::set_current_dir(&doomed_path).expect("chdir into doomed");
-        drop(doomed);
-        assert!(
-            std::env::current_dir().is_err(),
-            "precondition: process CWD must be invalid"
-        );
-
+        let original = std::env::current_dir().expect("cwd before test");
         let target = tempfile::TempDir::new().expect("target");
-        let repo = init_empty_repo(&target.path().join("repo"));
-        assert!(repo.git_dir().exists(), "repo initialized after recovery");
+
+        let doomed = tempfile::TempDir::new().expect("doomed cwd");
+        std::env::set_current_dir(doomed.path()).expect("chdir into doomed");
+        drop(doomed);
+        let cwd_is_invalid = std::env::current_dir().is_err();
+
+        let outcome = std::panic::catch_unwind(|| {
+            let repo = init_empty_repo(&target.path().join("repo"));
+            repo.git_dir().exists()
+        });
+
+        // Restore before asserting so a failure cannot poison sibling tests.
+        std::env::set_current_dir(&original).expect("restore cwd");
+
+        assert!(cwd_is_invalid, "precondition: process CWD must be invalid");
+        assert!(
+            matches!(outcome, Ok(true)),
+            "init_empty_repo must recover from a deleted CWD: {outcome:?}"
+        );
     }
 }
