@@ -460,38 +460,64 @@ fn guard_full_unwind(
     let target_commit_id = target.commit_id.as_str();
     let backing = workspace_history_backing(project_root)
         .map_err(|err| ApiError::Internal(format!("resolve private workspace history: {err}")))?;
-    let plan = match plan_workspace_rewind(backing, None) {
-        Ok(plan) => plan,
-        // A history that cannot be planned is caught by the rewind itself.
-        Err(_) => return Ok(()),
-    };
-    // Turns at or before the target, by the parent commit their turn id names.
+    // A planning failure must not skip the guard: a transient repository
+    // read error that succeeds on the rewind's own second plan would let an
+    // unguarded full unwind through. Refuse instead — a persistent error
+    // would have refused anyway, so failing closed costs nothing.
+    let plan = plan_workspace_rewind(backing, None).map_err(|err| {
+        ApiError::Conflict(format!(
+            "turn '{}' records no workspace-history identity and the private history could not \
+             be read to prove a full unwind is safe: {err}",
+            target.commit_id
+        ))
+    })?;
+    // A step's turn id names the Turn that installed it as
+    // `<session>:<parent commit>`, so this session's own Turns can be placed
+    // exactly against the log. Everything else — another session's Turns, or
+    // a Turn on a branch this log does not contain — has no such ordering, so
+    // it falls back to when the mutation was recorded against when the target
+    // Turn was committed. Both timestamps are written by the same machine.
     let at_or_before: std::collections::BTreeSet<&str> = log
         .iter()
         .take(target_index + 1)
         .flat_map(|entry| entry.parent_ids.first().map(String::as_str))
         .chain(std::iter::once("root"))
         .collect();
-    // The private history is per project, so a step may belong to another
-    // session entirely. Two independent signals place a step before the
-    // target: this session's own turn ids, and — for every session — the
-    // moment the mutation was recorded against the moment the target Turn was
-    // committed. Both are written by the same machine.
-    let target_recorded_by = parse_rfc3339_seconds(&target.created_at);
+    let after: std::collections::BTreeSet<&str> = log
+        .iter()
+        .skip(target_index + 1)
+        .flat_map(|entry| entry.parent_ids.first().map(String::as_str))
+        .collect();
+    let target_committed_at = parse_rfc3339_seconds(&target.created_at);
+
     for step in &plan.steps {
-        let same_session_before =
-            step.turn_id
-                .split_once(':')
-                .is_some_and(|(step_session, parent)| {
-                    step_session == session_id && at_or_before.contains(parent)
-                });
-        let recorded_before = match (step.recorded_at, target_recorded_by) {
-            (Some(recorded), Some(target_at)) => recorded <= target_at,
-            // An unreadable timestamp on either side is ambiguity, and a full
+        let placement = step
+            .turn_id
+            .split_once(':')
+            .filter(|(step_session, _)| *step_session == session_id)
+            .map(|(_, parent)| {
+                if at_or_before.contains(parent) {
+                    Placement::Before
+                } else if after.contains(parent) {
+                    Placement::After
+                } else {
+                    Placement::Unknown
+                }
+            })
+            .unwrap_or(Placement::Unknown);
+
+        let predates = match placement {
+            Placement::Before => true,
+            Placement::After => false,
+            // No exact placement: fall back to recording time, and treat an
+            // unreadable timestamp on either side as ambiguity — a full
             // unwind must not proceed on ambiguity.
-            _ => true,
+            Placement::Unknown => match (step.recorded_at, target_committed_at) {
+                (Some(recorded), Some(target_at)) => recorded < target_at,
+                _ => true,
+            },
         };
-        if same_session_before || recorded_before {
+        if predates {
             return Err(ApiError::Conflict(format!(
                 "turn '{target_commit_id}' records no workspace-history identity, but the private \
                  history still holds a mutation recorded at or before it ({} on '{}', turn \
@@ -501,6 +527,16 @@ fn guard_full_unwind(
         }
     }
     Ok(())
+}
+
+/// Where a reversed step's Turn sits relative to the rewind target.
+enum Placement {
+    /// A Turn of this session at or before the target.
+    Before,
+    /// A Turn of this session after the target.
+    After,
+    /// Another session's Turn, or one this session's log does not place.
+    Unknown,
 }
 
 /// Unix seconds from an RFC 3339 timestamp, or `None` if it does not parse.

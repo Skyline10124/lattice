@@ -445,8 +445,11 @@ impl WorkspaceHistory {
     ///
     /// The whole sequence — plan, apply (preflight + restore), and the
     /// compare-and-set that moves `current` backwards — runs under the same
-    /// advisory lock that serializes recording, so a concurrent mutation
-    /// recorder can never interleave. `apply` returning `Err` aborts before
+    /// advisory lock that serializes recording, so a concurrent *recorder*
+    /// can never interleave. The lock covers history writes, not the Local
+    /// Workspace: a Turn installing a mutation takes it only after its bytes
+    /// are already on disk, so a concurrently running Turn can still write a
+    /// path while a Rewind is between verifying and restoring it. `apply` returning `Err` aborts before
     /// any ref moves. Pin refs are never touched, so every reversed commit
     /// stays reachable afterwards.
     pub fn rewind_with<E>(

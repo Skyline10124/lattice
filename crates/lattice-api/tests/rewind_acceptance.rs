@@ -1622,3 +1622,76 @@ async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the
         "another session's earlier work must survive"
     );
 }
+
+/// The full-unwind guard must refuse only what is unsafe. A Turn that really
+/// does predate every recorded mutation is the legitimate case, and rewinding
+/// to it must unwind the whole chain — otherwise the guard would be a blanket
+/// refusal and the refusal tests above would prove nothing.
+#[tokio::test]
+async fn a_legitimate_full_unwind_still_succeeds() {
+    let ws = setup_turn_workspace(&["mutate.create"]);
+    let scoped = ScopedState::new(&ws.root);
+    let sessions_dir = TempDir::new().unwrap();
+    let sessions = sessions_dir.path().join("sessions");
+    let session_id = new_session(&sessions);
+    let api = SessionApi::git(&sessions);
+    let resolved = api.status(&session_id).unwrap().session_id;
+
+    // A first Turn that installs nothing: the history is still empty, so it
+    // legitimately records no identity.
+    let store = GitSessionGraphStore::new(&sessions);
+    let target = store
+        .commit_turn(TurnCommitInput {
+            workspace_history_oid: None,
+            session_id: resolved.clone(),
+            parent_ids: Vec::new(),
+            messages: vec![
+                lattice_session::test_helpers::user_msg("just talk"),
+                lattice_session::test_helpers::assistant_msg("nothing to do"),
+            ],
+            agent_name: "default".to_string(),
+            profile_snapshot_hash: "test-profile".to_string(),
+            profile_snapshot_json: "{}".to_string(),
+            model: "sonnet".to_string(),
+            provider: "anthropic".to_string(),
+            status: lattice_session::TurnCommitStatus::Completed,
+            disposition: lattice_session::WorkspaceDisposition::NotApplicable,
+            lifecycle: None,
+            commit_message: "chat only".to_string(),
+            usage: None,
+            terminal_reason: None,
+        })
+        .expect("commit chat-only turn");
+    assert!(
+        history_for(scoped.path(), &ws.root)
+            .current()
+            .unwrap()
+            .is_none(),
+        "the history must still be empty at the target Turn"
+    );
+
+    // Only afterwards does a Turn install something.
+    turn_creating(&ws, &sessions, &session_id, "after.md", "after\n").await;
+    assert!(ws.root.join("after.md").exists());
+
+    let outcome = lattice_api::rewind_to_turn(&api, &session_id, &target.commit_id, &ws.root)
+        .expect("a legitimate full unwind must be allowed");
+    let RewindOutcome::Success(success) = outcome else {
+        panic!("expected success, got {outcome:?}");
+    };
+    assert_eq!(
+        success.to_history_oid, None,
+        "the chain is unwound entirely"
+    );
+    assert_eq!(success.steps.len(), 1);
+    assert!(
+        !ws.root.join("after.md").exists(),
+        "the later mutation is reversed"
+    );
+    assert_eq!(
+        history_for(scoped.path(), &ws.root).current().unwrap(),
+        None,
+        "the private history ref is deleted for an empty target"
+    );
+    assert_eq!(api.log(&session_id).unwrap().len(), 1);
+}
