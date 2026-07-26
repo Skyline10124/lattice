@@ -42,9 +42,10 @@ pub use error::{
     CepError, CepErrorCode, CepErrorData, CepErrorFamily, Retriability, ToolExecutionErrorData,
 };
 pub use evidence::{
-    ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, CapabilityAdmissionPolicy, DeniedOperation,
-    EffectSource, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord,
-    ObservedScope, ObservedTarget,
+    ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, CapabilityAdmissionPolicy,
+    DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, DeniedOperationsRecord, EffectSource,
+    OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord, ObservedScope,
+    ObservedTarget,
 };
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};
 pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};

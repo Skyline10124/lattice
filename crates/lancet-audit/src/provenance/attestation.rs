@@ -233,7 +233,7 @@ fn evidence_entry(audit_id: i64, meta: &Value) -> Option<Value> {
     if let Some(effects) = versioned_evidence(meta, "observed_effects") {
         entry.insert("observed_effects".into(), effects.clone());
     }
-    if let Some(denied) = meta.get("denied_operations").filter(|v| v.is_array()) {
+    if let Some(denied) = versioned_evidence(meta, "denied_operations") {
         entry.insert("denied_operations".into(), denied.clone());
     }
     Some(Value::Object(entry))
@@ -340,13 +340,16 @@ mod tests {
                 "source": "operation"
             }]
         },
-        "denied_operations": [{
-            "seq": 1,
-            "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
-            "scope": {"scope": "session", "trust": "in", "channel": "session"},
-            "target": {"kind": "none"},
-            "reason": "uncovered operation"
-        }],
+        "denied_operations": {
+            "version": 1,
+            "denied": [{
+                "seq": 1,
+                "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
+                "scope": {"scope": "session", "trust": "in", "channel": "session"},
+                "target": {"kind": "none"},
+                "reason": "uncovered operation"
+            }]
+        },
         "component_cells": ["mutate:none:session:in"]
     }"#;
 
@@ -385,7 +388,7 @@ mod tests {
             json!("mutate")
         );
         assert_eq!(
-            evidence[0]["denied_operations"][0]["reason"],
+            evidence[0]["denied_operations"]["denied"][0]["reason"],
             json!("uncovered operation")
         );
         assert!(

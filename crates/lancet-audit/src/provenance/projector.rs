@@ -446,7 +446,10 @@ mod tests {
                     "version": 1,
                     "effects": [{"seq": 0, "source": "operation"}]
                 },
-                "denied_operations": [{"seq": 1, "reason": "uncovered operation"}],
+                "denied_operations": {
+                    "version": 1,
+                    "denied": [{"seq": 1, "reason": "uncovered operation"}]
+                },
                 "component_cells": ["mutate:none:session:in"]
             }"#,
         )];
@@ -477,7 +480,7 @@ mod tests {
             serde_json::json!("operation")
         );
         assert_eq!(
-            attrs["denied_operations"][0]["reason"],
+            attrs["denied_operations"]["denied"][0]["reason"],
             serde_json::json!("uncovered operation")
         );
 

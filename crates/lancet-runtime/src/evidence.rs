@@ -26,8 +26,9 @@ use std::sync::{Arc, Mutex};
 
 use lancet_protocol::cell::Cell;
 use lancet_protocol::evidence::{
-    AdmissionEvidence, DeniedOperation, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION,
-    ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
+    AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, DeniedOperationsRecord,
+    EffectSource, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord,
+    ObservedScope, ObservedTarget,
 };
 
 #[derive(Debug, Default)]
@@ -59,8 +60,7 @@ impl CellEvidenceLedger {
     }
 
     /// Record an effect that actually happened. The ledger assigns `seq`;
-    /// `context_measure` is host-computed and only ever `Some` for an `Alloc`
-    /// cell (D12).
+    /// `context_measure` is host-computed, never guest-supplied (D12).
     pub fn record_effect(
         &self,
         cell: Cell,
@@ -105,13 +105,14 @@ impl CellEvidenceLedger {
 
     /// The call's evidence triple: why it was authorized, what happened, and
     /// what was refused. Admission is absent only for a call the transport
-    /// never admitted.
+    /// never admitted; the other two are versioned roots so a persisted
+    /// reader can gate on `version` before interpreting either.
     pub fn snapshot(
         &self,
     ) -> (
         Option<AdmissionEvidence>,
         ObservedEffectsRecord,
-        Vec<DeniedOperation>,
+        DeniedOperationsRecord,
     ) {
         let inner = self.inner.lock().unwrap();
         (
@@ -120,7 +121,10 @@ impl CellEvidenceLedger {
                 version: OBSERVED_EFFECTS_RECORD_VERSION,
                 effects: inner.effects.clone(),
             },
-            inner.denied.clone(),
+            DeniedOperationsRecord {
+                version: DENIED_OPERATIONS_RECORD_VERSION,
+                denied: inner.denied.clone(),
+            },
         )
     }
 
@@ -196,8 +200,9 @@ mod tests {
             vec![0, 2]
         );
         assert_eq!(effects.effects[1].context_measure, Some(17));
-        assert_eq!(denied.len(), 1);
-        assert_eq!(denied[0].seq, 1);
+        assert_eq!(denied.version, DENIED_OPERATIONS_RECORD_VERSION);
+        assert_eq!(denied.denied.len(), 1);
+        assert_eq!(denied.denied[0].seq, 1);
     }
 
     /// A clone taken before the call sees everything the moved clone records.

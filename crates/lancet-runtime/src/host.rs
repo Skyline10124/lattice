@@ -209,18 +209,18 @@ mod tests {
         );
         let (_, effects, denied) = evidence.snapshot();
         assert!(effects.effects.is_empty(), "{:?}", effects.effects);
-        assert_eq!(denied.len(), 1);
-        assert_eq!(denied[0].cell.scope, UNBOUND_SCOPE);
-        assert_eq!(denied[0].scope.scope, UNBOUND_SCOPE);
-        assert_eq!(denied[0].scope.trust, Trust::Ex);
+        assert_eq!(denied.denied.len(), 1);
+        assert_eq!(denied.denied[0].cell.scope, UNBOUND_SCOPE);
+        assert_eq!(denied.denied[0].scope.scope, UNBOUND_SCOPE);
+        assert_eq!(denied.denied[0].scope.trust, Trust::Ex);
         assert_eq!(
-            denied[0].target,
+            denied.denied[0].target,
             ObservedTarget::Session {
                 turn_id: "turn-1".into()
             }
         );
         assert_eq!(
-            denied[0].reason,
+            denied.denied[0].reason,
             format!("emit-event has no unique session-channel scope ({declared} declared)")
         );
     }
@@ -266,7 +266,7 @@ mod tests {
             "tool.event"
         );
         let (_, effects, denied) = evidence.snapshot();
-        assert!(denied.is_empty(), "{denied:?}");
+        assert!(denied.denied.is_empty(), "{denied:?}");
         assert_eq!(effects.effects.len(), 1);
         assert_eq!(effects.effects[0].cell.reference(), "mutate:none:session");
         assert_eq!(effects.effects[0].context_measure, None);

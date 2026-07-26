@@ -6,8 +6,8 @@ use lancet_catalog::CepMethod;
 use lancet_catalog::methods::{Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod};
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{
-    ADMISSION_EVIDENCE_VERSION, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION, ObservedScope,
-    ObservedTarget,
+    ADMISSION_EVIDENCE_VERSION, DENIED_OPERATIONS_RECORD_VERSION, EffectSource,
+    OBSERVED_EFFECTS_RECORD_VERSION, ObservedScope, ObservedTarget,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -1142,25 +1142,28 @@ fn admission_evidence() -> AdmissionEvidence {
     }
 }
 
-fn denied_operations() -> Vec<DeniedOperation> {
-    vec![
-        DeniedOperation {
-            seq: 3,
-            cell: cell(CtxOp::Mutate),
-            scope: observed_scope(),
-            target: ObservedTarget::None,
-            reason: "uncovered operation".into(),
-        },
-        DeniedOperation {
-            seq: 2,
-            cell: cell(CtxOp::Mutate),
-            scope: observed_scope(),
-            target: ObservedTarget::Path {
-                path: "src/lib.rs".into(),
+fn denied_operations() -> DeniedOperationsRecord {
+    DeniedOperationsRecord {
+        version: DENIED_OPERATIONS_RECORD_VERSION,
+        denied: vec![
+            DeniedOperation {
+                seq: 3,
+                cell: cell(CtxOp::Mutate),
+                scope: observed_scope(),
+                target: ObservedTarget::None,
+                reason: "uncovered operation".into(),
             },
-            reason: "path target denied this cycle".into(),
-        },
-    ]
+            DeniedOperation {
+                seq: 2,
+                cell: cell(CtxOp::Mutate),
+                scope: observed_scope(),
+                target: ObservedTarget::Path {
+                    path: "src/lib.rs".into(),
+                },
+                reason: "path target denied this cycle".into(),
+            },
+        ],
+    }
 }
 
 #[test]
@@ -1178,7 +1181,7 @@ fn merge_finalize_metadata_separates_admission_effects_and_denials() {
         &ComponentCallEvidence {
             admission: Some(&admission),
             effects: Some(&effects),
-            denied: &denied,
+            denied: Some(&denied),
         },
     )
     .unwrap();
@@ -1209,7 +1212,8 @@ fn merge_finalize_metadata_separates_admission_effects_and_denials() {
         "capability aliases are admission evidence only, never effects"
     );
 
-    let denials = parsed["denied_operations"].as_array().unwrap();
+    assert_eq!(parsed["denied_operations"]["version"], json!(1));
+    let denials = parsed["denied_operations"]["denied"].as_array().unwrap();
     assert_eq!(denials.len(), 2);
     assert_eq!(denials[0]["seq"], json!(2));
     assert_eq!(denials[1]["seq"], json!(3));
@@ -1230,7 +1234,7 @@ fn merge_finalize_metadata_is_order_independent() {
     let mut reversed = effects_record();
     reversed.effects.reverse();
     let mut reversed_denied = denied.clone();
-    reversed_denied.reverse();
+    reversed_denied.denied.reverse();
     let effects = effects_record();
 
     let first = merge_finalize_metadata(
@@ -1240,7 +1244,7 @@ fn merge_finalize_metadata_is_order_independent() {
         &ComponentCallEvidence {
             admission: Some(&admission),
             effects: Some(&effects),
-            denied: &denied,
+            denied: Some(&denied),
         },
     )
     .unwrap();
@@ -1251,7 +1255,7 @@ fn merge_finalize_metadata_is_order_independent() {
         &ComponentCallEvidence {
             admission: Some(&admission),
             effects: Some(&reversed),
-            denied: &reversed_denied,
+            denied: Some(&reversed_denied),
         },
     )
     .unwrap();

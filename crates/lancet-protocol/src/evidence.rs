@@ -25,6 +25,9 @@ pub const ADMISSION_EVIDENCE_VERSION: u32 = 1;
 /// Current `ObservedEffectsRecord::version`.
 pub const OBSERVED_EFFECTS_RECORD_VERSION: u32 = 1;
 
+/// Current `DeniedOperationsRecord::version`.
+pub const DENIED_OPERATIONS_RECORD_VERSION: u32 = 1;
+
 /// The concrete runtime object an effect touched (C1). A scope name is open
 /// vocabulary and cannot express a runtime boundary on its own, so every
 /// effect also carries the target the host authorized.
@@ -67,9 +70,10 @@ pub struct ObservedEffect {
     pub scope: ObservedScope,
     pub target: ObservedTarget,
     pub source: EffectSource,
-    /// Host-computed context allocation in bytes; `Some` only when
-    /// `cell.ctx_op == Alloc`. Tool self-reported numbers are never trusted
-    /// (A3); the charge/credit seam stays in #6.
+    /// Host-computed context allocation in bytes, recorded on every result
+    /// effect whatever `ctx_op` the guest declared (D12) and absent on
+    /// operation effects, which return no value. Tool self-reported numbers
+    /// are never trusted (A3); the charge/credit seam stays in #6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_measure: Option<u64>,
 }
@@ -93,6 +97,16 @@ pub struct DeniedOperation {
     pub scope: ObservedScope,
     pub target: ObservedTarget,
     pub reason: String,
+}
+
+/// Versioned container for a call's refused operations. Every persisted
+/// evidence root carries its own `version` so a reader can check it before
+/// interpreting the contents; denials are no exception. Producers keep
+/// `denied` sorted by `seq`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeniedOperationsRecord {
+    pub version: u32,
+    pub denied: Vec<DeniedOperation>,
 }
 
 /// Why a call was authorized (B5/A2/B6): the capability *names* the
@@ -249,9 +263,47 @@ mod tests {
             },
             reason: "capability not admitted".into(),
         };
-        let parsed: DeniedOperation =
-            serde_json::from_str(&serde_json::to_string(&denied).unwrap()).unwrap();
-        assert_eq!(parsed, denied);
+        let record = DeniedOperationsRecord {
+            version: DENIED_OPERATIONS_RECORD_VERSION,
+            denied: vec![denied],
+        };
+        let parsed: DeniedOperationsRecord =
+            serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+        assert_eq!(parsed, record);
+    }
+
+    /// Every persisted evidence root is a versioned object, so a reader can
+    /// gate on `version` before interpreting any of them (design §3). A bare
+    /// array of denials is not a readable root.
+    #[test]
+    fn every_persisted_evidence_root_carries_a_version() {
+        for value in [
+            serde_json::to_value(ObservedEffectsRecord {
+                version: OBSERVED_EFFECTS_RECORD_VERSION,
+                effects: Vec::new(),
+            })
+            .unwrap(),
+            serde_json::to_value(DeniedOperationsRecord {
+                version: DENIED_OPERATIONS_RECORD_VERSION,
+                denied: Vec::new(),
+            })
+            .unwrap(),
+            serde_json::to_value(AdmissionEvidence {
+                version: ADMISSION_EVIDENCE_VERSION,
+                tool: "noop.echo".into(),
+                approved_capabilities: Vec::new(),
+                denied_capabilities: Vec::new(),
+                boundary_excluded: Vec::new(),
+                max_boundary: Trust::In,
+            })
+            .unwrap(),
+        ] {
+            assert_eq!(
+                value.get("version").and_then(serde_json::Value::as_u64),
+                Some(1),
+                "persisted root must expose a numeric version: {value}"
+            );
+        }
     }
 
     #[test]
@@ -287,16 +339,20 @@ mod tests {
         .unwrap();
         assert_eq!(admission.approved_capabilities.len(), 1);
 
-        let denied: DeniedOperation = serde_json::from_value(json!({
-            "seq": 1,
-            "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
-            "scope": {"scope": "session", "trust": "in", "channel": "session"},
-            "target": {"kind": "none"},
-            "reason": "uncovered operation",
-            "future_field": []
+        let denied: DeniedOperationsRecord = serde_json::from_value(json!({
+            "version": 1,
+            "future_field": 0,
+            "denied": [{
+                "seq": 1,
+                "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
+                "scope": {"scope": "session", "trust": "in", "channel": "session"},
+                "target": {"kind": "none"},
+                "reason": "uncovered operation",
+                "future_field": []
+            }]
         }))
         .unwrap();
-        assert_eq!(denied.target, ObservedTarget::None);
+        assert_eq!(denied.denied[0].target, ObservedTarget::None);
     }
 
     #[test]

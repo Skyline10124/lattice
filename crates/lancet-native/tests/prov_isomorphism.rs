@@ -150,13 +150,16 @@ fn component_turn_projection_separates_admission_from_effects() {
                     "context_measure": 18
                 }]
             },
-            "denied_operations": [{
-                "seq": 0,
-                "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
-                "scope": {"scope": "session", "trust": "in", "channel": "session"},
-                "target": {"kind": "session", "turn_id": "turn-component"},
-                "reason": "cell mutate:none:session is not covered by an admitted capability"
-            }],
+            "denied_operations": {
+                "version": 1,
+                "denied": [{
+                    "seq": 0,
+                    "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
+                    "scope": {"scope": "session", "trust": "in", "channel": "session"},
+                    "target": {"kind": "session", "turn_id": "turn-component"},
+                    "reason": "cell mutate:none:session is not covered by an admitted capability"
+                }]
+            },
             "component_cells": ["alloc:none:session:in"]
         }"#,
     );
@@ -178,7 +181,7 @@ fn component_turn_projection_separates_admission_from_effects() {
         serde_json::json!("alloc")
     );
     assert_eq!(
-        attributes["denied_operations"][0]["cell"]["ctx_op"],
+        attributes["denied_operations"]["denied"][0]["cell"]["ctx_op"],
         serde_json::json!("mutate")
     );
     assert_projection_idempotent(&rows);

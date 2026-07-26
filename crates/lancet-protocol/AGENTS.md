@@ -18,8 +18,9 @@ types.
 - `src/cell.rs` owns the ADR 0004 Cell effect core (`CtxOp`/`ExtImpact`/`Trust`/
   `ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`) + trust-free CellRef layering.
 - `src/evidence.rs` owns the #28 admission/effect evidence vocabulary
-  (`AdmissionEvidence`, `ObservedEffect`(`sRecord`), `DeniedOperation`,
-  `ObservedScope`/`ObservedTarget`, `CapabilityAdmissionPolicy`).
+  (`AdmissionEvidence`, `ObservedEffect`(`sRecord`), `DeniedOperation`(`sRecord`),
+  `ObservedScope`/`ObservedTarget`, `CapabilityAdmissionPolicy`). Every
+  persisted root carries a `version` a reader checks before interpreting it.
 - `src/canonical.rs` owns `canonical_json` — the single canonical-bytes writer
   behind context measures and v2 attestation statements.
 - `src/capability.rs` owns required-capability patterns and resolution errors.

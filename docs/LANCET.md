@@ -222,9 +222,10 @@ Transport finalize merges catalog `required_capability` and effect-ledger `obser
 
 Component Tool calls record why the call was authorized apart from what it did:
 `admission_evidence` holds the approved/denied/boundary-excluded capability
-names, `observed_effects` a versioned seq-ordered array of actual
-Cell + `ObservedScope` + concrete target entries, and `denied_operations` the
-per-operation refusals. `component_cells` remains the 4-segment query key and is
+names, `observed_effects` the actual Cell + `ObservedScope` + concrete target
+entries, and `denied_operations` the per-operation refusals. All three are
+versioned objects with seq-ordered inner arrays, so a reader checks `version`
+before interpreting any of them. `component_cells` remains the 4-segment query key and is
 derived from the effect ledger, so a multi-effect call cannot disagree with
 itself. Operator audit APIs and `replay_audit` project all three into PROV
 activity attributes.

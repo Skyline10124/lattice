@@ -342,7 +342,7 @@ async fn handle_request(
         &ComponentCallEvidence {
             admission: admission.as_ref(),
             effects: admission.is_some().then_some(&cell_effects),
-            denied: &denied_operations,
+            denied: admission.is_some().then_some(&denied_operations),
         },
     );
 

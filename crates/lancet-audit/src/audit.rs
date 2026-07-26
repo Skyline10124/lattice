@@ -6,7 +6,8 @@
 use lancet_catalog::{RequiredCapability, catalog};
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::evidence::{
-    AdmissionEvidence, DeniedOperation, ObservedEffect, ObservedEffectsRecord,
+    AdmissionEvidence, DeniedOperation, DeniedOperationsRecord, ObservedEffect,
+    ObservedEffectsRecord,
 };
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
@@ -298,14 +299,15 @@ fn required_capability_for_method(method: &str) -> Option<RequiredCapability> {
 pub struct ComponentCallEvidence<'a> {
     pub admission: Option<&'a AdmissionEvidence>,
     pub effects: Option<&'a ObservedEffectsRecord>,
-    pub denied: &'a [DeniedOperation],
+    pub denied: Option<&'a DeniedOperationsRecord>,
 }
 
 /// Merge transport and catalog summary keys into metadata JSON only.
 ///
-/// Component evidence lands under three keys: `admission_evidence` and
-/// `observed_effects` (versioned objects) plus `denied_operations`. The
-/// arrays are written in `seq` order regardless of producer ordering, and
+/// Component evidence lands under three keys — `admission_evidence`,
+/// `observed_effects`, and `denied_operations` — each a versioned object a
+/// reader gates on before interpreting. The inner arrays are written in
+/// `seq` order regardless of producer ordering, and
 /// `observed_capabilities` is ordered by label, so two runs of the same call
 /// produce identical bytes.
 ///
@@ -374,10 +376,13 @@ pub fn merge_finalize_metadata(
         }
     }
 
-    if !component.denied.is_empty() {
-        let mut denied: Vec<DeniedOperation> = component.denied.to_vec();
+    if let Some(record) = component.denied.filter(|record| !record.denied.is_empty()) {
+        let mut denied: Vec<DeniedOperation> = record.denied.clone();
         denied.sort_by_key(|operation| operation.seq);
-        if let Ok(value) = serde_json::to_value(&denied) {
+        if let Ok(value) = serde_json::to_value(DeniedOperationsRecord {
+            version: record.version,
+            denied,
+        }) {
             obj_map.insert("denied_operations".into(), value);
         }
     }

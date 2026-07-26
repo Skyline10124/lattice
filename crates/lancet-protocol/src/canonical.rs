@@ -10,6 +10,14 @@
 //! never a canonicalization guarantee. Array order is data and is preserved.
 //! No whitespace is emitted; scalars use serde_json's own formatting so
 //! number rendering matches the rest of the wire surface.
+//!
+//! The workspace builds serde_json without `preserve_order`, so `Map` is a
+//! `BTreeMap` and no `Value` can present unsorted entries: the sort is
+//! forward defense against a future feature unification and is **not
+//! observable through `canonical_json` today**. That is why [`write_object`]
+//! takes an entry sequence rather than a `Map` — it is the one seam where
+//! the sort can be driven, and `object_entries_are_sorted_by_the_writer`
+//! is what keeps it alive.
 
 use serde_json::Value;
 
@@ -22,21 +30,12 @@ pub fn canonical_json(value: &Value) -> String {
 
 fn write_value(value: &Value, out: &mut String) {
     match value {
-        Value::Object(map) => {
-            // Collect and sort: never trust the map's own iteration order.
-            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
-            keys.sort_unstable();
-            out.push('{');
-            for (index, key) in keys.iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                write_string(key, out);
-                out.push(':');
-                write_value(&map[*key], out);
-            }
-            out.push('}');
-        }
+        Value::Object(map) => write_object(
+            map.iter()
+                .map(|(key, value)| (key.as_str(), value))
+                .collect(),
+            out,
+        ),
         Value::Array(items) => {
             out.push('[');
             for (index, item) in items.iter().enumerate() {
@@ -52,6 +51,22 @@ fn write_value(value: &Value, out: &mut String) {
     }
 }
 
+/// Write one object from its entries, sorted by key. Takes a sequence rather
+/// than a `Map` so the sort is exercisable without a `preserve_order` build.
+fn write_object(mut entries: Vec<(&str, &Value)>, out: &mut String) {
+    entries.sort_unstable_by_key(|(key, _)| *key);
+    out.push('{');
+    for (index, (key, value)) in entries.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        write_string(key, out);
+        out.push(':');
+        write_value(value, out);
+    }
+    out.push('}');
+}
+
 fn write_string(value: &str, out: &mut String) {
     // Escaping stays with serde_json; a hand-rolled escaper would drift from
     // the format used for every other string on this surface.
@@ -62,6 +77,19 @@ fn write_string(value: &str, out: &mut String) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The only non-tautological guard on the sort. `serde_json::Map` is a
+    /// `BTreeMap` in this workspace, so every `Value`-level order assertion
+    /// below would pass with the sort deleted; this one drives the writer's
+    /// entry sequence directly, which is what a `preserve_order` build would
+    /// hand it.
+    #[test]
+    fn object_entries_are_sorted_by_the_writer() {
+        let (one, two, three) = (json!(1), json!(2), json!({"z": 0, "a": 1}));
+        let mut out = String::new();
+        write_object(vec![("b", &one), ("", &three), ("a", &two)], &mut out);
+        assert_eq!(out, r#"{"":{"a":1,"z":0},"a":2,"b":1}"#);
+    }
 
     #[test]
     fn key_order_does_not_affect_output() {

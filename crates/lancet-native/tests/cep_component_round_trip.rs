@@ -196,7 +196,11 @@ async fn partial_admission_denies_only_the_uncovered_operation() {
         metadata["component_cells"],
         serde_json::json!(["alloc:none:session:in"])
     );
-    let denied = metadata["denied_operations"]
+    assert_eq!(
+        metadata["denied_operations"]["version"],
+        serde_json::json!(1)
+    );
+    let denied = metadata["denied_operations"]["denied"]
         .as_array()
         .expect("denied operations array");
     assert_eq!(denied.len(), 1);
@@ -356,7 +360,7 @@ async fn real_denial_reaches_prov_attributes_and_the_v2_predicate() {
         .expect("audit query");
 
     let attributes = &project_rows(&rows).activities[0].attributes;
-    let denied = attributes["denied_operations"]
+    let denied = attributes["denied_operations"]["denied"]
         .as_array()
         .expect("the denial reaches the PROV activity attributes");
     assert_eq!(denied.len(), 1);
@@ -374,7 +378,7 @@ async fn real_denial_reaches_prov_attributes_and_the_v2_predicate() {
         CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2
     );
     let evidence = &statement.predicate["evidence"][0];
-    assert_eq!(evidence["denied_operations"][0]["reason"], reason);
+    assert_eq!(evidence["denied_operations"]["denied"][0]["reason"], reason);
     assert_eq!(
         evidence["admission"]["denied_capabilities"],
         serde_json::json!(["session.events"]),

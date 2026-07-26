@@ -139,7 +139,7 @@ async fn call_records_operation_and_result_evidence() {
         admission.approved_capabilities,
         vec!["session.events".to_string(), "session.result".to_string()]
     );
-    assert!(denied.is_empty(), "nothing was refused: {denied:?}");
+    assert!(denied.denied.is_empty(), "nothing was refused: {denied:?}");
 
     // C8: one call, two effects, kept in `seq` order and never collapsed.
     assert_eq!(
@@ -237,13 +237,15 @@ async fn partial_deny_refuses_the_operation_but_not_the_call() {
     // Only the result effect happened; the operation is a denial record.
     assert_eq!(effects.effects.len(), 1);
     assert_eq!(effects.effects[0].source, EffectSource::Result);
-    assert_eq!(denied.len(), 1);
-    assert_eq!(denied[0].seq, 0);
-    assert_eq!(denied[0].cell.reference(), "mutate:none:session");
+    assert_eq!(denied.denied.len(), 1);
+    assert_eq!(denied.denied[0].seq, 0);
+    assert_eq!(denied.denied[0].cell.reference(), "mutate:none:session");
     assert!(
-        denied[0].reason.contains("not covered by an admitted"),
+        denied.denied[0]
+            .reason
+            .contains("not covered by an admitted"),
         "{}",
-        denied[0].reason
+        denied.denied[0].reason
     );
     // C8: `component_cells` derives from effects only — a denial contributes
     // no cell key.
@@ -270,7 +272,7 @@ async fn result_cell_outside_the_admitted_set_fails_closed() {
     // The operation was admitted, so it really happened and is recorded.
     assert!(rx.try_recv().is_ok(), "the event was emitted");
     let (_admission, effects, denied) = evidence.snapshot();
-    assert!(denied.is_empty(), "{denied:?}");
+    assert!(denied.denied.is_empty(), "{denied:?}");
     assert_eq!(effects.effects.len(), 1, "{:?}", effects.effects);
     assert_eq!(effects.effects[0].source, EffectSource::Operation);
     assert_eq!(effects.effects[0].cell.reference(), "mutate:none:session");

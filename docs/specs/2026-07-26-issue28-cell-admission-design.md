@@ -87,6 +87,9 @@ pub struct ObservedEffectsRecord { pub version: u32 /* 1 */, pub effects: Vec<Ob
 pub struct DeniedOperation { pub seq: u32, pub cell: Cell, pub scope: ObservedScope,
                              pub target: ObservedTarget, pub reason: String }
 
+/// Versioned canonical container for denials, mirroring ObservedEffectsRecord.
+pub struct DeniedOperationsRecord { pub version: u32 /* 1 */, pub denied: Vec<DeniedOperation> }
+
 /// Why the call was authorized (B5/A2/B6).
 pub struct AdmissionEvidence {
     pub version: u32,                    // 1
@@ -114,8 +117,11 @@ in). Implement via explicit `Default`, not derived.
 `metadata_json` and attestation predicates, so they follow the persisted-root
 convention from `provenance.rs` — **no `deny_unknown_fields`** on
 `ObservedTarget`/`ObservedEffect`/`ObservedEffectsRecord`/`AdmissionEvidence`/
-`DeniedOperation` (forward-compat readers), with the `version` field checked
-before interpreting contents.
+`DeniedOperation`/`DeniedOperationsRecord` (forward-compat readers), with the
+`version` field checked before interpreting contents. Every **persisted root**
+is one of the three versioned records — a bare `Vec<DeniedOperation>` is not a
+readable root, which is why denials get their own container rather than being
+persisted as an array.
 
 Also in protocol:
 - `DescriptorError::InvalidCapabilityName` + grammar check in `validate()` (D7).
@@ -129,7 +135,11 @@ Also in protocol:
   internals or the absence of `preserve_order` — no whitespace, serde_json
   number formatting) in a new `src/canonical.rs` — the single implementation
   used by the context measure (D12) and v2 attestation statement bytes (D8).
-  Property-test: key-order invariance and array-order stability.
+  The explicit sort is **forward defense**, not observable behaviour: without
+  `preserve_order` a `serde_json::Map` is a `BTreeMap`, so every order-invariance
+  assertion made through a `Value` is tautological. The writer therefore takes
+  an entry sequence, which is the one seam a test can hand unsorted entries;
+  array-order stability and the golden form are pinned through `Value`.
 
 ## 4. Admission algorithm (`lancet-runtime/src/admission.rs`) — B2, B4, C2, C3
 
@@ -213,7 +223,7 @@ struct EvidenceInner { seq: u32, admission: Option<AdmissionEvidence>,
                        effects: Vec<ObservedEffect>, denied: Vec<DeniedOperation> }
 ```
 
-`snapshot()` returns `(AdmissionEvidence, ObservedEffectsRecord, Vec<DeniedOperation>)`;
+`snapshot()` returns `(AdmissionEvidence, ObservedEffectsRecord, DeniedOperationsRecord)`;
 `snapshot_keys()` (4-segment audit keys) remains, derived from `effects`, so the
 existing `component_cells` audit key keeps working.
 
@@ -235,8 +245,8 @@ existing `component_cells` audit key keeps working.
    an old-shape DB (e.g. missing a NOT NULL column) and asserts the actionable
    error. No history is ever silently dropped.
 2. **Structured evidence**: `merge_finalize_metadata` gains
-   `admission_evidence` (versioned object) and `observed_effects` (versioned
-   canonical array, seq-ordered) and `denied_operations`; `component_cells`
+   `admission_evidence`, `observed_effects`, and `denied_operations` — three
+   versioned objects with seq-ordered inner arrays; `component_cells`
    stays (derived) for query compatibility; `observed_capabilities` ordering
    becomes deterministic (BTreeSet).
 3. **Attestation v2 (C4/D8)**: v2 predicate carries `admission` ("why") and
@@ -333,6 +343,9 @@ max_boundary = "in"          # default "in"; "ex" opts into external-world capab
 | C6 multi-capability tool + multi-effect call: noop emits event + result → 2 effects in one call, ordered by seq | round-trip tests |
 | C6 unknown profile capability: deny typo → startup error | policy validation tests |
 | B11 e2e: noop allow / deny(result cap) / partial-deny(events cap) with audit + provenance + attestation assertions | lancet-native `cep_component_round_trip.rs`, lattice-api |
+| B8/B9/A4 isolation, both directions: every `ImpactKind` denied by `[lancet.effects]` refuses a native method and never a Component call in the same run; a no-tool-enabled admission policy refuses the Component call and never a native method | lancet-native `cep_component_round_trip.rs` |
+| B2/B8 profile chain: a real `agent.toml` `[lancet.capabilities]` deny entry reaches admission through `build_production_turn_deps` (C2 startup error on the empty production catalog) | lattice-api `turn/cep.rs` |
+| canonical-JSON key sort driven through the writer's entry sequence — the only non-tautological guard while `preserve_order` is off | lancet-protocol `canonical.rs` |
 
 Pinned tests that consciously change (complete list — anything else breaking
 is a regression):
