@@ -44,6 +44,15 @@ but delegates concrete composition to `lancet-runtime`.
 
 ## Recent Issues
 
+- ADDED #63: `LancetRuntimeConfig.workspace_history` selects the private
+  mutation-history backing. `LancetRuntime::build` opens it before the server
+  starts, threads it through `ServerRunConfig`, and exposes it via
+  `workspace_history()` / `LancetRuntimeParts` so a host can read the object
+  id a Turn arrived at. `project_state_dir{,_in}` is the shared per-project
+  private state directory; `workspace_history_backing{,_in}` resolves
+  `<state>/lattice/projects/<key>/workspace-history.git` next to the audit
+  database. `WorkspaceHistoryBacking::Disabled` is the default so an embedder
+  never gets durable history by accident.
 - ADDED #5 slice D: `LancetRuntime::build` composes `ComponentRuntime::from_embedded()`
   once and threads the same `Arc<ComponentRuntime>` into `ServerRunConfig.components`
   (D.3 dispatch) and into the LLM tool definitions projection (D.4).
@@ -61,8 +70,6 @@ but delegates concrete composition to `lancet-runtime`.
   into this crate; turn runtime and CLI `lancet` smoke route through
   `LancetServer`/`LancetRuntime`. CLI `lattice audit` uses `query_audit` /
   `tail_audit` against the project audit store (no CEP server).
-- FIXED issue #11: `observe.audit` / `observe.audit_replay` removed from the
-  agent catalog; operator reads live in `src/audit.rs` only.
 - DOWNGRADED L-11-01/L-11-02 (ACCEPTED RESIDUAL, neither optimally handled):
   `tail_audit` yields between batches via `tokio::task::yield_now().await` so
   drop-cancellation takes effect at batch boundaries, but there is no dedicated
@@ -74,12 +81,6 @@ but delegates concrete composition to `lancet-runtime`.
   `CepAuditStore` API, so the store concurrency boundary is identical. Both
   contracts are documented in `src/audit.rs`; escalation conditions in root
   `FINDINGS.md`.
-- FIXED M-24-04: `ToolExposure` and `BaseAuthorityPlan` now live behind the
-  `lancet-cep` facade. `MethodDescriptor::base_authority` supplies method-local
-  requirements, this crate no longer maps method names directly to base envelope
-  grants, and projection wrapper shims were removed.
-- FIXED L-llm-coupling: shared URL/DNS safety primitives moved to the neutral
-  `net-guard` leaf; the LANCET dependency graph has no LATTICE runtime crates.
 
 ## Next Actions
 
@@ -89,6 +90,8 @@ but delegates concrete composition to `lancet-runtime`.
   from `lib.rs`; do not add pass-through functions for lower-crate APIs.
 - Keep the public facade stable while #12 replaces hand-wired native/CEP/dispatch
   composition with `lancet-runtime`; do not preserve both paths afterward.
+- Keep durable per-project state under `project_state_dir`; a new store goes
+  beside the audit DB and the workspace history, never in the project root.
 
 ## Record Maintenance
 

@@ -18,11 +18,12 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   patch write limits.
-- `src/workspace/` owns the one concrete `LocalWorkspace` (#37/#38/#39): secure
-  per-segment path resolution, Policy-Visible Workspace filtering (gix Git
-  facts + authority read policy), bounded read/list/grep/find, content hashing
-  (Local Revision), no-replace create, atomic edit install, filesystem error
-  normalization, and the Local operation vocabulary (`WorkspacePath`,
+- `src/workspace/` owns the one concrete `LocalWorkspace` (#37/#38/#39/#63):
+  secure per-segment path resolution, Policy-Visible Workspace filtering (gix
+  Git facts + authority read policy), bounded read/list/grep/find, content
+  hashing (Local Revision), no-replace create, atomic edit install, private
+  mutation-history recording (`with_history` / `record_mutation`), filesystem
+  error normalization, and the Local operation vocabulary (`WorkspacePath`,
   `PathFacts`, `PathIntent`, requests). ADR 0004 moves this into
   `lancet-runtime`.
 - `src/executor/` owns crate-private web/render helpers and output limits.
@@ -47,6 +48,15 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Recent Issues
 
+- ADDED #63: every successfully installed Atomic Local Mutation is appended to
+  the run's private `lancet_runtime::WorkspaceHistory`. `ServerRunConfig`
+  carries the history, `run_native` attaches it to the one `LocalWorkspace`,
+  and `mutate.create`/`mutate.edit` call `record_mutation` only *after* the
+  install returned success — so precondition, replan, guard, and policy
+  failures record nothing and never move the current history ref. The
+  recorded commit ids land in durable audit metadata under
+  `workspace_history`. A history failure after a successful install is
+  recorded as evidence and never triggers a compensating write.
 - FIXED #48: call-scoped cancellation is audited from the structured code,
   not a message string — `finalize_audit_for_dispatch` records
   `AuditOutcome::Cancelled` on `CepErrorCode::CallCancelled` (the old
@@ -70,19 +80,11 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   descendant are navigable but not emitted by list/find; successful
   read/list/grep/find audit metadata now records content-free visibility rule
   categories without hidden paths, content, counts, or hashes.
-- FIXED M-24-02: command workspace snapshots and artifact lower rechecks run in
-  the blocking pool with entry/depth limits.
-- FIXED M-24-03: `ToolLimits` was removed; shell timeouts are explicit and
-  patch write size is owned by `PatchApplyLimits`.
-- FIXED L-30/L-31: cleanup metadata records all cleanup failures, and positive
-  commit-baseline hunk summaries are recorded when evidence exists.
 - PARTIAL M-05: web fetch rebinding defense uses request-time pinned IP plus a
   maintained rebinding suffix denylist.
 - WATCH: current schemas must continue to come from `lancet-cep` projection until
   generated descriptors replace it; never hand-write a native or Component
   compatibility schema.
-- CLOSED 31-CR-01/WR-02: artifact commit delete paths reject symlink parents,
-  and commit-baseline anchor files are read from the captured lower baseline.
 
 ## Next Actions
 
@@ -92,6 +94,9 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   CEP mutation policy rather than reviving generic native tool limits.
 - Keep web fetch security centered on request-time DNS pinning; treat denylist
   additions as defense in depth.
+- Keep mutation-history recording at the handler level, after a successful
+  install: a rollback inside the patch engine must never produce a history
+  commit. #64 consumes this history; do not add a second recording site.
 
 ## Record Maintenance
 

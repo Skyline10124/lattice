@@ -39,6 +39,14 @@ agent loop over `lancet-api`'s CEP runtime.
 
 ## Recent Issues
 
+- ADDED #63: `build_production_turn_deps` resolves the private workspace
+  history alongside the external audit store — an ephemeral (in-memory audit)
+  run records no durable history, so it never touches the user's state
+  directory. The live turn path reads `WorkspaceHistory::current` after the
+  server has drained and passes it to `build_commit_input`, which now requires
+  `workspace_history_oid` explicitly. `SessionApi::get_turn_commit` resolves a
+  Turn's history object id by commit id, so it is unaffected by branch
+  movement or reopen.
 - ADDED #5 slice D: `CepExecutorAdapter` now takes `definitions: &[ToolDefinition]`
   + `enabled_names` instead of deriving the available set from `catalog()`.
   The hardcoded five-arm `dispatch_typed`/`call_typed`/`schema_mismatch_for_method`
@@ -46,20 +54,12 @@ agent loop over `lancet-api`'s CEP runtime.
   `CepClient::call_raw`, so Component Tools are no longer blocked by central
   catalog membership. Params/result validation is done server-side (native
   typed registry or generated descriptor validators).
-- FIXED M-24-04: `lancet-cep` now separates `ToolExposure` from
-  `BaseAuthorityPlan`, and catalog descriptors declare method-local base
-  authority requirements. This crate converts CEP tool definitions to provider
-  tool definitions only at the LATTICE↔LANCET seam.
 - FIXED M-24-05: turn/LANCET runtime composition extracted into the new
   `lancet-api` crate. `cep.rs` is now only the LATTICE↔LANCET seam (profile→policy
   translation, `CepExecutorAdapter`, event mapping); `enabled_tools.rs` moved to
   `lancet-api`.
 - FIXED #24: public `TurnStarted` includes `turn_id` for audit replay, and
   `[llm].timeout_secs` lowers to the agent turn deadline in `turn/mapping.rs`.
-- FIXED H-06: `stream_turn` now streams live instead of replaying buffered
-  events after full turn completion.
-- FIXED M-19b: observer backpressure no longer blocks live task drain/commit.
-- FIXED M-15: session error mapping preserves structured error categories.
 - FIXED: `SessionApi` now resolves abbreviated session ID prefixes via
   `resolve_id()` — exact match first, then prefix scan over `store.list()`.
   Ambiguous prefixes list up to 5 candidate IDs and suggest more characters.
@@ -77,6 +77,9 @@ agent loop over `lancet-api`'s CEP runtime.
 - Keep `run_turn` implemented through `stream_turn` and `RunTurnCollector`.
 - Add focused tests whenever public `TurnEvent` mapping or commit semantics
   change.
+- Read the workspace-history identity after the LANCET server has drained,
+  and keep `build_commit_input`'s parameters explicit so a new call site
+  cannot silently commit a Turn with no history identity.
 
 ## Record Maintenance
 

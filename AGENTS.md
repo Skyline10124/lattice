@@ -130,6 +130,10 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
   user's project `.git`; restore Git tree state and move workspace/session refs.
   Keep prior object IDs reachable through internal refs without compensation
   commits or additional user-facing command surface.
+- That history landed in GitHub #63: `lancet_runtime::WorkspaceHistory` records
+  every successfully installed Atomic Local Mutation, and a completed
+  `TurnCommit` carries the `workspace_history_oid` the Turn arrived at. #64
+  builds Rewind on top of it; do not add a second mutation-history store.
 
 ## Turn Execution
 
@@ -148,8 +152,10 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
    remain authoritative.
 6. Turn outcomes are persisted as commits in the session graph.
 
-Session commits never imply a Local Workspace snapshot; only the explicit
-gix-backed `/rewind` path (GitHub #63/#64) restores recorded LATTICE mutations.
+Session commits never imply a Local Workspace snapshot. GitHub #63 records each
+successfully installed Atomic Local Mutation in the private gix history and
+stamps the resulting object id on the Turn commit; only the explicit `/rewind`
+path (GitHub #64) restores from it.
 
 ## Review Records
 

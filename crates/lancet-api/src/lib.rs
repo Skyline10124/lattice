@@ -51,7 +51,8 @@ pub use audit::{
 };
 pub use config::{
     AuditBacking, ExternalAuditPathError, LancetRuntimeConfig, audit_db_path_for_project,
-    audit_db_path_for_project_in, audit_state_root, project_storage_key,
+    audit_db_path_for_project_in, audit_state_root, project_state_dir, project_state_dir_in,
+    project_storage_key, workspace_history_backing, workspace_history_backing_in,
 };
 pub use doctor::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 pub use error::{LancetError, LancetResult};
@@ -74,3 +75,6 @@ pub use lancet_native::{
     register_production_method_registry,
 };
 pub use lancet_protocol::CepError;
+pub use lancet_runtime::{
+    HistorySnapshot, WorkspaceHistory, WorkspaceHistoryBacking, WorkspaceHistoryError,
+};

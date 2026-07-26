@@ -36,6 +36,7 @@ fn git_store_turn_commit_creates_git_history() {
     // Build a minimal first turn (no parents).
     let messages = vec![user_msg("Hello, git history!"), assistant_msg("Hi there.")];
     let input = TurnCommitInput {
+        workspace_history_oid: None,
         session_id: session_id.clone(),
         parent_ids: vec![],
         messages,

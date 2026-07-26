@@ -157,6 +157,17 @@ gix objects retain file history and mutable refs identify the selected state.
   the concrete Local Workspace module. `lattice-api` coordinates explicit
   `/rewind` with `lattice-session`; neither layer writes the user's project
   `.git`.
+
+  > **Ownership amended by GitHub #63 (2026-07-26).** The private gix
+  > workspace-history implementation landed in `lancet-runtime`
+  > (`lancet_runtime::WorkspaceHistory`), not `lancet-native`, following ADR
+  > 0004's placement of the concrete host responsibilities and the crate-role
+  > table in the root `AGENTS.md`. `lancet-native` still owns *when* a mutation
+  > is recorded: its `LocalWorkspace` holds the history handle and its mutation
+  > handlers record only after a successful atomic install, so installation and
+  > recording remain behind one concrete host module as this ADR requires.
+  > Everything else in this bullet is unchanged — no layer writes the user's
+  > project `.git`.
 - `lattice-workspace`, `WorkspaceExecutionBackend`, `ExecutionBackend`,
   `ExecutionRouting`, `UpperContext`, and snapshot-journal coordination are
   migration residue and are removed rather than retained as compatibility

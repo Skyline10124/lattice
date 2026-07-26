@@ -2,6 +2,37 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #63: persist successful Atomic Local Mutations to a private gix history — 2026-07-26
+
+Severity: feature / durability.
+
+**Problem:** A successfully installed Atomic Local Mutation left no durable record outside the Local Workspace. The Session History records Turn outcomes but never the workspace state a Turn arrived at, so an explicit Rewind (#64) had nothing to restore from, and a mutation that survived a later Tool/model/Turn failure was invisible after the fact. AGENTS.md already reserved this ground for `lancet-runtime` ("private gix history"), but nothing implemented it.
+
+**Fix:**
+- New `lancet-runtime/src/history.rs`: `WorkspaceHistory` over a private **bare** `gix` repository living outside the Local Workspace and outside the user's project `.git` (no Git subprocess, no `git2`). Blobs/trees/commits express before/after state for exactly the paths LATTICE has mutated — not a projection, checkpoint, or whole-project snapshot. `refs/lattice/workspace-history/current` tracks the newest recorded mutation; `refs/lattice/workspace-history/records/<oid>` pins every recorded commit so prior object ids stay reachable with no time-based expiry. A first `mutate.edit` on a path LATTICE has not touched writes a preceding `baseline` commit so the mutation commit's parent tree really is the before state. Recording is serialized, so multiple mutations in one Turn keep real execution order and parent relationships.
+- `lancet-native`: `LocalWorkspace::with_history` attaches the run's history to the one concrete host module; `record_mutation` appends. `mutate.create`/`mutate.edit` record only **after** the atomic install returned success, so Mutation Precondition failures, `ReplanRequired`, Guard/policy/effect denials, and pre-install errors record nothing and never move the current ref. Recorded commit ids land in durable audit metadata under `workspace_history`; a history failure after a successful install is recorded as evidence and never triggers a compensating write.
+- `lancet-api`: `LancetRuntimeConfig.workspace_history` + `WorkspaceHistoryBacking`; `project_state_dir{,_in}` and `workspace_history_backing{,_in}` resolve `<state>/lattice/projects/<key>/workspace-history.git` next to the CEP audit database. `LancetRuntime::workspace_history()` exposes the handle.
+- `lattice-api`: the live turn path reads `WorkspaceHistory::current` after the server drains and passes it into `build_commit_input`, which now requires the value explicitly. A Turn with no mutation records the inherited current identity. `SessionApi::get_turn_commit` resolves a Turn's history object id by commit id.
+- `lattice-session`: `workspace_history_oid` on `TurnCommitInput`/`TurnCommit`, persisted in the git session manifest (`skip_serializing_if`, so history-less turns produce byte-identical manifests). Manifest-only — no canonical seed or turn-id derivation changed, so no existing commit id moves.
+
+**Adversarial-review corrections (same patch).** A 12-agent adversarial pass over the ten acceptance criteria found two real defects, both fixed and covered before landing:
+- *Before-state loss on workspace drift.* The baseline decision tested only whether the path was **present** in the parent tree. When the Local Workspace drifted between two LATTICE mutations of one path (the user edits the file in their editor, a `git checkout` swaps branch contents, an external delete precedes a re-create), the mutation commit's parent tree held LATTICE's stale after-state and the genuine pre-mutation bytes were dropped even though the handler had supplied them — a Rewind built on that history would have overwritten the user's own edit or resurrected a deleted file. The recorder now compares the parent tree's **bytes** against the before state the installer observed and writes a baseline whenever they differ, including removing the path when the real before state was absence.
+- *Lost mutations under concurrent recorders.* Two LATTICE runtimes sharing one project (two processes, or two runtimes in one process) each hold their own handle and their own mutex; a compare-and-set alone dropped roughly a tenth of successfully installed mutations from the recorded chain, reported only as `workspace_history.recorded=false` audit metadata. Recording now also takes an advisory `flock` on a lock file inside the private repository (kernel-released on process death, so a crash cannot wedge it), and a losing compare-and-set rebuilds on the winner's tip instead of failing. Proven by a 4-handle × 12-mutation contention test, stable over repeated runs.
+- Also from the review: `open_or_init_bare` now tolerates a concurrent first-open race instead of aborting the turn; a history-recording failure after a successful install is logged via `tracing::error!` as well as recorded in audit metadata; and the `.git`-unchanged test now asserts that recording actually happened, so it can no longer pass with the feature switched off.
+
+**Verification:**
+- `cargo fmt --all --check` — passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed.
+- `cargo xtask harness-boundary` / `lancet-boundary` / `tool-codegen --check` — passed.
+- `cargo test -p lancet-runtime --lib history::` — 13 passed (adds external drift, create-after-external-delete, single-commit common case, 4-handle concurrency).
+- `cargo test -p lattice-api --test workspace_history_acceptance` — 13 passed (create, edit, first edit of a pre-existing file, external drift, multi-mutation Turn, no-mutation Turn, pre-install failure at both the runtime and Turn layer, post-install Turn failure, session reopen, branch movement, object reachability, project `.git` unchanged, no new Agent-visible method).
+- `LATTICE_BIN=target/debug/lattice cargo test -p lattice-system-harness` — 55+ scenarios passed, including the new Layer-3 `direct_workspace_history` (a real turn through the built binary records into the private history under an isolated HOME; a pre-install failure records nothing).
+- Per-crate (the `cargo xtask ci` shape): all 19 crates green — `lancet-runtime` 51, `lancet-native` 142, `lancet-api` 18, `lattice-session` 54, `lattice-api` 149, plus the untouched crates; 1231 tests, 0 failures.
+- Two pre-existing test-isolation races were observed while verifying under `cargo test --workspace` on a loaded dev machine and are recorded as `FINDINGS.md` `L-63-01`; both files are untouched by this change and neither reproduces per crate.
+
+**Changed files:**
+`crates/lancet-runtime/{Cargo.toml,src/lib.rs,src/history.rs}`; `crates/lancet-native/src/{workspace/local.rs,server/transport.rs,handlers/mutation.rs}`; `crates/lancet-api/src/{config.rs,runtime.rs,lib.rs}`; `crates/lattice-api/src/{session.rs,turn/cep.rs,turn/live.rs,turn/execute.rs}` + `tests/workspace_history_acceptance.rs`; `crates/lattice-session/src/{graph.rs,git_graph/helpers.rs,git_graph/commit.rs}`; `crates/lattice-system-harness/tests/direct_workspace_history.rs`; root `AGENTS.md` + per-crate `AGENTS.md`; `CONTEXT.md` (Workspace History / Workspace-History Object ID); `docs/adr/0003-...md` (ownership amendment note); `FINDINGS.md` (M-REWIND-01 → PARTIAL + residuals); `Cargo.lock`; `FIX.md`.
+
 ## GitHub #46 residual finalization: fetch capability pre-outbound + scenario tighten — 2026-07-24
 
 Severity: test refactor / product fail-closed / review closeout.

@@ -28,6 +28,17 @@ for the D.3 dispatch split and D.4 LLM projection.
   (the epoch ticker is lazily spawned via `OnceLock`); an
   `Arc<ComponentRuntime>` can be shared across the projection (D.4) and
   server dispatch (D.3) paths.
+- `src/history.rs` owns `WorkspaceHistory`, `WorkspaceHistoryBacking`,
+  `MutationRecord`, `RecordedMutation`, and `HistorySnapshot` — the private
+  durable history of successfully installed Atomic Local Mutations (#63). A
+  private **bare** `gix` repository outside the Local Workspace and outside
+  the user's project `.git`; Git blobs/trees/commits express before/after
+  state, `refs/lattice/workspace-history/current` tracks the newest recorded
+  mutation, and `refs/lattice/workspace-history/records/<oid>` pins every
+  recorded commit so prior object ids stay reachable without time-based
+  expiry. Recording is serialized behind a mutex so concurrent mutations
+  chain in real execution order. Never a Git subprocess, never `git2`, never
+  a parallel receipt/SQLite store.
 - `src/bindings.rs` owns the `wasmtime::component::bindgen!` expansion for
   the Tool Host WIT world (`lattice:tool-host@0.1.0`).
 - `src/host.rs` implements the `host-control` interface on `StoreState`
@@ -55,6 +66,9 @@ for the D.3 dispatch split and D.4 LLM projection.
   The dependency graph has no cycle.
 - No `wasmtime-wasi`/`wasi-common` dependency — no ambient WASI. Only
   versioned Tool Host WIT imports are linked.
+- `WorkspaceHistory` never touches the Local Workspace or the user's project
+  `.git`, never writes a compensation commit, and exposes no user command
+  surface. Callers record only after an install has already succeeded.
 - No runtime registration API: the catalog is immutable after `compose`.
   The public constructor (`from_embedded`) reads `inventory` + the
   generated `EXPECTED_COMPONENTS` only.
@@ -70,10 +84,21 @@ for the D.3 dispatch split and D.4 LLM projection.
 ## Verification
 
 - Local: `cargo test -p lancet-runtime`.
+- History changes: `cargo test -p lancet-runtime --lib history::` plus
+  `cargo test -p lattice-api --test workspace_history_acceptance`.
 - Clippy: `cargo clippy -p lancet-runtime --all-targets -- -D warnings`.
 - No-WASI: `cargo tree -p lancet-runtime | grep -E "wasmtime-wasi|wasi-common"`
   must be empty.
 - Protocol: `cargo test -p lancet-protocol` (Tool execution error codes).
+
+## Next Actions
+
+- `WorkspaceHistory` records; it never restores. #64 adds reverse tree
+  application and ref movement on top of it — do not add a second history
+  store or a user-facing history command.
+- Keep the baseline rule content-based: the parent tree must equal the
+  before state the installer observed, since the Local Workspace is shared
+  with the user and drifts.
 
 ## Record Maintenance
 

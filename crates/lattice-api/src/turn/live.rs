@@ -254,6 +254,7 @@ async fn run_live_turn_task(
         cep_client,
         audit,
         audit_context,
+        workspace_history,
         ..
     } = deps;
 
@@ -353,6 +354,19 @@ async fn run_live_turn_task(
     // Direct-Local mutations are immediate and are not rolled back by a
     // later Tool/model/audit failure (ADR 0003 decision 8).
 
+    // #63: the workspace-history object id this Turn arrived at, read after
+    // the server has drained so every mutation this Turn installed is already
+    // recorded. A Turn that installed nothing reads back the identity it
+    // inherited; a Turn that failed after installing still reports the
+    // mutation it installed, because the history is never rewound here.
+    let workspace_history_oid = match workspace_history.current() {
+        Ok(oid) => oid,
+        Err(err) => {
+            eprintln!("failed to read workspace history for {turn_id}: {err}");
+            None
+        }
+    };
+
     {
         let ctx = audit_context.read().await;
         if let Err(err) = store_turn_attestation(&audit, &ctx, &turn_id) {
@@ -389,6 +403,7 @@ async fn run_live_turn_task(
         &agent_result,
         outcome.disposition.clone(),
         None,
+        workspace_history_oid,
     );
 
     // 10. Commit and emit result.

@@ -34,6 +34,7 @@ fn git_store_no_remote_push_refspec_for_lattice_refs() {
 
     // Commit a turn so refs/lattice/sessions/<id>/main actually exists.
     let input = TurnCommitInput {
+        workspace_history_oid: None,
         session_id: session_id.clone(),
         parent_ids: vec![],
         messages: vec![user_msg("run"), assistant_msg("done")],

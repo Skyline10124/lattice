@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use lancet_authority::policy::default::PolicyConfig;
 use lancet_protocol::policy::CepMode;
+use lancet_runtime::WorkspaceHistoryBacking;
 use sha2::{Digest, Sha256};
 
 /// Failure resolving the external project-keyed CEP audit store path.
@@ -69,8 +70,12 @@ pub fn project_storage_key(project_root: &Path) -> Result<String, ExternalAuditP
         .collect())
 }
 
-/// External audit DB path under a caller-supplied state root (tests/embedders).
-pub fn audit_db_path_for_project_in(
+/// Per-project private state directory under a caller-supplied state root.
+///
+/// Every piece of durable LATTICE state that must live outside both the Local
+/// Workspace and the user's project `.git` — the CEP audit database and the
+/// private workspace mutation history (#63) — hangs off this one directory.
+pub fn project_state_dir_in(
     external_state_root: &Path,
     project_root: &Path,
 ) -> Result<PathBuf, ExternalAuditPathError> {
@@ -78,14 +83,48 @@ pub fn audit_db_path_for_project_in(
     Ok(external_state_root
         .join("lattice")
         .join("projects")
-        .join(key)
-        .join("cep_audit.db"))
+        .join(key))
+}
+
+/// Per-project private state directory using the platform state directory.
+pub fn project_state_dir(project_root: &Path) -> Result<PathBuf, ExternalAuditPathError> {
+    let state_root = audit_state_root().ok_or(ExternalAuditPathError::MissingStateDir)?;
+    project_state_dir_in(&state_root, project_root)
+}
+
+/// External audit DB path under a caller-supplied state root (tests/embedders).
+pub fn audit_db_path_for_project_in(
+    external_state_root: &Path,
+    project_root: &Path,
+) -> Result<PathBuf, ExternalAuditPathError> {
+    Ok(project_state_dir_in(external_state_root, project_root)?.join("cep_audit.db"))
 }
 
 /// External audit DB path using the platform state directory.
 pub fn audit_db_path_for_project(project_root: &Path) -> Result<PathBuf, ExternalAuditPathError> {
     let state_root = audit_state_root().ok_or(ExternalAuditPathError::MissingStateDir)?;
     audit_db_path_for_project_in(&state_root, project_root)
+}
+
+/// Private workspace-history repository backing under a caller-supplied state
+/// root (tests/embedders).
+pub fn workspace_history_backing_in(
+    external_state_root: &Path,
+    project_root: &Path,
+) -> Result<WorkspaceHistoryBacking, ExternalAuditPathError> {
+    Ok(WorkspaceHistoryBacking::under_project_state_dir(
+        project_state_dir_in(external_state_root, project_root)?,
+    ))
+}
+
+/// Private workspace-history repository backing under the platform state
+/// directory.
+pub fn workspace_history_backing(
+    project_root: &Path,
+) -> Result<WorkspaceHistoryBacking, ExternalAuditPathError> {
+    Ok(WorkspaceHistoryBacking::under_project_state_dir(
+        project_state_dir(project_root)?,
+    ))
 }
 
 /// Where CEP audit records are persisted for the runtime.
@@ -149,6 +188,12 @@ pub struct LancetRuntimeConfig {
     pub cep_mode: CepMode,
     /// Audit store backing.
     pub audit: AuditBacking,
+    /// Private workspace mutation history backing (#63).
+    ///
+    /// Defaults to [`WorkspaceHistoryBacking::Disabled`]; production turn
+    /// runtimes set the per-project private bare repository so every
+    /// successfully installed Atomic Local Mutation is recorded.
+    pub workspace_history: WorkspaceHistoryBacking,
     /// Model identifier recorded in the audit context.
     pub model_id: String,
     /// Runtime version string recorded in the audit context and attestations.
@@ -169,6 +214,7 @@ impl LancetRuntimeConfig {
             policy,
             cep_mode: CepMode::Enforce,
             audit: AuditBacking::InMemory,
+            workspace_history: WorkspaceHistoryBacking::Disabled,
             model_id: String::new(),
             runtime_version: String::new(),
         }

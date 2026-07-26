@@ -311,6 +311,7 @@ pub(super) fn build_manifest_from_prepared(prepared: &PreparedTurnCommit) -> Git
             .as_ref()
             .map(|u| serde_json::to_value(u).unwrap_or(serde_json::Value::Null)),
         terminal_reason: commit.terminal_reason.clone(),
+        workspace_history_oid: commit.workspace_history_oid.clone(),
         legacy_session_id: None,
         legacy_commit_id: None,
         commit_message: commit.commit_message.clone(),
@@ -348,6 +349,7 @@ pub(super) fn turn_commit_from_manifest_and_oid(
         commit_message: manifest.commit_message.clone(),
         usage,
         terminal_reason: manifest.terminal_reason.clone(),
+        workspace_history_oid: manifest.workspace_history_oid.clone(),
         created_at: manifest.timestamp.clone(),
     }
 }

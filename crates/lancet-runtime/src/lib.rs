@@ -24,6 +24,10 @@
 //!   validation, and Cell evidence recording. Errors map to structured
 //!   `CepError` codes (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/
 //!   `CallCancelled`).
+//! - **Private workspace history** — [`history::WorkspaceHistory`] appends
+//!   every successfully installed Atomic Local Mutation to a private bare
+//!   `gix` repository that lives outside the Local Workspace and the user's
+//!   project `.git` (GitHub #63).
 //!
 //! `lancet-runtime` does **not** depend on `lancet-native`, `lancet-api`, or
 //! any LATTICE session/agent/profile crate. The dependency graph has no cycle.
@@ -33,6 +37,7 @@ pub mod composition;
 pub mod error_map;
 pub mod evidence;
 pub mod generated;
+pub mod history;
 pub mod host;
 pub mod limits;
 pub mod runtime;
@@ -42,5 +47,9 @@ pub mod test_helpers;
 
 pub use composition::{ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity};
 pub use evidence::CellEvidenceLedger;
+pub use history::{
+    HistorySnapshot, MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryBacking,
+    WorkspaceHistoryError,
+};
 pub use limits::ExecutionLimits;
 pub use runtime::{ComponentCallContext, ComponentRuntime};

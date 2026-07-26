@@ -14,7 +14,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lancet_api::{AuditBacking, LancetError, LancetRuntime, LancetRuntimeConfig};
+use lancet_api::{
+    AuditBacking, LancetError, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory,
+    WorkspaceHistoryBacking, workspace_history_backing,
+};
 use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{
     BudgetLimits, CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig,
@@ -137,6 +140,10 @@ pub(crate) struct ProductionTurnDeps {
     pub cep_client: CepClient,
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
+    /// Private durable history of successfully installed Atomic Local
+    /// Mutations (#63). The live turn path reads its current object id once
+    /// the agent loop is done and records it on the Turn commit.
+    pub workspace_history: Arc<WorkspaceHistory>,
     #[cfg(test)]
     pub build_metrics: CepRuntimeBuildMetrics,
 }
@@ -451,11 +458,21 @@ pub(crate) async fn build_production_turn_deps(
         .map(|c| c.mode.clone())
         .unwrap_or(lancet_protocol::policy::CepMode::Enforce);
     let in_memory_audit = request.test_llm.is_some() && request.test_persist_audit != Some(false);
-    let audit = if in_memory_audit {
-        AuditBacking::InMemory
+    // The CEP audit database and the private workspace mutation history (#63)
+    // are the two pieces of durable per-project state that live outside the
+    // Local Workspace and the project `.git`. They are resolved together: a
+    // run with an ephemeral audit store writes no durable history either, so
+    // an ephemeral turn never touches the user's state directory.
+    let (audit, workspace_history) = if in_memory_audit {
+        (AuditBacking::InMemory, WorkspaceHistoryBacking::Disabled)
     } else {
-        AuditBacking::external_for_project(Path::new(project_root))
-            .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?
+        (
+            AuditBacking::external_for_project(Path::new(project_root))
+                .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?,
+            workspace_history_backing(Path::new(project_root)).map_err(|err| {
+                ApiError::Internal(format!("resolve workspace history path: {err}"))
+            })?,
+        )
     };
 
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
@@ -464,6 +481,7 @@ pub(crate) async fn build_production_turn_deps(
         policy,
         cep_mode,
         audit,
+        workspace_history,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
     })
@@ -498,6 +516,7 @@ pub(crate) async fn build_production_turn_deps(
         cep_client: parts.client,
         audit: parts.audit,
         audit_context: parts.audit_context,
+        workspace_history: parts.workspace_history,
         #[cfg(test)]
         build_metrics: CepRuntimeBuildMetrics {
             adapter_instances: 1,
@@ -524,11 +543,16 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
     let cep_mode = lancet
         .map(|c| c.mode.clone())
         .unwrap_or(lancet_protocol::policy::CepMode::Enforce);
-    let audit = if in_memory_audit {
-        AuditBacking::InMemory
+    let (audit, workspace_history) = if in_memory_audit {
+        (AuditBacking::InMemory, WorkspaceHistoryBacking::Disabled)
     } else {
-        AuditBacking::external_for_project(Path::new(project_root))
-            .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?
+        (
+            AuditBacking::external_for_project(Path::new(project_root))
+                .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?,
+            workspace_history_backing(Path::new(project_root)).map_err(|err| {
+                ApiError::Internal(format!("resolve workspace history path: {err}"))
+            })?,
+        )
     };
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
         project_root: PathBuf::from(project_root),
@@ -536,6 +560,7 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         policy,
         cep_mode,
         audit,
+        workspace_history,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
     })
@@ -567,6 +592,7 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         cep_client: parts.client,
         audit: parts.audit,
         audit_context: parts.audit_context,
+        workspace_history: parts.workspace_history,
         build_metrics: CepRuntimeBuildMetrics {
             adapter_instances: 1,
             transport_pairs: 1,

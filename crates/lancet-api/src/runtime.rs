@@ -16,7 +16,7 @@ use lancet_dispatch::{CepClient, CepTransport};
 use lancet_native::{
     CepServerNativeExt, MethodRegistry, ServerRunConfig, register_production_method_registry,
 };
-use lancet_runtime::ComponentRuntime;
+use lancet_runtime::{ComponentRuntime, WorkspaceHistory};
 use tokio::sync::RwLock;
 
 use crate::config::{AuditBacking, LancetRuntimeConfig};
@@ -132,6 +132,8 @@ pub struct LancetRuntimeParts {
     pub audit: Arc<CepAuditStore>,
     /// Mutable audit context (model id, runtime version, session/turn ids).
     pub audit_context: Arc<RwLock<CepAuditContext>>,
+    /// Private workspace mutation history backing this runtime (#63).
+    pub workspace_history: Arc<WorkspaceHistory>,
     /// Server lifecycle; keep alive while the client is used.
     pub lifecycle: ServerLifecycle,
 }
@@ -147,6 +149,7 @@ pub struct LancetRuntime {
     audit: Arc<CepAuditStore>,
     audit_context: Arc<RwLock<CepAuditContext>>,
     tool_definitions: Vec<ToolDefinition>,
+    workspace_history: Arc<WorkspaceHistory>,
     lifecycle: ServerLifecycle,
 }
 
@@ -164,6 +167,7 @@ impl LancetRuntime {
             policy,
             cep_mode,
             audit,
+            workspace_history,
             model_id,
             runtime_version,
         } = config;
@@ -217,6 +221,14 @@ impl LancetRuntime {
             }
         };
 
+        // #63: the private mutation history repository is opened once per
+        // runtime, before the server starts, so a turn can never install a
+        // mutation the history is not ready to record.
+        let workspace_history = Arc::new(
+            WorkspaceHistory::open(workspace_history)
+                .map_err(|err| LancetError::Internal(format!("workspace history setup: {err}")))?,
+        );
+
         let audit_context = Arc::new(RwLock::new(CepAuditContext {
             model_id,
             runtime_version,
@@ -233,6 +245,7 @@ impl LancetRuntime {
             default_policy_hook: Some(default_hook),
             cep_mode,
             components: None, // set by spawn_composed
+            workspace_history: Arc::clone(&workspace_history),
         };
 
         let (client, lifecycle) =
@@ -243,6 +256,7 @@ impl LancetRuntime {
             audit,
             audit_context,
             tool_definitions,
+            workspace_history,
             lifecycle,
         })
     }
@@ -267,6 +281,15 @@ impl LancetRuntime {
         &self.tool_definitions
     }
 
+    /// Private durable history of successfully installed Atomic Local
+    /// Mutations (#63).
+    ///
+    /// Hosts read [`WorkspaceHistory::current`] at the end of a Turn to record
+    /// the workspace-history object id the Turn arrived at.
+    pub fn workspace_history(&self) -> &Arc<WorkspaceHistory> {
+        &self.workspace_history
+    }
+
     /// Signal shutdown and await the server task.
     pub async fn shutdown(&mut self) {
         self.lifecycle.shutdown().await;
@@ -279,6 +302,7 @@ impl LancetRuntime {
             tool_definitions: self.tool_definitions,
             audit: self.audit,
             audit_context: self.audit_context,
+            workspace_history: self.workspace_history,
             lifecycle: self.lifecycle,
         }
     }

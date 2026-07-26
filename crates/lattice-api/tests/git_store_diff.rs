@@ -21,6 +21,7 @@ fn init_git_repo(dir: &std::path::Path) {
 
 fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCommitInput {
     TurnCommitInput {
+        workspace_history_oid: None,
         session_id: session_id.to_string(),
         parent_ids,
         messages: vec![

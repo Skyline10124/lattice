@@ -49,6 +49,7 @@ fn git_store_get_turn_commit_includes_profile_snapshot_json() {
     let profile_hash = "deadbeefcafebabe".to_string();
 
     let input = TurnCommitInput {
+        workspace_history_oid: None,
         session_id: session_id.clone(),
         parent_ids: vec![],
         messages: vec![user_msg("run"), assistant_msg("done")],

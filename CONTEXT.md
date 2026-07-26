@@ -90,6 +90,21 @@ The git-style graph of conversation turns and Tool transcripts. It records
 workspace interactions but does not own Local Workspace contents.
 _Avoid_: workspace checkpoint lineage, Local rollback log, retained sandbox
 
+**Workspace History**:
+The durable private record of Atomic Local Mutations LATTICE has successfully
+installed. It lives in a private bare Git repository outside the Local
+Workspace and the user's project Git, expresses before/after state as Git
+trees, and covers only the paths LATTICE has mutated.
+_Avoid_: whole-project snapshot, execution workspace, projection, checkpoint,
+receipt store
+
+**Workspace-History Object ID**:
+The identity a completed Turn arrived at in the Workspace History. Recorded on
+the Turn's immutable commit so the Turn's mutations stay resolvable after
+session reopen, branch movement, and process restart. A Turn that installed no
+mutation records the identity it inherited.
+_Avoid_: workspace snapshot id, session commit id, checkpoint handle
+
 **Rewind**:
 An explicit move to an earlier Session History point that reverses only the
 later Atomic Local Mutations made by LATTICE. It preserves unrelated external

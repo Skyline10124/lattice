@@ -12,11 +12,11 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-#[cfg(any(test, feature = "test-fault-injection"))]
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-fault-injection"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use lancet_runtime::{MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryError};
 use regex::Regex;
 
 use crate::edit::content_hash;
@@ -30,12 +30,17 @@ use super::visibility::{VisibilityEngine, VisibilityEvidence};
 /// The single concrete Local Workspace (ADR 0003 decision 3).
 ///
 /// Internal deep module: secure path resolution, bounded read, atomic
-/// installation, and error normalization all live behind this type. It is
-/// `pub(crate)` because native handlers and the edit engine are the only
-/// allowed callers; there is no workspace-backend seam.
+/// installation, mutation history, and error normalization all live behind
+/// this type. It is `pub(crate)` because native handlers and the edit engine
+/// are the only allowed callers; there is no workspace-backend seam.
 pub(crate) struct LocalWorkspace {
     /// Canonical project root. Captured at construction time; never mutates.
     root: PathBuf,
+    /// Private durable history of successfully installed Atomic Local
+    /// Mutations (GitHub #63). Lives in its own bare `gix` repository outside
+    /// this workspace and outside the project `.git`; recording never touches
+    /// workspace content.
+    history: Arc<WorkspaceHistory>,
     /// One-shot install-failure flag for the narrow fault-injection seam
     /// (`fail_next_install`). Not present in production builds.
     #[cfg(any(test, feature = "test-fault-injection"))]
@@ -43,14 +48,26 @@ pub(crate) struct LocalWorkspace {
 }
 
 impl LocalWorkspace {
-    /// Construct from a project root, canonicalizing it once.
+    /// Construct from a project root with mutation history recording off.
+    ///
+    /// Test-only: the production server always attaches the run's private
+    /// history through [`LocalWorkspace::with_history`], so an installation
+    /// path that records nothing cannot exist in a real turn.
+    #[cfg(test)]
+    pub(crate) fn new(root: &Path) -> Self {
+        Self::with_history(root, Arc::new(WorkspaceHistory::disabled()))
+    }
+
+    /// Construct from a project root, canonicalizing it once, with a private
+    /// mutation history attached.
     ///
     /// Falls back to the raw path if canonicalize fails (mirrors
     /// `CepPolicyConfig::defaults_for_project_root` tolerance).
-    pub(crate) fn new(root: &Path) -> Self {
+    pub(crate) fn with_history(root: &Path, history: Arc<WorkspaceHistory>) -> Self {
         let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         Self {
             root: canonical,
+            history,
             #[cfg(any(test, feature = "test-fault-injection"))]
             fail_install: Arc::new(AtomicBool::new(false)),
         }
@@ -61,10 +78,33 @@ impl LocalWorkspace {
         &self.root
     }
 
+    /// Append one successfully installed Atomic Local Mutation to the private
+    /// history.
+    ///
+    /// Callers must only reach this after the atomic install returned success:
+    /// a recorded commit asserts the mutation is on disk. Returns `Ok(None)`
+    /// when history recording is disabled. Recording writes only into the
+    /// private history repository — never the Local Workspace and never the
+    /// project `.git`.
+    pub(crate) async fn record_mutation(
+        &self,
+        record: MutationRecord,
+    ) -> Result<Option<RecordedMutation>, WorkspaceHistoryError> {
+        let history = Arc::clone(&self.history);
+        tokio::task::spawn_blocking(move || history.record(&record))
+            .await
+            .unwrap_or_else(|err| {
+                Err(WorkspaceHistoryError::Repo(format!(
+                    "history recording task failed: {err}"
+                )))
+            })
+    }
+
     /// Clone the shareable state for a `spawn_blocking` closure.
     fn blocking_clone(&self) -> Self {
         Self {
             root: self.root.clone(),
+            history: Arc::clone(&self.history),
             #[cfg(any(test, feature = "test-fault-injection"))]
             fail_install: Arc::clone(&self.fail_install),
         }
