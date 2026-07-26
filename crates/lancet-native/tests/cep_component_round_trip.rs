@@ -20,11 +20,13 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use lancet_authority::CepTurnContext;
 use lancet_native::{
     AuditQueryFilters, CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry,
     ServerRunConfig, register_production_method_registry,
 };
-use lancet_protocol::{CapabilityAdmissionPolicy, Trust};
+use lancet_protocol::effect_types::ImpactKind;
+use lancet_protocol::{CapabilityAdmissionPolicy, CepErrorCode, Trust};
 use lancet_runtime::ComponentRuntime;
 
 /// The noop fixture's admission policy: the tool is enabled, and `deny`
@@ -57,9 +59,25 @@ async fn spawn_native_with_admission(
     Arc<CepAuditStore>,
     tokio::task::JoinHandle<()>,
 ) {
+    spawn_native_with_policies(policy, BTreeSet::new()).await
+}
+
+/// One server run carrying **both** vocabularies' policies: the Cell
+/// admission policy and the legacy `[lancet.effects]` deny list.
+async fn spawn_native_with_policies(
+    policy: CapabilityAdmissionPolicy,
+    denied_effect_kinds: BTreeSet<ImpactKind>,
+) -> (
+    lancet_native::CepClient,
+    Arc<CepAuditStore>,
+    tokio::task::JoinHandle<()>,
+) {
     let components =
         Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
     let mut config = ServerRunConfig::in_memory_for_tests().with_capability_admission(policy);
+    let mut turn_policy = config.cep_context.policy.clone();
+    turn_policy.denied_effect_kinds = denied_effect_kinds;
+    config.cep_context = Arc::new(CepTurnContext::from_policy(turn_policy));
     config.components = Some(components);
 
     let mut registry = MethodRegistry::new();
@@ -434,6 +452,90 @@ async fn native_method_still_works_alongside_component() {
         result.get("todos").is_some(),
         "todo_write result must have todos field"
     );
+}
+
+/// Every legacy `ImpactKind`. Cross-checked against the native catalog by the
+/// isolation tests, so a narrowed fixture cannot quietly leave a native method
+/// authorized and make the Component leg look isolated when it is not.
+fn all_impact_kinds() -> BTreeSet<ImpactKind> {
+    BTreeSet::from([
+        ImpactKind::WorkspaceObservation,
+        ImpactKind::WorkspaceMutation,
+        ImpactKind::CommandExecution,
+        ImpactKind::ExternalObservation,
+        ImpactKind::SessionStateMutation,
+        ImpactKind::AuditObservation,
+    ])
+}
+
+fn todo_params() -> serde_json::Value {
+    serde_json::json!({"todos": [{"content": "isolation", "status": "pending"}]})
+}
+
+/// B8/B9/A4: the two authorization vocabularies never cross-authorize.
+///
+/// One server run, one turn policy: every legacy `ImpactKind` denied by
+/// `[lancet.effects]`, every Cell capability admitted. The native method is
+/// refused by that deny list and the Component call still succeeds in the
+/// same run — proving the legacy vocabulary is not a second authority over
+/// Cell admission. A refactor that routed Component dispatch through the
+/// `lancet_catalog::catalog()` lookup would kill the Component leg here.
+#[tokio::test]
+async fn legacy_effect_deny_refuses_native_methods_and_never_component_calls() {
+    let denied = all_impact_kinds();
+    assert!(
+        lancet_catalog::catalog().iter().all(|descriptor| descriptor
+            .effect
+            .kinds
+            .0
+            .iter()
+            .all(|k| denied.contains(k))),
+        "the fixture must deny every kind the native catalog declares"
+    );
+
+    let (client, audit, _task) = spawn_native_with_policies(admission(&[]), denied).await;
+
+    let err = client
+        .call_raw("session.todo_write", todo_params())
+        .await
+        .expect_err("every declared impact kind is denied");
+    assert_eq!(err.code, CepErrorCode::EffectViolation);
+
+    let value = client
+        .call_raw("noop.echo", serde_json::json!({"message": "isolated"}))
+        .await
+        .expect("the legacy deny list has no authority over a Cell-admitted Tool");
+    assert_eq!(value, serde_json::json!({"echoed": "isolated"}));
+
+    // The Component row still carries its own evidence: the call went through
+    // Cell admission, not through a legacy allowance.
+    let metadata = noop_metadata(&audit).await;
+    assert_eq!(
+        metadata["admission_evidence"]["approved_capabilities"],
+        serde_json::json!(["session.events", "session.result"])
+    );
+    audit.await_pending().await;
+}
+
+/// The converse leg: a Cell admission policy that admits nothing refuses the
+/// Component Tool and leaves the native methods untouched. `[lancet
+/// .capabilities]` is not a second authority over the legacy path either.
+#[tokio::test]
+async fn cell_admission_denial_never_refuses_a_native_method() {
+    let (client, _audit, _task) =
+        spawn_native_with_policies(CapabilityAdmissionPolicy::default(), BTreeSet::new()).await;
+
+    let err = client
+        .call_raw("noop.echo", serde_json::json!({"message": "refused"}))
+        .await
+        .expect_err("no tool is enabled");
+    assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
+
+    let result = client
+        .call_raw("session.todo_write", todo_params())
+        .await
+        .expect("Cell admission has no authority over a native method");
+    assert!(result.get("todos").is_some());
 }
 
 /// D.6: the Component call emits events through the CEP event stream.
