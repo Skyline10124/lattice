@@ -964,4 +964,101 @@ mod turn_wiring {
         .expect_err("session.envelope is no longer a catalog method");
         assert!(err.unknown.contains(&"session.envelope".to_string()));
     }
+
+    /// Write a real `agent.toml` under `dir` and load it through the profile
+    /// loader — the production entry point, not a hand-built struct.
+    fn write_and_load_profile(dir: &std::path::Path, capabilities: &str) -> LoadedAgentProfile {
+        let path = dir.join("agent.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"schema_version = 1
+
+[agent]
+name = "t"
+model = "m"
+
+[prompt]
+system = "sys"
+
+[tools]
+enabled = ["{todo}"]
+{capabilities}"#,
+                todo = TodoWrite::NAME,
+            ),
+        )
+        .unwrap();
+        lattice_profile::load_agent_profile(&path).expect("profile loads")
+    }
+
+    async fn build_deps_for(
+        profile: &LoadedAgentProfile,
+        project: &TempDir,
+    ) -> Result<ProductionTurnDeps, ApiError> {
+        let llm: Arc<dyn lattice_agent::LlmClient> =
+            Arc::new(FakeStreamingLlmClient::builder().build());
+        let request = RunTurnRequest {
+            input: "hi".into(),
+            session_id: "s".into(),
+            loaded_profile: Some(profile.clone()),
+            cancel_flag: None,
+            test_llm: Some(llm.clone()),
+            test_project_root: Some(project.path().to_string_lossy().into()),
+            test_persist_audit: None,
+        };
+        let enabled_tools = [TodoWrite::NAME.to_string()];
+        build_production_turn_deps(ProductionTurnDepsInput {
+            request: &request,
+            project_root: project.path().to_str().unwrap(),
+            enabled_tools: &enabled_tools,
+            llm,
+            lancet: Some(&profile.profile.lancet),
+            model_id: "m",
+            runtime_version: "v",
+        })
+        .await
+    }
+
+    /// #28 B2/B8: the profile's `[lancet.capabilities]` is what production
+    /// admission runs on. A deny entry naming no composed capability is a
+    /// startup error (C2) — the only decision observable end to end while the
+    /// production component catalog is empty — so this pins the whole chain
+    /// `agent.toml` → `LoadedAgentProfile` → `CapabilityAdmissionPolicy` →
+    /// `ServerRunConfig`. Lose the profile lowering and the fail-closed
+    /// default silently takes over with an empty deny list.
+    #[tokio::test]
+    async fn profile_capabilities_section_reaches_component_admission() {
+        let project = TempDir::new().unwrap();
+        let profile = write_and_load_profile(
+            project.path(),
+            "\n[lancet.capabilities]\ndeny = [\"session.events\"]\n",
+        );
+        assert_eq!(
+            profile.profile.capability_admission_policy().enabled_tools,
+            std::collections::BTreeSet::from([TodoWrite::NAME.to_string()])
+        );
+
+        let Err(err) = build_deps_for(&profile, &project).await else {
+            panic!("a deny entry no composed capability declares must refuse startup");
+        };
+        assert!(
+            format!("{err:?}").contains("session.events"),
+            "the startup error must name the profile's deny entry: {err:?}"
+        );
+    }
+
+    /// Control for the above: the same profile without the section builds,
+    /// so the error there is the deny entry and not the fixture.
+    #[tokio::test]
+    async fn profile_without_capabilities_section_builds() {
+        let project = TempDir::new().unwrap();
+        let profile = write_and_load_profile(project.path(), "");
+        assert!(
+            profile.profile.lancet.capabilities.is_none(),
+            "control fixture must carry no [lancet.capabilities]"
+        );
+        build_deps_for(&profile, &project)
+            .await
+            .expect("an empty deny list admits startup");
+    }
 }
