@@ -79,6 +79,7 @@ fn run_inner(check: bool) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     tool: ToolSection,
     params: SchemaSection,
@@ -420,7 +421,7 @@ fn write_or_check(manifest_path: &Path, out: &Outputs, check: bool) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_protocol::cell::{ChannelKind, Trust};
+    use lancet_protocol::cell::{ChannelKind, DescriptorError, Trust};
 
     fn noop_manifest() -> Manifest {
         toml::from_str(
@@ -547,8 +548,44 @@ toolchain = "t"
         assert!(toml::from_str::<Manifest>(bad).is_err());
     }
 
+    /// A typo'd top-level section must not be dropped on the floor: the root
+    /// is as strict as every sub-table, or a whole `[[capabilities]]` block
+    /// misspelled once would compose as an empty capability set.
+    #[test]
+    fn manifest_rejects_unknown_top_level_section() {
+        let bad = r#"
+[tool]
+name = "x"
+version = "0.1.0"
+description = "x"
+abi-version = 1
+
+[params]
+schema = '{}'
+
+[result]
+schema = '{}'
+
+[[capabilties]]
+name = "session.result"
+cell = "alloc:none:session"
+
+[artifact]
+sha256 = "00"
+toolchain = "t"
+"#;
+        let err = toml::from_str::<Manifest>(bad).expect_err("unknown root section is rejected");
+        assert!(
+            err.to_string().contains("capabilties"),
+            "the error must name the typo'd section: {err}"
+        );
+    }
+
     #[test]
     fn manifest_rejects_undeclared_scope_capability() {
+        // The name is grammar-conforming on purpose: `validate` checks the
+        // capability-name grammar first, so a single-segment fixture would
+        // fail on the wrong rule and prove nothing about scope declaration.
         let bad = r#"
 [tool]
 name = "x"
@@ -568,7 +605,7 @@ trust = "in"
 channel = "session"
 
 [[capabilities]]
-name = "ghost"
+name = "ghost.read"
 cell = "alloc:none:workspace"
 
 [artifact]
@@ -577,9 +614,13 @@ toolchain = "t"
 "#;
         let m: Manifest = toml::from_str(bad).unwrap();
         let d = lower_manifest(&m).unwrap();
-        assert!(
-            d.validate().is_err(),
-            "undeclared scope must fail validation"
+        assert_eq!(
+            d.validate()
+                .expect_err("undeclared scope must fail validation"),
+            DescriptorError::UndeclaredScope {
+                capability: "ghost.read".into(),
+                scope: "workspace".into(),
+            },
         );
     }
 
