@@ -28,11 +28,16 @@ in-toto attestation construction, and attestation persistence.
 
 ## Recent Issues
 
-- ADDED #5 slice D: `merge_finalize_metadata` gained a `component_cells: &[String]`
-  parameter. Component Tool calls record 4-segment Cell audit keys
-  (`ctx:ext:scope:trust`) as a `component_cells` JSON array; native handler
-  calls pass an empty slice (no behavior change). Audit records cells, not
-  capability names (spec §6.3).
+- ADDED #28: `PRAGMA user_version` carries `AUDIT_SCHEMA_VERSION`; a newer or
+  old-shape database fails open with `AuditError::IncompatibleSchema` and is left
+  untouched (read-only legacy import stays the migration path).
+  `merge_finalize_metadata` takes `ComponentCallEvidence` and writes
+  `admission_evidence` / `observed_effects` / `denied_operations` separately;
+  `component_cells` (4-segment `ctx:ext:scope:trust`, spec §6.3) is derived from
+  the effect ledger and `observed_capabilities` is label-ordered.
+  `build_in_toto_statement` picks v1/v2 per turn from row evidence,
+  `rebuild_in_toto_statement` gives a stored `predicate_type` the last word, and
+  `statement_bytes` canonicalizes v2 only — stored v1 bytes are never rewritten.
 - FIXED #38: `RejectionStage` vocabulary de-Uppered — `AdapterPreflight` →
   `PathGuard`, `BackendExecution` → `LocalIo`, `VerificationFailure` removed;
   `CallAuditMetadata.backend_invoked` and all routing metadata
@@ -42,8 +47,6 @@ in-toto attestation construction, and attestation persistence.
   observed Local Revision on stale-hash replans). Historical rows written
   before #38 keep the old labels; alpha-stage no-compat means no label
   migration — `rejection_stage` query filters match new writes only.
-- FIXED M-24-05: attestation persistence wiring moved into `lancet-api`;
-  `lattice-api` consumes it through the public LANCET runtime surface.
 - FIXED issue #11: agent catalog audit CEP methods removed; operator reads live in
   `lancet-api::audit` and `lattice audit` (direct store, no CEP server).
 - OPEN #17: operator read DTOs, pagination/filter behavior, and contract tests

@@ -4,6 +4,11 @@
 use super::*;
 use lancet_catalog::CepMethod;
 use lancet_catalog::methods::{Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod};
+use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
+use lancet_protocol::evidence::{
+    ADMISSION_EVIDENCE_VERSION, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION, ObservedScope,
+    ObservedTarget,
+};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -74,6 +79,110 @@ fn open_rejects_symlinked_audit_database_file() {
     );
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&outside);
+}
+
+fn stored_schema_version(path: &std::path::Path) -> i64 {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap()
+}
+
+fn set_schema_version(path: &std::path::Path, version: i64) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.pragma_update(None, "user_version", version).unwrap();
+}
+
+#[test]
+fn open_stamps_schema_version_on_create() {
+    let root = unique_test_dir("schema-stamp");
+    let path = root.join("audit.db");
+    let store = CepAuditStore::open(&path).unwrap();
+    drop(store);
+    assert_eq!(stored_schema_version(&path), AUDIT_SCHEMA_VERSION);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn open_adopts_unversioned_current_shape_database() {
+    // A database written before versioning but with today's row shape is an
+    // additive case: stamp it, keep every row.
+    let root = unique_test_dir("schema-adopt");
+    let path = root.join("audit.db");
+    write_legacy_audit_fixture(&path);
+    set_schema_version(&path, 0);
+
+    let store = CepAuditStore::open(&path).unwrap();
+    assert_eq!(store.row_count().unwrap(), 1);
+    assert_eq!(store.row_by_audit_id(1).unwrap().turn_id, "legacy-turn");
+    drop(store);
+    assert_eq!(stored_schema_version(&path), AUDIT_SCHEMA_VERSION);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn open_rejects_newer_schema_version() {
+    let root = unique_test_dir("schema-newer");
+    let path = root.join("audit.db");
+    write_legacy_audit_fixture(&path);
+    set_schema_version(&path, AUDIT_SCHEMA_VERSION + 1);
+
+    let err = match CepAuditStore::open(&path) {
+        Ok(_) => panic!("a newer audit schema must not be opened for writing"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, AuditError::IncompatibleSchema { .. }));
+    let message = err.to_string();
+    assert!(message.contains(&path.display().to_string()), "{message}");
+    assert!(message.contains("upgrade the binary"), "{message}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn open_rejects_old_shape_database_without_touching_it() {
+    // C5: the real pre-versioning hazard is a row shape no additive DDL can
+    // repair (here `semantic_stage`/`guard_stage`/`policy_enforced` are
+    // absent). It used to open silently and die later on a raw INSERT.
+    let root = unique_test_dir("schema-old-shape");
+    let path = root.join("audit.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cep_audit_entries (
+                audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id INTEGER NOT NULL,
+                method TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                result_or_error TEXT,
+                impact_kind TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                metadata_json TEXT
+             );
+             INSERT INTO cep_audit_entries
+                (call_id, method, started_at, impact_kind, turn_id, session_id)
+             VALUES (7, 'observe.workspace', '1', 'workspace_observation', 'old-turn', 'old-session');",
+        )
+        .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+
+    let err = match CepAuditStore::open(&path) {
+        Ok(_) => panic!("an old-shape audit database must not be opened"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, AuditError::IncompatibleSchema { .. }));
+    let message = err.to_string();
+    assert!(message.contains(&path.display().to_string()), "{message}");
+    assert!(message.contains("semantic_stage"), "{message}");
+    assert!(message.contains("read-only legacy import"), "{message}");
+
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a refused open must leave the audit history byte-identical"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -814,7 +923,7 @@ fn merge_finalize_metadata_adds_required_capability() {
         Some(r#"{"observation_source":"workspace"}"#),
         "observe.workspace",
         &[],
-        &[],
+        &ComponentCallEvidence::default(),
     )
     .unwrap();
     assert!(merged.contains("required_capability"));
@@ -824,31 +933,219 @@ fn merge_finalize_metadata_adds_required_capability() {
 #[test]
 fn merge_finalize_metadata_records_component_cells() {
     // Component Tools (ADR 0004) record 4-segment Cell audit keys
-    // (ctx:ext:scope:trust). merge_finalize_metadata must add them as a
-    // `component_cells` JSON array so the durable audit row carries
-    // cell-attributed effect evidence (spec §6.3: audit records cells,
+    // (ctx:ext:scope:trust), derived from the effect ledger so the query key
+    // and the effect array cannot disagree (spec §6.3: audit records cells,
     // not capability names).
+    let effects = effects_record();
     let merged = merge_finalize_metadata(
         None,
         "noop.echo",
         &[],
-        &["alloc:none:session:in".to_string()],
+        &ComponentCallEvidence {
+            effects: Some(&effects),
+            ..Default::default()
+        },
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
     assert_eq!(
         parsed["component_cells"],
-        serde_json::json!(["alloc:none:session:in"])
+        serde_json::json!(["mutate:none:session:in", "alloc:none:session:in"])
     );
 }
 
 #[test]
 fn merge_finalize_metadata_omits_component_cells_when_empty() {
-    let merged = merge_finalize_metadata(None, "observe.workspace", &[], &[]).unwrap();
+    let merged = merge_finalize_metadata(
+        None,
+        "observe.workspace",
+        &[],
+        &ComponentCallEvidence::default(),
+    )
+    .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
     assert!(
         parsed.get("component_cells").is_none(),
         "empty component_cells must not appear in metadata"
+    );
+}
+
+fn observed_scope() -> ObservedScope {
+    ObservedScope {
+        scope: "session".into(),
+        trust: Trust::In,
+        channel: ChannelKind::Session,
+    }
+}
+
+fn cell(ctx_op: CtxOp) -> Cell {
+    Cell {
+        ctx_op,
+        ext_impact: ExtImpact::None,
+        scope: "session".into(),
+    }
+}
+
+/// One call with two effects (an operation then the result), deliberately
+/// pushed out of seq order to pin the seq-ordered write.
+fn effects_record() -> ObservedEffectsRecord {
+    ObservedEffectsRecord {
+        version: OBSERVED_EFFECTS_RECORD_VERSION,
+        effects: vec![
+            ObservedEffect {
+                seq: 1,
+                cell: cell(CtxOp::Alloc),
+                scope: observed_scope(),
+                target: ObservedTarget::Session {
+                    turn_id: "turn-1".into(),
+                },
+                source: EffectSource::Result,
+                context_measure: Some(17),
+            },
+            ObservedEffect {
+                seq: 0,
+                cell: cell(CtxOp::Mutate),
+                scope: observed_scope(),
+                target: ObservedTarget::Session {
+                    turn_id: "turn-1".into(),
+                },
+                source: EffectSource::Operation,
+                context_measure: None,
+            },
+        ],
+    }
+}
+
+fn admission_evidence() -> AdmissionEvidence {
+    AdmissionEvidence {
+        version: ADMISSION_EVIDENCE_VERSION,
+        tool: "noop.echo".into(),
+        approved_capabilities: vec!["session.events".into(), "session.result".into()],
+        denied_capabilities: vec!["net.fetch".into()],
+        boundary_excluded: vec!["fs.write".into()],
+        max_boundary: Trust::In,
+    }
+}
+
+fn denied_operations() -> Vec<DeniedOperation> {
+    vec![
+        DeniedOperation {
+            seq: 3,
+            cell: cell(CtxOp::Mutate),
+            scope: observed_scope(),
+            target: ObservedTarget::None,
+            reason: "uncovered operation".into(),
+        },
+        DeniedOperation {
+            seq: 2,
+            cell: cell(CtxOp::Mutate),
+            scope: observed_scope(),
+            target: ObservedTarget::Path {
+                path: "src/lib.rs".into(),
+            },
+            reason: "path target denied this cycle".into(),
+        },
+    ]
+}
+
+#[test]
+fn merge_finalize_metadata_separates_admission_effects_and_denials() {
+    // B5/A2: "why authorized" (approved capability names) must not be merged
+    // into "what happened" (real cells with host-resolved scope and target),
+    // and a refused operation is neither.
+    let admission = admission_evidence();
+    let effects = effects_record();
+    let denied = denied_operations();
+    let merged = merge_finalize_metadata(
+        None,
+        "noop.echo",
+        &[],
+        &ComponentCallEvidence {
+            admission: Some(&admission),
+            effects: Some(&effects),
+            denied: &denied,
+        },
+    )
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+    assert_eq!(parsed["admission_evidence"]["version"], json!(1));
+    assert_eq!(
+        parsed["admission_evidence"]["approved_capabilities"],
+        json!(["session.events", "session.result"])
+    );
+    assert!(
+        parsed["admission_evidence"].get("effects").is_none(),
+        "admission evidence must not carry effects"
+    );
+
+    let observed = &parsed["observed_effects"];
+    assert_eq!(observed["version"], json!(1));
+    let effect_array = observed["effects"].as_array().unwrap();
+    assert_eq!(effect_array.len(), 2, "C8: effects stay an array");
+    assert_eq!(effect_array[0]["seq"], json!(0));
+    assert_eq!(effect_array[0]["source"], json!("operation"));
+    assert_eq!(effect_array[1]["seq"], json!(1));
+    assert_eq!(effect_array[1]["context_measure"], json!(17));
+    assert!(
+        effect_array
+            .iter()
+            .all(|effect| effect.get("approved_capabilities").is_none()),
+        "capability aliases are admission evidence only, never effects"
+    );
+
+    let denials = parsed["denied_operations"].as_array().unwrap();
+    assert_eq!(denials.len(), 2);
+    assert_eq!(denials[0]["seq"], json!(2));
+    assert_eq!(denials[1]["seq"], json!(3));
+
+    // The derived query key still covers both effects, in the same order.
+    assert_eq!(
+        parsed["component_cells"],
+        json!(["mutate:none:session:in", "alloc:none:session:in"])
+    );
+}
+
+#[test]
+fn merge_finalize_metadata_is_order_independent() {
+    // The metadata bytes feed attestation, so nothing may depend on the
+    // iteration order of the caller's containers.
+    let admission = admission_evidence();
+    let denied = denied_operations();
+    let mut reversed = effects_record();
+    reversed.effects.reverse();
+    let mut reversed_denied = denied.clone();
+    reversed_denied.reverse();
+    let effects = effects_record();
+
+    let first = merge_finalize_metadata(
+        None,
+        "noop.echo",
+        &[RequiredCapability::WritePath, RequiredCapability::Inspect],
+        &ComponentCallEvidence {
+            admission: Some(&admission),
+            effects: Some(&effects),
+            denied: &denied,
+        },
+    )
+    .unwrap();
+    let second = merge_finalize_metadata(
+        None,
+        "noop.echo",
+        &[RequiredCapability::Inspect, RequiredCapability::WritePath],
+        &ComponentCallEvidence {
+            admission: Some(&admission),
+            effects: Some(&reversed),
+            denied: &reversed_denied,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(first, second);
+    let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(
+        parsed["observed_capabilities"],
+        json!(["inspect", "write_path"])
     );
 }
 

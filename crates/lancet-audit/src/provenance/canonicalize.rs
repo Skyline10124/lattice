@@ -41,9 +41,7 @@ pub fn canonicalize_turn_trace(trace: &TurnExecutionTrace) -> TurnExecutionTrace
 /// Normalize an in-toto statement predicate (masks volatile predicate fields).
 pub fn canonicalize_in_toto_statement(statement: &InTotoStatement) -> InTotoStatement {
     let mut out = statement.clone();
-    if let Some(obj) = out.predicate.as_object_mut() {
-        mask_object_timestamps(obj);
-    }
+    mask_timestamps(&mut out.predicate);
     out
 }
 
@@ -52,16 +50,27 @@ pub fn traces_equal_modulo_nondeterminism(a: &TurnExecutionTrace, b: &TurnExecut
     canonicalize_turn_trace(a) == canonicalize_turn_trace(b)
 }
 
-fn mask_object_timestamps(obj: &mut serde_json::Map<String, Value>) {
-    for key in NONDETERMINISTIC_METADATA_KEYS {
-        if obj.contains_key(*key) {
-            obj.insert(key.to_string(), Value::String(MASKED.into()));
+/// Mask volatile keys at every depth. Arrays are descended into as well: v2
+/// predicates carry materials and per-call evidence as arrays of objects, and
+/// a comparison that stopped at the array would silently ignore them.
+fn mask_timestamps(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            for key in NONDETERMINISTIC_METADATA_KEYS {
+                if obj.contains_key(*key) {
+                    obj.insert((*key).to_string(), Value::String(MASKED.into()));
+                }
+            }
+            for nested in obj.values_mut() {
+                mask_timestamps(nested);
+            }
         }
-    }
-    for value in obj.values_mut() {
-        if let Some(nested) = value.as_object_mut() {
-            mask_object_timestamps(nested);
+        Value::Array(items) => {
+            for item in items {
+                mask_timestamps(item);
+            }
         }
+        _ => {}
     }
 }
 
@@ -126,5 +135,33 @@ mod tests {
             statement: None,
         };
         assert!(traces_equal_modulo_nondeterminism(&trace, &other));
+    }
+
+    #[test]
+    fn masking_descends_into_predicate_arrays() {
+        // v2 predicates carry materials and per-call evidence as arrays; a
+        // comparison that stopped at the array would ignore their contents.
+        let statement = InTotoStatement {
+            subject: Vec::new(),
+            predicate_type: "https://lattice.dev/attestation/cep-turn/v2".into(),
+            predicate: serde_json::json!({
+                "evidence": [{"audit_id": 1, "admission": {"generated_at": "111"}}]
+            }),
+            _type: None,
+            signatures: None,
+        };
+        let other = InTotoStatement {
+            predicate: serde_json::json!({
+                "evidence": [{"audit_id": 1, "admission": {"generated_at": "999"}}]
+            }),
+            ..statement.clone()
+        };
+
+        let canon = canonicalize_in_toto_statement(&statement);
+        assert_eq!(
+            canon.predicate["evidence"][0]["admission"]["generated_at"],
+            serde_json::json!(MASKED)
+        );
+        assert_eq!(canon, canonicalize_in_toto_statement(&other));
     }
 }

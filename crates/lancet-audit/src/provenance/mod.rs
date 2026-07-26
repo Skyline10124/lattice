@@ -7,7 +7,10 @@ pub mod attestation;
 pub mod canonicalize;
 pub mod projector;
 
-pub use attestation::{build_in_toto_statement, source_audit_range_hash};
+pub use attestation::{
+    AttestationVersion, build_in_toto_statement, rebuild_in_toto_statement,
+    source_audit_range_hash, statement_bytes,
+};
 pub use canonicalize::{
     canonicalize_in_toto_statement, canonicalize_prov_fragment, canonicalize_turn_trace,
     traces_equal_modulo_nondeterminism,

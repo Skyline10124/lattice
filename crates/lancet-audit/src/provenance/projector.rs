@@ -146,6 +146,11 @@ fn activity_attributes_from_metadata(meta: Option<&Value>) -> BTreeMap<String, V
         "cep_policy",
         "cep_preflight",
         "approval_request",
+        // #28 B6: "why authorized" and "what happened" reach the PROV
+        // fragment as separate activity attributes.
+        "admission_evidence",
+        "observed_effects",
+        "denied_operations",
     ] {
         if let Some(value) = meta.and_then(|m| m.get(key)) {
             attributes.insert(key.into(), value.clone());
@@ -358,6 +363,8 @@ mod tests {
         );
     }
 
+    /// Pins the activity-attribute whitelist: exactly these metadata keys
+    /// reach the PROV fragment, and nothing else does.
     #[test]
     fn preflight_and_policy_metadata_project_to_activity_attributes() {
         let rows = vec![fixture_row(
@@ -374,7 +381,19 @@ mod tests {
                 },
                 "approval_request": {
                     "status": "required"
-                }
+                },
+                "effective_boundary": {},
+                "admission_evidence": {
+                    "version": 1,
+                    "tool": "noop.echo",
+                    "approved_capabilities": ["session.events"]
+                },
+                "observed_effects": {
+                    "version": 1,
+                    "effects": [{"seq": 0, "source": "operation"}]
+                },
+                "denied_operations": [{"seq": 1, "reason": "uncovered operation"}],
+                "component_cells": ["mutate:none:session:in"]
             }"#,
         )];
 
@@ -392,6 +411,34 @@ mod tests {
         assert_eq!(
             attrs["approval_request"]["status"],
             serde_json::json!("required")
+        );
+        // B6: "why authorized" and "what happened" project as separate
+        // attributes, never folded into one another.
+        assert_eq!(
+            attrs["admission_evidence"]["approved_capabilities"],
+            serde_json::json!(["session.events"])
+        );
+        assert_eq!(
+            attrs["observed_effects"]["effects"][0]["source"],
+            serde_json::json!("operation")
+        );
+        assert_eq!(
+            attrs["denied_operations"][0]["reason"],
+            serde_json::json!("uncovered operation")
+        );
+
+        assert_eq!(
+            attrs.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "admission_evidence",
+                "approval_request",
+                "cep_policy",
+                "cep_preflight",
+                "denied_operations",
+                "effective_boundary",
+                "observed_effects",
+            ],
+            "activity attributes are whitelisted; component_cells stays a query key"
         );
     }
 }
