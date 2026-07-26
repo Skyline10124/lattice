@@ -38,6 +38,20 @@
 ## LOW
 
 
+### L-47-01: `direct_failures` SIGINT scenario interrupts the whole `cargo test` run on CI — `robustness` / offline-ci / harness / #47
+- **位置**: `crates/lattice-system-harness/src/driver.rs:99-101` (`interrupt` → `signal_process_group(self.pgid, "-INT")`)，`:259-262` (`set_new_process_group` → `Command::process_group(0)`)；`crates/lattice-system-harness/tests/direct_failures.rs:324-360` (`direct_failure_sigint_while_stalled_commits_cancelled`)。
+- **问题**: harness 用 `kill -INT -<pgid>` 向整个进程组发 SIGINT，pgid 取自 `child.id()`，前提是 `process_group(0)` 已生效、子进程自成组长。若该前提在某些时序下不成立，负号 pgid 会落到**测试进程自己所在的进程组**，把 `cargo test` 一并 SIGINT。ubuntu-latest 上观察到 `cargo test --workspace` 以 **exit 130（SIGINT）** 终止，而当时已报告 **1059 passed / 0 failed**、无任何 FAILED 条目、无 panic——即没有测试失败，是作业被信号中断。
+- **当前状态**: OPEN（CI 阻塞）。本地 Linux 不复现（单独跑 `direct_failures` 与全量 `cargo test --workspace` 均绿，1258 passed / 0 failed）；macos-latest 已全绿。仅在 ubuntu-latest runner 上出现，指向运行器的进程/会话拓扑差异（runner 中 `cargo test` 自身的进程组归属与本地不同）。#47 的其余七类 CI 失败均已修复并验证。
+- **升级条件**: 已阻塞 ordinary CI lane 绿灯，若要求 CI 必须全绿才能合并 → 升为 HIGH。
+- **计划**: （a）在 `interrupt()` 中断言 pgid 确实不等于测试进程自身的 pgid（`libc::getpgrp()`），不成立则 fail-closed 而非广播信号；（b）改用 `libc::killpg` 直接调用而非 `Command::new("kill")`，避开 shell 层对负号参数的解释差异；（c）若仍不稳，给该场景加 `#[ignore]` + 专用 serial lane。不要为绕开而删除 SIGINT 协作取消的覆盖——那是 #46 cancellation 契约的核心证据。
+
+### L-47-02: `git_graph` 测试 fixture 使用固定共享路径 `/tmp/lattice-session-git-graph-tests/` — `robustness` / test-isolation / #47
+- **位置**: `crates/lattice-session/src/git_graph/tests/mod.rs:23-29` (`temp_dir`)。
+- **问题**: `temp_dir(name)` 拼接 `env::temp_dir()/lattice-session-git-graph-tests/<name>` 并在进入前 `remove_dir_all`，而非用 `TempDir` 取唯一路径。同一主机上并行的两个测试二进制（例如不同 `CARGO_TARGET_DIR` 的两次 `cargo test`）会互相删除对方的 fixture，表现为 `Refusing to initialize the existing '...' directory` 或 `NotARepository`。实测复现：并行两份测试时 2 个测试失败，清理共享目录后 55/55 通过。
+- **当前状态**: ACCEPTED RESIDUAL。单份 `cargo test` 下不发生（各测试 `name` 不同），CI 也只跑一份，故不阻塞。仅在本地并行多份测试时暴露。
+- **升级条件**: 若 CI 引入 matrix 内并行或 nextest 分片共享主机 → 升为 MEDIUM。
+- **计划**: 改用 `tempfile::TempDir` 取唯一路径（与仓内其他 fixture 一致），删除手写的 `remove_dir_all` 前置清理。
+
 ### L-5-01: `lancet-protocol` Cell core coexists add-only with legacy `ImpactKind` — `architecture` / #5 / #6 / #12
 - **位置**: `crates/lancet-protocol/src/cell.rs` (new ADR 0004 closed core: `CtxOp`/`ExtImpact`/`Trust`/`ChannelKind`/`ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`/`ToolOutput`); `crates/lancet-protocol/src/effect_types.rs` (`ImpactKind`/`EffectScopeKind`/`OverlayBehavior`/`FailureSemantics`/`EffectDecl`, still consumed by production handlers).
 - **问题**: #5 slice A landed the ADR 0004 Cell vocabulary add-only. The legacy `effect_types.rs` machinery remains the production effect path (authority/audit/native handlers still key on `ImpactKind`), so two effect vocabularies coexist in the crate until #6 unifies Cell authorization/evidence and #12 deletes the migration crates. `cell.rs` had no production consumers at slice A; slices B–D landed them (codegen at B, Component engine at C, dispatch/audit/adapter at D).
