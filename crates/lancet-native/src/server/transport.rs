@@ -8,7 +8,8 @@ use crate::server::registry::{HandlerContext, MethodRegistry};
 use crate::workspace::LocalWorkspace;
 use lancet_audit::{
     AuditOutcome, AuditStart, CallAuditMetadata, CepAuditContext, CepAuditStore,
-    ComponentCallEvidence, SEMANTIC_STAGE_SCAFFOLD, SEMANTIC_STAGE_UNROUTED,
+    ComponentCallEvidence, SEMANTIC_STAGE_COMPONENT, SEMANTIC_STAGE_SCAFFOLD,
+    SEMANTIC_STAGE_UNROUTED, SEMANTIC_STATUS_COMPONENT, SEMANTIC_STATUS_COMPONENT_DENIED,
     impact_kind_for_method, impact_kind_label, merge_finalize_metadata,
 };
 use lancet_authority::policy::CepTurnContext;
@@ -190,7 +191,15 @@ async fn handle_request(
     let events = call.event_sink();
     let cancellation = call.cancellation();
 
-    let call_audit_metadata = CallAuditMetadata::for_production_dispatch(&method);
+    // #28: the dispatch split decides the audit vocabulary too. A Component
+    // Tool is routed and Cell-governed, so labeling it by the legacy catalog
+    // lookup would audit it as `unrouted` / not policy-enforced — the opposite
+    // of both facts.
+    let call_audit_metadata = if is_component_method(components.as_deref(), &method) {
+        CallAuditMetadata::for_component_dispatch()
+    } else {
+        CallAuditMetadata::for_production_dispatch(&method)
+    };
 
     let ctx_snapshot = audit_context.read().await.clone();
     let audit_start = match audit.start_call(&ctx_snapshot, id, &method, &call_audit_metadata) {
@@ -364,6 +373,14 @@ async fn handle_request(
     call.respond(final_result);
 }
 
+/// Whether `method` resolves to a Component Tool in the closed catalog.
+///
+/// Single source of truth for the dispatch split's audit labeling; the dispatch
+/// itself resolves the same descriptor below.
+fn is_component_method(components: Option<&ComponentRuntime>, method: &str) -> bool {
+    components.is_some_and(|rt| rt.descriptor(method).is_some())
+}
+
 /// Structured refusal for a Component Tool the turn's policy does not admit.
 ///
 /// #28 D10: admission denials reuse `CapabilityNotGranted` — no new error code
@@ -504,6 +521,8 @@ fn finalize_audit_for_dispatch(
 ) {
     let semantic_status = if call_metadata.semantic_stage == SEMANTIC_STAGE_SCAFFOLD {
         "scaffold_stub"
+    } else if call_metadata.semantic_stage == SEMANTIC_STAGE_COMPONENT {
+        SEMANTIC_STATUS_COMPONENT
     } else if call_metadata.policy_enforced {
         "native_handler"
     } else {
@@ -530,12 +549,25 @@ fn finalize_audit_for_dispatch(
             );
         }
         Err(err) if err.code == CepErrorCode::CallCancelled => {
-            let _ = audit.finalize_call(audit_start, AuditOutcome::Cancelled, None, None);
+            // A cancellation ends the call; it does not unmake the evidence the
+            // call already produced. Admission evidence, effects recorded
+            // before the interrupt, and denied operations stay on the row —
+            // the outcome classification (#48/#70) is unchanged.
+            let _ = audit.finalize_call(
+                audit_start,
+                AuditOutcome::Cancelled,
+                None,
+                durable_metadata_json,
+            );
         }
         Err(err) => {
             let code = format!("{:?}", err.code);
             let summary = compact_error_summary(err);
-            let semantic_status = if call_metadata.semantic_stage == SEMANTIC_STAGE_UNROUTED {
+            let semantic_status = if call_metadata.semantic_stage == SEMANTIC_STAGE_COMPONENT {
+                // A refused Component call was dispatched to an existing Tool
+                // and stopped by Cell policy — never `method_not_found`.
+                SEMANTIC_STATUS_COMPONENT_DENIED
+            } else if call_metadata.semantic_stage == SEMANTIC_STAGE_UNROUTED {
                 "method_not_found"
             } else {
                 "native_handler_denied"

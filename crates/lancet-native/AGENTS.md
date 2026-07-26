@@ -56,6 +56,13 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   `ServerRunConfig::validate_capability_admission` makes an unknown deny name a
   startup error at `run_native`. Admission is unconditional: `CepMode` is not
   consulted. The legacy pre-dispatch deny and all native handlers are untouched.
+  The dispatch split also picks the audit vocabulary:
+  `CallAuditMetadata::for_component_dispatch` for a catalogued Component (never
+  the legacy `unrouted` labeling), finalizing as `component_handler` or
+  `component_denied` — a Component refusal is a Cell policy denial, never
+  `method_not_found`. Every finalize arm, cancellation included, persists the
+  merged evidence metadata: an outcome ends the call, it does not unmake the
+  evidence the call already produced.
 - FIXED #48: call-scoped cancellation is audited from the structured code,
   not a message string — `finalize_audit_for_dispatch` records
   `AuditOutcome::Cancelled` on `CepErrorCode::CallCancelled` (the old

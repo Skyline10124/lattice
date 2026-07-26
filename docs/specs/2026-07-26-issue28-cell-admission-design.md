@@ -383,3 +383,19 @@ Until then the `transport.rs` dispatch split is the single, documented seam
 between the two vocabularies; Component Tools never consult the legacy types
 (no dual authorization for the same consumer), and no new consumer of the
 legacy vocabulary may be added.
+
+**Residual carried by the gate** (recorded, not fixed this cycle):
+
+- `ProvActivity::impact_kind` and `TurnCallSummary::impact_kind` are
+  non-optional `ImpactKind` fields on a serialized protocol type, so a
+  Cell-governed row cannot decline to fill them. Audit labeling is honest
+  (`cell_component` stage, `component_handler`/`component_denied` status,
+  policy-enforced, never `method_not_found`) and the projector marks the
+  activity `impact_kind_attributed: false` rather than passing the `unknown`
+  column through `parse_impact_kind`; but the placeholder value itself, and the
+  unmarked `TurnCallSummary` copy, stay until the field can be made optional or
+  Cell-native — a wire change gated on precondition 2 above.
+- C5 shape detection is by **column name** over both written tables
+  (`cep_audit_entries`, `attestation_records`). An unversioned database whose
+  column names match but whose types differ is still adopted and fails later at
+  INSERT; no history is dropped, so C5's "never silently delete" holds.
