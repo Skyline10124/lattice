@@ -2650,7 +2650,6 @@ dependencies = [
 name = "lancet-api"
 version = "0.1.0"
 dependencies = [
- "dirs",
  "lancet-audit",
  "lancet-authority",
  "lancet-catalog",
@@ -2659,9 +2658,7 @@ dependencies = [
  "lancet-native",
  "lancet-protocol",
  "lancet-runtime",
- "rusqlite",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2673,11 +2670,14 @@ name = "lancet-audit"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "dirs",
  "lancet-catalog",
  "lancet-protocol",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2752,6 +2752,7 @@ dependencies = [
  "proptest",
  "regex",
  "reqwest",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",
@@ -2851,6 +2852,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "lancet-api",
+ "lancet-audit",
  "lancet-catalog",
  "lancet-native",
  "lattice-agent",

@@ -34,7 +34,7 @@ gix = { workspace = true }
 lattice-session = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true }
 tempfile = { workspace = true }
-lancet-audit = { workspace = true }
+lancet-audit = { workspace = true, features = ["test-support"] }
 lancet-cep = { workspace = true }
 lancet-runtime = { workspace = true, features = ["test-utils"] }
 lattice-agent = { workspace = true, features = ["test-utils"] }

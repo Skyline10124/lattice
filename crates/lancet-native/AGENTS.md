@@ -47,6 +47,37 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Recent Issues
 
+- FIXED GitHub #39 (= Codeberg #17; PR #74 review defects) — four
+  `src/workspace/local.rs` fixes. NOTE: the bare `#37/#38/#39` above and the
+  `FIXED #39 follow-up` bullet below are **Codeberg** numbers (GitHub
+  #59/#60/#61), a different ticket.
+  (1) Grep byte budget: `GREP_MAX_FILE_BYTES` 8 MiB / `GREP_MAX_TOTAL_BYTES`
+  64 MiB walk aggregate / `GREP_MAX_LINE_BYTES` 64 KiB + `struct GrepBudget`;
+  `grep_file` streams via `BufReader` + `Read::take` instead of
+  `fs::read_to_string`, and over-cap files are skipped before being opened.
+  (2) `list_dir` uses non-following `DirEntry::file_type()` via `file_type_kind`,
+  so symlinks (including dangling ones) list as `PathKind::Symlink` instead of
+  failing the whole listing; `metadata_kind` stays for `resolve_secure` callers.
+  (3) `glob_match` is a real iterative two-pointer fnmatch matcher (`*`, `?`,
+  `[abc]`, `[a-z]`, `[!...]`; unclosed `[` literal) plus `match_char_class`,
+  backing both `find_files` patterns and grep's glob filter.
+  (4) Write-path TOCTOU closed: private `open_parent_dir_secure` walks the
+  parent chain with `rustix` `openat`
+  (`O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`) relative to the already-pinned
+  fd (`mkdirat` + EEXIST-tolerant retry when creating), and `create_excl` /
+  `install_atomic` / `remove_file` reach the filesystem only through that fd
+  with single-component leaf names (`openat O_CREAT|O_EXCL`, `renameat`,
+  `unlinkat`, `fsync` on the dirfd; path-based `fsync_dir` is gone). Portable
+  (Linux + macOS; no `openat2`/`O_PATH`). It is NOT `openat2(RESOLVE_BENEATH)`:
+  pinning defeats symlink substitution but not a rename of the pinned directory
+  out of the workspace between pin and leaf op — accepted residual L-39-04.
+  Adds `rustix` (features `["fs"]`) to the root workspace deps and here.
+  Deliberate deltas: over-cap files are silently skipped by grep (fewer matches,
+  no error); grep keeps matches found before a mid-file IO/invalid-UTF-8 error
+  instead of dropping the file; a regular-file parent component now surfaces as
+  `SymlinkRejected` (ENOTDIR from the `O_DIRECTORY` walk), not `Io`.
+  Read/observation paths remain `resolve_secure`-only — accepted residual
+  L-39-01, plus L-39-02/L-39-03 on walk depth and symlink reporting.
 - FIXED #48: call-scoped cancellation is audited from the structured code,
   not a message string — `finalize_audit_for_dispatch` records
   `AuditOutcome::Cancelled` on `CepErrorCode::CallCancelled` (the old

@@ -31,12 +31,12 @@ plus base-authority planning. The underlying contract remains split across
 | ----------- | ------------- |
 | `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
 | `lancet-catalog::CATALOG` | The **5-method** canonical agent CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`, `session.todo_write`. (`session.envelope`, `exec.command_run`, `mutate.batch`, post-mutation verify, and agent-visible audit CEP methods were removed - catalog and tests assert their absence.) |
-| `lancet-api::audit` | Operator audit query/tail/replay over the project-keyed audit store (`query_audit`, `tail_audit`, `replay_audit`); not agent CEP methods. |
+| `lancet-api::audit` | Stable operator entry points for audit query/tail/replay over the project-keyed audit store (`query_audit`, `tail_audit`, `replay_audit`); a thin facade that delegates to `lancet-audit::operator`, which owns the DTOs, pagination, filters, and projection. Not agent CEP methods. |
 | Method params/results | Typed `*Params` / `*Result` structs per catalog method in `lancet-catalog` |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
 | `PolicyHook` / `PolicyDecision` | Pluggable policy hook interface in `lancet-protocol` |
-| Audit/provenance schemas | `ProvGraphFragment` wire shapes in `lancet-protocol`; audit rows, filters, and attestation persistence in `lancet-audit` |
+| Audit/provenance schemas | `ProvGraphFragment` wire shapes in `lancet-protocol`; audit rows, filters, attestation persistence, operator read DTOs, and project-keyed store-path resolution in `lancet-audit` |
 
 Internal implementation is split across `lancet-authority` (default policy, Guard L1, active envelope, effect-region semantics) and `lancet-native` (production handlers, transport lifecycle, edit/web integration).
 
@@ -68,7 +68,9 @@ The canonical method names are grouped by primary effect class:
 Audit query, tail, and turn replay are **not** catalog methods. Operators use
 `lattice audit` (default: query/tail; `lattice audit replay --turn <id>` for
 turn provenance reconstruction), backed by `lancet-api::{query_audit,
-tail_audit, replay_audit}`; see **Provenance Audit** below.
+tail_audit, replay_audit}`, which delegate to `lancet-audit::operator`; see
+**Provenance Audit** below. The operator DTOs never lived in `CATALOG`, and
+since GitHub #39 they no longer live in `lancet-catalog` at all.
 
 ### Rollout gate and self-check
 
@@ -176,7 +178,8 @@ Git history retains the non-claims narrative.
 Audit rows live in SQLite (`cep_audit_entries`). Production persistence uses the
 **external project-keyed path** under the platform state directory
 (`$XDG_STATE_HOME/lattice/projects/<sha256-canonical-root>/cep_audit.db` via
-`lancet_api::audit_db_path_for_project`). Each finalized CEP call is one
+`audit_db_path_for_project`, defined in `lancet_audit::store_path` and
+re-exported as `lancet_api::audit_db_path_for_project`). Each finalized CEP call is one
 append-only row. **PROV-DM** structure (`Activity`, `Entity`, `Agent`, relations)
 is **not** stored as a graph; it is **projected** at read time into a
 `ProvGraphFragment` wire type (operator `query_audit` / `replay_audit`).
@@ -233,3 +236,14 @@ server). `replay_audit` rebuilds turn traces and optional in-toto statements fro
 stored rows. `CepAuditStore::query_rows` returns only **finalized** rows
 (`ended_at` and `result_or_error` set). Agents do not receive `ReadAudit` or
 audit methods in `[tools].enabled`.
+
+Since GitHub #39 the `lancet-api` entry points are one-line delegations and the
+behavior — request DTOs, the `AUDIT_TAIL_MAX_ROWS` / `AUDIT_TAIL_MAX_BATCHES`
+pagination loop, filter construction, wire projection, and the replay
+attestation comparison — lives in `lancet-audit::operator`, with the contract
+tests in `lancet-audit::operator_tests`. "No CEP server" is enforced
+structurally: `lancet-audit` depends on none of `lancet-native`,
+`lancet-dispatch`, `lancet-cep`, or `lancet-runtime`, so the read path cannot
+name a server, transport, or registry type. The tail cancellation contract
+(L-11-01) and the synthetic-writer concurrency contract (L-11-02) are documented
+in that module's doc comment.

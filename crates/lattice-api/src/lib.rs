@@ -18,12 +18,6 @@ mod profile;
 mod session;
 pub mod turn;
 
-#[cfg(test)]
-mod test_env;
-
-#[cfg(test)]
-pub use test_env::ScopedXdgStateHome;
-
 pub use lattice_session::{
     GraphDiff, GraphHead, GraphRef, GraphSession, ResetResult, SessionGraphSummary, SessionStatus,
     TurnLogEntry,

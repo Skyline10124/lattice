@@ -76,6 +76,10 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
+# fd-relative filesystem ops (openat/mkdirat/renameat/unlinkat) for the
+# TOCTOU-safe Local Workspace write path (#39). Portable across Linux and
+# macOS — deliberately no Linux-only openat2/RESOLVE_BENEATH usage.
+rustix = { version = "1.1.4", features = ["fs"] }
 gix = { version = "0.85", features = ["tree-editor"] }
 schemars = "1.2"
 bytes = "1"

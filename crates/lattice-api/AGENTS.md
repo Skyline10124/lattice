@@ -24,9 +24,11 @@ agent loop over `lancet-api`'s CEP runtime.
 - `src/turn/mapping.rs` and `src/turn/types.rs` own public event/result mapping.
 - Integration tests cover CEP round trips, audit provenance, release flows, and
   consistency.
-- `src/test_env.rs` (`#[cfg(test)]` via `lib.rs`) serialises `XDG_STATE_HOME`
-  for audit-path tests; duplicated in `lattice-cli/src/commands/test_env.rs` for
-  CLI audit/status tests (no shared test-support crate yet).
+- Audit-path tests serialise `XDG_STATE_HOME` through
+  `lancet_audit::ScopedXdgStateHome`, pulled in via
+  `[dev-dependencies] lancet-audit = { features = ["test-support"] }`. The
+  crate-local `src/test_env.rs` copy was deleted in GitHub #39; there is exactly one
+  such helper in the workspace and it lives in `lancet-audit/src/test_support.rs`.
 
 ## Boundaries
 
@@ -39,6 +41,11 @@ agent loop over `lancet-api`'s CEP runtime.
 
 ## Recent Issues
 
+- FIXED #39: the crate-local `src/test_env.rs` XDG helper was deleted; this
+  crate now consumes the single workspace-wide `lancet_audit::ScopedXdgStateHome`
+  through the `test-support` dev-dependency feature. Do not reintroduce a local
+  copy — the helper owns a process-global env mutex, and a second copy
+  reintroduces the `XDG_STATE_HOME` race that ENV-OOM-02 closed.
 - ADDED #5 slice D: `CepExecutorAdapter` now takes `definitions: &[ToolDefinition]`
   + `enabled_names` instead of deriving the available set from `catalog()`.
   The hardcoded five-arm `dispatch_typed`/`call_typed`/`schema_mismatch_for_method`

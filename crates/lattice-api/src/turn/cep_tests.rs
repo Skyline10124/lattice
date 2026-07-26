@@ -323,7 +323,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
     // drop it under our open SQLite store (FINDINGS ENV-OOM-02 "disk I/O
     // error" flake); the isolated state dir also keeps the audit DB out of
     // the real platform state directory.
-    let _xdg = crate::ScopedXdgStateHome::new();
+    let _xdg = lancet_audit::ScopedXdgStateHome::new();
     let dir = TempDir::new().unwrap();
 
     let llm: Arc<dyn LlmClient> = Arc::new(
@@ -420,7 +420,7 @@ mod attestation_and_dispatch {
 
     #[tokio::test]
     async fn attestation_matches_replay_statement() {
-        let _xdg = crate::ScopedXdgStateHome::new();
+        let _xdg = lancet_audit::ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "attest").unwrap();
         let llm: Arc<dyn LlmClient> = Arc::new(
@@ -491,7 +491,7 @@ mod attestation_and_dispatch {
 
     #[tokio::test]
     async fn replay_without_stored_attestation() {
-        let _xdg = crate::ScopedXdgStateHome::new();
+        let _xdg = lancet_audit::ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "x").unwrap();
         let llm: Arc<dyn LlmClient> = Arc::new(
