@@ -60,7 +60,7 @@ pub use error::{LancetError, LancetResult};
 pub use lancet_catalog::methods::audit::AuditReplayResult;
 pub use rewind::{
     WorkspaceRewindConflict, WorkspaceRewindError, WorkspaceRewindOutcome, WorkspaceRewindReport,
-    record_rewind_audit, rewind_audit_records, rewind_workspace,
+    plan_workspace_rewind, record_rewind_audit, rewind_audit_records, rewind_workspace,
 };
 pub use runtime::{
     DEFAULT_CHANNEL_CAPACITY, LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle,
@@ -85,5 +85,6 @@ pub use lancet_native::{
 };
 pub use lancet_protocol::CepError;
 pub use lancet_runtime::{
-    HistorySnapshot, RewindStep, WorkspaceHistory, WorkspaceHistoryBacking, WorkspaceHistoryError,
+    HistorySnapshot, RewindPlan, RewindStep, WorkspaceHistory, WorkspaceHistoryBacking,
+    WorkspaceHistoryError,
 };

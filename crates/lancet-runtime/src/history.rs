@@ -394,6 +394,16 @@ pub enum RewindError<E> {
         /// The requested target object id (hex), or "<none>" for empty.
         target: String,
     },
+    /// The planned restores do not cover every path the range changed.
+    ///
+    /// A mutation commit could not be read as one, so proceeding would move
+    /// `current` over a path that was never verified or restored.
+    #[error("rewind plan does not cover changed path(s): {paths:?}")]
+    PlanIncomplete {
+        /// Paths that differ between the target and the tip but have no
+        /// planned restore.
+        paths: Vec<String>,
+    },
     /// The apply closure refused the plan; no ref was moved.
     #[error("rewind aborted before any ref moved")]
     Apply(#[source] E),
@@ -468,6 +478,7 @@ impl RewindError<std::convert::Infallible> {
             Self::History(e) => RewindError::History(e),
             Self::Disabled => RewindError::Disabled,
             Self::TargetUnreachable { target } => RewindError::TargetUnreachable { target },
+            Self::PlanIncomplete { paths } => RewindError::PlanIncomplete { paths },
             Self::RefMove(msg) => RewindError::RefMove(msg),
             Self::Apply(never) => match never {},
         }
@@ -538,12 +549,69 @@ fn plan_rewind_locked(
         });
     }
 
+    // Structural check, independent of how the steps were parsed: the plan
+    // must cover every path whose recorded state differs between the target
+    // and the tip. Anything else means a mutation commit was mis-read, and
+    // proceeding would move `current` while leaving a mutated path both
+    // unverified and unrestored — a Rewind reporting success over a path it
+    // never touched. Fail closed instead.
+    let target_tree = match target_oid {
+        Some(oid) => Some(commit_tree_id(repo, oid)?),
+        None => None,
+    };
+    let planned: std::collections::BTreeSet<&str> =
+        path_restores.iter().map(|r| r.path.as_str()).collect();
+    let uncovered: Vec<String> = changed_paths(repo, from_tree, target_tree)?
+        .into_iter()
+        .filter(|path| !planned.contains(path.as_str()))
+        .collect();
+    if !uncovered.is_empty() {
+        return Err(RewindError::PlanIncomplete { paths: uncovered });
+    }
+
     Ok(RewindPlan {
         from: from.map(|oid| oid.to_string()),
         to: target_oid.map(|oid| oid.to_string()),
         steps,
         restores: path_restores,
     })
+}
+
+/// Paths whose recorded content differs between two history trees.
+fn changed_paths(
+    repo: &gix::Repository,
+    from: Option<gix::ObjectId>,
+    to: Option<gix::ObjectId>,
+) -> Result<Vec<String>, WorkspaceHistoryError> {
+    let from_files = tree_files(repo, from)?;
+    let to_files = tree_files(repo, to)?;
+    let mut changed = Vec::new();
+    for (path, bytes) in &from_files {
+        if to_files.get(path) != Some(bytes) {
+            changed.push(path.clone());
+        }
+    }
+    for path in to_files.keys() {
+        if !from_files.contains_key(path) {
+            changed.push(path.clone());
+        }
+    }
+    Ok(changed)
+}
+
+/// Every recorded file in a tree, or an empty map for no tree.
+fn tree_files(
+    repo: &gix::Repository,
+    tree: Option<gix::ObjectId>,
+) -> Result<BTreeMap<String, Vec<u8>>, WorkspaceHistoryError> {
+    let mut files = BTreeMap::new();
+    if let Some(oid) = tree {
+        let tree = repo
+            .find_tree(oid)
+            .map_err(|e| WorkspaceHistoryError::Repo(format!("find history tree: {e}")))?;
+        collect_tree_files(&tree, "", &mut files)?;
+    }
+    Ok(files)
 }
 
 /// Parse a history commit message into a rewind step.
@@ -558,16 +626,23 @@ fn parse_mutation_step(oid: &gix::ObjectId, message: &str) -> Option<RewindStep>
     let mut path = None;
     let mut content_hash = None;
     for line in message.lines() {
-        let Some((key, value)) = line.split_once(':') else {
+        let Some((key, raw_value)) = line.split_once(':') else {
             continue;
         };
-        let value = value.trim();
+        let value = raw_value.trim();
         match key.trim() {
             KIND_TRAILER => kind = Some(value.to_string()),
             "lattice-method" => method = Some(value.to_string()),
             "lattice-turn-id" => turn_id = Some(value.to_string()),
             "lattice-call-id" => call_id = value.parse::<u64>().ok(),
-            "lattice-path" => path = Some(value.to_string()),
+            // The path must round-trip byte-exactly: a workspace-relative
+            // path can legitimately begin or end with a space (`./ a.txt`
+            // normalizes to ` a.txt`), and trimming it here would plan a
+            // restore for a path LATTICE never touched while leaving the real
+            // one unverified. Only the single separator space is removed.
+            "lattice-path" => {
+                path = Some(raw_value.strip_prefix(' ').unwrap_or(raw_value).to_string())
+            }
             "lattice-content-hash" => content_hash = Some(value.to_string()),
             _ => {}
         }
@@ -1690,6 +1765,74 @@ mod tests {
         assert_eq!(
             next.baseline_commit_id, None,
             "the restored content matches the rewound tree, so no baseline"
+        );
+    }
+
+    /// A workspace-relative path may legitimately begin with a space —
+    /// `mutate.create` with `./ a.txt` normalizes to ` a.txt`. The path
+    /// trailer must round-trip byte-exactly, or the plan would verify and
+    /// restore a *different* path while leaving the real one untouched and
+    /// still move `current`.
+    #[test]
+    fn a_path_with_leading_whitespace_round_trips_through_the_plan() {
+        let state = TempDir::new().unwrap();
+        let history = history_at(&state);
+        let target = history.record(&create("anchor.txt", "a")).unwrap().unwrap();
+        history
+            .record(&create(" spaced.txt", "s1"))
+            .unwrap()
+            .unwrap();
+
+        let plan = history.plan_rewind(Some(&target.commit_id)).unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(
+            plan.steps[0].path, " spaced.txt",
+            "the recorded path must survive parsing unchanged"
+        );
+        assert_eq!(plan.restores.len(), 1);
+        assert_eq!(plan.restores[0].path, " spaced.txt");
+        assert_eq!(plan.restores[0].expected.as_deref(), Some(b"s1".as_ref()));
+        assert_eq!(plan.restores[0].restore, None);
+    }
+
+    /// The plan must cover every path the reversed range changed. A commit
+    /// whose mutation trailer cannot be read is not a licence to move
+    /// `current` over an unverified path.
+    #[test]
+    fn a_plan_that_misses_a_changed_path_fails_closed() {
+        let state = TempDir::new().unwrap();
+        let history = history_at(&state);
+        let target = history.record(&create("a.txt", "a")).unwrap().unwrap();
+        let hidden = history.record(&create("b.txt", "b")).unwrap().unwrap();
+
+        // Rewrite the newest commit with its mutation trailer stripped, as a
+        // stand-in for any commit the walker cannot recognise, and point
+        // `current` at the rewritten commit.
+        let repo = raw_repo(&history);
+        let commit = repo
+            .find_commit(parse_oid(&hidden.commit_id).unwrap())
+            .unwrap();
+        let tree = commit.tree_id().unwrap().detach();
+        let parent = commit.parent_ids().next().map(|id| id.detach());
+        let signature = history_signature(1_700_000_010);
+        let mut time_buf = gix::date::parse::TimeBuf::default();
+        let signature_ref = signature.to_ref(&mut time_buf);
+        let opaque = repo
+            .new_commit_as(signature_ref, signature_ref, "opaque\n", tree, parent)
+            .unwrap()
+            .id;
+        repo.reference(CURRENT_REF, opaque, PreviousValue::Any, "test rewrite")
+            .unwrap();
+
+        let err = history.plan_rewind(Some(&target.commit_id)).unwrap_err();
+        match err {
+            RewindError::PlanIncomplete { paths } => assert_eq!(paths, vec!["b.txt".to_string()]),
+            other => panic!("expected PlanIncomplete, got {other:?}"),
+        }
+        assert_eq!(
+            history.current().unwrap().as_deref(),
+            Some(opaque.to_string().as_str()),
+            "a refused plan must not move the ref"
         );
     }
 

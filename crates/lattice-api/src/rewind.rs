@@ -34,8 +34,8 @@
 use std::path::Path;
 
 use lancet_api::{
-    RewindAuditRecord, WorkspaceRewindError, WorkspaceRewindOutcome, record_rewind_audit,
-    rewind_workspace, workspace_history_backing,
+    RewindAuditRecord, WorkspaceRewindError, WorkspaceRewindOutcome, plan_workspace_rewind,
+    record_rewind_audit, rewind_workspace, workspace_history_backing,
 };
 use lattice_session::GraphHead;
 use serde::{Deserialize, Serialize};
@@ -203,6 +203,21 @@ pub fn rewind_to_turn(
     let history_target =
         effective_history_target(session, &resolved_session_id, &target, &log, target_index)?;
 
+    // An unwind-everything plan is only sound when nothing this session
+    // installed at or before the target would be reversed by it. The ancestor
+    // scan above proves the identity was never recorded on this branch; this
+    // proves the same against the history chain itself, which is the record
+    // that actually drives the reversal.
+    if history_target.is_none() {
+        guard_full_unwind(
+            project_root,
+            &resolved_session_id,
+            &target.commit_id,
+            &log,
+            target_index,
+        )?;
+    }
+
     // 3. Workspace half.
     let backing = workspace_history_backing(project_root)
         .map_err(|err| ApiError::Internal(format!("resolve private workspace history: {err}")))?;
@@ -245,6 +260,16 @@ pub fn rewind_to_turn(
             )?;
             return Err(ApiError::Internal(format!(
                 "rewind restore failed: {source}"
+            )));
+        }
+        Err(WorkspaceRewindError::PlanIncomplete { paths }) => {
+            // Nothing moved; the history could not be read as a complete
+            // account of the range, so refuse rather than half-restore.
+            return Err(ApiError::Conflict(format!(
+                "the recorded history does not account for {} path(s) changed since turn '{}': \
+                 {paths:?}",
+                paths.len(),
+                target_commit_id
             )));
         }
         Err(WorkspaceRewindError::TargetUnreachable { target }) => {
@@ -404,6 +429,52 @@ fn effective_history_target(
         }
     }
     Ok(None)
+}
+
+/// Refuse a full unwind that would reverse this session's own pre-target work.
+///
+/// A Turn stamped with no identity is honoured as "before any mutation", but
+/// the private history is per project: another session's Turns share the same
+/// chain, so a stale or failed identity read can leave a target whose
+/// ancestors are all identity-less while the chain already holds mutations
+/// this session installed at or before it. Every mutation commit carries the
+/// `<session>:<parent-commit>` turn id that installed it, so the plan can be
+/// checked directly against this session's log.
+fn guard_full_unwind(
+    project_root: &Path,
+    session_id: &str,
+    target_commit_id: &str,
+    log: &[lattice_session::TurnLogEntry],
+    target_index: usize,
+) -> Result<()> {
+    let backing = workspace_history_backing(project_root)
+        .map_err(|err| ApiError::Internal(format!("resolve private workspace history: {err}")))?;
+    let plan = match plan_workspace_rewind(backing, None) {
+        Ok(plan) => plan,
+        // A history that cannot be planned is caught by the rewind itself.
+        Err(_) => return Ok(()),
+    };
+    // Turns at or before the target, by the parent commit their turn id names.
+    let at_or_before: std::collections::BTreeSet<&str> = log
+        .iter()
+        .take(target_index + 1)
+        .flat_map(|entry| entry.parent_ids.first().map(String::as_str))
+        .chain(std::iter::once("root"))
+        .collect();
+    for step in &plan.steps {
+        let Some((step_session, parent)) = step.turn_id.split_once(':') else {
+            continue;
+        };
+        if step_session == session_id && at_or_before.contains(parent) {
+            return Err(ApiError::Conflict(format!(
+                "turn '{target_commit_id}' records no workspace-history identity, but the private \
+                 history still holds a mutation this session installed at or before it \
+                 ({} on '{}'); rewinding would reverse work that predates the target",
+                step.method, step.path
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Pin the head a Rewind abandons under an internal session ref.

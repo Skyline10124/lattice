@@ -1012,9 +1012,19 @@ async fn rewind_works_after_reopen_on_a_branch_and_from_a_detached_head() {
         .expect("checkout");
     let on_branch = turn_creating(&ws, &sessions, &session_id, "b2.md", "2\n").await;
 
-    // A fresh store handle stands in for a session reopen / process restart.
+    // Session reopen: resolve the session through `open_session` on a store
+    // handle that has never seen this session before, and drive the Rewind
+    // through that handle by its *prefix* — nothing may depend on state the
+    // turn-running handles held.
     let reopened = SessionApi::git(&sessions);
-    let outcome = lattice_api::rewind_to_turn(&reopened, &session_id, &base, &ws.root)
+    let opened = reopened
+        .open_session(lattice_api::OpenSessionRequest {
+            id: session_id.clone(),
+        })
+        .expect("reopen the session");
+    assert_eq!(opened.session_id, session_id);
+    let prefix = &session_id[..8];
+    let outcome = lattice_api::rewind_to_turn(&reopened, prefix, &base, &ws.root)
         .expect("rewind on a branch runs");
     let RewindOutcome::Success(success) = outcome else {
         panic!("expected success, got {outcome:?}");
@@ -1026,6 +1036,21 @@ async fn rewind_works_after_reopen_on_a_branch_and_from_a_detached_head() {
     );
     assert!(!ws.root.join("b2.md").exists());
     assert_eq!(std::fs::read(ws.root.join("b1.md")).unwrap(), b"1\n");
+    // The branch itself really moved, not just the returned report.
+    let branch_status = reopened.status(&session_id).expect("status on the branch");
+    assert!(matches!(
+        branch_status.head,
+        GraphHead::Branch { ref name } if name == "work"
+    ));
+    assert_eq!(
+        branch_status.current_commit_id.as_deref(),
+        Some(base.as_str())
+    );
+    assert_eq!(
+        reopened.log(&session_id).expect("log on the branch").len(),
+        1,
+        "the branch's conversation target is back at the base Turn"
+    );
 
     // Detached HEAD case: add another Turn, detach onto it, then rewind.
     let next = turn_creating(&ws, &sessions, &session_id, "b3.md", "3\n").await;
@@ -1059,9 +1084,21 @@ async fn rewind_works_after_reopen_on_a_branch_and_from_a_detached_head() {
 }
 
 /// A store whose Session History ref refuses to move, so the ordering
-/// guarantee can be exercised end to end.
+/// guarantee can be exercised end to end on both the branch and the detached
+/// arm. `allow_checkout` lets a test detach first and only then arm the
+/// failure.
 struct FailingResetStore {
     inner: GitSessionGraphStore,
+    allow_checkout: std::sync::atomic::AtomicBool,
+}
+
+impl FailingResetStore {
+    fn new(dir: &Path) -> Self {
+        Self {
+            inner: GitSessionGraphStore::new(dir),
+            allow_checkout: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
 }
 
 impl SessionGraphStore for FailingResetStore {
@@ -1094,7 +1131,16 @@ impl SessionGraphStore for FailingResetStore {
         self.inner.commit_turn(input)
     }
     fn checkout(&self, session_id: &str, target: &str) -> lattice_session::Result<GraphHead> {
-        self.inner.checkout(session_id, target)
+        if self
+            .allow_checkout
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.inner.checkout(session_id, target)
+        } else {
+            Err(SessionError::Git(
+                "injected detached session ref durability failure".to_string(),
+            ))
+        }
     }
     fn branch(
         &self,
@@ -1148,9 +1194,7 @@ async fn a_session_ref_failure_is_not_reported_as_success() {
     let first = turn_creating(&ws, &sessions, &session_id, "one.md", "1\n").await;
     let second = turn_creating(&ws, &sessions, &session_id, "two.md", "2\n").await;
 
-    let failing = SessionApi::new(Box::new(FailingResetStore {
-        inner: GitSessionGraphStore::new(&sessions),
-    }));
+    let failing = SessionApi::new(Box::new(FailingResetStore::new(&sessions)));
     let err = lattice_api::rewind_to_turn(&failing, &session_id, &first, &ws.root)
         .expect_err("a session ref failure must surface");
     assert!(
@@ -1293,4 +1337,198 @@ async fn a_rewind_reverses_in_range_mutations_from_every_session() {
     assert_eq!(records.len(), 1);
     assert!(records[0].steps_json.contains(&session_b));
     let _ = scoped;
+}
+
+/// AC2 defence, chain shape: a Turn whose identity is unavailable must not be
+/// honoured as "before any mutation" when the private history still holds a
+/// mutation this session installed at or before it. The same-session ancestor
+/// scan cannot see that on its own — every ancestor here is identity-less —
+/// so only the check against the history chain itself catches it.
+#[tokio::test]
+async fn a_full_unwind_is_refused_when_this_session_installed_work_before_the_target() {
+    let ws = setup_turn_workspace(&["mutate.create"]);
+    let scoped = ScopedState::new(&ws.root);
+    let sessions_dir = TempDir::new().unwrap();
+    let sessions = sessions_dir.path().join("sessions");
+    let session_id = new_session(&sessions);
+    let api = SessionApi::git(&sessions);
+    let resolved = api.status(&session_id).unwrap().session_id;
+
+    // A mutation this session installed, recorded in the shared private
+    // history under the turn id of its first Turn.
+    std::fs::write(ws.root.join("early.md"), "early\n").unwrap();
+    let history = history_for(scoped.path(), &ws.root);
+    history
+        .record(&lancet_runtime::MutationRecord {
+            method: "mutate.create".into(),
+            turn_id: format!("{resolved}:root"),
+            call_id: 1,
+            path: "early.md".into(),
+            before: None,
+            after: b"early\n".to_vec(),
+            content_hash: content_hash(b"early\n"),
+            recorded_at: 1_700_000_000,
+        })
+        .expect("record")
+        .expect("history is enabled");
+    let tip = history.current().unwrap();
+
+    // Two Turns, both stamped with no identity — the shape a swallowed
+    // end-of-turn identity read produces. The second is the rewind target,
+    // and every one of its ancestors is identity-less.
+    let store = GitSessionGraphStore::new(&sessions);
+    let mut parent: Vec<String> = Vec::new();
+    let mut committed = Vec::new();
+    for label in ["first", "second"] {
+        let commit = store
+            .commit_turn(TurnCommitInput {
+                workspace_history_oid: None,
+                session_id: resolved.clone(),
+                parent_ids: parent.clone(),
+                messages: vec![
+                    lattice_session::test_helpers::user_msg(label),
+                    lattice_session::test_helpers::assistant_msg("no identity"),
+                ],
+                agent_name: "default".to_string(),
+                profile_snapshot_hash: "test-profile".to_string(),
+                profile_snapshot_json: "{}".to_string(),
+                model: "sonnet".to_string(),
+                provider: "anthropic".to_string(),
+                status: lattice_session::TurnCommitStatus::Completed,
+                disposition: lattice_session::WorkspaceDisposition::NotApplicable,
+                lifecycle: None,
+                commit_message: format!("{label} turn"),
+                usage: None,
+                terminal_reason: None,
+            })
+            .expect("commit turn");
+        parent = vec![commit.commit_id.clone()];
+        committed.push(commit.commit_id);
+    }
+    let target = committed.last().unwrap().clone();
+
+    let err = lattice_api::rewind_to_turn(&api, &session_id, &target, &ws.root)
+        .expect_err("a full unwind over this session's own earlier work must be refused");
+    assert!(
+        matches!(err, lattice_api::ApiError::Conflict(_)),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("early.md"),
+        "the refusal names the work it would have reversed: {err}"
+    );
+    assert_eq!(
+        history.current().unwrap(),
+        tip,
+        "the refusal must not move the private history ref"
+    );
+    assert_eq!(
+        std::fs::read(ws.root.join("early.md")).unwrap(),
+        b"early\n",
+        "work installed before the target must not be reversed"
+    );
+}
+
+/// AC7/AC10, detached arm: the same ordering guarantee holds when HEAD is
+/// detached — a Session History ref that will not move is an error carrying
+/// the partial state, not a success.
+#[tokio::test]
+async fn a_detached_session_ref_failure_is_not_reported_as_success() {
+    let ws = setup_turn_workspace(&["mutate.create"]);
+    let scoped = ScopedState::new(&ws.root);
+    let sessions_dir = TempDir::new().unwrap();
+    let sessions = sessions_dir.path().join("sessions");
+    let session_id = new_session(&sessions);
+
+    let first = turn_creating(&ws, &sessions, &session_id, "d1.md", "1\n").await;
+    let second = turn_creating(&ws, &sessions, &session_id, "d2.md", "2\n").await;
+
+    let store = FailingResetStore::new(&sessions);
+    let failing = {
+        // Detach onto the newest Turn first, then arm the failure so the
+        // rewind takes the detached arm and cannot move HEAD back.
+        let api = SessionApi::git(&sessions);
+        api.checkout(&session_id, &second).expect("detach");
+        store
+            .allow_checkout
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        SessionApi::new(Box::new(store))
+    };
+
+    let err = lattice_api::rewind_to_turn(&failing, &session_id, &first, &ws.root)
+        .expect_err("a detached ref failure must surface");
+    assert!(
+        err.to_string()
+            .contains("detached session HEAD did not move"),
+        "the error must name the partial state: {err}"
+    );
+
+    // The workspace half really happened, which is why this is not a success.
+    assert!(!ws.root.join("d2.md").exists());
+    let history = history_for(scoped.path(), &ws.root);
+    let target_oid = SessionApi::git(&sessions)
+        .get_turn_commit(&session_id, &first)
+        .unwrap()
+        .unwrap()
+        .workspace_history_oid;
+    assert_eq!(history.current().unwrap(), target_oid);
+
+    let status = SessionApi::git(&sessions).status(&session_id).unwrap();
+    assert!(matches!(status.head, GraphHead::Detached { ref commit_id } if commit_id == &second));
+    let records = rewind_records(&ws.root, &status.session_id);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].outcome, "session_ref_failure");
+}
+
+/// AC9/AC10, restore-failure arm: a Rewind whose restore cannot run at all
+/// still leaves a durable record naming the target and the planned steps.
+/// A recorded path under a System Path Exclusion is the reachable trigger:
+/// the history's own path check lets `.lattice/**` through, the restore
+/// executor does not.
+#[tokio::test]
+async fn a_restore_failure_is_recorded_and_never_reported_as_success() {
+    let ws = setup_turn_workspace(&["mutate.create"]);
+    let scoped = ScopedState::new(&ws.root);
+    let sessions_dir = TempDir::new().unwrap();
+    let sessions = sessions_dir.path().join("sessions");
+    let session_id = new_session(&sessions);
+
+    let target = turn_creating(&ws, &sessions, &session_id, "kept.md", "keep\n").await;
+    let api = SessionApi::git(&sessions);
+    let resolved = api.status(&session_id).unwrap().session_id;
+
+    // A mutation the restore executor must refuse to reverse.
+    let history = history_for(scoped.path(), &ws.root);
+    history
+        .record(&lancet_runtime::MutationRecord {
+            method: "mutate.create".into(),
+            turn_id: format!("{resolved}:{target}"),
+            call_id: 1,
+            path: ".lattice/private.toml".into(),
+            before: None,
+            after: b"x\n".to_vec(),
+            content_hash: content_hash(b"x\n"),
+            recorded_at: 1_700_000_100,
+        })
+        .expect("record")
+        .expect("history is enabled");
+    let tip = history.current().unwrap();
+
+    let err = lattice_api::rewind_to_turn(&api, &session_id, &target, &ws.root)
+        .expect_err("a restore that cannot run must surface");
+    assert!(
+        matches!(err, lattice_api::ApiError::Internal(_)),
+        "got {err:?}"
+    );
+
+    assert_eq!(
+        history.current().unwrap(),
+        tip,
+        "a refused restore must not move the private history ref"
+    );
+    assert_eq!(std::fs::read(ws.root.join("kept.md")).unwrap(), b"keep\n");
+    let records = rewind_records(&ws.root, &resolved);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].outcome, "restore_failure");
+    assert!(records[0].steps_json.contains(".lattice/private.toml"));
 }

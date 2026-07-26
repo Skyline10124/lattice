@@ -90,6 +90,15 @@ pub enum WorkspaceRewindError {
         /// The requested target identity.
         target: String,
     },
+    /// The plan does not cover every path the reversed range changed.
+    ///
+    /// Nothing was written and no ref moved: a Rewind that cannot account for
+    /// a mutated path must not claim to have restored the workspace.
+    #[error("the rewind plan does not cover changed path(s): {paths:?}")]
+    PlanIncomplete {
+        /// The uncovered paths.
+        paths: Vec<String>,
+    },
     /// Preflight or restore failed outright (not a same-path conflict).
     ///
     /// `steps` carries the planned reversal so callers can still write a
@@ -117,6 +126,47 @@ pub enum WorkspaceRewindError {
         /// Boxed so the success path is not paying for the failure payload.
         report: Box<WorkspaceRewindReport>,
     },
+}
+
+/// Plan — without applying — the reversal back to `target_history_oid`.
+///
+/// Read-only: it opens the private history, walks the chain, and returns what
+/// a Rewind *would* reverse. Callers use it to decide whether a Rewind is
+/// admissible before anything is verified or written.
+pub fn plan_workspace_rewind(
+    backing: WorkspaceHistoryBacking,
+    target_history_oid: Option<&str>,
+) -> Result<lancet_runtime::RewindPlan, WorkspaceRewindError> {
+    let history = WorkspaceHistory::open(backing)?;
+    if !history.is_enabled() {
+        return Err(WorkspaceRewindError::Disabled {
+            target: target_history_oid.unwrap_or("<none>").to_string(),
+        });
+    }
+    match history.plan_rewind(target_history_oid) {
+        Ok(plan) => Ok(plan),
+        Err(RewindError::History(err)) => Err(WorkspaceRewindError::History(err)),
+        Err(RewindError::Disabled) => Err(WorkspaceRewindError::Disabled {
+            target: target_history_oid.unwrap_or("<none>").to_string(),
+        }),
+        Err(RewindError::TargetUnreachable { target }) => {
+            Err(WorkspaceRewindError::TargetUnreachable { target })
+        }
+        Err(RewindError::PlanIncomplete { paths }) => {
+            Err(WorkspaceRewindError::PlanIncomplete { paths })
+        }
+        Err(RewindError::Apply(never)) => match never {},
+        Err(RewindError::RefMove(detail)) => Err(WorkspaceRewindError::RefMove {
+            detail,
+            report: Box::new(WorkspaceRewindReport {
+                from_history_oid: None,
+                to_history_oid: target_history_oid.map(str::to_string),
+                steps: Vec::new(),
+                preflight: Vec::new(),
+                restored: Vec::new(),
+            }),
+        }),
+    }
 }
 
 /// Rewind the Local Workspace to `target_history_oid`.
@@ -221,6 +271,9 @@ pub fn rewind_workspace(
         }),
         Err(RewindError::TargetUnreachable { target }) => {
             Err(WorkspaceRewindError::TargetUnreachable { target })
+        }
+        Err(RewindError::PlanIncomplete { paths }) => {
+            Err(WorkspaceRewindError::PlanIncomplete { paths })
         }
         Err(RewindError::RefMove(detail)) => {
             let RewindRestoreOutcome::Applied {
