@@ -120,7 +120,7 @@ impl LocalWorkspace {
     /// Resolution is intent-independent: the same secure walk backs read,
     /// create, overwrite, delete, and list flows. The intent is carried as
     /// operation vocabulary for the guard/precondition layer.
-    fn resolve_secure(
+    pub(crate) fn resolve_secure(
         &self,
         path: &WorkspacePath,
         _intent: PathIntent,
@@ -506,35 +506,44 @@ impl LocalWorkspace {
         let ws = self.blocking_clone();
         let path = path.clone();
         let content = content.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let (full, _facts) = ws.resolve_secure(&path, PathIntent::Overwrite)?;
-            #[cfg(any(test, feature = "test-fault-injection"))]
-            if ws.fail_install.swap(false, Ordering::SeqCst) {
-                return Err(LocalWorkspaceError::Io(std::io::Error::other(
-                    "injected install failure",
-                )));
-            }
-            let parent = full.parent().unwrap_or(&ws.root).to_path_buf();
-            fs::create_dir_all(&parent)?;
-            let tmp = tempfile::Builder::new()
-                .prefix(".lattice-tmp-")
-                .tempfile_in(&parent)?;
-            tmp.as_file().write_all(&content)?;
-            tmp.as_file().sync_all()?;
-            tmp.persist(&full).map_err(|e| {
-                LocalWorkspaceError::Io(std::io::Error::other(format!(
-                    "atomic persist failed: {e}"
-                )))
-            })?;
-            fsync_dir(&parent)?;
-            Ok(InstalledFile {
-                path,
-                content_hash: content_hash(&content),
-                bytes_written: content.len() as u64,
-            })
+        tokio::task::spawn_blocking(move || ws.install_atomic_sync(&path, &content))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+    }
+
+    /// Synchronous core of [`LocalWorkspace::install_atomic`].
+    ///
+    /// Shared by the async mutation path and the explicit Rewind restore
+    /// (#64), which runs on a blocking thread of its own.
+    pub(crate) fn install_atomic_sync(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Result<InstalledFile, LocalWorkspaceError> {
+        path.require_file_path()?;
+        let (full, _facts) = self.resolve_secure(path, PathIntent::Overwrite)?;
+        #[cfg(any(test, feature = "test-fault-injection"))]
+        if self.fail_install.swap(false, Ordering::SeqCst) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::other(
+                "injected install failure",
+            )));
+        }
+        let parent = full.parent().unwrap_or(&self.root).to_path_buf();
+        fs::create_dir_all(&parent)?;
+        let tmp = tempfile::Builder::new()
+            .prefix(".lattice-tmp-")
+            .tempfile_in(&parent)?;
+        tmp.as_file().write_all(content)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&full).map_err(|e| {
+            LocalWorkspaceError::Io(std::io::Error::other(format!("atomic persist failed: {e}")))
+        })?;
+        fsync_dir(&parent)?;
+        Ok(InstalledFile {
+            path: path.clone(),
+            content_hash: content_hash(content),
+            bytes_written: content.len() as u64,
         })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
     /// Remove a file.
@@ -545,24 +554,29 @@ impl LocalWorkspace {
         path.require_file_path()?;
         let ws = self.blocking_clone();
         let path = path.clone();
-        tokio::task::spawn_blocking(move || {
-            let (full, facts) = ws.resolve_secure(&path, PathIntent::Delete)?;
-            if !facts.exists {
-                return Err(LocalWorkspaceError::NotFound {
-                    normalized: path.as_str().to_string(),
-                });
-            }
-            if !matches!(facts.kind, Some(PathKind::File)) {
-                return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "not a regular file",
-                )));
-            }
-            fs::remove_file(&full)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+        tokio::task::spawn_blocking(move || ws.remove_file_sync(&path))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+    }
+
+    /// Synchronous core of [`LocalWorkspace::remove_file`], shared with the
+    /// explicit Rewind restore (#64).
+    pub(crate) fn remove_file_sync(&self, path: &WorkspacePath) -> Result<(), LocalWorkspaceError> {
+        path.require_file_path()?;
+        let (full, facts) = self.resolve_secure(path, PathIntent::Delete)?;
+        if !facts.exists {
+            return Err(LocalWorkspaceError::NotFound {
+                normalized: path.as_str().to_string(),
+            });
+        }
+        if !matches!(facts.kind, Some(PathKind::File)) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a regular file",
+            )));
+        }
+        fs::remove_file(&full)?;
+        Ok(())
     }
 
     /// Flip a one-shot flag so the next install (`install_atomic` or

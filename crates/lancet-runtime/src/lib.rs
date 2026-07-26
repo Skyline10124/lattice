@@ -48,8 +48,8 @@ pub mod test_helpers;
 pub use composition::{ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity};
 pub use evidence::CellEvidenceLedger;
 pub use history::{
-    HistorySnapshot, MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryBacking,
-    WorkspaceHistoryError,
+    HistorySnapshot, MutationRecord, RecordedMutation, RewindError, RewindPathRestore, RewindPlan,
+    RewindStep, WorkspaceHistory, WorkspaceHistoryBacking, WorkspaceHistoryError,
 };
 pub use limits::ExecutionLimits;
 pub use runtime::{ComponentCallContext, ComponentRuntime};

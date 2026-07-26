@@ -15,6 +15,7 @@
 
 mod models;
 mod profile;
+mod rewind;
 mod session;
 pub mod turn;
 
@@ -30,6 +31,10 @@ pub use lattice_session::{
 };
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
 pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
+pub use rewind::{
+    RewindConflict, RewindOutcome, RewindPathConflict, RewindPathPreflight, RewindRestoredPath,
+    RewindStep, RewindSuccess, SessionHeadMove, rewind_to_turn,
+};
 pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
 pub use turn::{
     LifecycleFailureKind, RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus,

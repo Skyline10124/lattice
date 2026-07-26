@@ -44,6 +44,13 @@ but delegates concrete composition to `lancet-runtime`.
 
 ## Recent Issues
 
+- ADDED #64: `rewind_workspace` composes the private history's plan/ref
+  movement with the `lancet-native` restore executor under one recording
+  lock, and `record_rewind_audit` / `rewind_audit_records` persist the
+  durable Rewind record into the project's `cep_audit.db`. Both follow the
+  `query_audit` operator shape — direct store access, never an Agent Tool.
+  The Session History half stays above this crate: lancet-api must not see
+  `lattice-session`.
 - ADDED #63: `LancetRuntimeConfig.workspace_history` selects the private
   mutation-history backing. `LancetRuntime::build` opens it before the server
   starts, threads it through `ServerRunConfig`, and exposes it via

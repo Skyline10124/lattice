@@ -132,8 +132,17 @@ Layer 5:         lattice-tui(-> api + presentation dependencies)
   commits or additional user-facing command surface.
 - That history landed in GitHub #63: `lancet_runtime::WorkspaceHistory` records
   every successfully installed Atomic Local Mutation, and a completed
-  `TurnCommit` carries the `workspace_history_oid` the Turn arrived at. #64
-  builds Rewind on top of it; do not add a second mutation-history store.
+  `TurnCommit` carries the `workspace_history_oid` the Turn arrived at. Do not
+  add a second mutation-history store.
+- Rewind itself landed in GitHub #64: `lattice_api::rewind_to_turn` resolves the
+  target Turn in the current session, `lancet_api::rewind_workspace` plans the
+  reversal and verifies every affected path's recorded post-state before any
+  write, `lancet_native::rewind` restores parent-tree content through the same
+  System Path Exclusion / safe resolution / atomic installation the mutation
+  path uses, and only then do the private workspace-history ref and the Session
+  History ref move. A same-path divergence is a structured conflict with nothing
+  moved; a ref durability failure is never reported as success. The user-facing
+  surface is exactly one command, `lattice session rewind`.
 
 ## Turn Execution
 

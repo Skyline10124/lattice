@@ -28,6 +28,14 @@ in-toto attestation construction, and attestation persistence.
 
 ## Recent Issues
 
+- ADDED #64: `rewind_records` table plus `RewindAuditRecord`,
+  `insert_rewind_record`, and `rewind_records_for_session`. One durable row
+  per explicit Rewind attempt — success, conflict, restore failure, or ref
+  failure — carrying the target Turn, both history identities, the reversed
+  steps, per-path preflight revisions, restored paths, and conflicts.
+  Content policy is unchanged: paths, hashes, and object ids only, never
+  file bytes. `init_schema` creates the table with `IF NOT EXISTS`, so a
+  pre-#64 database gains it on first open (covered by a compatibility test).
 - ADDED #5 slice D: `merge_finalize_metadata` gained a `component_cells: &[String]`
   parameter. Component Tool calls record 4-segment Cell audit keys
   (`ctx:ext:scope:trust`) as a `component_cells` JSON array; native handler

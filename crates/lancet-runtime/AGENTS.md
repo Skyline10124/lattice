@@ -86,6 +86,7 @@ for the D.3 dispatch split and D.4 LLM projection.
 - Local: `cargo test -p lancet-runtime`.
 - History changes: `cargo test -p lancet-runtime --lib history::` plus
   `cargo test -p lattice-api --test workspace_history_acceptance`.
+- Rewind changes: also `cargo test -p lattice-api --test rewind_acceptance`.
 - Clippy: `cargo clippy -p lancet-runtime --all-targets -- -D warnings`.
 - No-WASI: `cargo tree -p lancet-runtime | grep -E "wasmtime-wasi|wasi-common"`
   must be empty.
@@ -93,9 +94,13 @@ for the D.3 dispatch split and D.4 LLM projection.
 
 ## Next Actions
 
-- `WorkspaceHistory` records; it never restores. #64 adds reverse tree
-  application and ref movement on top of it — do not add a second history
-  store or a user-facing history command.
+- `WorkspaceHistory` records and plans; the Local Workspace writes stay
+  outside it. #64 added `plan_rewind` / `rewind_with`: the walk from
+  `current` back to a target identity, the per-path preflight/restore states
+  derived from parent trees, and the guarded backwards move of `current`
+  (deleting it for an empty target) under the same recording lock. The
+  restore itself is the caller's closure — do not pull filesystem writes,
+  a second history store, or an Agent-visible history command in here.
 - Keep the baseline rule content-based: the parent tree must equal the
   before state the installer observed, since the Local Workspace is shared
   with the user and drifts.

@@ -2916,6 +2916,7 @@ dependencies = [
 name = "lattice-system-harness"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "gix",
  "portable-pty",
  "serde",
