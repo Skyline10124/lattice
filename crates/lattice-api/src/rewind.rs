@@ -247,19 +247,27 @@ pub fn rewind_to_turn(
                 report.restored.len()
             )));
         }
-        Err(WorkspaceRewindError::Restore { source, steps }) => {
+        Err(WorkspaceRewindError::Restore {
+            source,
+            steps,
+            restored,
+        }) => {
+            // Phase 2 writes one path at a time, so this may be a partially
+            // restored workspace. Record exactly which paths were written.
             let steps = steps_of(&steps);
+            let restored = restored_of(&restored);
             audit.write(
                 "restore_failure",
                 None,
                 history_target.as_deref(),
                 &steps,
                 &[],
-                None,
+                Some(&restored),
                 None,
             )?;
             return Err(ApiError::Internal(format!(
-                "rewind restore failed: {source}"
+                "rewind restore failed after restoring {} path(s): {source}",
+                restored.len()
             )));
         }
         Err(WorkspaceRewindError::PlanIncomplete { paths }) => {

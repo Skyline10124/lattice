@@ -326,6 +326,35 @@ fn direct_rewind_reverses_later_mutations_and_preserves_external_changes() {
             !world.project_dir().join("doomed.txt").exists(),
             "an unrelated external delete must stay deleted",
         )?;
+        // Prove the survivor really is ignored content, not just another
+        // unrelated file: ask the project's own Git.
+        let ignored = world
+            .command("git")
+            .args(["check-ignore", "-q", "secret.env"])
+            .status()
+            .map_err(|e| AssertError::StdoutMissing {
+                expected: format!("git check-ignore runs: {e}"),
+            })?;
+        require(
+            ignored.success(),
+            "secret.env must actually match an ignore rule",
+        )?;
+        // …and that it is genuinely untracked, so this is ignored content
+        // rather than a committed file that merely matches a pattern.
+        let tracked = world
+            .command("git")
+            .args(["ls-files", "--", "secret.env"])
+            .output()
+            .map_err(|e| AssertError::StdoutMissing {
+                expected: format!("git ls-files runs: {e}"),
+            })?;
+        require(
+            tracked.stdout.is_empty(),
+            format!(
+                "secret.env must be untracked ignored content, got: {}",
+                String::from_utf8_lossy(&tracked.stdout)
+            ),
+        )?;
         require(
             read_project(&world, "secret.env").as_deref() == Some(b"TOKEN=rotated\n"),
             "ignored content LATTICE never touched must be untouched",

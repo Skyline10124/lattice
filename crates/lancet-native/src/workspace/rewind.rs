@@ -119,12 +119,18 @@ pub enum RewindRestoreError {
         path: String,
     },
     /// Reading or writing the Local Workspace failed.
+    ///
+    /// Phase 2 writes one path at a time, so a failure part-way leaves the
+    /// earlier paths restored. `restored` carries exactly those, because a
+    /// half-restored workspace is the state an operator most needs recorded.
     #[error("rewind restore io on '{path}': {detail}")]
     Io {
         /// The path the failure occurred on.
         path: String,
         /// Normalized failure description.
         detail: String,
+        /// Paths already restored when the failure hit.
+        restored: Vec<RestoredPath>,
     },
 }
 
@@ -215,12 +221,16 @@ pub fn preflight_and_restore(
     for (path, restore) in &parsed {
         match restore.restore.as_deref() {
             Some(bytes) => {
-                let installed = workspace.install_atomic_sync(path, bytes).map_err(|err| {
-                    RewindRestoreError::Io {
-                        path: path.as_str().to_string(),
-                        detail: err.to_string(),
+                let installed = match workspace.install_atomic_sync(path, bytes) {
+                    Ok(installed) => installed,
+                    Err(err) => {
+                        return Err(RewindRestoreError::Io {
+                            path: path.as_str().to_string(),
+                            detail: err.to_string(),
+                            restored,
+                        });
                     }
-                })?;
+                };
                 restored.push(RestoredPath {
                     path: path.as_str().to_string(),
                     restored_revision: Some(installed.content_hash),
@@ -235,6 +245,7 @@ pub fn preflight_and_restore(
                         return Err(RewindRestoreError::Io {
                             path: path.as_str().to_string(),
                             detail: err.to_string(),
+                            restored,
                         });
                     }
                 }
@@ -287,10 +298,27 @@ fn observe(workspace: &LocalWorkspace, path: &WorkspacePath) -> Observed {
         return Observed::Absent;
     }
     match facts.kind {
-        Some(PathKind::File) => match std::fs::read(&full) {
-            Ok(bytes) => Observed::File(bytes),
-            Err(err) => Observed::Unverifiable(format!("the file could not be read: {err}")),
-        },
+        Some(PathKind::File) => {
+            // `PathKind::File` means "neither directory nor symlink", which
+            // also covers FIFOs, sockets, and device nodes. Reading a FIFO
+            // blocks until a writer appears — forever, while this thread
+            // holds the history's recording lock — so confirm a regular file
+            // before opening it.
+            match std::fs::symlink_metadata(&full) {
+                Ok(meta) if meta.file_type().is_file() => match std::fs::read(&full) {
+                    Ok(bytes) => Observed::File(bytes),
+                    Err(err) => {
+                        Observed::Unverifiable(format!("the file could not be read: {err}"))
+                    }
+                },
+                Ok(_) => Observed::Unverifiable(
+                    "a special file sits where a regular file was recorded".to_string(),
+                ),
+                Err(err) => {
+                    Observed::Unverifiable(format!("the path could not be inspected: {err}"))
+                }
+            }
+        }
         Some(other) => Observed::NotAFile(other),
         None => Observed::Absent,
     }
@@ -453,6 +481,80 @@ mod tests {
         assert!(
             dir.path().join("was-file.txt").is_dir(),
             "nothing was written"
+        );
+    }
+
+    /// When phase 2 fails part-way, the error must carry the paths it had
+    /// already written — a half-restored workspace is the state an operator
+    /// most needs recorded.
+    #[test]
+    fn a_partial_restore_reports_the_paths_it_already_wrote() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a2").unwrap();
+        // A read-only directory: preflight sees an absent path (no conflict),
+        // and phase 2 cannot write into it.
+        let ro = dir.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        let mut perms = std::fs::metadata(&ro).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&ro, perms).unwrap();
+
+        let err = preflight_and_restore(
+            dir.path(),
+            &[
+                restore("a.txt", Some("a2"), Some("a1")),
+                restore("ro/blocked.txt", None, Some("nope")),
+            ],
+        );
+
+        // Restore permissions so the TempDir can clean up.
+        let mut perms = std::fs::metadata(&ro).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(&ro, perms);
+
+        let Err(RewindRestoreError::Io { path, restored, .. }) = err else {
+            panic!("expected a phase-2 io failure, got {err:?}");
+        };
+        assert_eq!(path, "ro/blocked.txt");
+        assert_eq!(
+            restored,
+            vec![RestoredPath {
+                path: "a.txt".to_string(),
+                restored_revision: Some(content_hash(b"a1")),
+            }],
+            "the error names exactly the paths already written"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("a.txt")).unwrap(),
+            b"a1",
+            "the first path really was written"
+        );
+    }
+
+    /// A FIFO at an affected path must conflict, not block the Rewind (and
+    /// with it the recording lock) inside `open(2)` waiting for a writer.
+    #[test]
+    fn a_fifo_at_an_affected_path_conflicts_instead_of_blocking() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("piped.txt");
+        let c_path = std::ffi::CString::new(target.to_str().unwrap()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated path for the duration of
+        // the call; mkfifo only creates a filesystem entry.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+        assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+        let outcome =
+            preflight_and_restore(dir.path(), &[restore("piped.txt", Some("v2"), Some("v1"))])
+                .expect("a FIFO is a conflict, not an executor error");
+        let RewindRestoreOutcome::Conflict { conflicts, .. } = outcome else {
+            panic!("expected Conflict, got {outcome:?}");
+        };
+        assert_eq!(conflicts.len(), 1);
+        assert!(
+            conflicts[0].detail.contains("special file"),
+            "detail: {}",
+            conflicts[0].detail
         );
     }
 

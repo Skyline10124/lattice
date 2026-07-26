@@ -101,8 +101,8 @@ pub enum WorkspaceRewindError {
     },
     /// Preflight or restore failed outright (not a same-path conflict).
     ///
-    /// `steps` carries the planned reversal so callers can still write a
-    /// durable audit record of the attempt.
+    /// `steps` carries the planned reversal and `restored` the paths phase 2
+    /// had already written, so callers can record the partial state.
     #[error("rewind restore failed: {source}")]
     Restore {
         /// The executor failure.
@@ -110,6 +110,8 @@ pub enum WorkspaceRewindError {
         source: RewindRestoreError,
         /// The mutation commits the aborted rewind had planned to reverse.
         steps: Vec<RewindStep>,
+        /// Paths already restored when the failure hit.
+        restored: Vec<RestoredPath>,
     },
     /// Paths were restored but the history ref did not move durably.
     ///
@@ -263,7 +265,15 @@ pub fn rewind_workspace(
             }))
         }
         Err(RewindError::Apply(Abort::Restore(source))) => {
-            Err(WorkspaceRewindError::Restore { source, steps })
+            let restored = match &source {
+                RewindRestoreError::Io { restored, .. } => restored.clone(),
+                _ => Vec::new(),
+            };
+            Err(WorkspaceRewindError::Restore {
+                source,
+                steps,
+                restored,
+            })
         }
         Err(RewindError::History(err)) => Err(WorkspaceRewindError::History(err)),
         Err(RewindError::Disabled) => Err(WorkspaceRewindError::Disabled {
