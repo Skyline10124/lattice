@@ -111,3 +111,12 @@ later Atomic Local Mutations made by LATTICE. It preserves unrelated external
 changes and refuses to overwrite a path whose current Local Revision has
 diverged from the recorded LATTICE result.
 _Avoid_: whole-workspace snapshot restore, automatic overwrite, conversation-only reset
+
+**Rewind Conflict**:
+The structured refusal a Rewind returns when a LATTICE-touched path can no
+longer be verified against its recorded post-mutation state — changed,
+deleted, replaced by another kind of entry, or unreadable. It names every
+divergent path with its recorded and observed Local Revision, and nothing
+moves: not the Local Workspace, not the private workspace-history ref, not the
+Session History ref.
+_Avoid_: partial rewind, per-path skip, forced overwrite
