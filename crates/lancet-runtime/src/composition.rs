@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use lancet_protocol::cell::{ChannelKind, ToolDescriptor};
+use lancet_protocol::cell::{Cell, ChannelKind, ToolDescriptor};
 use sha2::{Digest, Sha256};
 use wasmtime::component::Component;
 
@@ -87,6 +87,8 @@ pub enum CompositionError {
     ResultSchema(String),
     #[error("missing expected tools: {0:?}")]
     MissingNames(Vec<String>),
+    #[error("capability {name} maps to different cells across tools: {tools:?}")]
+    CapabilityConflict { name: String, tools: Vec<String> },
     #[error("engine creation failed")]
     Engine(#[source] wasmtime::Error),
     #[error("linker construction failed")]
@@ -242,6 +244,9 @@ impl ClosedCatalog {
             return Err(CompositionError::MissingNames(missing));
         }
 
+        // Cross-tool capability rule, checked once over the sealed catalog.
+        check_capability_conflicts(tools.values().map(|tool| tool.descriptor.as_ref()))?;
+
         Ok(Self { tools })
     }
 
@@ -257,6 +262,35 @@ impl ClosedCatalog {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// One capability name is one cell for the whole composed catalog (#28 C2).
+/// Same name over the same cell is a permitted shared alias across tools;
+/// same name over a different cell refuses startup, because the name would
+/// otherwise mean two different authorizations depending on which tool a
+/// profile enabled. Iteration is over the name-sorted catalog, so the
+/// reported pair is stable.
+fn check_capability_conflicts<'a>(
+    descriptors: impl IntoIterator<Item = &'a ToolDescriptor>,
+) -> Result<(), CompositionError> {
+    let mut seen: BTreeMap<&str, (&Cell, &str)> = BTreeMap::new();
+    for descriptor in descriptors {
+        for capability in &descriptor.capabilities {
+            match seen.get(capability.name.as_str()) {
+                Some((cell, tool)) if **cell != capability.cell => {
+                    return Err(CompositionError::CapabilityConflict {
+                        name: capability.name.clone(),
+                        tools: vec![(*tool).to_string(), descriptor.name.clone()],
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    seen.insert(&capability.name, (&capability.cell, &descriptor.name));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Compute SHA-256 of `bytes` and compare with `expected`. Returns `Ok(())`
 /// on match.
@@ -437,6 +471,77 @@ mod tests {
         assert!(verify_sha256(data, arr).is_ok());
         arr[0] ^= 0xff;
         assert!(verify_sha256(data, arr).is_err());
+    }
+
+    fn descriptor_with(
+        name: &str,
+        capabilities: Vec<(&str, lancet_protocol::cell::CtxOp)>,
+    ) -> ToolDescriptor {
+        use lancet_protocol::cell::{ArtifactIdentity, Capability, ExtImpact, ScopeDecl, Trust};
+        ToolDescriptor {
+            name: name.into(),
+            version: "0.1.0".into(),
+            description: "conflict fixture".into(),
+            params_schema: serde_json::Value::Null,
+            result_schema: serde_json::Value::Null,
+            scopes: vec![ScopeDecl {
+                name: "session".into(),
+                trust: Trust::In,
+                channel: ChannelKind::Session,
+            }],
+            capabilities: capabilities
+                .into_iter()
+                .map(|(capability, ctx_op)| Capability {
+                    name: capability.into(),
+                    cell: Cell {
+                        ctx_op,
+                        ext_impact: ExtImpact::None,
+                        scope: "session".into(),
+                    },
+                })
+                .collect(),
+            artifact: ArtifactIdentity {
+                sha256: "0".repeat(64),
+                toolchain: "test".into(),
+            },
+            abi_version: 1,
+        }
+    }
+
+    /// C2: two tools naming one capability with different cells refuse
+    /// startup; the error names both tools.
+    #[test]
+    fn capability_conflict_refuses_composition() {
+        use lancet_protocol::cell::CtxOp;
+
+        let a = descriptor_with("a.tool", vec![("session.result", CtxOp::Alloc)]);
+        let b = descriptor_with("b.tool", vec![("session.result", CtxOp::Mutate)]);
+        let error = check_capability_conflicts([&a, &b]).expect_err("conflict must refuse");
+        assert!(
+            matches!(
+                error,
+                CompositionError::CapabilityConflict { ref name, ref tools }
+                    if name == "session.result" && tools == &["a.tool".to_string(), "b.tool".to_string()]
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// The same name over the same cell is a permitted shared alias, and a
+    /// tool may carry several capabilities over different cells.
+    #[test]
+    fn shared_capability_name_over_one_cell_is_allowed() {
+        use lancet_protocol::cell::CtxOp;
+
+        let a = descriptor_with(
+            "a.tool",
+            vec![
+                ("session.result", CtxOp::Alloc),
+                ("session.events", CtxOp::Mutate),
+            ],
+        );
+        let b = descriptor_with("b.tool", vec![("session.result", CtxOp::Alloc)]);
+        assert!(check_capability_conflicts([&a, &b]).is_ok());
     }
 
     /// The committed noop Component expands into 3 core instances (the guest

@@ -8,24 +8,44 @@
 //! Custom-component trap/effect-violation tests require a WIT-matching
 //! guest and are deferred to a dedicated test tool crate.
 
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
 use lancet_dispatch::{Cancellation, EventSink};
 use lancet_protocol::CepErrorCode;
-use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime};
+use lancet_protocol::cell::Trust;
+use lancet_protocol::evidence::CapabilityAdmissionPolicy;
+use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool};
 use tokio::sync::{mpsc, watch};
 
-fn call_ctx() -> (
+/// A call context with every declared `noop.echo` capability admitted, built
+/// the way the transport builds it: admission runs per call, before `call`.
+fn call_ctx(
+    rt: &ComponentRuntime,
+) -> (
     ComponentCallContext,
     mpsc::Receiver<lancet_protocol::ToolEvent>,
     watch::Sender<bool>,
 ) {
     let (tx, rx) = mpsc::channel(64);
     let (cancel_tx, cancel_rx) = watch::channel(false);
+    let descriptor = rt.descriptor("noop.echo").expect("fixture tool exists");
+    let admitted = admit_tool(
+        descriptor,
+        &CapabilityAdmissionPolicy {
+            enabled_tools: BTreeSet::from(["noop.echo".to_string()]),
+            denied_capabilities: BTreeSet::new(),
+            max_boundary: Trust::In,
+        },
+    )
+    .expect("noop.echo is admitted");
     let ctx = ComponentCallContext {
         call_id: 1,
         turn_id: "test".into(),
         events: EventSink::new(tx, 1),
         cancellation: Cancellation::new(cancel_rx),
         evidence: CellEvidenceLedger::new(),
+        admitted: Arc::new(admitted),
     };
     (ctx, rx, cancel_tx)
 }
@@ -37,14 +57,14 @@ async fn survival_after_method_not_found() {
     let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
 
     // Call a non-existent tool.
-    let (ctx_bad, _rx, _cancel) = call_ctx();
+    let (ctx_bad, _rx, _cancel) = call_ctx(&rt);
     let bad = rt
         .call("no.such.tool", serde_json::json!({}), ctx_bad)
         .await;
     assert!(bad.is_err());
 
     // A normal no-op call still works.
-    let (ctx_ok, _rx, _cancel) = call_ctx();
+    let (ctx_ok, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call(
             "noop.echo",
@@ -62,14 +82,14 @@ async fn survival_after_schema_mismatch() {
     let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
 
     // Bad params.
-    let (ctx_bad, _rx, _cancel) = call_ctx();
+    let (ctx_bad, _rx, _cancel) = call_ctx(&rt);
     let bad = rt
         .call("noop.echo", serde_json::json!({"wrong": "field"}), ctx_bad)
         .await;
     assert!(bad.is_err());
 
     // Normal call.
-    let (ctx_ok, _rx, _cancel) = call_ctx();
+    let (ctx_ok, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call("noop.echo", serde_json::json!({"message": "ok"}), ctx_ok)
         .await
@@ -83,7 +103,7 @@ async fn survival_after_guest_error() {
     let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
 
     // Pre-cancelled call → guest error.
-    let (ctx_bad, _rx, cancel_tx) = call_ctx();
+    let (ctx_bad, _rx, cancel_tx) = call_ctx(&rt);
     cancel_tx.send(true).unwrap();
     let bad = rt
         .call("noop.echo", serde_json::json!({"message": "x"}), ctx_bad)
@@ -91,7 +111,7 @@ async fn survival_after_guest_error() {
     assert!(bad.is_err());
 
     // Normal call.
-    let (ctx_ok, _rx, _cancel) = call_ctx();
+    let (ctx_ok, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call("noop.echo", serde_json::json!({"message": "ok"}), ctx_ok)
         .await
@@ -103,7 +123,7 @@ async fn survival_after_guest_error() {
 #[tokio::test]
 async fn call_rejects_extra_params() {
     let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-    let (ctx, _rx, _cancel) = call_ctx();
+    let (ctx, _rx, _cancel) = call_ctx(&rt);
 
     // The schema has additionalProperties: false and requires "message".
     // Extra field should be rejected.
@@ -131,7 +151,7 @@ async fn call_fuel_exhaustion_then_survival() {
         ..Default::default()
     });
 
-    let (ctx, _rx, _cancel) = call_ctx();
+    let (ctx, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call("noop.echo", serde_json::json!({"message": "fuel"}), ctx)
         .await;
@@ -141,7 +161,7 @@ async fn call_fuel_exhaustion_then_survival() {
 
     // Restore normal limits and call again.
     rt.set_limits(lancet_runtime::ExecutionLimits::default());
-    let (ctx2, _rx, _cancel) = call_ctx();
+    let (ctx2, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call(
             "noop.echo",
@@ -175,7 +195,7 @@ async fn call_with_past_deadline_does_not_crash() {
         ..Default::default()
     });
 
-    let (ctx, _rx, _cancel) = call_ctx();
+    let (ctx, _rx, _cancel) = call_ctx(&rt);
     // The call should complete normally — the noop is faster than 1ms.
     let result = rt
         .call("noop.echo", serde_json::json!({"message": "fast"}), ctx)
@@ -192,7 +212,7 @@ async fn call_with_past_deadline_does_not_crash() {
 
     // Restore normal limits and call again — engine must survive.
     rt.set_limits(lancet_runtime::ExecutionLimits::default());
-    let (ctx2, _rx, _cancel) = call_ctx();
+    let (ctx2, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call(
             "noop.echo",
@@ -229,7 +249,7 @@ async fn assert_resource_exhausted_then_survives(
     let mut rt = ComponentRuntime::noop_fixture().expect("fixture composes");
     rt.set_limits(limits);
 
-    let (ctx, _rx, _cancel) = call_ctx();
+    let (ctx, _rx, _cancel) = call_ctx(&rt);
     let err = rt
         .call("noop.echo", serde_json::json!({"message": "limit"}), ctx)
         .await
@@ -247,7 +267,7 @@ async fn assert_resource_exhausted_then_survives(
 
     // The engine must survive: a normal call with default limits still works.
     rt.set_limits(lancet_runtime::ExecutionLimits::default());
-    let (ctx2, _rx, _cancel) = call_ctx();
+    let (ctx2, _rx, _cancel) = call_ctx(&rt);
     let result = rt
         .call(
             "noop.echo",

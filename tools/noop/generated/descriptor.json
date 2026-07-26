@@ -41,6 +41,14 @@
         "ext_impact": "none",
         "scope": "session"
       }
+    },
+    {
+      "name": "session.events",
+      "cell": {
+        "ctx_op": "mutate",
+        "ext_impact": "none",
+        "scope": "session"
+      }
     }
   ],
   "artifact": {

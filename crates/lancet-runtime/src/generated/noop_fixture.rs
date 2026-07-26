@@ -27,7 +27,7 @@ pub fn expected_identity() -> ExpectedToolIdentity {
     ExpectedToolIdentity {
         name: "noop.echo",
         descriptor_sha256: parse_hex_digest(
-            "c452ffe16c8837746ea1088224422e5047baaf110adb7c862c454a3f4259e6ca",
+            "17de570c1304cce5696c53b86bcb0f79e604c032ac5e37433995152a0b8870c3",
         ),
         artifact_sha256: parse_hex_digest(
             "6fcc7fc8570be61f887278661f4a5a6353c3ca2c46e249dcc8de843500f73df4",
