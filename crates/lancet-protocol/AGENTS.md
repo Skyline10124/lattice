@@ -17,6 +17,11 @@ types.
   `ExecutionEnvelope`.
 - `src/cell.rs` owns the ADR 0004 Cell effect core (`CtxOp`/`ExtImpact`/`Trust`/
   `ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`) + trust-free CellRef layering.
+- `src/evidence.rs` owns the #28 admission/effect evidence vocabulary
+  (`AdmissionEvidence`, `ObservedEffect`(`sRecord`), `DeniedOperation`,
+  `ObservedScope`/`ObservedTarget`, `CapabilityAdmissionPolicy`).
+- `src/canonical.rs` owns `canonical_json` — the single canonical-bytes writer
+  behind context measures and v2 attestation statements.
 - `src/capability.rs` owns required-capability patterns and resolution errors.
 - `src/error.rs` owns `CepError`, families, wire codes, and retriability.
 - `src/policy.rs` owns deterministic policy hook input/output data.
@@ -61,6 +66,10 @@ types.
   `ToolResourceExhausted`/`CallCancelled`) + `ToolExecutionErrorData` landed
   in `src/error.rs` Execution family (#5 slice C). No guest backtrace/host
   path/secret in the data.
+- #28 protocol slice: capability-name grammar is the first per-capability check
+  in `ToolDescriptor::validate`; evidence roots stay free of
+  `deny_unknown_fields` (persisted surface — gate content on `version`); no new
+  `CepErrorCode`/`PolicyReasonCode` variants for Cell admission.
 
 ## Record Maintenance
 

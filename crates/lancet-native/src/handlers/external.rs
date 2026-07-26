@@ -86,6 +86,9 @@ async fn handle_fetch_as(
                         violations: vec![
                             "handler missing authorized region before outbound fetch".to_string(),
                         ],
+                        // Legacy ImpactKind path: the Cell fields stay unset.
+                        cell_ref: None,
+                        capability: None,
                     })),
                     Retriability::Permanent,
                 ));
@@ -186,6 +189,9 @@ fn ensure_fetch_host_authorized(
             violations: vec![format!(
                 "ExternalObservation@Host({host}) exceeds authorized region"
             )],
+            // Legacy ImpactKind path: the Cell fields stay unset.
+            cell_ref: None,
+            capability: None,
         })),
         Retriability::Permanent,
     ))

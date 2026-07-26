@@ -302,6 +302,8 @@ cep_family_test!(
             ImpactKind::WorkspaceMutation,
         ],
         violations: vec!["observed workspace_mutation not in declared effect ceiling".into(),],
+        cell_ref: None,
+        capability: None,
     })),
     Retriability::Permanent
 );

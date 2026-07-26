@@ -131,6 +131,8 @@ pub(crate) fn effect_violation(method: &str, cell_ref: &str) -> CepError {
             violations: vec![format!(
                 "result cell {cell_ref} not in descriptor capability cells"
             )],
+            cell_ref: Some(cell_ref.to_owned()),
+            capability: None,
         })),
         Retriability::Permanent,
     )

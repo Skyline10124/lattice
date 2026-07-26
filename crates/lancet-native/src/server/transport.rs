@@ -391,6 +391,9 @@ fn apply_effect_check(
                     violations: vec![
                         "handler completed without setting authorized region".to_string(),
                     ],
+                    // Legacy ImpactKind path: the Cell fields stay unset.
+                    cell_ref: None,
+                    capability: None,
                 })),
                 Retriability::Permanent,
             )),
