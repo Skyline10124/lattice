@@ -410,11 +410,18 @@ fn direct_tools_todo_write_success() {
                 TurnEventLine::ToolCallFinished { name, .. } if name == "session.todo_write"
             )
         });
+        // CEP call events and agent-loop tool events travel on separate async
+        // channels (the CEP sink in lancet-native's transport vs the turn event
+        // stream), so their relative interleaving is not ordered. Assert only
+        // the ordering that holds within the CEP channel itself, plus the
+        // presence of the tool completion. Requiring
+        // `cep_finished < ToolCallFinished` across the two channels was flaky on
+        // macOS, where the tool event frequently lands first.
         require(
             cep_started
                 .zip(cep_finished)
-                .zip(tool_finished)
-                .is_some_and(|((started, finished), tool)| started < finished && finished < tool),
+                .is_some_and(|(started, finished)| started < finished)
+                && tool_finished.is_some(),
             format!(
                 "todo CEP/tool lifecycle ordering missing: {:?}",
                 outcome.events
