@@ -73,4 +73,4 @@ pub use lancet_native::{
     AuditQueryFilters, CepAuditContext, CepAuditStore, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
 };
-pub use lancet_protocol::CepError;
+pub use lancet_protocol::{CapabilityAdmissionPolicy, CepError};

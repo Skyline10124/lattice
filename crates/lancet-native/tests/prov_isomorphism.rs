@@ -118,6 +118,72 @@ fn mutation_turn_projection_is_isomorphic() {
     assert_projection_idempotent(&rows);
 }
 
+/// #28 B6/B11: a Component turn's row carries "why authorized" apart from
+/// "what happened", and both reach the PROV fragment as separate activity
+/// attributes. The projection stays idempotent with the new keys present.
+#[test]
+fn component_turn_projection_separates_admission_from_effects() {
+    let audit = CepAuditStore::in_memory().expect("audit");
+    let ctx = base_ctx("sess-prov", "turn-component");
+    store_row(
+        &audit,
+        &ctx,
+        1,
+        "noop.echo",
+        r#"{
+            "admission_evidence": {
+                "version": 1,
+                "tool": "noop.echo",
+                "approved_capabilities": ["session.result"],
+                "denied_capabilities": ["session.events"],
+                "boundary_excluded": [],
+                "max_boundary": "in"
+            },
+            "observed_effects": {
+                "version": 1,
+                "effects": [{
+                    "seq": 1,
+                    "cell": {"ctx_op": "alloc", "ext_impact": "none", "scope": "session"},
+                    "scope": {"scope": "session", "trust": "in", "channel": "session"},
+                    "target": {"kind": "session", "turn_id": "turn-component"},
+                    "source": "result",
+                    "context_measure": 18
+                }]
+            },
+            "denied_operations": [{
+                "seq": 0,
+                "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
+                "scope": {"scope": "session", "trust": "in", "channel": "session"},
+                "target": {"kind": "session", "turn_id": "turn-component"},
+                "reason": "cell mutate:none:session is not covered by an admitted capability"
+            }],
+            "component_cells": ["alloc:none:session:in"]
+        }"#,
+    );
+    let rows = audit
+        .query_rows(&lancet_native::AuditQueryFilters {
+            session_id: Some(ctx.session_id.clone()),
+            turn_id: Some(ctx.turn_id.clone()),
+            ..Default::default()
+        })
+        .expect("query");
+
+    let attributes = &project_rows(&rows).activities[0].attributes;
+    assert_eq!(
+        attributes["admission_evidence"]["approved_capabilities"],
+        serde_json::json!(["session.result"])
+    );
+    assert_eq!(
+        attributes["observed_effects"]["effects"][0]["cell"]["ctx_op"],
+        serde_json::json!("alloc")
+    );
+    assert_eq!(
+        attributes["denied_operations"][0]["cell"]["ctx_op"],
+        serde_json::json!("mutate")
+    );
+    assert_projection_idempotent(&rows);
+}
+
 #[test]
 fn mixed_turn_projection_is_isomorphic() {
     let audit = CepAuditStore::in_memory().expect("audit");

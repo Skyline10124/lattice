@@ -39,6 +39,12 @@ agent loop over `lancet-api`'s CEP runtime.
 
 ## Recent Issues
 
+- ADDED #28: `build_production_turn_deps` lowers the loaded profile into
+  `CapabilityAdmissionPolicy` via `AgentProfile::capability_admission_policy`
+  (`[tools].enabled` is the stage-1 grant, `[lancet.capabilities]` subtracts)
+  and hands it to `LancetRuntimeConfig`. Without a loaded profile nothing is
+  admitted. `cep_policy_from_profile` only carries executor policy, so it leaves
+  the admission field at its fail-closed default.
 - ADDED #5 slice D: `CepExecutorAdapter` now takes `definitions: &[ToolDefinition]`
   + `enabled_names` instead of deriving the available set from `catalog()`.
   The hardcoded five-arm `dispatch_typed`/`call_typed`/`schema_mismatch_for_method`

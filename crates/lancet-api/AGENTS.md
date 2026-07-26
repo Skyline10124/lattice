@@ -44,6 +44,13 @@ but delegates concrete composition to `lancet-runtime`.
 
 ## Recent Issues
 
+- ADDED #28: `LancetRuntimeConfig.capability_admission` threads the host's
+  Component Tool admission policy into `CepPolicyConfig`; `spawn_composed`
+  validates it against the composed catalog, so an unknown deny name fails
+  composition instead of a spawned server task. `store_turn_attestation` writes
+  `statement_bytes` (canonical for v2, stored serde order for v1) and
+  `replay_audit` rebuilds under the stored `predicate_type`, so a turn attested
+  as v1 never re-projects as v2.
 - ADDED #5 slice D: `LancetRuntime::build` composes `ComponentRuntime::from_embedded()`
   once and threads the same `Arc<ComponentRuntime>` into `ServerRunConfig.components`
   (D.3 dispatch) and into the LLM tool definitions projection (D.4).

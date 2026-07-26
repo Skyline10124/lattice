@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use lancet_authority::policy::default::PolicyConfig;
+use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use lancet_protocol::policy::CepMode;
 use sha2::{Digest, Sha256};
 
@@ -145,6 +146,9 @@ pub struct LancetRuntimeConfig {
     pub enabled_tools: Vec<String>,
     /// Fully-resolved authority/policy configuration.
     pub policy: PolicyConfig,
+    /// Component Tool admission inputs (#28). Fail-closed by default: no
+    /// Component Tool is callable until the host supplies its operator policy.
+    pub capability_admission: CapabilityAdmissionPolicy,
     /// CEP enforcement mode.
     pub cep_mode: CepMode,
     /// Audit store backing.
@@ -167,6 +171,7 @@ impl LancetRuntimeConfig {
             project_root,
             enabled_tools: Vec::new(),
             policy,
+            capability_admission: CapabilityAdmissionPolicy::default(),
             cep_mode: CepMode::Enforce,
             audit: AuditBacking::InMemory,
             model_id: String::new(),

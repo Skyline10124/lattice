@@ -24,5 +24,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 lancet-catalog = { workspace = true }
+lancet-runtime = { workspace = true, features = ["test-utils"] }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }

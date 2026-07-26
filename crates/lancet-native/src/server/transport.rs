@@ -8,15 +8,20 @@ use crate::server::registry::{HandlerContext, MethodRegistry};
 use crate::workspace::LocalWorkspace;
 use lancet_audit::{
     AuditOutcome, AuditStart, CallAuditMetadata, CepAuditContext, CepAuditStore,
-    SEMANTIC_STAGE_SCAFFOLD, SEMANTIC_STAGE_UNROUTED, impact_kind_for_method, impact_kind_label,
-    merge_finalize_metadata,
+    ComponentCallEvidence, SEMANTIC_STAGE_SCAFFOLD, SEMANTIC_STAGE_UNROUTED,
+    impact_kind_for_method, impact_kind_label, merge_finalize_metadata,
 };
 use lancet_authority::policy::CepTurnContext;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_dispatch::{CepServer, ServerCall, ServerRuntime};
+use lancet_protocol::error::PermissionErrorData;
+use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, policy::CepMode};
-use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime};
+use lancet_runtime::{
+    AdmissionDenial, CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool,
+    validate_policy_against_catalog,
+};
 use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
@@ -73,6 +78,35 @@ impl ServerRunConfig {
             components: None,
         }
     }
+
+    /// Install the Component Tool admission policy on the turn context.
+    ///
+    /// Production assembles `CepTurnContext` with the policy already resolved
+    /// from the operator profile; this is the seam for callers that start from
+    /// [`Self::in_memory_for_tests`]. The default admits nothing, so a caller
+    /// dispatching a Component Tool must name it here.
+    pub fn with_capability_admission(mut self, policy: CapabilityAdmissionPolicy) -> Self {
+        let mut context = (*self.cep_context).clone();
+        context.policy.capability_admission = policy;
+        self.cep_context = Arc::new(context);
+        self
+    }
+
+    /// Refuse a policy whose deny list names capabilities no composed Tool
+    /// declares (#28 C2): a deny typo silently keeps the grant it meant to
+    /// remove. Runs once at server construction, never per turn. An absent
+    /// Component runtime is an empty catalog, so *any* deny entry fails there.
+    pub fn validate_capability_admission(&self) -> Result<(), CepError> {
+        let declared: Vec<&str> = self
+            .components
+            .iter()
+            .flat_map(|components| components.descriptors())
+            .flat_map(|descriptor| descriptor.capabilities.iter())
+            .map(|capability| capability.name.as_str())
+            .collect();
+        validate_policy_against_catalog(declared, &self.cep_context.policy.capability_admission)
+            .map_err(|err| CepError::internal_error(err.to_string()))
+    }
 }
 
 /// Per-run native server runtime: the run configuration plus the one
@@ -121,6 +155,9 @@ impl CepServerNativeExt for CepServer {
         config: ServerRunConfig,
     ) -> Pin<Box<dyn Future<Output = Result<(), CepError>> + Send>> {
         Box::pin(async move {
+            // Catalog and admission policy first coexist here, so this is
+            // where an unknown deny name fails the run closed (#28 C2).
+            config.validate_capability_admission()?;
             // ADR 0003: the one concrete Local Workspace is constructed once
             // per server run from the resolved policy's canonical project
             // root. No caller-supplied workspace implementation is accepted.
@@ -218,35 +255,54 @@ async fn handle_request(
         return;
     }
 
-    let dispatch_result = if let Some(ref rt) = components
-        && rt.contains(&method)
+    // #28 D1: Cell capability admission is the sole authorization for a
+    // Component Tool and runs before the runtime is entered. It is
+    // unconditional — `CepMode` gates only the legacy effect-region checks
+    // below (D11). Both outcomes record their `AdmissionEvidence`, so a
+    // refused call still finalizes with the "why" in its audit row.
+    let dispatch_result = match components
+        .as_ref()
+        .and_then(|rt| rt.descriptor(&method).map(|descriptor| (rt, descriptor)))
     {
-        let comp_ctx = ComponentCallContext {
-            call_id: id,
-            turn_id: turn_id.clone(),
-            events: events.clone(),
-            cancellation: cancellation.clone(),
-            evidence: component_evidence.clone(),
-        };
-        rt.call(&method, params, comp_ctx).await
-    } else {
-        let ctx = HandlerContext {
-            call_id: id,
-            events: events.clone(),
-            cancellation,
-            cep_context: Arc::clone(&cep_context),
-            turn_id,
-            durable_metadata: durable_metadata.clone(),
-            effect_ledger: effect_ledger.clone(),
-            authorized_region: authorized_region_slot.clone(),
-            policy_hook: Arc::clone(&policy_hook),
-            default_policy_hook: default_policy_hook.clone(),
-            audit_context: Arc::clone(&audit_context),
-            audit: Arc::clone(&audit),
-            cep_mode: cep_mode.clone(),
-            workspace,
-        };
-        registry.dispatch(&method, params, ctx).await
+        Some((rt, descriptor)) => {
+            match admit_tool(descriptor, &cep_context.policy.capability_admission) {
+                Ok(admitted) => {
+                    component_evidence.set_admission(admitted.evidence.clone());
+                    let comp_ctx = ComponentCallContext {
+                        call_id: id,
+                        turn_id: turn_id.clone(),
+                        events: events.clone(),
+                        cancellation: cancellation.clone(),
+                        evidence: component_evidence.clone(),
+                        admitted: Arc::new(admitted),
+                    };
+                    rt.call(&method, params, comp_ctx).await
+                }
+                Err(denial) => {
+                    component_evidence.set_admission(denial.evidence.clone());
+                    Err(admission_denied_error(&method, &denial))
+                }
+            }
+        }
+        None => {
+            let ctx = HandlerContext {
+                call_id: id,
+                events: events.clone(),
+                cancellation,
+                cep_context: Arc::clone(&cep_context),
+                turn_id,
+                durable_metadata: durable_metadata.clone(),
+                effect_ledger: effect_ledger.clone(),
+                authorized_region: authorized_region_slot.clone(),
+                policy_hook: Arc::clone(&policy_hook),
+                default_policy_hook: default_policy_hook.clone(),
+                audit_context: Arc::clone(&audit_context),
+                audit: Arc::clone(&audit),
+                cep_mode: cep_mode.clone(),
+                workspace,
+            };
+            registry.dispatch(&method, params, ctx).await
+        }
     };
 
     let observed_effects = effect_ledger.snapshot();
@@ -266,12 +322,19 @@ async fn handle_request(
         .iter()
         .map(|effect| effect.required_capability)
         .collect();
-    let component_cells = component_evidence.snapshot_keys();
+    // Admission evidence is recorded exactly for a Component call, so it also
+    // decides whether this row carries a Cell evidence record at all: a native
+    // handler row keeps its legacy metadata shape.
+    let (admission, cell_effects, denied_operations) = component_evidence.snapshot();
     let merged_metadata = merge_finalize_metadata(
         durable_metadata_json.as_deref(),
         &method,
         &observed_capabilities,
-        &component_cells,
+        &ComponentCallEvidence {
+            admission: admission.as_ref(),
+            effects: admission.is_some().then_some(&cell_effects),
+            denied: &denied_operations,
+        },
     );
 
     finalize_audit_for_dispatch(
@@ -299,6 +362,24 @@ async fn handle_request(
     .await;
 
     call.respond(final_result);
+}
+
+/// Structured refusal for a Component Tool the turn's policy does not admit.
+///
+/// #28 D10: admission denials reuse `CapabilityNotGranted` — no new error code
+/// or reason variant. The message names the tool and the stage that refused
+/// it; the permission data carries whatever the policy did approve, which is
+/// empty for a tool that was never enabled.
+fn admission_denied_error(method: &str, denial: &AdmissionDenial) -> CepError {
+    CepError::new(
+        CepErrorCode::CapabilityNotGranted,
+        format!("{method}: {denial}"),
+        CepErrorData::Permission(PermissionErrorData {
+            required_capability: method.to_string(),
+            granted_capabilities: denial.evidence.approved_capabilities.clone(),
+        }),
+        Retriability::Permanent,
+    )
 }
 
 /// #48: a dispatch that never completed because the call was cancelled.

@@ -47,6 +47,15 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Recent Issues
 
+- ADDED #28: the Component branch of `transport.rs` runs `admit_tool` against
+  `cep_context.policy.capability_admission` before `rt.call`. A denial answers
+  `CapabilityNotGranted` and still finalizes the audit row with its
+  `AdmissionEvidence` — a Component call never finalizes with absent metadata.
+  An admitted call carries the admitted set into `ComponentCallContext`, and
+  finalize merges admission evidence, observed effects, and denied operations.
+  `ServerRunConfig::validate_capability_admission` makes an unknown deny name a
+  startup error at `run_native`. Admission is unconditional: `CepMode` is not
+  consulted. The legacy pre-dispatch deny and all native handlers are untouched.
 - FIXED #48: call-scoped cancellation is audited from the structured code,
   not a message string — `finalize_audit_for_dispatch` records
   `AuditOutcome::Cancelled` on `CepErrorCode::CallCancelled` (the old

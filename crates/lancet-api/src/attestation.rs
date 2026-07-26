@@ -5,7 +5,7 @@
 
 use lancet_native::{
     AttestationRecord, AuditQueryFilters, CepAuditContext, CepAuditStore, build_in_toto_statement,
-    source_audit_range_hash,
+    source_audit_range_hash, statement_bytes,
 };
 
 use crate::error::LancetError;
@@ -48,8 +48,11 @@ pub fn store_turn_attestation(
     } else {
         ctx.runtime_version.as_str()
     };
+    // The builder picks the predicate version per turn (#28 D8); the byte
+    // writer canonicalizes v2 only, so a re-projected statement compares byte
+    // for byte while stored v1 bytes keep their serde order.
     let statement = build_in_toto_statement(turn_id, &rows, runtime_version);
-    let statement_json = serde_json::to_string(&statement)
+    let statement_json = statement_bytes(&statement)
         .map_err(|err| LancetError::Internal(format!("attestation statement serialize: {err}")))?;
     let range_hash = source_audit_range_hash(&rows);
     let session_id = rows
@@ -75,4 +78,118 @@ pub fn store_turn_attestation(
         .map_err(|err| LancetError::Internal(format!("attestation insert: {err}")))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use lancet_native::{
+        AuditQueryFilters, ServerRunConfig, rebuild_in_toto_statement, statement_bytes,
+    };
+    use lancet_protocol::provenance::CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2;
+    use lancet_protocol::{CapabilityAdmissionPolicy, Trust};
+    use lancet_runtime::ComponentRuntime;
+
+    use super::*;
+    use crate::runtime::{DEFAULT_CHANNEL_CAPACITY, LancetServer};
+
+    fn noop_admission(deny: &[&str]) -> CapabilityAdmissionPolicy {
+        CapabilityAdmissionPolicy {
+            enabled_tools: BTreeSet::from(["noop.echo".to_string()]),
+            denied_capabilities: deny.iter().map(|name| (*name).to_string()).collect(),
+            max_boundary: Trust::In,
+        }
+    }
+
+    /// #28 D8/B6: a turn whose rows carry versioned Cell evidence attests as
+    /// v2, and re-projecting it under the stored predicate type reproduces the
+    /// stored bytes exactly — the canonical writer is the only difference from
+    /// the v1 path, and it is deterministic.
+    #[tokio::test]
+    async fn component_turn_attests_v2_and_replays_byte_identically() {
+        let components =
+            Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
+        let config =
+            ServerRunConfig::in_memory_for_tests().with_capability_admission(noop_admission(&[]));
+        let audit = Arc::clone(&config.audit);
+        let ctx = config.audit_context.read().await.clone();
+
+        let (client, _lifecycle) =
+            LancetServer::spawn_composed(config, DEFAULT_CHANNEL_CAPACITY, components)
+                .expect("spawn composed runtime");
+        let value: serde_json::Value = client
+            .call_named("noop.echo", serde_json::json!({ "message": "attest" }))
+            .await
+            .expect("component call");
+        assert_eq!(value, serde_json::json!({ "echoed": "attest" }));
+        audit.await_pending().await;
+
+        store_turn_attestation(&audit, &ctx, &ctx.turn_id).expect("store attestation");
+        let stored = audit
+            .attestation_for_turn(&ctx.turn_id)
+            .expect("attestation lookup")
+            .expect("attestation stored");
+        assert_eq!(
+            stored.predicate_type, CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2,
+            "a turn carrying Cell evidence attests as v2"
+        );
+
+        let rows = audit
+            .query_rows(&AuditQueryFilters {
+                session_id: Some(ctx.session_id.clone()),
+                turn_id: Some(ctx.turn_id.clone()),
+                ..Default::default()
+            })
+            .expect("query rows");
+        let replayed = rebuild_in_toto_statement(
+            &ctx.turn_id,
+            &rows,
+            &ctx.runtime_version,
+            Some(stored.predicate_type.as_str()),
+        );
+        assert_eq!(
+            statement_bytes(&replayed).expect("replay bytes"),
+            stored.statement_json,
+            "stored and re-projected v2 statements must be byte identical"
+        );
+        // B6: the predicate keeps "why authorized" and "what happened" as
+        // separate per-call fields.
+        let statement: serde_json::Value =
+            serde_json::from_str(&stored.statement_json).expect("statement is JSON");
+        let evidence = &statement["predicate"]["evidence"][0];
+        assert_eq!(
+            evidence["admission"]["approved_capabilities"],
+            serde_json::json!(["session.events", "session.result"])
+        );
+        assert_eq!(
+            evidence["observed_effects"]["effects"]
+                .as_array()
+                .expect("observed effects array")
+                .len(),
+            2,
+            "the emit-event operation and the result are both recorded"
+        );
+    }
+
+    /// #28 C2: composition refuses a deny entry that names no composed
+    /// capability, so the caller never receives a client for a policy the
+    /// operator mistyped.
+    #[tokio::test]
+    async fn unknown_deny_name_refuses_composition() {
+        let components =
+            Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
+        let config = ServerRunConfig::in_memory_for_tests()
+            .with_capability_admission(noop_admission(&["session.tyop"]));
+
+        let Err(err) = LancetServer::spawn_composed(config, DEFAULT_CHANNEL_CAPACITY, components)
+        else {
+            panic!("an unknown deny name must refuse composition");
+        };
+        assert!(
+            format!("{err}").contains("session.tyop"),
+            "the error must name the unknown deny entry: {err}"
+        );
+    }
 }

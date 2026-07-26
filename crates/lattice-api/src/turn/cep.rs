@@ -207,6 +207,10 @@ pub(crate) fn cep_policy_from_profile(
             .as_ref()
             .map(|effects| effects.deny.iter().cloned().collect())
             .unwrap_or_default(),
+        // Component Tool admission needs `[tools].enabled` as well as
+        // `[lancet.capabilities]`, so it is lowered from the whole profile at
+        // runtime assembly; this executor-facing config leaves it fail-closed.
+        capability_admission: Default::default(),
     })
 }
 
@@ -458,10 +462,20 @@ pub(crate) async fn build_production_turn_deps(
             .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?
     };
 
+    // #28 B8/D6: the profile is the single admission authority — `[tools].enabled`
+    // is the stage-1 capability grant, `[lancet.capabilities]` subtracts. Without
+    // a loaded profile nothing is admitted (fail closed).
+    let capability_admission = request
+        .loaded_profile
+        .as_ref()
+        .map(|loaded| loaded.profile.capability_admission_policy())
+        .unwrap_or_default();
+
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
         project_root: PathBuf::from(project_root),
         enabled_tools: enabled_tools.to_vec(),
         policy,
+        capability_admission,
         cep_mode,
         audit,
         model_id: model_id.to_string(),
@@ -534,6 +548,8 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         project_root: PathBuf::from(project_root),
         enabled_tools: enabled_tools.to_vec(),
         policy,
+        // Native envelope fixture: no Component Tool is exercised here.
+        capability_admission: Default::default(),
         cep_mode,
         audit,
         model_id: model_id.to_string(),
