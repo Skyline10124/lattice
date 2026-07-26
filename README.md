@@ -128,7 +128,7 @@ emit one `TurnEvent` JSON object per line on stdout instead of human output.
 Other `session` subcommands: `agent`, `status`, `list`, `checkout`, `diff`,
 `reset`, and `migrate` (one-shot SQLite→Git session graph migration for
 legacy stores). `resume` and `prune-snapshots` were removed with the Upper
-snapshot lifecycle (#37/#40).
+snapshot lifecycle (#59/#62, Codeberg #37/#40).
 
 ## Build, test, lint
 

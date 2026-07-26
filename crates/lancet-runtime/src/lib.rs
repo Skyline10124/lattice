@@ -4,7 +4,8 @@
 //! `lancet-runtime` — ADR 0004 Component engine, closed composition gate,
 //! and minimal ToolHost for LATTICE Source Tools.
 //!
-//! This crate is the Component execution substrate (#5 slice C). It owns:
+//! This crate is the Component execution substrate (#27 slice C, Codeberg #5).
+//! It owns:
 //!
 //! - **Embedded tool registration** — `EmbeddedTool` (name + bytes) collected
 //!   via `inventory`. A Tool crate cannot self-approve; only the trusted host
@@ -17,8 +18,8 @@
 //!   (no `wasmtime-wasi`/`wasi-common` dependency). Only versioned Tool Host
 //!   WIT imports are linked.
 //! - **Minimal ToolHost** — `host-control` only (cancellation + structured
-//!   events). No workspace/network/session domain operation before #6
-//!   capability admission.
+//!   events). No workspace/network/session domain operation before #28
+//!   (Codeberg #6) capability admission.
 //! - **Call execution** — params validation, Component instantiation, result
 //!   CellRef validation against descriptor capabilities, result schema
 //!   validation, and Cell evidence recording. Errors map to structured

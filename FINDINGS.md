@@ -76,6 +76,13 @@
 - **升级条件**: 若 `max_grep_matches` 默认值调高,或 grep 结果进入长驻内存 / 并发多路 → 升为 MEDIUM。
 - **计划**: 给 `out` 加聚合字节预算(命中即停,与 over-cap 文件同口径静默截断),并把 `GREP_MAX_LINE_BYTES` 的 doc comment 改成只声称单行上界。
 
+### ENV-DISK-01: 多 worktree 并行编译撑爆磁盘,`xtask ci` 逐 crate 超时/配额失败(非代码问题)— `environment` / dev-loop
+- **位置**: 开发机环境,非 repo 代码。`xtask/src/ci.rs` 的 per-step 超时(`LATTICE_TEST_TIMEOUT_SECS`,默认 300s)与 cargo 全局包缓存锁 `~/.cargo/.package-cache` 是放大器。
+- **问题**: 2026-07-27 一次 `cargo xtask ci` 报 `cargo test failed for 3 crate(s): lancet-native, lattice-api, lattice-tui`。逐条查明**全部为环境所致,无一为代码回归**:(1) `lancet-native` 与 `lattice-api` 是 `timed out after 300s` —— 另一个 Claude 会话正在 `issue-28-cell-capability` worktree 里跑 `cargo test`,两边争用**全局** `~/.cargo/.package-cache` 锁,反复 `Blocking waiting for file lock on package cache`,编译阶段被拖过 300s 硬超时;(2) `lattice-tui` 是 rustdoc 写临时文件失败 `Os { code: 122, kind: QuotaExceeded, message: "Disk quota exceeded" }`。实测:根分区 938G 已用 880G(**95%**),`/tmp` tmpfs 16G 仅剩 4.8G;lattice 各 target 目录合计约 **217 GB**(主仓 108G + `issue-28-cell-capability` 38G + `issue-39-audit-sink` 37G + `issue-64-rewind` 34G)。三个 crate 在串行、低并发(`CARGO_BUILD_JOBS=2`)下单独重跑全绿:lancet-native 155、lattice-api 136、lattice-tui 3。
+- **当前状态**: ACCEPTED RESIDUAL(环境侧)。与 ENV-OOM-01 同源——常驻多 worktree + 并行会话超售本机资源;那一条是内存,这一条是磁盘与全局 cargo 锁。CI(ubuntu/macos-latest,单 worktree、独占 runner)不受影响。
+- **升级条件**: 若在**无**并行会话、磁盘充裕时仍出现 300s 超时或配额失败 → 升为 MEDIUM 并排查是否有测试真的变慢。
+- **计划**: (a) 跑门禁前先确认没有其他会话在编译,或用 `LATTICE_TEST_TIMEOUT_SECS` 抬高超时;(b) 定期 `cargo clean` 不活跃的 worktree target(单个 34–38 GB);(c) **不要**因为这条去删别人正在用的 worktree target;(d) 若要根治并行争用,给各 worktree 配独立 `CARGO_HOME`(锁即不再全局),代价是依赖缓存不复用、磁盘占用更高——在当前 95% 占用下不划算。
+
 ### ENV-WASM-01: 不过滤的 `cargo build --workspace` 在本开发机 host-link `noop-echo` cdylib 失败 — `environment` / dev-loop(pre-existing)
 - **位置**: `tools/noop`(`noop-echo`,`[lib] crate-type = ["cdylib"]`,真实目标 `wasm32-unknown-unknown`),它是根 `Cargo.toml` 的 workspace member;任何不带 `-p` / `--exclude` 的 `cargo build --workspace`。
 - **问题**: unfiltered workspace build 会拿**宿主**目标去链接这个 wasm guest cdylib 并失败。它只在 `xtask tool-build` 的 wasm 目标下才有意义。

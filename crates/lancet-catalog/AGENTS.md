@@ -7,7 +7,7 @@ Crate-local guidance for `lancet-catalog`.
 This crate owns the current typed CEP method catalog used by native handlers and
 tool projection. It is a migration authority, not the ADR 0004 target: Source
 Tool manifests and generated descriptors replace it after Component migration,
-and #12 removes the remaining central catalog surface.
+and #34 (Codeberg #12) removes the remaining central catalog surface.
 
 ## Sub-Architecture
 
@@ -52,9 +52,9 @@ and #12 removes the remaining central catalog surface.
 - FIXED M-24-04: `MethodDescriptor::base_authority` now declares method-local
   base authority requirements consumed by `lancet-cep::ToolExposure`; policy
   inputs such as allowed hosts stay outside catalog.
-- FIXED issue #11: production `CATALOG` is 5 agent methods; audit reads are
-  operator-only and were never registered in `CATALOG` (their DTOs left this
-  crate in #39).
+- FIXED issue #33 (Codeberg #11): production `CATALOG` is 5 agent methods;
+  audit reads are operator-only and were never registered in `CATALOG` (their
+  DTOs left this crate in #39).
 - WATCH: dotted method names stay canonical in CEP catalog; provider-specific
   name encoding belongs in `lattice-llm` wire adapters.
 - WATCH: optional scaffold methods must remain feature-gated and outside the

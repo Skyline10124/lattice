@@ -55,11 +55,12 @@ types.
   in the same series.
 - When adding boundary evidence fields, update authority validation and native
   host/runtime projection together.
-- ADR 0004 Cell core landed add-only in `src/cell.rs` (#5 slice A); legacy
-  `ImpactKind` in `effect_types.rs` coexists, retired by #6/#12 — do not extend.
+- ADR 0004 Cell core landed add-only in `src/cell.rs` (#27 (Codeberg #5)
+  slice A); legacy `ImpactKind` in `effect_types.rs` coexists, retired by
+  #28/#34 (Codeberg #6/#12) — do not extend.
 - Component Tool execution error codes (`ToolTrap`/`ToolTimeout`/
   `ToolResourceExhausted`/`CallCancelled`) + `ToolExecutionErrorData` landed
-  in `src/error.rs` Execution family (#5 slice C). No guest backtrace/host
+  in `src/error.rs` Execution family (#27 slice C). No guest backtrace/host
   path/secret in the data.
 
 ## Record Maintenance

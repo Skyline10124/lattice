@@ -4,11 +4,12 @@
 //! Cell evidence ledger — records the `(Cell, Trust)` pairs produced by a
 //! Tool call's result CellRef.
 //!
-//! In #5 slice C, evidence is produced only from the Tool's **result CellRef**
-//! at call return: the host parses the trust-free 3-segment CellRef, verifies
-//! it against the descriptor's capability cells, derives trust from the
-//! descriptor's scope declaration, and records the 4-segment audit key.
-//! Domain host operations do not produce evidence yet (#6).
+//! In #27 (Codeberg #5) slice C, evidence is produced only from the Tool's
+//! **result CellRef** at call return: the host parses the trust-free
+//! 3-segment CellRef, verifies it against the descriptor's capability cells,
+//! derives trust from the descriptor's scope declaration, and records the
+//! 4-segment audit key. Domain host operations do not produce evidence yet
+//! (#28 (Codeberg #6)).
 //!
 //! The ledger is backed by `Arc<Mutex<...>>` so a clone taken before the
 //! call shares the same underlying records: the call moves one clone into

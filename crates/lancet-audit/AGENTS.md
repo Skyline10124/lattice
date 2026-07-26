@@ -66,25 +66,27 @@ store-path resolution behind it.
   `tempfile`. Residuals L-11-01 (tail cancellation) and L-11-02
   (synthetic-writer concurrency) are now crate-local — contracts in
   `src/operator.rs`, escalation conditions in root `FINDINGS.md`.
-- ADDED #5 slice D: `merge_finalize_metadata` gained a `component_cells: &[String]`
-  parameter. Component Tool calls record 4-segment Cell audit keys
-  (`ctx:ext:scope:trust`) as a `component_cells` JSON array; native handler
-  calls pass an empty slice (no behavior change). Audit records cells, not
-  capability names (spec §6.3).
-- FIXED #38: `RejectionStage` vocabulary de-Uppered — `AdapterPreflight` →
-  `PathGuard`, `BackendExecution` → `LocalIo`, `VerificationFailure` removed;
-  `CallAuditMetadata.backend_invoked` and all routing metadata
-  (`execution_backend`, `upper_workspace_id`, `adapter_preflight_invoked`,
-  `backend_invoked`) are gone from durable audit rows. Mutation preflight
-  evidence renamed `expected_hash_status` → `local_revision` (carries the
-  observed Local Revision on stale-hash replans). Historical rows written
-  before #38 keep the old labels; alpha-stage no-compat means no label
-  migration — `rejection_stage` query filters match new writes only.
+- ADDED #27 (Codeberg #5) slice D: `merge_finalize_metadata` gained a
+  `component_cells: &[String]` parameter. Component Tool calls record
+  4-segment Cell audit keys (`ctx:ext:scope:trust`) as a `component_cells`
+  JSON array; native handler calls pass an empty slice (no behavior change).
+  Audit records cells, not capability names (spec §6.3).
+- FIXED #60 (Codeberg #38): `RejectionStage` vocabulary de-Uppered —
+  `AdapterPreflight` → `PathGuard`, `BackendExecution` → `LocalIo`,
+  `VerificationFailure` removed; `CallAuditMetadata.backend_invoked` and all
+  routing metadata (`execution_backend`, `upper_workspace_id`,
+  `adapter_preflight_invoked`, `backend_invoked`) are gone from durable audit
+  rows. Mutation preflight evidence renamed `expected_hash_status` →
+  `local_revision` (carries the observed Local Revision on stale-hash
+  replans). Historical rows written before #60 keep the old labels;
+  alpha-stage no-compat means no label migration — `rejection_stage` query
+  filters match new writes only.
 - FIXED M-24-05: attestation persistence wiring moved into `lancet-api`;
   `lattice-api` consumes it through the public LANCET runtime surface.
-- FIXED issue #11: agent catalog audit CEP methods removed; operator reads are
-  reached through `lancet-api::audit` and `lattice audit` (direct store, no CEP
-  server) and, since #39, implemented here in `src/operator.rs`.
+- FIXED issue #33 (Codeberg #11): agent catalog audit CEP methods removed;
+  operator reads are reached through `lancet-api::audit` and `lattice audit`
+  (direct store, no CEP server) and, since #39, implemented here in
+  `src/operator.rs`.
 - WATCH: provenance isomorphism tests in `lancet-native` and audit turn tests in
   `lattice-api` are the practical consumers of this crate's contract.
 - WATCH: call stage and impact labels are shared language between native

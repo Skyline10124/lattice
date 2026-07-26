@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Direct-Local atomic mutation, external concurrency, and effect denial
-//! (issue #24 slice 3).
+//! (issue #46 slice 3, Codeberg #24).
 //!
 //! Covers `mutate.create` / `mutate.edit` operating on current Local state:
 //! success paths leave bytes immediately; denials and stale preconditions

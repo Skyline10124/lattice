@@ -23,9 +23,10 @@ The production execution path is **Direct-Local** (ADR 0003): structured
 LANCET Tools observe and mutate the canonical Local Workspace directly behind
 host-enforced policy, Guard L1 path checks, effect checks, and audit. There is
 no sandbox VM, workspace projection, or per-turn provisioning — the
-MSB/Upper path and the `lattice-workspace` crate were removed in #40. The
-session graph store is git-backed (`GitSessionGraphStore` over the project's
-`git2` object database); the previous SQLite graph store has been removed.
+MSB/Upper path and the `lattice-workspace` crate were removed in
+#62 (Codeberg #40). The session graph store is git-backed
+(`GitSessionGraphStore` over the project's `git2` object database); the
+previous SQLite graph store has been removed.
 ## 2. Component diagram
 
 The workspace has 15 crates grouped into layers. Arrows point from a higher
@@ -165,7 +166,7 @@ A single turn, from user keystroke to committed session graph:
      calls into typed CEP method invocations.
    - The runtime is rooted at the canonical Local Workspace (the project
      root). No sandbox VM, lease, or per-turn workspace provisioning exists;
-     the #40 cleanup removed the Upper lifecycle (`prepare_upper`,
+     the #62 cleanup removed the Upper lifecycle (`prepare_upper`,
      `UpperLease`, `UpperHandle`) with the `lattice-workspace` crate.
 4. **`AgentLoop` assembles messages from session state.**
    - `AgentLoop` (`crates/lattice-agent/src/agent_loop/mod.rs`) reads the
@@ -278,7 +279,7 @@ asserting a raw CEP call to `exec.command_run` returns JSON-RPC `-32601`.
 - **MSB/Upper sandbox workspace** (`lattice-workspace`, `Workspace` trait,
   `UpperHandle`, `UpperSpec`, `UpperLease`, `prepare_upper`, warm templates,
   guest-Git baseline/candidate flow, credential injection, `[workspace]`
-  profile section with egress/image/lifecycle fields) was removed in #40.
+  profile section with egress/image/lifecycle fields) was removed in #62.
   Turns run Direct-Local against the canonical project root; profiles with a
   legacy `[workspace]` section now fail strict parsing.
 - **Landlock / netns command isolation** was removed (commit `a29072e2`,

@@ -18,13 +18,13 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   patch write limits.
-- `src/workspace/` owns the one concrete `LocalWorkspace` (#37/#38/#39): secure
-  per-segment path resolution, Policy-Visible Workspace filtering (gix Git
-  facts + authority read policy), bounded read/list/grep/find, content hashing
-  (Local Revision), no-replace create, atomic edit install, filesystem error
-  normalization, and the Local operation vocabulary (`WorkspacePath`,
-  `PathFacts`, `PathIntent`, requests). ADR 0004 moves this into
-  `lancet-runtime`.
+- `src/workspace/` owns the one concrete `LocalWorkspace` (#59/#60/#61,
+  Codeberg #37/#38/#39): secure per-segment path resolution, Policy-Visible
+  Workspace filtering (gix Git facts + authority read policy), bounded
+  read/list/grep/find, content hashing (Local Revision), no-replace create,
+  atomic edit install, filesystem error normalization, and the Local operation
+  vocabulary (`WorkspacePath`, `PathFacts`, `PathIntent`, requests). ADR 0004
+  moves this into `lancet-runtime`.
 - `src/executor/` owns crate-private web/render helpers and output limits.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 
@@ -40,17 +40,17 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   contracts start in Source manifests; Components receive authority only through
   Tool Host imports.
 - The concrete guarded Local Workspace is the single workspace path. The
-  `ExecutionBackend`/routing seam was deleted in #38 — do not reintroduce a
+  `ExecutionBackend`/routing seam was deleted in #60 — do not reintroduce a
   pluggable workspace implementation, routing enum, fallback, or parallel
-  path. #12 moves the concrete host module into `lancet-runtime` after Tool
-  migration.
+  path. #34 (Codeberg #12) moves the concrete host module into
+  `lancet-runtime` after Tool migration.
 
 ## Recent Issues
 
 - FIXED GitHub #39 (= Codeberg #17; PR #74 review defects) — four
-  `src/workspace/local.rs` fixes. NOTE: the bare `#37/#38/#39` above and the
-  `FIXED #39 follow-up` bullet below are **Codeberg** numbers (GitHub
-  #59/#60/#61), a different ticket.
+  `src/workspace/local.rs` fixes. NOTE: #39 here is the operator audit sink
+  ticket, not the Direct-Local workspace tickets #59/#60/#61 cited above and
+  below.
   (1) Grep byte budget: `GREP_MAX_FILE_BYTES` 8 MiB / `GREP_MAX_TOTAL_BYTES`
   64 MiB walk aggregate / `GREP_MAX_LINE_BYTES` 64 KiB + `struct GrepBudget`;
   `grep_file` streams via `BufReader` + `Read::take` instead of
@@ -78,26 +78,27 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   `SymlinkRejected` (ENOTDIR from the `O_DIRECTORY` walk), not `Io`.
   Read/observation paths remain `resolve_secure`-only — accepted residual
   L-39-01, plus L-39-02/L-39-03 on walk depth and symlink reporting.
-- FIXED #48: call-scoped cancellation is audited from the structured code,
-  not a message string — `finalize_audit_for_dispatch` records
+- FIXED #70 (Codeberg #48): call-scoped cancellation is audited from the
+  structured code, not a message string — `finalize_audit_for_dispatch` records
   `AuditOutcome::Cancelled` on `CepErrorCode::CallCancelled` (the old
   exact-message arm was unreachable dead code), and `is_incomplete_dispatch`
   matches the code only. Component and (future) native cancellations share
   one classification authority.
-- ADDED #5 slice D: `ServerRunConfig` carries `Option<Arc<ComponentRuntime>>`.
-  `handle_request` branches Component vs native dispatch after audit start
-  and before finalize, sharing one durable audit path. Component calls
-  produce Cell evidence (`component_cells` in audit metadata); native calls
-  produce effect-ledger evidence as before. Production `from_embedded()`
-  yields an empty Component catalog so all 5 native methods are unchanged.
-- FIXED #38: `ExecutionBackend`/`ExecutionRouting`/`UpperContext`/
+- ADDED #27 (Codeberg #5) slice D: `ServerRunConfig` carries
+  `Option<Arc<ComponentRuntime>>`. `handle_request` branches Component vs
+  native dispatch after audit start and before finalize, sharing one durable
+  audit path. Component calls produce Cell evidence (`component_cells` in
+  audit metadata); native calls produce effect-ledger evidence as before.
+  Production `from_embedded()` yields an empty Component catalog so all 5
+  native methods are unchanged.
+- FIXED #60: `ExecutionBackend`/`ExecutionRouting`/`UpperContext`/
   `RoutingInvocationState`/`NullExecutionBackend` and all spy backends
   deleted; handlers and the edit engine call the concrete `LocalWorkspace`
   directly; audit routing metadata replaced with method-local evidence
   (guarded path, `local_revision`, post-install content hash,
   `PathGuard`/`LocalIo` rejection stages); narrow one-shot
   `fail_next_install` fault injection is the only test seam.
-- FIXED #39 follow-up: ignored ancestors reachable only for an exact included
+- FIXED #61 follow-up: ignored ancestors reachable only for an exact included
   descendant are navigable but not emitted by list/find; successful
   read/list/grep/find audit metadata now records content-free visibility rule
   categories without hidden paths, content, counts, or hashes.

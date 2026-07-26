@@ -21,7 +21,7 @@ integration-test target of any product crate.
 - Read session/audit state through `lattice` CLI only.
 - The fake LLM (`src/fake_llm.rs`) connects through the formal
   `OPENAI_COMPATIBLE_*` configuration; there is no test-only provider,
-  hidden flag, or product-side change (RFC #19 decision four).
+  hidden flag, or product-side change (RFC #41 (Codeberg #19) decision four).
 - `SessionSendDriver` (`src/session_send.rs`) drives the public
   `lattice --json session send` entrypoint and returns raw command evidence
   together with parsed JSONL. Unknown valid `TurnEvent` variants are kept as
@@ -30,7 +30,8 @@ integration-test target of any product crate.
 - Subprocesses are spawned in their own process group
   (`process_group(0)` on Unix). Timeout and controlled interrupt retain drained
   stdout/stderr, reap the direct child, and clean the whole group. The repo does
-  not commit to Windows (see #26 Out-of-Scope); process groups are a no-op there.
+  not commit to Windows (see #48 (Codeberg #26) Out-of-Scope); process groups
+  are a no-op there.
 - Fake-provider races use `ResponseGate` plus bounded request waits. Failure
   evidence is redacted before writing, stale bundles are cleared, and recursive
   byte-level sentinel scans fail closed on both hits and I/O errors.
@@ -39,7 +40,7 @@ integration-test target of any product crate.
 - Direct-Local integration targets share only generic plumbing through private
   `tests/support/mod.rs`; scenario-specific fixtures and assertions stay local.
 
-## Test Layers (RFC #19 decision two / seven, updated by #40)
+## Test Layers (RFC #41 decision two / seven, updated by #62 (Codeberg #40))
 
 - **Fast binary black-box** (`tests/fast_cli_help.rs`, plus all `#[test]`
   unit tests in `src/`): run on every ordinary CI. `cargo xtask ci` runs
@@ -49,16 +50,16 @@ integration-test target of any product crate.
   skeletons. They drive the real turn path against the canonical Local
   Workspace — no KVM, no MSB daemon, no OCI image, no `[workspace]` profile
   section — and run in the ordinary lane. The full Direct-Local scenario
-  matrix landed in #24 slices 0–8: `direct_turn_contract` (turn lifecycle +
-  reopen), `direct_observation` (visibility/bounds), `direct_mutation`
-  (atomic mutation/concurrency/effect denial), `direct_tools`
+  matrix landed in #46 (Codeberg #24) slices 0–8: `direct_turn_contract`
+  (turn lifecycle + reopen), `direct_observation` (visibility/bounds),
+  `direct_mutation` (atomic mutation/concurrency/effect denial), `direct_tools`
   (fetch/todo/catalog/retired methods), `direct_failures` (provider
   failures/SIGINT/deadline/no-rollback), `direct_operator` (audit/session/
   lancet cross-validation), `direct_secrets` (sentinel scanning),
   `direct_session_isolation` (two-session graph isolation).
 - **PTY smoke** (`tests/pty_tui_smoke.rs`): proves the TUI entrypoint wires
   into the same Direct-Local `stream_turn` chain. Also ordinary-lane since
-  #40; the retired KVM-lane opt-in gate and its `layer_guard` module are
+  #62; the retired KVM-lane opt-in gate and its `layer_guard` module are
   gone — a broken Direct-Local environment is a product failure, never a
   skip.
 

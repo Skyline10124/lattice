@@ -1,13 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local turn scenarios (issue #40): the production turn path runs
-//! against the canonical Local Workspace — no KVM, no MSB daemon, no OCI
-//! image registry, no guest Git installation, no `[workspace]` profile
+//! Direct-Local turn scenarios (issue #62, Codeberg #40): the production turn
+//! path runs against the canonical Local Workspace — no KVM, no MSB daemon,
+//! no OCI image registry, no guest Git installation, no `[workspace]` profile
 //! section. These scenarios run in the ordinary lane (not `#[ignore]`):
-//! after #40 a broken turn path is a product failure, never a skip.
+//! after #62 a broken turn path is a product failure, never a skip.
 //!
-//! Skeleton coverage (full Direct-Local scenario matrix belongs to #24):
+//! Skeleton coverage (full Direct-Local scenario matrix belongs to #46,
+//! Codeberg #24):
 //!
 //! - **plain-text turn** — a complete text-only turn commits and exits 0;
 //!   `session log --json` cross-validates the commit (supersedes the retired
@@ -138,7 +139,7 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
 /// turn still commits and its request carries the first turn's transcript
 /// (user text + assistant reply), proving the reopen path reads current
 /// Local state and session history. Skeleton — full external-binary
-/// competition coverage (mid-turn races, mutation conflicts) is #24.
+/// competition coverage (mid-turn races, mutation conflicts) is #46.
 #[test]
 fn direct_local_session_reopen_after_external_change() {
     let driver = driver();
@@ -232,7 +233,7 @@ fn direct_local_session_reopen_after_external_change() {
 /// guarded Local Workspace, surfaces as a failed tool event in the public
 /// stream, and leaves nothing on disk; the model's recovery reply completes
 /// the turn. Skeleton — the full denial matrix (read denial, effect denial,
-/// system exclusions) is #24.
+/// system exclusions) is #46.
 #[test]
 fn direct_local_mutate_create_denied_by_write_policy() {
     let driver = driver();

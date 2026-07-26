@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Composition gate tests (#5 slice C.7).
+//! Composition gate tests (#27 slice C.7, Codeberg #5).
 //!
 //! Each negative case is exercised with synthetic registrations/identities
 //! constructed directly in the test, not through the public fixture. The

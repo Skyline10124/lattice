@@ -1,9 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local workspace observation visibility and bounds (issue #24
-//! slice 2): proves all four `observe.workspace` modes share the same
-//! Policy-Visible Workspace visibility and bounds through the built binary.
+//! Direct-Local workspace observation visibility and bounds (issue #46,
+//! Codeberg #24, slice 2): proves all four `observe.workspace` modes share the
+//! same Policy-Visible Workspace visibility and bounds through the built
+//! binary.
 //!
 //! The fixture matrix covers tracked, untracked, ignored, explicitly-included
 //! ignored, read-denied, system-excluded, and budget-exceeding paths. Each

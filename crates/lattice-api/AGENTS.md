@@ -46,10 +46,11 @@ agent loop over `lancet-api`'s CEP runtime.
   through the `test-support` dev-dependency feature. Do not reintroduce a local
   copy — the helper owns a process-global env mutex, and a second copy
   reintroduces the `XDG_STATE_HOME` race that ENV-OOM-02 closed.
-- ADDED #5 slice D: `CepExecutorAdapter` now takes `definitions: &[ToolDefinition]`
-  + `enabled_names` instead of deriving the available set from `catalog()`.
-  The hardcoded five-arm `dispatch_typed`/`call_typed`/`schema_mismatch_for_method`
-  and the five method type imports are deleted; all methods go through
+- ADDED #27 (Codeberg #5) slice D: `CepExecutorAdapter` now takes
+  `definitions: &[ToolDefinition]` + `enabled_names` instead of deriving the
+  available set from `catalog()`. The hardcoded five-arm
+  `dispatch_typed`/`call_typed`/`schema_mismatch_for_method` and the five
+  method type imports are deleted; all methods go through
   `CepClient::call_raw`, so Component Tools are no longer blocked by central
   catalog membership. Params/result validation is done server-side (native
   typed registry or generated descriptor validators).
@@ -61,8 +62,9 @@ agent loop over `lancet-api`'s CEP runtime.
   `lancet-api` crate. `cep.rs` is now only the LATTICE↔LANCET seam (profile→policy
   translation, `CepExecutorAdapter`, event mapping); `enabled_tools.rs` moved to
   `lancet-api`.
-- FIXED #24: public `TurnStarted` includes `turn_id` for audit replay, and
-  `[llm].timeout_secs` lowers to the agent turn deadline in `turn/mapping.rs`.
+- FIXED #46 (Codeberg #24): public `TurnStarted` includes `turn_id` for audit
+  replay, and `[llm].timeout_secs` lowers to the agent turn deadline in
+  `turn/mapping.rs`.
 - FIXED H-06: `stream_turn` now streams live instead of replaying buffered
   events after full turn completion.
 - FIXED M-19b: observer backpressure no longer blocks live task drain/commit.

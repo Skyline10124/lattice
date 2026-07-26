@@ -42,8 +42,8 @@ but delegates concrete composition to `lancet-runtime`.
   `CepMode`). Translating an application profile into policy belongs to the host
   (today: `lattice-api::turn::cep`).
 - Native handler/transport implementation currently stays in `lancet-native`;
-  after #12 this crate composes `lancet-runtime`. Do not add another production
-  assembly path during the transition.
+  after #34 (Codeberg #12) this crate composes `lancet-runtime`. Do not add
+  another production assembly path during the transition.
 - Tool projection currently lives in `lancet-cep`; generated Source Tool
   descriptors replace it. Do not add compatibility wrappers or a parallel Tool
   schema here.
@@ -66,16 +66,17 @@ but delegates concrete composition to `lancet-runtime`.
   `lancet-native` / `lancet-dispatch` / `lancet-cep` / `lancet-runtime`, "the
   operator read never composes a CEP server" is now a structural
   crate-dependency guarantee rather than a source-string-scan assertion.
-- ADDED #5 slice D: `LancetRuntime::build` composes `ComponentRuntime::from_embedded()`
-  once and threads the same `Arc<ComponentRuntime>` into `ServerRunConfig.components`
-  (D.3 dispatch) and into the LLM tool definitions projection (D.4).
+- ADDED #27 (Codeberg #5) slice D: `LancetRuntime::build` composes
+  `ComponentRuntime::from_embedded()` once and threads the same
+  `Arc<ComponentRuntime>` into `ServerRunConfig.components` (D.3 dispatch) and
+  into the LLM tool definitions projection (D.4).
   `LancetServer::spawn` composes from embedded inventory and delegates to
   `pub(crate) spawn_composed`; there is no public path to inject Component
   bytes, paths, or handlers. Production builds have zero Component Tools
-  until #7–#10.
-- FIXED #38: `ServerRunConfig.execution` and the `ExecutionRouting`/
-  `UpperContext`/`NullExecutionBackend` re-exports are gone. The native
-  server constructs the one concrete Local Workspace from
+  until #29–#32 (Codeberg #7–#10).
+- FIXED #60 (Codeberg #38): `ServerRunConfig.execution` and the
+  `ExecutionRouting`/`UpperContext`/`NullExecutionBackend` re-exports are gone.
+  The native server constructs the one concrete Local Workspace from
   `cep_context.policy.project_root` inside `run_native`; embedders supply
   only the canonical project root (via resolved policy). `LancetServer::spawn`
   and direct test servers must use `CepServerNativeExt::run_native`.
@@ -83,9 +84,9 @@ but delegates concrete composition to `lancet-runtime`.
   into this crate; turn runtime and CLI `lancet` smoke route through
   `LancetServer`/`LancetRuntime`. CLI `lattice audit` uses `query_audit` /
   `tail_audit` against the project audit store (no CEP server).
-- FIXED issue #11: `observe.audit` / `observe.audit_replay` removed from the
-  agent catalog; `src/audit.rs` is the only operator entry point here (its
-  implementation moved to `lancet-audit` in #39).
+- FIXED issue #33 (Codeberg #11): `observe.audit` / `observe.audit_replay`
+  removed from the agent catalog; `src/audit.rs` is the only operator entry
+  point here (its implementation moved to `lancet-audit` in #39).
 - DOWNGRADED L-11-01/L-11-02 (ACCEPTED RESIDUAL, neither optimally handled):
   `tail_audit` yields between batches via `tokio::task::yield_now().await` so
   drop-cancellation takes effect at batch boundaries, but there is no dedicated
@@ -110,7 +111,7 @@ but delegates concrete composition to `lancet-runtime`.
   `LancetRuntimeConfig` with a LANCET-native type — never accept `LancetSection`.
 - When adding a public entry point, re-export only the types in its signature
   from `lib.rs`; do not add pass-through functions for lower-crate APIs.
-- Keep the public facade stable while #12 replaces hand-wired native/CEP/dispatch
+- Keep the public facade stable while #34 replaces hand-wired native/CEP/dispatch
   composition with `lancet-runtime`; do not preserve both paths afterward.
 
 ## Record Maintenance

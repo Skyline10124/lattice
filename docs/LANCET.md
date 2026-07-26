@@ -3,11 +3,12 @@
 > **TRANSITION NOTICE - 2026-07-16 (updated 2026-07-17):** This document mostly
 > describes the current v1.4-alpha migration implementation, not the accepted
 > target architecture. ADR 0003 replaces MSB/Upper with one guarded Direct-Local
-> Workspace path - **landed in #37-#40**: production turns now operate directly
-> on the canonical Local Workspace, and the MSB/Upper path, `[workspace]`
-> profile section, and `lattice-workspace` crate are deleted. ADR 0004 replaces
-> the permanent native/central-catalog boundary with a per-build closed catalog
-> of embedded WASM Component Tools whose Source manifests own their descriptors.
+> Workspace path - **landed in #59-#62 (Codeberg #37-#40)**: production turns
+> now operate directly on the canonical Local Workspace, and the MSB/Upper
+> path, `[workspace]` profile section, and `lattice-workspace` crate are
+> deleted. ADR 0004 replaces the permanent native/central-catalog boundary
+> with a per-build closed catalog of embedded WASM Component Tools whose
+> Source manifests own their descriptors.
 > The default distribution still has the five methods shown below, but operators
 > may add verified precompiled Tool Bundles before building another closed
 > runtime; running processes cannot load code. Components receive no ambient
