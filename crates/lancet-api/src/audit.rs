@@ -379,16 +379,13 @@ fn parse_impact_kind(label: Option<&str>) -> LancetResult<Option<ImpactKind>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::audit_db_path_for_project_in;
+    use crate::config::{audit_db_path_for_project_in, lock_xdg_state_home};
     use crate::store_turn_attestation;
     use lancet_audit::{CallAuditMetadata, CepAuditContext};
     use lancet_catalog::CepMethod;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
     use rusqlite::Connection;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static XDG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct IsolatedProjectAudit {
         _state: TempDir,
@@ -398,7 +395,9 @@ mod tests {
 
     impl IsolatedProjectAudit {
         fn setup() -> Self {
-            let guard = XDG_TEST_LOCK.lock().expect("xdg test lock");
+            // Shared with `config`'s own `XDG_STATE_HOME` test: two locks over
+            // one process-global variable do not serialize anything.
+            let guard = lock_xdg_state_home();
             let state = TempDir::new().expect("state tempdir");
             let project = TempDir::new().expect("project tempdir");
             unsafe {

@@ -54,6 +54,21 @@ pub fn audit_state_root() -> Option<PathBuf> {
     dirs::state_dir().or_else(dirs::data_local_dir)
 }
 
+/// Serializes every test in this crate that mutates `XDG_STATE_HOME`.
+///
+/// Environment variables are process-global, so one lock per module is one
+/// race per module pair: a test restoring the variable can blank it while a
+/// test in another module is mid-read, which resolves audit paths to the real
+/// user state directory. Poison is recovered rather than propagated — a
+/// panicking test must fail alone, not cascade through every later acquirer.
+#[cfg(test)]
+pub(crate) fn lock_xdg_state_home() -> std::sync::MutexGuard<'static, ()> {
+    static XDG_STATE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    XDG_STATE_HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Deterministic SHA-256 project key from the canonical project root identity.
 pub fn project_storage_key(project_root: &Path) -> Result<String, ExternalAuditPathError> {
     let canonical = std::fs::canonicalize(project_root)
@@ -202,8 +217,7 @@ mod external_audit_tests {
     /// outside their temp dir (observed as CI failures on macos-latest).
     #[test]
     fn audit_state_root_prefers_absolute_xdg_state_home() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_xdg_state_home();
         let dir = TempDir::new().unwrap();
         let prev = std::env::var_os("XDG_STATE_HOME");
 

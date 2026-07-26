@@ -2,6 +2,21 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## ENV-OOM-02 third occurrence: `lancet-api` audit tests race `config`'s `XDG_STATE_HOME` test — 2026-07-27
+
+Severity: test flakiness / gate-blocking.
+
+**Problem:** The second `cargo xtask ci` run of the #28 sweep failed `cargo test -p lancet-api` (exit 101, 9 failures) where the first run passed. `config.rs`'s `audit_state_root_prefers_absolute_xdg_state_home` and `audit.rs`'s `IsolatedProjectAudit` each guarded `XDG_STATE_HOME` with their **own** mutex, which serializes nothing: the config test's restore path (`remove_var`, since the outer environment has no such variable) landed inside an audit test's read window, so `tail_audit` resolved the real `~/.local/state/lattice/…` path and panicked with "audit database not found". The panic then poisoned `XDG_TEST_LOCK`, and `expect("xdg test lock")` turned one failure into nine. Pre-existing: both tests and both locks are unchanged at base `538b476e`; #28 only altered the scheduling around them.
+
+**Fix:** One process-wide `config::lock_xdg_state_home()` shared by both modules, recovering poison instead of propagating it (`unwrap_or_else(|p| p.into_inner())`) so a panicking test fails alone. Test-only change; no product behavior.
+
+**Verification:**
+- `cargo test -p lancet-api` — 20 passed.
+- `cargo test -p lancet-api --lib` ×25 — 25/25 green (0 failures).
+- `cargo xtask ci` — All checks passed.
+
+**Changed files:** `crates/lancet-api/src/{config,audit}.rs`; `FINDINGS.md` (ENV-OOM-02 third occurrence); `FIX.md`.
+
 ## GitHub #28: Cell capability admission, effect ledger, audit/provenance evidence — 2026-07-27
 
 Severity: feature / fail-closed authorization / audit schema.
