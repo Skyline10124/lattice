@@ -3,7 +3,7 @@
 
 //! Project flat [`AuditRow`] records into PROV-DM fragments.
 
-use crate::audit::{AuditRow, impact_kind_from_label};
+use crate::audit::{AuditRow, SEMANTIC_STAGE_COMPONENT, impact_kind_from_label};
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::provenance::{
     ProvActivity, ProvAgent, ProvEntity, ProvGraphFragment, ProvUsed, ProvWasAssociatedWith,
@@ -13,6 +13,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 const RUNTIME_FALLBACK: &str = "lattice";
+
+/// Activity attribute that marks [`ProvActivity::impact_kind`] as a placeholder
+/// rather than an attribution (#28 B6). A Cell-governed Component row has no
+/// legacy `ImpactKind` at all — its authorization vocabulary is the Cell — but
+/// the PROV wire type makes the field mandatory, so the projection states the
+/// fact instead of letting the fallback read as a real impact claim. Dropping
+/// the field is gated on the legacy deletion (design §11).
+const IMPACT_KIND_ATTRIBUTED: &str = "impact_kind_attributed";
 
 /// Project audit rows into a PROV graph fragment (one Activity per row).
 pub fn project_rows(rows: &[AuditRow]) -> ProvGraphFragment {
@@ -26,17 +34,22 @@ pub fn project_rows(rows: &[AuditRow]) -> ProvGraphFragment {
     for row in rows {
         let activity_id = activity_id_for(row.audit_id);
         let meta = parse_metadata(row);
+        let (impact_kind, attributed) = impact_kind_for_row(row);
+        let mut attributes = activity_attributes_from_metadata(meta.as_ref());
+        if !attributed {
+            attributes.insert(IMPACT_KIND_ATTRIBUTED.into(), Value::Bool(false));
+        }
         fragment.activities.push(ProvActivity {
             id: activity_id.clone(),
             method: row.method.clone(),
-            impact_kind: parse_impact_kind(&row.impact_kind),
+            impact_kind,
             started_at: Some(row.started_at.clone()),
             ended_at: row.ended_at.clone(),
             guard_stage: Some(row.guard_stage.clone()),
             semantic_status: row.semantic_status.clone(),
             guard_verdict: None,
             outcome_summary: row.result_or_error.clone(),
-            attributes: activity_attributes_from_metadata(meta.as_ref()),
+            attributes,
         });
 
         if let Some(agent) = &agent_id {
@@ -127,6 +140,20 @@ fn parse_metadata(row: &AuditRow) -> Option<Value> {
     row.metadata_json
         .as_ref()
         .and_then(|s| serde_json::from_str(s).ok())
+}
+
+/// A row's legacy impact kind and whether it is a real attribution.
+///
+/// A Cell-governed Component row never carried one, so it is not run through
+/// the label parser at all: coercing its `unknown` column into a concrete
+/// legacy kind would attribute an impact the row never claimed. The placeholder
+/// travels with [`IMPACT_KIND_ATTRIBUTED`]` = false`.
+fn impact_kind_for_row(row: &AuditRow) -> (ImpactKind, bool) {
+    if row.semantic_stage == SEMANTIC_STAGE_COMPONENT {
+        (ImpactKind::WorkspaceObservation, false)
+    } else {
+        (parse_impact_kind(&row.impact_kind), true)
+    }
 }
 
 fn parse_impact_kind(label: &str) -> ImpactKind {
@@ -309,6 +336,33 @@ mod tests {
         assert_eq!(
             fragment.activities[0].impact_kind,
             ImpactKind::WorkspaceObservation
+        );
+    }
+
+    /// #28 b8: a Cell-governed row's `impact_kind` column is `unknown` because
+    /// the row never had a legacy impact kind. Projecting it as a concrete
+    /// `ImpactKind` without saying so attributes an impact the call never made.
+    #[test]
+    fn cell_governed_row_marks_its_impact_kind_as_unattributed() {
+        let component = AuditRow {
+            impact_kind: "unknown".into(),
+            semantic_stage: crate::audit::SEMANTIC_STAGE_COMPONENT.into(),
+            semantic_status: Some("component_handler".into()),
+            guard_stage: crate::audit::GUARD_STAGE_COMPONENT.into(),
+            ..fixture_row(1, "noop.echo", r#"{}"#)
+        };
+        let native = fixture_row(2, "observe.workspace", r#"{}"#);
+        let fragment = project_rows(&[component, native]);
+
+        assert_eq!(
+            fragment.activities[0].attributes["impact_kind_attributed"],
+            serde_json::json!(false)
+        );
+        assert!(
+            !fragment.activities[1]
+                .attributes
+                .contains_key("impact_kind_attributed"),
+            "a native row's impact kind is a real attribution and stays unmarked"
         );
     }
 

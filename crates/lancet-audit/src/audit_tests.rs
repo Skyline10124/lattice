@@ -186,6 +186,68 @@ fn open_rejects_old_shape_database_without_touching_it() {
 }
 
 #[test]
+fn open_rejects_old_shape_attestation_table_without_touching_it() {
+    // C5 covers every table this store writes: an unversioned file whose call
+    // rows match today's shape but whose attestation table does not would be
+    // adopted and stamped v1, then die at the first attestation INSERT.
+    let root = unique_test_dir("schema-old-attestation");
+    let path = root.join("audit.db");
+    write_legacy_audit_fixture(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE attestation_records;
+             CREATE TABLE attestation_records (
+                turn_id TEXT PRIMARY KEY,
+                statement_json TEXT NOT NULL,
+                generated_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    }
+    set_schema_version(&path, 0);
+    let before = std::fs::read(&path).unwrap();
+
+    let err = match CepAuditStore::open(&path) {
+        Ok(_) => panic!("an old-shape attestation table must not be opened"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, AuditError::IncompatibleSchema { .. }));
+    let message = err.to_string();
+    assert!(
+        message.contains("attestation_records.predicate_type"),
+        "the missing column must be named with its table: {message}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a refused open must leave the database byte-identical"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn for_component_dispatch_labels_cell_governed_rows() {
+    // #28 b8: a Component Tool is routed and Cell-governed. The legacy
+    // catalog lookup knows nothing about it, so labeling by
+    // `for_production_dispatch` would claim the opposite of both facts.
+    assert_eq!(
+        CallAuditMetadata::for_production_dispatch("noop.echo").semantic_stage,
+        SEMANTIC_STAGE_UNROUTED,
+        "the legacy lookup is exactly what must not label a Component call"
+    );
+
+    let component = CallAuditMetadata::for_component_dispatch();
+    assert_eq!(component.semantic_stage, SEMANTIC_STAGE_COMPONENT);
+    assert_eq!(component.guard_stage, GUARD_STAGE_COMPONENT);
+    assert!(component.policy_enforced);
+    assert_ne!(
+        component.semantic_status.as_deref(),
+        Some("method_not_found")
+    );
+}
+
+#[test]
 fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
     // Known catalog method -> native + policy-enforced.
     let known = CallAuditMetadata::for_production_dispatch(TodoWriteMethod::NAME);
@@ -794,6 +856,59 @@ fn query_rows_filters_by_verdict() {
         denied_rows[0].semantic_status.as_deref(),
         Some("native_handler_denied")
     );
+}
+
+#[test]
+fn query_rows_verdicts_reach_component_rows() {
+    // #28 b8: Component calls carry their own status vocabulary, so the
+    // operator verdict filters must name it or Cell-governed rows fall out of
+    // both `success` and `denied`.
+    let store = CepAuditStore::in_memory().unwrap();
+    let ctx = test_context();
+    for (call_id, outcome, status) in [
+        (
+            1,
+            AuditOutcome::Success {
+                summary: "ok".into(),
+            },
+            SEMANTIC_STATUS_COMPONENT,
+        ),
+        (
+            2,
+            AuditOutcome::Error {
+                code: "CapabilityNotGranted".into(),
+                summary: "not enabled".into(),
+            },
+            SEMANTIC_STATUS_COMPONENT_DENIED,
+        ),
+    ] {
+        let start = store
+            .start_call(
+                &ctx,
+                call_id,
+                "noop.echo",
+                &CallAuditMetadata::for_component_dispatch(),
+            )
+            .unwrap();
+        store
+            .finalize_call(start, outcome, Some(status), None)
+            .unwrap();
+    }
+
+    for (verdict, expected_status) in [
+        ("success", SEMANTIC_STATUS_COMPONENT),
+        ("denied", SEMANTIC_STATUS_COMPONENT_DENIED),
+    ] {
+        let rows = store
+            .query_rows(&AuditQueryFilters {
+                session_id: Some(ctx.session_id.clone()),
+                verdict: Some(verdict.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "verdict {verdict}");
+        assert_eq!(rows[0].semantic_status.as_deref(), Some(expected_status));
+    }
 }
 
 #[test]

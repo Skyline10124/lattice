@@ -30,14 +30,24 @@ in-toto attestation construction, and attestation persistence.
 
 - ADDED #28: `PRAGMA user_version` carries `AUDIT_SCHEMA_VERSION`; a newer or
   old-shape database fails open with `AuditError::IncompatibleSchema` and is left
-  untouched (read-only legacy import stays the migration path).
-  `merge_finalize_metadata` takes `ComponentCallEvidence` and writes
+  untouched (read-only legacy import stays the migration path). Shape detection
+  covers both written tables by column name (`cep_audit_entries` and
+  `attestation_records`); matching names with different column types are still
+  adopted. `merge_finalize_metadata` takes `ComponentCallEvidence` and writes
   `admission_evidence` / `observed_effects` / `denied_operations` separately;
   `component_cells` (4-segment `ctx:ext:scope:trust`, spec §6.3) is derived from
   the effect ledger and `observed_capabilities` is label-ordered.
   `build_in_toto_statement` picks v1/v2 per turn from row evidence,
   `rebuild_in_toto_statement` gives a stored `predicate_type` the last word, and
   `statement_bytes` canonicalizes v2 only — stored v1 bytes are never rewritten.
+- ADDED #28 (labels): Component calls have their own vocabulary —
+  `CallAuditMetadata::for_component_dispatch` (`cell_component` /
+  `cell_admission`, policy-enforced) plus `SEMANTIC_STATUS_COMPONENT` and
+  `SEMANTIC_STATUS_COMPONENT_DENIED`, which the `success`/`denied` verdict
+  filters both name. The legacy catalog lookup must never label a Component
+  call. A Cell-governed row has no legacy `ImpactKind`, so the projector marks
+  its `ProvActivity::impact_kind` `impact_kind_attributed: false` instead of
+  coercing the `unknown` column into a concrete kind.
 - FIXED #38: `RejectionStage` vocabulary de-Uppered — `AdapterPreflight` →
   `PathGuard`, `BackendExecution` → `LocalIo`, `VerificationFailure` removed;
   `CallAuditMetadata.backend_invoked` and all routing metadata
