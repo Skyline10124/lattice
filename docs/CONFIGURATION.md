@@ -104,7 +104,8 @@ an `extensions` map. The real sub-sections are:
 | `[lancet.observation]` | `LancetObservationSection` | Path allow-roots and observation/todo budget limits. |
 | `[lancet.network]` | `LancetNetworkSection` | `fetch.web` host policy and response size cap. |
 | `[lancet.policy]` | `LancetPolicySection` | Pointer to an external structured TOML policy file. |
-| `[lancet.effects]` | `LancetEffectsSection` | Runtime effect-kind deny switch. |
+| `[lancet.effects]` | `LancetEffectsSection` | Runtime effect-kind deny switch (native path only). |
+| `[lancet.capabilities]` | `LancetCapabilitiesSection` | Component Tool capability admission policy. |
 | `[lancet.workspace]` | `LancetWorkspacePolicySection` | Local Workspace write-deny and read-visibility policy (blacklist). |
 
 > **Removed:** `[lancet.isolation]` does not exist. There is no
@@ -227,6 +228,31 @@ profile inline `[lancet.*]` < external policy file < test/runtime override**.
 `ImpactKind` (snake_case): `workspace_observation`, `workspace_mutation`,
 `command_execution`, `external_observation`, `session_state_mutation`,
 `audit_observation`.
+
+This section is the **native** authorization path only; Component Tool policy
+lives in `[lancet.capabilities]` and never names method impact identity.
+
+### `[lancet.capabilities]` — `LancetCapabilitiesSection`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `deny` | `Vec<String>` | `[]` | Capability names subtracted from the enabled tools' declared set. |
+| `max_boundary` | `Trust` | `in` | Highest trust boundary an admitted capability may cross. |
+
+Component Tool admission runs in a fixed stage order: the `[tools].enabled`
+tools' declared capabilities form the grant (there is no independent
+capability allow-list, so profiles stay portable), `deny` subtracts from it,
+`max_boundary` removes every capability whose scope trust resolves to `ex`
+(an undeclared scope trust is `ex`), and the concrete per-operation target
+check runs at call time. A tool left with no capability is not callable.
+
+`Trust` (snake_case): `in` (the operation stays inside the Tool Host's control
+and accounting domain), `ex` (it reaches the external world).
+
+Every `deny` entry must name a capability of the composed Component catalog.
+An unknown name is a **hard error at server construction**, never a warning: a
+deny typo that silently keeps a grant is fail-open. On a binary whose Component
+catalog is empty, *any* `deny` entry therefore fails startup.
 
 ### `[lancet.workspace]` — `LancetWorkspacePolicySection`
 
@@ -362,6 +388,10 @@ max_web_response_bytes = 10485760
 [lancet.effects]
 deny = []
 
+[lancet.capabilities]
+deny = []
+max_boundary = "in"
+
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
 included_ignored_read_patterns = []
@@ -401,6 +431,9 @@ sections into LANCET-native config:
 - `load_policy_config` — assembles the unified `PolicyConfig` and, if
   `[lancet.policy].path` is set, loads and merges the external TOML policy
   file.
+- `AgentProfile::capability_admission_policy` — lowers `[tools].enabled` plus
+  `[lancet.capabilities]` into the `CapabilityAdmissionPolicy` that gates
+  Component Tools. Without a profile nothing is admitted (fail closed).
 `[lancet.project_root].root` and `[lancet.observation].allowed_roots` entries
 are canonicalized and must resolve inside the runtime project root; otherwise
 the turn fails fast with a `BadRequest` error.

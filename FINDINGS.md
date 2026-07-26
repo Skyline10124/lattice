@@ -38,6 +38,13 @@
 ## LOW
 
 
+### L-38-01: `inspect-scaffold` feature 下 `lancet-native` 测试无法编译（先于 #28 存在）— `verification` / feature-gated / #38
+- **位置**: `crates/lancet-native/src/handlers/scaffold.rs:178`（`#[cfg(all(test, feature = "inspect-scaffold"))]` 内 `server.run(registry, config)`）；`crates/lancet-native/src/server/transport.rs:82,121`（`ServerRuntime<HandlerContext>` 只由 `NativeServerRuntime` 实现）。
+- **问题**: #38 删除 ExecutionBackend 路由层时把 server runtime 从 `ServerRunConfig` 拆成 `NativeServerRuntime`，feature-gated 的 scaffold 测试仍直接把 `ServerRunConfig` 传给 `CepServer::run`，于是 `cargo check --workspace --all-features --all-targets` 以 3 个 E0277（`ServerRunConfig: ServerRuntime<HandlerContext>` 未满足）失败。
+- **当前状态**: OPEN，非 #28 引入——在 base `538b476e` 上同样失败。`cargo xtask ci` 从不开 `inspect-scaffold`，所以门是绿的；只有显式 `--all-features` 才暴露。
+- **升级条件**: 若 scaffold 方法重新进入任何产品 lane，或门加上 `--all-features` → 升为 MEDIUM。
+- **计划**: 在 scaffold 测试里构造 `NativeServerRuntime` 再 `server.run(registry, runtime)`；`inspect-scaffold` 属 ADR 0004 待退役面（#34），若届时整体删除则本条随之关闭。
+
 ### L-47-01: `direct_failures` SIGINT scenario interrupts the whole `cargo test` run on CI — `robustness` / offline-ci / harness / #47
 - **位置**: `crates/lattice-system-harness/src/driver.rs:99-101` (`interrupt` → `signal_process_group(self.pgid, "-INT")`)，`:259-262` (`set_new_process_group` → `Command::process_group(0)`)；`crates/lattice-system-harness/tests/direct_failures.rs:324-360` (`direct_failure_sigint_while_stalled_commits_cancelled`)。
 - **问题**: harness 用 `kill -INT -<pgid>` 向整个进程组发 SIGINT，pgid 取自 `child.id()`，前提是 `process_group(0)` 已生效、子进程自成组长。若该前提在某些时序下不成立，负号 pgid 会落到**测试进程自己所在的进程组**，把 `cargo test` 一并 SIGINT。ubuntu-latest 上观察到 `cargo test --workspace` 以 **exit 130（SIGINT）** 终止，而当时已报告 **1059 passed / 0 failed**、无任何 FAILED 条目、无 panic——即没有测试失败，是作业被信号中断。
