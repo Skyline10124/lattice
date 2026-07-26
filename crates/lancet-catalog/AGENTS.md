@@ -4,10 +4,10 @@ Crate-local guidance for `lancet-catalog`.
 
 ## Role
 
-This crate owns the typed CEP method catalog: method identifiers, params and
-results, descriptors, required capabilities, schema metadata, catalog-declared
-base authority requirements, and the static production catalog used by native
-handlers and tool projection.
+This crate owns the current typed CEP method catalog used by native handlers and
+tool projection. It is a migration authority, not the ADR 0004 target: Source
+Tool manifests and generated descriptors replace it after Component migration,
+and #12 removes the remaining central catalog surface.
 
 ## Sub-Architecture
 
@@ -24,13 +24,18 @@ handlers and tool projection.
 ## Boundaries
 
 - Depend only on protocol plus serialization/schema support.
-- `CATALOG` is the authoritative production method set.
-- Keep the production catalog aligned with the root **5-method** agent CEP contract.
+- `CATALOG` remains authoritative for the current production path only. Do not
+  create a third schema beside it and the ADR 0004 Source Tool manifest work.
+- Keep the current default catalog aligned with its five built-ins, but do not
+  treat that set as a permanent global limit; closed runtime composition belongs
+  to generated registrations in the target architecture.
 - Do not define LLM-facing tool schemas here; `lancet-cep` projects them from
   descriptors and `lancet-native` exposes the native path.
 - Keep method params/results, descriptors, and capabilities in sync.
 - Keep base authority requirements method-local and policy-neutral; catalog may
   say that `fetch.web` needs fetch authority, but not which hosts are allowed.
+- Do not add operator-only contracts here. #17 moves existing audit DTOs to
+  `lancet-audit`; operator audit is not a Tool.
 
 ## Recent Issues
 
@@ -48,13 +53,15 @@ handlers and tool projection.
 
 ## Next Actions
 
-- For any new or changed method, update params/results, descriptor metadata,
-  required capabilities, native handlers, tool projection tests, and API mapping.
+- Do not add new production Tools by extending this crate. Start ADR 0004 Tool
+  contract work in its Source manifest and generated artifacts.
+- For maintenance of a current built-in before migration, update params/results,
+  descriptor metadata, native handlers, projection tests, and API mapping as one
+  temporary-path change.
 - Add regression tests when descriptor schemas, capability requirements, or
   method names/base-authority requirements change.
-- Keep scaffold additions behind `inspect-scaffold` and verify production
-  catalog length remains unchanged unless the root contract is intentionally
-  updated.
+- Keep scaffold additions behind `inspect-scaffold` and outside the current
+  production catalog.
 
 ## Record Maintenance
 

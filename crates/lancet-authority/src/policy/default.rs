@@ -73,38 +73,60 @@ pub struct MethodPolicy {
     pub max_todo_ops: Option<usize>,
 }
 
-// ── Workspace write policy (blacklist) ─────────────────────────────────
+// ── Workspace policy (write blacklist + read visibility) ──────────────
 
-/// Immutable workspace write-deny policy (blacklist).
+/// Immutable workspace policy for write-deny and read-visibility rules.
 ///
-/// A path is allowed unless it matches any denied pattern. Shared by
-/// `mutate.*` decisions. No system-level denies are hardcoded — the deny
-/// list is user-controlled.
+/// Write policy is a blacklist: a path is allowed unless it matches any
+/// denied write pattern. Read visibility is decided by
+/// [`super::visibility::ReadVisibilityPolicy`] built from the read fields
+/// below plus runtime System Path Exclusions and Git status.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct WorkspacePolicy {
     pub denied_write_patterns: Vec<String>,
+    pub included_ignored_read_patterns: Vec<String>,
+    pub denied_read_patterns: Vec<String>,
 }
 
 impl WorkspacePolicy {
-    /// Validate every configured deny pattern using Guard L1 write-pattern rules.
+    /// Validate every configured pattern using Guard L1 write-pattern rules.
     pub fn validate(&self) -> Result<(), String> {
         use crate::guard::normalize_write_path_pattern;
-        for pattern in &self.denied_write_patterns {
-            if pattern.is_empty() {
-                return Err("denied_write_patterns entry must not be empty".into());
+        for (field, patterns) in [
+            ("denied_write_patterns", &self.denied_write_patterns),
+            (
+                "included_ignored_read_patterns",
+                &self.included_ignored_read_patterns,
+            ),
+            ("denied_read_patterns", &self.denied_read_patterns),
+        ] {
+            for pattern in patterns {
+                if pattern.is_empty() {
+                    return Err(format!("{field} entry must not be empty"));
+                }
+                if pattern.contains('\0') {
+                    return Err(format!("{field} entry must not contain NUL bytes"));
+                }
+                if pattern.contains("..") {
+                    return Err(format!("{field} entry must not contain '..' traversal"));
+                }
+                if Path::new(pattern).is_absolute() {
+                    return Err(format!("{field} entry must be project-root-relative"));
+                }
+                normalize_write_path_pattern(pattern).map_err(|e| e.message)?;
             }
-            if pattern.contains('\0') {
-                return Err("denied_write_patterns entry must not contain NUL bytes".into());
-            }
-            if pattern.contains("..") {
-                return Err("denied_write_patterns entry must not contain '..' traversal".into());
-            }
-            if Path::new(pattern).is_absolute() {
-                return Err("denied_write_patterns entry must be project-root-relative".into());
-            }
-            normalize_write_path_pattern(pattern).map_err(|e| e.message)?;
         }
         Ok(())
+    }
+
+    /// Build the pure read-visibility decision surface for this policy.
+    pub fn read_visibility_policy(
+        &self,
+    ) -> Result<super::visibility::ReadVisibilityPolicy, String> {
+        super::visibility::ReadVisibilityPolicy::from_patterns(
+            &self.included_ignored_read_patterns,
+            &self.denied_read_patterns,
+        )
     }
 
     /// Build the post-policy authorized region for a method decision.
@@ -120,7 +142,7 @@ impl WorkspacePolicy {
         match method {
             "observe.workspace" => {
                 region.kinds.insert(ImpactKind::WorkspaceObservation);
-                // Observation effects are Upper-relative; authorize the workspace root sentinel.
+                // Observation effects are project-relative; authorize the workspace root sentinel.
                 region.observation_roots = vec![PathBuf::from(".")];
             }
             "fetch.web" => {
@@ -129,6 +151,13 @@ impl WorkspacePolicy {
             }
             "mutate.create" | "mutate.edit" => {
                 region.kinds.insert(ImpactKind::WorkspaceMutation);
+                // System Path Exclusions are host-enforced and not
+                // profile-configurable (AGENTS.md / ADR 0003).
+                for exclusion in super::visibility::SYSTEM_PATH_EXCLUSIONS {
+                    region
+                        .denied_write_path_prefixes
+                        .push(PathBuf::from(exclusion));
+                }
                 apply_denied_write_patterns(
                     &mut region,
                     &self.denied_write_patterns,
@@ -284,6 +313,12 @@ impl PolicyConfig {
             if let Some(patterns) = &workspace.denied_write_patterns {
                 self.workspace.denied_write_patterns = patterns.clone();
             }
+            if let Some(patterns) = &workspace.included_ignored_read_patterns {
+                self.workspace.included_ignored_read_patterns = patterns.clone();
+            }
+            if let Some(patterns) = &workspace.denied_read_patterns {
+                self.workspace.denied_read_patterns = patterns.clone();
+            }
             self.workspace.validate()?;
         }
         if let Some(obs) = &external.observation {
@@ -352,6 +387,8 @@ pub struct ExternalPolicyFile {
 #[serde(deny_unknown_fields)]
 pub struct ExternalWorkspacePolicy {
     pub denied_write_patterns: Option<Vec<String>>,
+    pub included_ignored_read_patterns: Option<Vec<String>>,
+    pub denied_read_patterns: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]

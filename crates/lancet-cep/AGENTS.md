@@ -4,9 +4,11 @@ Crate-local guidance for `lancet-cep`.
 
 ## Role
 
-This crate is the public CEP facade. It frames the CEP interface by re-exporting
-the protocol/catalog/dispatch contracts and by owning CEP-facing tool exposure
-and base authority planning helpers.
+This crate is the current public CEP facade. It frames the migration interface
+by re-exporting protocol/catalog/dispatch contracts and owning CEP-facing tool
+exposure and base-authority planning helpers. ADR 0004 replaces hand-maintained
+catalog projection with generated Source Tool descriptors and absorbs or retires
+this facade through `lancet-runtime` in #12.
 
 ## Sub-Architecture
 
@@ -25,8 +27,9 @@ and base authority planning helpers.
   `lattice-*` crate.
 - Do not implement native execution, policy side effects, audit persistence, or
   provider-specific LLM behavior here.
-- Keep tool schemas derived from `lancet-catalog`; never add a parallel hard-
-  coded production schema list.
+- Until generated Source Tool projection becomes production, keep schemas
+  derived from `lancet-catalog`; never add a parallel hard-coded schema list or
+  a compatibility projection for the target runtime.
 - Keep tool exposure separate from policy decisions: exposure aggregates
   catalog-declared requirements, while host lists and policy semantics come from
   the runtime policy layer.
@@ -38,6 +41,9 @@ and base authority planning helpers.
   requirements instead of acting as the authority interface itself.
 - FIXED L-llm-coupling: LANCET-facing tool definitions stay here while shared
   URL/DNS safety primitives live in the neutral `net-guard` leaf.
+- MIGRATION: do not deepen `ToolDefinition`, `ToolExposure`, or
+  `BaseAuthorityPlan` into permanent Tool authority. #5/#6 replace their Tool
+  contract role; #12 removes the migration facade.
 
 ## Verification
 

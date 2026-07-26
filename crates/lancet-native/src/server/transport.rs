@@ -3,9 +3,9 @@
 
 //! Native CEP server lifecycle layered on dispatch transport.
 
-use crate::execution_backend::{ExecutionRouting, UpperContext};
 use crate::server::call_durable_metadata::CallDurableMetadata;
-use crate::server::registry::{HandlerContext, MethodRegistry, build_routing_metadata};
+use crate::server::registry::{HandlerContext, MethodRegistry};
+use crate::workspace::LocalWorkspace;
 use lancet_audit::{
     AuditOutcome, AuditStart, CallAuditMetadata, CepAuditContext, CepAuditStore,
     SEMANTIC_STAGE_SCAFFOLD, SEMANTIC_STAGE_UNROUTED, impact_kind_for_method, impact_kind_label,
@@ -16,6 +16,7 @@ use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_dispatch::{CepServer, ServerCall, ServerRuntime};
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, policy::CepMode};
+use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime};
 use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
@@ -23,6 +24,17 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Server-side audit and lifecycle configuration for a turn-scoped native runtime.
+///
+/// The Local Workspace is not configuration: the server constructs the one
+/// concrete [`LocalWorkspace`] from `cep_context.policy.project_root` when the
+/// run starts. Callers supply only the canonical project root (via policy)
+/// and resolved policy.
+///
+/// `components` carries the closed Component runtime (ADR 0004). When a
+/// method name is in the Component catalog, `handle_request` dispatches to
+/// it instead of the native typed registry. Production builds compose
+/// `ComponentRuntime::from_embedded()` (empty until #7–#10); tests may
+/// inject a no-op fixture via `with_components`.
 #[derive(Clone)]
 pub struct ServerRunConfig {
     pub audit: Arc<CepAuditStore>,
@@ -34,9 +46,10 @@ pub struct ServerRunConfig {
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     /// CEP enforcement mode.
     pub cep_mode: CepMode,
-    /// Upper (MSB) execution routing — always present since MSB is the sole
-    /// execution path.
-    pub execution: ExecutionRouting,
+    /// Closed Component runtime for ADR 0004 Tool dispatch. `None` in
+    /// legacy callers; the native server treats `None` as an empty
+    /// Component catalog (all methods go to the native typed registry).
+    pub components: Option<Arc<ComponentRuntime>>,
 }
 
 impl ServerRunConfig {
@@ -57,31 +70,35 @@ impl ServerRunConfig {
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
-            execution: ExecutionRouting {
-                backend: Arc::new(crate::execution_backend::NullExecutionBackend),
-                upper: UpperContext {
-                    execution_backend: "null".into(),
-                    upper_workspace_id: "test-upper".into(),
-                },
-            },
+            components: None,
         }
     }
 }
 
-impl ServerRuntime<HandlerContext> for ServerRunConfig {
+/// Per-run native server runtime: the run configuration plus the one
+/// concrete [`LocalWorkspace`] constructed once from the resolved policy
+/// project root when the server starts.
+#[derive(Clone)]
+struct NativeServerRuntime {
+    config: ServerRunConfig,
+    workspace: Arc<LocalWorkspace>,
+}
+
+impl ServerRuntime<HandlerContext> for NativeServerRuntime {
     fn handle_call(
         &self,
         registry: MethodRegistry,
         call: ServerCall,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let config = self.clone();
+        let config = self.config.clone();
+        let workspace = Arc::clone(&self.workspace);
         Box::pin(async move {
-            handle_request(registry, call, config).await;
+            handle_request(registry, call, config, workspace).await;
         })
     }
 
     fn after_shutdown(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let audit = Arc::clone(&self.audit);
+        let audit = Arc::clone(&self.config.audit);
         Box::pin(async move {
             audit.await_pending().await;
         })
@@ -103,11 +120,23 @@ impl CepServerNativeExt for CepServer {
         registry: MethodRegistry,
         config: ServerRunConfig,
     ) -> Pin<Box<dyn Future<Output = Result<(), CepError>> + Send>> {
-        Box::pin(async move { self.run(registry, config).await })
+        Box::pin(async move {
+            // ADR 0003: the one concrete Local Workspace is constructed once
+            // per server run from the resolved policy's canonical project
+            // root. No caller-supplied workspace implementation is accepted.
+            let workspace = Arc::new(LocalWorkspace::new(&config.cep_context.policy.project_root));
+            self.run(registry, NativeServerRuntime { config, workspace })
+                .await
+        })
     }
 }
 
-async fn handle_request(registry: MethodRegistry, call: ServerCall, config: ServerRunConfig) {
+async fn handle_request(
+    registry: MethodRegistry,
+    call: ServerCall,
+    config: ServerRunConfig,
+    workspace: Arc<LocalWorkspace>,
+) {
     let ServerRunConfig {
         audit,
         audit_context,
@@ -115,7 +144,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         policy_hook,
         default_policy_hook,
         cep_mode,
-        execution,
+        components,
     } = config;
 
     let id = call.id();
@@ -138,41 +167,89 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     emit_cep_call_started(&events, &method, audit_start.audit_id, &call_audit_metadata).await;
 
     let durable_metadata = CallDurableMetadata::default();
-    let routing_invocation = crate::execution_backend::RoutingInvocationState::default();
     let effect_ledger = lancet_authority::effect::ledger::EffectLedger::new();
     let authorized_region_slot = lancet_authority::effect::ledger::AuthorizedRegionSlot::new();
     let turn_id = ctx_snapshot.turn_id.clone();
 
-    durable_metadata.record(build_routing_metadata(
-        Some(&execution),
-        &routing_invocation,
-    ));
+    // D.3: Component/native dispatch split. If the method name is in the
+    // closed Component catalog, dispatch to the Component runtime; otherwise
+    // fall through to the existing 5-method typed registry. The split happens
+    // after audit start and before finalize, so Component and native calls
+    // share one durable audit path. Component calls produce Cell evidence
+    // (no domain operation in #5); native calls produce effect-ledger evidence.
+    let component_evidence = CellEvidenceLedger::new();
 
-    let ctx = HandlerContext {
-        call_id: id,
-        events: events.clone(),
-        cancellation,
-        cep_context: Arc::clone(&cep_context),
-        turn_id,
-        durable_metadata: durable_metadata.clone(),
-        effect_ledger: effect_ledger.clone(),
-        authorized_region: authorized_region_slot.clone(),
-        policy_hook: Arc::clone(&policy_hook),
-        default_policy_hook: default_policy_hook.clone(),
-        audit_context: Arc::clone(&audit_context),
-        audit: Arc::clone(&audit),
-        cep_mode: cep_mode.clone(),
-        execution: execution.clone(),
-        routing_invocation: routing_invocation.clone(),
+    // Pre-dispatch effect-kind deny (issue #24 slice 3): compare the method's
+    // static declared effect kinds with `denied_effect_kinds` before invoking
+    // any handler/backend. Post-dispatch observed-effect checking remains
+    // defense in depth below.
+    if let Some(descriptor) = lancet_catalog::catalog()
+        .iter()
+        .find(|descriptor| descriptor.name == method)
+        && let Err(denial) = lancet_authority::effect::checker::check_declared_effect_kinds_denied(
+            &method,
+            &descriptor.effect,
+            &cep_context.policy.denied_effect_kinds,
+        )
+    {
+        let final_result: Result<Value, CepError> = Err(denial);
+        finalize_audit_for_dispatch(
+            &audit,
+            audit_start,
+            &method,
+            &final_result,
+            &call_audit_metadata,
+            None,
+        );
+        let error_code = final_result
+            .as_ref()
+            .err()
+            .map(|err| format!("{:?}", err.code));
+        emit_cep_call_finished(
+            &events,
+            &method,
+            audit_start.audit_id,
+            false,
+            error_code.as_deref(),
+            &call_audit_metadata,
+        )
+        .await;
+        call.respond(final_result);
+        return;
+    }
+
+    let dispatch_result = if let Some(ref rt) = components
+        && rt.contains(&method)
+    {
+        let comp_ctx = ComponentCallContext {
+            call_id: id,
+            turn_id: turn_id.clone(),
+            events: events.clone(),
+            cancellation: cancellation.clone(),
+            evidence: component_evidence.clone(),
+        };
+        rt.call(&method, params, comp_ctx).await
+    } else {
+        let ctx = HandlerContext {
+            call_id: id,
+            events: events.clone(),
+            cancellation,
+            cep_context: Arc::clone(&cep_context),
+            turn_id,
+            durable_metadata: durable_metadata.clone(),
+            effect_ledger: effect_ledger.clone(),
+            authorized_region: authorized_region_slot.clone(),
+            policy_hook: Arc::clone(&policy_hook),
+            default_policy_hook: default_policy_hook.clone(),
+            audit_context: Arc::clone(&audit_context),
+            audit: Arc::clone(&audit),
+            cep_mode: cep_mode.clone(),
+            workspace,
+        };
+        registry.dispatch(&method, params, ctx).await
     };
 
-    let dispatch_result = registry.dispatch(&method, params, ctx).await;
     let observed_effects = effect_ledger.snapshot();
-
-    durable_metadata.record(build_routing_metadata(
-        Some(&execution),
-        &routing_invocation,
-    ));
 
     let final_result = apply_effect_check(
         &method,
@@ -189,10 +266,12 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         .iter()
         .map(|effect| effect.required_capability)
         .collect();
+    let component_cells = component_evidence.snapshot_keys();
     let merged_metadata = merge_finalize_metadata(
         durable_metadata_json.as_deref(),
         &method,
         &observed_capabilities,
+        &component_cells,
     );
 
     finalize_audit_for_dispatch(
@@ -222,13 +301,12 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     call.respond(final_result);
 }
 
+/// #48: a dispatch that never completed because the call was cancelled.
+/// Cancellation state is the classification authority end to end, so every
+/// call-scoped cancellation surfaces as the structured `CallCancelled` code
+/// — never matched on a guest/client-controlled error string.
 fn is_incomplete_dispatch(result: &Result<Value, CepError>) -> bool {
-    matches!(
-        result,
-        Err(err)
-            if err.code == CepErrorCode::ExecutionFailed
-                && err.message.contains("cancelled")
-    )
+    matches!(result, Err(err) if err.code == CepErrorCode::CallCancelled)
 }
 
 fn apply_effect_check(
@@ -353,12 +431,12 @@ fn finalize_audit_for_dispatch(
             let metadata = if call_metadata.semantic_stage == SEMANTIC_STAGE_SCAFFOLD {
                 merge_scaffold_success_metadata(
                     durable_metadata_json,
-                    compact_success_metadata(method, value, call_metadata).as_deref(),
+                    compact_success_metadata(method, value).as_deref(),
                 )
             } else {
                 durable_metadata_json
                     .map(str::to_string)
-                    .or_else(|| compact_success_metadata(method, value, call_metadata))
+                    .or_else(|| compact_success_metadata(method, value))
             };
             let _ = audit.finalize_call(
                 audit_start,
@@ -367,7 +445,7 @@ fn finalize_audit_for_dispatch(
                 metadata.as_deref(),
             );
         }
-        Err(err) if err.message == "call cancelled" => {
+        Err(err) if err.code == CepErrorCode::CallCancelled => {
             let _ = audit.finalize_call(audit_start, AuditOutcome::Cancelled, None, None);
         }
         Err(err) => {
@@ -428,14 +506,7 @@ fn compact_success_summary(method: &str, value: &Value) -> String {
     }
 }
 
-fn compact_success_metadata(
-    method: &str,
-    value: &Value,
-    call_metadata: &CallAuditMetadata,
-) -> Option<String> {
-    let backend_invoked = call_metadata
-        .backend_invoked
-        .unwrap_or(!call_metadata.policy_enforced);
+fn compact_success_metadata(method: &str, value: &Value) -> Option<String> {
     match method {
         "session.todo_write" => {
             let count = value
@@ -443,9 +514,7 @@ fn compact_success_metadata(
                 .and_then(|v| v.as_array())
                 .map(|a| a.len())
                 .unwrap_or(0);
-            Some(format!(
-                r#"{{"outcome":"todo_write","op_count":{count},"backend_invoked":{backend_invoked}}}"#
-            ))
+            Some(format!(r#"{{"outcome":"todo_write","op_count":{count}}}"#))
         }
         "fetch.web" => {
             let response_size = value
@@ -458,7 +527,7 @@ fn compact_success_metadata(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             Some(format!(
-                r#"{{"outcome":"fetch_web","response_size":{response_size},"truncated":{truncated},"backend_invoked":{backend_invoked}}}"#
+                r#"{{"outcome":"fetch_web","response_size":{response_size},"truncated":{truncated}}}"#
             ))
         }
         "workspace.inspect" | "workspace.navigate" => {
@@ -471,12 +540,10 @@ fn compact_success_metadata(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             Some(format!(
-                r#"{{"outcome":"scaffold","status":"{status}","routed":{routed},"observation_payload_bytes":0,"budget_charged":0,"backend_invoked":{backend_invoked}}}"#
+                r#"{{"outcome":"scaffold","status":"{status}","routed":{routed},"observation_payload_bytes":0,"budget_charged":0}}"#
             ))
         }
-        _ => Some(format!(
-            r#"{{"method":"{method}","backend_invoked":{backend_invoked}}}"#
-        )),
+        _ => Some(format!(r#"{{"method":"{method}"}}"#)),
     }
 }
 

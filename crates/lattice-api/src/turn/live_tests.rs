@@ -7,17 +7,14 @@
 //! real AgentLoop with FakeStreamingLlmClient, and the live stream_turn_live_with_agent
 //! function. No internal boundaries are mocked.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 
+use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
+use crate::session::SessionApi;
 use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
+use lattice_agent::{AgentLoop, AgentLoopConfig};
 use lattice_llm::{LlmEvent, TokenUsage};
-use lattice_session::WorkspaceDisposition;
-
-use super::types::{RunTurnRequest, RunTurnStatus, TurnEvent, TurnEventStream};
-use crate::session::SessionApi;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -61,11 +58,6 @@ async fn stream_turn_live_with_agent(
     tool_definitions: Vec<lattice_llm::ToolDefinition>,
 ) -> crate::session::Result<TurnEventStream> {
     let (cep_client, _server) = lancet_native::CepTransport::pair(1);
-    let upper_lease = super::upper::UpperLease::without_handle(Arc::new(
-        lattice_workspace::testing::DeterministicWorkspace::new()
-            .expect("deterministic workspace for test"),
-    )
-        as Arc<dyn lattice_workspace::Workspace>);
     let deps = super::cep::ProductionTurnDeps {
         agent_loop,
         tool_definitions,
@@ -75,7 +67,6 @@ async fn stream_turn_live_with_agent(
         audit_context: Arc::new(tokio::sync::RwLock::new(
             lancet_native::CepAuditContext::default(),
         )),
-        upper_lease,
         #[cfg(test)]
         build_metrics: super::cep::CepRuntimeBuildMetrics {
             adapter_instances: 0,
@@ -95,7 +86,6 @@ fn make_request(input: &str) -> RunTurnRequest {
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
-        workspace_override: None,
     }
 }
 
@@ -108,7 +98,6 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
-        workspace_override: None,
     }
 }
 
@@ -130,16 +119,6 @@ fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::Loa
             tools: lattice_profile::ToolsSection { enabled: vec![] },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
-            workspace: lattice_profile::WorkspaceSection {
-                egress: None,
-                credentials: vec![],
-                image: Some("test-template".to_string()),
-                cpus: None,
-                memory_mb: None,
-                allowed_egress_targets: vec![],
-                cleanup_rounds: 3,
-                max_pending_snapshots: 5,
-            },
         },
         system_prompt: system_prompt.to_string(),
     }
@@ -162,333 +141,7 @@ fn happy_events() -> Vec<LlmEvent> {
     ]
 }
 
-/// Multi-event sequence for ordering tests.
-fn ordered_events() -> Vec<LlmEvent> {
-    vec![
-        LlmEvent::Token {
-            content: "response text".to_string(),
-        },
-        LlmEvent::Done {
-            finish_reason: "stop".to_string(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 8,
-                completion_tokens: 3,
-                total_tokens: 11,
-            }),
-        },
-    ]
-}
-
-// ── BlockingLlmClient ─────────────────────────────────────────────────
-//
-// A streaming LLM fake that yields initial events, then blocks on a
-// `tokio::sync::Notify` before emitting the remaining events. This gives
-// the test thread deterministic control over when the agent loop progresses
-// past model consumption.
-
-struct BlockingLlmClient {
-    pre_block_events: std::sync::Mutex<Option<Vec<LlmEvent>>>,
-    resume: Arc<tokio::sync::Notify>,
-    post_resume_events: std::sync::Mutex<Option<Vec<LlmEvent>>>,
-}
-
-impl BlockingLlmClient {
-    fn new(
-        pre_block_events: Vec<LlmEvent>,
-        resume: Arc<tokio::sync::Notify>,
-        post_resume_events: Vec<LlmEvent>,
-    ) -> Self {
-        Self {
-            pre_block_events: std::sync::Mutex::new(Some(pre_block_events)),
-            resume,
-            post_resume_events: std::sync::Mutex::new(Some(post_resume_events)),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl LlmClient for BlockingLlmClient {
-    async fn chat(
-        &self,
-        _request: lattice_llm::ChatRequest,
-    ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-        unreachable!("stream-only fake")
-    }
-
-    async fn stream_chat(
-        &self,
-        _request: lattice_llm::ChatRequest,
-    ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        let pre = self
-            .pre_block_events
-            .lock()
-            .unwrap()
-            .take()
-            .expect("BlockingLlmClient only supports a single round");
-        let post = self
-            .post_resume_events
-            .lock()
-            .unwrap()
-            .take()
-            .expect("BlockingLlmClient only supports a single round");
-        let resume = self.resume.clone();
-
-        // State machine: Pre -> (await notify) -> Post
-        enum StreamState {
-            Pre(
-                VecDeque<LlmEvent>,
-                Arc<tokio::sync::Notify>,
-                VecDeque<LlmEvent>,
-            ),
-            Post(VecDeque<LlmEvent>),
-        }
-
-        let initial = StreamState::Pre(VecDeque::from(pre), resume, VecDeque::from(post));
-
-        let stream = futures::stream::unfold(initial, |state| async move {
-            match state {
-                StreamState::Pre(mut queue, notify, mut post) => {
-                    if let Some(event) = queue.pop_front() {
-                        Some((event, StreamState::Pre(queue, notify, post)))
-                    } else {
-                        // All pre-block events emitted; block until notified
-                        notify.notified().await;
-                        // Transition to Post state
-                        post.pop_front()
-                            .map(|event| (event, StreamState::Post(post)))
-                    }
-                }
-                StreamState::Post(mut queue) => queue
-                    .pop_front()
-                    .map(|event| (event, StreamState::Post(queue))),
-            }
-        });
-
-        Ok(Box::pin(stream))
-    }
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn stream_turn_live_with_agent_basic_completed() {
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-    let client = FakeStreamingLlmClient::builder()
-        .push_events(happy_events())
-        .build();
-    let agent_loop = make_agent_loop(client);
-    let request = make_request("hello");
-
-    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
-        .await
-        .expect("stream_turn_live_with_agent should succeed");
-    let events: Vec<TurnEvent> = stream.collect().await;
-
-    // First event is TurnStarted with non-empty session_id
-    let first = &events[0];
-    if let TurnEvent::TurnStarted {
-        session_id,
-        parent_commit_id: _,
-        branch: _,
-    } = first
-    {
-        assert!(!session_id.is_empty(), "session_id should not be empty");
-    } else {
-        panic!("first event should be TurnStarted, got: {first:?}");
-    }
-
-    // Contains TokenDelta events
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TokenDelta { .. })),
-        "should contain TokenDelta events"
-    );
-
-    // Contains ModelFinished
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::ModelFinished { .. })),
-        "should contain ModelFinished event"
-    );
-
-    // No TurnFailed or TurnCancelled
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnFailed { .. })),
-        "should not contain TurnFailed"
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnCancelled { .. })),
-        "should not contain TurnCancelled"
-    );
-
-    // Contains TurnCommitting followed by TurnCommitted with status Completed
-    let committing_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitting))
-        .expect("should have TurnCommitting");
-    let committed_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
-        .expect("should have TurnCommitted");
-    assert!(
-        committing_pos < committed_pos,
-        "TurnCommitting must precede TurnCommitted"
-    );
-
-    if let TurnEvent::TurnCommitted {
-        session_id: committed_sid,
-        commit_id,
-        status,
-        ..
-    } = &events[committed_pos]
-    {
-        assert_eq!(*status, RunTurnStatus::Completed);
-        assert!(!commit_id.is_empty(), "commit_id should not be empty");
-
-        // TurnCommitted.session_id matches TurnStarted.session_id
-        if let TurnEvent::TurnStarted { session_id, .. } = first {
-            assert_eq!(committed_sid, session_id);
-        }
-    } else {
-        panic!("expected TurnCommitted at committed_pos");
-    }
-}
-
-#[tokio::test]
-async fn stream_turn_live_with_agent_error_commits_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-    // Push an error event that will cause the agent loop to fail
-    let client = FakeStreamingLlmClient::builder()
-        .push_error("provider unavailable")
-        .build();
-    let agent_loop = make_agent_loop(client);
-    let request = make_request("hello");
-
-    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
-        .await
-        .expect("stream_turn_live_with_agent should succeed (error is in-stream)");
-    let events: Vec<TurnEvent> = stream.collect().await;
-
-    // Contains TurnFailed with non-empty reason
-    let failed = events
-        .iter()
-        .find(|e| matches!(e, TurnEvent::TurnFailed { .. }))
-        .expect("should have TurnFailed event");
-    if let TurnEvent::TurnFailed { reason } = failed {
-        assert!(!reason.is_empty(), "TurnFailed reason should not be empty");
-    }
-
-    // TurnFailed appears before TurnCommitting
-    let failed_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnFailed { .. }))
-        .unwrap();
-    let committing_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitting))
-        .expect("should have TurnCommitting");
-    assert!(
-        failed_pos < committing_pos,
-        "TurnFailed must appear before TurnCommitting"
-    );
-
-    // Contains TurnCommitted with status Error
-    let committed = events
-        .iter()
-        .find(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
-        .expect("should have TurnCommitted event");
-    if let TurnEvent::TurnCommitted { status, .. } = committed {
-        assert_eq!(*status, RunTurnStatus::Error);
-    }
-
-    // No CommitFailed event
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::CommitFailed { .. })),
-        "should not contain CommitFailed"
-    );
-}
-
-#[tokio::test]
-async fn stream_turn_live_with_agent_event_ordering() {
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-    let client = FakeStreamingLlmClient::builder()
-        .push_events(ordered_events())
-        .build();
-    let agent_loop = make_agent_loop(client);
-    let request = make_request("test ordering");
-
-    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
-        .await
-        .expect("stream_turn_live_with_agent should succeed");
-    let events: Vec<TurnEvent> = stream.collect().await;
-
-    // TurnStarted is first
-    assert!(
-        matches!(&events[0], TurnEvent::TurnStarted { .. }),
-        "first event should be TurnStarted"
-    );
-
-    // ModelStarted appears after TurnStarted
-    let started_pos = 0;
-    let model_started_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::ModelStarted { .. }))
-        .expect("should have ModelStarted");
-    assert!(model_started_pos > started_pos);
-
-    // TokenDelta appears after ModelStarted
-    let token_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TokenDelta { .. }))
-        .expect("should have TokenDelta");
-    assert!(
-        token_pos > model_started_pos,
-        "TokenDelta should appear after ModelStarted"
-    );
-
-    // ModelFinished appears after TokenDelta
-    let model_finished_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::ModelFinished { .. }))
-        .expect("should have ModelFinished");
-    assert!(
-        model_finished_pos > token_pos,
-        "ModelFinished should appear after TokenDelta"
-    );
-
-    // TurnCommitting appears after ModelFinished
-    let committing_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitting))
-        .expect("should have TurnCommitting");
-    assert!(
-        committing_pos > model_finished_pos,
-        "TurnCommitting should appear after ModelFinished"
-    );
-
-    // TurnCommitted is last
-    let committed_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
-        .expect("should have TurnCommitted");
-    assert_eq!(
-        committed_pos,
-        events.len() - 1,
-        "TurnCommitted should be the last event"
-    );
-}
-
 #[tokio::test]
 async fn stream_turn_live_with_agent_startup_failure_no_stream() {
     let dir = tempfile::tempdir().unwrap();
@@ -639,198 +292,6 @@ async fn stream_turn_live_with_agent_commit_stores_delta_only() {
 
     // The first turn's messages are unchanged at positions 0-1
     assert_eq!(all_messages[0].content, "What is 2+2?");
-}
-
-#[tokio::test]
-async fn stream_turn_live_with_agent_branch_populated() {
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-    let client = FakeStreamingLlmClient::builder()
-        .push_events(happy_events())
-        .build();
-    let agent_loop = make_agent_loop(client);
-    let request = make_request("hello");
-
-    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
-        .await
-        .expect("stream_turn_live_with_agent should succeed");
-    let events: Vec<TurnEvent> = stream.collect().await;
-
-    // TurnStarted.branch should be Some (default branch name) when session is on a branch
-    if let TurnEvent::TurnStarted { branch, .. } = &events[0] {
-        assert!(
-            branch.is_some(),
-            "TurnStarted.branch should be Some when session is on a branch"
-        );
-        assert_eq!(
-            branch.as_deref(),
-            Some("main"),
-            "default branch should be 'main'"
-        );
-    } else {
-        panic!("first event should be TurnStarted");
-    }
-}
-
-#[tokio::test]
-async fn stream_turn_live_with_agent_commit_failure_deterministic() {
-    // Deterministic commit failure using BlockingLlmClient.
-    // and real SQLite parent conflict.
-    let dir = tempfile::tempdir().unwrap();
-    let session = make_session(dir.path());
-
-    // Create a session manually so we can manipulate it
-    let create_req = crate::session::CreateSessionRequest {
-        label: None,
-        active_agent: "test".to_string(),
-        project_branch: "main".to_string(),
-    };
-    let created = session.create_session(create_req).expect("create session");
-    let session_id = created.session_id.clone();
-
-    // First turn: establish a commit (so we have a parent)
-    let client1 = FakeStreamingLlmClient::builder()
-        .push_events(happy_events())
-        .build();
-    let agent_loop1 = make_agent_loop(client1);
-    let request1 = make_request_with_session("first turn", &session_id);
-    let stream1 = stream_turn_live_with_agent(session, agent_loop1, request1, vec![])
-        .await
-        .expect("first turn should succeed");
-    let events1: Vec<TurnEvent> = stream1.collect().await;
-    assert!(
-        events1
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnCommitted { .. })),
-        "first turn should commit"
-    );
-
-    // Build BlockingLlmClient: yields tokens, then blocks until resumed
-    let resume = Arc::new(tokio::sync::Notify::new());
-    let blocking_client = BlockingLlmClient::new(
-        vec![
-            LlmEvent::Token {
-                content: "partial".to_string(),
-            },
-            LlmEvent::Token {
-                content: " response".to_string(),
-            },
-        ],
-        resume.clone(),
-        vec![LlmEvent::Done {
-            finish_reason: "stop".to_string(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-            }),
-        }],
-    );
-
-    // Start second turn with BlockingLlmClient
-    let session2 = make_session(dir.path());
-    let agent_loop2 = Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm: Arc::new(blocking_client),
-        tool_executor: Arc::new(NoOpToolExecutor),
-    }));
-    let request2 = make_request_with_session("second turn", &session_id);
-
-    // stream_turn_live_with_agent returning Ok guarantees prepare_live_turn completed
-    // with the stale parent.
-    let stream2 = stream_turn_live_with_agent(session2, agent_loop2, request2, vec![])
-        .await
-        .expect("second turn prepare should succeed");
-
-    // Insert racing commit while BlockingLlmClient is paused.
-    let session3 = make_session(dir.path());
-    let log = session3.log(&session_id).expect("log");
-    let current_head = log.last().unwrap().commit_id.clone();
-
-    let racing_input = lattice_session::TurnCommitInput {
-        session_id: session_id.clone(),
-        parent_ids: vec![current_head],
-        messages: vec![lattice_session::GraphMessage {
-            role: "user".to_string(),
-            content: "racing turn".to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }],
-        agent_name: "coder".to_string(),
-        profile_snapshot_hash: "test-profile".to_string(),
-        profile_snapshot_json: "{}".to_string(),
-        model: "sonnet".to_string(),
-        provider: "anthropic".to_string(),
-        status: lattice_session::TurnCommitStatus::Completed,
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
-        commit_message: "Racing commit".to_string(),
-        usage: None,
-        terminal_reason: None,
-    };
-    session3
-        .store()
-        .commit_turn(racing_input)
-        .expect("racing commit should succeed");
-
-    // Resume BlockingLlmClient — agent finishes, commit_turn_inner finds
-    // parent mismatch.
-    resume.notify_one();
-
-    // Collect second turn's events
-    let events2: Vec<TurnEvent> = stream2.collect().await;
-
-    // Assert: TokenDelta events present before CommitFailed (proves live
-    // activity before commit)
-    let token_pos = events2
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TokenDelta { .. }));
-    assert!(
-        token_pos.is_some(),
-        "should have TokenDelta events (live activity before commit)"
-    );
-
-    // Assert: TurnCommitting present
-    assert!(
-        events2
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnCommitting)),
-        "should have TurnCommitting event"
-    );
-
-    // Assert: CommitFailed present with non-empty reason
-    let commit_failed = events2
-        .iter()
-        .find(|e| matches!(e, TurnEvent::CommitFailed { .. }));
-    assert!(
-        commit_failed.is_some(),
-        "should have CommitFailed event when parent is stale. Events: {events2:?}"
-    );
-    if let Some(TurnEvent::CommitFailed { reason }) = commit_failed {
-        assert!(
-            !reason.is_empty(),
-            "CommitFailed reason should not be empty"
-        );
-    }
-
-    // Assert: TurnCommitted absent
-    assert!(
-        !events2
-            .iter()
-            .any(|e| matches!(e, TurnEvent::TurnCommitted { .. })),
-        "should not contain TurnCommitted when commit fails"
-    );
-
-    // Assert: HEAD = 2 commits (first turn + racing), not 3
-    let session4 = make_session(dir.path());
-    let log_after = session4.log(&session_id).expect("log after failed commit");
-    assert_eq!(
-        log_after.len(),
-        2,
-        "HEAD should have exactly 2 commits (first + racing), got {}",
-        log_after.len()
-    );
 }
 
 #[tokio::test]

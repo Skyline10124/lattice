@@ -16,6 +16,10 @@ pub struct LoadedAgentProfile {
 }
 
 /// Forbidden top-level sections that must be rejected before deserialization.
+///
+/// `workspace` is the retired Upper microVM section (#40): legacy profiles
+/// that still declare it fail here with a named, actionable error rather
+/// than a bare `deny_unknown_fields` rejection.
 const FORBIDDEN_SECTIONS: &[&str] = &[
     "capabilities",
     "handoff",
@@ -28,6 +32,7 @@ const FORBIDDEN_SECTIONS: &[&str] = &[
     "security",
     "context",
     "behavior",
+    "workspace",
 ];
 
 /// Load and validate an `agent.toml` profile at `path`.
@@ -63,7 +68,7 @@ pub fn load_agent_profile(path: impl AsRef<Path>) -> Result<LoadedAgentProfile, 
     // Validate prompt mutual exclusivity.
     let system_prompt = resolve_system_prompt(&path, &profile)?;
     validate_llm_retry(&path, &profile)?;
-
+    validate_llm_timeout(&path, &profile)?;
     let package_dir = path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -120,6 +125,25 @@ fn validate_llm_retry(path: &Path, profile: &AgentProfile) -> Result<(), Profile
         });
     }
     Ok(())
+}
+
+fn validate_llm_timeout(path: &Path, profile: &AgentProfile) -> Result<(), ProfileError> {
+    let Some(secs) = profile.llm.timeout_secs else {
+        return Ok(());
+    };
+    let (reason, expected) = match secs {
+        0 => ("timeout must be nonzero", "timeout_secs must be > 0"),
+        3601.. => ("timeout is too large", "timeout_secs must be <= 3600"),
+        _ => return Ok(()),
+    };
+    Err(ProfileError::InvalidField {
+        path: path.to_path_buf(),
+        section: "llm".into(),
+        field: "timeout_secs".into(),
+        value: secs.to_string().into_boxed_str(),
+        reason: reason.into(),
+        expected: expected.into(),
+    })
 }
 
 /// Check raw TOML content for forbidden top-level sections.
@@ -258,7 +282,6 @@ model = "sonnet"
 [prompt]
 system = "You are a helpful assistant."
 
-[workspace]
 "#,
         );
         let loaded = load_agent_profile(&path).unwrap();
@@ -284,7 +307,6 @@ model = "sonnet"
 [prompt]
 system_path = "{}"
 
-[workspace]
 "#,
             prompt_path.file_name().unwrap().to_str().unwrap()
         );
@@ -308,7 +330,6 @@ model = "sonnet"
 system = "inline"
 system_path = "prompt.md"
 
-[workspace]
 "#,
         );
         let err = load_agent_profile(&path).unwrap_err();
@@ -327,7 +348,6 @@ model = "sonnet"
 
 [prompt]
 
-[workspace]
 "#,
         );
         let err = load_agent_profile(&path).unwrap_err();
@@ -350,7 +370,6 @@ model = "sonnet"
 [prompt]
 system_path = "nonexistent.md"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -374,7 +393,6 @@ model = "sonnet"
 [prompt]
 system_path = "/etc/passwd"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -398,7 +416,6 @@ model = "sonnet"
 [prompt]
 system_path = "../secret/prompt.md"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -429,7 +446,6 @@ model = "sonnet"
 [prompt]
 system_path = "escape/secret.md"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -456,7 +472,6 @@ model = "sonnet"
 [prompt]
 system_path = "subdir"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -480,7 +495,6 @@ model = "sonnet"
 [prompt]
 system = "hello"
 
-[workspace]
 "#,
         )
         .unwrap();
@@ -509,7 +523,6 @@ model = "sonnet"
 [prompt]
 system = "hi"
 
-[workspace]
 "#,
         );
         let err = load_agent_profile(&path).unwrap_err();
@@ -533,7 +546,6 @@ model = "sonnet"
 [prompt]
 system = "hi"
 
-[workspace]
 "#,
         );
         let err = load_agent_profile(&path).unwrap_err();
@@ -552,6 +564,7 @@ system = "hi"
             "orchestrator",
             "pipeline",
             "memory",
+            "workspace",
         ];
         for section in forbidden {
             let dir = tempfile::tempdir().unwrap();
@@ -570,7 +583,6 @@ system = "hi"
 [{section}]
 x = 1
 
-[workspace]
 "#
             );
             std::fs::write(&toml_path, toml).unwrap();
@@ -600,7 +612,6 @@ max_retries = 0
 initial_delay_ms = 1
 max_delay_ms = 1
 
-[workspace]
 "#,
         );
         let loaded = load_agent_profile(&path).unwrap();
@@ -638,7 +649,6 @@ system = "hi"
 [llm.retry]
 {retry}
 
-[workspace]
 "#
             ));
             let err = load_agent_profile(&path).unwrap_err();
@@ -647,6 +657,69 @@ system = "hi"
                 "expected {field} in error, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn llm_timeout_secs_zero_rejected() {
+        let (_dir, path) = temp_profile(
+            r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[llm]
+timeout_secs = 0
+"#,
+        );
+        let err = load_agent_profile(&path).unwrap_err();
+        assert!(err.to_string().contains("timeout_secs"), "got: {err}");
+    }
+
+    #[test]
+    fn llm_timeout_secs_over_upper_bound_rejected() {
+        let (_dir, path) = temp_profile(
+            r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[llm]
+timeout_secs = 3601
+"#,
+        );
+        let err = load_agent_profile(&path).unwrap_err();
+        assert!(err.to_string().contains("timeout_secs"), "got: {err}");
+    }
+
+    #[test]
+    fn llm_timeout_secs_upper_bound_accepted() {
+        let (_dir, path) = temp_profile(
+            r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[llm]
+timeout_secs = 3600
+"#,
+        );
+        let loaded = load_agent_profile(&path).unwrap();
+        assert_eq!(loaded.profile.llm.timeout_secs, Some(3600));
     }
 
     #[test]
@@ -663,7 +736,6 @@ model = "sonnet"
 [prompt]
 system = "hi"
 
-[workspace]
 "#,
                 version
             ));
@@ -680,7 +752,7 @@ system = "hi"
     #[test]
     fn all_forbidden_sections_rejected() {
         // Covers: capabilities, handoff, orchestrator, plugins, pipeline,
-        // subagents, micro_agents, memory
+        // subagents, micro_agents, memory, workspace (retired Upper section)
         let forbidden = [
             "capabilities",
             "handoff",
@@ -690,6 +762,7 @@ system = "hi"
             "subagents",
             "micro_agents",
             "memory",
+            "workspace",
         ];
         for section in forbidden {
             let dir = tempfile::tempdir().unwrap();
@@ -708,7 +781,6 @@ system = "hi"
 [{section}]
 x = 1
 
-[workspace]
 "#
             );
             std::fs::write(&toml_path, toml).unwrap();

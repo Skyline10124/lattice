@@ -24,11 +24,14 @@ fn test_branch_create() {
     assert_eq!(graph_ref.name, "feature");
     assert_eq!(graph_ref.commit_id, Some(head.clone()));
 
-    let repo = git2::Repository::open(&dir).expect("open repo");
+    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
     let reference = repo
         .find_reference("refs/lattice/sessions/sess-branch/feature")
         .expect("find feature ref");
-    assert_eq!(reference.target().map(|o| o.to_string()), Some(head));
+    assert_eq!(
+        reference.target().try_id().map(|o| o.to_string()),
+        Some(head)
+    );
 }
 
 #[test]
@@ -105,11 +108,14 @@ fn test_reset() {
     assert_eq!(result.old_commit_id, Some(third.clone()));
     assert_eq!(result.new_commit_id, first.clone());
 
-    let repo = git2::Repository::open(&dir).expect("open repo");
+    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
     let reference = repo
         .find_reference("refs/lattice/sessions/sess-reset/main")
         .expect("find main");
-    assert_eq!(reference.target().map(|o| o.to_string()), Some(first));
+    assert_eq!(
+        reference.target().try_id().map(|o| o.to_string()),
+        Some(first)
+    );
 
     // Old commit still reachable via get_turn_commit.
     let old = store.get_turn_commit("sess-reset", &third).expect("get");
@@ -249,20 +255,25 @@ fn test_candidate_ref_created() {
     input.disposition = WorkspaceDisposition::PendingPromotion;
     let commit = store.commit_turn(input).expect("commit");
 
-    let repo = git2::Repository::open(&dir).expect("open repo");
+    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
     let git_commit = repo
-        .find_commit(git2::Oid::from_str(&commit.commit_id).expect("parse"))
+        .find_commit(gix::ObjectId::from_hex(commit.commit_id.as_bytes()).expect("parse"))
         .expect("find commit");
-    let manifest_bytes =
-        crate::git_graph::helpers::read_tree_blob(&repo, &git_commit, "turn/manifest.json")
-            .expect("read manifest");
+    let manifest_bytes = crate::git_graph::helpers::read_tree_blob(
+        &repo,
+        git_commit.id().detach(),
+        "turn/manifest.json",
+    )
+    .expect("read manifest");
     let manifest: crate::git_graph::helpers::GitSessionManifest =
         serde_json::from_slice(&manifest_bytes).expect("parse manifest");
     let turn_id = manifest.turn_id;
     let cand_ref = format!("refs/lattice/candidates/sess-cand/{turn_id}");
-    let reference = repo.find_reference(&cand_ref).expect("find candidate ref");
+    let reference = repo
+        .find_reference(cand_ref.as_str())
+        .expect("find candidate ref");
     assert_eq!(
-        reference.target().map(|o| o.to_string()),
+        reference.target().try_id().map(|o| o.to_string()),
         Some(commit.commit_id)
     );
 }

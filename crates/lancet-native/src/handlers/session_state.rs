@@ -91,7 +91,6 @@ async fn emit_success_metadata(ctx: &HandlerContext, op_count: usize) {
         "method": TodoWrite::NAME,
         "op_count": op_count,
         "policy_enforced": true,
-        "backend_invoked": true,
         "budget_charged": 0,
     });
     ctx.record_durable_metadata(metadata.clone());
@@ -109,7 +108,6 @@ async fn emit_denial_metadata(ctx: &HandlerContext, op_count: usize, denial_sour
         "op_count": op_count,
         "denial_source": denial_source,
         "policy_enforced": true,
-        "backend_invoked": false,
         "budget_charged": 0,
     });
     ctx.record_durable_metadata(metadata.clone());
@@ -151,7 +149,7 @@ mod tests {
                 call_id: 9,
                 events: EventSink::new(event_tx, 9),
                 cancellation: Cancellation::new(cancel_rx),
-                cep_context,
+                cep_context: Arc::clone(&cep_context),
                 turn_id: "test-turn".into(),
                 durable_metadata:
                     crate::server::call_durable_metadata::CallDurableMetadata::default(),
@@ -166,14 +164,9 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: crate::execution_backend::ExecutionRouting {
-                    backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
-                    upper: crate::execution_backend::UpperContext {
-                        execution_backend: "null".into(),
-                        upper_workspace_id: "null".into(),
-                    },
-                },
-                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+                workspace: Arc::new(crate::workspace::LocalWorkspace::new(
+                    &cep_context.policy.project_root,
+                )),
             },
             event_rx,
         )

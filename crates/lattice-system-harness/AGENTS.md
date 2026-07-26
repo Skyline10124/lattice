@@ -23,28 +23,44 @@ integration-test target of any product crate.
   `OPENAI_COMPATIBLE_*` configuration; there is no test-only provider,
   hidden flag, or product-side change (RFC #19 decision four).
 - `SessionSendDriver` (`src/session_send.rs`) drives the public
-  `lattice --json session send` entrypoint and parses JSONL with a tolerant
-  parser (unknown `TurnEvent` variants are kept as `Unknown`, never a parse
-  error — the public contract is incremental). Exit code classification
-  mirrors the product's 0/1/2 contract but never imports the product enum.
+  `lattice --json session send` entrypoint and returns raw command evidence
+  together with parsed JSONL. Unknown valid `TurnEvent` variants are kept as
+  `Unknown`; malformed nonblank lines are retained separately. Exit code
+  classification mirrors the product's 0/1/2 contract without importing it.
 - Subprocesses are spawned in their own process group
-  (`process_group(0)` on Unix) and a timeout kills the whole group via
-  `kill -KILL -<pgid>` (RFC #19 decision eight, PRD user story 20). The repo
-  does not commit to Windows (see #26 Out-of-Scope); `set_new_process_group`
-  is a no-op on non-Unix.
+  (`process_group(0)` on Unix). Timeout and controlled interrupt retain drained
+  stdout/stderr, reap the direct child, and clean the whole group. The repo does
+  not commit to Windows (see #26 Out-of-Scope); process groups are a no-op there.
+- Fake-provider races use `ResponseGate` plus bounded request waits. Failure
+  evidence is redacted before writing, stale bundles are cleared, and recursive
+  byte-level sentinel scans fail closed on both hits and I/O errors.
+- `ScenarioBudget::cap_timeout` applies `min(step_timeout, remaining_total)`;
+  multi-command drivers must use the capped value for every spawned command.
+- Direct-Local integration targets share only generic plumbing through private
+  `tests/support/mod.rs`; scenario-specific fixtures and assertions stay local.
 
-## Test Layers (RFC #19 decision two / seven)
+## Test Layers (RFC #19 decision two / seven, updated by #40)
 
 - **Fast binary black-box** (`tests/fast_cli_help.rs`, plus all `#[test]`
-  unit tests in `src/`): run on every ordinary CI. No Microsandbox
-  dependency. `cargo xtask ci` runs these by default.
-- **Real Microsandbox + PTY smoke** (`tests/msb_full_turn.rs`,
-  `tests/pty_tui_smoke.rs`): `#[ignore]`-gated, opted into via
-  `LATTICE_HARNESS_MSB=1`. When the flag is set, the test body runs and
-  `require_msb_env` probes the MSB stack via `lattice lancet status`; a
-  broken MSB environment **panics** (the suite fails rather than silently
-  passing — RFC #19 irreversible boundary 7). When the flag is unset the
-  tests are skipped, keeping ordinary CI clean.
+  unit tests in `src/`): run on every ordinary CI. `cargo xtask ci` runs
+  these by default.
+- **Direct-Local turn scenarios** (`tests/direct_local_turn.rs`): plain-text
+  turn, session reopen against changed Local state, and policy denial
+  skeletons. They drive the real turn path against the canonical Local
+  Workspace — no KVM, no MSB daemon, no OCI image, no `[workspace]` profile
+  section — and run in the ordinary lane. The full Direct-Local scenario
+  matrix landed in #24 slices 0–8: `direct_turn_contract` (turn lifecycle +
+  reopen), `direct_observation` (visibility/bounds), `direct_mutation`
+  (atomic mutation/concurrency/effect denial), `direct_tools`
+  (fetch/todo/catalog/retired methods), `direct_failures` (provider
+  failures/SIGINT/deadline/no-rollback), `direct_operator` (audit/session/
+  lancet cross-validation), `direct_secrets` (sentinel scanning),
+  `direct_session_isolation` (two-session graph isolation).
+- **PTY smoke** (`tests/pty_tui_smoke.rs`): proves the TUI entrypoint wires
+  into the same Direct-Local `stream_turn` chain. Also ordinary-lane since
+  #40; the retired KVM-lane opt-in gate and its `layer_guard` module are
+  gone — a broken Direct-Local environment is a product failure, never a
+  skip.
 
 ## Verification
 
@@ -52,16 +68,8 @@ Run from the workspace root:
 
 - `cargo xtask harness-boundary`
 - `cargo build -p lattice-cli --bin lattice`
-- Fast lane: `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
-- Full gate (real Microsandbox, owner's KVM host):
-  `LATTICE_HARNESS_MSB=1 LATTICE_MSB_IMAGE=<fully-qualified OCI ref> LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness -- --include-ignored`
-  (or `cargo test ... -- --include-ignored` to run ignored tests too). A
-  broken MSB environment makes this fail, not skip. `LATTICE_MSB_IMAGE` is
-  **required** for the MSB/PTY scenarios — the harness bakes no default so
-  the owner pins exactly the OCI ref (or warm template name) they have
-  cached; unset/empty panics with a clear message before any turn runs.
-  Example: `LATTICE_MSB_IMAGE=docker.m.daocloud.io/library/python:3.12-slim`.
-
+- Full suite (ordinary lane, no KVM/MSB required):
+  `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness`
 `LATTICE_BIN` is resolved by `LatticeDriver::from_env` **in the test process**
 (`is_file()` then `canonicalize`), i.e. relative to the test-process cwd,
 before any scenario child is spawned. A relative path that is a real file from

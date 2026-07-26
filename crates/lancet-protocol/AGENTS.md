@@ -15,6 +15,8 @@ types.
 - `src/frame.rs` gives CEP-specific aliases over JSON-RPC frames.
 - `src/envelope.rs` owns intent, impact, scope, effects, guard verdicts, and
   `ExecutionEnvelope`.
+- `src/cell.rs` owns the ADR 0004 Cell effect core (`CtxOp`/`ExtImpact`/`Trust`/
+  `ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`) + trust-free CellRef layering.
 - `src/capability.rs` owns required-capability patterns and resolution errors.
 - `src/error.rs` owns `CepError`, families, wire codes, and retriability.
 - `src/policy.rs` owns deterministic policy hook input/output data.
@@ -27,7 +29,11 @@ types.
 - No I/O, no tokio, no native execution, and no policy side effects.
 - Serialized field changes are cross-crate changes, not local refactors.
 - Keep serde and schemars behavior explicit for new or renamed fields.
-- Do not encode native handler assumptions that belong in `lancet-native`.
+- Do not encode concrete native handler, Component engine, or Tool Host
+  implementation assumptions. This crate owns only shared wire/data vocabulary.
+- ADR 0004 Cell vocabulary (`CtxOp`, `ExtImpact`, scope, trust, capability, and
+  observed effects) starts here before authority, audit, runtime, or generated
+  descriptor consumers change.
 
 ## Recent Issues
 
@@ -48,7 +54,13 @@ types.
   authority matching, native effect regions, schemas, and compatibility notes
   in the same series.
 - When adding boundary evidence fields, update authority validation and native
-  host probe projection together.
+  host/runtime projection together.
+- ADR 0004 Cell core landed add-only in `src/cell.rs` (#5 slice A); legacy
+  `ImpactKind` in `effect_types.rs` coexists, retired by #6/#12 — do not extend.
+- Component Tool execution error codes (`ToolTrap`/`ToolTimeout`/
+  `ToolResourceExhausted`/`CallCancelled`) + `ToolExecutionErrorData` landed
+  in `src/error.rs` Execution family (#5 slice C). No guest backtrace/host
+  path/secret in the data.
 
 ## Record Maintenance
 

@@ -160,6 +160,7 @@ fn workspace_policy_validates_denied_patterns() {
     // .. traversal in denied patterns is rejected
     let policy = WorkspacePolicy {
         denied_write_patterns: vec!["../etc".into()],
+        ..Default::default()
     };
     assert!(policy.validate().is_err());
 }
@@ -168,6 +169,7 @@ fn workspace_policy_validates_denied_patterns() {
 fn workspace_policy_applies_denied_patterns_to_mutate_region() {
     let policy = WorkspacePolicy {
         denied_write_patterns: vec!["crates/**".into()],
+        ..Default::default()
     };
     let cep = lancet_authority::CepPolicyConfig::defaults_for_project_root("/tmp/project");
     let mutate_region = policy.authorized_region_for("mutate.create", &cep);

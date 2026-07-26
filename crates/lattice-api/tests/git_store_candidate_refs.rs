@@ -7,8 +7,6 @@
 //! candidate ref under `refs/lattice/candidates/<session_id>/<turn_id>`
 //! pointing to the session commit OID. The ref is queryable.
 
-use std::fs;
-
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
@@ -17,8 +15,7 @@ use lattice_session::{
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
-    fs::create_dir_all(dir).expect("create dir");
-    git2::Repository::init(dir).expect("init repo");
+    let _ = lattice_session::test_utils::init_empty_repo(dir);
 }
 
 #[test]
@@ -67,16 +64,17 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
     // 1. Enumerate all refs under refs/lattice/candidates/<session_id>/** and
     //    confirm exactly one candidate ref exists pointing at the session
     //    commit OID.
-    let repo = git2::Repository::open(dir).expect("open repo");
+    let repo = gix::open_opts(dir, gix::open::Options::isolated()).expect("open repo");
     let candidate_prefix = format!("refs/lattice/candidates/{session_id}/");
-    let mut candidate_refs: Vec<(String, git2::Oid)> = Vec::new();
-    for reference in repo.references().expect("enumerate references") {
+    let mut candidate_refs: Vec<(String, gix::ObjectId)> = Vec::new();
+    let platform = repo.references().expect("enumerate references");
+    for reference in platform.all().expect("iterate references") {
         let r = reference.expect("read reference");
-        if let Some(name) = r.name()
-            && name.starts_with(&candidate_prefix)
-            && let Some(oid) = r.target()
+        let name = r.name().as_bstr().to_string();
+        if name.starts_with(&candidate_prefix)
+            && let Some(oid) = r.target().try_id()
         {
-            candidate_refs.push((name.to_string(), oid));
+            candidate_refs.push((name, oid.to_owned()));
         }
     }
     assert_eq!(
@@ -112,12 +110,12 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
         "turn_id must be a valid ref component: {turn_id}",
     );
 
-    // 3. The candidate ref is queryable via git2 find_reference.
+    // 3. The candidate ref is queryable via find_reference.
     let queried = repo
-        .find_reference(ref_name)
+        .find_reference(ref_name.as_str())
         .expect("candidate ref should be queryable via find_reference");
     assert_eq!(
-        queried.target().map(|o| o.to_string()),
+        queried.target().try_id().map(|o| o.to_string()),
         Some(commit_oid.clone()),
         "queried candidate ref target must match session commit OID",
     );
@@ -143,14 +141,15 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
     };
     let _plain = store.commit_turn(plain_input).expect("commit plain turn");
 
-    let mut candidate_refs_after: Vec<(String, git2::Oid)> = Vec::new();
-    for reference in repo.references().expect("enumerate references after") {
+    let mut candidate_refs_after: Vec<(String, gix::ObjectId)> = Vec::new();
+    let platform = repo.references().expect("enumerate references after");
+    for reference in platform.all().expect("iterate references after") {
         let r = reference.expect("read reference");
-        if let Some(name) = r.name()
-            && name.starts_with(&candidate_prefix)
-            && let Some(oid) = r.target()
+        let name = r.name().as_bstr().to_string();
+        if name.starts_with(&candidate_prefix)
+            && let Some(oid) = r.target().try_id()
         {
-            candidate_refs_after.push((name.to_string(), oid));
+            candidate_refs_after.push((name, oid.to_owned()));
         }
     }
     assert_eq!(

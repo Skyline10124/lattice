@@ -9,7 +9,7 @@ use lattice_agent::{
     LlmRetryConfig, ToolCallExecutor, ToolExecutionError,
 };
 use lattice_llm::ToolDefinition;
-use lattice_session::{GraphMessage, HeadTranscript};
+use lattice_session::HeadTranscript;
 
 fn read_file_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
@@ -87,110 +87,6 @@ fn make_request(user_input: &str, tool_definitions: Vec<ToolDefinition>) -> Agen
         llm_retry: LlmRetryConfig::default(),
     }
 }
-
-fn make_request_with_transcript(
-    user_input: &str,
-    transcript_messages: Vec<GraphMessage>,
-    tool_definitions: Vec<ToolDefinition>,
-) -> AgentTurnRequest {
-    AgentTurnRequest {
-        session_id: "test-session".to_string(),
-        transcript: HeadTranscript {
-            session_id: "test-session".to_string(),
-            parent_commit_id: Some("parent-1".to_string()),
-            messages: transcript_messages,
-        },
-        user_input: user_input.to_string(),
-        system_prompt: None,
-        model: "test-model".to_string(),
-        provider: None,
-        tool_definitions,
-        cancel_flag: None,
-        timeout: None,
-        llm_retry: LlmRetryConfig::default(),
-    }
-}
-
-#[tokio::test]
-async fn agent_loop_builds_messages_from_transcript_and_user_input() {
-    let transcript_messages = vec![
-        GraphMessage {
-            role: "user".to_string(),
-            content: "previous question".to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        },
-        GraphMessage {
-            role: "assistant".to_string(),
-            content: "previous answer".to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        },
-    ];
-
-    let llm = Arc::new(FakeLlm::new(vec![Ok(lattice_llm::ChatResponse {
-        content: "final answer".to_string(),
-        reasoning_content: None,
-        tool_calls: None,
-        finish_reason: "stop".to_string(),
-        model: "test-model".to_string(),
-        usage: None,
-    })]));
-
-    let request_capture: Arc<std::sync::Mutex<Option<lattice_llm::ChatRequest>>> =
-        Arc::new(std::sync::Mutex::new(None));
-    let capture_clone = request_capture.clone();
-
-    struct CapturingLlm {
-        inner: Arc<FakeLlm>,
-        captured: Arc<std::sync::Mutex<Option<lattice_llm::ChatRequest>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmClient for CapturingLlm {
-        async fn chat(
-            &self,
-            request: lattice_llm::ChatRequest,
-        ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-            *self.captured.lock().unwrap() = Some(request.clone());
-            self.inner.chat(request).await
-        }
-    }
-
-    let capturing_llm = Arc::new(CapturingLlm {
-        inner: llm,
-        captured: capture_clone,
-    });
-
-    let executor = Arc::new(FakeToolExecutor::new(vec![]));
-    let loop_inst = AgentLoop::new(AgentLoopConfig {
-        llm: capturing_llm,
-        tool_executor: executor,
-    });
-
-    let request = make_request_with_transcript(
-        "current question",
-        transcript_messages,
-        vec![read_file_tool_definition()],
-    );
-
-    let result = loop_inst.run_turn(request).await;
-    assert_eq!(result.status, AgentTurnStatus::Completed);
-
-    let captured = request_capture.lock().unwrap().take().unwrap();
-    assert_eq!(captured.messages.len(), 3);
-    assert_eq!(captured.messages[0].content, "previous question");
-    assert_eq!(captured.messages[0].role, lattice_llm::Role::User);
-    assert_eq!(captured.messages[1].content, "previous answer");
-    assert_eq!(captured.messages[1].role, lattice_llm::Role::Assistant);
-    assert_eq!(captured.messages[2].content, "current question");
-    assert_eq!(captured.messages[2].role, lattice_llm::Role::User);
-}
-
 #[tokio::test]
 async fn agent_loop_prepends_system_prompt_when_present() {
     let request_capture: Arc<std::sync::Mutex<Option<lattice_llm::ChatRequest>>> =

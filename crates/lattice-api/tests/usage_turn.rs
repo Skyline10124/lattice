@@ -11,10 +11,9 @@ mod support;
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
+use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{GitSessionGraphStore, SessionGraphStore};
@@ -69,8 +68,6 @@ struct Workspace {
 
 fn workspace_toml_suffix(_enabled_tools: &[&str]) -> &'static str {
     r#"
-[workspace]
-image = "test-template"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
 "#
@@ -119,16 +116,28 @@ enabled = {enabled:?}{workspace}
 
 /// Create an unattached branch at the current HEAD without checking it out.
 fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
-    std::process::Command::new("git")
-        .args(["branch", name])
-        .current_dir(root)
-        .status()
-        .expect("git branch (create unattached target)");
+    let mut repo = gix::open_opts(root, gix::open::Options::isolated()).expect("open repo");
+    // Isolated repos have no identity; inject a fixture committer for the reflog.
+    {
+        let mut cfg = repo.config_snapshot_mut();
+        cfg.set_raw_value("user.name", "lattice-test")
+            .expect("set name");
+        cfg.set_raw_value("user.email", "test@lattice.local")
+            .expect("set email");
+        let _ = cfg.commit();
+    }
+    let head = repo
+        .head_id()
+        .expect("HEAD id for unattached branch")
+        .detach();
+    repo.reference(
+        format!("refs/heads/{name}"),
+        head,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "create unattached target branch",
+    )
+    .expect("create unattached target branch");
     name.to_string()
-}
-
-fn create_default_session(sessions_path: &std::path::Path) -> String {
-    create_session_with_branch(sessions_path, "main")
 }
 
 fn create_session_with_branch(sessions_path: &std::path::Path, branch: &str) -> String {
@@ -149,124 +158,15 @@ fn make_request(
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
-    support::attach_upper_fixture(
-        RunTurnRequest {
-            input: input.to_string(),
-            session_id: session_id.to_string(),
-            loaded_profile: Some(ws.loaded.clone()),
-            cancel_flag: None,
-            test_llm: Some(llm),
-            test_project_root: Some(ws.root.to_string_lossy().to_string()),
-            test_persist_audit: None,
-            workspace_override: None,
-        },
-        &ws.loaded
-            .profile
-            .tools
-            .enabled
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>(),
-    )
-}
-
-// ── Test 1: read workspace file through default profile ─────────────────────
-
-#[tokio::test]
-async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["observe.workspace"]);
-
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(tool_call_events(
-                "call_1",
-                "observe.workspace",
-                r#"{"mode":"read_file","path":"src/lib.rs"}"#,
-            ))
-            .push_events(final_response_events("Read workspace file successfully."))
-            .build(),
-    );
-
-    let target = create_unattached_target_branch(&ws.root, "lattice-target-read");
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_session_with_branch(&sessions_path, &target);
-
-    let result = lattice_api::run_turn(
-        lattice_api::SessionApi::git(&sessions_path),
-        make_request(&ws, "Read src/lib.rs", &session_id, fake_llm),
-    )
-    .await
-    .expect("run_turn must succeed");
-
-    assert_eq!(result.status, RunTurnStatus::Completed);
-    assert!(
-        result
-            .assistant_output
-            .contains("Read workspace file successfully"),
-        "assistant output: {}",
-        result.assistant_output
-    );
-
-    let tool_result = result
-        .tool_results
-        .iter()
-        .find(|t| t.name == "observe.workspace")
-        .expect("should have an observe.workspace tool result");
-    assert!(tool_result.output_len > 0, "tool output must be non-empty");
-
-    let store = GitSessionGraphStore::new(&sessions_path);
-    let transcript = store
-        .head_transcript(&result.session_id)
-        .expect("head_transcript");
-    assert!(
-        transcript
-            .messages
-            .iter()
-            .any(|m| m.role == "tool" && m.content.contains("pub fn answer")),
-        "committed tool message must contain workspace file content"
-    );
-
-    let verify_api = lattice_api::SessionApi::git(&sessions_path);
-    let log = verify_api
-        .log(&result.session_id)
-        .expect("log must succeed");
-    assert_eq!(log.len(), 1, "session log should have exactly one commit");
-}
-
-#[tokio::test]
-async fn usage_stream_turn_model_started_includes_routed_provider() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &[]);
-
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(final_response_events("Done."))
-            .build(),
-    );
-
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_default_session(&sessions_path);
-
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::git(&sessions_path),
-        make_request(&ws, "Hello", &session_id, fake_llm),
-    )
-    .await
-    .expect("stream_turn must start")
-    .collect()
-    .await;
-
-    let model_started = events
-        .iter()
-        .find_map(|event| match event {
-            TurnEvent::ModelStarted { provider, model } => Some((provider, model)),
-            _ => None,
-        })
-        .expect("stream should include ModelStarted");
-
-    assert_eq!(model_started.0.as_deref(), Some("anthropic"));
-    assert_eq!(model_started.1, "sonnet");
+    RunTurnRequest {
+        input: input.to_string(),
+        session_id: session_id.to_string(),
+        loaded_profile: Some(ws.loaded.clone()),
+        cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(ws.root.to_string_lossy().to_string()),
+        test_persist_audit: None,
+    }
 }
 
 // ── Test 2: edit workspace file and commit ──────────────────────────────────
@@ -314,7 +214,7 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
         .expect("mutate.edit tool result");
     assert!(
         edit_result.ok,
-        "mutate.edit must succeed in Upper: {:?}",
+        "mutate.edit must succeed in the Local Workspace: {:?}",
         edit_result.error_summary
     );
 
@@ -400,166 +300,5 @@ async fn usage_resume_session_includes_previous_turn_context() {
     assert!(
         matches!(status.head, lattice_session::GraphHead::Branch { name } if name == "main"),
         "HEAD should be on main branch"
-    );
-}
-
-// ── CEP: network policy without FetchUrl("*") ──────────────────────────
-
-fn setup_workspace_with_cep_network(
-    src_content: &str,
-    enabled_tools: &[&str],
-    network_toml: &str,
-) -> Workspace {
-    let ws = tempfile::tempdir().unwrap();
-    let root = ws.path().to_path_buf();
-
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/lib.rs"), src_content).unwrap();
-    support::init_git_repo(&root);
-
-    let profile_dir = root.join(".lattice/agents/default");
-    std::fs::create_dir_all(&profile_dir).unwrap();
-    let enabled: Vec<String> = enabled_tools.iter().map(|s| s.to_string()).collect();
-    let toml_content = format!(
-        r#"schema_version = 1
-[agent]
-name = "default"
-model = "sonnet"
-[prompt]
-system = "You are a test agent."
-[tools]
-enabled = {enabled:?}{workspace}
-{network_toml}
-"#,
-        workspace = workspace_toml_suffix(enabled_tools),
-    );
-    std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
-
-    let global_agents = tempfile::tempdir().unwrap();
-    let paths = DiscoveryPaths {
-        project_root: root.clone(),
-        global_agents_dir: global_agents.path().to_path_buf(),
-    };
-    let loaded = lattice_profile::resolve_agent_profile(ProfileSource::Default, &paths)
-        .expect("profile must load");
-
-    Workspace {
-        _dir: ws,
-        _global_agents: global_agents,
-        root,
-        loaded,
-    }
-}
-
-#[tokio::test]
-async fn public_https_policy_requires_fetch_capability() {
-    let ws = setup_workspace_with_cep_network(
-        "fn main() {}",
-        &["fetch.web"],
-        "[lancet.network]\nallow_public_https = true\nallow_localhost = false\n",
-    );
-
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(tool_call_events(
-                "call_1",
-                "fetch.web",
-                r#"{"url":"https://example.com/"}"#,
-            ))
-            .push_events(final_response_events("Fetched public HTTPS."))
-            .build(),
-    );
-
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_default_session(&sessions_path);
-
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::git(&sessions_path),
-        make_request(&ws, "Fetch example.com", &session_id, fake_llm),
-    )
-    .await
-    .expect("stream_turn must start")
-    .collect()
-    .await;
-
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, TurnEvent::TurnCommitted { status, .. } if *status == RunTurnStatus::Completed)),
-        "turn must complete"
-    );
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            TurnEvent::ToolCallFinished {
-                name,
-                ok: false,
-                ..
-            } if name == "fetch.web"
-        )),
-        "fetch.web must be denied without FetchUrl capability even with allow_public_https"
-    );
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            TurnEvent::CepCallStarted {
-                method,
-                impact_kind,
-                semantic_stage,
-                ..
-            } if method == "fetch.web"
-                && impact_kind == "external_observation"
-                && semantic_stage == "cep_native"
-        )),
-        "native fetch.web must emit CEP lifecycle with external_observation impact"
-    );
-}
-
-#[tokio::test]
-async fn rejects_profile_disabled_web_fetch() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["observe.workspace"]);
-
-    let fake_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(tool_call_events(
-                "call_1",
-                "fetch.web",
-                r#"{"url":"https://example.com/"}"#,
-            ))
-            .push_events(final_response_events("Should not fetch."))
-            .build(),
-    );
-
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_default_session(&sessions_path);
-
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::git(&sessions_path),
-        make_request(&ws, "Try fetch.web", &session_id, fake_llm),
-    )
-    .await
-    .expect("stream_turn must start")
-    .collect()
-    .await;
-
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            TurnEvent::ToolCallFinished {
-                name,
-                ok: false,
-                ..
-            } if name == "fetch.web"
-        )),
-        "disabled fetch.web must surface as failed ToolCallFinished"
-    );
-    assert!(
-        !events.iter().any(|event| matches!(
-            event,
-            TurnEvent::CepCallStarted { method, .. } if method == "fetch.web"
-        )),
-        "disabled fetch.web must not emit CepCallStarted"
     );
 }

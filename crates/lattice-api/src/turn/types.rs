@@ -9,7 +9,6 @@ use std::sync::atomic::AtomicBool;
 use futures::stream::Stream;
 use lattice_profile::LoadedAgentProfile;
 use lattice_session::WorkspaceDisposition;
-use lattice_workspace::Workspace;
 
 /// Request to run a turn through either [`run_turn`] or [`stream_turn`].
 ///
@@ -39,9 +38,6 @@ pub struct RunTurnRequest {
     /// When `Some(false)` with `test_llm`, persist audit to `.lattice/cep_audit.db` instead of in-memory.
     #[serde(skip)]
     pub test_persist_audit: Option<bool>,
-    /// Deterministic workspace adapter override for tests and embedders.
-    #[serde(skip)]
-    pub workspace_override: Option<Arc<dyn Workspace>>,
 }
 
 impl PartialEq for RunTurnRequest {
@@ -154,6 +150,10 @@ pub enum TurnEvent {
     /// The turn has started execution.
     TurnStarted {
         session_id: String,
+        /// Additive stable turn identifier (`<session>:<parent-or-root>`).
+        /// Audit replay needs it to address a turn deterministically; old
+        /// consumers ignore the extra field.
+        turn_id: String,
         parent_commit_id: Option<String>,
         branch: Option<String>,
     },

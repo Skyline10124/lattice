@@ -1,6 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use std::time::Duration;
+
 use lattice_agent::{AgentTurnRequest, AgentTurnStatus, LlmRetryConfig};
 use lattice_llm::{ModelRouter, ModelTarget, ToolDefinition};
 use lattice_session::HeadTranscript;
@@ -59,7 +61,10 @@ pub(crate) fn build_agent_request(
         provider,
         tool_definitions,
         cancel_flag: request.cancel_flag.clone(),
-        timeout: None,
+        timeout: request
+            .loaded_profile
+            .as_ref()
+            .and_then(|lp| lp.profile.llm.timeout_secs.map(Duration::from_secs)),
         llm_retry: llm_retry_config_from_request(request),
     }
 }

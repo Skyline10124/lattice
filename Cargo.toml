@@ -17,8 +17,10 @@ members = [
     "crates/lattice-tui",
     "crates/lattice-cli",
     "crates/lattice-profile",
-    "crates/lattice-workspace",
+    "crates/lattice-tool-prelude",
+    "crates/lancet-runtime",
     "crates/lattice-system-harness",
+    "tools/noop",
     "xtask",
 ]
 
@@ -26,7 +28,7 @@ members = [
 version = "0.1.0"
 license = "Apache-2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 authors = ["Ast Rin"]
 
 [workspace.dependencies]
@@ -44,10 +46,11 @@ lancet-audit    = { path = "crates/lancet-audit" }
 lancet-authority = { path = "crates/lancet-authority" }
 lancet-native   = { path = "crates/lancet-native" }
 lancet-api      = { path = "crates/lancet-api" }
+lancet-runtime  = { path = "crates/lancet-runtime" }
 lattice-tui      = { path = "crates/lattice-tui" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
-lattice-workspace = { path = "crates/lattice-workspace" }
+lattice-tool-prelude = { path = "crates/lattice-tool-prelude" }
 
 # External dependencies — shared versions
 async-trait = "0.1"
@@ -73,9 +76,18 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
-git2 = "0.20"
+gix = { version = "0.85", features = ["tree-editor"] }
 schemars = "1.2"
 bytes = "1"
+# Component Tool engine (ADR 0004 / #5 slice C). Pinned exactly; wasmtime
+# major bumps change the component-model API surface. No wasmtime-wasi.
+wasmtime = { version = "=46.0.1", default-features = false, features = [
+  "async", "component-model", "cranelift", "runtime", "std", "wit-parser"
+] }
+inventory = "=0.3.24"
+jsonschema = "=0.48.1"
+# Component binary parser for import inspection in the composition gate.
+wasmparser = "0.251"
 
 # CLI dependencies
 clap = { version = "4", features = ["derive", "env"] }

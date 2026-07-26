@@ -40,7 +40,6 @@ pub struct CallAuditMetadata {
     pub guard_stage: String,
     pub policy_enforced: bool,
     pub denial_source: Option<String>,
-    pub backend_invoked: Option<bool>,
     pub observation_source: Option<String>,
 }
 
@@ -53,14 +52,13 @@ impl CallAuditMetadata {
             guard_stage: GUARD_STAGE_NATIVE.to_string(),
             policy_enforced: true,
             denial_source: None,
-            backend_invoked: Some(true),
             observation_source: None,
         }
     }
 
     /// Unknown production method (not in the catalog). Dispatch will reject it with
     /// `MethodNotFound`; no handler or policy hook runs, so this must not claim
-    /// policy enforcement or backend invocation.
+    /// policy enforcement.
     pub fn unrouted() -> Self {
         Self {
             semantic_stage: SEMANTIC_STAGE_UNROUTED.to_string(),
@@ -68,7 +66,6 @@ impl CallAuditMetadata {
             guard_stage: GUARD_STAGE_NATIVE.to_string(),
             policy_enforced: false,
             denial_source: None,
-            backend_invoked: Some(false),
             observation_source: None,
         }
     }
@@ -81,14 +78,12 @@ impl CallAuditMetadata {
             guard_stage: GUARD_STAGE_NATIVE.to_string(),
             policy_enforced: true,
             denial_source: None,
-            backend_invoked: Some(false),
             observation_source: None,
         }
     }
 
     pub fn with_denial_source(mut self, source: &str) -> Self {
         self.denial_source = Some(source.to_string());
-        self.backend_invoked = Some(false);
         self
     }
 
@@ -137,9 +132,13 @@ pub struct CepAuditContext {
 pub enum RejectionStage {
     SchemaValidation,
     PolicyGate,
-    AdapterPreflight,
-    BackendExecution,
-    VerificationFailure,
+    /// Guard L1 path validation or the concrete Local Workspace's secure
+    /// path resolution rejected the call (post-#38 vocabulary; replaces the
+    /// Upper-era `adapter_preflight`).
+    PathGuard,
+    /// The concrete Local Workspace's I/O failed after policy and guard
+    /// checks passed (replaces the Upper-era `backend_execution`).
+    LocalIo,
 }
 
 impl RejectionStage {
@@ -148,9 +147,8 @@ impl RejectionStage {
         match self {
             Self::SchemaValidation => "schema_validation",
             Self::PolicyGate => "policy_gate",
-            Self::AdapterPreflight => "adapter_preflight",
-            Self::BackendExecution => "backend_execution",
-            Self::VerificationFailure => "verification_failure",
+            Self::PathGuard => "path_guard",
+            Self::LocalIo => "local_io",
         }
     }
 }
@@ -215,10 +213,16 @@ fn required_capability_for_method(method: &str) -> Option<RequiredCapability> {
 }
 
 /// Merge transport and catalog summary keys into metadata JSON only.
+///
+/// `component_cells` carries the 4-segment Cell audit keys
+/// (`ctx:ext:scope:trust`) produced by Component Tool calls (ADR 0004).
+/// Audit records cells, not capability names (spec §6.3). Native handler
+/// calls pass an empty slice.
 pub fn merge_finalize_metadata(
     existing: Option<&str>,
     method: &str,
     observed_capabilities: &[RequiredCapability],
+    component_cells: &[String],
 ) -> Option<String> {
     let mut obj = existing
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -248,6 +252,14 @@ pub fn merge_finalize_metadata(
             "observed_capabilities".into(),
             serde_json::Value::Array(list),
         );
+    }
+
+    if !component_cells.is_empty() {
+        let list: Vec<_> = component_cells
+            .iter()
+            .map(|cell| serde_json::Value::String(cell.clone()))
+            .collect();
+        obj_map.insert("component_cells".into(), serde_json::Value::Array(list));
     }
 
     serde_json::to_string(&obj).ok()

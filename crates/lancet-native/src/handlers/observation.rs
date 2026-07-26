@@ -2,21 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Native CEP workspace observation CEP handlers.
+//!
+//! Observation reads the one concrete [`crate::workspace::LocalWorkspace`]
+//! directly: secure per-segment resolution, Guard L1 validation of the
+//! resolved facts, then bounded read/list/grep/find. There is no backend
+//! routing layer.
 
 use crate::edit::content_hash;
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
-use crate::execution_backend::{
-    DirectoryEntry as BackendDirectoryEntry, ExecutionBackendError, FindRequest, GrepRequest,
-    PathFacts as BackendPathFacts, PathIntent, WorkspacePath,
-};
 use crate::executor::render::render_file_slice;
 use crate::server::registry::{HandlerContext, MethodRegistry};
+use crate::workspace::{
+    FindRequest, GrepRequest, LocalWorkspaceError, PathFacts, PathIntent, VisibilityEngine,
+    WorkspacePath, join_rel,
+};
 use lancet_audit::{RejectionRecord, RejectionStage};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::effect::region::AuthorizedEffectRegion;
-use lancet_authority::guard::{PathFacts, PathKind, validate_path_facts};
+use lancet_authority::guard::validate_path_facts;
 use lancet_authority::policy::CepPolicyConfig;
 use lancet_authority::policy::budget::BudgetExhausted;
+use lancet_authority::{HiddenReason, ReadVisibility, ReadVisibilityPolicy};
 use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
@@ -166,37 +172,14 @@ fn parse_observation_path(raw: &str, field: &str) -> Result<WorkspacePath, CepEr
     })
 }
 
-fn path_facts_to_guard(facts: &BackendPathFacts) -> PathFacts {
-    PathFacts {
-        normalized_path: facts.normalized_path.clone(),
-        exists: facts.exists,
-        kind: facts.kind.map(path_kind),
-        parent_exists: facts.parent_exists,
-        parent_kind: facts.parent_kind.map(path_kind),
-        canonical_under_workspace: facts.canonical_under_workspace,
-    }
+fn validate_observation_facts(path: &str, facts: &PathFacts) -> Result<(), CepError> {
+    validate_path_facts(path, &facts.to_guard(), &AuthorizedEffectRegion::empty())
 }
 
-fn path_kind(kind: crate::execution_backend::PathKind) -> PathKind {
-    match kind {
-        crate::execution_backend::PathKind::File => PathKind::File,
-        crate::execution_backend::PathKind::Directory => PathKind::Directory,
-        crate::execution_backend::PathKind::Symlink => PathKind::Symlink,
-    }
-}
-
-fn validate_observation_facts(path: &str, facts: &BackendPathFacts) -> Result<(), CepError> {
-    validate_path_facts(
-        path,
-        &path_facts_to_guard(facts),
-        &AuthorizedEffectRegion::empty(),
-    )
-}
-
-fn observation_backend_error(path: &str, err: ExecutionBackendError) -> CepError {
+fn observation_workspace_error(path: &str, err: LocalWorkspaceError) -> CepError {
     CepError::new(
         CepErrorCode::ExecutionFailed,
-        format!("observation backend failed for '{path}': {err}"),
+        format!("observation failed for '{path}': {err}"),
         CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
             command: "observe.workspace".into(),
             exit_code: None,
@@ -209,7 +192,7 @@ fn observation_backend_error(path: &str, err: ExecutionBackendError) -> CepError
 fn reject_leaking_path(path: &str, requested: &str) -> CepError {
     CepError::new(
         CepErrorCode::ExecutionFailed,
-        format!("backend returned leaking path '{path}' for request '{requested}'"),
+        format!("workspace returned leaking path '{path}' for request '{requested}'"),
         CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
             command: "observe.workspace".into(),
             exit_code: None,
@@ -219,18 +202,18 @@ fn reject_leaking_path(path: &str, requested: &str) -> CepError {
     )
 }
 
-fn normalize_backend_path(path: &str) -> Result<String, CepError> {
+fn normalize_workspace_path(path: &str) -> Result<String, CepError> {
     let parsed = WorkspacePath::parse(path).map_err(|_| reject_leaking_path(path, path))?;
     Ok(parsed.as_str().to_string())
 }
 
-fn convert_directory_entry(entry: &BackendDirectoryEntry) -> DirectoryEntry {
+fn convert_directory_entry(entry: &crate::workspace::DirectoryEntry) -> DirectoryEntry {
     DirectoryEntry {
         name: entry.name.clone(),
         kind: match entry.kind {
-            crate::execution_backend::PathKind::File => DirectoryEntryKind::File,
-            crate::execution_backend::PathKind::Directory => DirectoryEntryKind::Directory,
-            crate::execution_backend::PathKind::Symlink => DirectoryEntryKind::Symlink,
+            crate::workspace::PathKind::File => DirectoryEntryKind::File,
+            crate::workspace::PathKind::Directory => DirectoryEntryKind::Directory,
+            crate::workspace::PathKind::Symlink => DirectoryEntryKind::Symlink,
         },
     }
 }
@@ -240,23 +223,24 @@ async fn record_observation_denial(
     method: &str,
     stage: RejectionStage,
     denial_source: &str,
-    backend_invoked: bool,
 ) {
     ctx.record_rejection(RejectionRecord {
         rejection_stage: stage,
         denial_source: denial_source.into(),
     });
-    emit_denial_metadata(ctx, method, denial_source, backend_invoked).await;
+    emit_denial_metadata(ctx, method, denial_source).await;
 }
 
 async fn emit_success_metadata(
     ctx: &HandlerContext,
     method: &str,
     request_path: &str,
+    guarded_path: &str,
     mut metadata: serde_json::Value,
 ) {
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("request_target".to_string(), json!(request_path));
+        obj.insert("guarded_path".to_string(), json!(guarded_path));
     }
     ctx.record_durable_metadata(metadata.clone());
     ctx.events
@@ -267,13 +251,64 @@ async fn emit_success_metadata(
         .await;
 }
 
+fn read_visibility_policy(ctx: &HandlerContext) -> ReadVisibilityPolicy {
+    ctx.default_policy_hook
+        .as_ref()
+        .and_then(|hook| hook.config().workspace.read_visibility_policy().ok())
+        .unwrap_or_default()
+}
+
+fn load_visibility(ctx: &HandlerContext) -> VisibilityEngine {
+    VisibilityEngine::load(ctx.workspace.root(), read_visibility_policy(ctx))
+}
+
+async fn deny_hidden(
+    ctx: &HandlerContext,
+    method: &str,
+    request_path: &str,
+    reason: HiddenReason,
+) -> CepError {
+    record_observation_denial(
+        ctx,
+        method,
+        RejectionStage::PathGuard,
+        reason.as_audit_label(),
+    )
+    .await;
+    // Agent-facing shape matches a missing path; reason is audit-only.
+    path_not_found(request_path)
+}
+
+/// Resolve `ws_path` through the concrete Local Workspace and validate the
+/// observed facts against Guard L1, recording denial evidence on failure.
+async fn resolve_and_validate(
+    ctx: &HandlerContext,
+    ws_path: &WorkspacePath,
+    intent: PathIntent,
+    request_path: &str,
+    method: &str,
+) -> Result<PathFacts, CepError> {
+    let facts = match ctx.workspace.resolve_facts(ws_path, intent).await {
+        Ok(facts) => facts,
+        Err(err) => {
+            record_observation_denial(ctx, method, RejectionStage::PathGuard, "local_workspace")
+                .await;
+            return Err(observation_workspace_error(request_path, err));
+        }
+    };
+    if let Err(err) = validate_observation_facts(ws_path.as_str(), &facts) {
+        record_observation_denial(ctx, method, RejectionStage::PathGuard, "guard_l1").await;
+        return Err(err);
+    }
+    Ok(facts)
+}
+
 async fn handle_read_file(
     params: ReadFileParams,
     ctx: HandlerContext,
     method: &str,
 ) -> Result<ReadFileResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = &ctx.execution;
     let ws_path = parse_observation_path(&params.path, "path")?;
     ws_path.require_file_path().map_err(|err| {
         CepError::new(
@@ -287,38 +322,14 @@ async fn handle_read_file(
         )
     })?;
 
-    ctx.mark_adapter_preflight_invoked();
-    let facts = match execution
-        .backend
-        .resolve_path(&ws_path, PathIntent::Read)
-        .await
-    {
-        Ok(facts) => facts,
-        Err(err) => {
-            record_observation_denial(
-                &ctx,
-                method,
-                RejectionStage::AdapterPreflight,
-                "adapter_preflight",
-                false,
-            )
-            .await;
-            return Err(observation_backend_error(&params.path, err));
-        }
-    };
-    if let Err(err) = validate_observation_facts(ws_path.as_str(), &facts) {
-        record_observation_denial(
-            &ctx,
-            method,
-            RejectionStage::AdapterPreflight,
-            "guard_l1",
-            false,
-        )
-        .await;
-        return Err(err);
-    }
-    if !facts.exists || !matches!(facts.kind, Some(crate::execution_backend::PathKind::File)) {
+    let facts =
+        resolve_and_validate(&ctx, &ws_path, PathIntent::Read, &params.path, method).await?;
+    if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::File)) {
         return Err(path_not_found(&params.path));
+    }
+    let mut visibility = load_visibility(&ctx);
+    if let ReadVisibility::Hidden(reason) = visibility.decide(ws_path.as_str(), false) {
+        return Err(deny_hidden(&ctx, method, &params.path, reason).await);
     }
     if let Some(size) = facts.byte_size
         && size as usize > policy.observation.max_single_read_bytes
@@ -326,12 +337,11 @@ async fn handle_read_file(
         return Err(single_read_budget_exceeded(size as usize, policy));
     }
 
-    ctx.mark_backend_invoked();
-    let bytes = execution
-        .backend
+    let bytes = ctx
+        .workspace
         .read_file(&ws_path)
         .await
-        .map_err(|err| observation_backend_error(&params.path, err))?;
+        .map_err(|err| observation_workspace_error(&params.path, err))?;
     if bytes.len() > policy.observation.max_single_read_bytes {
         return Err(single_read_budget_exceeded(bytes.len(), policy));
     }
@@ -375,6 +385,7 @@ async fn handle_read_file(
         &ctx,
         method,
         &params.path,
+        ws_path.as_str(),
         json!({
             "observation_source": "workspace",
             "bytes_read": content.len(),
@@ -382,7 +393,7 @@ async fn handle_read_file(
             "content_hash": hash,
             "truncated": truncated,
             "policy_enforced": true,
-            "backend_invoked": true,
+            "visibility_evidence": visibility.evidence().as_json(),
         }),
     )
     .await;
@@ -399,7 +410,6 @@ async fn handle_list_directory(
     method: &str,
 ) -> Result<ListDirectoryResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = &ctx.execution;
     let raw_path = if params.path.is_empty() {
         ".".to_string()
     } else {
@@ -407,43 +417,17 @@ async fn handle_list_directory(
     };
     let ws_path = parse_observation_path(&raw_path, "path")?;
 
-    ctx.mark_adapter_preflight_invoked();
-    let facts = match execution
-        .backend
-        .resolve_path(&ws_path, PathIntent::ListDirectory)
-        .await
-    {
-        Ok(facts) => facts,
-        Err(err) => {
-            record_observation_denial(
-                &ctx,
-                method,
-                RejectionStage::AdapterPreflight,
-                "adapter_preflight",
-                false,
-            )
-            .await;
-            return Err(observation_backend_error(&raw_path, err));
-        }
-    };
-    if let Err(err) = validate_observation_facts(ws_path.as_str(), &facts) {
-        record_observation_denial(
-            &ctx,
-            method,
-            RejectionStage::AdapterPreflight,
-            "guard_l1",
-            false,
-        )
-        .await;
-        return Err(err);
-    }
-    if !facts.exists
-        || !matches!(
-            facts.kind,
-            Some(crate::execution_backend::PathKind::Directory)
-        )
-    {
+    let facts =
+        resolve_and_validate(&ctx, &ws_path, PathIntent::ListDirectory, &raw_path, method).await?;
+    if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
         return Err(path_not_found(&raw_path));
+    }
+    let mut visibility = load_visibility(&ctx);
+    let root_assessment = visibility.assess(ws_path.as_str(), true);
+    if let Some(reason) = root_assessment.hidden_reason()
+        && !root_assessment.should_descend()
+    {
+        return Err(deny_hidden(&ctx, method, &raw_path, reason).await);
     }
 
     let limit = params
@@ -452,16 +436,20 @@ async fn handle_list_directory(
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, policy.observation.max_list_entries);
 
-    ctx.mark_backend_invoked();
-    let backend_entries = execution
-        .backend
+    let workspace_entries = ctx
+        .workspace
         .list_dir(&ws_path)
         .await
-        .map_err(|err| observation_backend_error(&raw_path, err))?;
-    let mut entries = backend_entries
-        .iter()
-        .map(convert_directory_entry)
-        .collect::<Vec<_>>();
+        .map_err(|err| observation_workspace_error(&raw_path, err))?;
+    let parent_rel = ws_path.as_str();
+    let mut entries = Vec::new();
+    for entry in &workspace_entries {
+        let child_rel = join_rel(parent_rel, &entry.name);
+        let is_dir = matches!(entry.kind, crate::workspace::PathKind::Directory);
+        if visibility.is_visible_entry(&child_rel, is_dir) {
+            entries.push(convert_directory_entry(entry));
+        }
+    }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let total = entries.len();
     let truncated = total > limit;
@@ -485,13 +473,14 @@ async fn handle_list_directory(
         &ctx,
         method,
         &raw_path,
+        ws_path.as_str(),
         json!({
             "observation_source": "workspace",
             "entry_count": total,
             "bytes_returned": bytes_returned,
             "truncated": truncated,
             "policy_enforced": true,
-            "backend_invoked": true,
+            "visibility_evidence": visibility.evidence().as_json(),
         }),
     )
     .await;
@@ -509,7 +498,6 @@ async fn handle_grep(
     method: &str,
 ) -> Result<GrepResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = &ctx.execution;
     let ws_path = parse_observation_path(path, "path")?;
     let _re = Regex::new(&params.pattern).map_err(|e| {
         CepError::new(
@@ -523,43 +511,17 @@ async fn handle_grep(
         )
     })?;
 
-    ctx.mark_adapter_preflight_invoked();
-    let facts = match execution
-        .backend
-        .resolve_path(&ws_path, PathIntent::ListDirectory)
-        .await
-    {
-        Ok(facts) => facts,
-        Err(err) => {
-            record_observation_denial(
-                &ctx,
-                method,
-                RejectionStage::AdapterPreflight,
-                "adapter_preflight",
-                false,
-            )
-            .await;
-            return Err(observation_backend_error(path, err));
-        }
-    };
-    if let Err(err) = validate_observation_facts(ws_path.as_str(), &facts) {
-        record_observation_denial(
-            &ctx,
-            method,
-            RejectionStage::AdapterPreflight,
-            "guard_l1",
-            false,
-        )
-        .await;
-        return Err(err);
-    }
-    if !facts.exists
-        || !matches!(
-            facts.kind,
-            Some(crate::execution_backend::PathKind::Directory)
-        )
-    {
+    let facts =
+        resolve_and_validate(&ctx, &ws_path, PathIntent::ListDirectory, path, method).await?;
+    if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
         return Err(path_not_found(path));
+    }
+    let mut visibility = load_visibility(&ctx);
+    let root_assessment = visibility.assess(ws_path.as_str(), true);
+    if let Some(reason) = root_assessment.hidden_reason()
+        && !root_assessment.should_descend()
+    {
+        return Err(deny_hidden(&ctx, method, path, reason).await);
     }
 
     let max_results = params
@@ -568,22 +530,21 @@ async fn handle_grep(
         .unwrap_or(DEFAULT_GREP_LIMIT)
         .clamp(1, policy.observation.max_grep_matches);
 
-    ctx.mark_backend_invoked();
     let request = GrepRequest {
         pattern: params.pattern.clone(),
-        path: ws_path,
+        path: ws_path.clone(),
         glob: None,
     };
-    let backend_matches = execution
-        .backend
-        .grep(&request)
+    let (workspace_matches, visibility_evidence_value) = ctx
+        .workspace
+        .grep(&request, max_results, visibility)
         .await
-        .map_err(|err| observation_backend_error(path, err))?;
+        .map_err(|err| observation_workspace_error(path, err))?;
 
     let mut matches = Vec::new();
-    let mut truncated = backend_matches.len() >= max_results;
-    for m in backend_matches {
-        let rel = normalize_backend_path(m.path.as_str())?;
+    let mut truncated = workspace_matches.len() >= max_results;
+    for m in workspace_matches {
+        let rel = normalize_workspace_path(m.path.as_str())?;
         matches.push(GrepMatch {
             path: rel,
             line: m.line_number,
@@ -612,13 +573,14 @@ async fn handle_grep(
         &ctx,
         method,
         path,
+        ws_path.as_str(),
         json!({
             "observation_source": "workspace",
             "match_count": matches.len(),
             "bytes_returned": bytes_returned,
             "truncated": truncated,
             "policy_enforced": true,
-            "backend_invoked": true,
+            "visibility_evidence": visibility_evidence_value.as_json(),
         }),
     )
     .await;
@@ -636,46 +598,19 @@ async fn handle_find_files(
     method: &str,
 ) -> Result<FindFilesResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let execution = &ctx.execution;
     let ws_path = parse_observation_path(path, "path")?;
 
-    ctx.mark_adapter_preflight_invoked();
-    let facts = match execution
-        .backend
-        .resolve_path(&ws_path, PathIntent::ListDirectory)
-        .await
-    {
-        Ok(facts) => facts,
-        Err(err) => {
-            record_observation_denial(
-                &ctx,
-                method,
-                RejectionStage::AdapterPreflight,
-                "adapter_preflight",
-                false,
-            )
-            .await;
-            return Err(observation_backend_error(path, err));
-        }
-    };
-    if let Err(err) = validate_observation_facts(ws_path.as_str(), &facts) {
-        record_observation_denial(
-            &ctx,
-            method,
-            RejectionStage::AdapterPreflight,
-            "guard_l1",
-            false,
-        )
-        .await;
-        return Err(err);
-    }
-    if !facts.exists
-        || !matches!(
-            facts.kind,
-            Some(crate::execution_backend::PathKind::Directory)
-        )
-    {
+    let facts =
+        resolve_and_validate(&ctx, &ws_path, PathIntent::ListDirectory, path, method).await?;
+    if !facts.exists || !matches!(facts.kind, Some(crate::workspace::PathKind::Directory)) {
         return Err(path_not_found(path));
+    }
+    let mut visibility = load_visibility(&ctx);
+    let root_assessment = visibility.assess(ws_path.as_str(), true);
+    if let Some(reason) = root_assessment.hidden_reason()
+        && !root_assessment.should_descend()
+    {
+        return Err(deny_hidden(&ctx, method, path, reason).await);
     }
 
     let limit = params
@@ -684,21 +619,20 @@ async fn handle_find_files(
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, policy.observation.max_find_paths);
 
-    ctx.mark_backend_invoked();
     let request = FindRequest {
         pattern: params.pattern.clone(),
-        path: ws_path,
+        path: ws_path.clone(),
     };
-    let backend_paths = execution
-        .backend
-        .find_files(&request)
+    let (workspace_paths, visibility_evidence_value) = ctx
+        .workspace
+        .find_files(&request, limit, visibility)
         .await
-        .map_err(|err| observation_backend_error(path, err))?;
+        .map_err(|err| observation_workspace_error(path, err))?;
 
     let mut paths = Vec::new();
-    let mut truncated = backend_paths.len() >= limit;
-    for p in backend_paths {
-        paths.push(normalize_backend_path(p.as_str())?);
+    let mut truncated = workspace_paths.len() >= limit;
+    for p in workspace_paths {
+        paths.push(normalize_workspace_path(p.as_str())?);
         if paths.len() >= limit {
             truncated = true;
             break;
@@ -719,13 +653,14 @@ async fn handle_find_files(
         &ctx,
         method,
         path,
+        ws_path.as_str(),
         json!({
             "observation_source": "workspace",
             "path_count": paths.len(),
             "bytes_returned": bytes_returned,
             "truncated": truncated,
             "policy_enforced": true,
-            "backend_invoked": true,
+            "visibility_evidence": visibility_evidence_value.as_json(),
         }),
     )
     .await;
@@ -736,17 +671,11 @@ async fn handle_find_files(
     })
 }
 
-async fn emit_denial_metadata(
-    ctx: &HandlerContext,
-    method: &str,
-    denial_source: &str,
-    backend_invoked: bool,
-) {
+async fn emit_denial_metadata(ctx: &HandlerContext, method: &str, denial_source: &str) {
     let metadata = json!({
         "method": method,
         "denial_source": denial_source,
         "policy_enforced": true,
-        "backend_invoked": backend_invoked,
     });
     ctx.record_durable_metadata(metadata.clone());
     ctx.events
@@ -760,324 +689,52 @@ async fn emit_denial_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution_backend::{
-        DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-        GrepMatch, GrepRequest, PathFacts as BackendPathFacts, PathIntent, UpperContext,
-        WorkspacePath,
-    };
     use crate::server::registry::{Cancellation, EventSink};
+    use crate::workspace::LocalWorkspace;
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::observation::reject_parent_traversal;
     use std::fs;
-    use std::future::Future;
     use std::path::Path;
-    use std::pin::Pin;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
 
-    /// A host-filesystem-backed `ExecutionBackend` for observation tests.
-    /// Reads from the real filesystem rooted at `root`.
-    struct HostFsBackend {
-        root: std::path::PathBuf,
-    }
-
-    impl HostFsBackend {
-        fn new(root: impl Into<std::path::PathBuf>) -> Self {
-            let raw = root.into();
-            Self {
-                root: std::fs::canonicalize(&raw).unwrap_or(raw),
-            }
-        }
-
-        fn resolve(&self, path: &WorkspacePath) -> std::path::PathBuf {
-            if path.is_project_root() {
-                self.root.clone()
-            } else {
-                self.root.join(path.as_str())
-            }
-        }
-    }
-
-    impl ExecutionBackend for HostFsBackend {
-        fn backend_name(&self) -> &str {
-            "host-fs"
-        }
-
-        fn resolve_path(
-            &self,
-            path: &WorkspacePath,
-            _intent: PathIntent,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<BackendPathFacts, ExecutionBackendError>> + Send + '_>,
-        > {
-            let full = self.resolve(path);
-            let path_str = path.as_str().to_string();
-            let exists = full.exists();
-            let kind = if full.is_dir() {
-                crate::execution_backend::PathKind::Directory
-            } else if full.is_symlink() {
-                crate::execution_backend::PathKind::Symlink
-            } else {
-                crate::execution_backend::PathKind::File
-            };
-            // Check canonical containment: canonicalize the resolved path and
-            // verify it falls under the workspace root. Symlinks pointing
-            // outside the workspace root have canonical_under_workspace = false.
-            let canonical_under_workspace = if full.is_symlink() {
-                full.canonicalize()
-                    .map(|canonical| canonical.starts_with(&self.root))
-                    .unwrap_or(false)
-            } else {
-                true
-            };
-            let parent_exists = full.parent().map(|p| p.exists()).unwrap_or(false);
-            let parent_kind = full.parent().and_then(|p| {
-                if p.is_dir() {
-                    Some(crate::execution_backend::PathKind::Directory)
-                } else {
-                    None
-                }
-            });
-            let byte_size = if full.is_file() {
-                Some(full.metadata().map(|m| m.len()).unwrap_or(0))
-            } else {
-                None
-            };
-            Box::pin(async move {
-                Ok(BackendPathFacts {
-                    normalized_path: path_str,
-                    exists,
-                    kind: Some(kind),
-                    parent_exists,
-                    parent_kind,
-                    byte_size,
-                    canonical_under_workspace,
-                })
-            })
-        }
-
-        fn read_file(
-            &self,
-            path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
-        {
-            let full = self.resolve(path);
-            Box::pin(async move {
-                std::fs::read(&full).map_err(|e| ExecutionBackendError::Unavailable {
-                    message: e.to_string(),
-                })
-            })
-        }
-
-        fn write_file(
-            &self,
-            _path: &WorkspacePath,
-            _content: &[u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-            Box::pin(async {
-                Err(ExecutionBackendError::Unavailable {
-                    message: "write not supported".into(),
-                })
-            })
-        }
-
-        fn remove_file(
-            &self,
-            _path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-            Box::pin(async {
-                Err(ExecutionBackendError::Unavailable {
-                    message: "remove not supported".into(),
-                })
-            })
-        }
-
-        fn list_dir(
-            &self,
-            path: &WorkspacePath,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_,
-            >,
-        > {
-            let full = self.resolve(path);
-            Box::pin(async move {
-                let mut entries = Vec::new();
-                if full.is_dir() {
-                    for entry in std::fs::read_dir(&full)
-                        .map_err(|e| ExecutionBackendError::Unavailable {
-                            message: e.to_string(),
-                        })?
-                        .flatten()
-                    {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let kind = if entry.path().is_dir() {
-                            crate::execution_backend::PathKind::Directory
-                        } else {
-                            crate::execution_backend::PathKind::File
-                        };
-                        entries.push(DirectoryEntry { name, kind });
-                    }
-                }
-                Ok(entries)
-            })
-        }
-
-        fn grep(
-            &self,
-            request: &GrepRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
-        {
-            let root = self.root.clone();
-            let pattern = request.pattern.clone();
-            let search_path = request.path.as_str().to_string();
-            Box::pin(async move {
-                let search_root = if search_path.is_empty() {
-                    root.clone()
-                } else {
-                    root.join(&search_path)
-                };
-                let mut matches = Vec::new();
-                let regex = regex::Regex::new(&pattern).map_err(|e| {
-                    ExecutionBackendError::Unavailable {
-                        message: e.to_string(),
-                    }
-                })?;
-                fn walk_dir(
-                    dir: &std::path::Path,
-                    search_root: &std::path::Path,
-                    regex: &regex::Regex,
-                    matches: &mut Vec<GrepMatch>,
-                ) {
-                    if let Ok(entries) = std::fs::read_dir(dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.is_dir() {
-                                // Skip symlinks to avoid following them outside the workspace.
-                                if path.is_symlink() {
-                                    continue;
-                                }
-                                walk_dir(&path, search_root, regex, matches);
-                            } else if path.is_file()
-                                && !path.is_symlink()
-                                && let Ok(content) = std::fs::read_to_string(&path)
-                            {
-                                for (line_num, line) in content.lines().enumerate() {
-                                    if regex.is_match(line) {
-                                        let rel = path
-                                            .strip_prefix(search_root)
-                                            .unwrap_or(&path)
-                                            .to_string_lossy()
-                                            .to_string();
-                                        matches.push(GrepMatch {
-                                            path: WorkspacePath::parse(&rel).unwrap_or_else(|_| {
-                                                WorkspacePath::parse(".").unwrap()
-                                            }),
-                                            line_number: (line_num + 1) as u64,
-                                            line: line.to_string(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                walk_dir(&search_root, &search_root, &regex, &mut matches);
-                Ok(matches)
-            })
-        }
-
-        fn find_files(
-            &self,
-            request: &FindRequest,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
-        > {
-            let root = self.root.clone();
-            let pattern = request.pattern.clone();
-            let search_path = request.path.as_str().to_string();
-            Box::pin(async move {
-                let search_root = if search_path.is_empty() {
-                    root.clone()
-                } else {
-                    root.join(&search_path)
-                };
-                let mut results = Vec::new();
-                // Convert glob pattern to regex: * → .*, ? → .
-                let regex_src = pattern
-                    .chars()
-                    .map(|c| match c {
-                        '*' => ".*".to_string(),
-                        '?' => ".".to_string(),
-                        c if c.is_alphanumeric() => c.to_string(),
-                        c => format!("\\{}", c),
-                    })
-                    .collect::<String>();
-                let regex_str = format!("^{}$", regex_src);
-                let regex = regex::Regex::new(&regex_str).map_err(|e| {
-                    ExecutionBackendError::Unavailable {
-                        message: e.to_string(),
-                    }
-                })?;
-                fn walk_dir(
-                    dir: &std::path::Path,
-                    root: &std::path::Path,
-                    regex: &regex::Regex,
-                    results: &mut Vec<WorkspacePath>,
-                ) {
-                    if let Ok(entries) = std::fs::read_dir(dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.is_dir() {
-                                if path.is_symlink() {
-                                    continue;
-                                }
-                                walk_dir(&path, root, regex, results);
-                            } else if path.is_file() && !path.is_symlink() {
-                                let name = entry.file_name().to_string_lossy().to_string();
-                                if regex.is_match(&name) {
-                                    let rel = path
-                                        .strip_prefix(root)
-                                        .unwrap_or(&path)
-                                        .to_string_lossy()
-                                        .to_string();
-                                    if let Ok(wp) = WorkspacePath::parse(&rel) {
-                                        results.push(wp);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                walk_dir(&search_root, &root, &regex, &mut results);
-                Ok(results)
-            })
-        }
-
-        fn changed_paths(
-            &self,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-    }
-
-    fn native_registry(root: &str) -> MethodRegistry {
+    fn native_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
         register_workspace_observation_methods(&mut registry).unwrap();
-        let _ = root;
         registry
+    }
+
+    fn local_workspace(root: &str) -> Arc<LocalWorkspace> {
+        Arc::new(LocalWorkspace::new(Path::new(root)))
     }
 
     fn ctx_for(root: &str) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         ctx_for_policy(CepPolicyConfig::defaults_for_project_root(root), root)
     }
 
+    fn ctx_for_workspace(
+        root: &str,
+        workspace: lancet_authority::policy::default::WorkspacePolicy,
+    ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
+        ctx_for_policy_workspace(
+            CepPolicyConfig::defaults_for_project_root(root),
+            root,
+            workspace,
+        )
+    }
+
     fn ctx_for_policy(
         policy: CepPolicyConfig,
         root: &str,
+    ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
+        ctx_for_policy_workspace(policy, root, Default::default())
+    }
+
+    fn ctx_for_policy_workspace(
+        policy: CepPolicyConfig,
+        root: &str,
+        workspace: lancet_authority::policy::default::WorkspacePolicy,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -1088,14 +745,13 @@ mod tests {
             network: cep_context.policy.network.clone(),
             budget: cep_context.policy.budget.clone(),
             observation: cep_context.policy.observation.clone(),
-            workspace: Default::default(),
+            workspace,
             project_root: cep_context.policy.project_root.clone(),
             denied_effect_kinds: Default::default(),
         };
         let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
             policy_cfg,
         ));
-        let backend = Arc::new(HostFsBackend::new(root));
         (
             HandlerContext {
                 call_id: 1,
@@ -1116,14 +772,7 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: ExecutionRouting {
-                    backend,
-                    upper: UpperContext {
-                        execution_backend: "host-fs".into(),
-                        upper_workspace_id: "test-upper".into(),
-                    },
-                },
-                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+                workspace: local_workspace(root),
             },
             event_rx,
         )
@@ -1215,7 +864,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("hello.txt"), "hello\nworld\n").unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = native_registry(root);
+        let registry = native_registry();
         let (ctx, _events) = ctx_for(root);
 
         let params = ReadFileParams {
@@ -1230,10 +879,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_read_file_rejects_parent_traversal_without_backend() {
+    async fn native_read_file_reads_current_disk_state() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("watch.txt"), "v1").unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _events) = ctx_for(root);
+
+        let params = ReadFileParams {
+            path: "watch.txt".into(),
+            offset: Some(1),
+            limit: Some(10),
+            line_numbers: Some(false),
+        };
+        let first = dispatch_read_file(&registry, params.clone(), ctx.clone())
+            .await
+            .unwrap();
+        assert!(first.content.contains("v1"));
+
+        // An external writer changes the file between Tool calls; the next
+        // observation reads the current Local state.
+        fs::write(dir.path().join("watch.txt"), "v2-external").unwrap();
+        let second = dispatch_read_file(&registry, params, ctx).await.unwrap();
+        assert!(second.content.contains("v2-external"));
+        assert!(!second.content.contains("v1"));
+    }
+
+    #[tokio::test]
+    async fn native_read_file_rejects_parent_traversal_before_workspace_io() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = native_registry(root);
+        let registry = native_registry();
         let (ctx, mut events) = ctx_for(root);
 
         let params = ReadFileParams {
@@ -1256,8 +932,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("big.txt"), "x".repeat(200)).unwrap();
         let root = dir.path().to_str().unwrap();
-        let mut registry = MethodRegistry::new();
-        register_workspace_observation_methods(&mut registry).unwrap();
+        let registry = native_registry();
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let cep_context = Arc::new(policy_with_limits(dir.path(), 50, 10_000));
@@ -1283,14 +958,7 @@ mod tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: ExecutionRouting {
-                backend: Arc::new(HostFsBackend::new(root)),
-                upper: UpperContext {
-                    execution_backend: "host-fs".into(),
-                    upper_workspace_id: "test-upper".into(),
-                },
-            },
-            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+            workspace: local_workspace(root),
         };
         let params = ReadFileParams {
             path: "big.txt".into(),
@@ -1309,8 +977,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("a.txt"), "abcdefghij").unwrap();
         let root = dir.path().to_str().unwrap();
-        let mut registry = MethodRegistry::new();
-        register_workspace_observation_methods(&mut registry).unwrap();
+        let registry = native_registry();
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let cep_context = Arc::new(policy_with_limits(dir.path(), 10_000, 5));
@@ -1336,14 +1003,7 @@ mod tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: ExecutionRouting {
-                backend: Arc::new(HostFsBackend::new(root)),
-                upper: UpperContext {
-                    execution_backend: "host-fs".into(),
-                    upper_workspace_id: "test-upper".into(),
-                },
-            },
-            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+            workspace: local_workspace(root),
         };
         let params = ReadFileParams {
             path: "a.txt".into(),
@@ -1361,7 +1021,7 @@ mod tests {
     async fn native_workspace_observation_grep_rejects_parent_traversal() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = native_registry(root);
+        let registry = native_registry();
         let (ctx, mut events) = ctx_for(root);
 
         let params = GrepParams {
@@ -1379,7 +1039,7 @@ mod tests {
     async fn native_workspace_observation_grep_invalid_regex() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = native_registry(root);
+        let registry = native_registry();
         let (ctx, _events) = ctx_for(root);
 
         let params = GrepParams {
@@ -1398,7 +1058,7 @@ mod tests {
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/inner.txt"), "nested\n").unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = native_registry(root);
+        let registry = native_registry();
         let (ctx, _events) = ctx_for(root);
 
         let grep_params = GrepParams {
@@ -1439,7 +1099,7 @@ mod tests {
         fs::write(src.join("allowed.txt"), "needle\n").unwrap();
 
         let root = dir.path().to_str().unwrap();
-        let registry = native_registry(root);
+        let registry = native_registry();
         let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
         policy.observation.allowed_roots = vec![src.canonicalize().unwrap()];
         let (ctx, _events) = ctx_for_policy(policy, root);
@@ -1453,7 +1113,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(grep.matches.len(), 1);
-        assert_eq!(grep.matches[0].path, "allowed.txt");
+        // Match paths are workspace-root-relative (the concrete Local
+        // Workspace reports paths beneath the canonical root).
+        assert_eq!(grep.matches[0].path, "src/allowed.txt");
 
         let effects = ctx.effect_ledger.snapshot();
         assert!(
@@ -1482,30 +1144,38 @@ mod tests {
         .unwrap();
 
         let root = dir.path().to_str().unwrap();
-        let registry = native_registry(root);
+        let registry = native_registry();
         let (ctx, _events) = ctx_for(root);
 
-        // Reading through the symlink should fail because the canonical target
-        // is outside the workspace root.
+        // Reading through the symlink fails: the concrete Local Workspace
+        // rejects the symlink leaf during secure resolution, and the denial
+        // is recorded with the path-guard stage.
         let read_params = ReadFileParams {
             path: "src/link_to_secret.txt".into(),
             offset: None,
             limit: None,
             line_numbers: None,
         };
+        let durable = ctx.durable_metadata.clone();
         let read_err = dispatch_read_file(&registry, read_params, ctx.clone())
             .await
             .unwrap_err();
-        assert!(
-            matches!(
-                read_err.code,
-                CepErrorCode::GuardDenied | CepErrorCode::ProjectRootViolation
-            ),
-            "expected guard denial for symlink escaping workspace, got {:?}",
-            read_err.code
+        assert_eq!(
+            read_err.code,
+            CepErrorCode::ExecutionFailed,
+            "symlink leaf rejection surfaces as a workspace resolution failure, got {read_err:?}"
         );
+        assert!(
+            read_err.message.contains("symlink"),
+            "expected symlink rejection, got: {}",
+            read_err.message
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
+        assert_eq!(metadata["rejection_stage"], "path_guard");
+        assert_eq!(metadata["denial_source"], "local_workspace");
 
-        // Grep in src should only find allowed.txt, not the symlink target.
+        // Grep in src only finds allowed.txt: the symlink is never followed.
         let grep_params = GrepParams {
             pattern: "SECRET".into(),
             path: Some("src".into()),
@@ -1515,25 +1185,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(grep.matches.len(), 1);
-        assert_eq!(grep.matches[0].path, "allowed.txt");
+        assert_eq!(grep.matches[0].path, "src/allowed.txt");
         assert_eq!(grep.matches[0].text, "SECRET_ALLOWED=yes");
 
+        // Find lists names only; the symlink target's content is never read.
         let find_params = FindFilesParams {
-            pattern: "*secret*.txt".into(),
+            pattern: "*allowed.txt".into(),
             path: Some("src".into()),
             limit: Some(10),
         };
         let find = dispatch_find_files(&registry, find_params, ctx)
             .await
             .unwrap();
-        assert!(find.paths.is_empty(), "unexpected paths: {:?}", find.paths);
+        assert_eq!(find.paths, vec!["src/allowed.txt".to_string()]);
     }
 
     #[tokio::test]
     async fn native_workspace_observation_list_directory_rejects_parent_traversal() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = native_registry(root);
+        let registry = native_registry();
         let (ctx, _events) = ctx_for(root);
 
         let params = ListDirectoryParams {
@@ -1553,8 +1224,7 @@ mod tests {
             fs::write(dir.path().join(format!("f{i}.txt")), "match\n").unwrap();
         }
         let root = dir.path().to_str().unwrap();
-        let mut registry = MethodRegistry::new();
-        register_workspace_observation_methods(&mut registry).unwrap();
+        let registry = native_registry();
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
@@ -1582,14 +1252,7 @@ mod tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: ExecutionRouting {
-                backend: Arc::new(HostFsBackend::new(root)),
-                upper: UpperContext {
-                    execution_backend: "host-fs".into(),
-                    upper_workspace_id: "test-upper".into(),
-                },
-            },
-            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+            workspace: local_workspace(root),
         };
         let params = GrepParams {
             pattern: "match".into(),
@@ -1607,227 +1270,477 @@ mod tests {
         assert_eq!(err.code, CepErrorCode::PathContainment);
     }
 
-    mod observation_tests {
-        use super::*;
-        use crate::execution_backend::{
-            DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-            GrepMatch, GrepRequest, PathFacts as BackendPathFacts, PathIntent, UpperContext,
-            WorkspacePath,
+    #[tokio::test]
+    async fn observation_policy_denial_records_no_observation_metadata() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _events) = ctx_for(root);
+        let durable = ctx.durable_metadata.clone();
+        let err = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: "../outside".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        // Policy denial precedes any workspace I/O: no observation success or
+        // denial metadata is emitted beyond the policy evidence itself.
+        let metadata: serde_json::Value =
+            serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
+        assert!(metadata.get("observation_source").is_none());
+        assert_eq!(metadata["denial_source"], "cep_policy");
+    }
+
+    fn init_git_ignore_fixture() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let mut repo = gix::init(root).expect("gix init");
+        // A fresh repo inherits no identity, and on a host without a global git
+        // config (CI runners) writing the `refs/heads/main` reflog below fails
+        // with `MissingCommitter`. Inject a fixture committer, matching the
+        // pattern used by the lattice-api test fixtures and the system harness.
+        {
+            let mut cfg = repo.config_snapshot_mut();
+            cfg.set_raw_value("user.name", "lattice-test")
+                .expect("set name");
+            cfg.set_raw_value("user.email", "test@lattice.local")
+                .expect("set email");
+            let _ = cfg.commit();
+        }
+        std::fs::write(root.join(".gitignore"), ".env\nsecret/\n").unwrap();
+        std::fs::write(root.join("visible.txt"), "hello visible\n").unwrap();
+        std::fs::write(root.join("denied.txt"), "DENIED_SENTINEL\n").unwrap();
+
+        std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::create_dir_all(root.join("secret")).unwrap();
+        std::fs::write(root.join("secret/key"), "hidden-key\n").unwrap();
+        std::fs::write(root.join("secret/other"), "denied\n").unwrap();
+        let empty = gix::ObjectId::empty_tree(repo.object_hash());
+        let mut editor = repo.edit_tree(empty).expect("edit tree");
+        for (rel, content) in [
+            (".gitignore", ".env\nsecret/\n"),
+            ("visible.txt", "hello visible\n"),
+            ("denied.txt", "DENIED_SENTINEL\n"),
+        ] {
+            let blob = repo.write_blob(content.as_bytes()).expect("blob").detach();
+            editor
+                .upsert(rel, gix::objs::tree::EntryKind::Blob, blob)
+                .expect("upsert");
+        }
+        let tree_id = editor.write().expect("write tree").detach();
+        let sig = gix::actor::Signature {
+            name: "t".into(),
+            email: "t@t".into(),
+            time: gix::date::Time::now_utc(),
         };
-        use std::future::Future;
-        use std::pin::Pin;
-        use std::sync::{Arc, Mutex};
+        let mut time_buf = gix::date::parse::TimeBuf::default();
+        let sig_ref = sig.to_ref(&mut time_buf);
+        let commit = repo
+            .new_commit_as(sig_ref, sig_ref, "init", tree_id, None::<gix::ObjectId>)
+            .expect("commit");
+        repo.reference(
+            "refs/heads/main",
+            commit.id,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "init",
+        )
+        .expect("update main");
+        dir
+    }
 
-        #[derive(Default)]
-        struct ObsSpyBackend {
-            read_content: Mutex<Vec<u8>>,
-        }
+    #[tokio::test]
+    async fn policy_visible_secret_sentinel_hidden_on_all_four_ops() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for(root);
 
-        impl ExecutionBackend for ObsSpyBackend {
-            fn backend_name(&self) -> &str {
-                "obs-spy"
-            }
+        let read_err = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".env".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            read_err.message.contains("not_found"),
+            "hidden read must look like missing: {}",
+            read_err.message
+        );
 
-            fn resolve_path(
-                &self,
-                path: &WorkspacePath,
-                _intent: PathIntent,
-            ) -> Pin<
-                Box<
-                    dyn Future<Output = Result<BackendPathFacts, ExecutionBackendError>>
-                        + Send
-                        + '_,
-                >,
-            > {
-                let path_str = path.as_str().to_string();
-                Box::pin(async move {
-                    Ok(BackendPathFacts {
-                        normalized_path: path_str.clone(),
-                        exists: true,
-                        kind: Some(crate::execution_backend::PathKind::File),
-                        parent_exists: true,
-                        parent_kind: Some(crate::execution_backend::PathKind::Directory),
-                        byte_size: Some(5),
-                        canonical_under_workspace: true,
-                    })
-                })
-            }
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = list.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"visible.txt"));
+        assert!(!names.contains(&".env"));
+        assert!(!names.contains(&"secret"));
 
-            fn read_file(
-                &self,
-                _path: &WorkspacePath,
-            ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
-            {
-                let bytes = self.read_content.lock().unwrap().clone();
-                Box::pin(async move { Ok(bytes) })
-            }
+        let grep = dispatch_grep(
+            &registry,
+            GrepParams {
+                pattern: "SECRET|hidden".into(),
+                path: Some(".".into()),
+                max_results: Some(20),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            grep.matches.is_empty(),
+            "hidden files must not produce matches: {:?}",
+            grep.matches
+        );
 
-            fn write_file(
-                &self,
-                _path: &WorkspacePath,
-                _content: &[u8],
-            ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-            {
-                Box::pin(async {
-                    Err(ExecutionBackendError::Unavailable {
-                        message: "not used".into(),
-                    })
-                })
-            }
+        let find = dispatch_find_files(
+            &registry,
+            FindFilesParams {
+                pattern: "*".into(),
+                path: Some(".".into()),
+                limit: Some(50),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            find.paths
+                .iter()
+                .all(|p| p != ".env" && !p.starts_with("secret")),
+            "find leaked hidden paths: {:?}",
+            find.paths
+        );
+    }
 
-            fn remove_file(
-                &self,
-                _path: &WorkspacePath,
-            ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
-            {
-                Box::pin(async {
-                    Err(ExecutionBackendError::Unavailable {
-                        message: "not used".into(),
-                    })
-                })
-            }
+    #[tokio::test]
+    async fn policy_visible_include_and_denial_precedence() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for_workspace(
+            root,
+            lancet_authority::policy::default::WorkspacePolicy {
+                included_ignored_read_patterns: vec![".env".into(), "secret/**".into()],
+                denied_read_patterns: vec!["secret/other".into()],
+                ..Default::default()
+            },
+        );
 
-            fn list_dir(
-                &self,
-                _path: &WorkspacePath,
-            ) -> Pin<
-                Box<
-                    dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>>
-                        + Send
-                        + '_,
-                >,
-            > {
-                Box::pin(async {
-                    Err(ExecutionBackendError::Unavailable {
-                        message: "not used".into(),
-                    })
-                })
-            }
+        let env = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".env".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(env.content.contains("SECRET=1"));
 
-            fn grep(
-                &self,
-                _request: &GrepRequest,
-            ) -> Pin<
-                Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>,
-            > {
-                Box::pin(async {
-                    Err(ExecutionBackendError::Unavailable {
-                        message: "not used".into(),
-                    })
-                })
-            }
+        let key = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: "secret/key".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(key.content.contains("hidden-key"));
 
-            fn find_files(
-                &self,
-                _request: &FindRequest,
-            ) -> Pin<
-                Box<
-                    dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
-                        + Send
-                        + '_,
-                >,
-            > {
-                Box::pin(async {
-                    Err(ExecutionBackendError::Unavailable {
-                        message: "not used".into(),
-                    })
-                })
-            }
+        let denied = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: "secret/other".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(denied.message.contains("not_found"), "{}", denied.message);
 
-            fn changed_paths(
-                &self,
-            ) -> Pin<
-                Box<
-                    dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
-                        + Send
-                        + '_,
-                >,
-            > {
-                Box::pin(async { Ok(Vec::new()) })
-            }
-        }
+        let root_list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(20),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(root_list.entries.iter().any(|entry| entry.name == "secret"));
 
-        fn obs_ctx(root: &str, backend: Arc<ObsSpyBackend>) -> HandlerContext {
-            let (event_tx, _rx) = mpsc::channel(8);
-            let (_cancel_tx, cancel_rx) = watch::channel(false);
-            let policy = CepPolicyConfig::defaults_for_project_root(root);
-            let cep_context = Arc::new(CepTurnContext::from_policy(policy));
-            let policy_cfg =
-                lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
-                    std::path::PathBuf::from(root),
-                );
-            let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
-                policy_cfg,
-            ));
-            HandlerContext {
-                call_id: 1,
-                events: EventSink::new(event_tx, 1),
-                cancellation: Cancellation::new(cancel_rx),
-                cep_context,
-                turn_id: "test-turn".into(),
-                durable_metadata:
-                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
-                default_policy_hook: Some(default_hook),
-                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                    turn_id: "test-turn".into(),
-                    session_id: "test-session".into(),
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: "secret".into(),
+                limit: Some(20),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = list.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"key"));
+        assert!(!names.contains(&"other"));
+    }
+
+    #[tokio::test]
+    async fn policy_visible_navigable_ancestor_is_not_emitted_but_can_be_listed() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let workspace = lancet_authority::policy::default::WorkspacePolicy {
+            included_ignored_read_patterns: vec!["secret/key".into()],
+            ..Default::default()
+        };
+        let (ctx, _) = ctx_for_workspace(root, workspace);
+
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(!list.entries.iter().any(|entry| entry.name == "secret"));
+
+        let find = dispatch_find_files(
+            &registry,
+            FindFilesParams {
+                pattern: "*".into(),
+                path: Some(".".into()),
+                limit: Some(50),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(!find.paths.iter().any(|path| path == "secret"));
+        assert!(find.paths.iter().any(|path| path == "secret/key"));
+        assert!(!find.paths.iter().any(|path| path == "secret/other"));
+
+        let explicit = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: "secret".into(),
+                limit: Some(50),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = explicit
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["key"]);
+    }
+
+    #[tokio::test]
+    async fn included_ignored_read_records_content_free_success_evidence() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for_workspace(
+            root,
+            lancet_authority::policy::default::WorkspacePolicy {
+                included_ignored_read_patterns: vec![".env".into()],
+                ..Default::default()
+            },
+        );
+        let durable = ctx.durable_metadata.clone();
+
+        let result = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".env".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert!(result.content.contains("SECRET=1"));
+
+        let raw = durable.take_json().expect("durable metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(metadata["observation_source"], "workspace");
+        assert_eq!(metadata["truncated"], false);
+        assert_eq!(
+            metadata["visibility_evidence"],
+            json!({"included_ignored": true, "filtered_by": []})
+        );
+        assert!(!raw.contains("SECRET=1"));
+        assert!(!raw.contains(root));
+    }
+
+    #[tokio::test]
+    async fn recursive_success_metadata_records_all_visibility_categories() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let workspace = || lancet_authority::policy::default::WorkspacePolicy {
+            included_ignored_read_patterns: vec!["secret/key".into()],
+            denied_read_patterns: vec!["denied.txt".into()],
+            ..Default::default()
+        };
+        let expected_recursive = json!({
+            "included_ignored": true,
+            "filtered_by": ["system_exclusion", "read_denied", "ignored_default"],
+        });
+
+        let (list_ctx, _) = ctx_for_workspace(root, workspace());
+        let list_durable = list_ctx.durable_metadata.clone();
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            list_ctx,
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = list
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert!(!names.contains(&".git"));
+        assert!(!names.contains(&".env"));
+        assert!(!names.contains(&"denied.txt"));
+        assert!(!names.contains(&"secret"));
+        let list_metadata: serde_json::Value =
+            serde_json::from_str(&list_durable.take_json().expect("list durable metadata"))
+                .unwrap();
+        assert_eq!(list_metadata["truncated"], false);
+        assert_eq!(
+            list_metadata["visibility_evidence"],
+            json!({
+                "included_ignored": false,
+                "filtered_by": ["system_exclusion", "read_denied", "ignored_default"],
+            })
+        );
+
+        let (grep_ctx, _) = ctx_for_workspace(root, workspace());
+        let grep_durable = grep_ctx.durable_metadata.clone();
+        let grep = dispatch_grep(
+            &registry,
+            GrepParams {
+                pattern: "hidden-key|SECRET|DENIED_SENTINEL|denied".into(),
+                path: Some(".".into()),
+                max_results: Some(50),
+            },
+            grep_ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(grep.matches.len(), 1);
+        assert_eq!(grep.matches[0].path, "secret/key");
+        assert_eq!(grep.matches[0].text, "hidden-key");
+        let grep_raw = grep_durable.take_json().expect("grep durable metadata");
+        let grep_metadata: serde_json::Value = serde_json::from_str(&grep_raw).unwrap();
+        assert_eq!(grep_metadata["truncated"], false);
+        assert_eq!(grep_metadata["visibility_evidence"], expected_recursive);
+        assert!(!grep_raw.contains("SECRET=1"));
+        assert!(!grep_raw.contains("DENIED_SENTINEL"));
+
+        let (find_ctx, _) = ctx_for_workspace(root, workspace());
+        let find_durable = find_ctx.durable_metadata.clone();
+        let find = dispatch_find_files(
+            &registry,
+            FindFilesParams {
+                pattern: "*".into(),
+                path: Some(".".into()),
+                limit: Some(50),
+            },
+            find_ctx,
+        )
+        .await
+        .unwrap();
+        assert!(find.paths.iter().any(|path| path == "secret/key"));
+        assert!(!find.paths.iter().any(|path| {
+            path == ".git"
+                || path.starts_with(".git/")
+                || path == ".env"
+                || path == "denied.txt"
+                || path == "secret"
+                || path == "secret/other"
+        }));
+        let find_raw = find_durable.take_json().expect("find durable metadata");
+        let find_metadata: serde_json::Value = serde_json::from_str(&find_raw).unwrap();
+        assert_eq!(find_metadata["truncated"], false);
+        assert_eq!(find_metadata["visibility_evidence"], expected_recursive);
+        assert!(!find_raw.contains(root));
+    }
+
+    #[tokio::test]
+    async fn direct_visibility_denials_keep_current_audit_labels() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        for (path, workspace, expected_label) in [
+            (".env", Default::default(), "ignored_default"),
+            (
+                "visible.txt",
+                lancet_authority::policy::default::WorkspacePolicy {
+                    denied_read_patterns: vec!["visible.txt".into()],
                     ..Default::default()
-                })),
-                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
-                cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: ExecutionRouting {
-                    backend,
-                    upper: UpperContext {
-                        execution_backend: "obs-spy".into(),
-                        upper_workspace_id: "upper-1".into(),
-                    },
                 },
-                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
-            }
-        }
-
-        #[tokio::test]
-        async fn observation_returns_upper_not_lower() {
-            let dir = TempDir::new().unwrap();
-            fs::write(dir.path().join("conflict.txt"), "LOWER_CONTENT").unwrap();
-            let root = dir.path().to_str().unwrap();
-            let registry = native_registry(root);
-            let backend = Arc::new(ObsSpyBackend::default());
-            *backend.read_content.lock().unwrap() = b"UPPER_CONTENT".to_vec();
-            let ctx = obs_ctx(root, backend);
-            let result = dispatch_read_file(
+                "read_denied",
+            ),
+            (
+                ".git/config",
+                lancet_authority::policy::default::WorkspacePolicy {
+                    included_ignored_read_patterns: vec![".git/**".into()],
+                    ..Default::default()
+                },
+                "system_exclusion",
+            ),
+        ] {
+            let (ctx, _) = ctx_for_workspace(root, workspace);
+            let durable = ctx.durable_metadata.clone();
+            let error = dispatch_read_file(
                 &registry,
                 ReadFileParams {
-                    path: "conflict.txt".into(),
-                    offset: Some(1),
-                    limit: Some(10),
-                    line_numbers: Some(false),
-                },
-                ctx,
-            )
-            .await
-            .unwrap();
-            assert!(result.content.contains("UPPER_CONTENT"));
-            assert!(!result.content.contains("LOWER_CONTENT"));
-            let lower = fs::read_to_string(dir.path().join("conflict.txt")).unwrap();
-            assert_eq!(lower, "LOWER_CONTENT");
-        }
-
-        #[tokio::test]
-        async fn observation_policy_denial_before_preflight() {
-            let dir = TempDir::new().unwrap();
-            let root = dir.path().to_str().unwrap();
-            let registry = native_registry(root);
-            let backend = Arc::new(ObsSpyBackend::default());
-            let ctx = obs_ctx(root, backend);
-            let routing = ctx.routing_invocation.clone();
-            let err = dispatch_read_file(
-                &registry,
-                ReadFileParams {
-                    path: "../outside".into(),
+                    path: path.into(),
                     offset: None,
                     limit: None,
                     line_numbers: None,
@@ -1836,8 +1749,112 @@ mod tests {
             )
             .await
             .unwrap_err();
-            assert_eq!(err.code, CepErrorCode::GuardDenied);
-            assert!(!routing.adapter_preflight_invoked());
+            assert_eq!(error.data, path_not_found(path).data);
+            let metadata: serde_json::Value =
+                serde_json::from_str(&durable.take_json().expect("denial durable metadata"))
+                    .unwrap();
+            assert_eq!(metadata["rejection_stage"], "path_guard");
+            assert_eq!(metadata["denial_source"], expected_label);
+            assert!(metadata.get("visibility_evidence").is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn policy_visible_system_exclusion_beats_include() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for_workspace(
+            root,
+            lancet_authority::policy::default::WorkspacePolicy {
+                included_ignored_read_patterns: vec![".git/**".into(), ".git/config".into()],
+                ..Default::default()
+            },
+        );
+
+        let err = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".git/config".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.message.contains("not_found"), "{}", err.message);
+
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert!(!list.entries.iter().any(|e| e.name == ".git"));
+    }
+
+    #[tokio::test]
+    async fn policy_visible_four_ops_agree_on_same_path() {
+        let dir = init_git_ignore_fixture();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry();
+        let (ctx, _) = ctx_for(root);
+
+        let read = dispatch_read_file(
+            &registry,
+            ReadFileParams {
+                path: ".env".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            },
+            ctx.clone(),
+        )
+        .await;
+        assert!(read.is_err());
+
+        let list = dispatch_list_directory(
+            &registry,
+            ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(50),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(!list.entries.iter().any(|e| e.name == ".env"));
+
+        let grep = dispatch_grep(
+            &registry,
+            GrepParams {
+                pattern: "SECRET".into(),
+                path: Some(".".into()),
+                max_results: Some(10),
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(grep.matches.iter().all(|m| m.path != ".env"));
+
+        let find = dispatch_find_files(
+            &registry,
+            FindFilesParams {
+                pattern: ".env".into(),
+                path: Some(".".into()),
+                limit: Some(10),
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        assert!(!find.paths.iter().any(|p| p == ".env"));
     }
 }

@@ -3,7 +3,7 @@
 
 //! In-process Tokio channel transport for CEP JSON-RPC frames.
 
-use crate::registry::{Cancellation, EventSink, MethodRegistry, call_cancelled};
+use crate::registry::{Cancellation, EventSink, MethodRegistry};
 use lancet_catalog::CatalogMethod;
 use lancet_protocol::{CepError, ErrorObject, Id, ToolEvent, ToolResult, error::to_jsonrpc_error};
 use serde::Serialize;
@@ -81,23 +81,48 @@ pub struct CepClient {
 
 impl CepClient {
     /// Issue a typed catalog method call.
+    ///
+    /// Delegates to [`CepClient::call_named`]: serializes `M::Params`, sends
+    /// a raw JSON-RPC call for `M::NAME`, and deserializes the result into
+    /// `M::Result`. The helper carries no JSON Schema — Component
+    /// params/result validation is enforced by generated descriptor
+    /// validators, not by this transport layer.
     pub async fn call<M>(&self, params: M::Params) -> Result<M::Result, CepError>
     where
         M: CatalogMethod,
         M::Params: Serialize,
         M::Result: DeserializeOwned,
     {
-        let (call, control) = self.start_call::<M>(params);
-        match call.await {
-            Ok(result) => {
-                control.disarm();
-                Ok(result)
-            }
-            Err(err) => Err(err),
-        }
+        self.call_named(M::NAME, params).await
     }
 
-    /// Begin a typed call; dropping the future or calling [`CallControl::cancel`] signals cancellation.
+    /// Name-dynamic, type-static transport helper.
+    ///
+    /// Serializes `params` to a JSON value, sends a raw JSON-RPC call for
+    /// `method`, and deserializes the result into `R`. Unlike [`call`], the
+    /// method name is a runtime string — this is the path Component Tools
+    /// use (their method names come from generated descriptors, not from
+    /// `CatalogMethod::NAME`). The helper carries no JSON Schema; Component
+    /// params/result validation is done by generated descriptor validators
+    /// on the server side.
+    pub async fn call_named<P, R>(&self, method: &str, params: P) -> Result<R, CepError>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        let raw_params = serde_json::to_value(params).map_err(|e| {
+            CepError::invalid_params(format!("failed to serialize {method} params: {e}"))
+        })?;
+        let raw = self.call_raw(method.to_owned(), raw_params).await?;
+        serde_json::from_value(raw).map_err(|e| {
+            CepError::internal_error(format!("failed to deserialize {method} result: {e}"))
+        })
+    }
+
+    /// Begin a typed call. Dropping the future or calling [`CallControl::cancel`]
+    /// signals cancellation; a pending call then resolves with the server-mapped
+    /// structured outcome (the server observes the same cancellation watch), not
+    /// a client-synthesized error (#48).
     #[doc(hidden)]
     pub fn start_call<M>(&self, params: M::Params) -> (BoxCallFuture<M::Result>, CallControl)
     where
@@ -133,7 +158,15 @@ impl CepClient {
         }
     }
 
-    fn start_call_raw(&self, method: String, params: Value) -> (BoxValueCallFuture, CallControl) {
+    /// Begin a raw JSON call, returning the pending future and its cancellation
+    /// control. After cancellation the future resolves with the server-mapped
+    /// structured outcome (#48).
+    #[doc(hidden)]
+    pub fn start_call_raw(
+        &self,
+        method: String,
+        params: Value,
+    ) -> (BoxValueCallFuture, CallControl) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (response_tx, response_rx) = oneshot::channel();
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
@@ -164,13 +197,20 @@ impl CepClient {
                 .await
                 .map_err(|_| CepError::internal_error("transport request channel closed"))?;
 
+            let mut response_rx = response_rx;
             let response = tokio::select! {
-                res = response_rx => {
+                res = &mut response_rx => {
                     guard.complete();
                     res.map_err(|_| CepError::internal_error("response channel closed"))??
                 }
                 _ = wait_cancelled(&mut cancel_rx) => {
-                    return Err(call_cancelled());
+                    // Cancellation requested: the server observes the same
+                    // watch and maps the call outcome authoritatively (#48).
+                    // Await its structured response instead of synthesizing
+                    // a client-side error.
+                    response_rx
+                        .await
+                        .map_err(|_| CepError::internal_error("response channel closed"))??
                 }
             };
 
@@ -418,10 +458,12 @@ impl CepServer {
 mod tests {
     use super::*;
     use crate::registry::MethodRegistry;
+    use lancet_catalog::CepMethod;
     use lancet_catalog::methods::TodoWrite;
     use lancet_catalog::methods::session::{
         TodoItem, TodoStatus, TodoWriteParams, TodoWriteResult,
     };
+    use lancet_protocol::error::jsonrpc;
 
     #[tokio::test]
     async fn transport_round_trip_returns_typed_result() {
@@ -464,5 +506,200 @@ mod tests {
         assert_eq!(result.todos[0].content, "ship");
         drop(client);
         server_task.abort();
+    }
+
+    // `call_named` is the name-dynamic, type-static transport helper that
+    // `call<M>` delegates to. It serializes params, calls `call_raw`, and
+    // deserializes the result — without carrying a JSON Schema (Component
+    // params/result validation is done by generated descriptor validators).
+
+    fn echo_registry() -> MethodRegistry<(EventSink, Cancellation)> {
+        let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
+        registry
+            .register_method::<TodoWrite, _, _>(|params, _ctx| async move {
+                Ok(TodoWriteResult {
+                    todos: params.todos,
+                })
+            })
+            .unwrap();
+        registry
+    }
+
+    fn spawn_echo_server(
+        registry: MethodRegistry<(EventSink, Cancellation)>,
+    ) -> (CepClient, tokio::task::JoinHandle<()>) {
+        let (client, server) = CepTransport::pair(8);
+        let task = tokio::spawn(async move {
+            let _ = server
+                .run_with_handler(move |call| {
+                    let registry = registry.clone();
+                    async move {
+                        let ctx = (call.event_sink(), call.cancellation());
+                        let result = registry
+                            .dispatch(call.method(), call.params().clone(), ctx)
+                            .await;
+                        call.respond(result);
+                    }
+                })
+                .await;
+        });
+        (client, task)
+    }
+
+    #[tokio::test]
+    async fn call_named_round_trips_typed_result() {
+        let (client, task) = spawn_echo_server(echo_registry());
+
+        let result: TodoWriteResult = client
+            .call_named(
+                TodoWrite::NAME,
+                TodoWriteParams {
+                    todos: vec![TodoItem {
+                        content: "named".into(),
+                        status: TodoStatus::Pending,
+                    }],
+                },
+            )
+            .await
+            .expect("call_named succeeds");
+
+        assert_eq!(result.todos[0].content, "named");
+        drop(client);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn call_named_returns_invalid_params_when_params_fail_to_serialize() {
+        // A type that cannot be serialized as JSON must produce a
+        // structured invalid_params error, not a panic.
+        let (client, task) = spawn_echo_server(echo_registry());
+
+        // Serialize a map with a non-string key — serde_json rejects it.
+        #[derive(Debug)]
+        struct Unserializable;
+        impl Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("synthetic serialize failure"))
+            }
+        }
+
+        let err = client
+            .call_named::<Unserializable, TodoWriteResult>(TodoWrite::NAME, Unserializable)
+            .await
+            .expect_err("serialize failure must error");
+        assert_eq!(
+            lancet_protocol::error::to_jsonrpc_error(&err).0,
+            jsonrpc::INVALID_PARAMS
+        );
+        drop(client);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn call_named_returns_internal_error_when_result_fails_to_deserialize() {
+        // The server returns a valid TodoWriteResult, but we ask for a
+        // different type — the deserialize step must fail with an
+        // ExecutionFailed (internal_error) CepError.
+        let (client, task) = spawn_echo_server(echo_registry());
+
+        let err = client
+            .call_named::<TodoWriteParams, String>(
+                TodoWrite::NAME,
+                TodoWriteParams { todos: vec![] },
+            )
+            .await
+            .expect_err("deserialize failure must error");
+        assert_eq!(err.code, lancet_protocol::CepErrorCode::ExecutionFailed);
+        assert!(err.message.contains("failed to deserialize"));
+        drop(client);
+        task.abort();
+    }
+
+    /// #48: after cancellation the pending call resolves with the
+    /// server-mapped structured error, not a client-synthesized one. The
+    /// server observes the same cancellation watch and is the authority
+    /// for the call outcome.
+    #[tokio::test]
+    async fn cancel_resolves_with_server_structured_error() {
+        let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
+        registry
+            .register_method::<TodoWrite, _, _>(|_params, mut ctx| async move {
+                // Simulate the Component path: wait until cancellation is
+                // observed, then return the host-mapped `CallCancelled`.
+                ctx.1.cancelled().await;
+                Err(lancet_protocol::CepError::tool_execution(
+                    lancet_protocol::CepErrorCode::CallCancelled,
+                    "session.todo_write",
+                    "cancelled",
+                    None,
+                    lancet_protocol::Retriability::Permanent,
+                ))
+            })
+            .unwrap();
+        let (client, task) = spawn_echo_server(registry);
+
+        let (call, control) = client.start_call::<TodoWrite>(TodoWriteParams {
+            todos: vec![TodoItem {
+                content: "cancel-me".into(),
+                status: TodoStatus::Pending,
+            }],
+        });
+        control.cancel();
+
+        let err = call.await.expect_err("cancelled call must fail");
+        assert_eq!(
+            err.code,
+            lancet_protocol::CepErrorCode::CallCancelled,
+            "client must see the server-mapped error code"
+        );
+        assert_eq!(err.message, "tool session.todo_write failed: cancelled");
+        drop(client);
+        task.abort();
+    }
+
+    /// #48: dropping the call future still signals cancellation to the
+    /// server-side handler through `CancelGuard` (unchanged semantics).
+    #[tokio::test]
+    async fn drop_future_signals_cancellation_to_server() {
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (observed_tx, mut observed_rx) = tokio::sync::mpsc::channel::<bool>(1);
+        let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
+        registry
+            .register_method::<TodoWrite, _, _>(move |params, mut ctx| {
+                let started_tx = started_tx.clone();
+                let observed_tx = observed_tx.clone();
+                async move {
+                    let _ = started_tx.send(()).await;
+                    ctx.1.cancelled().await;
+                    let _ = observed_tx.send(true).await;
+                    Ok(TodoWriteResult {
+                        todos: params.todos,
+                    })
+                }
+            })
+            .unwrap();
+        let (client, task) = spawn_echo_server(registry);
+
+        let (mut call, control) = client.start_call::<TodoWrite>(TodoWriteParams {
+            todos: vec![TodoItem {
+                content: "drop-me".into(),
+                status: TodoStatus::Pending,
+            }],
+        });
+        // Poll the call until the request reaches the server handler.
+        tokio::select! {
+            _ = &mut call => panic!("call cannot complete before the handler runs"),
+            _ = started_rx.recv() => {}
+        }
+        drop(call);
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx.recv())
+            .await
+            .expect("server observes cancellation")
+            .expect("observation channel open");
+        assert!(observed);
+        drop(control);
+        drop(client);
+        task.abort();
     }
 }

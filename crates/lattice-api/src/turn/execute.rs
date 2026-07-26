@@ -256,7 +256,6 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
     let prepared = super::live::prepare_live_turn(&session, &request)?;
     let project_root = resolve_project_root(&request);
     let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.lancet);
-    let loaded = request.loaded_profile.as_ref().expect("checked above");
     let (model_id, _, _) = resolve_model_and_prompt(&request);
     let runtime_version = env!("CARGO_PKG_VERSION");
     let enabled_tools = enabled_tools(&request);
@@ -268,7 +267,6 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
         lancet: cep,
         model_id: &model_id,
         runtime_version,
-        loaded_profile: loaded,
     })
     .await?;
     super::live::stream_turn_live_prepared(session, prepared, request, deps).await

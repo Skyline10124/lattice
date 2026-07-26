@@ -97,19 +97,21 @@ pub(crate) fn policy_denial_preflight_metadata(
             "changed_paths": paths,
             "write_patterns": [],
             "out_of_scope_paths": paths,
-            "expected_hash_status": null,
+            "local_revision": null,
             "replan_reason": "out_of_scope_paths",
-            "backend_invoked": false,
         },
         "changed_paths": paths,
         "out_of_scope_paths": paths,
         "replan_reason": "out_of_scope_paths",
-        "backend_invoked": false,
         "policy_enforced": true,
     }))
 }
 
 /// Build mutation-specific preflight metadata after scope checks.
+///
+/// Method-local evidence only: the guarded target paths, the Local Revision
+/// observed at the Mutation Precondition check (when relevant), and the
+/// replan reason. No routing invocation flags.
 pub(crate) fn mutation_preflight_metadata(input: MutationPreflight<'_>) -> Value {
     json!({
         "cep_preflight": {
@@ -119,15 +121,13 @@ pub(crate) fn mutation_preflight_metadata(input: MutationPreflight<'_>) -> Value
             "changed_paths": input.changed_paths,
             "write_patterns": input.write_patterns,
             "out_of_scope_paths": input.out_of_scope_paths,
-            "expected_hash_status": input.expected_hash_status,
+            "local_revision": input.local_revision,
             "replan_reason": input.replan_reason,
-            "backend_invoked": input.backend_invoked,
         },
         "changed_paths": input.changed_paths,
         "out_of_scope_paths": input.out_of_scope_paths,
-        "expected_hash_status": input.expected_hash_status,
+        "local_revision": input.local_revision,
         "replan_reason": input.replan_reason,
-        "backend_invoked": input.backend_invoked,
         "policy_enforced": true,
     })
 }
@@ -137,9 +137,11 @@ pub(crate) struct MutationPreflight<'a> {
     pub(crate) changed_paths: &'a [String],
     pub(crate) write_patterns: &'a [String],
     pub(crate) out_of_scope_paths: &'a [String],
-    pub(crate) expected_hash_status: Option<&'a str>,
+    /// Local Revision observed at the Mutation Precondition check (the
+    /// current content hash of the target), present when the precondition
+    /// failed on a stale expected hash.
+    pub(crate) local_revision: Option<&'a str>,
     pub(crate) replan_reason: Option<&'a str>,
-    pub(crate) backend_invoked: bool,
 }
 
 pub(crate) fn authorized_region_metadata(region: &AuthorizedEffectRegion) -> Value {

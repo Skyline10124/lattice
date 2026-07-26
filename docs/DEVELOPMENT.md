@@ -14,7 +14,8 @@ For workspace-level architecture guidance aimed at contributors, read
 LATTICE is a Rust Cargo workspace of 16 crates (see `Cargo.toml`). It targets
 Rust **1.88+** (edition 2024). This is a Rust project — there is no
 `package.json` and no `npm` scripts; all developer commands are `cargo`
-commands or shell scripts under `scripts/`.
+commands or `cargo xtask` subcommands. The former `scripts/` shell gates were
+removed in #47 — see [docs/TESTING.md](./TESTING.md) "Retired lanes".
 
 ## Local setup
 
@@ -73,16 +74,12 @@ cargo run -p lattice-cli -- doctor             # run diagnostics
 ## Build commands
 
 The CI workflow (`.github/workflows/ci.yml`) and the local mirror
-`cargo xtask ci` both run the same five-step gate on every push to `main` and
-on every pull request (fmt, clippy, build `lattice`, harness boundary,
-`cargo test --workspace`). Reproduce CI locally with `cargo xtask ci`.
-
-Upper OCI image inputs live under `images/upper/` (Containerfile, pin, probe,
-publish helpers). Path-filtered CI is
-`.github/workflows/upper-image.yml` — see [images/upper/README.md](../images/upper/README.md).
+`cargo xtask ci` cover the same ordinary gate on every push to `main` and on
+every pull request (fmt, clippy, build `lattice`, `cargo test --workspace`,
+harness/lancet boundary checks). Reproduce CI locally with `cargo xtask ci`.
 
 | Command | Purpose |
-|---|---|
+| --- | --- |
 | `cargo build` | Dev (debug) build of the whole workspace. Fast incremental feedback. |
 | `cargo build --release` | Optimized build; produces the shipped `lattice` binary. |
 | `cargo test` | Run the entire workspace test suite. |
@@ -93,13 +90,11 @@ publish helpers). Path-filtered CI is
 | `cargo run -p lattice-cli -- <subcommand>` | Run the `lattice` binary without installing (e.g. `models --auth`, `doctor`, `session new ...`). |
 | `cargo install --path crates/lattice-cli` | Install the release binary to `$CARGO_HOME/bin`. |
 | `cargo xtask ci` | Local mirror of the CI lane (fmt, clippy, build `lattice`, harness boundary, `cargo test --workspace`). |
-| `scripts/release-gate-v1.4.sh` | v1.4-alpha release gate. Offline-deterministic by default (no API keys/network): runs fmt, clippy, targeted crate tests, dogfood suite, LANCET boundary check, and `lattice lancet doctor`. Pass `--live` (or set `LATTICE_LINUX_ISOLATION_LIVE=1`) to also run the ignored Linux physical-boundary canary suite. See [docs/LANCET.md](./LANCET.md). |
-| `images/upper/build-and-probe.sh` | Build the official Upper OCI image (`linux/amd64`) and run the black-box capability probe. Never pushes. See [images/upper/README.md](../images/upper/README.md). |
-| `images/upper/verify-inputs.sh` | Static pin/lock-shape checks for Upper image inputs (no Docker required for the no-lock case). |
+| `cargo xtask rollout --channel alpha` | Alpha rollout gate: rejects a tracked-dirty worktree, builds a locked release binary, runs Direct-Local/offline/dogfood/audit-replay/doctor evidence steps against it, and writes a versioned JSON record to `target/rollout/`. See [docs/TESTING.md](./TESTING.md). |
 
-Note: `.cargo/config.toml` pins `target-dir = "target"` and forces
-`TMPDIR = "build/tmp"` (relative) so build artifacts and assembler temps land
-inside the workspace rather than a sandboxed `/tmp` cache with a small quota.
+Note: `.cargo/config.toml` defines only the `xtask` cargo alias
+(`xtask = "run --package xtask --"`); it pins no `target-dir` or `TMPDIR`.
+Build artifacts land in the workspace `target/` directory by cargo default.
 
 ## Code style
 
@@ -143,7 +138,7 @@ inside the workspace rather than a sandboxed `/tmp` cache with a small quota.
   `git log --oneline`). Use these prefixes:
 
   | Prefix | Use |
-  |---|---|
+  | --- | --- |
   | `feat(scope):` | New feature in `scope` (e.g. `feat(session):`, `feat(tui):`, `feat(api):`). |
   | `fix(scope):` | Bug fix (e.g. `fix(session):`, `fix(api):`). |
   | `refactor(scope):` | Refactor with no behavior change (e.g. `refactor(execution):`, `refactor(isolation):`). |
@@ -176,8 +171,8 @@ inside the workspace rather than a sandboxed `/tmp` cache with a small quota.
   cargo fmt --all --check
   ```
 
-  `cargo xtask ci` runs all three; `scripts/release-gate-v1.4.sh` is the
-  stronger release-gate entrypoint when preparing a release.
+  `cargo xtask ci` runs all three; `cargo xtask rollout --channel alpha` is the
+  stronger release-evidence gate when preparing a release.
 - **Record landed fixes in `FIX.md`** (append-only changelog). Per the root
   AGENTS.md "Review Records", add an entry only *after* the fix has landed,
   including issue id/severity, problem, fix summary, verification

@@ -46,7 +46,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn command_boundary_metadata_survives_backend_invoked_update() {
+    fn command_boundary_metadata_survives_later_merge_update() {
         let metadata = CallDurableMetadata::default();
         metadata.record(json!({
             "command_isolation_mode": "enforce",
@@ -63,18 +63,18 @@ mod tests {
                 "primitives": {}
             },
             "boundary_setup_failed_closed": true,
-            "backend_invoked": false,
+            "install_completed": false,
             "policy_enforced": true
         }));
         metadata.record(json!({
-            "backend_invoked": true,
+            "install_completed": true,
             "exit_code": 127,
             "policy_enforced": true
         }));
 
         let merged: Value =
             serde_json::from_str(&metadata.take_json().expect("metadata json")).unwrap();
-        assert_eq!(merged["backend_invoked"], true);
+        assert_eq!(merged["install_completed"], true);
         assert_eq!(
             merged["effective_boundary"]["network"]["status"],
             "failed_closed"

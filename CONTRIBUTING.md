@@ -34,7 +34,10 @@ license that covers the project.
 
 ## 2. Getting started
 
-LATTICE requires Rust **1.88+** (edition 2024). Build and test the workspace:
+LATTICE requires Rust **1.94+** (edition 2024). The toolchain is pinned to
+rustc 1.96.0 via `rust-toolchain.toml` (which also installs the
+`wasm32-unknown-unknown` target for Source Tool builds). Build and test the
+workspace:
 
 ```sh
 git clone <your-fork-url>

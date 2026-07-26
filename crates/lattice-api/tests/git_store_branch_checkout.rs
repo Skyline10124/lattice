@@ -7,8 +7,6 @@
 //! (HEAD moves to feature), checks out back to main (HEAD returns to main),
 //! then detaches to a commit OID (HEAD is detached at that commit).
 
-use std::fs;
-
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, GraphHead, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
@@ -17,8 +15,7 @@ use lattice_session::{
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
-    fs::create_dir_all(dir).expect("create dir");
-    git2::Repository::init(dir).expect("init repo");
+    let _ = lattice_session::test_utils::init_empty_repo(dir);
 }
 
 fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCommitInput {

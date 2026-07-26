@@ -8,7 +8,6 @@
 //! commit returns a Conflict error because the ref moved between the CAS
 //! check and the ref update.
 
-use std::fs;
 use std::sync::Arc;
 use std::thread;
 
@@ -20,8 +19,7 @@ use lattice_session::{
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
-    fs::create_dir_all(dir).expect("create dir");
-    git2::Repository::init(dir).expect("init repo");
+    let _ = lattice_session::test_utils::init_empty_repo(dir);
 }
 
 fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCommitInput {
@@ -91,13 +89,13 @@ fn git_store_concurrent_commit_same_parent_second_conflicts() {
     );
 
     // 5. The ref must still point at B (C did not silently overwrite it).
-    let repo = git2::Repository::open(&dir).expect("open repo");
+    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
     let ref_name = format!("refs/lattice/sessions/{session_id}/main");
     let branch_ref = repo
-        .find_reference(&ref_name)
+        .find_reference(ref_name.as_str())
         .expect("main ref should exist");
     assert_eq!(
-        branch_ref.target().map(|o| o.to_string()),
+        branch_ref.target().try_id().map(|o| o.to_string()),
         Some(b_oid.clone()),
         "ref must still point at B after C's conflict; C must not have overwritten it",
     );

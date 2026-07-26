@@ -1,8 +1,12 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Output;
+
+use thiserror::Error;
+
+use crate::driver::CommandOutcome;
 
 use crate::world::ScenarioWorld;
 
@@ -47,6 +51,9 @@ pub fn capture_from_output(
 }
 
 pub fn write_failure_artifacts(artifacts: &FailureArtifacts) -> std::io::Result<()> {
+    if artifacts.dir.exists() {
+        std::fs::remove_dir_all(&artifacts.dir)?;
+    }
     std::fs::create_dir_all(&artifacts.dir)?;
     std::fs::write(artifacts.dir.join("stdout.txt"), &artifacts.stdout)?;
     std::fs::write(artifacts.dir.join("stderr.txt"), &artifacts.stderr)?;
@@ -57,56 +64,206 @@ pub fn write_failure_artifacts(artifacts: &FailureArtifacts) -> std::io::Result<
     Ok(())
 }
 
-/// RFC #19 decision eight: failure artifacts are redacted **before** writing,
-/// then **scanned after writing** as defense-in-depth. This function walks
-/// `dir`, reads every regular file, and checks whether any `secrets` sentinel
-/// survived into the on-disk bytes. Any file that still contains a secret is
-/// best-effort redacted in place (the secret replaced with `[REDACTED]`) and
-/// its path is returned so the caller can record the catch. A read/decode
-/// error on a single file is skipped (best-effort), not fatal.
-///
-/// Returns the list of files that leaked and were patched. An empty list
-/// means the post-write scan found no secret in any written artifact.
-///
-/// Only UTF-8-decodable files are scanned/rewritten: a secret sentinel is a
-/// text substring, so a non-UTF8 file cannot carry one in a form the redactor
-/// would have produced, and rewriting it via a lossy conversion would corrupt
-/// it. Such files are skipped, not treated as leaks.
-pub fn scan_artifacts_for_secrets(dir: &std::path::Path, secrets: &[&str]) -> Vec<PathBuf> {
+/// Recursively scan persisted artifacts for byte-level secret sentinels.
+/// Hits are redacted in place and reported; any traversal, read, or rewrite
+/// error fails closed instead of certifying an incomplete scan.
+#[derive(Debug, Error)]
+#[error("secret scan failed at {}: {source}", path.display())]
+pub struct ArtifactScanError {
+    pub path: PathBuf,
+    #[source]
+    pub source: std::io::Error,
+}
+
+/// Recursively scan regular files for byte-level sentinels. Any I/O failure is
+/// returned: a bundle that could not be completely inspected is not clean.
+pub fn scan_artifacts_for_secrets(
+    dir: &Path,
+    secrets: &[&str],
+) -> Result<Vec<PathBuf>, ArtifactScanError> {
+    let secrets: Vec<&[u8]> = secrets
+        .iter()
+        .filter(|secret| !secret.is_empty())
+        .map(|secret| secret.as_bytes())
+        .collect();
+    if secrets.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut leaked = Vec::new();
-    if secrets.iter().all(|s| s.is_empty()) {
-        return leaked;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return leaked,
-    };
-    for entry in entries.flatten() {
+    scan_dir(dir, &secrets, &mut leaked)?;
+    Ok(leaked)
+}
+
+fn scan_dir(
+    dir: &Path,
+    secrets: &[&[u8]],
+    leaked: &mut Vec<PathBuf>,
+) -> Result<(), ArtifactScanError> {
+    let entries = std::fs::read_dir(dir).map_err(|source| ArtifactScanError {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| ArtifactScanError {
+            path: dir.to_path_buf(),
+            source,
+        })?;
         let path = entry.path();
-        let meta = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !meta.is_file() {
-            continue;
+        let file_type = entry.file_type().map_err(|source| ArtifactScanError {
+            path: path.clone(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            scan_dir(&path, secrets, leaked)?;
+        } else if file_type.is_file() {
+            let bytes = std::fs::read(&path).map_err(|source| ArtifactScanError {
+                path: path.clone(),
+                source,
+            })?;
+            if secrets
+                .iter()
+                .any(|secret| bytes.windows(secret.len()).any(|window| window == *secret))
+            {
+                let redacted = redact_bytes(bytes, secrets);
+                std::fs::write(&path, redacted).map_err(|source| ArtifactScanError {
+                    path: path.clone(),
+                    source,
+                })?;
+                leaked.push(path);
+            }
+        } else {
+            return Err(ArtifactScanError {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "artifact is neither a regular file nor a directory",
+                ),
+            });
         }
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            continue;
-        };
-        if !secrets.iter().any(|s| !s.is_empty() && text.contains(s)) {
-            continue;
-        }
-        // Leak found: redact and rewrite in place, then record the path so
-        // the caller can note which file the pre-write redaction missed.
-        let redacted = redact(text, secrets);
-        let _ = std::fs::write(&path, redacted);
-        leaked.push(path);
     }
-    leaked
+    Ok(())
+}
+
+fn redact_bytes(mut bytes: Vec<u8>, secrets: &[&[u8]]) -> Vec<u8> {
+    for secret in secrets {
+        let mut redacted = Vec::with_capacity(bytes.len());
+        let mut rest = bytes.as_slice();
+        while let Some(index) = rest
+            .windows(secret.len())
+            .position(|window| window == *secret)
+        {
+            redacted.extend_from_slice(&rest[..index]);
+            redacted.extend_from_slice(REDACTED.as_bytes());
+            rest = &rest[index + secret.len()..];
+        }
+        redacted.extend_from_slice(rest);
+        bytes = redacted;
+    }
+    bytes
+}
+
+#[derive(Debug, Error)]
+pub enum EvidenceError {
+    #[error("evidence I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Scan(#[from] ArtifactScanError),
+    #[error("post-write sentinel found in: {0:?}")]
+    PostWriteSentinel(Vec<PathBuf>),
+}
+
+#[derive(Debug, Clone)]
+struct RecordedCommand {
+    summary: String,
+    termination: crate::driver::Termination,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Failure-only scenario recorder. Construction clears stale artifacts so a
+/// passing rerun cannot leave an older failure looking current.
+pub struct ScenarioEvidence {
+    failure_dir: PathBuf,
+    project_dir: PathBuf,
+    before: WorkspaceSnapshot,
+    commands: Vec<RecordedCommand>,
+    captures: Vec<crate::fake_llm::CapturedRequest>,
+    sentinels: Vec<String>,
+}
+
+impl ScenarioEvidence {
+    pub fn new(
+        world: &ScenarioWorld,
+        failure_dir: impl Into<PathBuf>,
+        sentinels: impl IntoIterator<Item = String>,
+    ) -> Result<Self, EvidenceError> {
+        let failure_dir = failure_dir.into();
+        if failure_dir.exists() {
+            std::fs::remove_dir_all(&failure_dir)?;
+        }
+        Ok(Self {
+            failure_dir,
+            project_dir: world.project_dir().to_path_buf(),
+            before: WorkspaceSnapshot::capture(world.project_dir())?,
+            commands: Vec::new(),
+            captures: Vec::new(),
+            sentinels: sentinels.into_iter().collect(),
+        })
+    }
+
+    pub fn record_command(&mut self, summary: impl Into<String>, outcome: &CommandOutcome) {
+        self.commands.push(RecordedCommand {
+            summary: summary.into(),
+            termination: outcome.termination.clone(),
+            stdout: outcome.stdout.clone(),
+            stderr: outcome.stderr.clone(),
+        });
+    }
+
+    pub fn record_captures(&mut self, captures: Vec<crate::fake_llm::CapturedRequest>) {
+        self.captures = captures;
+    }
+
+    pub fn finish(self, failed: bool) -> Result<(), EvidenceError> {
+        if !failed {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&self.failure_dir)?;
+        let secrets: Vec<&str> = self.sentinels.iter().map(String::as_str).collect();
+        for (index, command) in self.commands.iter().enumerate() {
+            std::fs::write(
+                self.failure_dir.join(format!("{index}-command.txt")),
+                redact(
+                    &format!(
+                        "{}\ntermination: {:?}\n",
+                        command.summary, command.termination
+                    ),
+                    &secrets,
+                ),
+            )?;
+            std::fs::write(
+                self.failure_dir.join(format!("{index}-stdout.txt")),
+                redact(&String::from_utf8_lossy(&command.stdout), &secrets),
+            )?;
+            std::fs::write(
+                self.failure_dir.join(format!("{index}-stderr.txt")),
+                redact(&String::from_utf8_lossy(&command.stderr), &secrets),
+            )?;
+        }
+        write_fake_llm_log(&self.failure_dir, &self.captures, &secrets)?;
+        let after = WorkspaceSnapshot::capture(&self.project_dir)?;
+        write_workspace_diff(&self.failure_dir, &self.before, &after, &secrets)?;
+        verify_persisted_bundle(&self.failure_dir, &secrets)
+    }
+}
+
+fn verify_persisted_bundle(dir: &Path, secrets: &[&str]) -> Result<(), EvidenceError> {
+    let leaked = scan_artifacts_for_secrets(dir, secrets)?;
+    if leaked.is_empty() {
+        Ok(())
+    } else {
+        Err(EvidenceError::PostWriteSentinel(leaked))
+    }
 }
 
 /// Persist the fake LLM's captured request log into a failure bundle.
@@ -129,12 +286,15 @@ pub fn write_fake_llm_log(
     let mut text = String::new();
     for (i, cap) in captures.iter().enumerate() {
         text.push_str(&format!("--- request {i} ---\n"));
-        text.push_str(&format!("model: {}\n", cap.model));
+        text.push_str(&format!("model: {}\n", redact(&cap.model, secrets)));
         text.push_str(&format!(
             "message_roles: {}\n",
-            cap.message_roles.join(", ")
+            redact(&cap.message_roles.join(", "), secrets)
         ));
-        text.push_str(&format!("tool_names: {}\n", cap.tool_names.join(", ")));
+        text.push_str(&format!(
+            "tool_names: {}\n",
+            redact(&cap.tool_names.join(", "), secrets)
+        ));
         let raw = serde_json::to_string_pretty(&cap.raw).unwrap_or_default();
         text.push_str("body:\n");
         text.push_str(&redact(&raw, secrets));
@@ -198,10 +358,10 @@ pub fn write_workspace_listing(
 /// two listings) into `failure_dir`, all redacted against `secrets`.
 ///
 /// The diff is over the host-side project tree listing (path + size), not a
-/// byte-level file-content diff — the workspace Upper lives inside a
-/// microsandbox, not on the host filesystem, so the host-side listing is
-/// the observable artifact. A path appearing/disappearing or a size change
-/// shows up as a `-`/`+` line.
+/// byte-level file-content diff — the Direct-Local workspace IS the host
+/// project tree, so the listing captures exactly what a turn observed and
+/// mutated. A path appearing/disappearing or a size change shows up as a
+/// `-`/`+` line.
 pub fn write_workspace_diff(
     failure_dir: &std::path::Path,
     before: &WorkspaceSnapshot,
@@ -312,9 +472,8 @@ pub fn redact_env_pair(name: &str, value: &str, secrets: &[&str]) -> String {
 /// Build and write the `world.txt` context — scenario name, redacted command
 /// summary, project/home/port, and the redacted env allow-list — into `dir`.
 /// Shared by every failure-artifact path so the world-context block is not
-/// duplicated per caller (it had drifted across `assert_with_failure_artifacts`
-/// and the MSB full-turn test bundle, with the two copies already diverging
-/// in how they sourced the command summary).
+/// duplicated per caller (the copies had drifted across
+/// `assert_with_failure_artifacts` and the retired KVM-lane full-turn bundle).
 ///
 /// `command_summary` must already be redacted (the caller passes
 /// `artifacts.command_summary`, which `capture_from_output` redacts). Env
@@ -510,7 +669,7 @@ mod tests {
 
     #[test]
     fn write_world_context_redacts_secret_env_value() {
-        let mut world = ScenarioWorld::new("lattice-harness-ctx-redact").expect("world");
+        let world = ScenarioWorld::new("lattice-harness-ctx-redact").expect("world");
         world.set_env("CUSTOM_BEARER", "sk-leak-me");
         let out_dir = TempDir::new().unwrap();
         write_world_context(out_dir.path(), &world, "s", "c", &["sk-leak-me"]).unwrap();
@@ -525,7 +684,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("stdout.txt"), "clean output").unwrap();
         std::fs::write(dir.path().join("world.txt"), "scenario: s\n").unwrap();
-        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-secret"]);
+        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-secret"]).unwrap();
         assert!(leaked.is_empty());
     }
 
@@ -536,7 +695,7 @@ mod tests {
         // survives into the on-disk stdout.txt.
         std::fs::write(dir.path().join("stdout.txt"), "ok sk-leak-survived more").unwrap();
         std::fs::write(dir.path().join("clean.txt"), "no secret here").unwrap();
-        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-leak-survived"]);
+        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-leak-survived"]).unwrap();
         assert_eq!(leaked.len(), 1);
         assert!(leaked[0].file_name().unwrap() == "stdout.txt");
         let after = std::fs::read_to_string(dir.path().join("stdout.txt")).unwrap();
@@ -550,26 +709,72 @@ mod tests {
     }
 
     #[test]
-    fn scan_artifacts_for_secrets_skips_non_utf8_files() {
+    fn scan_artifacts_for_secrets_is_recursive_and_byte_level() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("bin.dat"), b"\xff\xfe not utf8 sk-secret").unwrap();
-        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-secret"]);
-        assert!(
-            leaked.is_empty(),
-            "non-UTF8 file should be skipped, not patched"
-        );
-        // The non-UTF8 bytes are preserved unchanged.
+        let nested = dir.path().join("nested/deeper");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("bin.dat");
+        std::fs::write(&file, b"\xff\xfe not utf8 sk-secret").unwrap();
+        let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-secret"]).unwrap();
+        assert_eq!(leaked, vec![file.clone()]);
         assert_eq!(
-            std::fs::read(dir.path().join("bin.dat")).unwrap(),
-            b"\xff\xfe not utf8 sk-secret"
+            std::fs::read(file).unwrap(),
+            b"\xff\xfe not utf8 [REDACTED]"
         );
+    }
+
+    #[test]
+    fn scan_artifacts_for_secrets_fails_closed_on_io_error() {
+        let missing = TempDir::new().unwrap().path().join("gone");
+        let error = scan_artifacts_for_secrets(&missing, &["secret"]).unwrap_err();
+        assert_eq!(error.path, missing);
     }
 
     #[test]
     fn scan_artifacts_for_secrets_empty_secret_list_is_noop() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("stdout.txt"), "anything").unwrap();
-        assert!(scan_artifacts_for_secrets(dir.path(), &[]).is_empty());
-        assert!(scan_artifacts_for_secrets(dir.path(), &[""]).is_empty());
+        assert!(
+            scan_artifacts_for_secrets(dir.path(), &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            scan_artifacts_for_secrets(dir.path(), &[""])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn scenario_evidence_clears_stale_bundle_and_writes_only_on_failure() {
+        let world = ScenarioWorld::new("evidence-stale").unwrap();
+        let root = TempDir::new().unwrap();
+        let failure_dir = root.path().join("scenario");
+        std::fs::create_dir_all(&failure_dir).unwrap();
+        std::fs::write(failure_dir.join("stale.txt"), "old failure").unwrap();
+        let evidence = ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+        assert!(
+            !failure_dir.exists(),
+            "constructor must clear stale evidence"
+        );
+        evidence.finish(false).unwrap();
+        assert!(!failure_dir.exists(), "passing scenarios write no bundle");
+
+        let evidence = ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+        evidence.finish(true).unwrap();
+        assert!(failure_dir.join("workspace_diff.txt").is_file());
+    }
+
+    #[test]
+    fn persisted_bundle_verification_fails_after_redacting_a_sentinel_hit() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("leak.bin"), b"\xffsecret-value").unwrap();
+        let error = verify_persisted_bundle(dir.path(), &["secret-value"]).unwrap_err();
+        assert!(matches!(error, EvidenceError::PostWriteSentinel(_)));
+        assert_eq!(
+            std::fs::read(dir.path().join("leak.bin")).unwrap(),
+            b"\xff[REDACTED]"
+        );
     }
 }

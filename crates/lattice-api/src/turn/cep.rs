@@ -19,18 +19,11 @@ use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig, Worksp
 use lancet_authority::{
     BudgetLimits, CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig,
 };
-use lancet_catalog::catalog;
-use lancet_catalog::methods::external::Fetch;
-use lancet_catalog::methods::session::TodoWrite;
-use lancet_catalog::methods::workspace::{Create, Edit, ObserveWorkspace};
-use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
-    CepAuditContext, CepAuditStore, CepClient, ExecutionRouting, impact_kind_for_method,
-    impact_kind_label, wire_code_for_error,
+    CepAuditContext, CepAuditStore, CepClient, impact_kind_for_method, impact_kind_label,
+    wire_code_for_error,
 };
-use lancet_protocol::error::{
-    CepErrorData, invalid_params, jsonrpc, method_not_found, parse_error,
-};
+use lancet_protocol::error::{CepErrorData, jsonrpc, method_not_found, parse_error};
 use lancet_protocol::{CepError, Retriability, ToolEvent};
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
@@ -38,17 +31,12 @@ use lattice_agent::{
 use lattice_llm::ToolCall;
 #[cfg(test)]
 use lattice_profile::LancetWorkspacePolicySection;
-use lattice_profile::{
-    LancetNetworkSection, LancetObservationSection, LancetSection, LoadedAgentProfile,
-};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use lattice_profile::{LancetNetworkSection, LancetObservationSection, LancetSection};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::session::ApiError;
 use crate::turn::types::RunTurnRequest;
-use crate::turn::upper::{UpperLease, UpperPrepareError, prepare_upper, resolve_upper_config};
 
 /// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
 fn map_lancet_err(err: LancetError) -> ApiError {
@@ -69,24 +57,38 @@ pub(crate) struct CepRuntimeBuildMetrics {
     pub transport_pairs: usize,
 }
 
-/// Client-backed adapter that maps LLM-shape tool calls into typed CEP invocations.
+/// Client-backed adapter that maps LLM-shape tool calls into CEP invocations.
+///
+/// D.5: the available set is driven by runtime definitions (native catalog
+/// methods + Component Tools projected from generated descriptors), not by
+/// a hardcoded catalog membership check. All methods — native and Component
+/// alike — go through `CepClient::call_raw`, so the server-side dispatch
+/// split (D.3) handles routing. The adapter does not hand-write method
+/// matches or schemas; params/result validation is done by the native typed
+/// registry or by generated descriptor validators on the server side.
 pub struct CepExecutorAdapter {
     client: CepClient,
-    catalog_names: HashSet<String>,
+    available_names: HashSet<String>,
     enabled_names: HashSet<String>,
 }
 
 impl CepExecutorAdapter {
+    /// Construct from a CEP client, the runtime-projected tool definitions
+    /// (available set), and the enabled-tool names.
+    ///
+    /// `definitions` is the combined native + Component projection from
+    /// `LancetRuntime::build`; `enabled_names` is the subset the profile
+    /// allows for this turn. A tool call is accepted only if its name is in
+    /// both sets.
     pub fn new(
         client: CepClient,
+        definitions: &[lancet_api::ToolDefinition],
         enabled_names: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        let catalog_names: HashSet<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-        let enabled_names = enabled_names.into_iter().map(Into::into).collect();
         Self {
             client,
-            catalog_names,
-            enabled_names,
+            available_names: definitions.iter().map(|d| d.name.clone()).collect(),
+            enabled_names: enabled_names.into_iter().map(Into::into).collect(),
         }
     }
 
@@ -101,63 +103,25 @@ impl CepExecutorAdapter {
             }),
         }
     }
-
-    fn catalog_method_names(&self) -> &HashSet<String> {
-        &self.catalog_names
-    }
-
-    async fn dispatch_typed(&self, method: &str, params: Value) -> Result<Value, CepError> {
-        match method {
-            ObserveWorkspace::NAME => self.call_typed::<ObserveWorkspace>(params).await,
-            Create::NAME => self.call_typed::<Create>(params).await,
-            Edit::NAME => self.call_typed::<Edit>(params).await,
-            Fetch::NAME => self.call_typed::<Fetch>(params).await,
-            TodoWrite::NAME => self.call_typed::<TodoWrite>(params).await,
-            other => Err(method_not_found(other)),
-        }
-    }
-
-    async fn call_typed<M>(&self, params: Value) -> Result<Value, CepError>
-    where
-        M: CatalogMethod,
-        M::Params: DeserializeOwned + Serialize,
-        M::Result: Serialize,
-    {
-        let typed = serde_json::from_value::<M::Params>(params)
-            .map_err(|err| schema_mismatch_for_method::<M>(err))?;
-        let result = self.client.call::<M>(typed).await?;
-        serde_json::to_value(result).map_err(|err| {
-            CepError::internal_error(format!("failed to serialize {} result: {err}", M::NAME))
-        })
-    }
 }
 
 #[async_trait]
 impl ToolCallExecutor for CepExecutorAdapter {
     async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
-        let params: Value = match serde_json::from_str(&call.function.arguments) {
-            Ok(value) => value,
-            Err(err) => {
-                return Err(Self::map_cep_error(parse_error(format!(
-                    "invalid tool arguments JSON: {err}"
-                ))));
-            }
-        };
-
-        if !self.catalog_method_names().contains(&call.function.name) {
-            return Err(Self::map_cep_error(method_not_found(&call.function.name)));
+        let name = &call.function.name;
+        if !self.available_names.contains(name) || !self.enabled_names.contains(name) {
+            return Err(Self::map_cep_error(method_not_found(name)));
         }
-
-        if !self.enabled_names.contains(&call.function.name) {
-            return Err(Self::map_cep_error(method_not_found(&call.function.name)));
-        }
-
-        match self.dispatch_typed(&call.function.name, params).await {
-            Ok(value) => serde_json::to_string(&value).map_err(|err| {
-                ToolExecutionError::simple(format!("failed to serialize tool result: {err}"))
-            }),
-            Err(cep) => Err(Self::map_cep_error(cep)),
-        }
+        let params: Value = serde_json::from_str(&call.function.arguments).map_err(|e| {
+            Self::map_cep_error(parse_error(format!("invalid tool arguments JSON: {e}")))
+        })?;
+        let value = self
+            .client
+            .call_raw(name.clone(), params)
+            .await
+            .map_err(Self::map_cep_error)?;
+        serde_json::to_string(&value)
+            .map_err(|e| ToolExecutionError::simple(format!("serialize tool result: {e}")))
     }
 }
 
@@ -173,7 +137,6 @@ pub(crate) struct ProductionTurnDeps {
     pub cep_client: CepClient,
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
-    pub upper_lease: UpperLease,
     #[cfg(test)]
     pub build_metrics: CepRuntimeBuildMetrics,
 }
@@ -186,7 +149,6 @@ pub(crate) struct ProductionTurnDepsInput<'a> {
     pub lancet: Option<&'a LancetSection>,
     pub model_id: &'a str,
     pub runtime_version: &'a str,
-    pub loaded_profile: &'a LoadedAgentProfile,
 }
 
 /// Build executor-facing CEP policy from profile `[lancet]` and the runtime project root.
@@ -252,10 +214,12 @@ fn workspace_policy_from_profile(lancet: &LancetSection) -> Result<WorkspacePoli
     let mut workspace = WorkspacePolicy::default();
     if let Some(section) = lancet.workspace.as_ref() {
         workspace.denied_write_patterns = section.denied_write_patterns.clone();
+        workspace.included_ignored_read_patterns = section.included_ignored_read_patterns.clone();
+        workspace.denied_read_patterns = section.denied_read_patterns.clone();
     }
-    workspace.validate().map_err(|err| {
-        ApiError::BadRequest(format!("lancet.workspace.denied_write_patterns: {err}"))
-    })?;
+    workspace
+        .validate()
+        .map_err(|err| ApiError::BadRequest(format!("lancet.workspace: {err}")))?;
     Ok(workspace)
 }
 
@@ -458,7 +422,10 @@ fn resolve_lancet_policy(
 /// Build a turn-scoped LANCET runtime and wrap its client in an [`AgentLoop`].
 ///
 /// Translation of the profile into policy happens here; runtime composition is
-/// delegated to [`lancet_api::LancetRuntime::build`].
+/// delegated to [`lancet_api::LancetRuntime::build`], which constructs the
+/// one concrete Direct-Local execution routing internally (ADR 0003). There is
+/// no Upper lifecycle, workspace override, or externally supplied execution
+/// backend.
 pub(crate) async fn build_production_turn_deps(
     input: ProductionTurnDepsInput<'_>,
 ) -> Result<ProductionTurnDeps, ApiError> {
@@ -470,7 +437,6 @@ pub(crate) async fn build_production_turn_deps(
         lancet,
         model_id,
         runtime_version,
-        loaded_profile,
     } = input;
     // Canonicalize the project root up front so the profile policy and the
     // runtime share one canonical root. Falls back to the raw path on failure,
@@ -492,30 +458,7 @@ pub(crate) async fn build_production_turn_deps(
             .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?
     };
 
-    // Pass None for baseline_oid to maintain backward compatibility.
-    // Future lifecycle orchestration will inject the preflight baseline from
-    // resolve_turn_target when Upper-backed turns are activated.
-    let upper_config = resolve_upper_config(loaded_profile, Path::new(project_root), None)
-        .map_err(|err| match err {
-            UpperPrepareError::MissingWorkspaceSection
-            | UpperPrepareError::MissingWorkspaceSource => {
-                ApiError::BadRequest(
-                    "Upper-backed tools require an explicit [workspace] section with a real image or template source".into(),
-                )
-            }
-            other => ApiError::BadRequest(other.to_string()),
-        })?;
-    let prepared = prepare_upper(&upper_config, request.workspace_override.clone())
-        .await
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-    let upper_context = prepared.backend.upper_context().clone();
-    let execution = ExecutionRouting {
-        backend: Arc::new(prepared.backend),
-        upper: upper_context,
-    };
-    let mut upper_lease = prepared.lease;
-
-    let runtime_result = LancetRuntime::build(LancetRuntimeConfig {
+    let runtime = LancetRuntime::build(LancetRuntimeConfig {
         project_root: PathBuf::from(project_root),
         enabled_tools: enabled_tools.to_vec(),
         policy,
@@ -523,17 +466,8 @@ pub(crate) async fn build_production_turn_deps(
         audit,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
-        execution,
     })
-    .map_err(map_lancet_err);
-
-    let runtime = match runtime_result {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            let _ = upper_lease.destroy().await;
-            return Err(err);
-        }
-    };
+    .map_err(map_lancet_err)?;
 
     let parts = runtime.into_parts();
 
@@ -542,12 +476,16 @@ pub(crate) async fn build_production_turn_deps(
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
+    let adapter = Arc::new(CepExecutorAdapter::new(
+        parts.client.clone(),
+        &parts.tool_definitions,
+        enabled_names,
+    ));
     let tool_definitions = parts
         .tool_definitions
         .into_iter()
         .map(to_llm_tool_definition)
         .collect();
-    let adapter = Arc::new(CepExecutorAdapter::new(parts.client.clone(), enabled_names));
     let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
         llm,
         tool_executor: adapter,
@@ -560,7 +498,6 @@ pub(crate) async fn build_production_turn_deps(
         cep_client: parts.client,
         audit: parts.audit,
         audit_context: parts.audit_context,
-        upper_lease,
         #[cfg(test)]
         build_metrics: CepRuntimeBuildMetrics {
             adapter_instances: 1,
@@ -601,13 +538,6 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         audit,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
-        execution: ExecutionRouting {
-            backend: Arc::new(lancet_native::NullExecutionBackend),
-            upper: lancet_native::UpperContext {
-                execution_backend: "null".into(),
-                upper_workspace_id: "null".into(),
-            },
-        },
     })
     .map_err(map_lancet_err)?;
     let parts = runtime.into_parts();
@@ -616,20 +546,20 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
+    let adapter = Arc::new(CepExecutorAdapter::new(
+        parts.client.clone(),
+        &parts.tool_definitions,
+        enabled_names,
+    ));
     let tool_definitions = parts
         .tool_definitions
         .into_iter()
         .map(to_llm_tool_definition)
         .collect();
-    let adapter = Arc::new(CepExecutorAdapter::new(parts.client.clone(), enabled_names));
     let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
         llm,
         tool_executor: adapter,
     }));
-    let upper_lease = UpperLease::without_handle(Arc::new(
-        lattice_workspace::testing::DeterministicWorkspace::new()
-            .expect("deterministic workspace for test scaffolding"),
-    ) as Arc<dyn lattice_workspace::Workspace>);
     Ok(ProductionTurnDeps {
         agent_loop,
         tool_definitions,
@@ -637,7 +567,6 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         cep_client: parts.client,
         audit: parts.audit,
         audit_context: parts.audit_context,
-        upper_lease,
         build_metrics: CepRuntimeBuildMetrics {
             adapter_instances: 1,
             transport_pairs: 1,
@@ -702,34 +631,6 @@ fn retriability_label(value: &Retriability) -> String {
         Retriability::RequiresReplan => "requires_replan".to_string(),
         Retriability::Unknown => "unknown".to_string(),
     }
-}
-
-fn schema_mismatch_for_method<M: CepMethod>(err: serde_json::Error) -> CepError {
-    let field = extract_json_field_path(&err).unwrap_or_else(|| "params".to_string());
-    let mut cep = invalid_params(format!("invalid params for {}: {err}", M::NAME));
-    if let CepErrorData::Validation(data) = &mut cep.data {
-        data.field = field;
-    }
-    cep
-}
-
-fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
-    let message = err.to_string();
-    if let Some(start) = message.find("missing field `") {
-        let rest = &message[start + "missing field `".len()..];
-        if let Some(end) = rest.find('`') {
-            return Some(rest[..end].to_string());
-        }
-    }
-    if let Some(start) = message.find("invalid type: ")
-        && let Some(field_start) = message[..start].rfind('`')
-    {
-        let prefix = &message[field_start + 1..];
-        if let Some(field_end) = prefix.find('`') {
-            return Some(prefix[..field_end].to_string());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -809,6 +710,7 @@ mod cep_context_profile_policy {
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
                 denied_write_patterns: vec!["src/**".into()],
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -822,15 +724,31 @@ mod cep_context_profile_policy {
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
                 denied_write_patterns: vec!["../etc/passwd".into()],
+                ..Default::default()
             }),
             ..Default::default()
         };
         let err = load_policy_config(&cep, dir.path()).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("lancet.workspace.denied_write_patterns"),
-            "{err}"
+        assert!(err.to_string().contains("lancet.workspace"), "{err}");
+    }
+
+    #[test]
+    fn workspace_policy_from_profile_lowers_read_visibility_patterns() {
+        let dir = TempDir::new().unwrap();
+        let cep = LancetSection {
+            workspace: Some(LancetWorkspacePolicySection {
+                denied_write_patterns: vec!["src/**".into()],
+                included_ignored_read_patterns: vec![".env".into()],
+                denied_read_patterns: vec!["secrets/**".into()],
+            }),
+            ..Default::default()
+        };
+        let config = load_policy_config(&cep, dir.path()).expect("policy config");
+        assert_eq!(
+            config.workspace.included_ignored_read_patterns,
+            vec![".env"]
         );
+        assert_eq!(config.workspace.denied_read_patterns, vec!["secrets/**"]);
     }
 
     #[test]
@@ -846,6 +764,7 @@ mod cep_context_profile_policy {
         let cep = LancetSection {
             workspace: Some(LancetWorkspacePolicySection {
                 denied_write_patterns: vec!["src/**".into()],
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -880,16 +799,18 @@ mod cep_context_profile_policy {
 mod turn_wiring {
     use super::*;
     use lancet_audit::{AuditOutcome, CallAuditMetadata};
+    use lancet_catalog::CepMethod;
     use lancet_catalog::methods::session::TodoWrite;
+    use lancet_catalog::methods::workspace::ObserveWorkspace;
     use lancet_cep::ToolExposure;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_profile::{
         AgentProfile, AgentSection, LancetSection, LlmSection, LoadedAgentProfile, PromptSection,
-        ToolsSection, WorkspaceSection,
+        ToolsSection,
     };
     use tempfile::TempDir;
 
-    fn profile_with_workspace(enabled: Vec<String>) -> LoadedAgentProfile {
+    fn test_profile(enabled: Vec<String>) -> LoadedAgentProfile {
         LoadedAgentProfile {
             path: PathBuf::from("/tmp/agent.toml"),
             package_dir: PathBuf::from("/tmp"),
@@ -907,55 +828,28 @@ mod turn_wiring {
                 tools: ToolsSection { enabled },
                 llm: LlmSection::default(),
                 lancet: LancetSection::default(),
-                workspace: WorkspaceSection {
-                    egress: None,
-                    credentials: vec![],
-                    image: Some("test-template".into()),
-                    cpus: None,
-                    memory_mb: None,
-                    allowed_egress_targets: vec![],
-                    cleanup_rounds: 3,
-                    max_pending_snapshots: 5,
-                },
             },
             system_prompt: "sys".into(),
         }
     }
 
-    fn deterministic_workspace() -> Arc<dyn lattice_workspace::Workspace> {
-        Arc::new(
-            lattice_workspace::testing::DeterministicWorkspace::new()
-                .expect("deterministic workspace for test"),
-        )
-    }
-
     fn init_git_repo(root: &std::path::Path) {
-        std::fs::write(root.join("README.md"), "init\n").expect("write README");
-        std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .status()
-            .expect("git init");
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@lattice.local"])
-            .current_dir(root)
-            .status()
-            .expect("git user.email");
-        std::process::Command::new("git")
-            .args(["config", "user.name", "lattice-test"])
-            .current_dir(root)
-            .status()
-            .expect("git user.name");
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .status()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-q", "-m", "init"])
-            .current_dir(root)
-            .status()
-            .expect("git commit");
+        let mut files: Vec<(String, String)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let content = std::fs::read_to_string(&path).unwrap_or_default();
+                    files.push((name, content));
+                }
+            }
+        }
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        let _ = lattice_session::test_utils::init_fixture_repo(root, &refs);
     }
 
     #[tokio::test]
@@ -994,7 +888,7 @@ mod turn_wiring {
 
         let llm: Arc<dyn lattice_agent::LlmClient> =
             Arc::new(FakeStreamingLlmClient::builder().build());
-        let profile = profile_with_workspace(vec![TodoWrite::NAME.to_string()]);
+        let profile = test_profile(vec![TodoWrite::NAME.to_string()]);
         let request = RunTurnRequest {
             input: "hi".into(),
             session_id: "s".into(),
@@ -1003,7 +897,6 @@ mod turn_wiring {
             test_llm: Some(llm.clone()),
             test_project_root: Some(project.path().to_string_lossy().into()),
             test_persist_audit: Some(false),
-            workspace_override: Some(deterministic_workspace()),
         };
         let enabled_tools = [TodoWrite::NAME.to_string()];
         let deps = build_production_turn_deps(ProductionTurnDepsInput {
@@ -1014,7 +907,6 @@ mod turn_wiring {
             lancet: None,
             model_id: "m",
             runtime_version: "v",
-            loaded_profile: &profile,
         })
         .await
         .expect("direct deps");
@@ -1039,38 +931,11 @@ mod turn_wiring {
         assert_eq!(before, after);
     }
 
-    #[tokio::test]
-    async fn upper_lifecycle_session_tool_creates_lease() {
-        let dir = TempDir::new().unwrap();
-        init_git_repo(dir.path());
-        let llm: Arc<dyn lattice_agent::LlmClient> =
-            Arc::new(FakeStreamingLlmClient::builder().build());
-        let profile = profile_with_workspace(vec![TodoWrite::NAME.to_string()]);
-        let request = RunTurnRequest {
-            input: "hi".into(),
-            session_id: "s".into(),
-            loaded_profile: Some(profile.clone()),
-            cancel_flag: None,
-            test_llm: Some(llm.clone()),
-            test_project_root: None,
-            test_persist_audit: None,
-            workspace_override: Some(deterministic_workspace()),
-        };
-        let enabled_tools = [TodoWrite::NAME.to_string()];
-        let deps = build_production_turn_deps(ProductionTurnDepsInput {
-            request: &request,
-            project_root: dir.path().to_str().unwrap(),
-            enabled_tools: &enabled_tools,
-            llm,
-            lancet: None,
-            model_id: "m",
-            runtime_version: "v",
-            loaded_profile: &profile,
-        })
-        .await
-        .expect("direct deps");
-        assert!(deps.upper_lease.handle().is_some());
-    }
+    // #37: `upper_lifecycle_session_tool_creates_lease` was removed — the
+    // Upper lease it asserted on no longer exists. The Direct-Local runtime
+    // builds its own execution routing internally, so an equivalent smoke
+    // test is `runtime_config_defaults_have_no_execution_field` in
+    // `lancet-api::runtime`.
 
     #[test]
     fn catalog_exposure_omits_unknown_envelope_method() {

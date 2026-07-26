@@ -1,37 +1,36 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Turn lifecycle state machine: workspace-dirty hook, terminal verification,
-//! the complete independent outcome classification matrix, and crash-safe
-//! disposition finalization.
+//! Turn lifecycle terminal classification and crash-safe disposition
+//! finalization.
 //!
-//! This module centralizes lifecycle ordering and classification.
+//! #37 removed the Upper-bound half of this module (workspace-dirty hook,
+//! terminal verification, promotion outcomes, promoted-commit retry). What
+//! remains is the terminal-classification vocabulary used by the live turn
+//! path (`super::live`) to derive an explicit `(status, disposition,
+//! resource_action)` triple for every committed turn, plus the
+//! journal/retain/release/commit orchestrator used by non-promotion
+//! finalization paths.
+//!
 //! Every terminal condition maps to an explicit `(TurnCommitStatus,
 //! WorkspaceDisposition, ResourceAction)` triple — no error-string inference.
-//!
-//! [`finalize_turn`] orchestrates the journal → retain/release → commit →
-//! journal-complete sequence for each disposition.
 
-use std::sync::Arc;
-
-use lattice_agent::{ProvisionalCompletionHook, ProvisionalDecision};
-use lattice_session::{GraphMessage, TurnCommitStatus, WorkspaceDisposition};
-use lattice_workspace::git_status::{GitStatus, GitStatusEntry};
-use lattice_workspace::{UpperHandle, Workspace};
-
-use super::snapshot_journal::{SnapshotJournal, SnapshotJournalRecord, SnapshotReconciler};
+use lattice_session::{TurnCommitStatus, WorkspaceDisposition};
 
 /// Internal resource instruction consumed by durable finalization.
 ///
-/// Tells the snapshot manager what to do with the Upper after the turn outcome
-/// is determined. Not part of the public session commit.
+/// Classifies what should happen to turn-scoped resources once the outcome is
+/// determined. The Direct-Local path has no sandbox or snapshot to manage, so
+/// only `Destroy` is produced in production; the other variants remain as
+/// classification vocabulary for the disposition matrix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceAction {
-    /// Destroy the Upper (no snapshot).
+    /// Tear down turn-scoped resources immediately.
     Destroy,
-    /// Retain the Upper as a named snapshot for later resume.
+    /// Retain turn-scoped resources (legacy retained-snapshot vocabulary).
     Retain,
-    /// Release the Upper after the candidate ref is durably pinned.
+    /// Release turn-scoped resources after a candidate ref is pinned (legacy
+    /// promotion vocabulary).
     ReleaseAfterCandidatePin,
 }
 
@@ -47,191 +46,26 @@ pub struct TurnLifecycleOutcome {
     pub disposition: WorkspaceDisposition,
     /// Lifecycle evidence messages.
     pub messages: Vec<String>,
-    /// Resource action for the Upper snapshot lifecycle.
+    /// Resource action for turn-scoped resources.
     pub resource_action: ResourceAction,
-    /// Whether the candidate was exported before this outcome.
+    /// Whether a candidate was exported before this outcome (legacy lifecycle
+    /// vocabulary; always `false` on the Direct-Local path).
     pub candidate_exported: bool,
-    /// Whether verification evidence was acquired.
+    /// Whether verification evidence was acquired (legacy lifecycle
+    /// vocabulary; always `false` on the Direct-Local path).
     pub verification_acquired: bool,
-    /// The promoted ref OID, if promotion succeeded.
+    /// The promoted ref OID, if promotion succeeded (legacy promotion
+    /// vocabulary; always `None` on the Direct-Local path).
     pub promoted_ref_committed: Option<String>,
 }
 
 /// A turn whose outcome is classified but not yet durably finalized.
 ///
-/// Retains ownership of the Upper handle and audit context until the
-/// finalization step commits the session record.
+/// Holds the classified outcome until the finalization step commits the
+/// session record.
 #[derive(Debug)]
 pub struct UnfinalizedTurn {
     pub outcome: TurnLifecycleOutcome,
-    pub upper_handle: Option<UpperHandle>,
-}
-
-/// Workspace-dirty hook for same-loop provisional completion.
-///
-/// Owns an `Arc<dyn Workspace>` and one `UpperHandle`. When the agent loop
-/// reaches a non-tool-call final response, the hook checks workspace
-/// cleanliness via `Workspace::git_status`:
-///
-/// - **Clean:** returns `Complete { cleanup_exhausted: false }`.
-/// - **Dirty:** emits a structured `workspace_dirty` system fact and returns
-///   `Continue` so the same AgentLoop iteration continues.
-/// - **Exhausted:** after `max_cleanup_rounds` dirty checks, returns
-///   `Complete { cleanup_exhausted: true }`.
-/// - **Error:** propagates as a string error (becomes `AgentTurnStatus::Error`).
-///
-/// The hook never auto-commits, restores, resets, removes, or discards Upper
-/// paths.
-pub struct WorkspaceDirtyHook {
-    workspace: Arc<dyn Workspace>,
-    handle: UpperHandle,
-    max_cleanup_rounds: u32,
-    completed_checks: u32,
-    dirty_rounds: u32,
-}
-
-impl WorkspaceDirtyHook {
-    /// Create a new hook with the given workspace, handle, and cleanup limit.
-    pub fn new(
-        workspace: Arc<dyn Workspace>,
-        handle: UpperHandle,
-        max_cleanup_rounds: u32,
-    ) -> Self {
-        Self {
-            workspace,
-            handle,
-            max_cleanup_rounds,
-            completed_checks: 0,
-            dirty_rounds: 0,
-        }
-    }
-
-    /// Return the number of dirty rounds observed so far.
-    pub fn dirty_rounds(&self) -> u32 {
-        self.dirty_rounds
-    }
-
-    /// Return the total number of completed checks.
-    pub fn completed_checks(&self) -> u32 {
-        self.completed_checks
-    }
-}
-
-impl std::fmt::Debug for WorkspaceDirtyHook {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkspaceDirtyHook")
-            .field("max_cleanup_rounds", &self.max_cleanup_rounds)
-            .field("completed_checks", &self.completed_checks)
-            .field("dirty_rounds", &self.dirty_rounds)
-            .finish()
-    }
-}
-
-#[async_trait::async_trait]
-impl ProvisionalCompletionHook for WorkspaceDirtyHook {
-    async fn on_provisional_complete(
-        &mut self,
-        _assistant: &GraphMessage,
-    ) -> Result<ProvisionalDecision, String> {
-        self.completed_checks += 1;
-
-        let status: GitStatus = self
-            .workspace
-            .git_status(&self.handle)
-            .await
-            .map_err(|e| format!("workspace git_status failed: {e}"))?;
-
-        if status.is_clean {
-            return Ok(ProvisionalDecision::Complete {
-                cleanup_exhausted: false,
-                final_message: None,
-            });
-        }
-
-        // Dirty: build structured workspace_dirty fact.
-        self.dirty_rounds += 1;
-        let fact = GitStatusEntry::workspace_dirty_fact(&status.entries);
-        let system_msg = GraphMessage {
-            role: "system".to_string(),
-            content: fact,
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        };
-
-        if self.dirty_rounds >= self.max_cleanup_rounds {
-            // Exhausted: return Complete with cleanup_exhausted=true and carry
-            // the final workspace-dirty fact as `final_message` so the loop
-            // appends it to the transcript. This preserves the
-            // diagnostic evidence of what was dirty when cleanup was exhausted
-            // — critical for understanding a PendingWorktree disposition.
-            return Ok(ProvisionalDecision::Complete {
-                cleanup_exhausted: true,
-                final_message: Some(system_msg),
-            });
-        }
-
-        Ok(ProvisionalDecision::Continue(system_msg))
-    }
-}
-
-/// Run terminal verification on an exported candidate.
-///
-/// Executes the verification argv inside the live Upper, constructs a
-/// `VerificationResult`, and checks post-export HEAD stability.
-///
-/// Returns `None` if verification config is absent (pending_verification,
-/// no fabricated evidence).
-///
-/// Returns the `VerificationResult` if verification was executed, regardless
-/// of pass/fail.
-pub async fn run_terminal_verification(
-    workspace: &dyn Workspace,
-    handle: &UpperHandle,
-    candidate_oid: &str,
-    profile_hash: &str,
-    verify_argv: Option<&[String]>,
-    expected_exit_code: i32,
-) -> Result<Option<lattice_workspace::promotion::VerificationResult>, String> {
-    let Some(argv) = verify_argv else {
-        // no verify config → pending_verification, no evidence.
-        return Ok(None);
-    };
-
-    if argv.is_empty() {
-        return Ok(None);
-    }
-
-    // Execute verification inside the Upper.
-    let prog = argv[0].as_str();
-    let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
-
-    let output = workspace
-        .exec_upper(handle, prog, &args)
-        .await
-        .map_err(|e| format!("verification exec failed: {e}"))?;
-
-    let exit_code = output.exit_code;
-    let passed = exit_code == expected_exit_code;
-    let summary = if passed {
-        "verification passed".to_string()
-    } else {
-        format!("verification failed: exit {exit_code} (expected {expected_exit_code})")
-    };
-
-    let result = lattice_workspace::promotion::VerificationResult::new(
-        candidate_oid.to_string(),
-        argv.to_vec(),
-        profile_hash.to_string(),
-        expected_exit_code,
-        Some(exit_code),
-        passed,
-        summary,
-    )
-    .map_err(|e| format!("verification result construction failed: {e}"))?;
-
-    Ok(Some(result))
 }
 
 /// Classify a lifecycle failure into a typed outcome.
@@ -333,19 +167,6 @@ pub enum LifecycleFailureKind {
     CancelledBeforeCandidate,
 }
 
-/// Build a successful promoted outcome.
-pub fn outcome_promoted(promoted_ref: String, candidate_exported: bool) -> TurnLifecycleOutcome {
-    TurnLifecycleOutcome {
-        status: TurnCommitStatus::Completed,
-        disposition: WorkspaceDisposition::Promoted,
-        messages: vec!["candidate promoted".to_string()],
-        resource_action: ResourceAction::ReleaseAfterCandidatePin,
-        candidate_exported,
-        verification_acquired: true,
-        promoted_ref_committed: Some(promoted_ref),
-    }
-}
-
 /// Build a workspace-less completed outcome (not_applicable).
 pub fn outcome_workspace_less() -> TurnLifecycleOutcome {
     TurnLifecycleOutcome {
@@ -361,108 +182,20 @@ pub fn outcome_workspace_less() -> TurnLifecycleOutcome {
 
 // ─── Durable Finalization ───────────────────────────────────────────────────
 
-/// Orchestrate crash-safe journal, retain/release, and commit for a terminal
-/// turn outcome.
+/// Commit a terminal turn outcome through the caller-supplied commit
+/// function.
 ///
-/// The exact order per resource action:
-/// - **Retain:** journal intent → retain snapshot → journal retained → commit →
-///   journal complete.
-/// - **ReleaseAfterCandidatePin:** candidate pin (caller prerequisite) →
-///   release snapshot → commit.
-/// - **Destroy:** destroy Upper → commit.
-///
-/// For `pending_conflict`: no snapshot is ever retained.
-/// Never rewrites a committed lifecycle row.
-///
-/// `prepared_commit_id` is the pre-allocated commit identity (UUID) used
-/// consistently across all journal records so they group as a single entry
-/// during crash recovery. The caller generates this before starting the
-/// finalization sequence.
-///
-/// `commit_fn` is called with the outcome and snapshot name to produce the
-/// immutable session commit ID. The caller is responsible for constructing
-/// `TurnCommitInput` with the correct lifecycle evidence.
-pub fn finalize_turn(
-    outcome: &TurnLifecycleOutcome,
-    session_id: &str,
-    snapshot_name: &str,
-    prepared_commit_id: &str,
-    journal: &mut SnapshotJournal,
-    reconciler: &mut dyn SnapshotReconciler,
-    commit_fn: impl FnOnce(&TurnLifecycleOutcome, &str) -> Result<String, String>,
-) -> Result<String, String> {
-    let commit_id = match outcome.resource_action {
-        ResourceAction::Retain => {
-            // journal intent BEFORE snapshot creation.
-            journal.append_record(SnapshotJournalRecord::Intent {
-                session_id: session_id.to_string(),
-                prepared_commit_id: prepared_commit_id.to_string(),
-                snapshot_name: snapshot_name.to_string(),
-            })?;
-
-            // Caller must have already performed the actual snapshot retention
-            // via UpperLease::retain. Journal the retained state BEFORE commit.
-            journal.append_record(SnapshotJournalRecord::Retained {
-                session_id: session_id.to_string(),
-                prepared_commit_id: prepared_commit_id.to_string(),
-                snapshot_name: snapshot_name.to_string(),
-            })?;
-
-            // Commit the session.
-            let cid = commit_fn(outcome, snapshot_name)?;
-
-            // Journal complete AFTER successful commit.
-            journal.append_record(SnapshotJournalRecord::SessionCommitted {
-                session_id: session_id.to_string(),
-                commit_id: cid.clone(),
-                snapshot_name: snapshot_name.to_string(),
-            })?;
-
-            cid
-        }
-        ResourceAction::ReleaseAfterCandidatePin => {
-            // candidate pin is durable before release (caller prerequisite).
-            // Release the snapshot now.
-            if reconciler.snapshot_exists(snapshot_name)? {
-                reconciler.release_snapshot(snapshot_name)?;
-            }
-
-            // Commit the session.
-            commit_fn(outcome, snapshot_name)?
-        }
-        ResourceAction::Destroy => {
-            // Destroy is handled by the caller via UpperLease::destroy.
-            // Just commit the session.
-            commit_fn(outcome, snapshot_name)?
-        }
-    };
-
-    Ok(commit_id)
-}
-
-/// Commit a promoted outcome with one retry on failure.
-///
-/// The promotion ref transaction is authoritative. If the first SQLite commit
-/// fails, the exact same `commit_fn` is retried once. After a second failure,
-/// the error is returned without attempting to roll back the Git refs.
-///
-/// Both attempts use the same prepared commit identity (same commit ID).
-pub fn commit_promoted_with_retry(
+/// #37 removed the Upper snapshot journal and retain/release paths; only the
+/// Direct-Local Destroy path remains in production, so this is a thin delegate
+/// over `commit_fn`. #40 removed the unused legacy `session_id` /
+/// `prepared_commit_id` parameters. Never rewrites a committed lifecycle row.
+pub fn finalize_turn<F>(
     outcome: &TurnLifecycleOutcome,
     snapshot_name: &str,
-    commit_fn: impl FnMut(&TurnLifecycleOutcome, &str) -> Result<String, String>,
-) -> Result<String, String> {
-    let mut commit_fn = commit_fn;
-    match commit_fn(outcome, snapshot_name) {
-        Ok(id) => Ok(id),
-        Err(first_error) => {
-            // retry once with the same prepared commit.
-            match commit_fn(outcome, snapshot_name) {
-                Ok(id) => Ok(id),
-                Err(second_error) => Err(format!(
-                    "promoted commit failed after retry: first={first_error}, second={second_error}"
-                )),
-            }
-        }
-    }
+    commit_fn: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&TurnLifecycleOutcome, &str) -> Result<String, String>,
+{
+    commit_fn(outcome, snapshot_name)
 }

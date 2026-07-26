@@ -3,17 +3,12 @@
 
 //! Default agent templates — generated text only, no filesystem writes.
 
-const WORKSPACE_SECTION: &str = r#"
-[workspace]
-# image = "docker.io/library/python:3.12-slim"  # set to a real OCI image or template name
-
+const LANCET_WORKSPACE_SECTION: &str = r#"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
 "#;
 
-const WORKSPACE_NOTE: &str = r#"# Every turn runs inside a microVM (MSB/Upper). Set [workspace].image to a
-# fully-qualified OCI image or an existing project template name before running.
-# [lancet.workspace].denied_write_patterns is a blacklist — paths matching any
+const LANCET_WORKSPACE_NOTE: &str = r#"# [lancet.workspace].denied_write_patterns is a blacklist — paths matching any
 # pattern are rejected.
 "#;
 
@@ -35,8 +30,7 @@ pub fn default_agent_template(name: &str, model: &str) -> String {
 #   [prompt] — system prompt (inline `system` or file `system_path`, not both)
 #   [tools]  — explicitly enabled tool names
 #   [llm.retry] — provider stream-open retry policy
-#   [workspace] — mandatory microVM (MSB/Upper) configuration
-{workspace_note}
+{lancet_workspace_note}
 schema_version = 1
 
 [agent]
@@ -53,10 +47,10 @@ enabled = ["session.todo_write"]
 max_retries = 3
 initial_delay_ms = 500
 max_delay_ms = 3000
-{workspace_section}
+{lancet_workspace_section}
 "#,
-        workspace_note = WORKSPACE_NOTE,
-        workspace_section = WORKSPACE_SECTION
+        lancet_workspace_note = LANCET_WORKSPACE_NOTE,
+        lancet_workspace_section = LANCET_WORKSPACE_SECTION
     )
 }
 
@@ -70,7 +64,7 @@ pub fn default_reader_template(name: &str, model: &str) -> String {
     format!(
         r#"# LATTICE Agent Profile (v1) — Reader
 # Read-only agent for code review and audit inspection.
-{workspace_note}
+{lancet_workspace_note}
 schema_version = 1
 
 [agent]
@@ -88,16 +82,14 @@ enabled = ["observe.workspace"]
 max_retries = 3
 initial_delay_ms = 500
 max_delay_ms = 3000
-{workspace_section}
+{lancet_workspace_section}
 "#,
-        workspace_note = WORKSPACE_NOTE,
-        workspace_section = WORKSPACE_SECTION
+        lancet_workspace_note = LANCET_WORKSPACE_NOTE,
+        lancet_workspace_section = LANCET_WORKSPACE_SECTION
     )
 }
 
 /// Generate a strict v1 `agent.toml` template for an editing agent.
-///
-/// Host-only planning tools until `[workspace]` is configured explicitly.
 pub fn default_editor_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
     let model = toml_string(model);
@@ -105,7 +97,7 @@ pub fn default_editor_template(name: &str, model: &str) -> String {
     format!(
         r#"# LATTICE Agent Profile (v1) — Editor
 # Editing agent for refactoring and fixing code.
-{workspace_note}
+{lancet_workspace_note}
 schema_version = 1
 
 [agent]
@@ -123,16 +115,14 @@ enabled = ["session.todo_write"]
 max_retries = 3
 initial_delay_ms = 500
 max_delay_ms = 3000
-{workspace_section}
+{lancet_workspace_section}
 "#,
-        workspace_note = WORKSPACE_NOTE,
-        workspace_section = WORKSPACE_SECTION
+        lancet_workspace_note = LANCET_WORKSPACE_NOTE,
+        lancet_workspace_section = LANCET_WORKSPACE_SECTION
     )
 }
 
 /// Generate a strict v1 `agent.toml` template for a development agent.
-///
-/// Host-only fetch/planning tools until `[workspace]` is configured explicitly.
 pub fn default_dev_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
     let model = toml_string(model);
@@ -140,7 +130,7 @@ pub fn default_dev_template(name: &str, model: &str) -> String {
     format!(
         r#"# LATTICE Agent Profile (v1) — Developer
 # Full development agent for coding, planning, and troubleshooting.
-{workspace_note}
+{lancet_workspace_note}
 schema_version = 1
 
 [agent]
@@ -158,10 +148,10 @@ enabled = ["session.todo_write", "fetch.web"]
 max_retries = 3
 initial_delay_ms = 500
 max_delay_ms = 3000
-{workspace_section}
+{lancet_workspace_section}
 "#,
-        workspace_note = WORKSPACE_NOTE,
-        workspace_section = WORKSPACE_SECTION
+        lancet_workspace_note = LANCET_WORKSPACE_NOTE,
+        lancet_workspace_section = LANCET_WORKSPACE_SECTION
     )
 }
 
@@ -247,14 +237,19 @@ mod tests {
     }
 
     #[test]
-    fn template_includes_mandatory_workspace_section() {
+    fn template_includes_lancet_workspace_policy_without_upper_workspace_section() {
         for toml_str in [
             default_agent_template("t", "sonnet"),
             default_reader_template("t", "sonnet"),
             default_editor_template("t", "sonnet"),
             default_dev_template("t", "sonnet"),
         ] {
-            assert!(toml_str.contains("[workspace]"));
+            // The Upper microVM [workspace] section was removed in #40; the
+            // strict schema now rejects it. Templates must not emit it.
+            assert!(
+                !toml_str.contains("\n[workspace]"),
+                "template must not contain the removed [workspace] section"
+            );
             assert!(
                 toml_str.contains("[lancet.workspace]"),
                 "template must include [lancet.workspace] policy section"
@@ -267,8 +262,6 @@ mod tests {
                 toml_str.contains(".git/**"),
                 "template must default to denying .git/**"
             );
-            // image is commented out — user must set it explicitly
-            assert!(!toml_str.contains("[workspace]\nimage ="));
         }
     }
 
@@ -338,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_profiles_have_mandatory_workspace_and_valid_tools() {
+    fn generated_profiles_parse_without_workspace_section_and_have_valid_tools() {
         for (name, toml_str) in [
             ("default", default_agent_template("t", "sonnet")),
             ("reader", default_reader_template("t", "sonnet")),
@@ -347,11 +340,6 @@ mod tests {
         ] {
             let profile: crate::schema::AgentProfile = toml::from_str(&toml_str)
                 .unwrap_or_else(|e| panic!("{name} template must parse: {e}"));
-            // [workspace] is mandatory and must be present
-            assert_eq!(
-                profile.workspace.cleanup_rounds, 3,
-                "{name} must have a parsed [workspace] section"
-            );
             for tool in &profile.tools.enabled {
                 assert!(
                     is_catalog_method(tool),

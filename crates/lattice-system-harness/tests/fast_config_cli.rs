@@ -8,7 +8,7 @@
 //! These scenarios drive the built `lattice` binary for the no-turn config
 //! surface (`models`, `resolve`, `doctor`). They assert public stdout/JSON
 //! fields and that no credential value ever appears in output - only env-var
-//! names. No turn is executed, so no Microsandbox is required. They supersede
+//! names. No turn is executed, so these need no turn runtime at all. They supersede
 //! the crate-internal `cli_diagnostics_models_*`, `cli_diagnostics_resolve_*`,
 //! and `doctor_*` unit tests in `lattice-cli` (see `docs/TEST-TRIAGE.md`).
 
@@ -40,6 +40,7 @@ fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
             },
         )
         .expect("drive lattice")
+        .output
 }
 
 fn ok_or_artifacts(
@@ -148,7 +149,7 @@ fn fast_models_auth_with_anthropic_key_lists_anthropic_aliases_only() {
     // lines; this one does, and rejects gpt-5.5 aliases whose credential is
     // absent.
     let spec = ScenarioSpec::fast("fast-models-auth-keyed");
-    let mut world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
     world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
     let out = run(&world, &spec, &["models", "--auth"]);
 
@@ -236,7 +237,7 @@ fn fast_resolve_text_shows_provider_and_model() {
 #[test]
 fn fast_resolve_json_includes_fields_and_excludes_secret_value() {
     let spec = ScenarioSpec::fast("fast-resolve-json");
-    let mut world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
     world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
     let out = run(&world, &spec, &["resolve", "sonnet", "--json"]);
 
@@ -282,7 +283,7 @@ fn fast_resolve_json_includes_fields_and_excludes_secret_value() {
 #[test]
 fn fast_resolve_verbose_includes_auth_env_and_credential_status() {
     let spec = ScenarioSpec::fast("fast-resolve-verbose");
-    let mut world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
     world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
     let out = run(&world, &spec, &["resolve", "sonnet", "--verbose"]);
 
@@ -319,7 +320,7 @@ fn fast_resolve_unknown_model_errors() {
 #[test]
 fn fast_doctor_text_lists_env_var_names_not_values() {
     let spec = ScenarioSpec::fast("fast-doctor-text");
-    let mut world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
     world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
     let out = run(&world, &spec, &["doctor"]);
 
@@ -335,7 +336,7 @@ fn fast_doctor_text_lists_env_var_names_not_values() {
 #[test]
 fn fast_doctor_json_does_not_leak_secrets() {
     let spec = ScenarioSpec::fast("fast-doctor-json");
-    let mut world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
     world.set_env("ANTHROPIC_API_KEY", SECRET_SENTINEL);
     let out = run(&world, &spec, &["--json", "doctor"]);
 
@@ -405,7 +406,7 @@ fn fast_models_lists_openai_compatible_when_configured() {
     // (and a model); without it the alias is absent, so `models` must list it
     // only when the user has configured the compatibility endpoint.
     let spec = ScenarioSpec::fast("fast-models-compat");
-    let mut world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
     world.set_env("OPENAI_COMPATIBLE_BASE_URL", "http://127.0.0.1:1/v1");
     world.set_env("OPENAI_COMPATIBLE_API_KEY", SECRET_SENTINEL);
     world.set_env("OPENAI_COMPATIBLE_MODEL", "compat-model");

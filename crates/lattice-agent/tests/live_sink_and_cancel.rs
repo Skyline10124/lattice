@@ -1316,3 +1316,77 @@ async fn scenario_08d_expired_deadline_wins_over_ready_stream() {
         "live events must match result.events on expired-deadline timeout"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Stall-cancel: a provider stream that never produces events must still
+// observe a cooperative cancel flag flip (SIGINT path). Exercises the
+// cancel-poll race added for #24 slice 5.
+// ---------------------------------------------------------------------------
+
+/// LLM client whose stream never produces any events (simulates a stalled
+/// provider). `chat` is unreachable; `stream_chat` returns a pending stream.
+struct StalledLlm;
+
+#[async_trait::async_trait]
+impl LlmClient for StalledLlm {
+    async fn chat(
+        &self,
+        _request: lattice_llm::ChatRequest,
+    ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        unreachable!("stream-only fake")
+    }
+
+    async fn stream_chat(
+        &self,
+        _request: lattice_llm::ChatRequest,
+    ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        // A stream that never yields and never ends.
+        let stream = futures::stream::pending::<LlmEvent>();
+        Ok(Box::pin(stream))
+    }
+}
+
+#[tokio::test]
+async fn cancel_during_stalled_stream_terminates_cancelled() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let llm: Arc<dyn LlmClient> = Arc::new(StalledLlm);
+    let executor = Arc::new(FakeToolExecutor::new(vec![]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: executor,
+    });
+
+    let request = make_request_with_cancel("hello", cancel.clone());
+
+    // Flip the cancel flag shortly after the turn starts so the stream is
+    // already stalled when the cancel poll observes it.
+    let cancel_for_task = cancel.clone();
+    let flipper = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_for_task.store(true, Ordering::Relaxed);
+    });
+
+    let (result, _received) = drive_run_turn_live(&loop_inst, request, 32).await;
+    flipper.await.unwrap();
+
+    assert_eq!(result.status, AgentTurnStatus::Cancelled);
+    assert_eq!(
+        result.terminal_reason,
+        Some("cancelled by caller".to_string()),
+        "stalled-stream cancel must report the cooperative cancel reason"
+    );
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
+        "ModelStarted must be emitted before the stall begins"
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::TokenDelta { .. })),
+        "stalled stream must not have produced any tokens"
+    );
+}

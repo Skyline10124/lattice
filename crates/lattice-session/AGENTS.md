@@ -7,8 +7,8 @@ Crate-local guidance for `lattice-session`.
 This crate owns the conversation graph contract: sessions, transcript messages,
 immutable turn commits, branch refs, detached HEAD state, graph diffs, usage
 records, and the **git-backed** session graph store (`GitSessionGraphStore`).
-The previous SQLite-backed store was retired; `src/migrate/` provides the
-one-shot SQLite→Git migration path for legacy stores.
+The previous SQLite-backed store and its one-shot SQLite→Git migration path
+were retired; the git-backed store is the only production path (gix).
 
 ## Sub-Architecture
 
@@ -21,16 +21,16 @@ one-shot SQLite→Git migration path for legacy stores.
   (`.lattice/sessions/<id>/meta.json`), create/open/list/status logic.
 - `src/git_graph/commit.rs` owns Git tree building, commit creation, transcript
   reconstruction via Revwalk, and manifest serialization.
-- `src/git_graph/refs.rs` owns branch, checkout, reset, and diff via git2 ref
+- `src/git_graph/refs.rs` owns branch, checkout, reset, and diff via gix ref
   APIs and `merge_base`.
-- `src/git_graph/helpers.rs` owns shared git2 tree/blob/sidecar helpers and
-  operational state (`ops/<oid>.json`) I/O.
+- `src/git_graph/helpers.rs` owns shared gix tree/blob/sidecar helpers.
 - `src/git_graph/tests/` owns Git-backed persistence and topology regression
   coverage.
-- `src/migrate/` owns the one-shot SQLite→Git session graph migration
-  (invoked via `lattice session migrate`).
-- `src/promotion.rs` owns graph-diff/promotion helpers consumed by
-  `lattice-workspace` multi-ref promotion.
+- `src/test_utils.rs` (feature `test-utils`) owns shared gix fixture helpers
+  for downstream crate tests.
+- #40 removed `src/promotion.rs` (promoted-commit builder) and the
+  `set_snapshot_lost`/`get_snapshot_lost` retained-snapshot ops-state chain
+  (`ops/<oid>.json`); both only served the deleted Upper promotion path.
 
 ## Boundaries
 
@@ -44,8 +44,8 @@ one-shot SQLite→Git migration path for legacy stores.
   under `refs/lattice/candidates/<id>/<turn>`. Do not add remote push refspecs
   for `refs/lattice/**`.
 - Mutable session metadata lives in sidecar files, never in Git objects.
-- Multi-ref promotion transactions remain in `lattice-workspace`; the Git store
-  performs single-ref operations only.
+- The Git store performs single-ref operations only; the `lattice-workspace`
+  multi-ref promotion transaction surface was deleted with that crate in #40.
 
 ## Recent Issues
 
@@ -65,8 +65,8 @@ one-shot SQLite→Git migration path for legacy stores.
 - Keep Git store topology tests for linear, merge, diamond, branch reset, and
   detached HEAD paths when changing transcript or ref logic.
 - Keep sidecar I/O atomic (temp + rename) and test crash-recovery paths.
-- If a SQLite legacy store reappears as a migration source, keep migration
-  coverage in `src/migrate/` rather than reviving `sqlite_graph/`.
+- Do not reintroduce SQLite session storage or a git2 dependency; keep the
+  store on gix.
 
 ## Record Maintenance
 

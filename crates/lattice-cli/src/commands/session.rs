@@ -13,7 +13,6 @@ use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
 use lattice_api::{CreateSessionRequest, GraphHead, OpenSessionRequest, SessionApi};
-use lattice_session::{MigrateOptions, migrate, migrate::find_legacy_session_db};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
@@ -35,10 +34,6 @@ pub(crate) fn default_session_dir() -> PathBuf {
 
 fn session_api() -> Result<SessionApi> {
     let git_repo_path = default_session_dir().join("sessions.git");
-    if let Err(msg) = lattice_api::check_migration_guard(&git_repo_path) {
-        eprintln!("{msg}");
-        std::process::exit(1);
-    }
     Ok(SessionApi::git(git_repo_path))
 }
 
@@ -115,40 +110,6 @@ pub enum SessionAction {
         /// Commit id to reset to.
         target: String,
     },
-    /// Resume a pending turn from a cold snapshot (cold resume).
-    Resume {
-        /// Session id containing the pending turn to resume.
-        session_id: String,
-    },
-    /// Prune retained snapshots scoped to a session (manual prune).
-    PruneSnapshots {
-        /// Session id whose snapshots should be pruned.
-        session_id: String,
-    },
-    /// One-shot SQLite→Git session graph migration.
-    ///
-    /// Reads the legacy SQLite session DB, writes equivalent Git session commits
-    /// and refs into a standalone bare repository, verifies equivalence, then
-    /// archives the source. Restartable and idempotent.
-    Migrate {
-        /// Read + plan only; perform no writes to the target repo.
-        #[arg(long)]
-        dry_run: bool,
-        /// Re-run equivalence checks against an already-written target
-        /// without re-writing.
-        #[arg(long)]
-        verify_only: bool,
-        /// Override the source legacy SQLite DB path (default: auto-detected).
-        #[arg(long)]
-        source: Option<PathBuf>,
-        /// Override the target bare repo path.
-        #[arg(long)]
-        target: Option<PathBuf>,
-        /// Physically delete the source DB after successful
-        /// migration instead of archiving it (default is archive).
-        #[arg(long)]
-        purge_source: bool,
-    },
 }
 
 /// Run the `session` command.
@@ -157,19 +118,6 @@ pub async fn run(
     json: bool,
     verbose: bool,
 ) -> Result<std::process::ExitCode> {
-    // Migrate operates below the SessionApi (direct SQLite read + Git write),
-    // so handle it before constructing the default API.
-    if let SessionAction::Migrate {
-        dry_run,
-        verify_only,
-        source,
-        target,
-        purge_source,
-    } = action
-    {
-        return cmd_migrate(dry_run, verify_only, source, target, purge_source, json);
-    }
-
     let api = session_api()?;
     match action {
         SessionAction::New {
@@ -186,14 +134,6 @@ pub async fn run(
         }
         SessionAction::Send { session_id, prompt } => {
             let exit = cmd_send_api(&api, &session_id, prompt, json, verbose).await;
-            Ok(exit)
-        }
-        SessionAction::Resume { session_id } => {
-            let exit = cmd_resume_api(&api, &session_id, json).await;
-            Ok(exit)
-        }
-        SessionAction::PruneSnapshots { session_id } => {
-            let exit = cmd_prune_snapshots_api(&api, &session_id, json).await;
             Ok(exit)
         }
         other => {
@@ -241,16 +181,6 @@ pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) 
         SessionAction::Reset { session_id, target } => {
             cmd_reset_api(api, &session_id, &target, json)?
         }
-        SessionAction::Resume { .. } | SessionAction::PruneSnapshots { .. } => {
-            return Err(anyhow::anyhow!(
-                "resume and prune-snapshots require the async dispatcher"
-            ));
-        }
-        SessionAction::Migrate { .. } => {
-            return Err(anyhow::anyhow!(
-                "session migrate is handled by the async production runner"
-            ));
-        }
     }
     Ok(())
 }
@@ -266,84 +196,6 @@ fn load_agent_checked(agent: &str) -> Result<lattice_api::LoadedAgentProfile> {
         ));
     }
     Ok(loaded)
-}
-
-/// Run the `session migrate` subcommand.
-///
-/// Thin caller over `lattice_session::migrate::run_migration`. Constructs
-/// `MigrateOptions` from the parsed flags + default paths, runs the pipeline,
-/// and prints the `MigrationResult`. Default source is discovered via
-/// `find_legacy_session_db(default_session_dir())` (probes session_v12.db,
-/// session_v11.db, session.db, sessions.db); default target is
-/// `default_session_dir()/sessions.git` (standalone bare repo).
-fn cmd_migrate(
-    dry_run: bool,
-    verify_only: bool,
-    source: Option<PathBuf>,
-    target: Option<PathBuf>,
-    purge_source: bool,
-    json: bool,
-) -> Result<std::process::ExitCode> {
-    let session_dir = default_session_dir();
-    // probe for the real legacy DB filename instead of hardcoding
-    // sessions.db. If no legacy DB is found, fall back to the session_v12.db
-    // path so the downstream "source not found" error names a real filename.
-    let source_db = source.unwrap_or_else(|| {
-        find_legacy_session_db(&session_dir).unwrap_or_else(|| session_dir.join("session_v12.db"))
-    });
-    let target_repo = target.unwrap_or_else(|| session_dir.join("sessions.git"));
-
-    let opts = MigrateOptions {
-        source_db,
-        target_repo,
-        dry_run,
-        verify_only,
-        purge_source,
-    };
-
-    let result = migrate::run_migration(&opts)?;
-
-    if json {
-        // build the object with serde_json so source_archived serializes
-        // to a real JSON `null` (not the string "null") when absent, and any
-        // path is properly escaped. Hand-built JSON could emit invalid output
-        // for a path containing a quote or backslash.
-        let value = serde_json::json!({
-            "sessions_migrated": result.sessions_migrated,
-            "commits_migrated": result.commits_migrated,
-            "refs_migrated": result.refs_migrated,
-            "verification_passed": result.verification_passed,
-            "source_archived": result
-                .source_archived
-                .as_ref()
-                .map(|p| p.to_string_lossy()),
-        });
-        println!("{}", serde_json::to_string(&value)?);
-    } else {
-        println!("sessions migrated: {}", result.sessions_migrated);
-        println!("commits migrated:  {}", result.commits_migrated);
-        println!("refs migrated:     {}", result.refs_migrated);
-        println!(
-            "verification:      {}",
-            if result.verification_passed {
-                "passed"
-            } else {
-                "failed"
-            }
-        );
-        match &result.source_archived {
-            Some(path) => println!("source archived:   {}", path.display()),
-            None if purge_source => println!("source purged"),
-            None => println!("source:            (not archived)"),
-        }
-    }
-
-    if result.verification_passed {
-        Ok(std::process::ExitCode::SUCCESS)
-    } else {
-        // Verification failure (or dry-run) — non-zero so scripts can detect.
-        Ok(std::process::ExitCode::from(1))
-    }
 }
 
 fn cmd_new_api(
@@ -738,133 +590,6 @@ fn cmd_reset_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -
     Ok(())
 }
 
-/// Resume a pending turn from a cold snapshot.
-///
-/// Calls the typed API (`lattice_api::resume_turn`) and renders the resulting
-/// [`TurnCommit`] in JSON or human mode. Does not implement runtime logic locally.
-async fn cmd_resume_api(api: &SessionApi, session_id: &str, json: bool) -> std::process::ExitCode {
-    let request = lattice_api::ResumeTurnRequest {
-        session_id: session_id.to_string(),
-        loaded_profile: None,
-        cancel_flag: None,
-        workspace_override: None,
-    };
-
-    match lattice_api::resume_turn(api, request).await {
-        Ok(commit) => {
-            if json {
-                let value = serde_json::json!({
-                    "type": "turn_committed",
-                    "session_id": commit.session_id,
-                    "commit_id": commit.commit_id,
-                    "status": format!("{:?}", commit.status),
-                    "disposition": format!("{:?}", commit.disposition),
-                    "agent": commit.agent_name,
-                    "source_commit_id": commit.parent_ids.first().cloned().unwrap_or_default(),
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&value).unwrap_or_default()
-                );
-            } else {
-                println!(
-                    "{} Resumed session {} \u{2192} commit {} ({} / {})",
-                    "\u{2713}".green(),
-                    display_id(session_id).cyan(),
-                    display_id(&commit.commit_id).bold(),
-                    format!("{:?}", commit.status).to_lowercase(),
-                    format!("{:?}", commit.disposition).to_lowercase(),
-                );
-            }
-            std::process::ExitCode::SUCCESS
-        }
-        Err(e) => {
-            let exit_code = if matches!(&e, lattice_api::ApiError::NotFound(_)) {
-                2
-            } else {
-                1
-            };
-            if json {
-                let value = serde_json::json!({
-                    "type": "error",
-                    "session_id": session_id,
-                    "error": format!("{e:#}"),
-                });
-                eprintln!(
-                    "{}",
-                    serde_json::to_string_pretty(&value).unwrap_or_default()
-                );
-            } else {
-                eprintln!("{}: {:#}", "error".red(), e);
-            }
-            std::process::ExitCode::from(exit_code)
-        }
-    }
-}
-
-/// Prune retained snapshots scoped to a session.
-///
-/// Calls the typed API (`lattice_api::prune_session_snapshots`) and renders
-/// the exact released/skipped/missing counts. Requires a workspace override
-/// in production; without it the API returns an error.
-async fn cmd_prune_snapshots_api(
-    api: &SessionApi,
-    session_id: &str,
-    json: bool,
-) -> std::process::ExitCode {
-    let request = lattice_api::PruneSnapshotsRequest {
-        session_id: session_id.to_string(),
-        workspace_override: None,
-    };
-
-    match lattice_api::prune_session_snapshots(api, request).await {
-        Ok(result) => {
-            let released_count = result.released.len();
-            let skipped_count = result.skipped.len();
-            let missing_count = result.already_missing.len();
-            if json {
-                let value = serde_json::json!({
-                    "type": "prune_complete",
-                    "session_id": session_id,
-                    "released": released_count,
-                    "skipped": skipped_count,
-                    "already_missing": missing_count,
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&value).unwrap_or_default()
-                );
-            } else {
-                println!(
-                    "{} Pruned session {} snapshots: {} released, {} skipped, {} already missing",
-                    "\u{2713}".green(),
-                    display_id(session_id).cyan(),
-                    released_count,
-                    skipped_count,
-                    missing_count,
-                );
-            }
-            std::process::ExitCode::SUCCESS
-        }
-        Err(e) => {
-            if json {
-                let value = serde_json::json!({
-                    "type": "error",
-                    "session_id": session_id,
-                    "error": format!("{e:#}"),
-                });
-                eprintln!(
-                    "{}",
-                    serde_json::to_string_pretty(&value).unwrap_or_default()
-                );
-            } else {
-                eprintln!("{}: {:#}", "error".red(), e);
-            }
-            std::process::ExitCode::from(1)
-        }
-    }
-}
-
 fn display_id(id: &str) -> String {
     if id.len() > 8 {
         let end = id.char_indices().nth(8).map(|(i, _)| i).unwrap_or(id.len());
@@ -1185,39 +910,6 @@ mod session_cli {
     }
 
     #[test]
-    fn migrate_subcommand_parses_with_flags() {
-        // `migrate` is a real subcommand with --dry-run,
-        // --verify-only, --source, --target, --purge-source.
-        let action = try_parse(&[
-            "migrate",
-            "--dry-run",
-            "--verify-only",
-            "--source",
-            "/tmp/s.db",
-            "--target",
-            "/tmp/r.git",
-            "--purge-source",
-        ]);
-        match action {
-            Ok(SessionAction::Migrate {
-                dry_run,
-                verify_only,
-                source,
-                target,
-                purge_source,
-            }) => {
-                assert!(dry_run);
-                assert!(verify_only);
-                assert_eq!(source.as_deref(), Some(std::path::Path::new("/tmp/s.db")));
-                assert_eq!(target.as_deref(), Some(std::path::Path::new("/tmp/r.git")));
-                assert!(purge_source);
-            }
-            Ok(_) => panic!("expected Migrate, got a different variant"),
-            Err(e) => panic!("expected Migrate, got parse error: {e}"),
-        }
-    }
-
-    #[test]
     fn summarize_short_text_unchanged() {
         assert_eq!(summarize("hello world", 120), "hello world");
     }
@@ -1267,52 +959,6 @@ mod session_cli {
         assert!(result.ends_with(".."));
     }
 
-    // ─── resume and prune-snapshots source tests (36-15 Task 2 RED) ──────
-
-    /// Helper: return only the implementation portion of session.rs
-    /// (lines before #[cfg(test)] mod session_cli), which excludes test
-    /// assertions and avoids self-matching in source scans.
-    fn impl_source() -> String {
-        let full = include_str!("session.rs");
-        // Take only lines before the first `mod session_cli` test module
-        // to avoid matching test assertion strings in source scans.
-        let mut lines = Vec::new();
-        for line in full.lines() {
-            if line.starts_with("mod session_cli {") {
-                break;
-            }
-            lines.push(line);
-        }
-        lines.join("\n")
-    }
-
-    #[test]
-    fn session_resume_variant_exists_in_enum() {
-        let src = impl_source();
-        assert!(
-            src.contains("Resume {") || src.contains("Resume{"),
-            "SessionAction enum must define a Resume variant"
-        );
-    }
-
-    #[test]
-    fn session_prune_handler_function_exists() {
-        let src = impl_source();
-        assert!(
-            src.contains("fn cmd_prune_snapshots_api"),
-            "session.rs must define a cmd_prune_snapshots_api handler function"
-        );
-    }
-
-    #[test]
-    fn session_prune_calls_typed_api() {
-        let src = impl_source();
-        assert!(
-            src.contains("prune_session_snapshots("),
-            "cmd_prune_snapshots_api must call the typed API prune_session_snapshots()"
-        );
-    }
-
     // ─── project_branch parser tests (36-15 Task 1 RED) ───────────────────
 
     #[test]
@@ -1358,268 +1004,6 @@ mod session_cli {
     }
 }
 
-// Scoped session regression tests: prove that checkout, branch, reset,
-// diff, and branch listing are scoped to the addressed session_id.
-
-#[cfg(test)]
-mod d25_scoped_session {
-    use super::*;
-    use lattice_api::SessionApi;
-    use lattice_session::{
-        GitSessionGraphStore, GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
-    };
-
-    /// Seed a session with N committed turns using the graph store directly.
-    fn seed_session(
-        store: &GitSessionGraphStore,
-        session_id: &str,
-        n: usize,
-        label: Option<&str>,
-    ) -> Vec<String> {
-        store
-            .create_session(session_id, label, "coder", "main")
-            .expect("create_session");
-
-        let mut commit_ids: Vec<String> = Vec::new();
-        for i in 0..n {
-            let parent_ids = if i == 0 {
-                vec![]
-            } else {
-                vec![commit_ids.last().unwrap().clone()]
-            };
-            let messages = vec![
-                GraphMessage {
-                    role: "user".to_string(),
-                    content: format!("{session_id} turn {i}"),
-                    reasoning_content: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                },
-                GraphMessage {
-                    role: "assistant".to_string(),
-                    content: format!("{session_id} response {i}"),
-                    reasoning_content: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                },
-            ];
-            let input = TurnCommitInput {
-                session_id: session_id.to_string(),
-                parent_ids,
-                messages,
-                agent_name: "coder".to_string(),
-                profile_snapshot_hash: "test-profile".to_string(),
-                profile_snapshot_json: "{}".to_string(),
-                model: "sonnet".to_string(),
-                provider: "anthropic".to_string(),
-                status: TurnCommitStatus::Completed,
-                disposition: lattice_session::WorkspaceDisposition::NotApplicable,
-                lifecycle: None,
-                commit_message: format!("Turn {i}"),
-                usage: None,
-                terminal_reason: None,
-            };
-            let commit = store.commit_turn(input).expect("commit_turn");
-            commit_ids.push(commit.commit_id);
-        }
-        commit_ids
-    }
-
-    /// Set up two sessions (sess-a, sess-b) each with 3 committed turns.
-    /// Returns (tempdir guard, SessionApi, sess-a commit ids, sess-b commit ids).
-    fn setup_two_sessions() -> (tempfile::TempDir, SessionApi, Vec<String>, Vec<String>) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = GitSessionGraphStore::new(dir.path());
-        let commits_a = seed_session(&store, "sess-a", 3, Some("Session A"));
-        let commits_b = seed_session(&store, "sess-b", 3, Some("Session B"));
-        drop(store);
-        let api = SessionApi::git(dir.path());
-        (dir, api, commits_a, commits_b)
-    }
-
-    #[test]
-    fn branch_listing_reads_only_addressed_session_refs() {
-        let (_dir, api, commits_a, _commits_b) = setup_two_sessions();
-
-        // Create same-named branch in both sessions, pointing to different commits.
-        api.branch("sess-a", "feature", Some(&commits_a[0]))
-            .unwrap();
-        api.branch("sess-b", "feature", Some(&_commits_b[1]))
-            .unwrap();
-
-        // Branch listing for sess-a should only see sess-a's refs.
-        let action = SessionAction::Branch {
-            session_id: "sess-a".to_string(),
-            name: None,
-            from: None,
-        };
-        run_with_api(&api, action, false).unwrap();
-
-        // Verify sess-a feature points to commits_a[0].
-        let status_a = api.status("sess-a").unwrap();
-        let feature_a = status_a
-            .branches
-            .iter()
-            .find(|b| b.name == "feature")
-            .expect("sess-a should have feature branch");
-        assert_eq!(
-            feature_a.commit_id,
-            Some(commits_a[0].clone()),
-            "sess-a feature should point to sess-a's first commit"
-        );
-
-        // Verify sess-b feature still points to commits_b[1].
-        let status_b = api.status("sess-b").unwrap();
-        let feature_b = status_b
-            .branches
-            .iter()
-            .find(|b| b.name == "feature")
-            .expect("sess-b should have feature branch");
-        assert_eq!(
-            feature_b.commit_id,
-            Some(_commits_b[1].clone()),
-            "sess-b feature should be unchanged"
-        );
-    }
-
-    #[test]
-    fn checkout_changes_only_addressed_session_head() {
-        let (_dir, api, commits_a, _commits_b) = setup_two_sessions();
-
-        // Create feature branch in sess-a.
-        api.branch("sess-a", "feature", Some(&commits_a[0]))
-            .unwrap();
-
-        // Checkout feature in sess-a.
-        let action = SessionAction::Checkout {
-            session_id: "sess-a".to_string(),
-            target: "feature".to_string(),
-        };
-        run_with_api(&api, action, false).unwrap();
-
-        // Verify sess-a HEAD is on feature.
-        let status_a = api.status("sess-a").unwrap();
-        match &status_a.head {
-            GraphHead::Branch { name } => assert_eq!(name, "feature"),
-            other => panic!("expected Branch HEAD for sess-a, got {:?}", other),
-        }
-
-        // Verify sess-b HEAD is still on main (unchanged).
-        let status_b = api.status("sess-b").unwrap();
-        match &status_b.head {
-            GraphHead::Branch { name } => assert_eq!(name, "main"),
-            other => panic!("expected Branch HEAD for sess-b, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn branch_create_affects_only_addressed_session() {
-        let (_dir, api, commits_a, _commits_b) = setup_two_sessions();
-
-        // Create "work" branch in sess-a from first commit.
-        let action = SessionAction::Branch {
-            session_id: "sess-a".to_string(),
-            name: Some("work".to_string()),
-            from: Some(commits_a[0].clone()),
-        };
-        run_with_api(&api, action, false).unwrap();
-
-        // Verify sess-a has "work" branch.
-        let status_a = api.status("sess-a").unwrap();
-        assert!(
-            status_a.branches.iter().any(|b| b.name == "work"),
-            "sess-a should have 'work' branch"
-        );
-
-        // Verify sess-b does NOT have "work" branch.
-        let status_b = api.status("sess-b").unwrap();
-        assert!(
-            !status_b.branches.iter().any(|b| b.name == "work"),
-            "sess-b should NOT have 'work' branch"
-        );
-    }
-
-    #[test]
-    fn reset_changes_only_addressed_session_branch_pointer() {
-        let (_dir, api, commits_a, commits_b) = setup_two_sessions();
-
-        // Record sess-b HEAD before reset.
-        let status_b_before = api.status("sess-b").unwrap();
-        let head_b_before = status_b_before.current_commit_id.clone();
-
-        // Reset sess-a to first commit.
-        let action = SessionAction::Reset {
-            session_id: "sess-a".to_string(),
-            target: commits_a[0].clone(),
-        };
-        run_with_api(&api, action, false).unwrap();
-
-        // Verify sess-a HEAD changed to first commit.
-        let status_a = api.status("sess-a").unwrap();
-        assert_eq!(
-            status_a.current_commit_id,
-            Some(commits_a[0].clone()),
-            "sess-a HEAD should be reset to first commit"
-        );
-
-        // Verify sess-b HEAD is unchanged.
-        let status_b_after = api.status("sess-b").unwrap();
-        assert_eq!(
-            status_b_after.current_commit_id, head_b_before,
-            "sess-b HEAD should be unchanged after sess-a reset"
-        );
-
-        // Verify sess-b current commit is still its last commit.
-        assert_eq!(
-            status_b_after.current_commit_id,
-            Some(commits_b.last().unwrap().clone())
-        );
-    }
-
-    #[test]
-    fn diff_resolves_refs_inside_addressed_session_only() {
-        let (_dir, api, commits_a, commits_b) = setup_two_sessions();
-
-        // Create same-named "feature" branch in both sessions from different commits.
-        api.branch("sess-a", "feature", Some(&commits_a[0]))
-            .unwrap();
-        api.branch("sess-b", "feature", Some(&commits_b[1]))
-            .unwrap();
-
-        // Diff sess-a: main vs feature.
-        let action = SessionAction::Diff {
-            session_id: "sess-a".to_string(),
-            from: "main".to_string(),
-            to: "feature".to_string(),
-        };
-        run_with_api(&api, action, false).unwrap();
-
-        // Verify the diff resolved within sess-a.
-        let diff = api.diff("sess-a", "main", "feature").unwrap();
-        assert_eq!(
-            diff.from_commit_id, commits_a[2],
-            "from should be sess-a main HEAD"
-        );
-        assert_eq!(
-            diff.to_commit_id, commits_a[0],
-            "to should be sess-a feature commit"
-        );
-
-        // Verify sess-b's feature is a different commit (proving isolation).
-        let diff_b = api.diff("sess-b", "main", "feature").unwrap();
-        assert_eq!(
-            diff_b.to_commit_id, commits_b[1],
-            "sess-b feature should resolve to sess-b's commit"
-        );
-        assert_ne!(
-            diff.to_commit_id, diff_b.to_commit_id,
-            "same branch name should resolve to different commits in different sessions"
-        );
-    }
-}
-
 // ─── project_branch persistence and output tests (36-15 Task 1 RED) ──────
 
 #[cfg(test)]
@@ -1632,26 +1016,6 @@ mod project_branch_tests {
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         SessionApi::git(dir)
-    }
-
-    #[test]
-    fn project_branch_creation_json_output_includes_branch() {
-        let api = temp_api("json-output");
-        // Seed a session with a known project_branch via the store.
-        // The cmd_new_api function will be updated to accept project_branch.
-        // For now, this test verifies the expected behavior after implementation.
-        let created = api
-            .create_session(lattice_api::CreateSessionRequest {
-                label: None,
-                active_agent: "coder".to_string(),
-                project_branch: "feature/test".to_string(),
-            })
-            .expect("create session");
-        assert_eq!(
-            created.project_target_branch.as_deref(),
-            Some("feature/test"),
-            "created session should carry project_branch"
-        );
     }
 
     #[test]
@@ -1692,30 +1056,6 @@ mod project_branch_tests {
             found.unwrap().project_target_branch.as_deref(),
             Some("release/v1"),
             "list output should expose project_target_branch"
-        );
-    }
-
-    #[test]
-    fn project_branch_persists_through_reopen() {
-        let api = temp_api("reopen");
-        let created = api
-            .create_session(lattice_api::CreateSessionRequest {
-                label: None,
-                active_agent: "coder".to_string(),
-                project_branch: "feature/persist".to_string(),
-            })
-            .expect("create session");
-
-        // Reopen by ID
-        let opened = api
-            .open_session(lattice_api::OpenSessionRequest {
-                id: created.session_id.clone(),
-            })
-            .expect("open session");
-        assert_eq!(
-            opened.project_target_branch.as_deref(),
-            Some("feature/persist"),
-            "reopened session should retain project_branch"
         );
     }
 }

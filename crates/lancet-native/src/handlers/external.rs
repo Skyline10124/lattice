@@ -9,13 +9,15 @@ use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::executor::web::fetch_url;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::policy::budget::BudgetExhausted;
 use lancet_authority::policy::network::validate_fetch_url;
 use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_protocol::effect_types::ImpactKind;
-use lancet_protocol::error::ExecutionErrorData;
+use lancet_protocol::error::{EffectErrorData, ExecutionErrorData};
+use lancet_protocol::policy::CepMode;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use reqwest::redirect::Policy;
 use serde_json::json;
@@ -56,6 +58,40 @@ async fn handle_fetch_as(
             return Err(err);
         }
     };
+
+    // Fail closed before outbound I/O when Enforce mode's FetchUrl region would
+    // reject the host. `allow_public_https` + empty `allowed_hosts` can pass URL
+    // shape validation, but authorized hosts still come from `allowed_hosts`.
+    // Post-dispatch region checking remains defense in depth after a successful
+    // handler.
+    if ctx.cep_mode == CepMode::Enforce {
+        let host = validated.host.clone();
+        match ctx.authorized_region.get() {
+            Some(region) => {
+                if let Err(err) = ensure_fetch_host_authorized(method, &host, &region) {
+                    emit_denial_metadata(&ctx, &params.url, false, method).await;
+                    return Err(err);
+                }
+            }
+            None => {
+                emit_denial_metadata(&ctx, &params.url, false, method).await;
+                return Err(CepError::new(
+                    CepErrorCode::EffectViolation,
+                    format!("authorized region missing before fetch.web outbound for {method}"),
+                    CepErrorData::Effect(Box::new(EffectErrorData {
+                        method: method.to_string(),
+                        declared_effect: Fetch::EFFECT.kinds.0.to_vec(),
+                        authorized_effect: vec![],
+                        observed_effects: vec![],
+                        violations: vec![
+                            "handler missing authorized region before outbound fetch".to_string(),
+                        ],
+                    })),
+                    Retriability::Permanent,
+                ));
+            }
+        }
+    }
 
     let max_bytes = policy.max_web_response_bytes;
     let pin_public = !validated.use_localhost_client;
@@ -125,6 +161,36 @@ fn http_execution_error(message: String) -> CepError {
     )
 }
 
+fn ensure_fetch_host_authorized(
+    method: &str,
+    host: &str,
+    region: &AuthorizedEffectRegion,
+) -> Result<(), CepError> {
+    let prospective = ObservedEffect {
+        kind: ImpactKind::ExternalObservation,
+        scope: ObservedScope::Host(host.to_string()),
+        required_capability: RequiredCapability::FetchUrl,
+        source: EffectSource::HandlerBackend,
+    };
+    if region.contains(&prospective) {
+        return Ok(());
+    }
+    Err(CepError::new(
+        CepErrorCode::EffectViolation,
+        format!("{method}: host '{host}' exceeds authorized region (1 violation)"),
+        CepErrorData::Effect(Box::new(EffectErrorData {
+            method: method.to_string(),
+            declared_effect: Fetch::EFFECT.kinds.0.to_vec(),
+            authorized_effect: region.kinds.iter().cloned().collect(),
+            observed_effects: vec![ImpactKind::ExternalObservation],
+            violations: vec![format!(
+                "ExternalObservation@Host({host}) exceeds authorized region"
+            )],
+        })),
+        Retriability::Permanent,
+    ))
+}
+
 async fn emit_success_metadata(
     ctx: &HandlerContext,
     request_url: &str,
@@ -143,7 +209,6 @@ async fn emit_success_metadata(
         "response_size_known": response_size_known,
         "truncated": truncated,
         "policy_enforced": true,
-        "backend_invoked": true,
         "budget_charged": bytes_returned,
     });
     ctx.record_durable_metadata(metadata.clone());
@@ -158,15 +223,14 @@ async fn emit_success_metadata(
 async fn emit_denial_metadata(
     ctx: &HandlerContext,
     request_url: &str,
-    backend_invoked: bool,
+    network_attempted: bool,
     method: &'static str,
 ) {
     let metadata = json!({
         "method": method,
         "request_url": request_url,
-        "denial_source": if backend_invoked { "backend" } else { "cep_policy" },
+        "denial_source": if network_attempted { "network" } else { "cep_policy" },
         "policy_enforced": true,
-        "backend_invoked": backend_invoked,
     });
     ctx.record_durable_metadata(metadata.clone());
     ctx.events
@@ -188,7 +252,6 @@ async fn emit_budget_denial_metadata(
         "request_url": request_url,
         "denial_source": "cep_budget",
         "policy_enforced": true,
-        "backend_invoked": true,
         "budget_limit": budget_err.limit,
         "budget_requested": budget_err.requested,
         "budget_remaining": budget_err.remaining,
@@ -242,7 +305,7 @@ mod tests {
                 call_id: 7,
                 events: EventSink::new(event_tx, 7),
                 cancellation: Cancellation::new(cancel_rx),
-                cep_context,
+                cep_context: Arc::clone(&cep_context),
                 turn_id: "test-turn".into(),
                 durable_metadata:
                     crate::server::call_durable_metadata::CallDurableMetadata::default(),
@@ -257,14 +320,9 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                execution: crate::execution_backend::ExecutionRouting {
-                    backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
-                    upper: crate::execution_backend::UpperContext {
-                        execution_backend: "null".into(),
-                        upper_workspace_id: "null".into(),
-                    },
-                },
-                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+                workspace: Arc::new(crate::workspace::LocalWorkspace::new(
+                    &cep_context.policy.project_root,
+                )),
             },
             event_rx,
         )
@@ -393,7 +451,7 @@ mod tests {
         assert_eq!(guard_event.method, "cep.guard_verdict");
         let event = events.recv().await.unwrap();
         assert_eq!(event.params["metadata"]["denial_source"], "cep_policy");
-        assert_eq!(event.params["metadata"]["backend_invoked"], false);
+        assert!(event.params["metadata"].get("backend_invoked").is_none());
     }
 
     #[tokio::test]
@@ -422,5 +480,48 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::Reserved);
+    }
+
+    #[tokio::test]
+    async fn native_web_fetch_empty_hosts_denies_before_outbound_in_enforce() {
+        let mut policy = lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(
+            TempDir::new().unwrap().path(),
+        );
+        // Network URL shape allows public HTTPS when the allowlist is empty,
+        // but FetchUrl authorized hosts still come from allowed_hosts.
+        policy.network.allow_public_https = true;
+        policy.network.allow_localhost = false;
+        policy.network.allowed_hosts.clear();
+        let cep_context = Arc::new(CepTurnContext::from_policy(policy));
+        let registry = test_registry();
+        let (mut ctx, mut events) = ctx_for(cep_context);
+        ctx.cep_mode = lancet_protocol::policy::CepMode::Enforce;
+
+        let err = registry
+            .dispatch(
+                Fetch::NAME,
+                serde_json::to_value(FetchParams {
+                    url: "https://example.com/".into(),
+                    headers: Default::default(),
+                })
+                .unwrap(),
+                ctx,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert!(
+            err.message.contains("authorized region")
+                || err.message.to_lowercase().contains("exceeds"),
+            "denial must name the effect/authorized-region seam: {}",
+            err.message
+        );
+
+        let guard_event = events.recv().await.unwrap();
+        assert_eq!(guard_event.method, "cep.guard_verdict");
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.method, "cep.native_external_metadata");
+        assert_eq!(event.params["metadata"]["denial_source"], "cep_policy");
+        assert!(event.params["metadata"].get("backend_invoked").is_none());
     }
 }

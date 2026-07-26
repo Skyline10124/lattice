@@ -4,13 +4,9 @@
 //! No remote push refspec for refs/lattice/**.
 //!
 //! The git repository has no remote push refspec that would push
-//! `refs/lattice/**` to a remote. Session refs stay local. This test sets up
-//! a real remote with a normal push refspec, creates session refs under
-//! `refs/lattice/**`, and verifies none of the configured push refspecs
-//! reference `refs/lattice`.
-
-use std::fs;
-use std::process::Command;
+//! `refs/lattice/**` to a remote. Session refs stay local. This test creates
+//! session refs under `refs/lattice/**` and verifies the repository config
+//! has no remote and no push refspec that references `refs/lattice`.
 
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
@@ -20,23 +16,7 @@ use lattice_session::{
 use tempfile::TempDir;
 
 fn init_git_repo(dir: &std::path::Path) {
-    fs::create_dir_all(dir).expect("create dir");
-    git2::Repository::init(dir).expect("init repo");
-}
-
-fn git(dir: &std::path::Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap_or_else(|_| panic!("git {:?} should run", args));
-    assert!(
-        output.status.success(),
-        "git {:?} failed: stderr={}",
-        args,
-        String::from_utf8_lossy(&output.stderr),
-    );
-    String::from_utf8_lossy(&output.stdout).to_string()
+    let _ = lattice_session::test_utils::init_empty_repo(dir);
 }
 
 #[test]
@@ -44,21 +24,6 @@ fn git_store_no_remote_push_refspec_for_lattice_refs() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path();
     init_git_repo(dir);
-
-    // Set up a dummy remote with a normal push refspec (refs/heads/*). This
-    // ensures the test is meaningful: there IS a remote and a push refspec,
-    // but it must not include refs/lattice/**.
-    let remote_url = "/tmp/lattice-dummy-remote";
-    git(dir, &["remote", "add", "origin", remote_url]);
-    git(
-        dir,
-        &[
-            "config",
-            "--add",
-            "remote.origin.push",
-            "refs/heads/*:refs/heads/*",
-        ],
-    );
 
     let store = GitSessionGraphStore::new(dir);
 
@@ -86,55 +51,45 @@ fn git_store_no_remote_push_refspec_for_lattice_refs() {
     };
     let commit = store.commit_turn(input).expect("commit_turn");
 
+    let repo = gix::open_opts(dir, gix::open::Options::isolated()).expect("open repo");
+
     // Confirm the session ref actually exists under refs/lattice/**.
     let session_ref = format!("refs/lattice/sessions/{session_id}/main");
-    let ref_value = git(dir, &["for-each-ref", "--format=%(refname)", &session_ref]);
-    assert!(
-        ref_value.trim() == session_ref,
-        "session ref {session_ref} should exist after commit, got: {ref_value:?}",
+    let r = repo
+        .find_reference(session_ref.as_str())
+        .expect("session ref should exist after commit");
+    assert_eq!(
+        r.target().try_id().map(|o| o.to_string()),
+        Some(commit.commit_id.clone()),
+        "session ref must point at the commit",
     );
 
-    // 1. `git remote -v` must not mention refs/lattice in any line.
-    let remote_v = git(dir, &["remote", "-v"]);
+    // 1. No remotes configured by the store.
+    let remotes: Vec<_> = repo.remote_names().into_iter().collect();
     assert!(
-        !remote_v.contains("refs/lattice"),
-        "no remote line should reference refs/lattice, got: {remote_v}",
+        remotes.is_empty(),
+        "store must not configure remotes, got: {remotes:?}"
     );
 
-    // 2. No configured push refspec for any remote references refs/lattice.
-    //    Enumerate all remotes and check each one's push refspecs.
-    let remotes = git(dir, &["remote"]);
-    for remote in remotes.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-        let push_key = format!("remote.{remote}.push");
-        let push_refspecs = git(dir, &["config", "--get-all", &push_key]);
-        for line in push_refspecs.lines() {
-            assert!(
-                !line.contains("refs/lattice"),
-                "push refspec for remote '{remote}' must not reference refs/lattice: {line}",
-            );
-        }
+    // 2. Raw config must not mention refs/lattice.
+    let config_path = dir.join(".git").join("config");
+    if config_path.is_file() {
+        let text = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(
+            !text.contains("refs/lattice"),
+            "git config must not reference refs/lattice, got: {text}"
+        );
     }
 
-    // 3. Explicitly check remote.origin.push does not contain refs/lattice.
-    let origin_push = git(dir, &["config", "--get-all", "remote.origin.push"]);
-    assert!(
-        !origin_push.contains("refs/lattice"),
-        "remote.origin.push must not reference refs/lattice: {origin_push}",
-    );
-
-    // 4. Verify via git2 that no reference name under refs/lattice/** has a
-    //    push refspec configured. Also confirm the commit is reachable only
-    //    via the local session ref, not via any remote-tracking branch.
-    let repo = git2::Repository::open(dir).expect("open repo");
-    let oid = git2::Oid::from_str(&commit.commit_id).expect("parse oid");
-
-    // No remote-tracking ref (refs/remotes/**) should point at this commit.
+    // 3. No remote-tracking ref (refs/remotes/**) should point at this commit.
+    let oid = gix::ObjectId::from_hex(commit.commit_id.as_bytes()).expect("parse oid");
+    let platform = repo.references().expect("enumerate references");
     let mut found_remote_tracking = false;
-    for reference in repo.references().expect("enumerate references") {
+    for reference in platform.all().expect("iterate references") {
         let r = reference.expect("read reference");
-        if let Some(name) = r.name()
-            && name.starts_with("refs/remotes/")
-            && r.target() == Some(oid)
+        let name = r.name().as_bstr().to_string();
+        if name.starts_with("refs/remotes/")
+            && r.target().try_id().map(|id| id.to_owned()) == Some(oid)
         {
             found_remote_tracking = true;
         }

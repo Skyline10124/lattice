@@ -28,10 +28,27 @@ in-toto attestation construction, and attestation persistence.
 
 ## Recent Issues
 
+- ADDED #5 slice D: `merge_finalize_metadata` gained a `component_cells: &[String]`
+  parameter. Component Tool calls record 4-segment Cell audit keys
+  (`ctx:ext:scope:trust`) as a `component_cells` JSON array; native handler
+  calls pass an empty slice (no behavior change). Audit records cells, not
+  capability names (spec §6.3).
+- FIXED #38: `RejectionStage` vocabulary de-Uppered — `AdapterPreflight` →
+  `PathGuard`, `BackendExecution` → `LocalIo`, `VerificationFailure` removed;
+  `CallAuditMetadata.backend_invoked` and all routing metadata
+  (`execution_backend`, `upper_workspace_id`, `adapter_preflight_invoked`,
+  `backend_invoked`) are gone from durable audit rows. Mutation preflight
+  evidence renamed `expected_hash_status` → `local_revision` (carries the
+  observed Local Revision on stale-hash replans). Historical rows written
+  before #38 keep the old labels; alpha-stage no-compat means no label
+  migration — `rejection_stage` query filters match new writes only.
 - FIXED M-24-05: attestation persistence wiring moved into `lancet-api`;
   `lattice-api` consumes it through the public LANCET runtime surface.
 - FIXED issue #11: agent catalog audit CEP methods removed; operator reads live in
   `lancet-api::audit` and `lattice audit` (direct store, no CEP server).
+- OPEN #17: operator read DTOs, pagination/filter behavior, and contract tests
+  move into this crate while `lancet-api` remains a thin facade. They must not
+  become Source Tools or generated catalog entries.
 - WATCH: provenance isomorphism tests in `lancet-native` and audit turn tests in
   `lattice-api` are the practical consumers of this crate's contract.
 - WATCH: call stage and impact labels are shared language between native
@@ -47,8 +64,8 @@ in-toto attestation construction, and attestation persistence.
   attestation serialization.
 - Keep provenance projection and canonicalization changes paired with
   integration tests that compare stable statements/hashes.
-- Coordinate new stage/impact labels with `lancet-native` lifecycle and
-  `lattice-cli` audit output.
+- Coordinate new stage/impact/Cell labels with the current `lancet-native` or
+  target `lancet-runtime` lifecycle and `lattice-cli` audit output.
 
 ## Record Maintenance
 
@@ -64,6 +81,7 @@ in-toto attestation construction, and attestation persistence.
 ## Verification
 
 - Local: `cargo test -p lancet-audit`.
-- Provenance/attestation changes: also run `lancet-native` provenance tests and
-  `lattice-api` audit turn provenance tests.
+- Provenance/attestation changes: also run the active runtime provenance tests
+  (`lancet-native` during migration, then `lancet-runtime`) and `lattice-api`
+  audit turn provenance tests.
 - Schema changes should include persistence, query, and replay coverage.

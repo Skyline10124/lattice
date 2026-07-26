@@ -9,6 +9,7 @@ pub mod default;
 pub mod network;
 pub mod observation;
 pub mod resolved;
+pub mod visibility;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;

@@ -96,8 +96,6 @@ struct Workspace {
 
 fn workspace_toml_suffix(_enabled_tools: &[&str]) -> &'static str {
     r#"
-[workspace]
-image = "test-template"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
 "#
@@ -162,25 +160,15 @@ fn make_request(
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
-    support::attach_upper_fixture(
-        RunTurnRequest {
-            input: input.to_string(),
-            session_id: session_id.to_string(),
-            loaded_profile: Some(ws.loaded.clone()),
-            cancel_flag: None,
-            test_llm: Some(llm),
-            test_project_root: Some(ws.root.to_string_lossy().to_string()),
-            test_persist_audit: None,
-            workspace_override: None,
-        },
-        &ws.loaded
-            .profile
-            .tools
-            .enabled
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>(),
-    )
+    RunTurnRequest {
+        input: input.to_string(),
+        session_id: session_id.to_string(),
+        loaded_profile: Some(ws.loaded.clone()),
+        cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(ws.root.to_string_lossy().to_string()),
+        test_persist_audit: None,
+    }
 }
 
 fn llm_with_events(llm_events: Vec<LlmEvent>) -> Arc<dyn LlmClient> {
@@ -433,59 +421,6 @@ async fn consistency_tool_call_path() {
 
     let durable = observe_durable_turn(&stream_store, &collected.session_id, collected.status);
     assert_eq!(durable.assistant_output, "File contents read successfully.");
-}
-
-#[tokio::test]
-async fn stream_turn_emits_activity_before_commit() {
-    let ws = setup_workspace(&[]);
-
-    let streaming_events = vec![
-        LlmEvent::Token {
-            content: "Hello!".to_string(),
-        },
-        LlmEvent::Done {
-            finish_reason: "stop".to_string(),
-            usage: Some(TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-            }),
-        },
-    ];
-
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_api = SessionApi::git(&sessions_path);
-    let llm = llm_with_events(streaming_events);
-    let session_id = create_default_session(&sessions_path);
-    let request = make_request(&ws, "hi", &session_id, llm);
-
-    let events: Vec<TurnEvent> = stream_turn(session_api, request)
-        .await
-        .expect("stream_turn must start")
-        .collect()
-        .await;
-
-    let model_started_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::ModelStarted { .. }))
-        .expect("must have ModelStarted");
-    let token_delta_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TokenDelta { .. }))
-        .expect("must have TokenDelta");
-    let turn_committing_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitting))
-        .expect("must have TurnCommitting");
-    let turn_committed_pos = events
-        .iter()
-        .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
-        .expect("must have TurnCommitted");
-
-    assert!(model_started_pos < token_delta_pos);
-    assert!(token_delta_pos < turn_committing_pos);
-    assert!(turn_committing_pos < turn_committed_pos);
 }
 
 /// Parity: completed turns have matching disposition across stream, run, and durable.

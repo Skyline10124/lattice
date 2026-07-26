@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::execution_backend::WorkspacePath;
+use crate::workspace::WorkspacePath;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatchDocument {

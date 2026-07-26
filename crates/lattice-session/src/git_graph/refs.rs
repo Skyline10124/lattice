@@ -4,10 +4,11 @@
 //! Ref operations for the Git-backed session graph store.
 
 use chrono::Utc;
+use gix::refs::transaction::PreviousValue;
 
 use super::GitSessionGraphStore;
 use super::helpers::{
-    parse_manifest, read_session_meta, read_tree_blob, session_ref_name,
+    parse_manifest, parse_oid, read_session_meta, read_tree_blob, session_ref_name, try_ref_target,
     turn_log_entry_from_manifest, validate_session_id, write_session_meta,
 };
 use super::session::resolve_head_oid;
@@ -34,16 +35,25 @@ impl GitSessionGraphStore {
         };
 
         let ref_name = session_ref_name(session_id, name)?;
-        match repo.reference(&ref_name, target_oid, false, "lattice branch") {
-            Ok(_) => {}
-            Err(e) if e.code() == git2::ErrorCode::Exists => {
-                return Err(SessionError::Conflict(format!(
-                    "branch '{}' already exists",
-                    name
-                )));
-            }
-            Err(e) => return Err(SessionError::Git(format!("create branch ref: {e}"))),
+        if try_ref_target(&repo, &ref_name)?.is_some() {
+            return Err(SessionError::Conflict(format!(
+                "branch '{name}' already exists"
+            )));
         }
+        repo.reference(
+            ref_name.as_str(),
+            target_oid,
+            PreviousValue::MustNotExist,
+            "lattice branch",
+        )
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("exist") || msg.contains("MustNotExist") {
+                SessionError::Conflict(format!("branch '{name}' already exists"))
+            } else {
+                SessionError::Git(format!("create branch ref: {e}"))
+            }
+        })?;
 
         let updated_at = Utc::now().to_rfc3339();
         Ok(GraphRef {
@@ -63,11 +73,8 @@ impl GitSessionGraphStore {
 
         // Try as branch first.
         if let Ok(ref_name) = session_ref_name(session_id, target)
-            && let Ok(reference) = repo.find_reference(&ref_name)
+            && let Some(oid) = try_ref_target(&repo, &ref_name)?
         {
-            let oid = reference
-                .target()
-                .ok_or_else(|| SessionError::Git(format!("branch ref '{target}' has no target")))?;
             meta.head_branch = Some(target.to_string());
             meta.head_commit_id = Some(oid.to_string());
             meta.updated_at = Utc::now().to_rfc3339();
@@ -78,8 +85,7 @@ impl GitSessionGraphStore {
         }
 
         // Try as commit OID.
-        let oid = git2::Oid::from_str(target)
-            .map_err(|_| SessionError::MissingCommit(target.to_string()))?;
+        let oid = parse_oid(target).map_err(|_| SessionError::MissingCommit(target.to_string()))?;
         if repo.find_commit(oid).is_err() {
             return Err(SessionError::MissingCommit(target.to_string()));
         }
@@ -102,24 +108,24 @@ impl GitSessionGraphStore {
         })?;
         let repo = self.repo()?;
 
-        let target_oid = git2::Oid::from_str(target)
-            .map_err(|e| SessionError::Git(format!("parse reset target: {e}")))?;
+        let target_oid =
+            parse_oid(target).map_err(|e| SessionError::Git(format!("parse reset target: {e}")))?;
         // Verify the target exists as a commit.
         let _ = repo
             .find_commit(target_oid)
             .map_err(|_| SessionError::MissingCommit(target.to_string()))?;
 
         let ref_name = session_ref_name(session_id, &branch_name)?;
-        let mut reference = repo
-            .find_reference(&ref_name)
-            .map_err(|e| SessionError::Git(format!("find branch ref: {e}")))?;
-        let old_oid = reference
-            .target()
+        let old_oid = try_ref_target(&repo, &ref_name)?
             .ok_or_else(|| SessionError::Git("branch ref has no target".to_string()))?;
 
-        reference
-            .set_target(target_oid, "lattice reset")
-            .map_err(|e| SessionError::Git(format!("set branch target: {e}")))?;
+        repo.reference(
+            ref_name.as_str(),
+            target_oid,
+            PreviousValue::MustExistAndMatch(gix::refs::Target::Object(old_oid)),
+            "lattice reset",
+        )
+        .map_err(|e| SessionError::Git(format!("set branch target: {e}")))?;
 
         meta.head_commit_id = Some(target.to_string());
         meta.updated_at = Utc::now().to_rfc3339();
@@ -140,9 +146,8 @@ impl GitSessionGraphStore {
         let to_oid = resolve_target_to_oid(&repo, session_id, to)?;
 
         let lca_oid = match repo.merge_base(from_oid, to_oid) {
-            Ok(oid) => Some(oid),
-            Err(e) if e.code() == git2::ErrorCode::NotFound => None,
-            Err(e) => return Err(SessionError::Git(format!("merge_base: {e}"))),
+            Ok(id) => Some(id.detach()),
+            Err(_) => None,
         };
         let common_ancestor_id = lca_oid.map(|o| o.to_string());
 
@@ -160,21 +165,19 @@ impl GitSessionGraphStore {
 }
 
 fn resolve_target_to_oid(
-    repo: &git2::Repository,
+    repo: &gix::Repository,
     session_id: &str,
     target: &str,
-) -> Result<git2::Oid> {
+) -> Result<gix::ObjectId> {
     // Try as branch ref first.
     if let Ok(ref_name) = session_ref_name(session_id, target)
-        && let Ok(reference) = repo.find_reference(&ref_name)
-        && let Some(oid) = reference.target()
+        && let Some(oid) = try_ref_target(repo, &ref_name)?
     {
         return Ok(oid);
     }
 
     // Try as commit OID.
-    let oid =
-        git2::Oid::from_str(target).map_err(|_| SessionError::MissingCommit(target.to_string()))?;
+    let oid = parse_oid(target).map_err(|_| SessionError::MissingCommit(target.to_string()))?;
     if repo.find_commit(oid).is_err() {
         return Err(SessionError::MissingCommit(target.to_string()));
     }
@@ -182,34 +185,27 @@ fn resolve_target_to_oid(
 }
 
 fn collect_unique_commits(
-    repo: &git2::Repository,
-    tip: git2::Oid,
-    hide: Option<git2::Oid>,
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    hide: Option<gix::ObjectId>,
 ) -> Result<Vec<TurnLogEntry>> {
-    let mut revwalk = repo
-        .revwalk()
-        .map_err(|e| SessionError::Git(format!("create revwalk: {e}")))?;
-    revwalk
-        .push(tip)
-        .map_err(|e| SessionError::Git(format!("push revwalk: {e}")))?;
-    if let Some(oid) = hide {
-        revwalk
-            .hide(oid)
-            .map_err(|e| SessionError::Git(format!("hide merge base in revwalk: {e}")))?;
+    // Newest-first to match historical TOPOLOGICAL (no reverse) order used
+    // by the previous implementation of this collector.
+    let mut platform = repo.rev_walk([tip]);
+    if let Some(hidden) = hide {
+        platform = platform.with_hidden(Some(hidden));
     }
-    revwalk
-        .set_sorting(git2::Sort::TOPOLOGICAL)
-        .map_err(|e| SessionError::Git(format!("set revwalk sorting: {e}")))?;
+    let walk = platform
+        .all()
+        .map_err(|e| SessionError::Git(format!("create revwalk: {e}")))?;
 
     let mut entries = Vec::new();
-    for oid in revwalk {
-        let oid = oid.map_err(|e| SessionError::Git(format!("revwalk error: {e}")))?;
-        let commit = repo
-            .find_commit(oid)
-            .map_err(|e| SessionError::Git(format!("find commit: {e}")))?;
-        let manifest_bytes = read_tree_blob(repo, &commit, "turn/manifest.json")?;
+    for item in walk {
+        let info = item.map_err(|e| SessionError::Git(format!("revwalk error: {e}")))?;
+        let oid = info.id;
+        let manifest_bytes = read_tree_blob(repo, oid, "turn/manifest.json")?;
         let manifest = parse_manifest(&manifest_bytes)?;
-        let messages_bytes = read_tree_blob(repo, &commit, "turn/messages.jsonl")?;
+        let messages_bytes = read_tree_blob(repo, oid, "turn/messages.jsonl")?;
         let messages_jsonl = String::from_utf8(messages_bytes)
             .map_err(|e| SessionError::Git(format!("messages.jsonl not utf8: {e}")))?;
         let total = messages_jsonl.lines().filter(|l| !l.is_empty()).count();

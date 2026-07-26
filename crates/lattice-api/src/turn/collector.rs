@@ -210,6 +210,7 @@ mod tests {
     fn completed_content_only() {
         let result = drain(vec![
             TurnEvent::TurnStarted {
+                turn_id: "s1:root".to_string(),
                 session_id: "s1".to_string(),
                 parent_commit_id: None,
                 branch: Some("main".to_string()),
@@ -254,6 +255,7 @@ mod tests {
     fn multi_round_tool_loop_uses_final_stop_tokens() {
         let result = drain(vec![
             TurnEvent::TurnStarted {
+                turn_id: "s1:root".to_string(),
                 session_id: "s1".to_string(),
                 parent_commit_id: None,
                 branch: None,
@@ -315,6 +317,7 @@ mod tests {
     fn tool_call_round_content_preserved_when_turn_ends_on_tool_calls() {
         let result = drain(vec![
             TurnEvent::TurnStarted {
+                turn_id: "s1:root".to_string(),
                 session_id: "s1".to_string(),
                 parent_commit_id: None,
                 branch: None,
@@ -361,6 +364,7 @@ mod tests {
     fn error_after_partial_tokens() {
         let result = drain(vec![
             TurnEvent::TurnStarted {
+                turn_id: "s1:root".to_string(),
                 session_id: "s1".to_string(),
                 parent_commit_id: None,
                 branch: None,
@@ -389,6 +393,7 @@ mod tests {
     fn cancelled_keeps_partial_output() {
         let result = drain(vec![
             TurnEvent::TurnStarted {
+                turn_id: "s1:root".to_string(),
                 session_id: "s1".to_string(),
                 parent_commit_id: None,
                 branch: None,
@@ -417,6 +422,7 @@ mod tests {
     fn commit_failed_returns_error() {
         let err = drain(vec![
             TurnEvent::TurnStarted {
+                turn_id: "s1:root".to_string(),
                 session_id: "s1".to_string(),
                 parent_commit_id: None,
                 branch: None,
@@ -433,6 +439,7 @@ mod tests {
     #[test]
     fn missing_turn_committed_returns_error() {
         let err = drain(vec![TurnEvent::TurnStarted {
+            turn_id: "s1:root".to_string(),
             session_id: "s1".to_string(),
             parent_commit_id: None,
             branch: None,
@@ -448,6 +455,7 @@ mod tests {
     fn turn_event_disposition_collector_captures_promoted() {
         let result = drain(vec![
             TurnEvent::TurnStarted {
+                turn_id: "s1:root".to_string(),
                 session_id: "s1".to_string(),
                 parent_commit_id: None,
                 branch: Some("main".to_string()),
@@ -474,6 +482,7 @@ mod tests {
     fn turn_event_disposition_independence_same_status() {
         let result_pending = drain(vec![
             TurnEvent::TurnStarted {
+                turn_id: "s1:root".to_string(),
                 session_id: "s1".to_string(),
                 parent_commit_id: None,
                 branch: None,
@@ -490,6 +499,7 @@ mod tests {
 
         let result_promoted = drain(vec![
             TurnEvent::TurnStarted {
+                turn_id: "s1:root".to_string(),
                 session_id: "s2".to_string(),
                 parent_commit_id: None,
                 branch: None,
@@ -545,6 +555,7 @@ mod tests {
         for (status, disposition) in cases {
             let result = drain(vec![
                 TurnEvent::TurnStarted {
+                    turn_id: "s1:root".to_string(),
                     session_id: "s1".to_string(),
                     parent_commit_id: None,
                     branch: None,
@@ -577,6 +588,7 @@ mod tests {
         let make_result = |disposition: WorkspaceDisposition| -> crate::turn::types::RunTurnResult {
             drain(vec![
                 TurnEvent::TurnStarted {
+                    turn_id: "s1:root".to_string(),
                     session_id: "s1".to_string(),
                     parent_commit_id: None,
                     branch: None,

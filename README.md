@@ -14,19 +14,19 @@ policy gating, path guards, effect checks, and an audit trail.
 
 ## Workspace
 
-LATTICE is a Cargo workspace of 16 crates, layered so dependencies always
+LATTICE is a Cargo workspace of 15 crates, layered so dependencies always
 point from higher layers down.
 
 ```text
-Layer 0 (leaf):  lancet-protocol   lattice-llm   lattice-session   lattice-workspace
+Layer 0 (leaf):  lancet-protocol   net-guard   lattice-llm   lattice-session
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
                  lattice-agent(->llm,session)
 Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
-                 lancet-authority(->protocol,catalog,llm)
+                 lancet-authority(->protocol,catalog,net-guard)
 Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
-Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,authority,llm)
+Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,authority,net-guard)
 Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,authority,native)
 Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
 Layer 5:         lattice-tui(-> api + presentation deps)
@@ -43,11 +43,11 @@ Layer 5:         lattice-tui(-> api + presentation deps)
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger. |
 | `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers. |
 | `lancet-api` | Unified LANCET public API composing the CEP runtime (`LancetRuntime`/`LancetServer`). |
+| `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, private/reserved IP checks. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security. |
 | `lattice-session` | Session graph contract and the **git-backed** graph store (`GitSessionGraphStore`). |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, LANCET `[lancet]` policy sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly. |
-| `lattice-workspace` | Swappable upper-workspace execution adapter seam (microsandbox/libkrun backend). |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution (`stream_turn`). |
 | `lattice-tui` | Inline CLI chat REPL over `lattice-api` via `rustyline` (no alternate screen). |
 | `lattice-cli` | The `lattice` binary: clap command surface and dispatch. |
@@ -66,7 +66,7 @@ methods and cannot be enabled in `[tools].enabled`.
 
 There is no `session.envelope` method (it was removed; the catalog and tests
 assert its absence). There is no `exec.command_run` method — it and
-post-mutation verify were permanently retired from the CEP layer (issue #4);
+post-mutation verify were permanently retired from the CEP layer (issue #26);
 command execution is not an agent-visible capability.
 
 ## Installation
@@ -126,8 +126,9 @@ last guard verdict; `doctor` runs diagnostics. Add `--json` (global flag) to
 emit one `TurnEvent` JSON object per line on stdout instead of human output.
 
 Other `session` subcommands: `agent`, `status`, `list`, `checkout`, `diff`,
-`reset`, `resume`, `prune-snapshots`, and `migrate` (one-shot SQLite→Git
-session graph migration for legacy stores).
+`reset`, and `migrate` (one-shot SQLite→Git session graph migration for
+legacy stores). `resume` and `prune-snapshots` were removed with the Upper
+snapshot lifecycle (#37/#40).
 
 ## Build, test, lint
 

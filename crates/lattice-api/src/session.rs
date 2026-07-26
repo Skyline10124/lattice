@@ -9,13 +9,11 @@
 
 use lattice_session::{
     GitSessionGraphStore, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
-    PreparedTurnCommit, ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus,
-    TurnCommit, TurnCommitInput, TurnLogEntry, migrate::find_legacy_session_db,
+    ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit,
+    TurnCommitInput, TurnLogEntry,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use uuid::Uuid;
-
-use crate::turn::promotion::PromotionLifecycleError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -30,15 +28,6 @@ pub enum ApiError {
 
     #[error("internal error: {0}")]
     Internal(String),
-
-    #[error("promotion recovery required before turn start")]
-    PromotionRecoveryRequired,
-
-    #[error("promotion recovery conflict: {0}")]
-    PromotionRecoveryConflict(String),
-
-    #[error("promotion lifecycle: {0}")]
-    PromotionLifecycle(#[from] PromotionLifecycleError),
 }
 
 pub type Result<T> = std::result::Result<T, ApiError>;
@@ -211,81 +200,6 @@ impl SessionApi {
         input.session_id = resolved;
         self.store.commit_turn(input).map_err(map_session_error)
     }
-
-    /// Persist a precomputed turn commit with prepared identity.
-    ///
-    /// Thin wrapper over the session store's prepared commit path.
-    /// Uses the prepared commit ID for idempotent retry.
-    ///
-    /// NOTE: Unlike `commit_turn`, this does not resolve abbreviated
-    /// session ID prefixes via `resolve_id`. The prepared commit must carry the
-    /// canonical (full) session ID; callers are responsible for resolving
-    /// prefixes before constructing the `PreparedTurnCommit`. This is
-    /// intentional because prepared commits are built internally after the
-    /// session has already been resolved for turn execution.
-    pub(crate) fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> Result<TurnCommit> {
-        self.store
-            .commit_prepared_turn(prepared)
-            .map_err(map_session_error)
-    }
-
-    /// Look up a single turn commit by session and commit ID.
-    pub(crate) fn get_turn_commit(
-        &self,
-        session_id: &str,
-        commit_id: &str,
-    ) -> Result<Option<TurnCommit>> {
-        let resolved = self.resolve_id(session_id)?;
-        self.store
-            .get_turn_commit(&resolved, commit_id)
-            .map_err(map_session_error)
-    }
-
-    /// Query whether a commit's retained snapshot is operationally lost.
-    ///
-    /// Returns `None` if no metadata is recorded for the commit.
-    /// Never modifies immutable commit fields.
-    pub(crate) fn get_snapshot_lost(&self, commit_id: &str) -> Result<Option<bool>> {
-        self.store
-            .get_snapshot_lost(commit_id)
-            .map_err(map_session_error)
-    }
-}
-
-/// Startup guard for un-migrated legacy SQLite session DB.
-///
-/// The sole reliable migration-completion signal is the archive action:
-/// successful migration renames the legacy DB to `<db>.migrated-<ts>`. If the
-/// original DB is still present, migration has NOT completed (either never
-/// started, or crashed mid-write). The guard blocks startup with a clear
-/// message prompting `lattice session migrate`.
-///
-/// The legacy filename is discovered via `find_legacy_session_db`, which probes
-/// `session_v12.db`, `session_v11.db`, `session.db`, `sessions.db` in priority
-/// order. The real legacy SQLite session store used
-/// `session_v12.db`; the plural `sessions.db` was an undocumented assumption.
-///
-/// Does NOT inspect the Git repo for commits — a crashed mid-migration may have
-/// written partial commits, so "has commits" is not a valid success signal.
-/// Uses only `Path::exists()` — no side effects, no git2 repo open (avoids
-/// triggering auto-init).
-pub fn check_migration_guard(git_repo_dir: &Path) -> std::result::Result<(), String> {
-    // probe for the real legacy DB filename instead of hardcoding
-    // sessions.db. The session DB lives in the parent of the git repo dir
-    // (e.g. .../lattice/sessions/sessions.git → .../lattice/sessions/).
-    let session_dir = git_repo_dir.parent().unwrap_or_else(|| Path::new("."));
-    let legacy_db = match find_legacy_session_db(session_dir) {
-        Some(path) => path,
-        None => return Ok(()), // no legacy DB — fresh install or already migrated
-    };
-    Err(format!(
-        "Legacy SQLite session DB detected at {}. The Git session store has not been migrated. \
-         Run 'lattice session migrate --source {} --target {}' to complete migration \
-         before starting LATTICE.",
-        legacy_db.display(),
-        legacy_db.display(),
-        git_repo_dir.display(),
-    ))
 }
 
 fn map_session_error(e: lattice_session::SessionError) -> ApiError {
@@ -305,11 +219,6 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
         } => ApiError::Internal(format!(
             "io error while {} '{}': {}",
             operation,
-            path.display(),
-            source
-        )),
-        lattice_session::SessionError::Database { path, source } => ApiError::Internal(format!(
-            "database error in '{}': {}",
             path.display(),
             source
         )),

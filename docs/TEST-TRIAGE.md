@@ -1,75 +1,84 @@
-# 全量旧测试 Triage 清单（issue #22 / 测试重构 3/6）
+# 全量旧测试 Triage 清单（issue #44 / 测试重构 3/6）
 
 > **性质**：判决书与人工闸口。**本文件不删除、不修改任何测试代码。**
 > 供 4/6 分批执行时直接引用。
 >
-> **判决标准**：RFC #19 决定二（四层）、决定六（旧测试不保证迁移）；父 PRD #18。
+> **判决标准**：RFC #41 决定二（四层）、决定六（旧测试不保证迁移）；父 PRD #40。
 >
 > **枚举快照**：2026-07-09，workspace 内 `crates/**` + `xtask/**` 的 `#[test]` / `#[tokio::test]` 共 **1449** 条。
 
 ## 1. 如何读这份清单
 
 | 字段 | 含义 |
-|---|---|
+| --- | --- |
 | 标识 | `crate` + 测试函数名 + 源文件:行号 |
 | 决定 | **保留** / **提升** / **删除** |
-| 目标层 | 局部不变量 / 快速二进制黑盒 / 真实 Microsandbox |
+| 目标层 | 局部不变量 / 快速二进制黑盒 / Direct-Local 外部二进制（#40 后；原「真实 Microsandbox」层已退役） |
 | 替代场景 | 提升或「删除且行为已被覆盖」时指向的已落地或 planned 场景；弱断言/源码扫描删除写 `n/a` |
 | 理由 | 一句话判决依据 |
 
-### 判决口径（复述 RFC #19 决定六）
+### 判决口径（复述 RFC #41 决定六）
 
 - 保护**局部不变量** → **保留**
-- 保护**产品行为**但从内部测 → **提升**到二进制/MSB 场景
+- 保护**产品行为**但从内部测 → **提升**到二进制/Direct-Local 场景
 - 保护**已退役结构**、只断言 `Ok`/可构造、扫描源码 import → **删除**
 - 同一 happy path 已被更高层覆盖 → 删低层重复（4/6 执行；本清单标「提升」或注明替代）
 - **不设**迁移率、数量或覆盖率目标
 
 ### 场景目录（替代场景 ID）
 
+> Active 场景 ID 登记在此表。#40 退役的 KVM-lane 场景词汇已从 machine ledger
+> 与本目录中完全移除；其语义由已落地的 `direct_*` exact scenarios 接管。
+> #46 residual closeout 已将 #72 遗留的 3 个 `planned_direct_*` 落地为 exact external scenarios 并删除对应内部测试；场景目录不再保留 planned residual。退役词汇的迁移记录见 FIX.md。
+
 | ID | 说明 | 状态 |
-|---|---|---|
-| `fast_cli_help` | 已落地 `fast_cli_help`（CLI help 表面） | 已落地 |
-| `msb_full_turn` | 已落地 `msb_full_turn`（session send 完整 turn） | 已落地 |
-| `pty_tui_smoke` | 已落地 `pty_tui_smoke`（TUI 入口 smoke） | 已落地 |
-| `planned_session_cli` | fast-binary: `session new/list/status/log/branch --json`（no-turn 子集） | **已落地** `tests/fast_session_cli.rs`（#23 批次 1/2） |
-| `planned_audit_cli` | fast-binary: `audit query/replay/tail` 缺失 store 错误态 `--json` | **已落地（部分）** `tests/fast_audit_cli.rs`（#23 批次 2；空态/seeded 态待 MSB） |
+| --- | --- | --- |
+| `fast_cli_help` | fast-binary: CLI help 表面 | 已落地 |
+| `pty_tui_smoke` | fast-binary: TUI 入口 smoke（#40 起 Direct-Local ordinary lane，无 KVM/MSB 依赖） | 已落地 |
+| `planned_session_cli` | fast-binary: `session new/list/status/log/branch --json`（no-turn 子集） | **已落地** `tests/fast_session_cli.rs`（#23 切片 1/2） |
+| `planned_audit_cli` | fast-binary: `audit query/replay/tail` 缺失 store 错误态 `--json` | **已落地** `tests/fast_audit_cli.rs`；seeded/turn 态由 `direct_operator_*` 接管 |
 | `planned_config_cli` | fast-binary: `models`/`resolve`/`doctor` + secret redaction + HOME/XDG | **已落地** `tests/fast_config_cli.rs`（#23 批次 1） |
-| `planned_lancet_cli` | fast-binary: `lattice lancet status/doctor` 空态/不变量 | planned（#23 review-fix 新增场景 ID；fast 测试待补） |
-| `planned_observe_msb` | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | planned（#18 矩阵 / 4–6/6） |
-| `planned_mutate_msb` | planned MSB: `mutate.create/edit` Upper-only + effect 记账 | planned（#18 矩阵 / 4–6/6） |
-| `planned_retired_msb` | planned MSB: 已退役 agent 方法明确失败且无副作用 | planned（#18 矩阵 / 4–6/6） |
-| `planned_policy_msb` | planned MSB: policy/channel 拒绝且无宿主 fallback | planned（#18 矩阵 / 4–6/6） |
-| `planned_provider_fail_msb` | planned MSB: provider 断流/非法 SSE/取消 + Upper 清理 | planned（#18 矩阵 / 4–6/6） |
-| `planned_resume_msb` | planned MSB: 跨进程 session resume | planned（#18 矩阵 / 4–6/6） |
-| `planned_secret_msb` | planned MSB: secret sentinel 跨 terminal/session/audit/provenance | planned（#18 矩阵 / 4–6/6） |
-| `planned_audit_ops_msb` | planned MSB: operator audit query/replay（真实 turn 后） | planned（#18 矩阵 / 4–6/6） |
-| `planned_session_graph_msb` | planned MSB: 跨 session 的 branch/checkout/reset/diff 隔离 | planned（#23 review-fix round-5） |
-| `planned_session_history_msb` | planned MSB: 真实 turn 后的 human session log 展示 | planned（#23 review-fix round-5） |
+| `planned_lancet_cli` | fast-binary: `lattice lancet status/doctor` 空态/不变量 | **已落地** `tests/fast_lancet_cli.rs`；seeded status 由 `direct_tools_todo_write_success` 接管 |
+| `direct_local_turn` | Direct-Local: plain-text turn / session reopen / policy denial | **已落地（骨架）** `tests/direct_local_turn.rs`（#40；完整矩阵归 #24） |
+| `direct_local_plain_text_turn_commits_and_exit_zero` | Direct-Local: plain-text 完整 turn + exit 0 + session log commit | **已落地** `tests/direct_local_turn.rs:108`（#40；接管旧 KVM-lane plain-turn 场景语义核心） |
+| `direct_turn_completed_reopen_contract` | Direct-Local: completed-Turn/reopen 契约（事件序、session/commit ID、transcript 重组、log/status、missing-session exit 2） | **已落地** `tests/direct_turn_contract.rs`（#24 slice 1） |
+| `direct_observation_visibility_and_bounds` | Direct-Local: visibility/bounds + canonical workspace root + tool activity | **已落地** `tests/direct_observation.rs` |
+| `direct_tools_fetch_disabled_no_dispatch` | Direct-Local: disabled fetch fail-closed/no dispatch | **已落地** `tests/direct_tools.rs` |
+| `direct_tools_todo_write_success` | Direct-Local: todo result + CEP lifecycle metadata + seeded `lancet status` | **已落地** `tests/direct_tools.rs`；#72 补齐 exact assertions |
+| `direct_failure_disconnect_before_output_commits_error` | Direct-Local: stream failure event order + durable error log | **已落地** `tests/direct_failures.rs`；#72 补齐 exact assertions |
+| `direct_failure_sigint_while_stalled_commits_cancelled` | Direct-Local: cooperative cancellation + durable cancelled log | **已落地** `tests/direct_failures.rs`；#72 补齐 exact assertions |
+| `direct_failure_profile_deadline_while_stalled_commits_error` | Direct-Local: product deadline on stalled provider | **已落地** `tests/direct_failures.rs` |
+| `direct_operator_audit_session_lancet_cross_validate` | Direct-Local: audit query/tail/replay + stored attestation match | **已落地** `tests/direct_operator.rs`；#72 补齐 exact assertion |
+| `direct_operator_audit_query_unknown_session_empty` | Direct-Local: unknown-session audit query empty success | **已落地** `tests/direct_operator.rs` |
+| `direct_operator_audit_replay_unknown_turn_fails` | Direct-Local: unknown-turn replay exact diagnostic | **已落地** `tests/direct_operator.rs`；#72 补齐 exact assertion |
+| `direct_session_*_isolation` | Direct-Local: branch/checkout/create/reset/diff session isolation | **已落地** `tests/direct_session_isolation.rs` |
+| `direct_failure_stale_parent_commit_failed` | Direct-Local: stale-parent race emits CommitFailed without durable extra commit | **已落地** `tests/direct_failures.rs`（#46 residual） |
+| `direct_turn_sonnet_routed_provider_event` | Direct-Local: default `sonnet`→Anthropic routed provider event | **已落地** `tests/direct_turn_contract.rs`（#46 residual） |
+| `direct_tools_fetch_capability_denial_with_public_https` | Direct-Local: public HTTPS URL-shape allowed but empty FetchUrl hosts deny pre-outbound with EffectViolation + CEP labels | **已落地** `tests/direct_tools.rs`（#46 residual） |
 
 ### 汇总
 
 | 决定 | 条数 |
-|---|---:|
-| 保留 | 1338 |
-| 提升 | 96 |
-| 删除 | 15 |
+| --- | ---: |
+| 保留 | 1191 |
+| 提升 | 42 |
+| 删除 | 216 |
 | **合计** | **1449** |
 
 #### 按 crate
 
 | crate | 保留 | 提升 | 删除 | 合计 |
-|---|---:|---:|---:|---:|
-| `lattice-api` | 223 | 36 | 1 | 260 |
-| `lattice-cli` | 118 | 57 | 10 | 185 |
-| `lattice-workspace` | 158 | 0 | 0 | 158 |
+| --- | ---: | ---: | ---: | ---: |
+| `lattice-api` | 234 | 0 | 26 | 260 |
+| `lattice-cli` | 117 | 41 | 27 | 185 |
+| `lattice-workspace` | 0 | 0 | 158 | 158 |
 | `lancet-authority` | 135 | 0 | 0 | 135 |
 | `lattice-llm` | 133 | 0 | 0 | 133 |
 | `lancet-native` | 107 | 0 | 0 | 107 |
 | `lattice-profile` | 96 | 0 | 1 | 97 |
-| `lattice-agent` | 68 | 3 | 0 | 71 |
+| `lattice-agent` | 70 | 0 | 1 | 71 |
 | `lattice-session` | 69 | 0 | 2 | 71 |
-| `lattice-system-harness` | 57 | 0 | 0 | 57 |
+| `lattice-system-harness` | 56 | 1 | 0 | 57 |
 | `lancet-protocol` | 36 | 0 | 0 | 36 |
 | `lancet-audit` | 34 | 0 | 0 | 34 |
 | `lancet-catalog` | 31 | 0 | 0 | 31 |
@@ -90,88 +99,282 @@
 
 ---
 
-
-
 ---
 
-## 1.5 #23 执行状态（4/6 批次执行，2026-07-11）
+## 1.5 #23 最终执行状态（2026-07-19）
 
-> #22 的判决书在 #23 按产品面分批执行。下表是**已执行**与**延期**的账本。
-> 延期条目均为**偏差**，原因见下；未静默改判。
-
-### 已执行（本批落地，门禁全绿）
-
-| 类别 | 条数 | 说明 |
-|---|---:|---|
-| 删除（源码扫描/import/manifest 字符串检查 + cfg-test helper） | 15 | 11 条源码扫描 + 2 条 round-2（`project_branch_new_source_defines_field`、`not_found_error_includes_object_id`）+ 2 条 round-3（`session_resume_handler_function_exists`、`session_resume_calls_typed_api` 源码扫描）；全部 `n/a` 无替代场景；架构边界由 `cargo xtask harness-boundary` / `lancet-boundary` + 依赖图接管。已删除并验证两道边界门仍绿。 |
-| 提升 -> fast-binary（已落地场景接管） | 36 | 31 条 #23 批次 + 1 条 round-2（`run_integration_missing_session`）+ 3 条 round-3（resume 缺参/不存在、send 无 profile）+ 1 条 round-6（send 缺凭据）。新增/强化 fast_session 场景精确断言 exit 2、可操作错误字段与 stdout/stderr secret redaction。 |
-| 夹具收口 | - | 新增 `ScenarioWorld::write_agent_profile` 统一 agent profile 夹具；删除随之失效的 `with_env_var` / `without_env_vars`；`audit::run_at` 标 `#[cfg(test)]`。 |
-| 顺手修阻塞 bug | - | `lattice-cli/src/commands/audit.rs` 的 `audit::run` 在 `#[tokio::main]` 内嵌套 `block_on` -> panic（`audit query` 缺失 store 时 exit 101）。改为 async 复用顶层 runtime，解锁 `planned_audit_cli`。详见 FIX.md `#23`。 |
-
-### 延期（偏差；MSB 项需 KVM 通道，fast 项可立即补）
-
-| 类别 | 条数 | 延期原因 |
-|---|---:|---|
-| 提升 -> `msb_full_turn` / `planned_*_msb`（`lattice-api` 36 + `lattice-agent` 3） | 39 | 每条都需真实完整 turn 驱动；完整 turn 默认走 Upper/Microsandbox，本机无 `/dev/kvm`、`LATTICE_HARNESS_MSB` 未开，无法落地或验证替代场景。不删原内部测试（删除即丢普通 CI 覆盖且无法验证替代）。 |
-| 提升 -> `planned_audit_ops_msb`(7) / `planned_observe_msb`(1) / `planned_provider_fail_msb`(1) / `planned_session_graph_msb`(5) / `planned_session_history_msb`(1)（`lattice-cli` MSB 子集） | 15 | audit seeded、observe workspace-root、provider timeout、跨 session graph 隔离与 human log 需真实 turn；原内部测试保留。 |
-| 提升 -> `planned_lancet_cli`（`lattice-cli` fast 子集） | 1 | `lancet status` 缺失 DB 空态不需 KVM；外部 fast-binary 场景待补，原内部测试保留。 |
-| **合计延期** | **55** | 54 条 MSB/KVM（API 36 + agent 3 + CLI 15）+ 1 条 fast-binary。 |
-
-### 偏差结论
-
-- #22 判决经六轮复审存在显式改判；所有 keep/elevate/delete 变化均在 JSON、逐条清单和本节记录，未静默处理。
-- #23 本批已落地 36 条 fast-binary 接管与全部 15 条删除；fast 层仍有 1 条 planned 场景、2 条 status 已完整接管待删，以及 2 条 project-branch 仅部分覆盖（需先补 branch create/reopen fast 场景再删），均显式列为 residual。门禁通过 `cargo xtask ci`（fmt / clippy -D warnings / build / harness-boundary / 全 workspace 测试）及单独的 `lancet-boundary`。
-- **批次 3（turn/Upper）整体延期**：39 条 lattice-api/lattice-agent 提升依赖 MSB；无 KVM 不可验证，不删除原测试。
-- lattice-cli 延期为 15 条 MSB + 1 条 fast：保留原内部测试；MSB 通道落地对应场景后逐条删除，`planned_lancet_cli` 不等待 KVM、应在下一 fast 批次补齐。缺凭据 send 已确认早于 `prepare_upper`，round-6 直接落地 fast 场景并删除原弱 smoke。
-- round-4 的 33 条 blanket keep 经源码复核拆分：25 条真正的渲染器/序列化器局部不变量继续 keep；`run_integration_commits_existing_session` 恢复 elevate，精确映射已落地 `msb_full_turn` 但原测试仍冗余保留；5 条 session graph 隔离与 human log 共 6 条映射专门 planned MSB 场景；missing-credential 先恢复 elevate，round-6 再按实际调用顺序落地 fast takeover。
-- 后续（5/6、6/6 或 KVM 可用环境）落地 `planned_*_msb` 场景后，按本表「延期」逐条删除对应内部测试，并在本节勾销。
-
-### #23 review-fix 映射精确化（2026-07-12/13，六轮）
-
-> 针对 #23 收到的 review 反馈：原 `docs/test-triage-decisions.json` 中 **101 条**
-> `lattice-cli` 提升项中有 **95 条**被写成泛化替代 `planned_session_cli|planned_config_cli|planned_audit_cli`
-> 三元兜底，无法逐条审计。六轮 review-fix 按测试行为精确映射，**不动 1449 条总数与测试身份**：
+> #44 的判决书在 #23 按产品面分批执行。本节是 **最终状态**：fast residual 归零、
+> MSB 词汇退役、44 个 assertion-level #24 场景 ID 精确登记（#24 slice 1 将其中 7 条
+> 改判保留，精确移交表现为 37 行）。历史执行批次
+> （round-1..6、#40 状态更新）已折叠为下表的「已执行」与「精确移交 #24」两段；
+> 旧的「MSB 项需 KVM 通道」延期表自 #40 起失效，保留为历史时明确标 obsolete。
 >
-> - **36 条已删除接管**（31 条 #23 批次 + 1 条 round-2 `run_integration_missing_session`
->   + 3 条 round-3 Upper 前失败：`smoke_session_resume_without_id`、
->   `smoke_session_resume_nonexistent`、`smoke_session_send_no_profile` + 1 条 round-6
->   `smoke_session_send_missing_credentials`）->
->   `planned_config_cli`(27) / `planned_session_cli`(7) / `planned_audit_cli`(1) /
->   `fast_cli_help`(1)，reason 标「已删除原内部测试，由已落地 X 黑盒接管」。
->   新增 5 个 fast-binary 黑盒：`fast_session_send_nonexistent_session_errors`（exit 2）、
->   `fast_session_resume_without_session_id_fails`（exit 2 + clap `SESSION_ID` 断言）、
->   `fast_session_resume_nonexistent_session_errors`（not found + id）、
->   `fast_session_send_no_agent_profile_errors`（exit 2 + `assert_no_secret` stdout+stderr）、
->   `fast_session_send_missing_credential_is_redacted_input_error`（exit 2 + 缺失 env-var 名 + 双流无 secret）。
->   `assert_exit_code` helper 使用 `ExitCodeMismatch { expected, actual }` 报告期望/实际值。
-> - **16 条真延期** -> `planned_audit_ops_msb`(7) / `planned_observe_msb`(1) /
->   `planned_provider_fail_msb`(1) / `planned_session_graph_msb`(5) /
->   `planned_session_history_msb`(1) / `planned_lancet_cli`(1)，target_layer =
->   `real_microsandbox`（15 条）或 `fast_binary`（1 条 `planned_lancet_cli` 待补 fast 测试），
->   原内部测试保留。
-> - **5 条冗余保留**（`project_branch_creation` / `project_branch_persists` /
->   `smoke_session_status_list` / `smoke_session_status_specific` / `run_integration_commits_existing_session`），replacement 指向已落地场景但
->   reason 明确标注冗余保留待删。
-> - **40 条复审判偏差**改记 **保留 / 局部不变量**，replacement 为 `null`：
->   15 条 round-1/2/3（纯 CLI helper/常量/源码扫描/脚本不变量/cfg-test/旧 schema 兼容）+
->   25 条 round-4（真正的 `render_human_*` / `render_json_*` / `seq_*` /
->   `verbose_epilogue_*` / `human_turn_log` 等渲染器、序列化器局部不变量）。
-> - **4 条源码扫描/cfg-test helper**（`project_branch_new_source_defines_field` /
->   `not_found_error_includes_object_id` / `session_resume_handler_function_exists` /
->   `session_resume_calls_typed_api`）round-2/3 改判 **删除**（RFC #19 决定六 / 已被 fast binary 覆盖），
->   并实际删除源码测试。
->
-> 据此 `lattice-cli` 计数由 保留 78 / 提升 101 / 删除 6 调整为 保留 118 / 提升 57 / 删除 10；
-> 全局由 保留 1298 / 提升 140 / 删除 11 调整为 保留 1338 / 提升 96 / 删除 15，合计仍 1449。
-> 验收段计数由 1443 修正为 1449（纯文档错误）。target_layer 按 41 fast_binary + 16 real_microsandbox
-> 正确分层。详见 `FIX.md` `#23 review-fix`。
+### Fast residual：0
+
+- 切片 1：`fast_lancet_cli` 接管 `cep_status_missing_db_returns_empty_state`（1 条）并删除原内部测试。
+- 切片 2：`fast_session_cli` 接管 `project_branch_creation_json_output_includes_branch` / `project_branch_persists_through_reopen`（2 条）并删除原内部测试；另删 2 条已完整接管的 smoke（`smoke_session_status_list_shows_seeded_session` / `smoke_session_status_specific_session`）。
+
+### #40 骨架已完成接管
+
+| replacement scenario | 删除/接管的内部测试 | superset 依据 |
+|---|---|---|
+| `direct_local_plain_text_turn_commits_and_exit_zero` | `direct_local_plain_text_turn_commits_and_exit_zero`（原 harness identity，keep→elevate；原名含退役词汇已重命名） | #40 落地 plain-text 完整 turn + exit 0 + session log commit |
+
+### 11 条退役契约补记 delete（#37–#40 已删除产品面，不向 #24 虚构 replacement）
+
+| ledger identity | 退役依据 |
+| --- | --- |
+| `stale_verification_reaches_no_promotion_effects` | #37–#40 删除 Upper/promotion 面 |
+| `success_uses_real_session_callback_and_materializes_lower` | #37–#40 删除 Upper/promotion 面 |
+| `promotion_module_documents_activation_requirement` | #37–#40 删除 Upper/promotion 面 |
+| `prune_one_session_does_not_remove_another` | #37–#40 删除 prune/snapshot 面 |
+| `prune_idempotent_second_call_returns_zero_released` | #37–#40 删除 prune/snapshot 面 |
+| `prune_session_snapshots_skips_pending_worktree_snapshot` | #37–#40 删除 prune/snapshot 面 |
+| `cleanup_status_error_yields_error_aborted` | #37–#40 删除 turn lifecycle Upper 面 |
+| `upper_routing_e2e` | #37–#40 删除 Upper routing 面 |
+| `adapter_failure_has_no_lower_fallback` | #37–#40 删除 Upper/adapter 面 |
+| `generated_profiles_are_executable_host_only` | #37–#40 删除 host-only profile 面 |
+| `retired_upper_routing_lane` | #37–#40 删除 Upper routing 面 |
+
+### #72 final assertion-level disposition（44 条）
+
+#72 对原始 handoff 逐条复核并运行新增/增强的 exact scenarios 后，当时分区为
+**keep 14 / elevate 3 / delete 27 = 44**。其中 7 条 keep 是 #24 slice 1 已批准的
+API-only invariants；当时对剩余 20 条判为 keep 7 / elevate 3 / delete 10。
+#46 residual closeout 将残余 3 条 elevate 落地为 exact external scenarios 并删除内部测试后，
+handoff 终态为 **keep 14 / elevate 0 / delete 30 = 44**。
+
+#### keep / local_invariant（14）
+
+`streaming_backward_compat_fake_llm_chat_only_still_works`、
+`stream_turn_live_with_agent_receiver_drop_does_not_cancel`、
+`stream_turn_live_with_agent_slow_observer_still_commits`、
+`consistency_error_after_partial_token`、`consistency_tool_call_path`、
+`consistency_completed_disposition_parity`、`consistency_error_disposition_parity`、
+`tool_execution_error_structured_payload_preserved`、
+`stream_turn_live_with_agent_startup_failure_no_stream`、
+`stream_turn_live_with_agent_commit_stores_delta_only`、
+`stream_turn_error_after_partial_commits_error`、
+`full_turn_audit_rows_and_replay_fragment`、
+`usage_resume_session_includes_previous_turn_context`、
+`run_integration_commits_existing_session`。逐条 residual 见 §2；均为 binary 无法忠实观察的
+trait/API return、raw graph/transcript、store/projection 或 collector parity seam。
+
+#### elevate / explicit unfinished behavior（0）
+
+#46 residual closeout 已关闭原 3 条 elevate；无剩余 unfinished Direct-Local handoff。
+
+#### delete / exact external assertion superset（30）
+
+| ledger identity | exact replacement |
+| --- | --- |
+| `agent_loop_builds_messages_from_transcript_and_user_input` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_live_with_agent_basic_completed` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_live_with_agent_error_commits_error` | `direct_failure_disconnect_before_output_commits_error` |
+| `stream_turn_live_with_agent_event_ordering` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_live_with_agent_branch_populated` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_emits_tool_activity_before_committed` | `direct_observation_visibility_and_bounds` |
+| `stream_turn_error_still_commits_error` | `direct_failure_disconnect_before_output_commits_error` |
+| `stream_turn_cancelled_commits_cancelled` | `direct_failure_sigint_while_stalled_commits_cancelled` |
+| `stream_turn_emits_cep_lifecycle_events` | `direct_tools_todo_write_success` |
+| `stream_turn_emits_activity_before_commit` | `direct_turn_completed_reopen_contract` |
+| `usage_run_turn_can_read_workspace_file_with_default_profile` | `direct_observation_visibility_and_bounds` |
+| `rejects_profile_disabled_web_fetch` | `direct_tools_fetch_disabled_no_dispatch` |
+| `audit_query_prints_fragment_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` |
+| `audit_tail_streams_rows_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` |
+| `audit_query_empty_result_for_unknown_session` | `direct_operator_audit_query_unknown_session_empty` |
+| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` |
+| `audit_replay_reports_stored_attestation_match` | `direct_operator_audit_session_lancet_cross_validate` |
+| `audit_replay_errors_for_unknown_turn` | `direct_operator_audit_replay_unknown_turn_fails` |
+| `cep_status_seeded_audit_json` | `direct_tools_todo_write_success` |
+| `stream_timeout_fires_after_duration` | `direct_failure_profile_deadline_while_stalled_commits_error` |
+| `tool_executor_uses_workspace_root_not_profile_package_dir` | `direct_observation_visibility_and_bounds` |
+| `branch_listing_reads_only_addressed_session_refs` | `direct_session_branch_listing_isolation` |
+| `checkout_changes_only_addressed_session_head` | `direct_session_checkout_isolation` |
+| `branch_create_affects_only_addressed_session` | `direct_session_branch_create_isolation` |
+| `reset_changes_only_addressed_session_branch_pointer` | `direct_session_reset_isolation` |
+| `diff_resolves_refs_inside_addressed_session_only` | `direct_session_diff_isolation` |
+| `smoke_session_log_shows_seeded_turn` | `direct_turn_completed_reopen_contract` |
+| `stream_turn_live_with_agent_commit_failure_deterministic` | `direct_failure_stale_parent_commit_failed` |
+| `usage_stream_turn_model_started_includes_routed_provider` | `direct_turn_sonnet_routed_provider_event` |
+| `public_https_policy_requires_fetch_capability` | `direct_tools_fetch_capability_denial_with_public_https` |
+
+### MSB 词汇退役
+
+# 40 删除 Upper/MSB/KVM lane 与门禁通道；machine ledger 与本文件已完全移除退役的
+
+KVM-lane 词汇（retired target_layer、replacement 场景 ID、门禁环境变量，
+以及含退役前缀的历史 identity 名）。ledger 只使用
+`direct_local_binary` 目标层与 `*_direct` / `direct_local_*` replacement 词汇。
+退役词汇的迁移记录见 FIX.md；历史决策/规划文档中残留的 KVM-lane 词汇由
+codeberg issue 跟踪重写。
+
+### layer 分布（最终）
+
+| 目标层 | 条数 |
+| --- | ---: |
+| 局部不变量 | 1372 |
+| 快速二进制黑盒 | 45 |
+| Direct-Local 外部二进制 | 32 |
+| **合计** | **1449** |
+
+### 决定分布（最终）
+
+| 决定 | 条数 |
+| --- | ---: |
+| 保留 | 1191 |
+| 提升 | 42 |
+| 删除 | 216 |
+| **合计** | **1449** |
+
+## 1.6 #24 slice 2 执行状态（2026-07-22）
+
+> 外部测试 `crates/lattice-system-harness/tests/direct_observation.rs` 已实现并通过全部 gate。
+> 按 plan「Exact replacement IDs」做 assertion-level superset review，结果如下。
+
+### 已删除（4 条，提升->删除）
+
+| ledger identity | replacement scenario | superset 依据 |
+| --- | --- | --- |
+| `usage_run_turn_can_read_workspace_file_with_default_profile` | `direct_observation_visibility_and_bounds` | direct_observation.rs 通过 .lattice/agents/ profile 读取 tracked.txt/notes.txt 并断言 content present |
+| `tool_executor_uses_workspace_root_not_profile_package_dir` | `direct_observation_visibility_and_bounds` | profile 位于 .lattice/agents/dl-obs/ 且读取 project-root 内容，严格强于原仅断言 ok=true |
+| `stream_turn_emits_tool_activity_before_committed` | `direct_observation_visibility_and_bounds` | tool_call_started/finished 在 completed commit 前，严格超集 |
+| `stream_turn_emits_activity_before_commit` | `direct_turn_completed_reopen_contract` | 完整生命周期子序列严格覆盖原排序断言 |
+
+### #72 复核后的 residual（1 keep / 1 delete）
+
+| ledger identity | replacement scenario | 未覆盖半 |
+| --- | --- | --- |
+| `full_turn_audit_rows_and_replay_fragment` | — `keep/local_invariant` | public operator scenario 已覆盖 query/replay；raw DB row 字段与 exact activity count 仅 API/store seam 可见 |
+| `stream_turn_emits_cep_lifecycle_events` | `direct_tools_todo_write_success` | #72 补齐 exact CEP metadata/order，scenario 通过后删除原测试 |
+
+### counts 变更
+
+- lattice-api：提升 19->16，删除 12->15（3 条提升->删除）
+- lattice-cli：提升 57->56，删除 10->11（1 条提升->删除）
+- 合计：提升 79->75，删除 184->188
+
+## 1.7 #24 slice 4 执行状态（2026-07-22）
+
+> 外部测试 `crates/lattice-system-harness/tests/direct_tools.rs` 已实现并通过全部 gate。
+
+### 已删除（1 条，提升->删除）
+
+| ledger identity | replacement scenario | superset 依据 |
+| --- | --- | --- |
+| `rejects_profile_disabled_web_fetch` | `direct_tools_fetch_disabled_no_dispatch` | 失败 tool + fixture 零请求 + 无 cep_call_started |
+
+### 原半保留（1 条；#46 residual 已关闭）
+
+| ledger identity | replacement scenario | 关闭依据 |
+| --- | --- | --- |
+| `public_https_policy_requires_fetch_capability` | `direct_tools_fetch_capability_denial_with_public_https` | #46 residual exact scenario 通过后 elevate→delete |
+
+
+## 1.8 #24 slice 5 执行状态（2026-07-22）
+
+> 外部测试 `crates/lattice-system-harness/tests/direct_failures.rs` 已实现并通过全部 gate（7 场景）。
+> 产品变更：`[llm] timeout_secs` profile 字段 + 校验；API mapping 映射到 `AgentTurnRequest.timeout`；
+> agent loop `await_with_deadline_and_cancel` 在 stall 时同时 race deadline 与 cancel flag；
+> CLI `session send` 安装 scoped SIGINT 监听并传递 cancel flag。
+
+### #72 复核后的终态（2 delete / 2 keep）
+
+| ledger identity | replacement scenario | 已落地半 | 未覆盖半 |
+| --- | --- | --- | --- |
+| `stream_turn_cancelled_commits_cancelled` | `direct_failure_sigint_while_stalled_commits_cancelled` | #72 补齐 reason + durable cancelled log | exact scenario 通过后删除 |
+| `stream_turn_error_after_partial_commits_error` | — `keep/local_invariant` | external 覆盖 partial/error events | raw transcript assistant + terminal_reason 映射仅 API/graph seam 可见 |
+| `stream_timeout_fires_after_duration` | `direct_failure_profile_deadline_while_stalled_commits_error` | 真实 stalled provider 产品 deadline | exact scenario 通过后删除 Tokio-only test |
+| `stream_turn_live_with_agent_startup_failure_no_stream` | — `keep/local_invariant` | binary 覆盖 missing-session exit 2/零事件 | 无法区分 Rust API immediate Err 与 Ok(empty stream) |
+
+### 新增不变量（无 ledger 前身）
+
+| scenario | 不变量 |
+| --- | --- |
+| `direct_failure_mutation_survives_provider_failure` | 成功 mutation 后 provider 失败，Local bytes 保留（Direct-Local 无回滚） |
+
+
+## 1.9 #24 slice 6 执行状态（2026-07-22）
+
+> 外部测试 `crates/lattice-system-harness/tests/direct_operator.rs`（3 场景）+ `tests/direct_secrets.rs`（2 场景）已实现并通过全部 gate。
+> 产品变更：`TurnStarted` 添加 additive `turn_id` 字段（audit replay 需要稳定 turn 标识）。
+
+### 已删除（4 条，提升->删除）
+
+| ledger identity | replacement scenario | superset 依据 |
+| --- | --- | --- |
+| `audit_query_prints_fragment_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` | row_count>0 + methods + method/verdict filters + tail + session status/log |
+| `audit_tail_streams_rows_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` | tail 返回非零 rows |
+| `audit_query_empty_result_for_unknown_session` | `direct_operator_audit_query_unknown_session_empty` | exit 0 + row_count==0 |
+| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` | replay trace.turn_id 非空 + observe.workspace activity |
+
+### #72 补齐并删除（2 条）
+
+| ledger identity | replacement scenario | 未覆盖半 |
+| --- | --- | --- |
+| `audit_replay_reports_stored_attestation_match` | `direct_operator_audit_session_lancet_cross_validate` | #72 补齐 public replay JSON stored_statement_match=true |
+| `cep_status_seeded_audit_json` | `direct_tools_todo_write_success` | #72 真实 todo Turn 后断言 recent_calls 含 todo_write + last_guard_verdict 非空 |
+
+
+## 1.10 #24 slice 7 执行状态（2026-07-22）
+
+> 外部测试 `crates/lattice-system-harness/tests/direct_session_isolation.rs`（5 场景）已实现并通过全部 gate。
+
+### 已删除（5 条，提升->删除）
+
+| ledger identity | replacement scenario |
+| --- | --- |
+| `branch_listing_reads_only_addressed_session_refs` | `direct_session_branch_listing_isolation` |
+| `checkout_changes_only_addressed_session_head` | `direct_session_checkout_isolation` |
+| `branch_create_affects_only_addressed_session` | `direct_session_branch_create_isolation` |
+| `reset_changes_only_addressed_session_branch_pointer` | `direct_session_reset_isolation` |
+| `diff_resolves_refs_inside_addressed_session_only` | `direct_session_diff_isolation` |
+
+
+## 1.11 #24 slice 8 执行状态（2026-07-22）
+
+> Ledger deletion closeout: strict-superset removals only; all half-covered mappings retained with documented reasons.
+
+### 已删除（3 条，提升->删除）
+
+| ledger identity | replacement scenario |
+| --- | --- |
+| `stream_turn_live_with_agent_basic_completed` | `direct_turn_completed_reopen_contract`（完整生命周期 + session_id/branch/exit code） |
+| `stream_turn_live_with_agent_event_ordering` | `direct_turn_completed_reopen_contract`（相同事件子序列） |
+| `stream_turn_live_with_agent_branch_populated` | `direct_turn_completed_reopen_contract`（branch == main） |
+
+### #72 最终更正
+
+slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 final review 将该 20 条
+判为 **keep 7 / elevate 3 / delete 10**；与 slice 1 已确认的 7 keep、此前 17 delete
+合并后，#72 当时的最终分区为 **keep 14 / elevate 3 / delete 27**。
+#46 residual closeout 后为 **keep 14 / elevate 0 / delete 30**。逐条结果见 §1.5 与 §2。
+
+## 1.9 #46 residual elevate closeout（2026-07-24）
+
+> 关闭 #72 遗留的 3 条 Direct-Local elevate：新增 exact external scenarios，通过后删除内部测试并同步 machine/prose ledger。
+
+### 已删除（3 条，提升->删除）
+
+| ledger identity | replacement scenario | superset 依据 |
+| --- | --- | --- |
+| `public_https_policy_requires_fetch_capability` | `direct_tools_fetch_capability_denial_with_public_https` | tool_call_finished ok=false + EffectViolation/authorized-region + cep_call_started external_observation/cep_native + turn_committed completed |
+| `usage_stream_turn_model_started_includes_routed_provider` | `direct_turn_sonnet_routed_provider_event` | model_started provider=anthropic model=sonnet（无 Anthropic 出站） |
+| `stream_turn_live_with_agent_commit_failure_deterministic` | `direct_failure_stale_parent_commit_failed` | token_delta→turn_committing→commit_failed、无 turn_committed、session log 长度=2 |
+
+### counts 变更
+
+- lattice-api：提升 3->0，删除 23->26
+- handoff：elevate 3->0，delete 27->30（keep 14 不变）
+- 全量：提升 45->42，删除 211->214（总 identity 1449 不变；layer 仍为 local 1372 / fast 45 / Direct-Local 32）
+
 
 ## 2. 逐条清单
 
 ### `lancet-api`（保留 17 / 提升 0 / 删除 1）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `query_audit_reads_store_without_cep_server` | `crates/lancet-api/src/audit.rs:450` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `tail_audit_paginates_large_result_without_cep_server` | `crates/lancet-api/src/audit.rs:463` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `query_audit_errors_when_store_missing` | `crates/lancet-api/src/audit.rs:505` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
@@ -179,7 +382,7 @@
 | `replay_audit_matches_stored_attestation` | `crates/lancet-api/src/audit.rs:529` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `query_audit_excludes_unfinalized_rows_during_active_turn` | `crates/lancet-api/src/audit.rs:580` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `operator_audit_reads_concurrent_with_active_writer` | `crates/lancet-api/src/audit.rs:630` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `operator_audit_module_does_not_reference_cep_server_types` | `crates/lancet-api/src/audit.rs:745` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
+| `operator_audit_module_does_not_reference_cep_server_types` | `crates/lancet-api/src/audit.rs:745` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
 | `query_audit_reads_legacy_table_missing_optional_columns` | `crates/lancet-api/src/audit.rs:768` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `query_audit_reads_legacy_table_without_attestation_records` | `crates/lancet-api/src/audit.rs:830` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `external_audit_distinct_project_keys` | `crates/lancet-api/src/config.rs:176` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
@@ -194,7 +397,7 @@
 ### `lancet-audit`（保留 34 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `open_rejects_symlinked_audit_parent` | `crates/lancet-audit/src/audit_tests.rs:32` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
 | `open_rejects_symlinked_audit_database_file` | `crates/lancet-audit/src/audit_tests.rs:53` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
 | `for_production_dispatch_labels_known_native_and_unknown_unrouted` | `crates/lancet-audit/src/audit_tests.rs:79` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
@@ -233,7 +436,7 @@
 ### `lancet-authority`（保留 135 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `observation_within_region_returns_ok` | `crates/lancet-authority/src/effect/checker.rs:220` | 保留 | 局部不变量 | — | policy/capability/Guard L1/effect 纯语义局部不变量；保留 |
 | `denied_effect_kind_rejects_authorized_handler_effect` | `crates/lancet-authority/src/effect/checker.rs:239` | 保留 | 局部不变量 | — | policy/capability/Guard L1/effect 纯语义局部不变量；保留 |
 | `mutation_in_observation_method_returns_effect_violation` | `crates/lancet-authority/src/effect/checker.rs:275` | 保留 | 局部不变量 | — | policy/capability/Guard L1/effect 纯语义局部不变量；保留 |
@@ -373,7 +576,7 @@
 ### `lancet-catalog`（保留 31 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `catalog_contains_expected_methods_in_stable_order` | `crates/lancet-catalog/src/catalog.rs:67` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |
 | `catalog_method_names_are_unique` | `crates/lancet-catalog/src/catalog.rs:73` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |
 | `catalog_method_names_are_full_dotted_names` | `crates/lancet-catalog/src/catalog.rs:81` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |
@@ -409,8 +612,8 @@
 ### `lancet-cep`（保留 7 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
-| `tool_definition_roundtrip` | `crates/lancet-cep/src/tool.rs:193` | 保留 | 局部不变量 | — | lancet-cep 局部不变量（wire/安全/dispatch/投影）；保留 |
+| --- | --- | --- | --- | --- | --- |
+| `tool_definition_roundtrip` | `crates/lattice-llm/src/types.rs:325` | 保留 | 局部不变量 | — | provider 请求构造/SSE parser/路由/HTTP pinning 局部不变量；保留 |
 | `projection_length_equals_catalog_len` | `crates/lancet-cep/src/tool.rs:205` | 保留 | 局部不变量 | — | lancet-cep 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `projected_names_match_catalog_exactly` | `crates/lancet-cep/src/tool.rs:211` | 保留 | 局部不变量 | — | lancet-cep 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `enabled_filter_rejects_unknown` | `crates/lancet-cep/src/tool.rs:219` | 保留 | 局部不变量 | — | lancet-cep 局部不变量（wire/安全/dispatch/投影）；保留 |
@@ -421,7 +624,7 @@
 ### `lancet-dispatch`（保留 5 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `registry_typed_handler_dispatch_returns_result` | `crates/lancet-dispatch/src/registry.rs:239` | 保留 | 局部不变量 | — | lancet-dispatch 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `registry_invalid_params_returns_32602` | `crates/lancet-dispatch/src/registry.rs:263` | 保留 | 局部不变量 | — | lancet-dispatch 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `registry_unknown_method_returns_32601` | `crates/lancet-dispatch/src/registry.rs:278` | 保留 | 局部不变量 | — | lancet-dispatch 局部不变量（wire/安全/dispatch/投影）；保留 |
@@ -431,7 +634,7 @@
 ### `lancet-native`（保留 107 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `apply_patch_engine_missing_hash_on_update_fails_before_any_write` | `crates/lancet-native/src/edit/apply.rs:904` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
 | `apply_patch_engine_missing_hash_on_delete_fails_before_any_write` | `crates/lancet-native/src/edit/apply.rs:926` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
 | `apply_patch_engine_hash_mismatch_fails_before_any_write` | `crates/lancet-native/src/edit/apply.rs:948` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
@@ -524,7 +727,7 @@
 | `cep_native_registry_labels_native_methods` | `crates/lancet-native/src/server/native_registry.rs:299` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
 | `registry_full_catalog_registered_via_production_helper` | `crates/lancet-native/src/server/registry.rs:131` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
 | `policy_denial_precedes_adapter` | `crates/lancet-native/src/server/registry.rs:310` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
-| `path_denial_records_preflight_only` | `crates/lancet-native/src/server/registry.rs:325` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
+| `path_denial_records_preflight_only` | `crates/lattice-api/tests/upper_routing.rs:316` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `backend_failure_records_both_invocations` | `crates/lancet-native/src/server/registry.rs:339` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
 | `verification_failure_after_backend` | `crates/lancet-native/src/server/registry.rs:354` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
 | `success_has_no_rejection_fields` | `crates/lancet-native/src/server/registry.rs:369` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
@@ -543,7 +746,7 @@
 ### `lancet-protocol`（保留 36 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `unknown_impact_kind_fails_deserialization` | `crates/lancet-protocol/src/effect_types.rs:155` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `every_family_has_code_in_range` | `crates/lancet-protocol/src/error.rs:356` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `family_code_round_trips_through_jsonrpc_error_response` | `crates/lancet-protocol/src/error.rs:378` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
@@ -581,10 +784,10 @@
 | `prov_activity_attributes_default_for_legacy_fragments` | `crates/lancet-protocol/src/provenance.rs:203` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `in_toto_statement_deserializes_with_unknown_fields` | `crates/lancet-protocol/src/provenance.rs:218` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
 
-### `lattice-agent`（保留 68 / 提升 3 / 删除 0）
+### `lattice-agent`（保留 70 / 提升 0 / 删除 1）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `append_llm_message_extends_provider_cache` | `crates/lattice-agent/src/agent_loop/messages.rs:58` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `truncate_ascii_short_noop` | `crates/lattice-agent/src/agent_loop/mod.rs:1346` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `truncate_ascii_long` | `crates/lattice-agent/src/agent_loop/mod.rs:1351` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
@@ -593,11 +796,11 @@
 | `truncate_mixed_ascii_cjk` | `crates/lattice-agent/src/agent_loop/mod.rs:1375` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `truncate_exact_width_noop` | `crates/lattice-agent/src/agent_loop/mod.rs:1383` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `truncate_empty` | `crates/lattice-agent/src/agent_loop/mod.rs:1389` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
-| `agent_loop_builds_messages_from_transcript_and_user_input` | `crates/lattice-agent/tests/agent_loop.rs:114` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部 Fake LLM 完整对话/tool happy path；提升到 session send 黑盒并删除低层重复 |
+| `agent_loop_builds_messages_from_transcript_and_user_input` | `crates/lattice-agent/tests/agent_loop.rs:114` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #72 assertion-level superset：direct_turn_completed_reopen_contract 通过真实 binary 两轮 Turn 精确断言 [system,user,assistant,user] 角色序列与 prior/current 内容，并验证 commit/reopen；exact scenario 已通过后删除原测试。 |
 | `agent_loop_prepends_system_prompt_when_present` | `crates/lattice-agent/tests/agent_loop.rs:194` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `agent_loop_terminates_at_hard_cap_when_llm_loops_forever` | `crates/lattice-agent/tests/agent_loop.rs:282` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `agent_loop_second_llm_round_includes_tool_result_in_request` | `crates/lattice-agent/tests/agent_loop.rs:305` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
-| `tool_execution_error_structured_payload_preserved` | `crates/lattice-agent/tests/agent_loop.rs:397` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部 Fake LLM 完整对话/tool happy path；提升到 session send 黑盒并删除低层重复 |
+| `tool_execution_error_structured_payload_preserved` | `crates/lattice-agent/tests/agent_loop.rs:397` | 保留 | 局部不变量 | — | #72 final review：AgentLoop 将 code/message/data/retriability 的 CepErrorPayload 原样保存在 AgentTurnResult；当前 binary TurnEvent/RunTurnResult 只公开 error summary，无法忠实外部观察，改判 keep/local_invariant。 |
 | `scenario_01_cancel_before_tool_execution` | `crates/lattice-agent/tests/live_sink_and_cancel.rs:258` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `scenario_06_cancel_after_first_tool_in_multi_tool_batch` | `crates/lattice-agent/tests/live_sink_and_cancel.rs:355` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `scenario_02_cancel_during_tool_execution` | `crates/lattice-agent/tests/live_sink_and_cancel.rs:483` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
@@ -636,7 +839,7 @@
 | `streaming_failed_tool_does_not_make_turn_error` | `crates/lattice-agent/tests/streaming_delta.rs:855` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `streaming_multi_round_tool_loop` | `crates/lattice-agent/tests/streaming_delta.rs:920` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `streaming_started_event_ignored_no_double_model_started` | `crates/lattice-agent/tests/streaming_delta.rs:1002` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
-| `streaming_backward_compat_fake_llm_chat_only_still_works` | `crates/lattice-agent/tests/streaming_delta.rs:1048` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部 Fake LLM 完整对话/tool happy path；提升到 session send 黑盒并删除低层重复 |
+| `streaming_backward_compat_fake_llm_chat_only_still_works` | `crates/lattice-agent/tests/streaming_delta.rs:1048` | 保留 | 局部不变量 | — | trait fallback（Fake LLM chat-only streaming）无忠实的外部二进制触发；保留为局部不变量 |
 | `streaming_open_retries_retryable_transport_error_then_succeeds` | `crates/lattice-agent/tests/streaming_delta.rs:1077` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `streaming_open_retry_exhaustion_returns_structured_error` | `crates/lattice-agent/tests/streaming_delta.rs:1152` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `streaming_open_does_not_retry_non_retryable_provider_http_error` | `crates/lattice-agent/tests/streaming_delta.rs:1202` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
@@ -657,10 +860,10 @@
 | `fake_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:473` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `fake_stream_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:486` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 
-### `lattice-api`（保留 223 / 提升 36 / 删除 1）
+### `lattice-api`（保留 234 / 提升 0 / 删除 26）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `create_and_open_session_round_trip` | `crates/lattice-api/src/session.rs:389` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `status_reports_head_branch_and_commit_count` | `crates/lattice-api/src/session.rs:416` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `list_sessions_includes_created_sessions` | `crates/lattice-api/src/session.rs:431` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -723,15 +926,15 @@
 | `live_activation_cancelled_classifies_as_aborted` | `crates/lattice-api/src/turn/live.rs:612` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `live_activation_outcome_messages_are_typed` | `crates/lattice-api/src/turn/live.rs:628` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `live_activation_no_candidate_exported_flag` | `crates/lattice-api/src/turn/live.rs:647` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `stream_turn_live_with_agent_basic_completed` | `crates/lattice-api/src/turn/live_tests.rs:273` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `stream_turn_live_with_agent_error_commits_error` | `crates/lattice-api/src/turn/live_tests.rs:364` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `stream_turn_live_with_agent_event_ordering` | `crates/lattice-api/src/turn/live_tests.rs:421` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `stream_turn_live_with_agent_startup_failure_no_stream` | `crates/lattice-api/src/turn/live_tests.rs:492` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `stream_turn_live_with_agent_commit_stores_delta_only` | `crates/lattice-api/src/turn/live_tests.rs:513` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `stream_turn_live_with_agent_branch_populated` | `crates/lattice-api/src/turn/live_tests.rs:644` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `stream_turn_live_with_agent_commit_failure_deterministic` | `crates/lattice-api/src/turn/live_tests.rs:675` | 提升 | 真实 Microsandbox | planned MSB: 跨进程 session resume | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `stream_turn_live_with_agent_receiver_drop_does_not_cancel` | `crates/lattice-api/src/turn/live_tests.rs:836` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `stream_turn_live_with_agent_slow_observer_still_commits` | `crates/lattice-api/src/turn/live_tests.rs:896` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变；planned MSB: policy/channel 拒绝且无宿主 fallback；planned MSB: 已退役 agent 方法明确失败且无副作用 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
+| `stream_turn_live_with_agent_basic_completed` | `crates/lattice-api/src/turn/live_tests.rs:273` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（完整生命周期 + session_id/branch/exit code）。已删除原测试。 |
+| `stream_turn_live_with_agent_error_commits_error` | `crates/lattice-api/src/turn/live_tests.rs:364` | 删除 | Direct-Local 外部二进制 | `direct_failure_disconnect_before_output_commits_error` | #72 assertion-level superset：direct_failure_disconnect_before_output_commits_error 断言非空 TurnFailed.reason、failed→committing→committed(error)、无 CommitFailed、exit 1 与 durable error log；exact scenario 已通过后删除原测试。 |
+| `stream_turn_live_with_agent_event_ordering` | `crates/lattice-api/src/turn/live_tests.rs:421` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（相同事件子序列）。已删除原测试。 |
+| `stream_turn_live_with_agent_startup_failure_no_stream` | `crates/lattice-api/src/turn/live_tests.rs:492` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已覆盖 missing-session exit 2 + 零 Turn events，但 binary 无法区分 Rust API 在 prepare 阶段立即返回 Err 与返回 Ok(empty stream)；保留该 startup return contract 为 local invariant。 |
+| `stream_turn_live_with_agent_commit_stores_delta_only` | `crates/lattice-api/src/turn/live_tests.rs:513` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已覆盖两轮 reopen/log/status 与首条 log 稳定；原测试仍直接断言 graph commit delta、HEAD transcript 精确四消息及 commit-message 长度，这些存储表示不由 public binary 忠实暴露，改判 keep/local_invariant。 |
+| `stream_turn_live_with_agent_branch_populated` | `crates/lattice-api/src/turn/live_tests.rs:644` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #24 slice 8 assertion-level superset review：direct_turn_completed_reopen_contract（branch == main）。已删除原测试。 |
+| `stream_turn_live_with_agent_commit_failure_deterministic` | `crates/lattice-api/src/turn/live_tests.rs:675` | 删除 | Direct-Local 外部二进制 | `direct_failure_stale_parent_commit_failed` | #46 residual elevate closeout：direct_failure_stale_parent_commit_failed 通过 baseline+gated A+retargeted racer B 断言 token_delta→turn_committing→commit_failed（非空 reason）、无 turn_committed、public session log 长度=2；严格超集。已删除原测试。 |
+| `stream_turn_live_with_agent_receiver_drop_does_not_cancel` | `crates/lattice-api/src/turn/live_tests.rs:836` | 保留 | 局部不变量 | — | API observer 行为（receiver drop 不取消 commit）无忠实的外部二进制触发；保留为局部不变量 |
+| `stream_turn_live_with_agent_slow_observer_still_commits` | `crates/lattice-api/src/turn/live_tests.rs:896` | 保留 | 局部不变量 | — | API observer 行为（慢 observer 仍 commit）无忠实的外部二进制触发；保留为局部不变量 |
 | `run_turn_uses_required_session_and_returns_session_id` | `crates/lattice-api/src/turn/run_tests.rs:17` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `run_turn_commits_exactly_one_turn` | `crates/lattice-api/src/turn/run_tests.rs:43` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `run_turn_uses_existing_session_transcript` | `crates/lattice-api/src/turn/run_tests.rs:62` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -741,11 +944,11 @@
 | `run_cutover_uses_loaded_profile_model` | `crates/lattice-api/src/turn/run_tests.rs:214` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata` | `crates/lattice-api/src/turn/run_tests.rs:240` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `run_turn_commits_parent_from_initial_transcript` | `crates/lattice-api/src/turn/run_tests.rs:269` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `stream_turn_emits_tool_activity_before_committed` | `crates/lattice-api/src/turn/stream_tests.rs:17` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `stream_turn_error_still_commits_error` | `crates/lattice-api/src/turn/stream_tests.rs:89` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `stream_turn_cancelled_commits_cancelled` | `crates/lattice-api/src/turn/stream_tests.rs:142` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变；planned MSB: provider 断流/非法 SSE/取消 + Upper 清理 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `stream_turn_error_after_partial_commits_error` | `crates/lattice-api/src/turn/stream_tests.rs:217` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `stream_turn_emits_cep_lifecycle_events` | `crates/lattice-api/src/turn/stream_tests.rs:282` | 提升 | 真实 Microsandbox | planned MSB: policy/channel 拒绝且无宿主 fallback；planned MSB: 已退役 agent 方法明确失败且无副作用 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
+| `stream_turn_emits_tool_activity_before_committed` | `crates/lattice-api/src/turn/stream_tests.rs:17` | 删除 | Direct-Local 外部二进制 | `direct_observation_visibility_and_bounds` | #24 slice 2 assertion-level superset review：direct_observation.rs 断言 tool_call_started<turn_committed（10 次 observe.workspace）+ 全部 tool_call_finished（ok_pattern）+ completed commit；tool_call_finished<committed 为 agent loop 结构不变量（commit 为终步）。已删除原测试。 |
+| `stream_turn_error_still_commits_error` | `crates/lattice-api/src/turn/stream_tests.rs:89` | 删除 | Direct-Local 外部二进制 | `direct_failure_disconnect_before_output_commits_error` | #72 assertion-level superset：direct_failure_disconnect_before_output_commits_error 断言 stream failure 事件顺序、committed error、exit 1，并通过 public session log 断言 durable status=error 与非空 terminal_reason；exact scenario 已通过后删除原测试。 |
+| `stream_turn_cancelled_commits_cancelled` | `crates/lattice-api/src/turn/stream_tests.rs:142` | 删除 | Direct-Local 外部二进制 | `direct_failure_sigint_while_stalled_commits_cancelled` | #72 assertion-level superset：direct_failure_sigint_while_stalled_commits_cancelled 断言 cancellation reason、cancelled→committing→committed(cancelled)、exit 1、零 assistant 输出与 public log status=cancelled；exact scenario 已通过后删除原测试。 |
+| `stream_turn_error_after_partial_commits_error` | `crates/lattice-api/src/turn/stream_tests.rs:217` | 保留 | 局部不变量 | — | #72 final review：direct_failure_disconnect_after_partial_token_commits_error 已覆盖 partial token、TurnFailed、committed error 与 exit 1；原测试仍直接断言 Session History 中 assistant delta 精确内容及 terminal_reason 映射，public CLI 无 transcript read surface，改判 keep/local_invariant。 |
+| `stream_turn_emits_cep_lifecycle_events` | `crates/lattice-api/src/turn/stream_tests.rs:282` | 删除 | Direct-Local 外部二进制 | `direct_tools_todo_write_success` | #72 assertion-level superset：direct_tools_todo_write_success 通过 public JSONL 精确断言 session.todo_write 的 cep_native/cep_policy_lifecycle/session_state_mutation 及 CepStarted<CepFinished<ToolFinished；exact scenario 已通过后删除原测试。 |
 | `turn_usage_summary_from_turn_usage` | `crates/lattice-api/src/turn/types_tests.rs:8` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `status_error_maps_to_commit_error` | `crates/lattice-api/src/turn/types_tests.rs:21` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `turn_event_serializes_with_type_discriminator` | `crates/lattice-api/src/turn/types_tests.rs:29` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
@@ -769,7 +972,7 @@
 | `upper_lease_destroy_consumes_handle_once` | `crates/lattice-api/src/turn/upper.rs:516` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `workspace_execution_backend_changed_paths_from_typed_entries` | `crates/lattice-api/src/turn/workspace_backend.rs:447` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `workspace_execution_backend_maps_content_too_large` | `crates/lattice-api/src/turn/workspace_backend.rs:482` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `full_turn_audit_rows_and_replay_fragment` | `crates/lattice-api/tests/audit_turn_provenance.rs:145` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变；planned MSB: `mutate.create/edit` Upper-only + effect 记账；planned MSB: operator audit query/replay（真实 turn 后）；planned MSB: provider 断流/非法 SSE/取消 + Upper 清理 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
+| `full_turn_audit_rows_and_replay_fragment` | `crates/lattice-api/tests/audit_turn_provenance.rs:145` | 保留 | 局部不变量 | — | #72 final review：direct_operator_audit_session_lancet_cross_validate 已覆盖 public query/filter/tail/replay；原测试仍直接断言 audit DB 持久化、逐 row call/method/impact/turn/session/model 字段与 replay activity 精确计数，这些 store/projection seam 不由 binary 完整暴露，改判 keep/local_invariant。 |
 | `cep_mode_enforce_effect_overreach_denied` | `crates/lattice-api/tests/cep_mode_integration.rs:100` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `cep_mode_warn_effect_overreach_ok_with_audit_warning` | `crates/lattice-api/tests/cep_mode_integration.rs:143` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `effect_deny_rejects_in_warn_mode` | `crates/lattice-api/tests/cep_mode_integration.rs:169` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -784,11 +987,11 @@
 | `cep_round_trip_cep_family_error_preserves_payload` | `crates/lattice-api/tests/cep_round_trip.rs:365` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `web_fetch_and_todo_write_audit_without_workspace_envelope` | `crates/lattice-api/tests/cep_round_trip.rs:488` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `consistency_completed_content_only` | `crates/lattice-api/tests/consistency.rs:274` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `consistency_error_after_partial_token` | `crates/lattice-api/tests/consistency.rs:294` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `consistency_tool_call_path` | `crates/lattice-api/tests/consistency.rs:357` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `stream_turn_emits_activity_before_commit` | `crates/lattice-api/tests/consistency.rs:438` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `consistency_completed_disposition_parity` | `crates/lattice-api/tests/consistency.rs:492` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `consistency_error_disposition_parity` | `crates/lattice-api/tests/consistency.rs:566` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变；planned MSB: provider 断流/非法 SSE/取消 + Upper 清理 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
+| `consistency_error_after_partial_token` | `crates/lattice-api/tests/consistency.rs:294` | 保留 | 局部不变量 | — | `run_turn`/collector parity（partial token 后 error）无忠实的外部二进制触发；保留为局部不变量 |
+| `consistency_tool_call_path` | `crates/lattice-api/tests/consistency.rs:357` | 保留 | 局部不变量 | — | `run_turn`/collector parity（tool call path）无忠实的外部二进制触发；保留为局部不变量 |
+| `stream_turn_emits_activity_before_commit` | `crates/lattice-api/tests/consistency.rs:438` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #24 slice 2 assertion-level superset review：slice-1 direct_turn_contract.rs（direct_turn_completed_reopen_contract）断言完整生命周期子序列 [turn_started, model_started, token_delta, model_finished, turn_committing, turn_committed]，为原内部测试 ModelStarted<TokenDelta<TurnCommitting<TurnCommitted 排序的严格超集。已删除原测试。 |
+| `consistency_completed_disposition_parity` | `crates/lattice-api/tests/consistency.rs:492` | 保留 | 局部不变量 | — | `run_turn`/collector parity（completed disposition）无忠实的外部二进制触发；保留为局部不变量 |
+| `consistency_error_disposition_parity` | `crates/lattice-api/tests/consistency.rs:566` | 保留 | 局部不变量 | — | `run_turn`/collector parity（error disposition）无忠实的外部二进制触发；保留为局部不变量 |
 | `dogfood_impact_matrix_five_production_classes` | `crates/lattice-api/tests/dogfood_impact_matrix.rs:248` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `git_store_branch_and_checkout_moves_head` | `crates/lattice-api/tests/git_store_branch_checkout.rs:46` | 保留 | 局部不变量 | — | session/git store 事务、恢复、原子性、ID 解析局部不变量；保留（非产品 turn 路径） |
 | `git_store_candidate_ref_created_for_lifecycle_turn` | `crates/lattice-api/tests/git_store_candidate_refs.rs:24` | 保留 | 局部不变量 | — | session/git store 事务、恢复、原子性、ID 解析局部不变量；保留（非产品 turn 路径） |
@@ -807,8 +1010,8 @@
 | `pending_journal_returns_recovery_required` | `crates/lattice-api/tests/promotion_wiring.rs:271` | 保留 | 局部不变量 | — | session/git store 事务、恢复、原子性、ID 解析局部不变量；保留（非产品 turn 路径） |
 | `third_state_journal_returns_recovery_conflict` | `crates/lattice-api/tests/promotion_wiring.rs:287` | 保留 | 局部不变量 | — | session/git store 事务、恢复、原子性、ID 解析局部不变量；保留（非产品 turn 路径） |
 | `recover_enables_preflight_and_promotion` | `crates/lattice-api/tests/promotion_wiring.rs:309` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `stale_verification_reaches_no_promotion_effects` | `crates/lattice-api/tests/promotion_wiring.rs:329` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `success_uses_real_session_callback_and_materializes_lower` | `crates/lattice-api/tests/promotion_wiring.rs:381` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
+| `stale_verification_reaches_no_promotion_effects` | `crates/lattice-api/tests/promotion_wiring.rs:329` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
+| `success_uses_real_session_callback_and_materializes_lower` | `crates/lattice-api/tests/promotion_wiring.rs:381` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `public_api_compiles_for_embedder` | `crates/lattice-api/tests/promotion_wiring.rs:470` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `promotion_source_contains_no_export_candidate_call` | `crates/lattice-api/tests/promotion_wiring.rs:500` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `preexported_promotion_succeeds_without_workspace` | `crates/lattice-api/tests/promotion_wiring.rs:512` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -823,10 +1026,10 @@
 | `temporarily_blocked_pins_candidate_before_returning` | `crates/lattice-api/tests/promotion_wiring.rs:734` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `retry_pinned_candidate_succeeds_after_temporary_block` | `crates/lattice-api/tests/promotion_wiring.rs:799` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `stream_turn_sources_do_not_reference_promotion_apis` | `crates/lattice-api/tests/promotion_wiring.rs:848` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `production_code_does_not_fabricate_passing_verification` | `crates/lattice-api/tests/promotion_wiring.rs:866` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
-| `promotion_module_documents_activation_requirement` | `crates/lattice-api/tests/promotion_wiring.rs:893` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
+| `production_code_does_not_fabricate_passing_verification` | `crates/lattice-api/tests/promotion_wiring.rs:866` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
+| `promotion_module_documents_activation_requirement` | `crates/lattice-api/tests/promotion_wiring.rs:893` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `deterministic_embedder_path_remains_primary` | `crates/lattice-api/tests/promotion_wiring.rs:900` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `microsandbox_workspace_type_checks_with_public_promotion_api` | `crates/lattice-api/tests/promotion_wiring.rs:911` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
+| `workspace_type_checks_with_public_promotion_api` | `crates/lattice-api/tests/promotion_wiring.rs:911` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `release_e2e_criterion_8` | `crates/lattice-api/tests/release_e2e.rs:177` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `pending_worktree_with_snapshot_resolves_restore_snapshot` | `crates/lattice-api/tests/resume_tests.rs:107` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `pending_verification_without_loss_resolves_restore_snapshot` | `crates/lattice-api/tests/resume_tests.rs:124` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -844,9 +1047,9 @@
 | `resume_without_project_branch_metadata_fails` | `crates/lattice-api/tests/resume_tests.rs:323` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `new_resume_commit_stores_exact_resumes_turn_oid` | `crates/lattice-api/tests/resume_tests.rs:354` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `pending_promotion_retry_invokes_no_snapshot_method` | `crates/lattice-api/tests/resume_tests.rs:376` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `prune_one_session_does_not_remove_another` | `crates/lattice-api/tests/resume_tests.rs:477` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `prune_idempotent_second_call_returns_zero_released` | `crates/lattice-api/tests/resume_tests.rs:522` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
-| `prune_session_snapshots_skips_pending_worktree_snapshot` | `crates/lattice-api/tests/resume_tests.rs:557` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
+| `prune_one_session_does_not_remove_another` | `crates/lattice-api/tests/resume_tests.rs:477` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
+| `prune_idempotent_second_call_returns_zero_released` | `crates/lattice-api/tests/resume_tests.rs:522` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
+| `prune_session_snapshots_skips_pending_worktree_snapshot` | `crates/lattice-api/tests/resume_tests.rs:557` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `journal_create_writes_header_and_is_parseable` | `crates/lattice-api/tests/snapshot_journal_tests.rs:120` | 保留 | 局部不变量 | — | session/git store 事务、恢复、原子性、ID 解析局部不变量；保留（非产品 turn 路径） |
 | `journal_append_intent_retained_committed` | `crates/lattice-api/tests/snapshot_journal_tests.rs:137` | 保留 | 局部不变量 | — | session/git store 事务、恢复、原子性、ID 解析局部不变量；保留（非产品 turn 路径） |
 | `journal_torn_final_line_is_tolerated` | `crates/lattice-api/tests/snapshot_journal_tests.rs:158` | 保留 | 局部不变量 | — | session/git store 事务、恢复、原子性、ID 解析局部不变量；保留（非产品 turn 路径） |
@@ -879,7 +1082,7 @@
 | `cleanup_clean_returns_complete_immediately` | `crates/lattice-api/tests/turn_lifecycle_tests.rs:84` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `cleanup_dirty_appends_workspace_dirty_system_fact_and_continues` | `crates/lattice-api/tests/turn_lifecycle_tests.rs:115` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `cleanup_exhaustion_yields_completed_pending_worktree` | `crates/lattice-api/tests/turn_lifecycle_tests.rs:151` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `cleanup_status_error_yields_error_aborted` | `crates/lattice-api/tests/turn_lifecycle_tests.rs:215` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部拼装 turn 路径；提升到 session send 黑盒 |
+| `cleanup_status_error_yields_error_aborted` | `crates/lattice-api/tests/turn_lifecycle_tests.rs:215` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
 | `cleanup_same_loop_assertion_one_hook_covers_all_rounds` | `crates/lattice-api/tests/turn_lifecycle_tests.rs:232` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `export_verify_promote_verification_executes_and_records_evidence` | `crates/lattice-api/tests/turn_lifecycle_tests.rs:288` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `export_verify_promote_failed_verification_yields_pending` | `crates/lattice-api/tests/turn_lifecycle_tests.rs:316` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
@@ -911,30 +1114,30 @@
 | `observation_uses_upper_relative_paths` | `crates/lattice-api/tests/upper_routing.rs:250` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `mutations_preserve_lower_sentinel` | `crates/lattice-api/tests/upper_routing.rs:286` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `path_denial_records_preflight_only` | `crates/lattice-api/tests/upper_routing.rs:316` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
-| `upper_routing_e2e` | `crates/lattice-api/tests/upper_routing.rs:375` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变；planned MSB: `mutate.create/edit` Upper-only + effect 记账；planned MSB: operator audit query/replay（真实 turn 后）；planned MSB: provider 断流/非法 SSE/取消 + Upper 清理；planned MSB: policy/channel 拒绝且无宿主 fallback；planned MSB: 已退役 agent 方法明确失败且无副作用；planned MSB: secret sentinel 跨 terminal/session/audit/provenance | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `adapter_failure_has_no_lower_fallback` | `crates/lattice-api/tests/upper_routing.rs:609` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变；planned MSB: operator audit query/replay（真实 turn 后）；planned MSB: provider 断流/非法 SSE/取消 + Upper 清理；planned MSB: secret sentinel 跨 terminal/session/audit/provenance | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `generated_profiles_are_executable_host_only` | `crates/lattice-api/tests/upper_routing.rs:699` | 提升 | 真实 Microsandbox | planned MSB: `mutate.create/edit` Upper-only + effect 记账；planned MSB: operator audit query/replay（真实 turn 后）；planned MSB: provider 断流/非法 SSE/取消 + Upper 清理 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `microsandbox_upper_routing` | `crates/lattice-api/tests/upper_routing.rs:787` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `usage_run_turn_can_read_workspace_file_with_default_profile` | `crates/lattice-api/tests/usage_turn.rs:175` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `usage_stream_turn_model_started_includes_routed_provider` | `crates/lattice-api/tests/usage_turn.rs:237` | 提升 | 真实 Microsandbox | 已落地 `msb_full_turn`（session send 完整 turn） | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
+| `upper_routing_e2e` | `crates/lattice-api/tests/upper_routing.rs:375` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
+| `adapter_failure_has_no_lower_fallback` | `crates/lattice-api/tests/upper_routing.rs:609` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
+| `generated_profiles_are_executable_host_only` | `crates/lattice-api/tests/upper_routing.rs:699` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
+| `retired_upper_routing_lane` | `crates/lattice-api/tests/upper_routing.rs:787` | 删除 | 局部不变量 | n/a | #37–#40 已删除该 Upper/promotion/MSB 产品契约；对应测试已不存在，不向 #24 虚构 replacement。 |
+| `usage_run_turn_can_read_workspace_file_with_default_profile` | `crates/lattice-api/tests/usage_turn.rs:175` | 删除 | Direct-Local 外部二进制 | `direct_observation_visibility_and_bounds` | #24 slice 2 assertion-level superset review：direct_observation.rs 通过 .lattice/agents/ 配置的 profile 读取 tracked.txt/notes.txt 并断言 content present，为原内部测试 default-profile-reads-workspace-file 的严格超集。已删除原测试。 |
+| `usage_stream_turn_model_started_includes_routed_provider` | `crates/lattice-api/tests/usage_turn.rs:237` | 删除 | Direct-Local 外部二进制 | `direct_turn_sonnet_routed_provider_event` | #46 residual elevate closeout：direct_turn_sonnet_routed_provider_event 断言默认 sonnet→anthropic 的 public model_started（缺 ANTHROPIC_API_KEY，不接触 api.anthropic.com），并断言 credential-class terminal、非 completed、exit Failed；严格超集。已删除原测试。 |
 | `usage_run_turn_can_edit_workspace_file_and_commit` | `crates/lattice-api/tests/usage_turn.rs:274` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
-| `usage_resume_session_includes_previous_turn_context` | `crates/lattice-api/tests/usage_turn.rs:340` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变；planned MSB: 跨进程 session resume | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 提升 | 真实 Microsandbox | planned MSB: policy/channel 拒绝且无宿主 fallback；planned MSB: 已退役 agent 方法明确失败且无副作用 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
-| `rejects_profile_disabled_web_fetch` | `crates/lattice-api/tests/usage_turn.rs:519` | 提升 | 真实 Microsandbox | planned MSB: `observe.workspace` 完整 turn + Lower 不变 | 内部 Fake LLM + workspace 注入的产品 turn/Upper/audit 行为；提升到 system harness MSB 场景 |
+| `usage_resume_session_includes_previous_turn_context` | `crates/lattice-api/tests/usage_turn.rs:340` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已精确覆盖 reopen provider context、两 commit 与 HEAD main；原测试仍直接断言 raw HeadTranscript 与第二 commit parent_ids 关系，属于 SessionApi/graph seam，改判 keep/local_invariant。 |
+| `public_https_policy_requires_fetch_capability` | `crates/lattice-api/tests/usage_turn.rs:454` | 删除 | Direct-Local 外部二进制 | `direct_tools_fetch_capability_denial_with_public_https` | #46 residual elevate closeout：direct_tools_fetch_capability_denial_with_public_https 断言 allow_public_https=true + empty allowed_hosts 下 fetch.web 以 EffectViolation/authorized-region 失败（Enforce 下出站前拒绝）、cep_call_started external_observation/cep_native、turn_committed completed；严格超集。已删除原测试。 |
+| `rejects_profile_disabled_web_fetch` | `crates/lattice-api/tests/usage_turn.rs:519` | 删除 | Direct-Local 外部二进制 | `direct_tools_fetch_disabled_no_dispatch` | #24 slice 4 assertion-level superset review：direct_tools_fetch_disabled_no_dispatch 断言 disabled fetch.web 失败、fixture 零请求、无 cep_call_started；严格超集。已删除原测试。 |
 
-### `lattice-cli`（保留 118 / 提升 57 / 删除 10）
+### `lattice-cli`（保留 117 / 提升 41 / 删除 27）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
-| `audit_query_prints_fragment_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:351` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；seed audit DB 需 committed turn，本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
-| `audit_tail_streams_rows_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:361` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| --- | --- | --- | --- | --- | --- |
+| `audit_query_prints_fragment_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:351` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_session_lancet_cross_validate` | #24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：row_count>0 + 两个方法 + method/verdict 过滤 + tail rows + session status/log。已删除原测试。 |
+| `audit_tail_streams_rows_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:361` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_session_lancet_cross_validate` | #24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：tail 返回非零 rows。已删除原测试。 |
 | `audit_query_errors_when_store_missing` | `crates/lattice-cli/src/commands/audit.rs:373` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_audit_cli` 接管 | 已删除原内部测试，由已落地 fast_audit_cli（audit query/replay/tail 空态/错误态 --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `audit_query_empty_result_for_unknown_session` | `crates/lattice-cli/src/commands/audit.rs:381` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；seed audit DB 需 committed turn，本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
-| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:389` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
-| `audit_replay_reports_stored_attestation_match` | `crates/lattice-cli/src/commands/audit.rs:401` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
-| `audit_replay_errors_for_unknown_turn` | `crates/lattice-cli/src/commands/audit.rs:441` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
-| `audit_command_source_does_not_reference_cep_server` | `crates/lattice-cli/src/commands/audit.rs:458` | 删除 | 局部不变量 | n/a | 扫描源码禁止字符串；删除（RFC #19 决定六） |
-| `audit_query_reads_legacy_schema_store` | `crates/lattice-cli/src/commands/audit.rs:481` | 保留 | 局部不变量 | - | #23 review-fix round-3 复审判偏差：手工植入旧 SQLite schema 测向后兼容；RFC #19 harness 边界禁止直接打开/植入内部 audit DB，planned_audit_ops_msb 永远无法覆盖（真实 turn 只生成当前 schema）；改记保留为局部不变量。 |
+| `audit_query_empty_result_for_unknown_session` | `crates/lattice-cli/src/commands/audit.rs:381` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_query_unknown_session_empty` | #24 slice 6 assertion-level superset review：direct_operator_audit_query_unknown_session_empty：exit 0 + row_count==0。已删除原测试。 |
+| `audit_replay_reconstructs_turn_trace_for_seeded_db` | `crates/lattice-cli/src/commands/audit.rs:389` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_session_lancet_cross_validate` | #24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：replay trace.turn_id 非空 + 引用 observe.workspace。已删除原测试。 |
+| `audit_replay_reports_stored_attestation_match` | `crates/lattice-cli/src/commands/audit.rs:401` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_session_lancet_cross_validate` | #72 assertion-level superset：direct_operator_audit_session_lancet_cross_validate 以真实 Turn 生成 attestation，public audit replay 成功且 JSON stored_statement_match=true；exact scenario 已通过后删除原测试。 |
+| `audit_replay_errors_for_unknown_turn` | `crates/lattice-cli/src/commands/audit.rs:441` | 删除 | Direct-Local 外部二进制 | `direct_operator_audit_replay_unknown_turn_fails` | #72 assertion-level superset：direct_operator_audit_replay_unknown_turn_fails 在真实 seeded audit store 上断言非零退出与 stderr 精确包含 no audit rows for turn_id；exact scenario 已通过后删除原测试。 |
+| `audit_command_source_does_not_reference_cep_server` | `crates/lattice-cli/src/commands/audit.rs:458` | 删除 | 局部不变量 | n/a | 扫描源码禁止字符串；删除（RFC #41 决定六） |
+| `audit_query_reads_legacy_schema_store` | `crates/lattice-cli/src/commands/audit.rs:481` | 保留 | 局部不变量 | - | #23 review-fix round-3 复审判偏差：手工植入旧 SQLite schema 测向后兼容；RFC #41 harness 边界禁止直接打开/植入内部 audit DB，#24 audit scenarios 永远无法覆盖（真实 turn 只生成当前 schema）；改记保留为局部不变量。 |
 | `doctor_report_contains_expected_keys` | `crates/lattice-cli/src/commands/doctor.rs:162` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `doctor_json_output_has_expected_structure` | `crates/lattice-cli/src/commands/doctor.rs:172` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `doctor_text_output_includes_credential_env_var_names` | `crates/lattice-cli/src/commands/doctor.rs:187` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
@@ -947,8 +1150,8 @@
 | `lancet_status_json_flag_parses` | `crates/lattice-cli/src/commands/lancet.rs:208` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `lancet_status_no_args_parses` | `crates/lattice-cli/src/commands/lancet.rs:218` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `lancet_doctor_parses` | `crates/lattice-cli/src/commands/lancet.rs:228` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `cep_status_missing_db_returns_empty_state` | `crates/lattice-cli/src/commands/lancet.rs:288` | 提升 | 快速二进制黑盒 | 延期 `planned_lancet_cli` | 延期到 planned_lancet_cli（lattice lancet status 空态：audit DB 不存在时返回空 recent_calls + None verdict，exit 0）；fast 测试尚未新增，原内部测试保留。 |
-| `cep_status_seeded_audit_json` | `crates/lattice-cli/src/commands/lancet.rs:297` | 提升 | 真实 Microsandbox | 延期 `planned_audit_ops_msb` | 延期到 planned_audit_ops_msb（operator audit query/replay post-turn）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `cep_status_missing_db_returns_empty_state` | `crates/lattice-cli/src/commands/lancet.rs:288` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_lancet_cli` 接管 | 已删除原内部测试，由已落地 fast_lancet_cli（lancet status 空态 JSON/text）黑盒接管 |
+| `cep_status_seeded_audit_json` | `crates/lattice-cli/src/commands/lancet.rs:297` | 删除 | Direct-Local 外部二进制 | `direct_tools_todo_write_success` | #72 assertion-level superset：direct_tools_todo_write_success 在真实 todo Tool Turn 后运行 public lancet status --json，断言 recent_calls 含 session.todo_write 且 last_guard_verdict 非空；exact scenario 已通过后删除原测试。 |
 | `cep_doctor_passes_on_repo_root` | `crates/lattice-cli/src/commands/lancet.rs:345` | 保留 | 局部不变量 | - | #23 复审偏差：测试 run_doctor_inner_for_project_root（LANCET doctor catalog 方法数 + registry 注册检查）是编译期不变量检查，经 #[cfg(test)] helper 驱动，非公开黑盒行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
 | `cli_diagnostics_models_auth_text_lists_aliases_one_per_line` | `crates/lattice-cli/src/commands/models.rs:37` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `cli_diagnostics_models_auth_text_excludes_secret_values` | `crates/lattice-cli/src/commands/models.rs:45` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
@@ -962,48 +1165,48 @@
 | `cli_diagnostics_resolve_unknown_model_returns_error` | `crates/lattice-cli/src/commands/resolve.rs:95` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `cli_diagnostics_resolve_no_provider_override` | `crates/lattice-cli/src/commands/resolve.rs:109` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `stream_timeout_constant_is_5_minutes` | `crates/lattice-cli/src/commands/run_tests.rs:9` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
-| `stream_timeout_fires_after_duration` | `crates/lattice-cli/src/commands/run_tests.rs:16` | 提升 | 真实 Microsandbox | 延期 `planned_provider_fail_msb` | 延期到 planned_provider_fail_msb（provider 断流/超时清理）；本机无 /dev/kvm，无法落地或验证替代场景，原内部测试保留。 |
+| `stream_timeout_fires_after_duration` | `crates/lattice-cli/src/commands/run_tests.rs:16` | 删除 | Direct-Local 外部二进制 | `direct_failure_profile_deadline_while_stalled_commits_error` | #72 assertion-level superset：原测试只断言 never-yield stream 会 timeout；direct_failure_profile_deadline_while_stalled_commits_error 通过真实 binary/provider stall 断言产品 deadline、TurnFailed→committed error、exit 1 与零 assistant 输出，exact scenario 已通过后删除原 Tokio-only 测试。 |
 | `run_validate_agents_dir_rejects_parent_components` | `crates/lattice-cli/src/commands/run_tests.rs:44` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
 | `run_validate_agents_dir_resolves_symlink_prefix_before_safety_check` | `crates/lattice-cli/src/commands/run_tests.rs:78` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
 | `run_default_session_dir_under_lattice_sessions` | `crates/lattice-cli/src/commands/run_tests.rs:98` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
-| `run_integration_commits_existing_session` | `crates/lattice-cli/src/commands/run_tests.rs:148` | 提升 | 真实 Microsandbox | `msb_full_turn` | 已落地 msb_full_turn 已通过公开 session send 完成真实 turn 并断言 commit；原内部集成测试仍保留，记为冗余待删，不能改判 local_invariant。 |
+| `run_integration_commits_existing_session` | `crates/lattice-cli/src/commands/run_tests.rs:148` | 保留 | 局部不变量 | — | #72 final review：direct_turn_completed_reopen_contract 已覆盖 existing session 的 public commit/reopen；原测试仍直接断言 RunTurnResult.assistant_output/status/session_id/commit_id 返回契约，该 Rust API 结果不由 binary 独立暴露，改判 keep/local_invariant。 |
 | `run_integration_missing_session_returns_not_found` | `crates/lattice-cli/src/commands/run_tests.rs:218` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session send <missing-id> 黑盒：open_session 在 workspace 前失败，exit 2 + stderr not found）接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `tool_executor_uses_workspace_root_not_profile_package_dir` | `crates/lattice-cli/src/commands/run_tests.rs:246` | 提升 | 真实 Microsandbox | 延期 `planned_observe_msb` | 延期到 planned_observe_msb（需 observe.workspace tool call 才能验证 workspace-root vs profile package-dir 分离；msb_full_turn profile 只执行纯文本 turn）；本机无 /dev/kvm，原内部测试保留。 |
-| `run_source_has_no_old_crate_imports` | `crates/lattice-cli/src/commands/run_tests.rs:369` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
-| `render_json_event_emits_single_line_with_trailing_newline` | `crates/lattice-cli/src/commands/run_tests.rs:391` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `render_json_event_roundtrips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:402` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `render_json_event_emits_no_ansi_escapes` | `crates/lattice-cli/src/commands/run_tests.rs:479` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `render_human_token_delta_writes_only_to_stdout` | `crates/lattice-cli/src/commands/run_tests.rs:494` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `render_human_status_line_after_partial_token_inserts_stderr_newline` | `crates/lattice-cli/src/commands/run_tests.rs:507` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `tool_executor_uses_workspace_root_not_profile_package_dir` | `crates/lattice-cli/src/commands/run_tests.rs:246` | 删除 | Direct-Local 外部二进制 | `direct_observation_visibility_and_bounds` | #24 slice 2 assertion-level superset review：direct_observation.rs profile 位于 .lattice/agents/dl-obs/，读取 project-root tracked.txt/notes.txt 并断言内容；若 executor 使用 profile package dir 则路径不存在。严格强于原内部测试仅断言 ok=true。已删除原测试。 |
+| `run_source_has_no_old_crate_imports` | `crates/lattice-cli/src/commands/run_tests.rs:369` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
+| `render_json_event_emits_single_line_with_trailing_newline` | `crates/lattice-cli/src/commands/run_tests.rs:391` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_json_event_roundtrips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:402` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_json_event_emits_no_ansi_escapes` | `crates/lattice-cli/src/commands/run_tests.rs:479` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_token_delta_writes_only_to_stdout` | `crates/lattice-cli/src/commands/run_tests.rs:494` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_status_line_after_partial_token_inserts_stderr_newline` | `crates/lattice-cli/src/commands/run_tests.rs:507` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
 | `flush_before_status_resets_mid_token_flag_after_first_status` | `crates/lattice-cli/src/commands/run_tests.rs:549` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `render_human_tool_finished_ok_renders_byte_size` | `crates/lattice-cli/src/commands/run_tests.rs:585` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `render_human_tool_finished_err_renders_summary` | `crates/lattice-cli/src/commands/run_tests.rs:603` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `render_human_reasoning_hidden_default` | `crates/lattice-cli/src/commands/run_tests.rs:621` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `render_human_reasoning_visible_verbose` | `crates/lattice-cli/src/commands/run_tests.rs:636` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `render_human_turn_started_silent_default` | `crates/lattice-cli/src/commands/run_tests.rs:650` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `render_human_committed_lowercases_status` | `crates/lattice-cli/src/commands/run_tests.rs:667` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `verbose_epilogue_emits_all_fields_when_populated` | `crates/lattice-cli/src/commands/run_tests.rs:692` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `verbose_epilogue_skips_unset_fields` | `crates/lattice-cli/src/commands/run_tests.rs:720` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_tool_finished_ok_renders_byte_size` | `crates/lattice-cli/src/commands/run_tests.rs:585` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_tool_finished_err_renders_summary` | `crates/lattice-cli/src/commands/run_tests.rs:603` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_reasoning_hidden_default` | `crates/lattice-cli/src/commands/run_tests.rs:621` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_reasoning_visible_verbose` | `crates/lattice-cli/src/commands/run_tests.rs:636` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_turn_started_silent_default` | `crates/lattice-cli/src/commands/run_tests.rs:650` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `render_human_committed_lowercases_status` | `crates/lattice-cli/src/commands/run_tests.rs:667` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `verbose_epilogue_emits_all_fields_when_populated` | `crates/lattice-cli/src/commands/run_tests.rs:692` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `verbose_epilogue_skips_unset_fields` | `crates/lattice-cli/src/commands/run_tests.rs:720` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
 | `verbose_epilogue_usage_from_state_not_committed` | `crates/lattice-cli/src/commands/run_tests.rs:731` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `exit_code_from_state_covers_all_da4_rows` | `crates/lattice-cli/src/commands/run_tests.rs:750` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `seq_happy_path_human` | `crates/lattice-cli/src/commands/run_tests.rs:863` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `seq_happy_path_verbose_with_epilogue` | `crates/lattice-cli/src/commands/run_tests.rs:916` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `seq_trailing_token_newline_emitted` | `crates/lattice-cli/src/commands/run_tests.rs:966` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `seq_token_then_status_inserts_stderr_newline` | `crates/lattice-cli/src/commands/run_tests.rs:989` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_happy_path_human` | `crates/lattice-cli/src/commands/run_tests.rs:863` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_happy_path_verbose_with_epilogue` | `crates/lattice-cli/src/commands/run_tests.rs:916` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_trailing_token_newline_emitted` | `crates/lattice-cli/src/commands/run_tests.rs:966` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_token_then_status_inserts_stderr_newline` | `crates/lattice-cli/src/commands/run_tests.rs:989` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
 | `seq_multiround_usage_sums_into_state` | `crates/lattice-cli/src/commands/run_tests.rs:1014` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `seq_tool_failure_renders_summary` | `crates/lattice-cli/src/commands/run_tests.rs:1055` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `seq_turn_failed_then_commit_drains_stream` | `crates/lattice-cli/src/commands/run_tests.rs:1096` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `seq_commit_failed_renders_reason` | `crates/lattice-cli/src/commands/run_tests.rs:1139` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `seq_stream_ends_without_terminal_is_protocol_violation` | `crates/lattice-cli/src/commands/run_tests.rs:1162` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `seq_jsonl_round_trips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:1186` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `seq_reasoning_hidden_default_in_human` | `crates/lattice-cli/src/commands/run_tests.rs:1297` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
-| `seq_reasoning_visible_in_verbose` | `crates/lattice-cli/src/commands/run_tests.rs:1335` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_tool_failure_renders_summary` | `crates/lattice-cli/src/commands/run_tests.rs:1055` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_turn_failed_then_commit_drains_stream` | `crates/lattice-cli/src/commands/run_tests.rs:1096` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_commit_failed_renders_reason` | `crates/lattice-cli/src/commands/run_tests.rs:1139` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_stream_ends_without_terminal_is_protocol_violation` | `crates/lattice-cli/src/commands/run_tests.rs:1162` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_jsonl_round_trips_every_variant` | `crates/lattice-cli/src/commands/run_tests.rs:1186` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_reasoning_hidden_default_in_human` | `crates/lattice-cli/src/commands/run_tests.rs:1297` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `seq_reasoning_visible_in_verbose` | `crates/lattice-cli/src/commands/run_tests.rs:1335` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
 | `parse_status_no_args` | `crates/lattice-cli/src/commands/session.rs:922` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `parse_status_with_session_id` | `crates/lattice-cli/src/commands/session.rs:932` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `parse_list` | `crates/lattice-cli/src/commands/session.rs:944` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `parse_log_with_session_id` | `crates/lattice-cli/src/commands/session.rs:951` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `parse_log_without_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:963` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `human_turn_log_renders_disposition_next_to_status` | `crates/lattice-cli/src/commands/session.rs:969` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；msb_full_turn 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
+| `human_turn_log_renders_disposition_next_to_status` | `crates/lattice-cli/src/commands/session.rs:969` | 保留 | 局部不变量 | - | #23 review-fix round-4 复审判偏差：纯渲染器/序列化器局部不变量（合成 TurnEvent 直接驱动 render_human_event/render_json_event/fake_event_loop，非经公开 CLI）；direct_local_plain_text_turn_commits_and_exit_zero 只执行 plain-text 成功 turn + --json，不覆盖 human stdout/stderr 渲染、verbose/epilogue、工具/提交失败、协议错误、branch/reset/diff 作用域、缺凭据路径；改记保留为局部不变量。 |
 | `parse_checkout_with_session_id_and_target` | `crates/lattice-cli/src/commands/session.rs:995` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `parse_checkout_missing_target_fails` | `crates/lattice-cli/src/commands/session.rs:1008` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `parse_checkout_missing_session_id_fails` | `crates/lattice-cli/src/commands/session.rs:1014` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
@@ -1040,26 +1243,26 @@
 | `display_id_short_unchanged` | `crates/lattice-cli/src/commands/session.rs:1265` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
 | `display_id_long_truncated` | `crates/lattice-cli/src/commands/session.rs:1270` | 保留 | 局部不变量 | - | #23 复审偏差：纯 CLI helper/常量/源码扫描行为，无已落地或 planned 场景能诚实接管；原判提升不成立，改记保留为局部不变量（不驱动公开黑盒）。 |
 | `session_resume_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1297` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `session_prune_snapshots_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1306` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
-| `session_resume_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1315` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains fn cmd_resume_api）的架构检查；删除（RFC #19 决定六）。 |
+| `session_prune_snapshots_variant_exists_in_enum` | `crates/lattice-cli/src/commands/session.rs:1306` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
+| `session_resume_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1315` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains fn cmd_resume_api）的架构检查；删除（RFC #41 决定六）。 |
 | `session_prune_handler_function_exists` | `crates/lattice-cli/src/commands/session.rs:1324` | 保留 | 局部不变量 | - | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
-| `session_resume_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1333` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains resume_turn()）的架构检查；删除（RFC #19 决定六）。 |
+| `session_resume_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1333` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import（impl_source() + contains resume_turn()）的架构检查；删除（RFC #41 决定六）。 |
 | `session_prune_calls_typed_api` | `crates/lattice-cli/src/commands/session.rs:1342` | 保留 | 局部不变量 | - | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
 | `project_branch_new_without_required_flag_fails` | `crates/lattice-cli/src/commands/session.rs:1353` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `project_branch_new_with_required_flag_is_accepted` | `crates/lattice-cli/src/commands/session.rs:1364` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `project_branch_send_has_no_branch_override` | `crates/lattice-cli/src/commands/session.rs:1385` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `project_branch_send_source_has_no_branch_flag` | `crates/lattice-cli/src/commands/session.rs:1395` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
-| `project_branch_new_source_defines_field` | `crates/lattice-cli/src/commands/session.rs:1410` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查（include_str! 扫描 SessionAction::New 字段）；删除（RFC #19 决定六）。 |
-| `branch_listing_reads_only_addressed_session_refs` | `crates/lattice-cli/src/commands/session.rs:1511` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 branch/list 路径验证仅读取目标 session refs；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
-| `checkout_changes_only_addressed_session_head` | `crates/lattice-cli/src/commands/session.rs:1556` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 checkout 路径验证只修改目标 session HEAD；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
-| `branch_create_affects_only_addressed_session` | `crates/lattice-cli/src/commands/session.rs:1586` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 branch create 路径验证只影响目标 session；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
-| `reset_changes_only_addressed_session_branch_pointer` | `crates/lattice-cli/src/commands/session.rs:1613` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 reset 路径验证只移动目标 session branch pointer；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
-| `diff_resolves_refs_inside_addressed_session_only` | `crates/lattice-cli/src/commands/session.rs:1650` | 提升 | 真实 Microsandbox | 延期 `planned_session_graph_msb` | 延期到 planned_session_graph_msb：需用公开 diff 路径验证 refs 在目标 session 内解析；现有 msb_full_turn 不覆盖跨 session graph 隔离，原测试保留。 |
-| `boundary_no_legacy_session_store_patterns` | `crates/lattice-cli/src/commands/session.rs:1691` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
-| `project_branch_creation_json_output_includes_branch` | `crates/lattice-cli/src/commands/session.rs:1755` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。 |
+| `project_branch_send_source_has_no_branch_flag` | `crates/lattice-cli/src/commands/session.rs:1395` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
+| `project_branch_new_source_defines_field` | `crates/lattice-cli/src/commands/session.rs:1410` | 删除 | 局部不变量 | n/a | 扫描源码字符串/import 的架构检查（include_str! 扫描 SessionAction::New 字段）；删除（RFC #41 决定六）。 |
+| `branch_listing_reads_only_addressed_session_refs` | `crates/lattice-cli/src/commands/session.rs:1511` | 删除 | Direct-Local 外部二进制 | `direct_session_branch_listing_isolation` | #24 slice 7 assertion-level superset review：direct_session_branch_listing_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
+| `checkout_changes_only_addressed_session_head` | `crates/lattice-cli/src/commands/session.rs:1556` | 删除 | Direct-Local 外部二进制 | `direct_session_checkout_isolation` | #24 slice 7 assertion-level superset review：direct_session_checkout_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
+| `branch_create_affects_only_addressed_session` | `crates/lattice-cli/src/commands/session.rs:1586` | 删除 | Direct-Local 外部二进制 | `direct_session_branch_create_isolation` | #24 slice 7 assertion-level superset review：direct_session_branch_create_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
+| `reset_changes_only_addressed_session_branch_pointer` | `crates/lattice-cli/src/commands/session.rs:1613` | 删除 | Direct-Local 外部二进制 | `direct_session_reset_isolation` | #24 slice 7 assertion-level superset review：direct_session_reset_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
+| `diff_resolves_refs_inside_addressed_session_only` | `crates/lattice-cli/src/commands/session.rs:1650` | 删除 | Direct-Local 外部二进制 | `direct_session_diff_isolation` | #24 slice 7 assertion-level superset review：direct_session_diff_isolation 覆盖相同隔离语义 + 公共 JSON 契约。已删除原测试。 |
+| `boundary_no_legacy_session_store_patterns` | `crates/lattice-cli/src/commands/session.rs:1691` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
+| `project_branch_creation_json_output_includes_branch` | `crates/lattice-cli/src/commands/session.rs:1755` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_new_json_reports_requested_project_branch：session new --project-branch feature/test --json 输出 project_branch=feature/test）黑盒接管 |
 | `project_branch_status_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1775` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `project_branch_list_output_includes_target_branch` | `crates/lattice-cli/src/commands/session.rs:1794` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
-| `project_branch_persists_through_reopen` | `crates/lattice-cli/src/commands/session.rs:1816` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。 |
+| `project_branch_persists_through_reopen` | `crates/lattice-cli/src/commands/session.rs:1816` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_project_branch_persists_across_cli_invocations：独立第二次 CLI 进程读 session status --json 断言 project_target_branch=feature/persist；进程边界 reopen 严格强于库内 SessionApi::open_session 往返）黑盒接管 |
 | `cli_surface_run_is_not_exposed` | `crates/lattice-cli/src/main.rs:153` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `cli_surface_session_new_agent` | `crates/lattice-cli/src/main.rs:158` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
 | `cli_surface_session_send` | `crates/lattice-cli/src/main.rs:173` | 保留 | 局部不变量 | - | CLI 参数解析/错误码映射局部契约；保留（与黑盒命令面互补，不重复产品路径） |
@@ -1093,21 +1296,21 @@
 | `cli_cutover_resolve_json_excludes_secret_value` | `crates/lattice-cli/tests/cli_cutover.rs:111` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `cli_cutover_models_auth_one_alias_per_line_without_icons_or_secrets` | `crates/lattice-cli/tests/cli_cutover.rs:148` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `cli_cutover_session_log_missing_session_fails_with_id_in_message` | `crates/lattice-cli/tests/cli_cutover.rs:197` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session new/list/status/log/branch --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `focused_tests_import_no_removed_crate_names` | `crates/lattice-cli/tests/cli_cutover.rs:224` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
+| `focused_tests_import_no_removed_crate_names` | `crates/lattice-cli/tests/cli_cutover.rs:224` | 删除 | 局部不变量 | n/a | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
 | `cli_cutover_run_command_is_removed` | `crates/lattice-cli/tests/cli_cutover.rs:328` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `fast_cli_help` 接管 | 已删除原内部测试，由已落地 fast_cli_help（CLI help 表面） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_models_auth_lists_aliases_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:100` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_resolve_sonnet_json_shows_env_var_not_secret` | `crates/lattice-cli/tests/release_smoke.rs:131` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_resolve_missing_credential_names_env_var` | `crates/lattice-cli/tests/release_smoke.rs:159` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `smoke_session_status_list_shows_seeded_session` | `crates/lattice-cli/tests/release_smoke.rs:185` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；seed_session 的 committed turn 是测试夹具而非断言对象，实际断言（session 出现在 status 列表）已被 fast_session_new_creates_session_and_appears_in_list 覆盖；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。 |
-| `smoke_session_status_specific_session` | `crates/lattice-cli/tests/release_smoke.rs:210` | 提升 | 快速二进制黑盒 | 冗余保留 `planned_session_cli` | 替代场景 fast_session_cli（session new/list/status/log/branch --json） 已（部分）落地，但原内部测试 #23 未删（冗余保留）；seed_session 的 committed turn 是测试夹具而非断言对象，实际断言（status <id> 输出含 ID）已被 fast_session_status_new_session_shows_zero_commits_and_agent 覆盖；逐条映射、消除三元泛化替代；待对应 fast/MSB lane 完整覆盖后再删。 |
-| `smoke_session_log_shows_seeded_turn` | `crates/lattice-cli/tests/release_smoke.rs:242` | 提升 | 真实 Microsandbox | 延期 `planned_session_history_msb` | 延期到 planned_session_history_msb：需真实 turn 后通过公开 human session log 验证 seeded turn 展示；现有 msb_full_turn 只断言 JSON log，原测试保留。 |
+| `smoke_session_status_list_shows_seeded_session` | `crates/lattice-cli/tests/release_smoke.rs:185` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_new_creates_session_and_appears_in_list：session new 后 session list --json 含 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象 |
+| `smoke_session_status_specific_session` | `crates/lattice-cli/tests/release_smoke.rs:210` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（fast_session_status_new_session_shows_zero_commits_and_agent + fast_session_status_json_stable_contract：session status <id> 文本/JSON 双模断言 session_id）黑盒接管；seed_session 的 committed turn 是测试夹具而非断言对象 |
+| `smoke_session_log_shows_seeded_turn` | `crates/lattice-cli/tests/release_smoke.rs:242` | 删除 | Direct-Local 外部二进制 | `direct_turn_completed_reopen_contract` | #72 assertion-level superset：direct_turn_completed_reopen_contract 在真实两轮 Turn 后同时验证 session log JSON durability 与 human 输出含 turn 0/首轮 commit message；exact scenario 已通过后删除内部 seed smoke。 |
 | `smoke_doctor_runs_without_leaking_secrets` | `crates/lattice-cli/tests/release_smoke.rs:269` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_doctor_json_does_not_leak_secrets` | `crates/lattice-cli/tests/release_smoke.rs:299` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_config_cli` 接管 | 已删除原内部测试，由已落地 fast_config_cli（models/resolve/doctor + secret redaction） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
 | `smoke_session_send_missing_credentials_fails_without_secrets` | `crates/lattice-cli/tests/release_smoke.rs:329` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原弱 smoke，由已落地 fast_session_send_missing_credential_is_redacted_input_error 接管：凭据解析早于 prepare_upper，无需 KVM；精确断言 exit 2、缺失 env-var 名与 stdout/stderr 无 secret 泄漏（#23 review-fix round-6）。 |
 | `smoke_session_send_no_profile_fails_with_clear_message` | `crates/lattice-cli/tests/release_smoke.rs:354` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_send_no_profile（session send 在 load_agent_checked 失败：创建 session 后删除 .lattice/agents/ 触发 agent profile 缺失错误，exit 2 + stderr 含 profile/agent.toml，不泄 secret）黑盒接管（#23 review-fix round-3）；Upper 前失败，逐条映射。 |
 | `smoke_session_status_nonexistent_returns_error` | `crates/lattice-cli/tests/release_smoke.rs:384` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_cli（session new/list/status/log/branch --json） 黑盒接管（#23 批次）；逐条映射、消除三元泛化替代。 |
-| `release_smoke_release_gate_sh_is_retired` | `crates/lattice-cli/tests/release_smoke.rs:407` | 保留 | 局部不变量 | - | #23 复审偏差：运行 release-gate.sh 并断言 nonzero exit + retired stderr，是脚本退役 smoke，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
-| `release_smoke_release_gate_v1_4_includes_lancet_boundary_check` | `crates/lattice-cli/tests/release_smoke.rs:432` | 保留 | 局部不变量 | - | #23 复审偏差：源码扫描 release-gate-v1.4.sh 脚本文件内容（asserts contains lancet-boundary 等），是 repo tooling 局部不变量，非 CLI help 表面行为；无已落地或 planned 场景能诚实接管，改记保留为局部不变量。 |
+| `release_smoke_release_gate_sh_is_retired` | `crates/lattice-cli/tests/release_smoke.rs`（已删除） | 删除 | n/a | n/a | #47：遗留 shell release gate（`scripts/release-gate*.sh`）已删除，钉住脚本存在性/退役 stderr 的 smoke 随 `release_smoke.rs` 整文件移除；不虚构 replacement。 |
+| `release_smoke_release_gate_v1_4_includes_lancet_boundary_check` | `crates/lattice-cli/tests/release_smoke.rs`（已删除） | 删除 | n/a | n/a | #47：被扫描的 `scripts/release-gate-v1.4.sh` 已删除，该源码扫描 smoke 随 `release_smoke.rs` 整文件移除；boundary 检查由 `cargo xtask lancet-boundary` 在 ordinary CI 与 rollout gate 中直接执行。 |
 | `smoke_session_resume_without_session_id_fails` | `crates/lattice-cli/tests/release_smoke.rs:459` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_resume_without_id（session resume 缺参数 clap 拒绝，exit 2 + stderr）黑盒接管（#23 review-fix round-3）；Upper 前失败，逐条映射。 |
 | `smoke_session_prune_snapshots_without_session_id_fails` | `crates/lattice-cli/tests/release_smoke.rs:481` | 保留 | 局部不变量 | - | session 生命周期/prune/cleanup 局部不变量（无完整 turn 栈）；保留 |
 | `smoke_session_resume_nonexistent_session_returns_error` | `crates/lattice-cli/tests/release_smoke.rs:503` | 提升 | 快速二进制黑盒 | 已删除原测试，由 `planned_session_cli` 接管 | 已删除原内部测试，由已落地 fast_session_resume_nonexistent_session（session resume 不存在 session，调用错误 exit 2 + stderr 含 not found 与 session ID）黑盒接管（#23 review-fix round-5）；Upper 前失败，逐条映射。 |
@@ -1115,7 +1318,7 @@
 ### `lattice-llm`（保留 133 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `missing_credential_returns_named_error` | `crates/lattice-llm/src/client.rs:519` | 保留 | 局部不变量 | — | provider 请求构造/SSE parser/路由/HTTP pinning 局部不变量；保留 |
 | `present_credential_reads_key_value` | `crates/lattice-llm/src/client.rs:539` | 保留 | 局部不变量 | — | provider 请求构造/SSE parser/路由/HTTP pinning 局部不变量；保留 |
 | `missing_credential_error_never_leaks_key_value` | `crates/lattice-llm/src/client.rs:560` | 保留 | 局部不变量 | — | provider 请求构造/SSE parser/路由/HTTP pinning 局部不变量；保留 |
@@ -1253,7 +1456,7 @@
 ### `lattice-profile`（保留 96 / 提升 0 / 删除 1）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `template_parses_as_valid_v1_profile` | `crates/lattice-profile/src/defaults.rs:207` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `template_escapes_name_and_model_as_toml_strings` | `crates/lattice-profile/src/defaults.rs:227` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `template_contains_auto_generated_comment` | `crates/lattice-profile/src/defaults.rs:236` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
@@ -1337,7 +1540,7 @@
 | `lancet_verify_section_is_not_a_typed_field` | `crates/lattice-profile/src/schema.rs:1170` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `workspace_image_optional_without_provisioner_default` | `crates/lattice-profile/src/schema.rs:1188` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `workspace_roundtrip` | `crates/lattice-profile/src/schema.rs:1204` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
-| `source_free_of_forbidden_symbols` | `crates/lattice-profile/src/schema.rs:1245` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
+| `source_free_of_forbidden_symbols` | `crates/lattice-profile/src/schema.rs:1245` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
 | `cep_policy_section_parses_path` | `crates/lattice-profile/src/schema.rs:1276` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `cep_section_without_policy_defaults_to_none` | `crates/lattice-profile/src/schema.rs:1293` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
 | `cep_policy_section_rejects_unknown_fields` | `crates/lattice-profile/src/schema.rs:1299` | 保留 | 局部不变量 | — | agent.toml schema/defaults/校验局部不变量；保留 |
@@ -1355,7 +1558,7 @@
 ### `lattice-session`（保留 69 / 提升 0 / 删除 2）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `test_commit_turn_tree_structure` | `crates/lattice-session/src/git_graph/tests/commit_turn.rs:10` | 保留 | 局部不变量 | — | session graph/Git 事务/并发/恢复/原子性局部不变量；保留 |
 | `test_commit_turn_linear` | `crates/lattice-session/src/git_graph/tests/commit_turn.rs:49` | 保留 | 局部不变量 | — | session graph/Git 事务/并发/恢复/原子性局部不变量；保留 |
 | `test_commit_turn_with_parent` | `crates/lattice-session/src/git_graph/tests/commit_turn.rs:67` | 保留 | 局部不变量 | — | session graph/Git 事务/并发/恢复/原子性局部不变量；保留 |
@@ -1425,13 +1628,13 @@
 | `verify_only_errors_when_target_absent` | `crates/lattice-session/src/migrate/tests.rs:869` | 保留 | 局部不变量 | — | session graph/Git 事务/并发/恢复/原子性局部不变量；保留 |
 | `session_commit_object_is_deterministic_and_ref_neutral` | `crates/lattice-session/tests/promotion_commit.rs:107` | 保留 | 局部不变量 | — | session graph/Git 事务/并发/恢复/原子性局部不变量；保留 |
 | `session_commit_object_links_optional_parent` | `crates/lattice-session/tests/promotion_commit.rs:146` | 保留 | 局部不变量 | — | session graph/Git 事务/并发/恢复/原子性局部不变量；保留 |
-| `promotion_crate_has_no_workspace_or_api_dependency` | `crates/lattice-session/tests/promotion_commit.rs:178` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #19 决定六） |
-| `promotion_module_is_object_only` | `crates/lattice-session/tests/promotion_commit.rs:191` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #19 决定六） |
+| `promotion_crate_has_no_workspace_or_api_dependency` | `crates/lattice-session/tests/promotion_commit.rs:178` | 删除 | 局部不变量 | n/a — 无替代场景（架构边界由 xtask/harness-boundary 负责） | 扫描源码 import/crate 名/manifest 字符串；删除（RFC #41 决定六） |
+| `promotion_module_is_object_only` | `crates/lattice-session/tests/promotion_commit.rs:191` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
 
-### `lattice-system-harness`（保留 57 / 提升 0 / 删除 0）
+### `lattice-system-harness`（保留 56 / 提升 1 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `write_fake_llm_log_renders_one_block_per_capture` | `crates/lattice-system-harness/src/artifacts.rs:351` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `write_fake_llm_log_empty_is_noop` | `crates/lattice-system-harness/src/artifacts.rs:377` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `write_fake_llm_log_redacts_secrets` | `crates/lattice-system-harness/src/artifacts.rs:384` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
@@ -1456,8 +1659,8 @@
 | `parse_body_surfaces_model_roles_and_tool_names` | `crates/lattice-system-harness/src/fake_llm.rs:517` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `parse_body_records_raw_text_when_not_json` | `crates/lattice-system-harness/src/fake_llm.rs:542` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `server_captures_request_and_returns_plain_text_sse` | `crates/lattice-system-harness/src/fake_llm.rs:557` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
-| `msb_requested_is_false_when_unset` | `crates/lattice-system-harness/src/layer_guard.rs:117` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
-| `msb_requested_is_true_when_one` | `crates/lattice-system-harness/src/layer_guard.rs:130` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
+| `retired_layer_guard_requested_is_false_when_unset` | `crates/lattice-system-harness/src/layer_guard.rs:117` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
+| `retired_layer_guard_requested_is_true_when_one` | `crates/lattice-system-harness/src/layer_guard.rs:130` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `strip_ansi_removes_color_and_cursor_codes` | `crates/lattice-system-harness/src/pty_tui.rs:301` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `strip_ansi_handles_osc_title_sequence` | `crates/lattice-system-harness/src/pty_tui.rs:307` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
 | `strip_ansi_handles_st_terminated_osc` | `crates/lattice-system-harness/src/pty_tui.rs:313` | 保留 | 局部不变量 | — | system harness 夹具/driver/隔离/失败产物/边界守卫局部契约；保留 |
@@ -1487,184 +1690,184 @@
 | `fast_cli_help_lists_public_commands` | `crates/lattice-system-harness/tests/fast_cli_help.rs:34` | 保留 | 快速二进制黑盒 | — | 已落地快速二进制黑盒场景；保留为成品层载体 |
 | `fast_bare_lattice_prints_help_and_exits_zero` | `crates/lattice-system-harness/tests/fast_cli_help.rs:51` | 保留 | 快速二进制黑盒 | — | 已落地快速二进制黑盒场景；保留为成品层载体 |
 | `fast_unknown_command_rejected` | `crates/lattice-system-harness/tests/fast_cli_help.rs:63` | 保留 | 快速二进制黑盒 | — | 已落地快速二进制黑盒场景；保留为成品层载体 |
-| `msb_plain_text_turn_commits_and_exit_zero` | `crates/lattice-system-harness/tests/msb_full_turn.rs:192` | 保留 | 真实 Microsandbox | — | 已落地真实 Microsandbox 完整 turn；保留 |
-| `pty_tui_smoke_runs_turn_and_quits_cleanly` | `crates/lattice-system-harness/tests/pty_tui_smoke.rs:84` | 保留 | 真实 Microsandbox | — | 已落地 PTY TUI 入口 smoke；保留 |
+| `direct_local_plain_text_turn_commits_and_exit_zero` | `crates/lattice-system-harness/tests/direct_local_turn.rs:108` | 提升 | Direct-Local 外部二进制 | `direct_local_plain_text_turn_commits_and_exit_zero` | #40 已落地 ordinary-lane Direct-Local plain-text turn scenario `direct_local_plain_text_turn_commits_and_exit_zero`；原 harness identity 由该 scenario 精确接管，decision 由 keep 改 elevate。 |
+| `pty_tui_smoke_runs_turn_and_quits_cleanly` | `crates/lattice-system-harness/tests/pty_tui_smoke.rs:84` | 保留 | Direct-Local 外部二进制 | — | #40 后为 ordinary-lane Direct-Local PTY smoke；保留。 |
 
 ### `lattice-tui`（保留 3 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `new_session_project_branch_is_required` | `crates/lattice-tui/src/runtime.rs:405` | 保留 | 局部不变量 | — | TUI 局部纯逻辑（若有）保留；展示细节不进契约 |
 | `new_session_project_branch_rejects_blank_values` | `crates/lattice-tui/src/runtime.rs:415` | 保留 | 局部不变量 | — | TUI 局部纯逻辑（若有）保留；展示细节不进契约 |
 | `new_session_project_branch_preserves_explicit_value` | `crates/lattice-tui/src/runtime.rs:425` | 保留 | 局部不变量 | — | TUI 局部纯逻辑（若有）保留；展示细节不进契约 |
 
-### `lattice-workspace`（保留 158 / 提升 0 / 删除 0）
+### `lattice-workspace`（保留 0 / 提升 0 / 删除 158）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
-| `blocked_maps_to_blocked_plan` | `crates/lattice-workspace/src/lib.rs:735` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `open_maps_to_open_plan` | `crates/lattice-workspace/src/lib.rs:741` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allowlist_propagates_domains_in_order` | `crates/lattice-workspace/src/lib.rs:746` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allowlist_empty_is_empty_allow` | `crates/lattice-workspace/src/lib.rs:763` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `validate_baseline_oid_accepts_sha1_40_hex` | `crates/lattice-workspace/src/lib.rs:778` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `validate_baseline_oid_accepts_sha256_64_hex` | `crates/lattice-workspace/src/lib.rs:783` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `validate_baseline_oid_rejects_non_hex` | `crates/lattice-workspace/src/lib.rs:789` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `validate_baseline_oid_rejects_wrong_lengths` | `crates/lattice-workspace/src/lib.rs:795` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_create_upper_returns_handle` | `crates/lattice-workspace/src/testing/mod.rs:524` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_exec_upper_echo` | `crates/lattice-workspace/src/testing/mod.rs:537` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_destroy_is_idempotent` | `crates/lattice-workspace/src/testing/mod.rs:548` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_requested_policy` | `crates/lattice-workspace/src/testing/mod.rs:559` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_git_status_clean` | `crates/lattice-workspace/src/testing/mod.rs:573` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_deterministic_contract_suite` | `crates/lattice-workspace/tests/contract_deterministic.rs:21` | 保留 | 局部不变量 | — | DeterministicWorkspace adapter 合同套件入口；保留（workspace adapter 合同车道） |
-| `test_deterministic_policy_is_recorded` | `crates/lattice-workspace/tests/contract_deterministic.rs:29` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_no_lower_path_in_handle_explicit` | `crates/lattice-workspace/tests/contract_deterministic.rs:66` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `env_var_debug_does_not_contain_value` | `crates/lattice-workspace/tests/cred_redaction.rs:15` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `file_cred_debug_does_not_contain_content` | `crates/lattice-workspace/tests/cred_redaction.rs:36` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `upper_spec_debug_via_credential_list` | `crates/lattice-workspace/tests/cred_redaction.rs:57` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_cred_debug_redaction` | `crates/lattice-workspace/tests/cred_redaction.rs:90` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_egress_variants_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:25` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_egress_blocked_debug_is_printable` | `crates/lattice-workspace/tests/egress_policy.rs:48` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_egress_allowlist_entry_target` | `crates/lattice-workspace/tests/egress_policy.rs:55` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allowlist_entries_are_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:63` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `blocked_variant_is_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:75` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `open_variant_is_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:84` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allowlist_entry_target_field_is_readable` | `crates/lattice-workspace/tests/egress_policy.rs:93` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `empty_bytes_are_clean` | `crates/lattice-workspace/tests/git_status_z.rs:16` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `ordinary_modified_entry` | `crates/lattice-workspace/tests/git_status_z.rs:25` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `ordinary_staged_added_entry` | `crates/lattice-workspace/tests/git_status_z.rs:38` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `untracked_entry` | `crates/lattice-workspace/tests/git_status_z.rs:49` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `multiple_ordinary_entries` | `crates/lattice-workspace/tests/git_status_z.rs:60` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `path_with_spaces_preserved_exactly` | `crates/lattice-workspace/tests/git_status_z.rs:73` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `path_with_embedded_newline_preserved_exactly` | `crates/lattice-workspace/tests/git_status_z.rs:81` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `path_with_tabs_and_special_whitespace` | `crates/lattice-workspace/tests/git_status_z.rs:89` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rename_entry_preserves_source_and_destination` | `crates/lattice-workspace/tests/git_status_z.rs:99` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `copy_entry_preserves_source_and_destination` | `crates/lattice-workspace/tests/git_status_z.rs:114` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rename_with_worktree_modification` | `crates/lattice-workspace/tests/git_status_z.rs:129` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rename_followed_by_ordinary_entry` | `crates/lattice-workspace/tests/git_status_z.rs:140` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `all_index_status_codes` | `crates/lattice-workspace/tests/git_status_z.rs:154` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `all_worktree_status_codes` | `crates/lattice-workspace/tests/git_status_z.rs:195` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `truncated_entry_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:217` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `truncated_rename_missing_second_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:228` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `non_utf8_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:239` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `absolute_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:252` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `traversal_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:263` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `invalid_status_code_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:274` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `workspace_dirty_fact_is_valid_json` | `crates/lattice-workspace/tests/git_status_z.rs:287` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `workspace_dirty_fact_escapes_hostile_paths` | `crates/lattice-workspace/tests/git_status_z.rs:316` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `workspace_dirty_fact_cannot_inject_record` | `crates/lattice-workspace/tests/git_status_z.rs:333` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `crate_level_git_status_has_typed_entries` | `crates/lattice-workspace/tests/git_status_z.rs:353` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `git_status_default_is_clean_with_empty_entries` | `crates/lattice-workspace/tests/git_status_z.rs:370` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `changed_paths_from_typed_entries` | `crates/lattice-workspace/tests/git_status_z.rs:380` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_fact_from_parsed_output` | `crates/lattice-workspace/tests/git_status_z.rs:408` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_template_create_and_restore` | `crates/lattice-workspace/tests/integration_microsandbox.rs:118` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_egress_blocked_live` | `crates/lattice-workspace/tests/integration_microsandbox.rs:234` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_microsandbox_contract_suite` | `crates/lattice-workspace/tests/integration_microsandbox.rs:305` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_git_ready_template_has_git_under_blocked_egress` | `crates/lattice-workspace/tests/integration_microsandbox.rs:351` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `clean_export_preserves_candidate_oid` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:112` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_staged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:158` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_unstaged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:193` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_untracked_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:215` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `artifact_byte_limit_boundary` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:237` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_mismatch_rejects_before_import` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:454` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `failed_verification_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:476` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `valid_candidate_passes_validation` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:492` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `malformed_bundle_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:518` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `object_count_limit_boundary` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:540` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `gitmodules_change_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:594` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `symlink_add_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:645` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejection_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:692` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_empty_argv_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:721` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_empty_profile_hash_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:739` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_coherence_exit_mismatch_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:757` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_timeout_cannot_pass` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:776` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_valid_evidence_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:795` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_failed_with_nonzero_exit_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:814` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `verification_failed_with_timeout_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:830` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `prepare_rejection_creates_no_lock_or_journal` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:253` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `stale_project_ref_blocks_before_callback` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:264` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `dirty_lower_blocks_before_callback` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:286` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `callback_error_leaves_refs_and_lower_unchanged` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:304` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `existing_candidate_ref_with_same_oid_succeeds_via_verify` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:321` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `callback_uses_observed_session_parent_and_cas` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:336` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `absent_session_ref_uses_create_without_parent` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:360` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `lock_precedes_journal_and_lower_writes` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:373` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `clean_candidate_advances_refs_and_materializes_lower` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:395` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `noop_candidate_keeps_project_oid_while_session_and_candidate_refs_advance` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:416` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `post_ref_materialization_fault_requires_recovery_before_retry` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:458` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `third_state_conflict_preserves_journal` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:503` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `only_commit_and_recover_mutate_managed_lower` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:529` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `deterministic_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:72` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `deterministic_invalid_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:110` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `deterministic_missing_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:127` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `microsandbox_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:151` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `provisions_linked_worktree_and_clean_baseline` | `crates/lattice-workspace/tests/promotion_lower.rs:94` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `reopens_existing_managed_worktree` | `crates/lattice-workspace/tests/promotion_lower.rs:109` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_branch_already_attached_elsewhere` | `crates/lattice-workspace/tests/promotion_lower.rs:119` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_staged_changes` | `crates/lattice-workspace/tests/promotion_lower.rs:130` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_unstaged_changes` | `crates/lattice-workspace/tests/promotion_lower.rs:147` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_untracked_files` | `crates/lattice-workspace/tests/promotion_lower.rs:159` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `allows_ignored_untracked_files` | `crates/lattice-workspace/tests/promotion_lower.rs:171` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_detached_head` | `crates/lattice-workspace/tests/promotion_lower.rs:193` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_wrong_branch` | `crates/lattice-workspace/tests/promotion_lower.rs:210` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_index_dirty_unmerged` | `crates/lattice-workspace/tests/promotion_lower.rs:235` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `same_identity_is_live_same_pid_different_ticks_is_stale` | `crates/lattice-workspace/tests/promotion_lower.rs:332` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `acquire_and_drop_records_parent_fsync` | `crates/lattice-workspace/tests/promotion_lower.rs:354` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `recovery_callback_failure_leaves_stale_lock` | `crates/lattice-workspace/tests/promotion_lower.rs:372` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `successful_recovery_removes_stale_lock` | `crates/lattice-workspace/tests/promotion_lower.rs:401` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `malformed_lock_json_is_not_auto_deleted` | `crates/lattice-workspace/tests/promotion_lower.rs:424` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `pin_creates_candidate_ref_with_exact_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:111` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `pin_is_idempotent_for_same_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:131` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `pin_rejects_different_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:151` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `load_pinned_candidate_validates_and_returns` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:183` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `load_pinned_rejects_missing_ref` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:206` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `candidate_remains_resolvable_after_pin` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:225` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `prepare_pinned_rebuilds_validated_candidate` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:247` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `prepare_pinned_rejects_verification_mismatch` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:282` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `prepare_pinned_runs_hazard_and_limit_checks` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:319` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `add_modify_delete_and_executable_transitions_converge` | `crates/lattice-workspace/tests/promotion_recovery.rs:124` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `non_empty_directory_blocks_removal` | `crates/lattice-workspace/tests/promotion_recovery.rs:178` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `third_state_returns_conflict_without_mutation` | `crates/lattice-workspace/tests/promotion_recovery.rs:212` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `durable_fs_syncs_file_before_parent` | `crates/lattice-workspace/tests/promotion_recovery.rs:252` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `crash_matrix_recovers_toward_candidate_ref` | `crates/lattice-workspace/tests/promotion_recovery.rs:330` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `recovery_after_baseline_ref_preserves_baseline` | `crates/lattice-workspace/tests/promotion_recovery.rs:378` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `third_ref_and_third_state_preserve_journal` | `crates/lattice-workspace/tests/promotion_recovery.rs:413` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `torn_final_line_is_tolerated_malformed_middle_is_fatal` | `crates/lattice-workspace/tests/promotion_recovery.rs:451` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `golden_payload_has_one_transaction_cycle_and_three_commands` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:124` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `first_session_commit_uses_create_not_update` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:164` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `injection_corpus_rejects_before_git_spawn` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:180` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `derived_refs_match_d07_layout` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:214` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `success_moves_all_three_refs_together` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:232` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `stale_project_oid_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:247` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `stale_session_oid_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:267` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `existing_candidate_ref_blocks_whole_transaction` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:291` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `project_ref_moves_between_request_and_execution` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:311` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `session_ref_moves_between_request_and_execution` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:334` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `child_failure_surfaces_typed_error` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:377` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_retain_preserves_dirty_state_and_git` | `crates/lattice-workspace/tests/retained_snapshot.rs:87` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_retain_preserves_clean_commits` | `crates/lattice-workspace/tests/retained_snapshot.rs:150` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_retain_removes_live_handle` | `crates/lattice-workspace/tests/retained_snapshot.rs:196` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_release_is_idempotent` | `crates/lattice-workspace/tests/retained_snapshot.rs:215` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_list_returns_exact_session_snapshots` | `crates/lattice-workspace/tests/retained_snapshot.rs:253` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_quota_refuses_at_limit` | `crates/lattice-workspace/tests/retained_snapshot.rs:299` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_invalid_name_rejected` | `crates/lattice-workspace/tests/retained_snapshot.rs:346` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_zero_quota_always_refuses` | `crates/lattice-workspace/tests/retained_snapshot.rs:371` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_retain_nonexistent_handle_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:385` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_restore_nonexistent_snapshot_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:398` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `test_microsandbox_retain_restore_release` | `crates/lattice-workspace/tests/retained_snapshot.rs:426` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `wave0_a1_sandbox_send_sync` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:48` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `wave0_a3_boot_and_exec` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:70` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `wave0_a4_snapshot_round_trip` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:131` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `wave0_a7_egress_allowlist` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:231` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `deterministic_primitives_contract` | `crates/lattice-workspace/tests/workspace_primitives.rs:28` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `rejects_invalid_paths` | `crates/lattice-workspace/tests/workspace_primitives.rs:101` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `content_too_large_before_write` | `crates/lattice-workspace/tests/workspace_primitives.rs:121` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `git_facts_without_bypass` | `crates/lattice-workspace/tests/workspace_primitives.rs:137` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
-| `create_overwrite_delete_intents` | `crates/lattice-workspace/tests/workspace_primitives.rs:154` | 保留 | 局部不变量 | — | workspace adapter 合同、路径 fail-closed、凭证/egress/baseline 局部不变量；保留（KVM live 仍为可选车道） |
+| --- | --- | --- | --- | --- | --- |
+| `blocked_maps_to_blocked_plan` | `crates/lattice-workspace/src/lib.rs:735` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `open_maps_to_open_plan` | `crates/lattice-workspace/src/lib.rs:741` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allowlist_propagates_domains_in_order` | `crates/lattice-workspace/src/lib.rs:746` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allowlist_empty_is_empty_allow` | `crates/lattice-workspace/src/lib.rs:763` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `validate_baseline_oid_accepts_sha1_40_hex` | `crates/lattice-workspace/src/lib.rs:778` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `validate_baseline_oid_accepts_sha256_64_hex` | `crates/lattice-workspace/src/lib.rs:783` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `validate_baseline_oid_rejects_non_hex` | `crates/lattice-workspace/src/lib.rs:789` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `validate_baseline_oid_rejects_wrong_lengths` | `crates/lattice-workspace/src/lib.rs:795` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_create_upper_returns_handle` | `crates/lattice-workspace/src/testing/mod.rs:524` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_exec_upper_echo` | `crates/lattice-workspace/src/testing/mod.rs:537` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_destroy_is_idempotent` | `crates/lattice-workspace/src/testing/mod.rs:548` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_requested_policy` | `crates/lattice-workspace/src/testing/mod.rs:559` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_git_status_clean` | `crates/lattice-workspace/src/testing/mod.rs:573` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_contract_suite` | `crates/lattice-workspace/tests/contract_deterministic.rs:21` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_deterministic_policy_is_recorded` | `crates/lattice-workspace/tests/contract_deterministic.rs:29` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_no_lower_path_in_handle_explicit` | `crates/lattice-workspace/tests/contract_deterministic.rs:66` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `env_var_debug_does_not_contain_value` | `crates/lattice-workspace/tests/cred_redaction.rs:15` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `file_cred_debug_does_not_contain_content` | `crates/lattice-workspace/tests/cred_redaction.rs:36` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `upper_spec_debug_via_credential_list` | `crates/lattice-workspace/tests/cred_redaction.rs:57` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_cred_debug_redaction` | `crates/lattice-workspace/tests/cred_redaction.rs:90` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_egress_variants_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:25` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_egress_blocked_debug_is_printable` | `crates/lattice-workspace/tests/egress_policy.rs:48` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_egress_allowlist_entry_target` | `crates/lattice-workspace/tests/egress_policy.rs:55` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allowlist_entries_are_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:63` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `blocked_variant_is_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:75` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `open_variant_is_publicly_constructible` | `crates/lattice-workspace/tests/egress_policy.rs:84` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allowlist_entry_target_field_is_readable` | `crates/lattice-workspace/tests/egress_policy.rs:93` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `empty_bytes_are_clean` | `crates/lattice-workspace/tests/git_status_z.rs:16` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `ordinary_modified_entry` | `crates/lattice-workspace/tests/git_status_z.rs:25` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `ordinary_staged_added_entry` | `crates/lattice-workspace/tests/git_status_z.rs:38` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `untracked_entry` | `crates/lattice-workspace/tests/git_status_z.rs:49` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `multiple_ordinary_entries` | `crates/lattice-workspace/tests/git_status_z.rs:60` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `path_with_spaces_preserved_exactly` | `crates/lattice-workspace/tests/git_status_z.rs:73` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `path_with_embedded_newline_preserved_exactly` | `crates/lattice-workspace/tests/git_status_z.rs:81` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `path_with_tabs_and_special_whitespace` | `crates/lattice-workspace/tests/git_status_z.rs:89` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rename_entry_preserves_source_and_destination` | `crates/lattice-workspace/tests/git_status_z.rs:99` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `copy_entry_preserves_source_and_destination` | `crates/lattice-workspace/tests/git_status_z.rs:114` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rename_with_worktree_modification` | `crates/lattice-workspace/tests/git_status_z.rs:129` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rename_followed_by_ordinary_entry` | `crates/lattice-workspace/tests/git_status_z.rs:140` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `all_index_status_codes` | `crates/lattice-workspace/tests/git_status_z.rs:154` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `all_worktree_status_codes` | `crates/lattice-workspace/tests/git_status_z.rs:195` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `truncated_entry_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:217` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `truncated_rename_missing_second_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:228` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `non_utf8_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:239` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `absolute_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:252` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `traversal_path_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:263` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `invalid_status_code_rejected` | `crates/lattice-workspace/tests/git_status_z.rs:274` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `workspace_dirty_fact_is_valid_json` | `crates/lattice-workspace/tests/git_status_z.rs:287` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `workspace_dirty_fact_escapes_hostile_paths` | `crates/lattice-workspace/tests/git_status_z.rs:316` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `workspace_dirty_fact_cannot_inject_record` | `crates/lattice-workspace/tests/git_status_z.rs:333` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `crate_level_git_status_has_typed_entries` | `crates/lattice-workspace/tests/git_status_z.rs:353` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `git_status_default_is_clean_with_empty_entries` | `crates/lattice-workspace/tests/git_status_z.rs:370` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `changed_paths_from_typed_entries` | `crates/lattice-workspace/tests/git_status_z.rs:380` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_fact_from_parsed_output` | `crates/lattice-workspace/tests/git_status_z.rs:408` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_template_create_and_restore` | `crates/lattice-workspace/tests/integration_workspace.rs:118` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_egress_blocked_live` | `crates/lattice-workspace/tests/integration_workspace.rs:234` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `retired_workspace_contract_suite` | `crates/lattice-workspace/tests/integration_workspace.rs:305` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_git_ready_template_has_git_under_blocked_egress` | `crates/lattice-workspace/tests/integration_workspace.rs:351` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `clean_export_preserves_candidate_oid` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:112` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_staged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:158` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_unstaged_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:193` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_untracked_rejects_export` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:215` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `artifact_byte_limit_boundary` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:237` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_mismatch_rejects_before_import` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:454` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `failed_verification_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:476` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `valid_candidate_passes_validation` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:492` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `malformed_bundle_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:518` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `object_count_limit_boundary` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:540` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `gitmodules_change_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:594` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `symlink_add_rejects` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:645` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejection_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:692` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_empty_argv_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:721` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_empty_profile_hash_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:739` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_coherence_exit_mismatch_rejected` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:757` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_timeout_cannot_pass` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:776` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_valid_evidence_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:795` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_failed_with_nonzero_exit_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:814` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `verification_failed_with_timeout_constructs` | `crates/lattice-workspace/tests/promotion_candidate_validation.rs:830` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `prepare_rejection_creates_no_lock_or_journal` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:253` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `stale_project_ref_blocks_before_callback` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:264` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `dirty_lower_blocks_before_callback` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:286` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `callback_error_leaves_refs_and_lower_unchanged` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:304` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `existing_candidate_ref_with_same_oid_succeeds_via_verify` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:321` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `callback_uses_observed_session_parent_and_cas` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:336` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `absent_session_ref_uses_create_without_parent` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:360` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `lock_precedes_journal_and_lower_writes` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:373` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `clean_candidate_advances_refs_and_materializes_lower` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:395` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `noop_candidate_keeps_project_oid_while_session_and_candidate_refs_advance` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:416` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `post_ref_materialization_fault_requires_recovery_before_retry` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:458` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `third_state_conflict_preserves_journal` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:503` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `only_commit_and_recover_mutate_managed_lower` | `crates/lattice-workspace/tests/promotion_end_to_end.rs:529` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `deterministic_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:72` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `deterministic_invalid_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:110` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `deterministic_missing_baseline_oid_rejected_before_handle` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:127` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `retired_workspace_exact_baseline` | `crates/lattice-workspace/tests/promotion_exact_baseline.rs:151` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `provisions_linked_worktree_and_clean_baseline` | `crates/lattice-workspace/tests/promotion_lower.rs:94` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `reopens_existing_managed_worktree` | `crates/lattice-workspace/tests/promotion_lower.rs:109` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_branch_already_attached_elsewhere` | `crates/lattice-workspace/tests/promotion_lower.rs:119` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_staged_changes` | `crates/lattice-workspace/tests/promotion_lower.rs:130` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_unstaged_changes` | `crates/lattice-workspace/tests/promotion_lower.rs:147` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_untracked_files` | `crates/lattice-workspace/tests/promotion_lower.rs:159` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `allows_ignored_untracked_files` | `crates/lattice-workspace/tests/promotion_lower.rs:171` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_detached_head` | `crates/lattice-workspace/tests/promotion_lower.rs:193` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_wrong_branch` | `crates/lattice-workspace/tests/promotion_lower.rs:210` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_index_dirty_unmerged` | `crates/lattice-workspace/tests/promotion_lower.rs:235` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `same_identity_is_live_same_pid_different_ticks_is_stale` | `crates/lattice-workspace/tests/promotion_lower.rs:332` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `acquire_and_drop_records_parent_fsync` | `crates/lattice-workspace/tests/promotion_lower.rs:354` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `recovery_callback_failure_leaves_stale_lock` | `crates/lattice-workspace/tests/promotion_lower.rs:372` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `successful_recovery_removes_stale_lock` | `crates/lattice-workspace/tests/promotion_lower.rs:401` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `malformed_lock_json_is_not_auto_deleted` | `crates/lattice-workspace/tests/promotion_lower.rs:424` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `pin_creates_candidate_ref_with_exact_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:111` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `pin_is_idempotent_for_same_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:131` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `pin_rejects_different_oid` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:151` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `load_pinned_candidate_validates_and_returns` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:183` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `load_pinned_rejects_missing_ref` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:206` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `candidate_remains_resolvable_after_pin` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:225` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `prepare_pinned_rebuilds_validated_candidate` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:247` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `prepare_pinned_rejects_verification_mismatch` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:282` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `prepare_pinned_runs_hazard_and_limit_checks` | `crates/lattice-workspace/tests/promotion_pending_candidate.rs:319` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `add_modify_delete_and_executable_transitions_converge` | `crates/lattice-workspace/tests/promotion_recovery.rs:124` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `non_empty_directory_blocks_removal` | `crates/lattice-workspace/tests/promotion_recovery.rs:178` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `third_state_returns_conflict_without_mutation` | `crates/lattice-workspace/tests/promotion_recovery.rs:212` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `durable_fs_syncs_file_before_parent` | `crates/lattice-workspace/tests/promotion_recovery.rs:252` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `crash_matrix_recovers_toward_candidate_ref` | `crates/lattice-workspace/tests/promotion_recovery.rs:330` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `recovery_after_baseline_ref_preserves_baseline` | `crates/lattice-workspace/tests/promotion_recovery.rs:378` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `third_ref_and_third_state_preserve_journal` | `crates/lattice-workspace/tests/promotion_recovery.rs:413` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `torn_final_line_is_tolerated_malformed_middle_is_fatal` | `crates/lattice-workspace/tests/promotion_recovery.rs:451` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `golden_payload_has_one_transaction_cycle_and_three_commands` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:124` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `first_session_commit_uses_create_not_update` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:164` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `injection_corpus_rejects_before_git_spawn` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:180` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `derived_refs_match_d07_layout` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:214` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `success_moves_all_three_refs_together` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:232` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `stale_project_oid_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:247` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `stale_session_oid_leaves_refs_unchanged` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:267` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `existing_candidate_ref_blocks_whole_transaction` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:291` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `project_ref_moves_between_request_and_execution` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:311` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `session_ref_moves_between_request_and_execution` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:334` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `child_failure_surfaces_typed_error` | `crates/lattice-workspace/tests/promotion_ref_transaction.rs:377` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_retain_preserves_dirty_state_and_git` | `crates/lattice-workspace/tests/retained_snapshot.rs:87` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_retain_preserves_clean_commits` | `crates/lattice-workspace/tests/retained_snapshot.rs:150` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_retain_removes_live_handle` | `crates/lattice-workspace/tests/retained_snapshot.rs:196` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_release_is_idempotent` | `crates/lattice-workspace/tests/retained_snapshot.rs:215` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_list_returns_exact_session_snapshots` | `crates/lattice-workspace/tests/retained_snapshot.rs:253` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_quota_refuses_at_limit` | `crates/lattice-workspace/tests/retained_snapshot.rs:299` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_invalid_name_rejected` | `crates/lattice-workspace/tests/retained_snapshot.rs:346` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_zero_quota_always_refuses` | `crates/lattice-workspace/tests/retained_snapshot.rs:371` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_retain_nonexistent_handle_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:385` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `test_restore_nonexistent_snapshot_fails` | `crates/lattice-workspace/tests/retained_snapshot.rs:398` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `retired_workspace_retain_restore_release` | `crates/lattice-workspace/tests/retained_snapshot.rs:426` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `wave0_a1_sandbox_send_sync` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:48` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `wave0_a3_boot_and_exec` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:70` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `wave0_a4_snapshot_round_trip` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:131` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `wave0_a7_egress_allowlist` | `crates/lattice-workspace/tests/wave0_sdk_probe.rs:231` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `deterministic_primitives_contract` | `crates/lattice-workspace/tests/workspace_primitives.rs:28` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `rejects_invalid_paths` | `crates/lattice-workspace/tests/workspace_primitives.rs:101` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `content_too_large_before_write` | `crates/lattice-workspace/tests/workspace_primitives.rs:121` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `git_facts_without_bypass` | `crates/lattice-workspace/tests/workspace_primitives.rs:137` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
+| `create_overwrite_delete_intents` | `crates/lattice-workspace/tests/workspace_primitives.rs:154` | 删除 | 局部不变量 | n/a | #40 已删除 lattice-workspace crate（Upper/MSB 产品面），对应测试已不存在；补记 delete（FINDINGS.md T-23-03），不向 #24 虚构 replacement。 |
 
 ### `net-guard`（保留 15 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `reject_file_scheme` | `crates/net-guard/src/lib.rs:250` | 保留 | 局部不变量 | — | net-guard 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `reject_userinfo` | `crates/net-guard/src/lib.rs:255` | 保留 | 局部不变量 | — | net-guard 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `reject_plain_http_remote` | `crates/net-guard/src/lib.rs:260` | 保留 | 局部不变量 | — | net-guard 局部不变量（wire/安全/dispatch/投影）；保留 |
@@ -1684,7 +1887,7 @@
 ### `xtask`（保留 26 / 提升 0 / 删除 0）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `ordered_test_crates_is_deterministic_and_excludes_xtask` | `xtask/src/ci.rs:310` | 保留 | 局部不变量 | — | xtask/CI 工具与 harness-boundary 局部契约；保留 |
 | `ordered_test_crates_puts_dependencies_before_dependents` | `xtask/src/ci.rs:340` | 保留 | 局部不变量 | — | xtask/CI 工具与 harness-boundary 局部契约；保留 |
 | `flags_string_form_lattice_dependency` | `xtask/src/harness_boundary/check.rs:180` | 保留 | 局部不变量 | — | xtask/CI 工具与 harness-boundary 局部契约；保留 |
@@ -1719,9 +1922,26 @@
 同目录 `test-triage-decisions.json`：每条含 `crate` / `file` / `line` / `name` / `decision` / `target_layer` / `replacement` / `reason` / `ignored`。
 4/6 可用脚本按 `decision` 过滤后分批改代码。
 
-## 4. 验收对照（issue #22）
+## 4. 验收对照（issue #44）
 
 - [x] 清单覆盖枚举到的全部现存测试，无遗漏条目（`docs/test-triage-decisions.json` 共 1449 条，与枚举键集合一致）
 - [x] 每条都有决定、理由、目标层；提升/删除条目标明替代场景（或显式 `n/a`）
 - [x] 以文档形式入库（本文件 + JSON）
-- [x] 本票未删除、未修改任何测试源码
+- [x] 本票未删除、未修改任何测试源码| `direct_session_branch_listing_isolation` | Direct-Local: 两个 session 同分支名，列表仅报告被寻址 session | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_session_checkout_isolation` | Direct-Local: checkout A feature，B 保持 main 不变 | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_session_branch_create_isolation` | Direct-Local: A 创建 work，B 无 work | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_session_reset_isolation` | Direct-Local: A reset 到 A0，B 不变 | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_session_diff_isolation` | Direct-Local: 同名 main/feature 在被寻址 session 内解析，A/B 指向不同 commit | **已落地** `tests/direct_session_isolation.rs`（#24 slice 7） |
+| `direct_operator_audit_session_lancet_cross` | Direct-Local: audit query/replay/tail + lancet status + session status/log 交叉校验 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
+| `direct_operator_audit_query_unknown_session` | Direct-Local: 未知 session query 返回空成功 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
+| `direct_operator_audit_replay_unknown_turn` | Direct-Local: 未知 turn replay 非零失败 | **已落地** `tests/direct_operator.rs`（#24 slice 6） |
+| `direct_secrets_sentinels_never_leak` | Direct-Local: provider 凭证 + 拒绝内容 sentinel 不泄漏到任何公开 sink | **已落地** `tests/direct_secrets.rs`（#24 slice 6） |
+| `direct_secrets_failure_bundle_redacts` | Direct-Local: 失败 bundle 递归 sentinel 扫描/脱敏 | **已落地** `tests/direct_secrets.rs`（#24 slice 6） |
+| `direct_failure_http_error_no_retry` | Direct-Local: provider HTTP 启动失败（retry disabled）→ error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_disconnect_before_output` | Direct-Local: 流前断连 → error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_disconnect_after_partial` | Direct-Local: partial token 后断连 → error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_malformed_sse` | Direct-Local: 非法 SSE → error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_sigint_while_stalled` | Direct-Local: SIGINT 协作取消（stall）→ cancelled commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_profile_deadline` | Direct-Local: profile deadline（stall）→ error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+| `direct_failure_mutation_survives` | Direct-Local: 成功 mutation 后 provider 失败，Local bytes 保留（无回滚） | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
+

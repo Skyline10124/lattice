@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 
 use lancet_authority::policy::default::PolicyConfig;
-use lancet_native::ExecutionRouting;
 use lancet_protocol::policy::CepMode;
 use sha2::{Digest, Sha256};
 
@@ -21,9 +20,37 @@ pub enum ExternalAuditPathError {
     Canonicalize(String),
 }
 
-/// Platform state-directory root used for external audit storage (`dirs::state_dir()`).
+/// Platform state-directory root used for external audit storage.
+///
+/// Resolution order:
+///
+/// 1. `XDG_STATE_HOME`, when set to an absolute path. The XDG spec honors this
+///    override on every platform, and `dirs::state_dir()` only consults it on
+///    Linux. Reading it here keeps one operator-visible knob that behaves the
+///    same everywhere, and is what the test-isolation helpers
+///    (`ScopedXdgStateHome`, the system harness) rely on to redirect audit
+///    storage into a temp dir.
+/// 2. `dirs::state_dir()` — the XDG state directory. Linux-only; returns
+///    `None` on macOS and Windows.
+/// 3. `dirs::data_local_dir()` — the conventional home for persistent per-user
+///    state on those platforms (`~/Library/Application Support` on macOS,
+///    `%LOCALAPPDATA%` on Windows).
+///
+/// Without steps 1 and 3 every project-keyed audit path is unresolvable off
+/// Linux, which breaks production audit storage, `lancet status`, and the CLI
+/// audit commands there.
+///
+/// Callers that need an explicit root (tests, embedders) should prefer
+/// [`audit_db_path_for_project_in`] over relying on this resolution.
 pub fn audit_state_root() -> Option<PathBuf> {
-    dirs::state_dir()
+    if let Some(explicit) = std::env::var_os("XDG_STATE_HOME") {
+        let path = PathBuf::from(explicit);
+        // Relative values are ignored per the XDG spec.
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    dirs::state_dir().or_else(dirs::data_local_dir)
 }
 
 /// Deterministic SHA-256 project key from the canonical project root identity.
@@ -57,7 +84,7 @@ pub fn audit_db_path_for_project_in(
 
 /// External audit DB path using the platform state directory.
 pub fn audit_db_path_for_project(project_root: &Path) -> Result<PathBuf, ExternalAuditPathError> {
-    let state_root = dirs::state_dir().ok_or(ExternalAuditPathError::MissingStateDir)?;
+    let state_root = audit_state_root().ok_or(ExternalAuditPathError::MissingStateDir)?;
     audit_db_path_for_project_in(&state_root, project_root)
 }
 
@@ -126,9 +153,6 @@ pub struct LancetRuntimeConfig {
     pub model_id: String,
     /// Runtime version string recorded in the audit context and attestations.
     pub runtime_version: String,
-    /// Upper (MSB) execution routing — always present since MSB is the sole
-    /// execution path.
-    pub execution: ExecutionRouting,
 }
 
 impl LancetRuntimeConfig {
@@ -147,13 +171,6 @@ impl LancetRuntimeConfig {
             audit: AuditBacking::InMemory,
             model_id: String::new(),
             runtime_version: String::new(),
-            execution: ExecutionRouting {
-                backend: std::sync::Arc::new(lancet_native::NullExecutionBackend),
-                upper: lancet_native::UpperContext {
-                    execution_backend: "null".into(),
-                    upper_workspace_id: "null".into(),
-                },
-            },
         }
     }
 }
@@ -171,6 +188,34 @@ mod external_audit_tests {
             meta.map(|m| m.modified().unwrap_or(SystemTime::UNIX_EPOCH))
                 .unwrap_or(SystemTime::UNIX_EPOCH),
         )
+    }
+
+    /// `audit_state_root` must honor an absolute `XDG_STATE_HOME` on every
+    /// platform, not just Linux. `dirs::state_dir()` only reads it on Linux, so
+    /// without the explicit lookup the test-isolation helpers silently fall
+    /// through to the real user directory on macOS/Windows and tests scribble
+    /// outside their temp dir (observed as CI failures on macos-latest).
+    #[test]
+    fn audit_state_root_prefers_absolute_xdg_state_home() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        let prev = std::env::var_os("XDG_STATE_HOME");
+
+        unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
+        assert_eq!(audit_state_root().as_deref(), Some(dir.path()));
+
+        // A relative value is ignored per the XDG spec; resolution falls
+        // through to the platform directories, which must still yield a path.
+        unsafe { std::env::set_var("XDG_STATE_HOME", "relative/path") };
+        let resolved = audit_state_root();
+        assert!(resolved.is_some(), "platform fallback must resolve");
+        assert_ne!(resolved.as_deref(), Some(Path::new("relative/path")));
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("XDG_STATE_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_STATE_HOME") },
+        }
     }
 
     #[test]

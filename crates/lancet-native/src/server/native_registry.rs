@@ -49,168 +49,20 @@ pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Res
 mod cep_native_registry_tests {
     use super::*;
     use crate::audit::{GUARD_STAGE_NATIVE, SEMANTIC_STAGE_NATIVE};
-    use crate::execution_backend::{
-        DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
-        GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
-    };
     use crate::server::registry::{Cancellation, EventSink, HandlerContext};
-    use crate::{CepTransport, ServerRunConfig};
+    use crate::workspace::LocalWorkspace;
+    use crate::{CepServerNativeExt, CepTransport, ServerRunConfig};
     use lancet_authority::policy::CepTurnContext;
     use lancet_catalog::CepMethod;
     use lancet_catalog::catalog;
     use lancet_catalog::methods::workspace::{
-        ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
+        Create, CreateParams, FindFilesParams, ObserveWorkspace, ObserveWorkspaceParams,
+        ObserveWorkspaceResult, ReadFileParams,
     };
     use lancet_protocol::CepErrorCode;
-    use std::future::Future;
-    use std::pin::Pin;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
-
-    /// Minimal host-filesystem backend for native registry tests.
-    struct TestFsBackend {
-        root: std::path::PathBuf,
-    }
-
-    impl TestFsBackend {
-        fn new(root: impl Into<std::path::PathBuf>) -> Self {
-            let raw = root.into();
-            Self {
-                root: std::fs::canonicalize(&raw).unwrap_or(raw),
-            }
-        }
-    }
-
-    impl ExecutionBackend for TestFsBackend {
-        fn backend_name(&self) -> &str {
-            "test-fs"
-        }
-
-        fn resolve_path(
-            &self,
-            path: &WorkspacePath,
-            _intent: PathIntent,
-        ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
-        {
-            let full = if path.is_project_root() {
-                self.root.clone()
-            } else {
-                self.root.join(path.as_str())
-            };
-            let path_str = path.as_str().to_string();
-            let exists = full.exists();
-            let kind = if full.is_dir() {
-                crate::execution_backend::PathKind::Directory
-            } else {
-                crate::execution_backend::PathKind::File
-            };
-            let canonical_under_workspace = if full.is_symlink() {
-                full.canonicalize()
-                    .map(|c| c.starts_with(&self.root))
-                    .unwrap_or(false)
-            } else {
-                true
-            };
-            Box::pin(async move {
-                Ok(PathFacts {
-                    normalized_path: path_str,
-                    exists,
-                    kind: Some(kind),
-                    parent_exists: true,
-                    parent_kind: Some(crate::execution_backend::PathKind::Directory),
-                    byte_size: None,
-                    canonical_under_workspace,
-                })
-            })
-        }
-
-        fn read_file(
-            &self,
-            path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
-        {
-            let full = if path.is_project_root() {
-                self.root.clone()
-            } else {
-                self.root.join(path.as_str())
-            };
-            Box::pin(async move {
-                std::fs::read(&full).map_err(|e| ExecutionBackendError::Unavailable {
-                    message: e.to_string(),
-                })
-            })
-        }
-
-        fn write_file(
-            &self,
-            _path: &WorkspacePath,
-            _content: &[u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-            Box::pin(async {
-                Err(ExecutionBackendError::Unavailable {
-                    message: "ro".into(),
-                })
-            })
-        }
-
-        fn remove_file(
-            &self,
-            _path: &WorkspacePath,
-        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
-            Box::pin(async {
-                Err(ExecutionBackendError::Unavailable {
-                    message: "ro".into(),
-                })
-            })
-        }
-
-        fn list_dir(
-            &self,
-            _path: &WorkspacePath,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_,
-            >,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn grep(
-            &self,
-            _request: &GrepRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
-        {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn find_files(
-            &self,
-            _request: &FindRequest,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn changed_paths(
-            &self,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-    }
-
-    fn test_execution(root: &str) -> ExecutionRouting {
-        ExecutionRouting {
-            backend: Arc::new(TestFsBackend::new(root)),
-            upper: UpperContext {
-                execution_backend: "test-fs".into(),
-                upper_workspace_id: "test-upper".into(),
-            },
-        }
-    }
 
     fn production_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
@@ -269,14 +121,7 @@ mod cep_native_registry_tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            execution: crate::execution_backend::ExecutionRouting {
-                backend: std::sync::Arc::new(crate::execution_backend::NullExecutionBackend),
-                upper: crate::execution_backend::UpperContext {
-                    execution_backend: "null".into(),
-                    upper_workspace_id: "null".into(),
-                },
-            },
-            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+            workspace: Arc::new(LocalWorkspace::new(std::path::Path::new(root))),
         };
 
         let params = ReadFileParams {
@@ -304,7 +149,6 @@ mod cep_native_registry_tests {
         let registry = production_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-        config.execution = test_execution(root);
         let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
             lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from(root),
@@ -316,7 +160,7 @@ mod cep_native_registry_tests {
         let (client, server) = CepTransport::pair(8);
         let audit = Arc::clone(&config.audit);
         let server_task = tokio::spawn(async move {
-            server.run(registry, config).await.unwrap();
+            server.run_native(registry, config).await.unwrap();
         });
 
         client
@@ -335,6 +179,131 @@ mod cep_native_registry_tests {
         assert_eq!(read_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
         assert_eq!(read_row.guard_stage, GUARD_STAGE_NATIVE);
         assert!(read_row.policy_enforced);
+        let metadata: serde_json::Value =
+            serde_json::from_str(read_row.metadata_json.as_deref().expect("metadata json"))
+                .unwrap();
+        assert_eq!(
+            metadata["visibility_evidence"],
+            serde_json::json!({"included_ignored": false, "filtered_by": []})
+        );
+
+        drop(client);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn recursive_visibility_evidence_survives_transport_finalization() {
+        let dir = TempDir::new().unwrap();
+        gix::init(dir.path()).expect("gix init");
+        std::fs::write(dir.path().join(".gitignore"), "secret/\n").unwrap();
+        std::fs::create_dir(dir.path().join("secret")).unwrap();
+        std::fs::write(dir.path().join("secret/key"), "AUDIT_SENTINEL\n").unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = production_registry();
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
+        let mut policy_config =
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(root.into());
+        policy_config.workspace.included_ignored_read_patterns = vec!["secret/key".into()];
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            policy_config,
+        ));
+        config.policy_hook = default_hook.clone();
+        config.default_policy_hook = Some(default_hook);
+
+        let (client, server) = CepTransport::pair(8);
+        let audit = Arc::clone(&config.audit);
+        let server_task = tokio::spawn(async move {
+            server.run_native(registry, config).await.unwrap();
+        });
+
+        let result = client
+            .call::<ObserveWorkspace>(ObserveWorkspaceParams::FindFiles(FindFilesParams {
+                pattern: "*".into(),
+                path: Some(".".into()),
+                limit: Some(50),
+            }))
+            .await
+            .unwrap();
+        let ObserveWorkspaceResult::FindFiles(result) = result else {
+            panic!("expected find result");
+        };
+        assert!(result.paths.iter().any(|path| path == "secret/key"));
+        assert!(!result.paths.iter().any(|path| path == "secret"));
+
+        let row = audit.row_by_audit_id(1).unwrap();
+        let raw = row.metadata_json.as_deref().expect("metadata json");
+        let metadata: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            metadata["visibility_evidence"],
+            serde_json::json!({
+                "included_ignored": true,
+                "filtered_by": ["system_exclusion", "ignored_default"],
+            })
+        );
+        assert!(!raw.contains("secret/key"));
+        assert!(!raw.contains("AUDIT_SENTINEL"));
+        assert!(!raw.contains(root));
+
+        drop(client);
+        server_task.abort();
+    }
+
+    /// Issue #24 slice 3: pre-dispatch effect-kind denial must never call the
+    /// mutation backend. A denied `mutate.create` leaves no file and records a
+    /// denied audit row.
+    #[tokio::test]
+    async fn denied_effect_kind_blocks_mutate_create_before_backend() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = production_registry();
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        let mut policy = lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root);
+        policy
+            .denied_effect_kinds
+            .insert(lancet_protocol::ImpactKind::WorkspaceMutation);
+        config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from(root),
+            ),
+        ));
+        config.policy_hook = default_hook.clone();
+        config.default_policy_hook = Some(default_hook);
+
+        let (client, server) = CepTransport::pair(8);
+        let audit = Arc::clone(&config.audit);
+        let server_task = tokio::spawn(async move {
+            server.run_native(registry, config).await.unwrap();
+        });
+
+        let err = client
+            .call::<Create>(CreateParams {
+                path: "must-not-land.txt".into(),
+                content: "denied content".into(),
+                create_parents: false,
+            })
+            .await
+            .expect_err("denied WorkspaceMutation must reject mutate.create");
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert!(
+            err.message.contains("declared effect denied")
+                || err.message.contains("effect-kind policy"),
+            "denial must identify effect-kind policy: {}",
+            err.message
+        );
+        assert!(
+            !dir.path().join("must-not-land.txt").exists(),
+            "pre-dispatch denial must never create the target file"
+        );
+
+        let row = audit.row_by_audit_id(1).expect("denied audit row");
+        assert_eq!(row.method, Create::NAME);
+        let result = row.result_or_error.as_deref().unwrap_or("");
+        assert!(
+            !result.is_empty() && !result.to_lowercase().contains("success"),
+            "denied call must record a non-success audit result: {result:?}"
+        );
 
         drop(client);
         server_task.abort();

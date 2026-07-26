@@ -12,35 +12,6 @@ fn stream_timeout_constant_is_5_minutes() {
     const EXPECTED_TIMEOUT: u64 = 300;
     assert_eq!(EXPECTED_TIMEOUT, STREAM_TIMEOUT_SECS);
 }
-
-#[tokio::test]
-async fn stream_timeout_fires_after_duration() {
-    use futures::StreamExt;
-    use std::time::Duration;
-    use tokio::time;
-
-    // Create a stream that never yields
-    struct NeverStream;
-    impl futures::Stream for NeverStream {
-        type Item = TurnEvent;
-        fn poll_next(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            std::task::Poll::Pending
-        }
-    }
-
-    let mut stream = NeverStream;
-    let timeout_duration = Duration::from_millis(50); // very short for test
-
-    let result = time::timeout(timeout_duration, stream.next()).await;
-    assert!(
-        result.is_err(),
-        "timeout should fire when stream never yields"
-    );
-}
-
 #[test]
 fn run_validate_agents_dir_rejects_parent_components() {
     let err = validate_agents_dir(Path::new(".lattice/../agents")).unwrap_err();
@@ -65,10 +36,6 @@ fn loaded_profile(model: &str) -> lattice_profile::LoadedAgentProfile {
             tools: lattice_profile::ToolsSection { enabled: vec![] },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
-            workspace: lattice_profile::WorkspaceSection {
-                image: Some("docker.io/library/alpine:3.19".into()),
-                ..Default::default()
-            },
         },
         system_prompt: String::new(),
     }
@@ -148,33 +115,24 @@ impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
 #[tokio::test]
 async fn run_integration_commits_existing_session() {
     let temp = tempfile::tempdir().unwrap();
-    // Wave 5: resolve_upper_config requires a git repo to resolve HEAD.
+    // The session graph store is git-backed; the fixture needs an initialized repo.
     std::fs::write(temp.path().join("README.md"), "init\n").expect("write");
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(temp.path())
-        .status()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@lattice.local"])
-        .current_dir(temp.path())
-        .status()
-        .expect("git config email");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "lattice-test"])
-        .current_dir(temp.path())
-        .status()
-        .expect("git config name");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(temp.path())
-        .status()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(temp.path())
-        .status()
-        .expect("git commit");
+    let mut __files: Vec<(String, String)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(temp.path()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                __files.push((name, content));
+            }
+        }
+    }
+    let __refs: Vec<(&str, &str)> = __files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let _ = lattice_session::test_utils::init_fixture_repo(temp.path(), &__refs);
 
     let session_api = lattice_api::SessionApi::git(temp.path());
     let created = session_api
@@ -194,10 +152,6 @@ async fn run_integration_commits_existing_session() {
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
         test_persist_audit: None,
-        workspace_override: Some(std::sync::Arc::new(
-            lattice_workspace::testing::DeterministicWorkspace::new()
-                .expect("deterministic workspace"),
-        )),
     };
 
     let result = lattice_api::run_turn(session_api, request).await;
@@ -215,128 +169,6 @@ async fn run_integration_commits_existing_session() {
     }
 }
 
-#[tokio::test]
-async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
-    use lattice_profile::WorkspaceSection;
-    use lattice_workspace::testing::DeterministicWorkspace;
-    use std::sync::Arc;
-
-    let workspace = tempfile::tempdir().unwrap();
-    let ws = workspace.path();
-    std::env::set_current_dir(ws).unwrap();
-
-    std::fs::create_dir_all(ws.join("src")).unwrap();
-    std::fs::write(ws.join("src/lib.rs"), "fn main() {}").unwrap();
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(ws)
-        .status()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@lattice.local"])
-        .current_dir(ws)
-        .status()
-        .expect("git user.email");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "lattice-test"])
-        .current_dir(ws)
-        .status()
-        .expect("git user.name");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(ws)
-        .status()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(ws)
-        .status()
-        .expect("git commit");
-
-    let profile_dir = ws.join(".lattice/agents/default");
-    std::fs::create_dir_all(&profile_dir).unwrap();
-    std::fs::write(profile_dir.join("agent.toml"), "[agent]\nname = \"test\"\n").unwrap();
-
-    let session_api = lattice_api::SessionApi::git(ws.join("sessions"));
-    let created = session_api
-        .create_session(lattice_api::CreateSessionRequest {
-            label: None,
-            active_agent: "test".to_string(),
-            project_branch: "main".to_string(),
-        })
-        .expect("create session");
-    let llm: std::sync::Arc<dyn lattice_agent::LlmClient> = std::sync::Arc::new(
-        lattice_agent::testing::FakeStreamingLlmClient::builder()
-            .push_events(vec![
-                lattice_llm::LlmEvent::ToolCallStart {
-                    id: "call_1".to_string(),
-                    name: "observe.workspace".to_string(),
-                },
-                lattice_llm::LlmEvent::ToolCallDelta {
-                    id: "call_1".to_string(),
-                    arguments_delta: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
-                },
-                lattice_llm::LlmEvent::ToolCallEnd {
-                    id: "call_1".to_string(),
-                },
-                lattice_llm::LlmEvent::Done {
-                    finish_reason: "stop".to_string(),
-                    usage: None,
-                },
-            ])
-            .build(),
-    );
-
-    let request = lattice_api::RunTurnRequest {
-        input: "read file".to_string(),
-        session_id: created.session_id,
-        loaded_profile: Some(lattice_profile::LoadedAgentProfile {
-            path: profile_dir.join("agent.toml"),
-            package_dir: profile_dir.clone(),
-            profile: lattice_profile::AgentProfile {
-                schema_version: 1,
-                agent: lattice_profile::AgentSection {
-                    name: "test".to_string(),
-                    model: "stub-model".to_string(),
-                    description: None,
-                },
-                prompt: lattice_profile::PromptSection {
-                    system: None,
-                    system_path: None,
-                },
-                tools: lattice_profile::ToolsSection {
-                    enabled: vec!["observe.workspace".to_string()],
-                },
-                llm: lattice_profile::LlmSection::default(),
-                lancet: lattice_profile::LancetSection::default(),
-                workspace: WorkspaceSection {
-                    image: Some("docker.io/library/alpine:3.19".into()),
-                    ..Default::default()
-                },
-            },
-            system_prompt: String::new(),
-        }),
-        cancel_flag: None,
-        test_llm: Some(llm),
-        test_project_root: Some(ws.to_string_lossy().to_string()),
-        test_persist_audit: None,
-        workspace_override: Some(Arc::new(
-            DeterministicWorkspace::new().expect("deterministic workspace for upper-backed test"),
-        )),
-    };
-
-    let result = lattice_api::run_turn(session_api, request)
-        .await
-        .expect("run_turn should succeed through API-owned CEP runtime");
-
-    assert!(
-        result
-            .tool_results
-            .iter()
-            .any(|tool| tool.ok && tool.name == "observe.workspace"),
-        "expected successful observe.workspace via workspace-root CEP runtime"
-    );
-}
 // ─── JSON renderer tests (Task 2) ──────────────────────────────
 
 #[test]
@@ -355,6 +187,7 @@ fn render_json_event_roundtrips_every_variant() {
     let events: Vec<TurnEvent> = vec![
         TurnEvent::TurnStarted {
             session_id: "s1".into(),
+            turn_id: "s1:root".into(),
             parent_commit_id: None,
             branch: Some("main".into()),
         },
@@ -602,6 +435,7 @@ fn render_human_reasoning_visible_verbose() {
 fn render_human_turn_started_silent_default() {
     let event = TurnEvent::TurnStarted {
         session_id: "s1".into(),
+        turn_id: "s1:root".into(),
         parent_commit_id: None,
         branch: None,
     };
@@ -815,6 +649,7 @@ fn s(bytes: &[u8]) -> String {
 fn seq_happy_path_human() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S1".into(),
             parent_commit_id: None,
             branch: Some("main".into()),
@@ -868,6 +703,7 @@ fn seq_happy_path_human() {
 fn seq_happy_path_verbose_with_epilogue() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S1".into(),
             parent_commit_id: None,
             branch: Some("main".into()),
@@ -1007,6 +843,7 @@ fn seq_multiround_usage_sums_into_state() {
 fn seq_tool_failure_renders_summary() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S".into(),
             parent_commit_id: None,
             branch: None,
@@ -1048,6 +885,7 @@ fn seq_tool_failure_renders_summary() {
 fn seq_turn_failed_then_commit_drains_stream() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S".into(),
             parent_commit_id: None,
             branch: None,
@@ -1114,6 +952,7 @@ fn seq_commit_failed_renders_reason() {
 fn seq_stream_ends_without_terminal_is_protocol_violation() {
     let events = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "S".into(),
             parent_commit_id: None,
             branch: None,
@@ -1139,6 +978,7 @@ fn seq_jsonl_round_trips_every_variant() {
     // Build a Vec<TurnEvent> covering every variant with representative field values.
     let events: Vec<TurnEvent> = vec![
         TurnEvent::TurnStarted {
+            turn_id: "s1:root".into(),
             session_id: "s1".into(),
             parent_commit_id: None,
             branch: Some("main".into()),

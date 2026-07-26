@@ -8,11 +8,14 @@ use serde::Deserialize;
 use thiserror::Error;
 
 /// Harness test layer (see RFC #19).
+///
+/// After #40 there is no Microsandbox layer: every scenario runs Direct-Local
+/// against the canonical project root — no KVM, no MSB daemon, no OCI image.
+/// `PtySmoke` remains as the TUI-entrypoint layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScenarioLayer {
     FastBinary,
-    Microsandbox,
     PtySmoke,
 }
 
@@ -56,6 +59,16 @@ impl ScenarioSpec {
             layer: ScenarioLayer::FastBinary,
             step_timeout_secs: default_step_timeout_secs(),
             total_timeout_secs: None,
+        }
+    }
+
+    /// Multi-step Direct-Local scenario with both step and whole-run bounds.
+    pub fn direct_local(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            layer: ScenarioLayer::FastBinary,
+            step_timeout_secs: default_step_timeout_secs(),
+            total_timeout_secs: Some(180),
         }
     }
 
@@ -111,6 +124,18 @@ impl ScenarioBudget {
         self.start.elapsed()
     }
 
+    /// Remaining whole-scenario time, or `None` when there is no total budget.
+    pub fn remaining(&self) -> Option<Duration> {
+        self.limit
+            .map(|limit| limit.saturating_sub(self.start.elapsed()))
+    }
+
+    /// Cap a command's timeout to `min(step_timeout, remaining_total)`.
+    pub fn cap_timeout(&self, step_timeout: Duration) -> Duration {
+        self.remaining()
+            .map_or(step_timeout, |remaining| step_timeout.min(remaining))
+    }
+
     /// Panic if the budget has elapsed. A no-op when there is no total
     /// budget. Call this before each step of a multi-step scenario.
     pub fn check(&self, scenario_name: &str) {
@@ -157,10 +182,25 @@ mod tests {
     }
 
     #[test]
+    fn remaining_total_budget_caps_later_command_timeout() {
+        let b = ScenarioBudget {
+            limit: Some(Duration::from_secs(5)),
+            start: std::time::Instant::now() - Duration::from_secs(3),
+        };
+        let capped = b.cap_timeout(Duration::from_secs(30));
+        assert!(capped <= Duration::from_secs(2));
+        assert!(capped > Duration::from_secs(1));
+        assert_eq!(
+            ScenarioBudget::new(None).cap_timeout(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
     fn spec_total_timeout_round_trips() {
         let spec = ScenarioSpec {
             name: "x".into(),
-            layer: ScenarioLayer::Microsandbox,
+            layer: ScenarioLayer::PtySmoke,
             step_timeout_secs: 30,
             total_timeout_secs: Some(180),
         };
@@ -175,5 +215,11 @@ mod tests {
         assert!(spec.total_timeout().is_none());
         let budget = spec.start_budget();
         budget.check("fast");
+    }
+
+    #[test]
+    fn direct_local_spec_has_a_whole_scenario_budget() {
+        let spec = ScenarioSpec::direct_local("direct");
+        assert_eq!(spec.total_timeout(), Some(Duration::from_secs(180)));
     }
 }

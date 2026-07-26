@@ -80,7 +80,6 @@ async fn run_turn_uses_existing_session_transcript() {
     let mut request = make_request_with_session("second turn", &session_id);
     request.test_llm = Some(llm);
     request.test_project_root = Some(fixture.project_root.clone());
-    request.workspace_override = Some(test_workspace_override());
 
     let result = run_turn(fixture.session_api, request).await.unwrap();
 
@@ -223,7 +222,6 @@ async fn run_cutover_uses_loaded_profile_model() {
             test_llm: None,
             test_project_root: None,
             test_persist_audit: None,
-            workspace_override: None,
         },
         fixture.llm.clone(),
         &fixture.enabled_tools,
@@ -252,7 +250,6 @@ async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() 
             test_llm: None,
             test_project_root: None,
             test_persist_audit: None,
-            workspace_override: None,
         },
         fixture.llm.clone(),
         &fixture.enabled_tools,
@@ -292,7 +289,6 @@ async fn run_turn_commits_parent_from_initial_transcript() {
     let mut request = make_request_with_session("second turn", &session_id);
     request.test_llm = Some(llm);
     request.test_project_root = Some(fixture.project_root.clone());
-    request.workspace_override = Some(test_workspace_override());
 
     let result = run_turn(session_api, request).await.unwrap();
 

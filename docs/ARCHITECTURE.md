@@ -19,23 +19,17 @@ workspace where dependencies only ever point from higher layers to lower layers,
 with no reverse dependencies, so the LANCET CEP runtime (the `lancet-*` crates)
 can be embedded without pulling in the LATTICE session/agent/profile layers.
 
-The production execution path is **MSB/Upper** based: an Upper sandbox
-workspace (microsandbox-backed) is provisioned per turn via the `Workspace`
-trait, and commands run inside it through typed argv. The session graph store is
-git-backed (`GitSessionGraphStore` over the project's `git2` object database);
-the previous SQLite graph store has been removed.
-
-<!-- VERIFY: production path is MSB/Upper; direct-mode naming was retired and
-     host-verify was deleted. Confirmed UpperHandle/UpperLease/UpperSpec exist
-     in lattice-workspace and lattice-api/src/turn/{lifecycle,upper,mod}.rs. -->
-<!-- VERIFY: sqlite_graph/ was removed; confirmed crates/lattice-session/src/
-     contains only git_graph/, graph.rs, migrate/, promotion.rs, lib.rs. -->
-
+The production execution path is **Direct-Local** (ADR 0003): structured
+LANCET Tools observe and mutate the canonical Local Workspace directly behind
+host-enforced policy, Guard L1 path checks, effect checks, and audit. There is
+no sandbox VM, workspace projection, or per-turn provisioning — the
+MSB/Upper path and the `lattice-workspace` crate were removed in #40. The
+session graph store is git-backed (`GitSessionGraphStore` over the project's
+`git2` object database); the previous SQLite graph store has been removed.
 ## 2. Component diagram
 
-The workspace has 16 crates grouped into layers. Arrows point from a higher
+The workspace has 15 crates grouped into layers. Arrows point from a higher
 layer toward the lower-layer crates it depends on.
-
 ```mermaid
 graph TD
     %% Layer 5 — presentation / entry
@@ -66,10 +60,9 @@ graph TD
 
     %% Layer 0 — leaves
     PROTOCOL["lancet-protocol"]
+    NETGUARD["net-guard"]
     LLM["lattice-llm"]
     SESSION["lattice-session"]
-    WORKSPACE["lattice-workspace"]
-
     %% Layer 5 -> 4
     CLI --> LAPI
     CLI --> TUI
@@ -80,7 +73,6 @@ graph TD
     LAPI --> AGENT
     LAPI --> PROFILE
     LAPI --> SESSION
-    LAPI --> WORKSPACE
     LAPI --> LLM
 
     %% Layer 3.5 -> 3 + 2 + 1 + 0
@@ -98,8 +90,7 @@ graph TD
     NATIVE --> AUTHORITY
     NATIVE --> CATALOG
     NATIVE --> PROTOCOL
-    NATIVE --> LLM
-
+    NATIVE --> NETGUARD
     %% Layer 2.5 -> 2 + 1 + 0
     CEP --> DISPATCH
     CEP --> CATALOG
@@ -112,13 +103,14 @@ graph TD
     AUDIT --> PROTOCOL
     AUTHORITY --> CATALOG
     AUTHORITY --> PROTOCOL
-    AUTHORITY --> LLM
+    AUTHORITY --> NETGUARD
 
     %% Layer 1 -> 0
     CATALOG --> PROTOCOL
     PROFILE --> PROTOCOL
     AGENT --> LLM
     AGENT --> SESSION
+    LLM --> NETGUARD
 ```
 
 Layer model (verified against each crate's `Cargo.toml` `[dependencies]`):
@@ -126,19 +118,19 @@ Layer model (verified against each crate's `Cargo.toml` `[dependencies]`):
 | Layer | Crate | Depends on |
 |---|---|---|
 | 0 (leaf) | `lancet-protocol` | — |
-| 0 (leaf) | `lattice-llm` | — |
+| 0 (leaf) | `net-guard` | — |
+| 0 (leaf) | `lattice-llm` | `net-guard` |
 | 0 (leaf) | `lattice-session` | — |
-| 0 (leaf) | `lattice-workspace` | — |
 | 1 | `lancet-catalog` | `lancet-protocol` |
 | 1 | `lattice-profile` | `lancet-protocol` |
 | 1 | `lattice-agent` | `lattice-llm`, `lattice-session` |
 | 2 | `lancet-dispatch` | `lancet-protocol`, `lancet-catalog` |
 | 2 | `lancet-audit` | `lancet-protocol`, `lancet-catalog` |
-| 2 | `lancet-authority` | `lancet-protocol`, `lancet-catalog`, `lattice-llm` |
+| 2 | `lancet-authority` | `lancet-protocol`, `lancet-catalog`, `net-guard` |
 | 2.5 | `lancet-cep` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch` |
-| 3 | `lancet-native` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `lattice-llm` |
+| 3 | `lancet-native` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `net-guard` |
 | 3.5 | `lancet-api` | `lancet-cep`, `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `lancet-native` |
-| 4 | `lattice-api` | `lancet-api` + `lattice-agent`, `lattice-profile`, `lattice-session`, `lattice-workspace`, `lattice-llm` |
+| 4 | `lattice-api` | `lancet-api` + `lattice-agent`, `lattice-profile`, `lattice-session`, `lattice-llm` |
 | 5 | `lattice-tui` | `lattice-api` |
 | 5 | `lattice-cli` | `lattice-api`, `lattice-tui` |
 
@@ -171,10 +163,10 @@ A single turn, from user keystroke to committed session graph:
    - The returned `CepClient` is wrapped in a `CepExecutorAdapter`, which
      implements `lattice_agent::ToolCallExecutor` and maps LLM-shape tool
      calls into typed CEP method invocations.
-   - An Upper workspace is prepared via `prepare_upper` /
-     `resolve_upper_config` (`crates/lattice-api/src/turn/upper.rs`), yielding
-     an `UpperLease` that owns the `UpperHandle` for the turn.
-
+   - The runtime is rooted at the canonical Local Workspace (the project
+     root). No sandbox VM, lease, or per-turn workspace provisioning exists;
+     the #40 cleanup removed the Upper lifecycle (`prepare_upper`,
+     `UpperLease`, `UpperHandle`) with the `lattice-workspace` crate.
 4. **`AgentLoop` assembles messages from session state.**
    - `AgentLoop` (`crates/lattice-agent/src/agent_loop/mod.rs`) reads the
      session graph state, assembles the LLM message history
@@ -196,15 +188,16 @@ A single turn, from user keystroke to committed session graph:
      `lancet-native` and `lancet-api`) carries the typed JSON-RPC call over an
      in-process transport to the native CEP server.
 
-7. **Native handlers execute behind policy / Guard L1 / effect / audit / verify.**
+7. **Native handlers execute behind policy / Guard L1 / effect / audit.**
    - Native handlers in `lancet-native` execute the typed CEP method
-     (`mutate.create`, `exec.command_run`, `fetch.web`, etc.) behind policy
-     decisions (`lancet-authority`), Guard L1 path/scope checks, effect-region
-     checks, audit recording (`lancet-audit`), and optional verification.
-   - Filesystem and command operations run inside the Upper workspace via the
-     `Workspace` trait (`lattice-workspace`), using typed argv and
-     workspace-relative paths — never shell strings.
-
+     (`observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`,
+     `session.todo_write`) behind policy decisions (`lancet-authority`),
+     Guard L1 path/scope checks, effect-region checks, and audit recording
+     (`lancet-audit`).
+   - Filesystem observation and mutation run directly on the guarded Local
+     Workspace (the concrete host module in `lancet-native`), using typed
+     workspace-relative paths — never shell strings. Mutation preconditions,
+     atomic installation, and policy-visible reads are host-enforced.
 8. **Turn outcome is committed to the git session graph.**
    - The turn outcome (messages, tool results, usage) is persisted as an
      immutable commit by `GitSessionGraphStore`
@@ -230,10 +223,7 @@ All file paths verified by reading the source.
 | `CepClient` | struct | `crates/lancet-dispatch/src/transport.rs:76` | Typed CEP JSON-RPC client over an in-process transport. Re-exported by `lancet-native` (`src/lib.rs`) and `lancet-api`. |
 | `CepExecutorAdapter` | struct | `crates/lattice-api/src/turn/cep.rs:75` | Maps LLM-shape `ToolCall`s into typed CEP method invocations via `CepClient`; implements `ToolCallExecutor`. Holds catalog/enabled name sets. |
 | `CATALOG` | static | `crates/lancet-catalog/src/catalog.rs:13` | `LazyLock<[MethodDescriptor; 5]>` — the authoritative production agent catalog (exactly 5 methods, see below). |
-| `Workspace` | trait | `crates/lattice-workspace/src/lib.rs:498` | Backend-neutral Upper workspace boundary: `create_upper`, `exec_upper` (typed argv), status, snapshot, template, restore, destroy. |
-| `UpperHandle` | struct | `crates/lattice-workspace/src/lib.rs:238` | Opaque handle to a live Upper (`id` + `backend` only — no host paths, no live SDK objects). |
-| `UpperSpec` | struct | `crates/lattice-workspace/src/lib.rs:206` | Provisioning spec: image/template, baseline OID, host repo path, egress, credentials, resource limits. |
-| `UpperLease` | struct | `crates/lattice-api/src/turn/upper.rs:34` | RAII ownership of an `UpperHandle` for a turn; retain/destroy lifecycle. |
+| `LocalWorkspace` | module | `crates/lancet-native/src/workspace/` | Concrete guarded Local Workspace host: secure path resolution, bounded observation, Mutation Preconditions, atomic installation. Not a pluggable seam (ADR 0003). |
 | `CepError` | struct | `crates/lancet-protocol/src/error.rs:216` | Typed CEP error with `data` + `Retriability`. Wire codes in reserved JSON-RPC range `-32000..-32099`. |
 | `CepErrorCode` | enum | `crates/lancet-protocol/src/error.rs:46` | Closed enum of CEP error codes, segmented by family (Validation/Permission/Execution/State/Guard/Effect). |
 | `stream_turn` | fn | `crates/lattice-api/src/turn/execute.rs:259` | `pub async fn stream_turn(...) -> Result<TurnEventStream>` — the single live execution core. |
@@ -262,7 +252,7 @@ There is **no** `session.envelope` method. It was removed from the catalog;
 `session.envelope` fails because it is no longer a catalog method.
 
 There is **no** `exec.command_run` method. It and post-mutation verify were
-permanently retired from the CEP layer (issue #4); command execution is not an
+permanently retired from the CEP layer (issue #26); command execution is not an
 agent-visible capability. `crates/lancet-catalog/src/catalog.rs` contains a
 regression test (`catalog_retires_exec_command_run`) asserting its absence, and
 `crates/lancet-api/src/runtime.rs` contains a production-path regression test
@@ -271,18 +261,25 @@ asserting a raw CEP call to `exec.command_run` returns JSON-RPC `-32601`.
 
 ### Removed subsystems (do not describe as active)
 
+- **MSB/Upper sandbox workspace** (`lattice-workspace`, `Workspace` trait,
+  `UpperHandle`, `UpperSpec`, `UpperLease`, `prepare_upper`, warm templates,
+  guest-Git baseline/candidate flow, credential injection, `[workspace]`
+  profile section with egress/image/lifecycle fields) was removed in #40.
+  Turns run Direct-Local against the canonical project root; profiles with a
+  legacy `[workspace]` section now fail strict parsing.
 - **Landlock / netns command isolation** was removed (commit `a29072e2`,
   "refactor(isolation): remove landlock and netns command isolation"). The
   `[lancet.isolation.command]` schema (`LancetIsolationSection`,
   `LancetLandlockBehavior`, etc.) was dropped from `lattice-profile`.
   `crates/lattice-profile/src/schema.rs` has no isolation/landlock/netns
   sections (verified: the `[lancet]` sub-sections are project-root,
-  observation, network, command, policy, workspace-policy, verify, effects).
-<!-- VERIFY: landlock/netns removal confirmed via git log a29072e2 and absence
-     of LancetIsolationSection in crates/lattice-profile/src/schema.rs. -->
+  observation, network, policy, workspace-policy, effects).
+- **Command execution and post-mutation verify** (`exec.command_run`,
+  `[lancet.command]`, `[lancet.verify]`) are retired surface; the profile
+  schema has no typed sections for them (untyped tables fall through to
+  `extensions`).
 - **SQLite session graph store** (`sqlite_graph/`) was removed; the session
   graph is now git-backed only (`git_graph/`).
-
 ## 5. Directory structure rationale
 
 The `crates/` directory is split into two families that map onto the layer
@@ -299,8 +296,11 @@ One sentence per crate:
 - **`lancet-protocol`** — Pure CEP wire/data contracts (JSON-RPC frames,
   typed errors, policy hook data, effect types, provenance wire types); no I/O
   and no tokio. The bottom contract.
+- **`net-guard`** — Neutral URL/DNS safety leaf: base-URL validation,
+  public-address resolution, private/reserved IP checks, and
+  rebinding-domain checks.
 - **`lancet-catalog`** — Typed CEP method contracts, params/results,
-  descriptors, and the static production `CATALOG` (6 agent-visible methods);
+  descriptors, and the static production `CATALOG` (5 agent-visible methods);
   `methods/audit.rs` holds operator query/replay DTOs only; depends only
   on protocol.
 - **`lancet-dispatch`** — Generic method registry, typed CEP dispatch,
@@ -315,23 +315,23 @@ One sentence per crate:
   catalog-derived `ToolDefinition`/`ToolExposure` and `BaseAuthorityPlan`; no
   native execution, no policy side effects, no audit persistence, no
   `lattice-*` deps.
-- **`lancet-native`** — Production native handlers, server lifecycle, verify,
-  edit/shell/web helpers, audit integration, and effect-contract enforcement.
+- **`lancet-native`** — Production native handlers, server lifecycle, the
+  concrete guarded Local Workspace host (secure path resolution, bounded
+  observation, Mutation Preconditions, atomic installation), edit/web
+  helpers, audit integration, and effect-contract enforcement.
 - **`lancet-api`** — Unified LANCET public API: composes `LancetRuntime` /
   `LancetServer` (server lifecycle, `CepClient`, audit, tool definitions)
   from the native crates, taking LANCET-native policy types; independent of
   LATTICE session/agent/profile layers.
 - **`lattice-llm`** — Provider adapters, SSE streaming, model routing,
-  tool-call vocabulary, URL/DNS security (SSRF defenses), and logging.
+  tool-call vocabulary, and logging. URL/DNS safety primitives live in the
+  shared `net-guard` leaf and are composed here.
 - **`lattice-session`** — Session graph contract, immutable turn commits,
   branch refs, HEAD state, and the git-backed `GitSessionGraphStore`.
 - **`lattice-profile`** — Strict `agent.toml` schema, discovery, defaults, and
   LANCET profile sections (no isolation section).
 - **`lattice-agent`** — Multi-turn `AgentLoop`, turn state machine, message
   assembly, and injectable `LlmClient` / `ToolCallExecutor` traits.
-- **`lattice-workspace`** — Backend-neutral Upper workspace boundary
-  (`Workspace` trait, `UpperHandle`, `UpperSpec`), sandbox lifecycle, typed
-  filesystem/command primitives, and the production microsandbox adapter.
 - **`lattice-api`** — Thin public facade for session creation/opening and turn
   execution; translates profile `[lancet]` policy into LANCET-native config
   and wires the agent loop over `lancet-api`'s CEP runtime.

@@ -15,7 +15,6 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::LlmEvent;
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_workspace::testing::DeterministicWorkspace;
 use tempfile::TempDir;
 
 fn tool_call_events(id: &str, name: &str, args: &str) -> Vec<LlmEvent> {
@@ -80,8 +79,6 @@ model = "sonnet"
 system = "test"
 [tools]
 enabled = {enabled:?}
-[workspace]
-image = "test-template"
 [lancet.workspace]
 denied_write_patterns = [".git/**"]
 "#
@@ -106,39 +103,33 @@ denied_write_patterns = [".git/**"]
 }
 
 fn init_git_repo(root: &std::path::Path) {
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(root)
-        .status()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@lattice.local"])
-        .current_dir(root)
-        .status()
-        .expect("git user.email");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "lattice-test"])
-        .current_dir(root)
-        .status()
-        .expect("git user.name");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(root)
-        .status()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "init"])
-        .current_dir(root)
-        .status()
-        .expect("git commit");
+    let repo = lattice_session::test_utils::init_empty_repo(root);
+    lattice_session::test_utils::commit_all(&repo, root, "init");
 }
 
+/// Create an unattached branch at the current HEAD without checking it out.
 fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
-    std::process::Command::new("git")
-        .args(["branch", name])
-        .current_dir(root)
-        .status()
-        .expect("git branch (create unattached target)");
+    let mut repo = gix::open_opts(root, gix::open::Options::isolated()).expect("open repo");
+    // Isolated repos have no identity; inject a fixture committer for the reflog.
+    {
+        let mut cfg = repo.config_snapshot_mut();
+        cfg.set_raw_value("user.name", "lattice-test")
+            .expect("set name");
+        cfg.set_raw_value("user.email", "test@lattice.local")
+            .expect("set email");
+        let _ = cfg.commit();
+    }
+    let head = repo
+        .head_id()
+        .expect("HEAD id for unattached branch")
+        .detach();
+    repo.reference(
+        format!("refs/heads/{name}"),
+        head,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "create unattached target branch",
+    )
+    .expect("create unattached target branch");
     name.to_string()
 }
 
@@ -196,9 +187,6 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             test_llm: Some(fake_llm),
             test_project_root: Some(ws.root.to_string_lossy().to_string()),
             test_persist_audit: Some(false),
-            workspace_override: Some(Arc::new(
-                DeterministicWorkspace::new().expect("deterministic workspace"),
-            )),
         },
     )
     .await

@@ -15,7 +15,7 @@
 //! - **Driver** (`SessionSendDriver`): creates a session via the public
 //!   `session new --json` command, runs `--json session send`, captures
 //!   stdout JSONL + exit code, and exposes the parsed event sequence. The
-//!   MSB-backed turn itself runs through the real product path.
+//!   Direct-Local turn itself runs through the real product path.
 //!
 //! The parser is **tolerant of unknown variants**: the public `TurnEvent`
 //! contract is explicitly incremental (new variants may appear), so each
@@ -27,8 +27,10 @@
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::driver::{DriverError, LatticeCommand, LatticeDriver};
-use crate::scenario::ScenarioSpec;
+use crate::driver::{
+    CommandOutcome, DriverError, LatticeCommand, LatticeDriver, RunningCommand, Termination,
+};
+use crate::scenario::{ScenarioBudget, ScenarioSpec};
 use crate::world::ScenarioWorld;
 
 /// Exit code contract for `lattice --json session send` (public, documented
@@ -75,6 +77,7 @@ impl SendExitCode {
 pub enum TurnEventLine {
     TurnStarted {
         session_id: String,
+        turn_id: String,
         branch: Option<String>,
     },
     ModelStarted {
@@ -150,158 +153,224 @@ impl TurnEventLine {
     }
 }
 
-/// Decode one JSONL line into a [`TurnEventLine`]. Unknown discriminators
-/// and missing fields are tolerated, never surfaced as errors: the public
-/// contract is incremental, and a parse error here would mask the real
-/// product-side failure that the scenario is asserting on.
+/// Decode one JSONL line into a [`TurnEventLine`]. Unknown discriminators are
+/// tolerated, while known variants must satisfy their documented field types.
 pub fn parse_event_line(line: &str) -> Option<TurnEventLine> {
+    parse_event_line_checked(line).ok().flatten()
+}
+
+fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String> {
     let line = line.trim();
     if line.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let value: Value = serde_json::from_str(line).ok()?;
-    let type_name = value.get("type").and_then(|v| v.as_str())?;
-    Some(match type_name {
-        "turn_started" => TurnEventLine::TurnStarted {
-            session_id: value
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            branch: value
-                .get("branch")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        },
+    let value: Value = serde_json::from_str(line).map_err(|error| error.to_string())?;
+    let type_name = required_string(&value, "type")?;
+    let event = match type_name.as_str() {
+        "turn_started" => {
+            required_nullable_string(&value, "parent_commit_id")?;
+            TurnEventLine::TurnStarted {
+                session_id: required_string(&value, "session_id")?,
+                turn_id: required_string(&value, "turn_id")?,
+                branch: required_nullable_string(&value, "branch")?,
+            }
+        }
         "model_started" => TurnEventLine::ModelStarted {
-            provider: value
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            model: value
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            provider: required_nullable_string(&value, "provider")?,
+            model: required_string(&value, "model")?,
         },
-        "llm_request_error" => TurnEventLine::LlmRequestError {
-            error_kind: value
-                .get("error_kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            will_retry: value
-                .get("will_retry")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        },
+        "llm_request_error" => {
+            required_nullable_string(&value, "provider")?;
+            required_string(&value, "model")?;
+            required_u64(&value, "attempt")?;
+            required_u64(&value, "max_attempts")?;
+            required_bool(&value, "retryable")?;
+            required_nullable_u64(&value, "delay_ms")?;
+            required_nullable_u64(&value, "status_code")?;
+            TurnEventLine::LlmRequestError {
+                error_kind: required_string(&value, "error_kind")?,
+                will_retry: required_bool(&value, "will_retry")?,
+                message: required_string(&value, "message")?,
+            }
+        }
         "reasoning_delta" => TurnEventLine::ReasoningDelta {
-            content: value
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            content: required_string(&value, "content")?,
         },
         "token_delta" => TurnEventLine::TokenDelta {
-            content: value
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            content: required_string(&value, "content")?,
         },
         "tool_call_started" => TurnEventLine::ToolCallStarted {
-            id: value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            name: value
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            id: required_string(&value, "id")?,
+            name: required_string(&value, "name")?,
         },
-        "tool_call_finished" => TurnEventLine::ToolCallFinished {
-            id: value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            name: value
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            ok: value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
-        },
-        "model_finished" => TurnEventLine::ModelFinished {
-            finish_reason: value
-                .get("finish_reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        },
+        "tool_call_finished" => {
+            required_u64(&value, "output_len")?;
+            required_nullable_string(&value, "error_summary")?;
+            TurnEventLine::ToolCallFinished {
+                id: required_string(&value, "id")?,
+                name: required_string(&value, "name")?,
+                ok: required_bool(&value, "ok")?,
+            }
+        }
+        "model_finished" => {
+            required_nullable_usage(&value, "usage")?;
+            TurnEventLine::ModelFinished {
+                finish_reason: required_string(&value, "finish_reason")?,
+            }
+        }
         "turn_failed" => TurnEventLine::TurnFailed {
-            reason: value
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            reason: required_string(&value, "reason")?,
         },
         "turn_cancelled" => TurnEventLine::TurnCancelled {
-            reason: value
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+            reason: required_nullable_string(&value, "reason")?,
         },
         "turn_committing" => TurnEventLine::TurnCommitting,
-        "turn_committed" => TurnEventLine::TurnCommitted {
-            session_id: value
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            commit_id: value
-                .get("commit_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            status: value
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        },
+        "turn_committed" => {
+            required_string(&value, "disposition")?;
+            TurnEventLine::TurnCommitted {
+                session_id: required_string(&value, "session_id")?,
+                commit_id: required_string(&value, "commit_id")?,
+                status: required_string(&value, "status")?,
+            }
+        }
         "commit_failed" => TurnEventLine::CommitFailed {
-            reason: value
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            reason: required_string(&value, "reason")?,
         },
+        "cep_call_started" => {
+            validate_cep_fields(&value, false)?;
+            TurnEventLine::Unknown {
+                type_name,
+                raw: value,
+            }
+        }
+        "cep_call_finished" => {
+            validate_cep_fields(&value, true)?;
+            TurnEventLine::Unknown {
+                type_name,
+                raw: value,
+            }
+        }
         other => TurnEventLine::Unknown {
             type_name: other.to_string(),
             raw: value,
         },
-    })
+    };
+    Ok(Some(event))
+}
+
+fn required_string(value: &Value, field: &str) -> Result<String, String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("`{field}` must be a string"))
+}
+
+fn required_nullable_string(value: &Value, field: &str) -> Result<Option<String>, String> {
+    match value.get(field) {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(format!("`{field}` must be a string or null")),
+        None => Err(format!("`{field}` is required")),
+    }
+}
+
+fn required_bool(value: &Value, field: &str) -> Result<bool, String> {
+    value
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("`{field}` must be a boolean"))
+}
+
+fn required_u64(value: &Value, field: &str) -> Result<u64, String> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("`{field}` must be an unsigned integer"))
+}
+
+fn required_i64(value: &Value, field: &str) -> Result<i64, String> {
+    value
+        .get(field)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("`{field}` must be an integer"))
+}
+
+fn required_nullable_u64(value: &Value, field: &str) -> Result<Option<u64>, String> {
+    match value.get(field) {
+        Some(Value::Null) => Ok(None),
+        Some(number) => number
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("`{field}` must be an unsigned integer or null")),
+        None => Err(format!("`{field}` is required")),
+    }
+}
+
+fn required_nullable_usage(value: &Value, field: &str) -> Result<(), String> {
+    match value.get(field) {
+        Some(Value::Null) => Ok(()),
+        Some(usage @ Value::Object(_)) => {
+            required_u64(usage, "prompt_tokens")?;
+            required_u64(usage, "completion_tokens")?;
+            required_u64(usage, "total_tokens")?;
+            Ok(())
+        }
+        Some(_) => Err(format!("`{field}` must be an object or null")),
+        None => Err(format!("`{field}` is required")),
+    }
+}
+
+fn validate_cep_fields(value: &Value, finished: bool) -> Result<(), String> {
+    required_u64(value, "call_id")?;
+    required_string(value, "method")?;
+    required_string(value, "impact_kind")?;
+    required_i64(value, "audit_id")?;
+    required_string(value, "semantic_stage")?;
+    required_string(value, "guard_stage")?;
+    if finished {
+        required_bool(value, "ok")?;
+        required_nullable_string(value, "error_code")?;
+    }
+    Ok(())
 }
 
 /// Derived outcome of a `session send` run, parsed purely from the public
 /// JSONL + exit code (no product types).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedJsonLine {
+    pub line_number: usize,
+    pub raw: Vec<u8>,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SendOutcome {
     /// Every decoded event line, in arrival order. Unknown variants are
     /// kept as [`TurnEventLine::Unknown`].
     pub events: Vec<TurnEventLine>,
+    /// Every nonblank stdout line that was not a valid JSON event.
+    pub malformed_lines: Vec<MalformedJsonLine>,
     /// The exit code the binary returned, classified into the public
     /// 0/1/2 contract. `None` if the process was killed by a signal (no
     /// exit code) — the scenario should treat that as a failure.
     pub exit_code: Option<SendExitCode>,
+}
+
+/// One lossless `session send` execution: raw process bytes and termination
+/// evidence alongside the tolerant JSONL projection.
+#[derive(Debug)]
+pub struct SendExecution {
+    pub command: CommandOutcome,
+    pub parsed: SendOutcome,
+}
+
+impl std::ops::Deref for SendExecution {
+    type Target = SendOutcome;
+
+    fn deref(&self) -> &Self::Target {
+        &self.parsed
+    }
 }
 
 impl SendOutcome {
@@ -380,21 +449,36 @@ pub fn derive_send_exit_code(events: &[TurnEventLine]) -> SendExitCode {
     SendExitCode::Failed
 }
 
-/// Parse a full `session send` stdout buffer into a [`SendOutcome`].
-/// Non-JSON lines and blank lines are silently skipped (the public JSONL
-/// contract is one event per line; anything else is a product bug the
-/// scenario will catch via the exit code / event assertions, not a parse
-/// failure here).
+/// Parse a full `session send` stdout buffer into a [`SendOutcome`]. Blank
+/// lines are ignored; every other invalid line is retained with its raw bytes.
 pub fn parse_send_stdout(stdout: &[u8], exit_code: Option<i32>) -> SendOutcome {
-    let text = String::from_utf8_lossy(stdout);
     let mut events = Vec::new();
-    for line in text.lines() {
-        if let Some(event) = parse_event_line(line) {
-            events.push(event);
+    let mut malformed_lines = Vec::new();
+    for (index, raw) in stdout.split(|byte| *byte == b'\n').enumerate() {
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        if raw.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match std::str::from_utf8(raw) {
+            Ok(line) => match parse_event_line_checked(line) {
+                Ok(Some(event)) => events.push(event),
+                Ok(None) => {}
+                Err(reason) => malformed_lines.push(MalformedJsonLine {
+                    line_number: index + 1,
+                    raw: raw.to_vec(),
+                    reason,
+                }),
+            },
+            Err(error) => malformed_lines.push(MalformedJsonLine {
+                line_number: index + 1,
+                raw: raw.to_vec(),
+                reason: error.to_string(),
+            }),
         }
     }
     SendOutcome {
         events,
+        malformed_lines,
         exit_code: SendExitCode::from_code(exit_code),
     }
 }
@@ -413,12 +497,10 @@ pub enum SessionSendError {
     NewSessionFailed { code: Option<i32> },
 }
 
-/// Create a session via `lattice --json session new` and return the new
-/// session id parsed from the public JSON output.
-pub fn create_session(
+fn create_session_with_timeout(
     driver: &LatticeDriver,
     world: &ScenarioWorld,
-    spec: &ScenarioSpec,
+    timeout: std::time::Duration,
     agent: &str,
     project_branch: &str,
 ) -> Result<String, SessionSendError> {
@@ -434,10 +516,10 @@ pub fn create_session(
                 "--project-branch".into(),
                 project_branch.into(),
             ],
-            timeout: Some(spec.step_timeout()),
+            timeout: Some(timeout),
         },
     )?;
-    if !output.status.success() {
+    if !matches!(&output.termination, Termination::Exited(Some(0))) {
         return Err(SessionSendError::NewSessionFailed {
             code: output.status.code(),
         });
@@ -456,20 +538,14 @@ pub fn create_session(
     Ok(id.to_string())
 }
 
-/// Drive one full turn: `lattice --json session send <id> <prompt>`.
-///
-/// Returns the captured [`SendOutcome`] (parsed JSONL + classified exit
-/// code). The caller asserts on the outcome; this function does not fail on
-/// a non-zero exit code, because a `1`/`2` exit is a successful *drive* of
-/// an unsuccessful *turn* and is exactly what negative scenarios assert on.
-pub fn send_prompt(
+fn send_prompt_with_timeout(
     driver: &LatticeDriver,
     world: &ScenarioWorld,
-    spec: &ScenarioSpec,
+    timeout: std::time::Duration,
     session_id: &str,
     prompt: &str,
-) -> Result<SendOutcome, DriverError> {
-    let output = driver.run(
+) -> Result<SendExecution, DriverError> {
+    let command = driver.run(
         world,
         &LatticeCommand {
             args: vec![
@@ -479,10 +555,11 @@ pub fn send_prompt(
                 session_id.into(),
                 prompt.into(),
             ],
-            timeout: Some(spec.step_timeout()),
+            timeout: Some(timeout),
         },
     )?;
-    Ok(parse_send_stdout(&output.stdout, output.status.code()))
+    let parsed = parse_send_stdout(&command.stdout, command.status.code());
+    Ok(SendExecution { command, parsed })
 }
 
 /// A convenience wrapper holding the resolved session id, so a scenario can
@@ -491,6 +568,7 @@ pub struct SessionSendDriver<'a> {
     driver: &'a LatticeDriver,
     world: &'a ScenarioWorld,
     spec: &'a ScenarioSpec,
+    budget: ScenarioBudget,
     session_id: String,
 }
 
@@ -503,11 +581,19 @@ impl<'a> SessionSendDriver<'a> {
         agent: &str,
         project_branch: &str,
     ) -> Result<Self, SessionSendError> {
-        let session_id = create_session(driver, world, spec, agent, project_branch)?;
+        let budget = spec.start_budget();
+        let session_id = create_session_with_timeout(
+            driver,
+            world,
+            budget.cap_timeout(spec.step_timeout()),
+            agent,
+            project_branch,
+        )?;
         Ok(Self {
             driver,
             world,
             spec,
+            budget,
             session_id,
         })
     }
@@ -516,9 +602,53 @@ impl<'a> SessionSendDriver<'a> {
         &self.session_id
     }
 
-    /// Send one prompt and return the parsed outcome.
-    pub fn send(&self, prompt: &str) -> Result<SendOutcome, DriverError> {
-        send_prompt(self.driver, self.world, self.spec, &self.session_id, prompt)
+    /// Send one prompt and return raw and parsed execution evidence.
+    pub fn send(&self, prompt: &str) -> Result<SendExecution, DriverError> {
+        send_prompt_with_timeout(
+            self.driver,
+            self.world,
+            self.budget.cap_timeout(self.spec.step_timeout()),
+            &self.session_id,
+            prompt,
+        )
+    }
+
+    /// Spawn `session send` without waiting. Used for concurrent races where
+    /// the scenario must mutate Local state or release a fake-LLM gate while
+    /// the turn is in flight.
+    pub fn spawn(&self, prompt: &str) -> Result<RunningCommand, DriverError> {
+        self.driver.start(
+            self.world,
+            &LatticeCommand {
+                args: vec![
+                    "--json".into(),
+                    "session".into(),
+                    "send".into(),
+                    self.session_id.clone(),
+                    prompt.into(),
+                ],
+                timeout: Some(self.budget.cap_timeout(self.spec.step_timeout())),
+            },
+        )
+    }
+
+    /// Wait for a previously [`spawn`](Self::spawn)ed send and parse its
+    /// JSONL the same way [`send`](Self::send) does.
+    pub fn wait_spawned(&self, running: RunningCommand) -> Result<SendExecution, DriverError> {
+        let command = running.wait(Some(self.budget.cap_timeout(self.spec.step_timeout())))?;
+        let parsed = parse_send_stdout(&command.stdout, command.status.code());
+        Ok(SendExecution { command, parsed })
+    }
+
+    /// Run another public CLI command under this scenario's shared total budget.
+    pub fn run_command(&self, args: &[&str]) -> Result<CommandOutcome, DriverError> {
+        self.driver.run(
+            self.world,
+            &LatticeCommand {
+                args: args.iter().map(|arg| (*arg).to_string()).collect(),
+                timeout: Some(self.budget.cap_timeout(self.spec.step_timeout())),
+            },
+        )
     }
 }
 
@@ -562,12 +692,13 @@ mod tests {
     #[test]
     fn parse_turn_started() {
         let e = line(
-            r#"{"type":"turn_started","session_id":"s1","parent_commit_id":null,"branch":"main"}"#,
+            r#"{"type":"turn_started","session_id":"s1","turn_id":"s:root","parent_commit_id":null,"branch":"main"}"#,
         );
         assert_eq!(
             e,
             TurnEventLine::TurnStarted {
                 session_id: "s1".into(),
+                turn_id: "s:root".into(),
                 branch: Some("main".into())
             }
         );
@@ -587,7 +718,7 @@ mod tests {
     #[test]
     fn parse_turn_committed_completed() {
         let e = line(
-            r#"{"type":"turn_committed","session_id":"s1","commit_id":"c1","status":"completed","disposition":{}}"#,
+            r#"{"type":"turn_committed","session_id":"s1","commit_id":"c1","status":"completed","disposition":"not_applicable"}"#,
         );
         assert_eq!(
             e,
@@ -612,11 +743,27 @@ mod tests {
     }
 
     #[test]
-    fn blank_and_non_json_lines_are_skipped() {
-        assert!(parse_event_line("").is_none());
-        assert!(parse_event_line("   ").is_none());
-        assert!(parse_event_line("not json at all").is_none());
-        assert!(parse_event_line(r#"{"no_type":true}"#).is_none());
+    fn known_variant_with_wrong_field_type_is_malformed() {
+        let outcome = parse_send_stdout(b"{\"type\":\"token_delta\",\"content\":7}\n", Some(1));
+        assert!(outcome.events.is_empty());
+        assert_eq!(outcome.malformed_lines.len(), 1);
+        assert!(outcome.malformed_lines[0].reason.contains("content"));
+    }
+
+    #[test]
+    fn known_variants_validate_required_discarded_fields() {
+        let lines = [
+            r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","branch":null}"#,
+            r#"{"type":"tool_call_finished","id":"c","name":"x","ok":true,"error_summary":null}"#,
+            r#"{"type":"model_finished","finish_reason":"stop"}"#,
+            r#"{"type":"turn_committed","session_id":"s","commit_id":"c","status":"completed"}"#,
+            r#"{"type":"cep_call_started","call_id":1,"method":"x"}"#,
+        ];
+        for line in lines {
+            let outcome = parse_send_stdout(format!("{line}\n").as_bytes(), Some(1));
+            assert!(outcome.events.is_empty(), "accepted malformed line: {line}");
+            assert_eq!(outcome.malformed_lines.len(), 1, "line: {line}");
+        }
     }
 
     #[test]
@@ -640,14 +787,14 @@ mod tests {
     fn derive_exit_committed_completed_is_zero() {
         let events = vec![
             line(
-                r#"{"type":"turn_started","session_id":"s","parent_commit_id":null,"branch":null}"#,
+                r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","parent_commit_id":null,"branch":null}"#,
             ),
             line(r#"{"type":"model_started","provider":null,"model":"compat:test"}"#),
             line(r#"{"type":"token_delta","content":"hi"}"#),
             line(r#"{"type":"model_finished","finish_reason":"stop","usage":null}"#),
             line(r#"{"type":"turn_committing"}"#),
             line(
-                r#"{"type":"turn_committed","session_id":"s","commit_id":"c","status":"completed","disposition":{}}"#,
+                r#"{"type":"turn_committed","session_id":"s","commit_id":"c","status":"completed","disposition":"not_applicable"}"#,
             ),
         ];
         assert_eq!(derive_send_exit_code(&events), SendExitCode::Committed);
@@ -657,7 +804,7 @@ mod tests {
     fn derive_exit_commit_failed_is_one() {
         let events = vec![
             line(
-                r#"{"type":"turn_started","session_id":"s","parent_commit_id":null,"branch":null}"#,
+                r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","parent_commit_id":null,"branch":null}"#,
             ),
             line(r#"{"type":"commit_failed","reason":"boom"}"#),
         ];
@@ -668,7 +815,7 @@ mod tests {
     fn derive_exit_turn_failed_is_one() {
         let events = vec![
             line(
-                r#"{"type":"turn_started","session_id":"s","parent_commit_id":null,"branch":null}"#,
+                r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","parent_commit_id":null,"branch":null}"#,
             ),
             line(r#"{"type":"turn_failed","reason":"provider boom"}"#),
         ];
@@ -678,7 +825,7 @@ mod tests {
     #[test]
     fn derive_exit_committed_error_status_is_one() {
         let events = vec![line(
-            r#"{"type":"turn_committed","session_id":"s","commit_id":"c","status":"error","disposition":{}}"#,
+            r#"{"type":"turn_committed","session_id":"s","commit_id":"c","status":"error","disposition":"aborted"}"#,
         )];
         assert_eq!(derive_send_exit_code(&events), SendExitCode::Failed);
     }
@@ -687,7 +834,7 @@ mod tests {
     fn derive_exit_no_terminal_is_one() {
         let events = vec![
             line(
-                r#"{"type":"turn_started","session_id":"s","parent_commit_id":null,"branch":null}"#,
+                r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","parent_commit_id":null,"branch":null}"#,
             ),
             line(r#"{"type":"token_delta","content":"hi"}"#),
         ];
@@ -697,12 +844,12 @@ mod tests {
     #[test]
     fn parse_send_stdout_concatenates_text_and_classifies() {
         let stdout = b"\
-{\"type\":\"turn_started\",\"session_id\":\"s\",\"parent_commit_id\":null,\"branch\":null}\n\
+{\"type\":\"turn_started\",\"session_id\":\"s\",\"turn_id\":\"s:root\",\"parent_commit_id\":null,\"branch\":null}\n\
 {\"type\":\"model_started\",\"provider\":null,\"model\":\"compat:test\"}\n\
 {\"type\":\"token_delta\",\"content\":\"Hello\"}\n\
 {\"type\":\"token_delta\",\"content\":\" world\"}\n\
 {\"type\":\"model_finished\",\"finish_reason\":\"stop\",\"usage\":null}\n\
-{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":{}}\n";
+{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":\"not_applicable\"}\n";
         let outcome = parse_send_stdout(stdout, Some(0));
         assert_eq!(outcome.exit_code, Some(SendExitCode::Committed));
         assert!(outcome.has_committed_completed());
@@ -728,9 +875,9 @@ mod tests {
     #[test]
     fn parse_send_stdout_with_unknown_variant_tolerated() {
         let stdout = b"\
-{\"type\":\"turn_started\",\"session_id\":\"s\",\"parent_commit_id\":null,\"branch\":null}\n\
+{\"type\":\"turn_started\",\"session_id\":\"s\",\"turn_id\":\"s:root\",\"parent_commit_id\":null,\"branch\":null}\n\
 {\"type\":\"some_future_event\",\"x\":1}\n\
-{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":{}}\n";
+{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":\"not_applicable\"}\n";
         let outcome = parse_send_stdout(stdout, Some(0));
         assert_eq!(outcome.events.len(), 3);
         assert!(matches!(
@@ -743,11 +890,11 @@ mod tests {
     fn assert_event_subsequence_satisfied_in_order() {
         let outcome = parse_send_stdout(
             b"\
-{\"type\":\"turn_started\",\"session_id\":\"s\",\"parent_commit_id\":null,\"branch\":null}\n\
+{\"type\":\"turn_started\",\"session_id\":\"s\",\"turn_id\":\"s:root\",\"parent_commit_id\":null,\"branch\":null}\n\
 {\"type\":\"model_started\",\"provider\":null,\"model\":\"m\"}\n\
 {\"type\":\"token_delta\",\"content\":\"x\"}\n\
 {\"type\":\"model_finished\",\"finish_reason\":\"stop\",\"usage\":null}\n\
-{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":{}}\n",
+{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":\"not_applicable\"}\n",
             Some(0),
         );
         let required = [
@@ -764,7 +911,7 @@ mod tests {
     #[test]
     fn assert_event_subsequence_missing_event_reports() {
         let outcome = parse_send_stdout(
-            b"{\"type\":\"turn_started\",\"session_id\":\"s\",\"parent_commit_id\":null,\"branch\":null}\n",
+            b"{\"type\":\"turn_started\",\"session_id\":\"s\",\"turn_id\":\"s:root\",\"parent_commit_id\":null,\"branch\":null}\n",
             Some(0),
         );
         let err = assert_event_subsequence(&outcome, &["turn_started", "turn_committed"])

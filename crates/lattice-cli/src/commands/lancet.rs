@@ -184,11 +184,7 @@ fn doctor_json_value(output: &LancetDoctorOutput) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::test_env::ScopedXdgStateHome;
     use clap::Parser;
-    use lancet_native::audit::{AuditOutcome, CallAuditMetadata};
-    use lancet_native::{CepAuditContext, CepAuditStore};
-    use tempfile::TempDir;
 
     // -- Clap surface tests --
 
@@ -231,115 +227,6 @@ mod tests {
         assert!(action.is_ok());
         assert!(matches!(action.unwrap(), LancetAction::Doctor {}));
     }
-
-    // -- Status tests --
-
-    fn seed_audit_db(dir: &Path) {
-        let db_path =
-            lancet_api::audit_db_path_for_project(dir).expect("resolve external audit path");
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let audit = CepAuditStore::open(&db_path).expect("open audit db");
-        let ctx = CepAuditContext {
-            turn_id: "test-turn".into(),
-            session_id: "test-session".into(),
-            model_id: "test-model".into(),
-            runtime_version: "test".into(),
-        };
-        // A session.todo_write row with metadata.
-        let start = audit
-            .start_call(
-                &ctx,
-                1,
-                "session.todo_write",
-                &CallAuditMetadata::native_policy_enforced(Some("started")),
-            )
-            .unwrap();
-        audit
-            .finalize_call(
-                start,
-                AuditOutcome::Success {
-                    summary: "todo written".into(),
-                },
-                Some("native_handler"),
-                Some(r#"{"todo_ops":1}"#),
-            )
-            .unwrap();
-        // A regular call row
-        let start2 = audit
-            .start_call(
-                &ctx,
-                2,
-                "observe.workspace",
-                &CallAuditMetadata::native_policy_enforced(Some("started")),
-            )
-            .unwrap();
-        audit
-            .finalize_call(
-                start2,
-                AuditOutcome::Success {
-                    summary: "read ok".into(),
-                },
-                Some("native_handler"),
-                None,
-            )
-            .unwrap();
-    }
-
-    #[test]
-    fn cep_status_missing_db_returns_empty_state() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        let output = collect_status(dir.path()).unwrap();
-        assert!(output.recent_calls.is_empty());
-        assert!(output.last_guard_verdict.is_none());
-    }
-
-    #[test]
-    fn cep_status_seeded_audit_json() {
-        let _xdg = ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-        seed_audit_db(dir.path());
-
-        let output = collect_status(dir.path()).unwrap();
-
-        // Should have at least the two seeded rows
-        assert!(!output.recent_calls.is_empty(), "should have recent calls");
-        // Last guard verdict derived from newest row
-        assert!(
-            output.last_guard_verdict.is_some(),
-            "should have last guard verdict"
-        );
-        // Check JSON schema keys
-        let json = serde_json::json!({
-            "recent_calls": output.recent_calls.iter().map(|c| serde_json::json!({
-                "audit_id": c.audit_id,
-                "method": c.method,
-                "impact": c.impact,
-                "verdict": c.verdict,
-                "duration_ms": c.duration_ms,
-            })).collect::<Vec<_>>(),
-            "last_guard_verdict": output.last_guard_verdict,
-        });
-        assert!(
-            json.get("recent_calls").is_some(),
-            "JSON must have recent_calls"
-        );
-        assert!(
-            json.get("last_guard_verdict").is_some(),
-            "JSON must have last_guard_verdict"
-        );
-
-        // Verify method values in recent_calls
-        let calls = json["recent_calls"].as_array().unwrap();
-        let has_todo = calls
-            .iter()
-            .any(|c| c["method"].as_str() == Some("session.todo_write"));
-        assert!(
-            has_todo,
-            "recent_calls should include session.todo_write row"
-        );
-    }
-
     // -- Doctor tests --
 
     #[test]

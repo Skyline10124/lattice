@@ -8,6 +8,7 @@ description = "External system tests for the lattice binary (no product crate de
 publish = false
 
 [dependencies]
+gix = { version = "0.85", features = ["tree-editor"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

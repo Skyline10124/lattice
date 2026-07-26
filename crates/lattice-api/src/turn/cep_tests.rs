@@ -9,7 +9,7 @@ use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResu
 use lancet_catalog::methods::workspace::{
     ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileResult,
 };
-use lancet_native::{CepTransport, MethodRegistry, ServerRunConfig};
+use lancet_native::{CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::error::{
     CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData, PermissionErrorData,
@@ -37,11 +37,16 @@ async fn adapter_over_registry(registry: MethodRegistry) -> CepExecutorAdapter {
     let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move {
         let _ = server
-            .run(registry, ServerRunConfig::in_memory_for_tests())
+            .run_native(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
+    // D.5: the adapter's available set is driven by runtime definitions,
+    // not by hardcoded catalog membership. Project the catalog definitions
+    // and pass them — same shape as LancetRuntime::build. `lancet_cep` is
+    // a dev-dependency; `lancet_api::ToolDefinition` re-exports the same type.
+    let definitions = lancet_cep::project_tool_definitions(catalog());
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    let adapter = CepExecutorAdapter::new(client, enabled);
+    let adapter = CepExecutorAdapter::new(client, &definitions, enabled);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
     adapter
@@ -122,10 +127,12 @@ async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
     let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move {
         let _ = server
-            .run(registry, ServerRunConfig::in_memory_for_tests())
+            .run_native(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
-    let adapter = CepExecutorAdapter::new(client, [ObserveWorkspace::NAME.to_string()]);
+    let definitions = lancet_cep::project_tool_definitions(catalog());
+    let adapter =
+        CepExecutorAdapter::new(client, &definitions, [ObserveWorkspace::NAME.to_string()]);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
 
@@ -187,16 +194,11 @@ async fn cep_executor_adapter_invalid_params_maps_to_32602() {
         .await
         .expect_err("schema mismatch must fail");
 
+    // D.5: the adapter no longer does client-side typed deserialization,
+    // so it does not extract the missing field path. The server-side native
+    // registry validates params and returns invalid_params (-32602) with
+    // field="params" (the registry's default, not the extracted field name).
     assert_cep_payload(&err, jsonrpc::INVALID_PARAMS);
-    let field = err
-        .cep_error
-        .as_ref()
-        .unwrap()
-        .data
-        .get("field")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    assert_eq!(field, "path");
 }
 
 macro_rules! cep_family_test {
@@ -333,8 +335,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
             .build(),
     );
 
-    let deps =
-        build_test_production_deps(dir.path().to_str().unwrap(), &[], llm, true, None, None).await;
+    let deps = build_test_production_deps(dir.path().to_str().unwrap(), &[], llm, true, None).await;
 
     assert_eq!(deps.build_metrics.adapter_instances, 1);
     assert_eq!(deps.build_metrics.transport_pairs, 1);
@@ -344,7 +345,6 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
         &["session.todo_write".to_string()],
         Arc::new(RealLlmClient),
         false,
-        None,
         None,
     )
     .await;
@@ -383,7 +383,6 @@ mod cep_native_registry {
             &[TodoWrite::NAME.to_string()],
             llm,
             true,
-            None,
             None,
         )
         .await;
@@ -548,5 +547,121 @@ mod attestation_and_dispatch {
         .await
         .expect("replay without stored attestation");
         assert!(replay.statement.is_some());
+    }
+}
+
+/// D.6: `CepExecutorAdapter` can execute a Component Tool using a
+/// descriptor-projected definition. This proves the LLM tool-call path
+/// is reachable for Component Tools (D.5's `call_raw` dispatch + D.4's
+/// descriptor projection).
+mod component_adapter {
+    use super::*;
+    use lancet_native::{
+        CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
+        register_production_method_registry,
+    };
+    use lancet_runtime::ComponentRuntime;
+    use std::sync::Arc;
+
+    /// Spawn a native server with the no-op Component fixture, then build
+    /// a `CepExecutorAdapter` from the projected Component descriptor.
+    async fn adapter_with_noop_component() -> CepExecutorAdapter {
+        let components =
+            Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op composition"));
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        config.components = Some(components);
+
+        let mut registry = MethodRegistry::new();
+        register_production_method_registry(&mut registry).unwrap();
+
+        let (client, server) = CepTransport::pair(64);
+        let server_task = tokio::spawn(async move {
+            let _ = server.run_native(registry, config).await;
+        });
+
+        // Project the Component descriptor into a ToolDefinition — same
+        // shape as LancetRuntime::build (D.4).
+        let components = ComponentRuntime::noop_fixture().expect("fixture");
+        let definitions: Vec<lancet_api::ToolDefinition> = components
+            .descriptors()
+            .map(|d| {
+                lancet_api::ToolDefinition::new(
+                    d.name.clone(),
+                    d.description.clone(),
+                    d.params_schema.clone(),
+                )
+            })
+            .collect();
+
+        let adapter = CepExecutorAdapter::new(client, &definitions, ["noop.echo".to_string()]);
+        tokio::task::yield_now().await;
+        std::mem::forget(server_task);
+        adapter
+    }
+
+    #[tokio::test]
+    async fn cep_executor_adapter_executes_component_tool() {
+        let adapter = adapter_with_noop_component().await;
+
+        let result = adapter
+            .execute(&ToolCall {
+                id: "call_noop".to_string(),
+                function: FunctionCall {
+                    name: "noop.echo".to_string(),
+                    arguments: r#"{"message":"adapter"}"#.to_string(),
+                },
+            })
+            .await
+            .expect("adapter executes component tool");
+
+        assert!(
+            result.contains("adapter"),
+            "result must contain echoed message: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cep_executor_adapter_rejects_disabled_component_tool() {
+        // The no-op descriptor is in the available set, but not in the
+        // enabled set → method_not_found.
+        let components = ComponentRuntime::noop_fixture().expect("fixture");
+        let definitions: Vec<lancet_api::ToolDefinition> = components
+            .descriptors()
+            .map(|d| {
+                lancet_api::ToolDefinition::new(
+                    d.name.clone(),
+                    d.description.clone(),
+                    d.params_schema.clone(),
+                )
+            })
+            .collect();
+        let (client, server) = CepTransport::pair(8);
+        let server_task = tokio::spawn(async move {
+            let _ = server
+                .run_native(
+                    MethodRegistry::new(),
+                    ServerRunConfig::in_memory_for_tests(),
+                )
+                .await;
+        });
+        let adapter = CepExecutorAdapter::new(
+            client,
+            &definitions,
+            Vec::<String>::new(), // nothing enabled
+        );
+        tokio::task::yield_now().await;
+        std::mem::forget(server_task);
+
+        let err = adapter
+            .execute(&ToolCall {
+                id: "call_noop".to_string(),
+                function: FunctionCall {
+                    name: "noop.echo".to_string(),
+                    arguments: r#"{"message":"x"}"#.to_string(),
+                },
+            })
+            .await
+            .expect_err("disabled tool must fail");
+        assert_cep_payload(&err, jsonrpc::METHOD_NOT_FOUND);
     }
 }

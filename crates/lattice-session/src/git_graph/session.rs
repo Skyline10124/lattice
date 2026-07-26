@@ -6,8 +6,8 @@
 use chrono::Utc;
 
 use super::helpers::{
-    SessionMetadata, count_reachable_commits, read_session_meta, session_ref_name,
-    validate_session_id, write_session_meta,
+    SessionMetadata, count_reachable_commits, parse_oid, read_session_meta, session_ref_name,
+    try_ref_target, validate_session_id, write_session_meta,
 };
 use super::{DEFAULT_BRANCH, GitSessionGraphStore, RepoHandle};
 use crate::graph::{
@@ -25,6 +25,10 @@ impl GitSessionGraphStore {
     ) -> Result<GraphSession> {
         validate_session_id(session_id)?;
         crate::validate_branch_name(project_target_branch)?;
+        // Ensure the git repository exists before writing sidecar meta. Auto-init
+        // of a bare store (e.g. sessions.git) requires an empty destination; if
+        // we write `.lattice/` first, bare init is refused.
+        let _ = self.repo()?;
 
         let now = Utc::now().to_rfc3339();
         let meta = SessionMetadata {
@@ -166,17 +170,20 @@ pub(super) fn enumerate_session_branches(
 ) -> Result<Vec<GraphRef>> {
     let prefix = format!("refs/lattice/sessions/{session_id}/");
     let mut refs = Vec::new();
-    let references = repo
+    let platform = repo
         .references()
         .map_err(|e| SessionError::Git(format!("enumerate references: {e}")))?;
-    for r in references {
+    let iter = platform
+        .all()
+        .map_err(|e| SessionError::Git(format!("iterate references: {e}")))?;
+    for r in iter {
         let reference = r.map_err(|e| SessionError::Git(format!("read reference: {e}")))?;
-        let name = reference.name().unwrap_or("");
+        let name = reference.name().as_bstr().to_string();
         if !name.starts_with(&prefix) {
             continue;
         }
-        let branch_name = name.strip_prefix(&prefix).unwrap_or(name).to_string();
-        let commit_id = reference.target().map(|o| o.to_string());
+        let branch_name = name.strip_prefix(&prefix).unwrap_or(&name).to_string();
+        let commit_id = reference.target().try_id().map(|o| o.to_string());
         // Active agent name is not stored per ref; we leave it empty here and
         // callers may enrich it from meta if needed.
         //
@@ -202,16 +209,12 @@ pub(super) fn resolve_head_oid(
     repo: &RepoHandle<'_>,
     meta: &SessionMetadata,
     session_id: &str,
-) -> Result<Option<git2::Oid>> {
+) -> Result<Option<gix::ObjectId>> {
     if let Some(branch) = &meta.head_branch {
         let ref_name = session_ref_name(session_id, branch)?;
-        match repo.find_reference(&ref_name) {
-            Ok(r) => Ok(r.target()),
-            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
-            Err(e) => Err(SessionError::Git(format!("resolve HEAD ref: {e}"))),
-        }
+        try_ref_target(repo, &ref_name)
     } else if let Some(commit_id) = &meta.head_commit_id {
-        let oid = git2::Oid::from_str(commit_id)
+        let oid = parse_oid(commit_id)
             .map_err(|e| SessionError::Git(format!("parse detached HEAD commit id: {e}")))?;
         Ok(Some(oid))
     } else {

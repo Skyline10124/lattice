@@ -24,7 +24,7 @@ pub use lancet_catalog::{
 pub use lancet_catalog::{SCAFFOLD_CATALOG, scaffold_catalog};
 pub use lancet_dispatch::{
     CallControl, Cancellation, CepClient, CepServer, CepTransport, EventSink, MethodRegistry,
-    ServerCall, ServerRuntime, call_cancelled, duplicate_registration, wire_code_for_error,
+    ServerCall, ServerRuntime, duplicate_registration, wire_code_for_error,
 };
 pub use lancet_protocol::{
     CEP_TURN_ATTESTATION_PREDICATE_TYPE, CepError, CepErrorCode, CepErrorData, CepErrorFamily,

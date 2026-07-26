@@ -87,7 +87,6 @@ fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
     let unknown = CallAuditMetadata::for_production_dispatch("crafted.unknown");
     assert_eq!(unknown.semantic_stage, SEMANTIC_STAGE_UNROUTED);
     assert!(!unknown.policy_enforced);
-    assert_eq!(unknown.backend_invoked, Some(false));
 }
 
 #[test]
@@ -411,7 +410,6 @@ fn cep_audit_effective_boundary_metadata_round_trips_compactly() {
             "network_namespace": {"status": "unavailable", "reason": "operation not permitted"}
         },
         "boundary_setup_failed_closed": true,
-        "backend_invoked": false,
         "policy_enforced": true
     });
     let metadata_json = serde_json::to_string(&metadata).unwrap();
@@ -816,10 +814,42 @@ fn merge_finalize_metadata_adds_required_capability() {
         Some(r#"{"observation_source":"workspace"}"#),
         "observe.workspace",
         &[],
+        &[],
     )
     .unwrap();
     assert!(merged.contains("required_capability"));
     assert!(merged.contains("inspect"));
+}
+
+#[test]
+fn merge_finalize_metadata_records_component_cells() {
+    // Component Tools (ADR 0004) record 4-segment Cell audit keys
+    // (ctx:ext:scope:trust). merge_finalize_metadata must add them as a
+    // `component_cells` JSON array so the durable audit row carries
+    // cell-attributed effect evidence (spec §6.3: audit records cells,
+    // not capability names).
+    let merged = merge_finalize_metadata(
+        None,
+        "noop.echo",
+        &[],
+        &["alloc:none:session:in".to_string()],
+    )
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert_eq!(
+        parsed["component_cells"],
+        serde_json::json!(["alloc:none:session:in"])
+    );
+}
+
+#[test]
+fn merge_finalize_metadata_omits_component_cells_when_empty() {
+    let merged = merge_finalize_metadata(None, "observe.workspace", &[], &[]).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert!(
+        parsed.get("component_cells").is_none(),
+        "empty component_cells must not appear in metadata"
+    );
 }
 
 #[tokio::test]
@@ -857,9 +887,8 @@ fn rejection_stage_serializes_stable_snake_case_labels() {
     let stages = [
         RejectionStage::SchemaValidation,
         RejectionStage::PolicyGate,
-        RejectionStage::AdapterPreflight,
-        RejectionStage::BackendExecution,
-        RejectionStage::VerificationFailure,
+        RejectionStage::PathGuard,
+        RejectionStage::LocalIo,
     ];
     for stage in stages {
         let label = serde_json::to_string(&stage).unwrap();
@@ -907,10 +936,10 @@ fn rejection_stage_filters_rows_by_metadata_json() {
             adapter_start,
             AuditOutcome::Error {
                 code: "GuardDenied".into(),
-                summary: "adapter".into(),
+                summary: "guard".into(),
             },
             Some("native_handler_denied"),
-            Some(r#"{"rejection_stage":"adapter_preflight","denial_source":"guard_l1"}"#),
+            Some(r#"{"rejection_stage":"path_guard","denial_source":"guard_l1"}"#),
         )
         .unwrap();
 
@@ -923,14 +952,14 @@ fn rejection_stage_filters_rows_by_metadata_json() {
     assert_eq!(policy_rows.len(), 1);
     assert_eq!(policy_rows[0].method, ObserveWorkspace::NAME);
 
-    let adapter_rows = store
+    let guard_rows = store
         .query_rows(&AuditQueryFilters {
-            rejection_stage: Some(RejectionStage::AdapterPreflight),
+            rejection_stage: Some(RejectionStage::PathGuard),
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(adapter_rows.len(), 1);
-    assert_eq!(adapter_rows[0].method, Create::NAME);
+    assert_eq!(guard_rows.len(), 1);
+    assert_eq!(guard_rows[0].method, Create::NAME);
 }
 
 fn write_legacy_audit_fixture(path: &std::path::Path) {

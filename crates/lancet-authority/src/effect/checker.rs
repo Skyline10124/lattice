@@ -40,7 +40,9 @@ pub fn check_effects_against_region(
 ///
 /// This is intentionally independent of region membership and `CepMode`: an
 /// effect-kind deny is a kill switch for runtime-observed handler effects, not
-/// a warn/off-tunable region policy.
+/// a warn/off-tunable region policy. Call this **after** dispatch as defense
+/// in depth; prefer [`check_declared_effect_kinds_denied`] before dispatch so
+/// denied methods never touch the backend.
 pub fn check_denied_effect_kinds(
     method: &str,
     observed: &[ObservedEffect],
@@ -78,6 +80,47 @@ pub fn check_denied_effect_kinds(
         observed_denied_kinds,
         violations,
         "observed effect denied by effect-kind policy",
+    ))
+}
+
+/// Pre-dispatch kill switch: deny a call when the method's static declared
+/// effect kinds intersect the turn's `denied_effect_kinds`.
+///
+/// This is the first enforcement point for effect-kind denial. It runs before
+/// the handler/backend so a denied mutation cannot change Local state. The
+/// post-dispatch [`check_denied_effect_kinds`] remains defense in depth for
+/// observed effects that diverge from the static declaration.
+pub fn check_declared_effect_kinds_denied(
+    method: &str,
+    effect_decl: &EffectDecl,
+    denied_effect_kinds: &BTreeSet<ImpactKind>,
+) -> Result<(), CepError> {
+    if denied_effect_kinds.is_empty() {
+        return Ok(());
+    }
+
+    let mut denied_declared: Vec<ImpactKind> = Vec::new();
+    let mut violations: Vec<String> = Vec::new();
+    for kind in effect_decl.kinds.0 {
+        if denied_effect_kinds.contains(kind) {
+            denied_declared.push(kind.clone());
+            violations.push(format!(
+                "declared effect kind {kind:?} denied by effect-kind policy"
+            ));
+        }
+    }
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    Err(effect_violation_error(
+        method,
+        effect_decl,
+        Vec::new(),
+        denied_declared,
+        violations,
+        "declared effect denied by effect-kind policy",
     ))
 }
 
@@ -270,6 +313,32 @@ mod tests {
         } else {
             panic!("expected Effect error data");
         }
+    }
+
+    #[test]
+    fn declared_effect_kind_denied_before_any_observation() {
+        let mut denied = empty_denied();
+        denied.insert(ImpactKind::WorkspaceMutation);
+        let decl = EffectDecl {
+            kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]),
+            scope: EffectScopeKind::WorkspaceWrite,
+            capabilities: &[RequiredCapability::WritePath],
+            overlay: OverlayBehavior::WriteWorkspace,
+            failure: FailureSemantics::NoBackendEffectOnFailure,
+        };
+
+        let err = check_declared_effect_kinds_denied("mutate.create", &decl, &denied)
+            .expect_err("declared WorkspaceMutation must be denied");
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert!(
+            err.message.contains("declared effect denied"),
+            "message must identify pre-dispatch denial: {}",
+            err.message
+        );
+        assert!(
+            check_declared_effect_kinds_denied("observe.workspace", &observation_decl(), &denied,)
+                .is_ok()
+        );
     }
 
     #[test]

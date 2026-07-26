@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 #[cfg(test)]
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
@@ -17,8 +17,8 @@ use super::types::{
     LineChangeKind, PatchDiagnostic, PatchDocument, PatchErrorCode, PatchHunk, PatchHunkLine,
     PatchOperation, PatchResultEnvelope, PlannedFileChange,
 };
-use crate::execution_backend::WorkspacePath;
 use crate::executor::error::ToolError;
+use crate::workspace::WorkspacePath;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PatchApplyLimits {
@@ -56,227 +56,12 @@ async fn apply_patch(
 
 #[cfg(test)]
 fn test_storage(project_root: &Path) -> EditStorage {
-    use crate::execution_backend::{ExecutionRouting, UpperContext};
     use std::sync::Arc;
+    let workspace = crate::workspace::LocalWorkspace::new(project_root);
     EditStorage::new(
-        ExecutionRouting {
-            backend: Arc::new(HostFsBackend::new(project_root)),
-            upper: UpperContext {
-                execution_backend: "host-fs".into(),
-                upper_workspace_id: "test-upper".into(),
-            },
-        },
+        Arc::new(workspace),
         lancet_authority::effect::region::AuthorizedEffectRegion::empty(),
     )
-}
-
-#[cfg(test)]
-struct HostFsBackend {
-    root: std::path::PathBuf,
-}
-
-#[cfg(test)]
-impl HostFsBackend {
-    fn new(root: impl Into<std::path::PathBuf>) -> Self {
-        let raw = root.into();
-        Self {
-            root: std::fs::canonicalize(&raw).unwrap_or(raw),
-        }
-    }
-
-    fn resolve(&self, path: &WorkspacePath) -> PathBuf {
-        if path.is_project_root() {
-            self.root.clone()
-        } else {
-            self.root.join(path.as_str())
-        }
-    }
-}
-
-#[cfg(test)]
-impl crate::execution_backend::ExecutionBackend for HostFsBackend {
-    fn backend_name(&self) -> &str {
-        "host-fs"
-    }
-
-    fn resolve_path(
-        &self,
-        path: &WorkspacePath,
-        _intent: crate::execution_backend::PathIntent,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        crate::execution_backend::PathFacts,
-                        crate::execution_backend::ExecutionBackendError,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > {
-        let full = self.resolve(path);
-        let path_str = path.as_str().to_string();
-        let exists = full.exists();
-        let kind = if full.is_dir() {
-            crate::execution_backend::PathKind::Directory
-        } else if full.is_symlink() {
-            crate::execution_backend::PathKind::Symlink
-        } else {
-            crate::execution_backend::PathKind::File
-        };
-        let canonical_under_workspace = if full.is_symlink() {
-            full.canonicalize()
-                .map(|c| c.starts_with(&self.root))
-                .unwrap_or(false)
-        } else {
-            true
-        };
-        let parent_exists = full.parent().map(|p| p.exists()).unwrap_or(false);
-        let parent_kind = full.parent().and_then(|p| {
-            if p.is_dir() {
-                Some(crate::execution_backend::PathKind::Directory)
-            } else {
-                None
-            }
-        });
-        Box::pin(async move {
-            Ok(crate::execution_backend::PathFacts {
-                normalized_path: path_str,
-                exists,
-                kind: Some(kind),
-                parent_exists,
-                parent_kind,
-                byte_size: None,
-                canonical_under_workspace,
-            })
-        })
-    }
-
-    fn read_file(
-        &self,
-        path: &WorkspacePath,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<Vec<u8>, crate::execution_backend::ExecutionBackendError>,
-                > + Send
-                + '_,
-        >,
-    > {
-        let full = self.resolve(path);
-        Box::pin(async move { std::fs::read(&full).map_err(io_err) })
-    }
-
-    fn write_file(
-        &self,
-        path: &WorkspacePath,
-        content: &[u8],
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<(), crate::execution_backend::ExecutionBackendError>,
-                > + Send
-                + '_,
-        >,
-    > {
-        let full = self.resolve(path);
-        let content = content.to_vec();
-        Box::pin(async move {
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent).map_err(io_err)?;
-            }
-            std::fs::write(&full, content).map_err(io_err)
-        })
-    }
-
-    fn remove_file(
-        &self,
-        path: &WorkspacePath,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<(), crate::execution_backend::ExecutionBackendError>,
-                > + Send
-                + '_,
-        >,
-    > {
-        let full = self.resolve(path);
-        Box::pin(async move { std::fs::remove_file(&full).map_err(io_err) })
-    }
-
-    fn list_dir(
-        &self,
-        _path: &WorkspacePath,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Vec<crate::execution_backend::DirectoryEntry>,
-                        crate::execution_backend::ExecutionBackendError,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > {
-        Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
-    }
-
-    fn grep(
-        &self,
-        _request: &crate::execution_backend::GrepRequest,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Vec<crate::execution_backend::GrepMatch>,
-                        crate::execution_backend::ExecutionBackendError,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > {
-        Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
-    }
-
-    fn find_files(
-        &self,
-        _request: &crate::execution_backend::FindRequest,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Vec<WorkspacePath>,
-                        crate::execution_backend::ExecutionBackendError,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > {
-        Box::pin(async { Err(io_err(std::io::Error::other("not used"))) })
-    }
-
-    fn changed_paths(
-        &self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Vec<WorkspacePath>,
-                        crate::execution_backend::ExecutionBackendError,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-}
-
-#[cfg(test)]
-fn io_err(e: std::io::Error) -> crate::execution_backend::ExecutionBackendError {
-    crate::execution_backend::ExecutionBackendError::Unavailable {
-        message: e.to_string(),
-    }
 }
 
 pub(crate) async fn apply_parsed_patch(
@@ -708,16 +493,15 @@ async fn write_apply_plan(
 
     for change in &plan.changes {
         let write_result = match (&change.operation, &change.bytes_after) {
-            (FileOperationKind::Update, Some(after)) => {
-                storage
-                    .write_edit_target(
-                        &change.path,
-                        &change.target_path,
-                        after,
-                        change.operation_index,
-                    )
-                    .await
-            }
+            (FileOperationKind::Update, Some(after)) => storage
+                .write_edit_target(
+                    &change.path,
+                    &change.target_path,
+                    after,
+                    change.operation_index,
+                )
+                .await
+                .map(|_| ()),
             (FileOperationKind::Delete, None) => {
                 storage
                     .remove_edit_target(&change.path, &change.target_path, change.operation_index)
@@ -1039,10 +823,11 @@ mod tests {
     async fn apply_patch_engine_write_stage_failure_rolls_back_already_written_files() {
         use std::os::unix::fs::PermissionsExt;
 
-        // This test forces a write failure via a read-only (0o444) file. Root
-        // bypasses DAC permission checks, so the write would succeed and the
-        // rollback path under test would never trigger — skip when running as
-        // root (e.g. inside containerized CI).
+        // This test forces a write failure via a read-only (0o555) directory:
+        // the atomic install cannot create its same-directory tempfile there.
+        // Root bypasses DAC permission checks, so the write would succeed and
+        // the rollback path under test would never trigger — skip when running
+        // as root (e.g. inside containerized CI).
         if unsafe { libc::geteuid() } == 0 {
             eprintln!("skipping: read-only write-failure path is not exercised as root");
             return;
@@ -1050,12 +835,14 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("first.txt");
-        let second = dir.path().join("second.txt");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let second = sub.join("second.txt");
         let first_before = "first old\n";
         let second_before = "second old\n";
         std::fs::write(&first, first_before).unwrap();
         std::fs::write(&second, second_before).unwrap();
-        std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
         let first_old = remove(1, "first old");
         let second_old = remove(1, "second old");
 
@@ -1067,7 +854,7 @@ mod tests {
 @@
 {first_old}
 +first new
-*** Update File: second.txt
+*** Update File: sub/second.txt
 *** Old Hash: {}
 @@
 {second_old}
@@ -1079,7 +866,7 @@ mod tests {
 
         let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
 
-        std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "io_error");
         assert_eq!(std::fs::read_to_string(first).unwrap(), first_before);
