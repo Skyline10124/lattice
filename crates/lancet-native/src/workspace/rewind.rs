@@ -24,6 +24,13 @@
 //!
 //! Paths never touched by LATTICE are never read or written here — the
 //! restore set is exactly the affected paths of the reversed commits.
+//!
+//! Directories a `mutate.create` created on the way to its target are
+//! deliberately *not* removed. The history records file blobs, so it cannot
+//! know which directories were LATTICE's, and a directory that looks empty of
+//! LATTICE content may hold files the user put there since — removing it
+//! would destroy exactly the external changes a Rewind must preserve. An
+//! empty directory left behind is the safe residue.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -333,6 +340,33 @@ mod tests {
             b"external",
             "paths outside the plan are untouched"
         );
+    }
+
+    /// A reversed create removes its file but leaves the directory it needed,
+    /// because the user may have put their own files there since. Removing
+    /// the directory would destroy exactly the external changes a Rewind
+    /// must preserve.
+    #[test]
+    fn reversing_a_create_never_removes_a_directory_holding_external_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("made/by/lattice")).unwrap();
+        std::fs::write(dir.path().join("made/by/lattice/new.txt"), "new").unwrap();
+        // The user drops their own file next to LATTICE's.
+        std::fs::write(dir.path().join("made/by/lattice/mine.txt"), "user").unwrap();
+
+        let outcome = preflight_and_restore(
+            dir.path(),
+            &[restore("made/by/lattice/new.txt", Some("new"), None)],
+        )
+        .unwrap();
+        assert!(matches!(outcome, RewindRestoreOutcome::Applied { .. }));
+        assert!(!dir.path().join("made/by/lattice/new.txt").exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("made/by/lattice/mine.txt")).unwrap(),
+            b"user",
+            "the user's file in a LATTICE-created directory must survive"
+        );
+        assert!(dir.path().join("made/by/lattice").is_dir());
     }
 
     #[test]
