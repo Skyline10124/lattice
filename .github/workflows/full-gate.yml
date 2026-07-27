@@ -61,11 +61,31 @@ jobs:
       # Component reproducibility evidence for #73. `cargo xtask ci` runs this
       # locally (ci.rs), but no GitHub lane did — so the cross-machine
       # bit-for-bit data #73's acceptance criterion asks for could never
-      # accumulate. Warn-only per #5 decision 1: a digest mismatch prints a
-      # warning and does not fail the lane. Runs last so a drift warning never
-      # masks an earlier hard failure.
-      - name: Component 可复现性（warn-only，#73 证据）
-        run: cargo xtask tool-build --verify
+      # accumulate. Runs last so a digest-drift warning never masks an earlier
+      # hard failure.
+      #
+      # `if: always()` because this step's whole purpose is collecting evidence:
+      # the preceding rollout gate is the most failure-prone step in the lane,
+      # and without this the very runs most worth inspecting would produce no
+      # reproducibility data at all.
+      #
+      # Only *digest drift* is warn-only (#5 decision 1). Everything else in
+      # `tool-build --verify` is a hard failure — guest build, `wasm-tools
+      # component new`, `validate`, the `wasi:*` import-surface assertion, and
+      # WIT world conformance all `bail!`. So this step can legitimately turn
+      # the lane red; the name says "drift warn-only", not "step warn-only".
+      # The log is written under target/rollout/ so the existing `if: always()`
+      # upload carries it — without that, the verify result lived only in job
+      # stdout and #73 had no artifact to cite. `pipefail` is required: the
+      # default `bash -e` would let `tee` mask a hard failure's exit code.
+      - name: Component 可复现性（digest 漂移 warn-only，#73 证据）
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target/rollout
+          cargo xtask tool-build --verify 2>&1 \
+            | tee target/rollout/component-verify.log
       # The rollout record is written even on rejection/failure, so upload
       # unconditionally: record + harness failure bundles + doctor evidence
       # all land under target/rollout/.

@@ -2,6 +2,49 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #80 review 收口：Component 里的宿主绝对路径、verify 证据丢失、encoder 指纹缺失 — 2026-07-27
+
+Severity: MEDIUM（阻断 #73 验收标准的结构性缺陷 + 证据收集失效）。
+
+对 PR #104（#80 的实现）做对抗性审查后落地的六项修复。三批独立 lens 高度重合地指向同一组缺陷，逐条实证核实后修复。推进 `FINDINGS.md` 的 **L-5-02**（仍为 ACCEPTED RESIDUAL，跨机证据未取得）。
+
+**Problem:**
+
+1. **committed `.wasm` 里烧进了维护者主机的 rustup sysroot 绝对路径（最严重）。** `xtask/src/tool_build.rs` 的 `build_guest` 只设了一条 `--remap-path-prefix`（workspace root），管不到 rustc 通过**本地 rustup 安装**解析的 std 源码路径。实测 `strings tools/noop/generated/noop_echo.component.wasm` 命中 `/home/astrin/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs` —— 而同一文件里其余 std 路径已被 rustc 规范化为 `/rustc/ac68faa2.../library/...`，唯独这一条漏网。后果：**任何跨机 `--verify` 都必然报 digest 漂移**，#80 刚接进 CI 的那条 lane 注定每晚误报，#73 要的跨机 bit-for-bit 证据在结构上无法取得。
+2. **verify 步骤缺 `if: always()`，且排在最易失败的 rollout 之后。** `.github/workflows/full-gate.yml` 把 `tool-build --verify` 放在 `cargo xtask rollout --channel alpha` 后面（意图是"跑最后，避免漂移警告掩盖前面的硬失败"），但没有 `if: always()`。rollout 是整条 lane 里最容易失败的 gating 步骤，它一失败 verify 直接被跳过 —— 恰好丢掉最值得检查的那些运行的证据。
+3. **verify 结果只存在于 job stdout。** 不进任何 `upload-artifact`，`#73` 所谓"可被引用的证据"实际取不回来。
+4. **步骤名标 `warn-only` 但该步骤有 6 条硬失败路径。** `tool_build.rs` 里只有 digest 不匹配是 warn（`:119-123`）；guest build、`wasm-tools component new`、`validate`、`wasi:*` import 断言、WIT world 一致性全部 `bail!`。名字与文档都在暗示"这步不会让 lane 变红"，与实际不符。
+5. **`EXPECTED_WASM_TOOLS` 的 doc 声称与 manifest 的 `[artifact] toolchain` 指纹保持同步，但该指纹里根本没有 wasm-tools**（原值 `rustc-1.96.0+wit-bindgen-0.59`）。而 encoder 恰恰决定 Component 字节，指纹漏掉它使 sha256 无法被解释。
+6. **`wasm_tools_version` probe 在工具缺失时仍写 `ok: true`**（`xtask/src/rollout.rs`），与紧邻的 `git_version`（探测失败写 `ok: false`）处理相反，release record 会声称成功探测了一个从未找到的工具。另外 `check_toolchain` 把"存在但不可用"也报成 `not found on PATH`，引导用户做无效重装。
+
+**Fix:**
+
+1. `build_guest` 改为设置**两条** `--remap-path-prefix`：workspace root，以及 `<sysroot>/lib/rustlib/src/rust` → `/rustc/<commit-hash>`（新增 `rustc_sysroot_and_commit_hash()` 从 `rustc --print sysroot` 与 `rustc -vV` 的 `commit-hash:` 读取，任一失败返回 `None` 而不影响构建 —— 少一条 remap 只损失可复现性，不该让构建失败）。映射到 rustc 自己用的同一前缀，使两种表示一致。重新 pin 后 digest 由 `6fcc7fc8...` 变为 `b677a9b3...`。
+2. verify 步骤补 `if: always()`，并在注释里写明理由（前置 rollout 最易失败，跳过就等于丢掉最该看的证据）。
+3. 输出 `tee` 到 `target/rollout/component-verify.log`，由既有的 `if: always()` upload 一并带走。用 `set -o pipefail` + `shell: bash`，否则 `tee` 会吞掉硬失败的退出码；`mkdir -p` 兜住 rollout 尚未创建目录的情况。
+4. 步骤名改为「Component 可复现性（digest 漂移 warn-only，#73 证据）」，并在 workflow 注释与 `docs/TESTING.md` 里明确列出 6 条硬失败路径 —— 是"漂移 warn-only"，不是"整步 warn-only"。
+5. `tools/noop/manifest.toml` 的指纹补为 `rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0`；`EXPECTED_WASM_TOOLS` 的 doc 改为列明必须一致的三处；新增门禁测试 `every_tool_manifest_fingerprint_names_the_expected_wasm_tools` 逐个 manifest 断言指纹含当前 encoder 版本，防止改 pin 而不重 pin 制品。
+6. probe 改为 `(value, ok)` 二元组，缺失时写 `ok: false` 并给出原因，与 `git_version` 对齐；新增 `WasmToolsProbe` 枚举区分 `NotOnPath`（仅 ENOENT）/ `Failed`（权限、非零退出、输出不可解析），`check_toolchain` 据此给出"安装"还是"修复"的正确指引。
+
+**顺带修复（由 1 触发的连带缺陷，实证了 #103）:** 重新 pin 后 `crates/lancet-runtime/src/generated/noop_fixture.rs` 里**手写**的两个 digest 与生成物脱节，composition gate 会 fail-closed 拒绝 fixture。该文件位于 `generated/` 目录下却无人生成、无人校验，正是 #103 记录的缺口。除同步两个 digest 外，新增 `fixture_digests_match_the_generated_expected_identity` 测试：`include_str!` 读入 `expected-identity.json` 并逐项比对 artifact/descriptor digest 与 abi-version，漂移时给出"跑完 `tool-build` 后把它抄过来"的可执行提示。反向验证：故意改末位一字符 → 测试 FAILED 且报出正确的期望值。
+
+**文档同步:** `docs/TESTING.md` 更正三处 —— pinned `wasm-tools` 安装不再被算作"ordinary lane 也跑的步骤"（ordinary lane 确实不装它）、补齐 warn-only 的准确边界、记录 `if: always()` 与 log 落盘位置。`CONTRIBUTING.md` 补齐两处 —— §2 新增 `wasm-tools 1.254.0` 前置（`cargo xtask ci` 缺它直接 fail，而这是强制的 pre-PR 门），§7 的 `xtask ci` 步骤清单由 5 步过时描述更正为实际 9 步（原先漏 toolchain precheck、`lancet-boundary`、`tool-codegen --check`、`tool-build --verify`，且顺序有误）。
+
+**Verification:**
+- `cargo fmt --all --check` — passed。
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed。
+- `cargo xtask tool-codegen --check` — passed（重新生成后一致）。
+- `cargo xtask lancet-boundary` / `harness-boundary` — passed。
+- `cargo xtask tool-build --verify` — `verify: noop-echo Component reproduces committed digest (b677a9b3...)`，即修复后本机仍幂等复现。
+- `strings` 核验：`/home/` 命中数由 1 降为 **0**；`core/src/str/pattern.rs` 现归入 `/rustc/ac68faa2.../` 与其余 std 路径一致。
+- `cargo test -p xtask` — 47 passed / 0 failed（含 2 条新增/相关门禁测试）。
+- `cargo test -p lancet-runtime --features test-utils` — lib 7 + 11 + 11 passed / 0 failed，含新增 digest 同步测试；负向验证该测试确实会 FAIL。
+
+**Residual:** 跨机 bit-for-bit 证据**仍未取得** —— 本次只是移除了让它必然失败的结构性阻碍（sysroot 路径）与让它无法被收集的流程缺陷（跳过、不上传）。需要一次 nightly full-gate 实跑产出 `component-verify.log`，把 runner 的 rebuilt digest 与本机 `b677a9b3...` 比对，才能按 #5 decision 1 escalation 决定是否把 `--verify` 升为硬门禁。详见 `FINDINGS.md` 的 **L-5-02**。另外 `noop_fixture.rs` 仍是"位于 generated/ 却手写"的状态，本次只加了漂移检测，真正的生成化归 **#103**。
+
+**Changed files:**
+`xtask/src/tool_build.rs`; `xtask/src/ci.rs`; `xtask/src/rollout.rs`; `.github/workflows/full-gate.yml`; `tools/noop/manifest.toml`; `tools/noop/generated/{descriptor.json,expected-identity.json,noop_echo.component.wasm}`; `crates/lancet-runtime/src/generated/noop_fixture.rs`; `docs/TESTING.md`; `CONTRIBUTING.md`; `FINDINGS.md`; `FIX.md`.
+
 ## GitHub #105 / #106: harness 进程组信号 fail-closed + git_graph fixture 唯一路径 — 2026-07-27
 
 Severity: CI 阻塞（#105，整条 ubuntu lane 长期红）/ test isolation（#106）。

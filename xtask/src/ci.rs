@@ -147,8 +147,8 @@ fn check_toolchain() -> anyhow::Result<()> {
     // Component's bytes. Absence is fatal here (the gate's last step would
     // fail anyway, but ~9 steps later); a version mismatch is a warning
     // because reproducibility is still warn-only per #5 decision 1 / #73.
-    match wasm_tools_version() {
-        Some(version) => {
+    match probe_wasm_tools() {
+        WasmToolsProbe::Version(version) => {
             if version != EXPECTED_WASM_TOOLS {
                 println!(
                     "warn: wasm-tools {version} installed, expected {EXPECTED_WASM_TOOLS}; \
@@ -156,10 +156,16 @@ fn check_toolchain() -> anyhow::Result<()> {
                 );
             }
         }
-        None => anyhow::bail!(
+        WasmToolsProbe::NotOnPath => anyhow::bail!(
             "wasm-tools not found on PATH; `cargo xtask tool-build` needs it to encode and \
              validate Source Tool Components. Install {EXPECTED_WASM_TOOLS} (for example \
              `cargo install wasm-tools --version {EXPECTED_WASM_TOOLS} --locked`)."
+        ),
+        // Present but unusable: reinstalling the same version is the wrong
+        // advice, so report what actually happened instead.
+        WasmToolsProbe::Failed(why) => anyhow::bail!(
+            "wasm-tools is on PATH but {why}; `cargo xtask tool-build` needs a working \
+             {EXPECTED_WASM_TOOLS} encoder. Repair the installation, then re-run."
         ),
     }
 
@@ -167,23 +173,57 @@ fn check_toolchain() -> anyhow::Result<()> {
 }
 
 /// The `wasm-tools` release the committed Component artifacts were encoded
-/// with. Kept in sync with the `[artifact] toolchain` fingerprint in
-/// `tools/*/manifest.toml` and with the pinned installer in
-/// `.github/workflows/full-gate.yml`.
+/// with. Three places must agree, each asserted by a test below: this constant,
+/// the pinned installer in `.github/workflows/full-gate.yml`, and the
+/// `[artifact] toolchain` fingerprint in `tools/*/manifest.toml`.
 pub(crate) const EXPECTED_WASM_TOOLS: &str = "1.254.0";
 
-/// The installed `wasm-tools` version, or `None` when the binary is missing
-/// or exits non-zero.
+/// Why `wasm-tools --version` could not be answered. Distinguished so the
+/// caller can tell a user to *install* the encoder versus *repair* it —
+/// collapsing all three into "not found on PATH" sends someone whose binary is
+/// present but broken off to do a reinstall that changes nothing.
+pub(crate) enum WasmToolsProbe {
+    Version(String),
+    NotOnPath,
+    Failed(String),
+}
+
+/// The installed `wasm-tools` version, or `None` when the binary is missing,
+/// exits non-zero, or prints output this can't parse. Prefer
+/// [`probe_wasm_tools`] when the distinction matters.
 pub(crate) fn wasm_tools_version() -> Option<String> {
-    let out = Command::new("wasm-tools")
+    match probe_wasm_tools() {
+        WasmToolsProbe::Version(v) => Some(v),
+        _ => None,
+    }
+}
+
+pub(crate) fn probe_wasm_tools() -> WasmToolsProbe {
+    let out = match Command::new("wasm-tools")
         .arg("--version")
         .stderr(Stdio::null())
         .output()
-        .ok()?;
+    {
+        Ok(out) => out,
+        // Only ENOENT means "not installed"; anything else (permissions, exec
+        // format) is a broken installation.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return WasmToolsProbe::NotOnPath,
+        Err(e) => return WasmToolsProbe::Failed(format!("could not be executed: {e}")),
+    };
     if !out.status.success() {
-        return None;
+        return WasmToolsProbe::Failed(format!(
+            "`wasm-tools --version` exited with {}",
+            out.status
+        ));
     }
-    parse_wasm_tools_version(&String::from_utf8_lossy(&out.stdout))
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    match parse_wasm_tools_version(&stdout) {
+        Some(v) => WasmToolsProbe::Version(v),
+        None => WasmToolsProbe::Failed(format!(
+            "`wasm-tools --version` printed unparseable output: {:?}",
+            stdout.trim()
+        )),
+    }
 }
 
 /// `wasm-tools --version` prints `wasm-tools <semver>`. Split out from the
@@ -433,6 +473,38 @@ mod tests {
             workflow.contains(&format!("wasm-tools@{EXPECTED_WASM_TOOLS}")),
             "full-gate.yml must install wasm-tools@{EXPECTED_WASM_TOOLS}"
         );
+    }
+
+    /// The encoder determines the committed Component's bytes, so every
+    /// manifest's `[artifact] toolchain` fingerprint must name the encoder its
+    /// pinned `sha256` was produced with. Without this the fingerprint claims
+    /// to identify the build while omitting a factor that changes the digest
+    /// (see #80), and `EXPECTED_WASM_TOOLS` could be bumped without anyone
+    /// re-pinning the artifacts.
+    #[test]
+    fn every_tool_manifest_fingerprint_names_the_expected_wasm_tools() {
+        let root = repo_root::repo_root().unwrap();
+        let manifests =
+            crate::tool_codegen::discover_tool_manifests(&root).expect("discover manifests");
+        assert!(
+            !manifests.is_empty(),
+            "expected at least one tools/*/manifest.toml"
+        );
+        let needle = format!("wasm-tools-{EXPECTED_WASM_TOOLS}");
+        for manifest in manifests {
+            let raw = std::fs::read_to_string(&manifest).unwrap();
+            let toolchain = raw
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("toolchain = "))
+                .unwrap_or_else(|| panic!("{} has no [artifact] toolchain", manifest.display()))
+                .trim_matches('"');
+            assert!(
+                toolchain.contains(&needle),
+                "{}: [artifact] toolchain is {toolchain:?}, which does not name {needle}; \
+                 re-run `cargo xtask tool-build` after changing the encoder pin",
+                manifest.display()
+            );
+        }
     }
 
     #[test]

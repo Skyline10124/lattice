@@ -500,23 +500,36 @@ green on both matrix OSes.
   binary) and does not gate every PR — the ordinary lane does.
 - **Runner:** `ubuntu-latest` (single OS to bound the long lane's cost).
 - **Steps:** everything the ordinary lane runs (checkout; rust-toolchain with
-  `targets: wasm32-unknown-unknown`; rust-cache; **pinned `wasm-tools`
-  install**; fmt; clippy; debug build; `cargo test --workspace` with both env
-  vars; `harness-boundary`; `lancet-boundary`; `tool-codegen --check`), then:
+  `targets: wasm32-unknown-unknown`; rust-cache; fmt; clippy; debug build;
+  `cargo test --workspace` with both env vars; `harness-boundary`;
+  `lancet-boundary`; `tool-codegen --check`), plus a **pinned `wasm-tools`
+  install** that only this lane needs (the ordinary lane does not install it —
+  nothing there shells out to the encoder), then:
   - `cargo test -p lancet-native fetch_effect_contract` — the explicit-network
     fetch-effect contract (positive + negative; real DNS/HTTP on the runner).
   - `cargo xtask rollout --channel alpha` — the layer-4 release-evidence lane.
   - `cargo xtask tool-build --verify` — rebuilds each Source Tool Component and
-    compares its digest with the committed artifact. **Warn-only** per `#5`
-    decision 1: a mismatch prints a warning and does not fail the lane. This is
-    the only gate that binds a committed `.wasm` to its source, and it is what
-    accumulates the cross-machine bit-for-bit evidence `#73` asks for. It runs
-    last so a drift warning never masks an earlier hard failure. `wasm-tools`
-    is installed at a pinned version because the encoder determines the
-    resulting bytes (`#80`).
+    compares its digest with the committed artifact. This is the only gate that
+    binds a committed `.wasm` to its source, and it is what accumulates the
+    cross-machine bit-for-bit evidence `#73` asks for. `wasm-tools` is installed
+    at a pinned version because the encoder determines the resulting bytes
+    (`#80`), and the same version is named in each manifest's `[artifact]
+    toolchain` fingerprint.
+
+    **Only digest drift is warn-only** per `#5` decision 1 — a mismatch prints a
+    warning and does not fail. Every other outcome is a hard failure: the guest
+    build, `wasm-tools component new`, `wasm-tools validate`, the `wasi:*`
+    import-surface assertion, and WIT world conformance all abort the step. So
+    this step can turn the nightly lane red.
+
+    It runs last so a drift warning never masks an earlier hard failure, and
+    carries `if: always()` — the preceding rollout gate is the lane's most
+    failure-prone step, and skipping verify on its failure would lose the
+    evidence from exactly the runs most worth inspecting. Output is teed to
+    `target/rollout/component-verify.log` so the upload below carries it.
   - `actions/upload-artifact@v4` (`if: always()`) uploads `target/rollout/` as
     `rollout-alpha-record` — the record is written even on rejection/failure,
-    alongside harness bundles and doctor evidence.
+    alongside harness bundles, doctor evidence, and the Component verify log.
   - `actions/upload-artifact@v4` (`if: failure()`) uploads
     `target/harness-failures/` as `harness-failures-full-gate`.
 
