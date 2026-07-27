@@ -728,13 +728,30 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Last ~800 bytes of a step's output, for the failure detail stored in the
+/// record.
+///
+/// Must not slice on a raw byte index: `&s[s.len() - 800..]` panics when the cut
+/// lands inside a multi-byte codepoint, and step output routinely contains
+/// non-ASCII (rustc diagnostics quote source, and gate-covered crates have
+/// non-ASCII comments and test literals). A panic here would replace an ordinary
+/// step failure with a crashed gate: the step's status would stay seeded
+/// `Blocked`, `detail` would stay `None`, no failure artifact would be written,
+/// and the process would exit 101 instead of 1 — losing exactly the diagnostic
+/// this function exists to produce.
 fn tail(output: &str) -> String {
+    const MAX: usize = 800;
     let trimmed = output.trim();
-    if trimmed.len() > 800 {
-        format!("…{}", &trimmed[trimmed.len() - 800..])
-    } else {
-        trimmed.to_owned()
+    if trimmed.len() <= MAX {
+        return trimmed.to_owned();
     }
+    // Walk forward to the next char boundary at or after the cut point, so the
+    // slice is always valid and never longer than MAX.
+    let mut cut = trimmed.len() - MAX;
+    while cut < trimmed.len() && !trimmed.is_char_boundary(cut) {
+        cut += 1;
+    }
+    format!("…{}", &trimmed[cut..])
 }
 
 /// Run a command under a hard timeout, capturing combined stdout+stderr.
@@ -742,8 +759,19 @@ fn tail(output: &str) -> String {
 /// whole tree (cargo + rustc + test binaries) instead of orphaning them.
 fn run_timed(cmd: &mut Command, timeout: Duration) -> anyhow::Result<TimedOutput> {
     let file = tempfile::NamedTempFile::new().context("create step output temp file")?;
-    cmd.stdout(Stdio::from(file.reopen()?))
-        .stderr(Stdio::from(file.reopen()?))
+    // Both streams must share ONE file offset. `reopen()` twice would hand out
+    // two descriptors with independent offsets (tempfile's `reopen` is a plain
+    // `OpenOptions::read().write().open()` — no `O_APPEND`), so interleaved
+    // stdout/stderr writes overwrite each other instead of appending. That
+    // corrupts everything downstream: `passed_test_count` parses `test result:`
+    // out of this text, `tail()` builds the failure detail stored in the record,
+    // and `Action::Doctor` writes it straight out as `evidence/doctor.json`.
+    // `try_clone` duplicates the descriptor, which shares the offset, so writes
+    // from either stream land in order.
+    let out = file.reopen().context("reopen step output for stdout")?;
+    let err = out.try_clone().context("clone step output for stderr")?;
+    cmd.stdout(Stdio::from(out))
+        .stderr(Stdio::from(err))
         // Own process group so a timeout can kill the whole tree.
         .process_group(0);
     let start = Instant::now();
@@ -770,7 +798,12 @@ fn run_timed(cmd: &mut Command, timeout: Duration) -> anyhow::Result<TimedOutput
         }
     };
 
-    let output = fs::read_to_string(file.path()).unwrap_or_default();
+    // Lossy rather than `read_to_string(..).unwrap_or_default()`: that silently
+    // turned any decode failure into an EMPTY string, and empty output makes
+    // `passed_test_count` return 0, which `cargo_test_passed` reports as "exited
+    // 0 but ran 0 tests" — a green artifact rejected with no diagnosable detail.
+    // Keep whatever bytes arrived instead of discarding the lot.
+    let output = String::from_utf8_lossy(&fs::read(file.path()).unwrap_or_default()).into_owned();
     if !output.is_empty() {
         print!("{output}");
     }
@@ -992,5 +1025,70 @@ mod tests {
             output: green.to_owned(),
         };
         assert!(cargo_test_passed(&out).is_err());
+    }
+
+    /// `tail` used to slice on a raw byte index, which panics when the 800-byte
+    /// cut lands inside a multi-byte codepoint. Step output routinely contains
+    /// non-ASCII, and a panic here crashes the gate (exit 101, no record detail)
+    /// instead of reporting a step failure.
+    #[test]
+    fn tail_does_not_panic_when_the_cut_lands_mid_codepoint() {
+        // Place a 3-byte codepoint so that len-800 falls strictly inside it.
+        let s = format!("{}中{}", "x".repeat(64), "y".repeat(799));
+        assert!(
+            !s.is_char_boundary(s.len() - 800),
+            "fixture must put the cut inside a codepoint"
+        );
+
+        let out = tail(&s);
+
+        assert!(out.starts_with('…'), "long output must be marked elided");
+        assert!(out.ends_with('y'));
+        // Never returns more than the cap (leading marker excluded).
+        assert!(out.len() - '…'.len_utf8() <= 800);
+    }
+
+    #[test]
+    fn tail_returns_short_output_verbatim_and_trimmed() {
+        assert_eq!(tail("  ok — done  "), "ok — done");
+    }
+
+    /// Both child streams must share one file offset. Two independent
+    /// descriptors on the same file (what `reopen()` twice yields) have separate
+    /// offsets and overwrite each other, corrupting the text that
+    /// `passed_test_count`, `tail`, and the doctor evidence file are built from.
+    #[test]
+    fn run_timed_interleaves_stdout_and_stderr_without_overwriting() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            // stderr first, then stdout, then stderr again: with independent
+            // offsets the second stderr write clobbers the stdout line.
+            .arg(
+                "echo compiling >&2; echo 'test result: ok. 7 passed; 0 failed'; echo running >&2",
+            );
+
+        let out = run_timed(&mut cmd, Duration::from_secs(30)).expect("run");
+
+        assert!(
+            out.success,
+            "fixture command must succeed: {:?}",
+            out.output
+        );
+        assert!(
+            out.output.contains("compiling") && out.output.contains("running"),
+            "stderr lines must survive: {:?}",
+            out.output
+        );
+        assert!(
+            out.output.contains("test result: ok. 7 passed"),
+            "stdout line must survive: {:?}",
+            out.output
+        );
+        assert_eq!(
+            passed_test_count(&out.output),
+            7,
+            "the gate's pass count must be parseable from the captured text: {:?}",
+            out.output
+        );
     }
 }
