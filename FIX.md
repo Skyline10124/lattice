@@ -2,11 +2,18 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
-## GitHub #111 部分收口：给两条守护安全不变量的假绿测试补上实质断言 — 2026-07-27
+## GitHub #111 部分收口：给两条断言强度不足的测试补上实质断言 — 2026-07-27
 
-Severity: HIGH（两条安全不变量的回归网失效）。
+Severity: LOW（**经对抗性复核下调，原评 HIGH 有误——见下方「严重度更正」**）。
 
-收口 **#111** 中 6 条假绿测试的第 1、2 条（其余 4 条留 #111，见下方 Residual）。
+收口 **#111** 中 6 条的第 1、2 条（其余 4 条留 #111，见下方 Residual）。
+
+**严重度更正（同日，落地后复核）:** 本条目初稿评为 HIGH，理由是「两条安全不变量的回归网失效」。**该判断是错的**，已实测推翻，故在此更正而非删改原文（append-only）。两个不变量都另有测试守着，且都在每个 PR 必跑的 `cargo test --workspace` 里：
+
+- **deny-all 退化**：给 `decide()` 注入无条件 `Denied` 后，**修复前就存在的** `crates/lancet-authority/tests/policy_tests.rs` 立刻 5 条 FAILED（`allows_observation_without_denied_patterns`、`allows_mutation_with_no_denied_patterns`、`allows_mutation_not_in_deny_list`、`denies_network_host`、`denies_observation_budget_exhausted`）。全仓 `PolicyDecision::Allowed` 断言共 9 处，其中 `policy_tests.rs:50/63/74` 正是「blacklist 误改回 allowlist」的对偶断言，`lancet-native/tests/policy_integration.rs:63/97` 覆盖网络短路场景。fuzz 套件对该退化盲，但它不是唯一防线。
+- **System Path Exclusion 被删**：`crates/lattice-system-harness/tests/direct_mutation.rs:475` 的 sys_deny 场景用**空 extra_profile** 尝试写 `.lattice/evil.txt`，其拒绝完全依赖 `default.rs:156-160` 压入的前缀；该文件 `#[ignore]` 计数为 0，`.github/workflows/ci.yml:44` 的必需 job 就是 `cargo test --workspace`。且它验证的正是 effect region——`mutation.rs:226` 传给 `validate_path_facts` 的第三参数就是 `ctx.authorized_region`。
+
+因此本次改动的真实价值是**回归定位速度**（单元测试直接指出是 region 构造问题，而不必等一个 full-turn harness 场景失败后反推）与**测试诚实性**，不是补防护缺口。另外复核纠正了一处事实误读：`biased_allowed_inputs()` 并非「6 条应当放行的输入」——`exec.command_run` 的源码注释明写它预期 `NonDeterminable`，故原属性名 `..._stable` 与其文档串其实是自洽的，不存在初稿所称的「文档/代码矛盾」。
 
 **Problem:**
 
@@ -28,6 +35,7 @@ Severity: HIGH（两条安全不变量的回归网失效）。
 - `cargo fmt --all --check`、`cargo clippy -p lancet-authority --all-targets -- -D warnings` — passed。
 
 **Residual:** #111 的其余 4 条留在该 issue 追踪，本次未动，因为它们需要的不是断言改写而是新增测试基础设施：**#111-3** `cep_warn_harness` 默认 CI 路径只读已提交 markdown（需把 `generate_warn_report()` 改为默认执行路径）；**#111-4** `fetch.web` 上限测试的 fixture（22 字节）小于上限（64 字节）且断言为析取（需换超限 fixture 并拆成合取）；**#111-5** `direct_secrets` 的 denied-content 哨兵场景 `tools.enabled = []` 致被读路径不存在（需启用 `observe.workspace` 并重写脚本）；**#111-6** Component deadline→`ToolTimeout` 无可失败测试（需要一个会自旋的 fixture guest，与 M-TOOL-02 相邻）。
+这 4 条的严重度**同样经复核下调为 LOW**，理由与上面两条同构——每条声称的「缺陷会静默通过」都被另一处测试切断：#111-3 被 `crates/lattice-api/tests/cep_mode_integration.rs:144-169` 对 `effect_warning` 的硬断言切断（且 `server/transport.rs:311-410` 的 effect 检查是方法无关的，无 per-method Warn 分支）；#111-4 被 `crates/lancet-native/src/handlers/external.rs:384-420` 的 `native_web_fetch_truncates_over_cap_response` 切断（500 字节 body 配 100 字节上限，断言 `body.len()==100` 且 `truncated==Some(true)`）——初稿的错误很具体：`rg max_web_response_bytes` 时把范围限定在 harness，漏掉产品 crate 内的真覆盖；#111-5 被 `crates/lattice-system-harness/tests/direct_observation.rs` 的完整读拒绝矩阵切断（`denied_read_patterns` 短路会让 `expected_ok`、无 JSON result、8 条 `GuardDenied` 三处同时变红），且该 world 的 extra_profile 为空、`private.txt` 已 tracked，按 `policy/visibility.rs:78-90` 它其实是 **Visible**，连「denied」都不是；#111-6 的危害论证不可达——当前封闭 world 无任何可阻塞的 host call（只 `import host-control`，`cancelled` 读 flag、`emit_event` 用 `try_send`，无 WASI/IO/sleep），故长跑 guest 必然消耗 wasm 指令并被 `set_fuel` 有界终止，deadline 是 fuel 之上的纵深；且 `EXPECTED_COMPONENTS` 为空使生产路径不可达，属有意的迁移中间态，已关闭的 #69 亦已在位记录该测试形态。复核另指出两个比原发现更有价值的方向：`direct_secrets` 相对 slice6 plan 真正缺的是 `audit query --tail`／`audit replay`／provenance JSON 三个 sink；epoch 回调的 **cancellation** 分支（`runtime.rs:269-272`）与 deadline 分支同样零覆盖。
 
 **Changed files:**
 `crates/lancet-authority/tests/guard_decide_fuzz.rs`; `crates/lancet-authority/tests/policy_tests.rs`; `FIX.md`.
