@@ -29,7 +29,7 @@ Severity: CI 阻塞（#105，整条 ubuntu lane 长期红）/ test isolation（#
 
 **Note:** `libc` 在 harness 清单里写死 `"0.2"` 而不用 workspace 继承——`harness-boundary` 的 `manifest_workspace_inheritance` 检查是**逐行文本匹配**，连注释里出现该字面量也会 FAIL（其自身测试 `workspace_true_in_comment_still_detected` 正是有意如此），本次为此调整了注释措辞。
 
-**Residual:** #105 建议清单里的第 4 步（若 ubuntu 仍不稳则给该场景加 `#[ignore]` + 专用 serial lane）未落地，也不应预先落地：本次修复把静默广播变成了本地可见错误，需先由 CI 实跑确认 ubuntu lane 转绿。若回读 pgid + fail-closed 后 ubuntu 仍出现 exit 130，则说明信号源不在 harness 内，届时再按 #105 第 4 步处置。
+**CI 实跑确认（2026-07-27，补记）:** ubuntu lane 已转绿，#105 建议清单第 4 步（`#[ignore]` + 专用 serial lane）确认**不需要**落地。证据是一组差一个提交的对照：PR #104（`44ceabc1` + `38af35bb`）在 ubuntu-latest 上仍以 `Process completed with exit code 130` 失败，失败日志中所有已报告测试均为 `ok`、无 FAILED、无 panic（run 30222133081 job 89944793831），同 run 的 macos-latest 通过；PR #107 在这两个提交之上仅多出本修复提交 `103478f8`，ubuntu-latest 与 macos-latest 双双通过（run 30257981171）。两次运行的唯一差异即本修复，故信号源确在 harness 内且已消除。
 
 **Changed files:**
 `crates/lattice-system-harness/src/driver.rs`; `crates/lattice-system-harness/Cargo.toml`; `crates/lattice-session/src/git_graph/tests/mod.rs`; `crates/lattice-session/src/git_graph/tests/{commit_turn,head_transcript,no_remote,pointer_ops,session_meta}.rs`; `FINDINGS.md`; `FIX.md`.

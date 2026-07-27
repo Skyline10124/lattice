@@ -147,7 +147,7 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 （完整修复记录见 [FIX.md](./FIX.md)。）
 
 ### L-47-01: harness SIGINT 广播到测试进程自身的进程组，使 ubuntu CI 以 exit 130 中断 — `robustness` / harness / #47 / #105
-- **当前状态**: 2026-07-27 closed — 由 **#105** 修复。`driver.rs` 现在用 `libc::getpgid(child_pid)` 从内核回读实际 pgid（不再假定等于 `child.id()`），任何组信号发送前先用 `libc::getpgrp()` 比对并在命中自身组时 fail-closed，且改用 `libc::killpg` 直接投递而非 spawn `kill(1)`（消除负号参数在不同 `kill` 实现间的解释差异）。新增两条回归测试锁定该契约；`direct_failure_sigint_while_stalled_commits_cancelled` 保留并通过，SIGINT 协作取消覆盖未削弱。**残留**：修复把静默广播变为本地可见错误，但 ubuntu lane 是否真的转绿需 CI 实跑确认；若仍出现 exit 130 则说明信号源不在 harness 内，按 #105 计划第 4 步（`#[ignore]` + serial lane）处置。完整记录见 FIX.md `#105 / #106`。
+- **当前状态**: 2026-07-27 closed — 由 **#105** 修复。`driver.rs` 现在用 `libc::getpgid(child_pid)` 从内核回读实际 pgid（不再假定等于 `child.id()`），任何组信号发送前先用 `libc::getpgrp()` 比对并在命中自身组时 fail-closed，且改用 `libc::killpg` 直接投递而非 spawn `kill(1)`（消除负号参数在不同 `kill` 实现间的解释差异）。新增两条回归测试锁定该契约；`direct_failure_sigint_while_stalled_commits_cancelled` 保留并通过，SIGINT 协作取消覆盖未削弱。**CI 实跑确认（2026-07-27）**：ubuntu lane 已转绿。同一对上游提交（`44ceabc1` + `38af35bb`）在 PR #104 上 ubuntu-latest 仍以 exit 130 失败（run 30222133081，macos 通过），而叠加本修复的 PR #107 ubuntu-latest 与 macos-latest 双双通过（run 30257981171）；两次运行只差这一个提交，坐实信号源在 harness 内且已消除，无需启用 #105 计划第 4 步的 `#[ignore]` + serial lane 退路。完整记录见 FIX.md `#105 / #106`。
 
 ### L-47-02: `git_graph` 测试 fixture 使用固定共享路径 — `robustness` / test-isolation / #47 / #106
 - **当前状态**: 2026-07-27 closed — 由 **#106** 修复。`temp_dir()` 改为返回持有 `tempfile::TempDir` 的 `Fixture` 守卫，路径唯一且 drop 时自动清理，`name` 退化为可读前缀；删除手写 `remove_dir_all` 前置清理，30 个调用点改用 `dir.path()`。反向验证：并行两份 `CARGO_TARGET_DIR` 各 29 passed / 0 failed（修复前有 2 个失败）。完整记录见 FIX.md `#105 / #106`。
