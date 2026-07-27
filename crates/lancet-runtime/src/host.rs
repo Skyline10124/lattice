@@ -1,12 +1,12 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Minimal ToolHost — control-only (#5 slice C).
+//! Minimal ToolHost — control-only (#27 slice C, Codeberg #5).
 //!
 //! The no-op Tool imports only `host-control` (cancellation probe +
 //! structured events). It imports **no** workspace/network/session domain
-//! operation: #6 unifies capability admission, and admitting a domain
-//! operation before the admission gate exists would create a
+//! operation: #28 (Codeberg #6) unifies capability admission, and admitting a
+//! domain operation before the admission gate exists would create a
 //! declare-then-authorize bypass.
 
 use crate::bindings;

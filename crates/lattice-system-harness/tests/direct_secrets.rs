@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local secret-sentinel discipline (issue #24 slice 6).
+//! Direct-Local secret-sentinel discipline (issue #46 (Codeberg #24) slice 6).
 //!
 //! Uses a unique per-scenario provider-credential sentinel plus a
 //! denied-workspace-content sentinel, then scans every public sink

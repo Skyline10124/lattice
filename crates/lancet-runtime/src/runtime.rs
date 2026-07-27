@@ -171,7 +171,7 @@ impl ComponentRuntime {
             .map_err(|e| schema_mismatch(name, format!("params: {e}")))?;
 
         // Pre-cancelled call: cancellation state is the authority; never
-        // enter Wasmtime (#48).
+        // enter Wasmtime (#70, Codeberg #48).
         if ctx.cancellation.is_cancelled() {
             return Err(cancelled_error(name));
         }
@@ -197,7 +197,7 @@ impl ComponentRuntime {
         // wasmtime's (traps), the inner is the guest's logical error. A
         // logical error while call-scoped cancellation is set maps to
         // `CallCancelled` — cancellation state, not the guest-controlled
-        // error string, is the classification authority (#48).
+        // error string, is the classification authority (#70).
         let cancelled = store.data().call.cancellation.is_cancelled();
         let raw = map_guest_logical_result(name, raw, cancelled)?;
 
@@ -281,7 +281,8 @@ impl ComponentRuntime {
     }
 }
 
-/// Map the guest's logical result to the host-visible result (#48).
+/// Map the guest's logical result to the host-visible result
+/// (#70, Codeberg #48).
 ///
 /// Call-scoped cancellation state is the sole classification authority: a
 /// guest logical `Err` while cancellation is set maps to `CallCancelled`,
@@ -360,7 +361,7 @@ mod tests {
         }
     }
 
-    /// #48: a guest logical error while call-scoped cancellation is set
+    /// #70: a guest logical error while call-scoped cancellation is set
     /// maps to the shared `CallCancelled` error — the guest-controlled
     /// error string plays no role.
     #[test]
@@ -371,7 +372,7 @@ mod tests {
         assert_eq!(err.message, "tool noop.echo failed: cancelled");
     }
 
-    /// #48: a guest logical error without cancellation keeps the
+    /// #70: a guest logical error without cancellation keeps the
     /// `ExecutionFailed` semantics.
     #[test]
     fn guest_error_without_cancellation_stays_execution_failed() {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Negative call tests: schema mismatch, fuel exhaustion, deadline, and
-//! survival proof (#5 slice C.7).
+//! survival proof (#27 slice C.7, Codeberg #5).
 //!
 //! After each failure, a normal no-op call proves the engine/server survives.
 //! Custom-component trap/effect-violation tests require a WIT-matching

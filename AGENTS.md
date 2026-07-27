@@ -160,6 +160,11 @@ accumulating.
 - SQLite for CEP audit records belongs in `lancet-audit`; the conversation
   graph is git-backed (git refs under `refs/lattice/sessions/<id>/**`) and
   lives in `lattice-session`. SQLite session graph storage was retired.
+- Operator audit read (query/tail/replay) is implemented in `lancet-audit`
+  and only re-exported by `lancet-api`; it is never an Agent Tool. Keep
+  `lancet-audit` free of `lancet-native`/`lancet-dispatch`/`lancet-cep`/
+  `lancet-runtime` deps — that absence is what makes "an operator read never
+  composes a CEP server" a structural guarantee rather than an assertion.
 - Explicit `/rewind` reverses only LATTICE mutations recorded after the target
   Turn, preserves unrelated external changes, and conflicts on a changed
   mutation path. Store that history in a private bare gix repository, never the

@@ -22,8 +22,9 @@ pub struct WorkspacePath {
 impl WorkspacePath {
     /// Sole `"."` root sentinel for execution cwd/directory intents.
     ///
-    /// Used by observation tests and by #39's Policy-Visible Workspace
-    /// visibility checks; production handlers currently parse `"."` instead.
+    /// Used by observation tests and by the #61 (Codeberg #39) Policy-Visible
+    /// Workspace visibility checks; production handlers currently parse `"."`
+    /// instead.
     #[allow(dead_code)]
     pub fn project_root() -> Self {
         Self {

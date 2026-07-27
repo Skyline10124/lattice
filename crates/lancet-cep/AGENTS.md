@@ -8,7 +8,7 @@ This crate is the current public CEP facade. It frames the migration interface
 by re-exporting protocol/catalog/dispatch contracts and owning CEP-facing tool
 exposure and base-authority planning helpers. ADR 0004 replaces hand-maintained
 catalog projection with generated Source Tool descriptors and absorbs or retires
-this facade through `lancet-runtime` in #12.
+this facade through `lancet-runtime` in #34 (Codeberg #12).
 
 ## Sub-Architecture
 
@@ -42,8 +42,8 @@ this facade through `lancet-runtime` in #12.
 - FIXED L-llm-coupling: LANCET-facing tool definitions stay here while shared
   URL/DNS safety primitives live in the neutral `net-guard` leaf.
 - MIGRATION: do not deepen `ToolDefinition`, `ToolExposure`, or
-  `BaseAuthorityPlan` into permanent Tool authority. #5/#6 replace their Tool
-  contract role; #12 removes the migration facade.
+  `BaseAuthorityPlan` into permanent Tool authority. #27/#28 (Codeberg #5/#6)
+  replace their Tool contract role; #34 removes the migration facade.
 
 ## Verification
 

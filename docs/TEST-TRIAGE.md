@@ -60,9 +60,9 @@
 
 | 决定 | 条数 |
 | --- | ---: |
-| 保留 | 1191 |
+| 保留 | 1190 |
 | 提升 | 42 |
-| 删除 | 216 |
+| 删除 | 217 |
 | **合计** | **1449** |
 
 #### 按 crate
@@ -79,12 +79,12 @@
 | `lattice-agent` | 70 | 0 | 1 | 71 |
 | `lattice-session` | 69 | 0 | 2 | 71 |
 | `lattice-system-harness` | 56 | 1 | 0 | 57 |
+| `lancet-audit` | 44 | 0 | 0 | 44 |
 | `lancet-protocol` | 36 | 0 | 0 | 36 |
-| `lancet-audit` | 34 | 0 | 0 | 34 |
-| `lancet-catalog` | 31 | 0 | 0 | 31 |
+| `lancet-catalog` | 30 | 0 | 1 | 31 |
 | `xtask` | 26 | 0 | 0 | 26 |
-| `lancet-api` | 17 | 0 | 1 | 18 |
 | `net-guard` | 15 | 0 | 0 | 15 |
+| `lancet-api` | 7 | 0 | 1 | 8 |
 | `lancet-cep` | 7 | 0 | 0 | 7 |
 | `lancet-dispatch` | 5 | 0 | 0 | 5 |
 | `lattice-tui` | 3 | 0 | 0 | 3 |
@@ -222,9 +222,9 @@ codeberg issue 跟踪重写。
 
 | 决定 | 条数 |
 | --- | ---: |
-| 保留 | 1191 |
+| 保留 | 1190 |
 | 提升 | 42 |
-| 删除 | 216 |
+| 删除 | 217 |
 | **合计** | **1449** |
 
 ## 1.6 #24 slice 2 执行状态（2026-07-22）
@@ -369,32 +369,80 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 - 全量：提升 45->42，删除 211->214（总 identity 1449 不变；layer 仍为 local 1372 / fast 45 / Direct-Local 32）
 
 
+## 1.12 GitHub #39 operator audit 下沉（2026-07-27）
+
+> operator audit 读路径（DTO / 分页 / 过滤 / 投影 / attestation 比对）从 `lancet-api`
+> 下沉到 `lancet-audit`，`crates/lancet-catalog/src/methods/audit.rs` 整体删除。
+> 本节只记录 ledger 影响：**没有任何测试被「提升」或被外部场景取代**，10 条 identity 仅换 crate/文件，
+> 1 条随被测 DTO 一并删除。
+
+### identity 迁移（10 条，crate 改判，决定不变）
+
+| ledger identity | 原位置 | 新位置 |
+| --- | --- | --- |
+| `tail_audit_paginates_large_result_without_cep_server` | `lancet-api` `src/audit.rs` | `lancet-audit` `src/operator_tests.rs:87` |
+| `replay_audit_returns_trace_for_turn` | `lancet-api` `src/audit.rs` | `lancet-audit` `src/operator_tests.rs:137` |
+| `query_audit_excludes_unfinalized_rows_during_active_turn` | `lancet-api` `src/audit.rs` | `lancet-audit` `src/operator_tests.rs:238` |
+| `operator_audit_reads_concurrent_with_active_writer` | `lancet-api` `src/audit.rs` | `lancet-audit` `src/operator_tests.rs:288` |
+| `query_audit_reads_legacy_table_missing_optional_columns` | `lancet-api` `src/audit.rs` | `lancet-audit` `src/operator_tests.rs:403` |
+| `query_audit_reads_legacy_table_without_attestation_records` | `lancet-api` `src/audit.rs` | `lancet-audit` `src/operator_tests.rs:465` |
+| `external_audit_distinct_project_keys` | `lancet-api` `src/config.rs` | `lancet-audit` `src/store_path.rs:137` |
+| `external_audit_symlink_canonical_identity` | `lancet-api` `src/config.rs` | `lancet-audit` `src/store_path.rs:154` |
+| `external_audit_invalid_canonical_identity_errors` | `lancet-api` `src/config.rs` | `lancet-audit` `src/store_path.rs:166` |
+| `external_audit_imports_legacy_read_only_once` | `lancet-api` `src/config.rs` | `lancet-audit` `src/store_path.rs:174` |
+
+另有 4 条留在 `lancet-api` 但行号刷新：`query_audit_reads_store_without_cep_server`
+（audit.rs:145）、`query_audit_errors_when_store_missing`（audit.rs:160）、
+`replay_audit_matches_stored_attestation`（audit.rs:172）、
+`external_audit_external_for_project_in_resolves_under_state_root`（config.rs:116）。
+
+### 已删除（1 条，保留->删除）
+
+| ledger identity | replacement scenario | 依据 |
+| --- | --- | --- |
+| `audit_replay_params_require_turn_id_field` | n/a — 被测 DTO 随 #39 一并删除 | `crates/lancet-catalog/src/methods/audit.rs` 整体删除，六个 operator DTO（含 `AuditReplayParams`）不再存在；未转成 Tool descriptor / 生成目录条目 / Agent catalog method，故无替代场景 |
+
+### 判决复核（无行变更）
+
+`lattice-cli` 的三条 audit 判决在本次实现中被**重新兑现**：`audit_query_errors_when_store_missing`
+（提升 → `planned_audit_cli`）、`audit_replay_reconstructs_turn_trace_for_seeded_db`、
+`audit_tail_streams_rows_for_seeded_db`（均为 删除）。实现期间曾新增三条 crate-internal CLI 测试，
+复核后与既有判决冲突，已再次删除；账本因此无需改行，判决保持真实。
+
+### counts 变更
+
+- lancet-api：保留 17->7，删除 1 不变（10 条迁往 lancet-audit）
+- lancet-audit：保留 34->44（迁入 10 条）
+- lancet-catalog：保留 31->30，删除 0->1
+- 全量：保留 1191->1190，删除 216->217，提升 42 不变（总 identity 1449 不变；layer 仍为 local 1372 / fast 45 / Direct-Local 32）
+
+> 计数基线说明：上列「全量」数字对齐 `docs/test-triage-decisions.json` 的真实计数
+> （改动前 keep 1191 / elevate 42 / delete 216）。早期批次说明里的 running total
+> （如 §1.9 的「删除 211->214」）与 machine ledger 存在 **2 条固有偏差**，属既有历史记录，
+> 非 #39 引入，本次不改写；以 machine ledger 与本节汇总表为准。
+
 ## 2. 逐条清单
 
-### `lancet-api`（保留 17 / 提升 0 / 删除 1）
+### `lancet-api`（保留 7 / 提升 0 / 删除 1）
+
+> GitHub #39 将 10 条 identity 迁往 `lancet-audit`（6 条 `audit.rs` → `operator_tests.rs`，
+> 4 条 `config.rs` → `store_path.rs`），决定/目标层/理由均不变，见下方 `lancet-audit` 小节。
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
-| `query_audit_reads_store_without_cep_server` | `crates/lancet-api/src/audit.rs:450` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `tail_audit_paginates_large_result_without_cep_server` | `crates/lancet-api/src/audit.rs:463` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `query_audit_errors_when_store_missing` | `crates/lancet-api/src/audit.rs:505` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `replay_audit_returns_trace_for_turn` | `crates/lancet-api/src/audit.rs:513` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `replay_audit_matches_stored_attestation` | `crates/lancet-api/src/audit.rs:529` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `query_audit_excludes_unfinalized_rows_during_active_turn` | `crates/lancet-api/src/audit.rs:580` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `operator_audit_reads_concurrent_with_active_writer` | `crates/lancet-api/src/audit.rs:630` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `query_audit_reads_store_without_cep_server` | `crates/lancet-api/src/audit.rs:145` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `query_audit_errors_when_store_missing` | `crates/lancet-api/src/audit.rs:160` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `replay_audit_matches_stored_attestation` | `crates/lancet-api/src/audit.rs:172` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `operator_audit_module_does_not_reference_cep_server_types` | `crates/lancet-api/src/audit.rs:745` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
-| `query_audit_reads_legacy_table_missing_optional_columns` | `crates/lancet-api/src/audit.rs:768` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `query_audit_reads_legacy_table_without_attestation_records` | `crates/lancet-api/src/audit.rs:830` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `external_audit_distinct_project_keys` | `crates/lancet-api/src/config.rs:176` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `external_audit_symlink_canonical_identity` | `crates/lancet-api/src/config.rs:193` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `external_audit_external_for_project_in_resolves_under_state_root` | `crates/lancet-api/src/config.rs:205` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `external_audit_invalid_canonical_identity_errors` | `crates/lancet-api/src/config.rs:219` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `external_audit_imports_legacy_read_only_once` | `crates/lancet-api/src/config.rs:227` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `external_audit_external_for_project_in_resolves_under_state_root` | `crates/lancet-api/src/config.rs:116` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `runtime_config_defaults_have_null_execution` | `crates/lancet-api/src/runtime.rs:246` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `production_runtime_rejects_retired_exec_command_run_as_method_not_found` | `crates/lancet-api/src/runtime.rs:259` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `production_runtime_rejects_retired_mutate_batch_as_method_not_found` | `crates/lancet-api/src/runtime.rs:313` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 
-### `lancet-audit`（保留 34 / 提升 0 / 删除 0）
+### `lancet-audit`（保留 44 / 提升 0 / 删除 0）
+
+> GitHub #39 从 `lancet-api` 迁入 10 条 identity（`operator_tests.rs` 6 条 + `store_path.rs` 4 条）。
+> 决定、目标层与理由逐字保留，只更新 crate 与 `文件` 定位。
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -424,6 +472,12 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `rejection_stage_filters_rows_by_metadata_json` | `crates/lancet-audit/src/audit_tests.rs:872` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
 | `import_legacy_read_only_if_empty_copies_both_tables` | `crates/lancet-audit/src/audit_tests.rs:974` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
 | `import_legacy_read_only_if_empty_is_noop_when_destination_has_rows` | `crates/lancet-audit/src/audit_tests.rs:1014` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
+| `tail_audit_paginates_large_result_without_cep_server` | `crates/lancet-audit/src/operator_tests.rs:87` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `replay_audit_returns_trace_for_turn` | `crates/lancet-audit/src/operator_tests.rs:137` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `query_audit_excludes_unfinalized_rows_during_active_turn` | `crates/lancet-audit/src/operator_tests.rs:238` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `operator_audit_reads_concurrent_with_active_writer` | `crates/lancet-audit/src/operator_tests.rs:288` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `query_audit_reads_legacy_table_missing_optional_columns` | `crates/lancet-audit/src/operator_tests.rs:403` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `query_audit_reads_legacy_table_without_attestation_records` | `crates/lancet-audit/src/operator_tests.rs:465` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `build_statement_lists_materials` | `crates/lancet-audit/src/provenance/attestation.rs:145` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
 | `source_audit_range_hash_is_stable` | `crates/lancet-audit/src/provenance/attestation.rs:191` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
 | `canonicalize_strips_timestamps` | `crates/lancet-audit/src/provenance/canonicalize.rs:76` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
@@ -432,6 +486,10 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `project_turn_trace_orders_calls` | `crates/lancet-audit/src/provenance/projector.rs:310` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
 | `boundary_observed_projection` | `crates/lancet-audit/src/provenance/projector.rs:323` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
 | `preflight_and_policy_metadata_project_to_activity_attributes` | `crates/lancet-audit/src/provenance/projector.rs:361` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
+| `external_audit_distinct_project_keys` | `crates/lancet-audit/src/store_path.rs:137` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `external_audit_symlink_canonical_identity` | `crates/lancet-audit/src/store_path.rs:154` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `external_audit_invalid_canonical_identity_errors` | `crates/lancet-audit/src/store_path.rs:166` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `external_audit_imports_legacy_read_only_once` | `crates/lancet-audit/src/store_path.rs:174` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 
 ### `lancet-authority`（保留 135 / 提升 0 / 删除 0）
 
@@ -573,7 +631,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `workspace_policy_validates_denied_patterns` | `crates/lancet-authority/tests/policy_tests.rs:158` | 保留 | 局部不变量 | — | policy/capability/Guard L1/effect 纯语义局部不变量；保留 |
 | `workspace_policy_applies_denied_patterns_to_mutate_region` | `crates/lancet-authority/tests/policy_tests.rs:167` | 保留 | 局部不变量 | — | policy/capability/Guard L1/effect 纯语义局部不变量；保留 |
 
-### `lancet-catalog`（保留 31 / 提升 0 / 删除 0）
+### `lancet-catalog`（保留 30 / 提升 0 / 删除 1）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -595,7 +653,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `catalog_retires_mutate_batch` | `crates/lancet-catalog/src/catalog.rs:286` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |
 | `catalog_len_matches_runtime_catalog` | `crates/lancet-catalog/src/catalog.rs:297` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |
 | `catalog_default_snapshot_scaffold_is_separate` | `crates/lancet-catalog/src/catalog.rs:303` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |
-| `audit_replay_params_require_turn_id_field` | `crates/lancet-catalog/src/methods/audit.rs:68` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |
+| `audit_replay_params_require_turn_id_field` | `crates/lancet-catalog/src/methods/audit.rs:68` | 删除 | 局部不变量 | n/a — 被测 DTO 随 #39 一并删除 | #39：operator audit DTO 下沉到 lancet-audit，crates/lancet-catalog/src/methods/audit.rs 整体删除，AuditReplayParams 及本测试随之消失（无替代场景）。 |
 | `web_fetch_name_is_dotted` | `crates/lancet-catalog/src/methods/external.rs:58` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |
 | `fetch_description_explains_host_allowlist_and_no_retry` | `crates/lancet-catalog/src/methods/external.rs:65` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |
 | `fetch_result_has_additive_truncated_field` | `crates/lancet-catalog/src/methods/external.rs:71` | 保留 | 局部不变量 | — | typed method contracts/schema/descriptor 局部不变量；保留 |

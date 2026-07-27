@@ -420,7 +420,8 @@ mod tests {
 
     #[test]
     fn resolve_command_run_errors_as_unknown_method() {
-        // Regression for issue #4: exec.command_run is retired from the
+        // Regression for issue #26 (Codeberg #4): exec.command_run is retired
+        // from the
         // catalog, so the resolver must reject it as an unknown method.
         let resolver = test_resolver();
         let input = PolicyInput {

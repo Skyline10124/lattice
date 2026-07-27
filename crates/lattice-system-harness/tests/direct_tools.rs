@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Direct-Local fetch, todo, catalog exposure, and retired methods
-//! (issue #24 slice 4).
+//! (issue #46 slice 4, Codeberg #24).
 //!
 //! Completes built-binary coverage of the default five-Tool distribution and
 //! proves retired methods fail explicitly without side effects or fallback.

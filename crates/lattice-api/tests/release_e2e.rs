@@ -67,7 +67,9 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
 
 struct ReleaseE2eWorkspace {
     _dir: tempfile::TempDir,
-    _state: tempfile::TempDir,
+    /// Holds the shared env lock and points `XDG_STATE_HOME` at a temp state
+    /// root for the whole fixture lifetime, restoring the previous value on drop.
+    _state: lancet_audit::ScopedXdgStateHome,
     _global_agents: tempfile::TempDir,
     root: std::path::PathBuf,
     canonical_root: std::path::PathBuf,
@@ -79,10 +81,7 @@ struct ReleaseE2eWorkspace {
 /// The profile enables `mutate.edit` with an empty workspace deny list
 /// (except `.git/**`) so edits apply cleanly.
 fn setup_release_e2e_workspace(src_content: &str) -> ReleaseE2eWorkspace {
-    let state = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("XDG_STATE_HOME", state.path());
-    }
+    let state = lancet_audit::ScopedXdgStateHome::new();
     let ws = tempfile::tempdir().unwrap();
     let root = ws.path().to_path_buf();
 

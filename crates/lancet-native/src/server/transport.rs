@@ -33,8 +33,8 @@ use tokio::sync::RwLock;
 /// `components` carries the closed Component runtime (ADR 0004). When a
 /// method name is in the Component catalog, `handle_request` dispatches to
 /// it instead of the native typed registry. Production builds compose
-/// `ComponentRuntime::from_embedded()` (empty until #7–#10); tests may
-/// inject a no-op fixture via `with_components`.
+/// `ComponentRuntime::from_embedded()` (empty until #29–#32, Codeberg
+/// #7–#10); tests may inject a no-op fixture via `with_components`.
 #[derive(Clone)]
 pub struct ServerRunConfig {
     pub audit: Arc<CepAuditStore>,
@@ -176,7 +176,8 @@ async fn handle_request(
     // fall through to the existing 5-method typed registry. The split happens
     // after audit start and before finalize, so Component and native calls
     // share one durable audit path. Component calls produce Cell evidence
-    // (no domain operation in #5); native calls produce effect-ledger evidence.
+    // (no domain operation in #27); native calls produce effect-ledger
+    // evidence.
     let component_evidence = CellEvidenceLedger::new();
 
     // Pre-dispatch effect-kind deny (issue #24 slice 3): compare the method's
@@ -301,7 +302,8 @@ async fn handle_request(
     call.respond(final_result);
 }
 
-/// #48: a dispatch that never completed because the call was cancelled.
+/// #70 (Codeberg #48): a dispatch that never completed because the call was
+/// cancelled.
 /// Cancellation state is the classification authority end to end, so every
 /// call-scoped cancellation surfaces as the structured `CallCancelled` code
 /// — never matched on a guest/client-controlled error string.

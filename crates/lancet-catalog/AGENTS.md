@@ -7,7 +7,7 @@ Crate-local guidance for `lancet-catalog`.
 This crate owns the current typed CEP method catalog used by native handlers and
 tool projection. It is a migration authority, not the ADR 0004 target: Source
 Tool manifests and generated descriptors replace it after Component migration,
-and #12 removes the remaining central catalog surface.
+and #34 (Codeberg #12) removes the remaining central catalog surface.
 
 ## Sub-Architecture
 
@@ -18,8 +18,9 @@ and #12 removes the remaining central catalog surface.
 - `src/methods/workspace.rs` owns observe and mutate workspace contracts.
 - `src/methods/external.rs` owns `fetch.web` contracts.
 - `src/methods/session.rs` owns session state helper contracts.
-- `src/methods/audit.rs` owns operator audit query/tail/replay DTOs (not agent catalog methods).
 - `src/methods/scaffold.rs` is feature-gated inspection scaffolding only.
+- There is no operator audit module here. `methods/audit.rs` was deleted in GitHub #39;
+  operator audit DTOs live in `lancet-audit::operator`.
 
 ## Boundaries
 
@@ -34,18 +35,26 @@ and #12 removes the remaining central catalog surface.
 - Keep method params/results, descriptors, and capabilities in sync.
 - Keep base authority requirements method-local and policy-neutral; catalog may
   say that `fetch.web` needs fetch authority, but not which hosts are allowed.
-- Do not add operator-only contracts here. #17 moves existing audit DTOs to
-  `lancet-audit`; operator audit is not a Tool.
+- Do not add operator-only contracts here. #39 moved the audit DTOs to
+  `lancet-audit`; operator audit is not a Tool and does not come back.
 
 ## Recent Issues
 
+- FIXED #39: `src/methods/audit.rs` and its `methods/mod.rs` wiring were
+  deleted, removing all six operator audit DTOs (`AuditQueryParams`,
+  `AuditQueryResult`, `AuditTailParams`, `AuditTailResult`, `AuditReplayParams`,
+  `AuditReplayResult`) from the central migration surface. None became a Tool
+  descriptor, generated inventory entry, Agent catalog method, or Component —
+  operator audit now owns its own DTOs in `lancet-audit`. This shrinks what #34
+  has to delete when the central catalog authority goes away.
 - FIXED P19: catalog sealing compile-fail coverage was corrected during CEP
   core review.
 - FIXED M-24-04: `MethodDescriptor::base_authority` now declares method-local
   base authority requirements consumed by `lancet-cep::ToolExposure`; policy
   inputs such as allowed hosts stay outside catalog.
-- FIXED issue #11: production `CATALOG` is 5 agent methods; audit DTOs in
-  `methods/audit.rs` are operator-only (not registered in `CATALOG`).
+- FIXED issue #33 (Codeberg #11): production `CATALOG` is 5 agent methods;
+  audit reads are operator-only and were never registered in `CATALOG` (their
+  DTOs left this crate in #39).
 - WATCH: dotted method names stay canonical in CEP catalog; provider-specific
   name encoding belongs in `lattice-llm` wire adapters.
 - WATCH: optional scaffold methods must remain feature-gated and outside the

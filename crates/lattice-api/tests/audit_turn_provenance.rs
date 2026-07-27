@@ -10,6 +10,7 @@ use lancet_api::{AuditReplayRequest, replay_audit};
 use lancet_native::{AuditQueryFilters, CepAuditStore};
 use lancet_protocol::effect_types::ImpactKind;
 
+use lancet_audit::ScopedXdgStateHome;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
@@ -49,17 +50,16 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
 
 struct Workspace {
     _dir: TempDir,
-    _state: TempDir,
+    /// Holds the shared env lock and points `XDG_STATE_HOME` at a temp state
+    /// root for the whole fixture lifetime, restoring the previous value on drop.
+    _state: ScopedXdgStateHome,
     root: std::path::PathBuf,
     loaded: LoadedAgentProfile,
     target_branch: String,
 }
 
 fn setup_workspace() -> Workspace {
-    let state = TempDir::new().unwrap();
-    unsafe {
-        std::env::set_var("XDG_STATE_HOME", state.path());
-    }
+    let state = ScopedXdgStateHome::new();
     let ws = TempDir::new().unwrap();
     let root = ws.path().to_path_buf();
     std::fs::create_dir_all(root.join("src")).unwrap();

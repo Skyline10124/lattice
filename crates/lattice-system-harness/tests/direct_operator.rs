@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Direct-Local operator paths: audit query/replay, lancet status, session
-//! status/log cross-validation (issue #24 slice 6).
+//! status/log cross-validation (issue #46 (Codeberg #24) slice 6).
 //!
 //! After a real success turn and a real denial turn, run bounded public
 //! commands and assert row counts, methods, impacts, verdicts, activity

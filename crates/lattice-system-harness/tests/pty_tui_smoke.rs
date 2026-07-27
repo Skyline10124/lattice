@@ -1,21 +1,22 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! PTY smoke scenario (RFC #19 layer 3 / PTY-smoke): prove the prototype
-//! TUI entrypoint still wires into the same `stream_turn` chain as
+//! PTY smoke scenario (RFC #41 (Codeberg #19) layer 3 / PTY-smoke): prove the
+//! prototype TUI entrypoint still wires into the same `stream_turn` chain as
 //! `session send --json`.
 //!
-//! Since #40 the turn chain is Direct-Local: the TUI drives a real turn
-//! against the canonical project root — no KVM, no MSB daemon, no OCI image,
-//! no `[workspace]` profile section. This scenario therefore runs in the
-//! ordinary lane (not `#[ignore]`-gated): a broken Direct-Local environment
-//! is a real product failure, never something to skip. RFC #19 decision
-//! three: the smoke does **not** assert on prompt shape, colors, or layout.
-//! Prompt recognition and ANSI cleanup live inside `PtyTuiDriver`; the
+//! Since #62 (Codeberg #40) the turn chain is Direct-Local: the TUI drives a
+//! real turn against the canonical project root — no KVM, no MSB daemon, no
+//! OCI image, no `[workspace]` profile section. This scenario therefore runs
+//! in the ordinary lane (not `#[ignore]`-gated): a broken Direct-Local
+//! environment is a real product failure, never something to skip. RFC #41
+//! decision three: the smoke does **not** assert on prompt shape, colors, or
+//! layout. Prompt recognition and ANSI cleanup live inside `PtyTuiDriver`; the
 //! scenario asserts only semantic markers (a turn produced visible assistant
 //! text and the TUI exited cleanly).
 //!
-//! What it proves (issue #21 acceptance point: at least one PTY smoke):
+//! What it proves (issue #43 (Codeberg #21) acceptance point: at least one
+//! PTY smoke):
 //!
 //! - `lattice tui --agent <name> --project-branch <branch>` starts, prints
 //!   a banner, and accepts a prompt.
@@ -88,7 +89,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
 
     // Wait for the TUI to be ready for input. Prompt recognition lives
     // inside the driver (`wait_for_prompt`); the scenario never matches the
-    // prompt shape itself (RFC #19 decision three).
+    // prompt shape itself (RFC #41 decision three).
     tui.wait_for_prompt(Duration::from_secs(30))
         .expect("tui banner/prompt appeared");
 

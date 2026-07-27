@@ -72,6 +72,8 @@ Severity: HIGH（CI 双平台红；本机复现率 11/40 ≈ 27%）。
 **Changed files:**
 `crates/lancet-api/src/config.rs`; `crates/lancet-api/src/audit.rs`; `FIX.md`.
 
+**后续（合并 GitHub #39 时）:** 上述 `config::XDG_STATE_HOME_LOCK` / `lock_xdg_state_home()` 在与 #39 合并时被移除，**不是回退**：#39 把 XDG 隔离整体下沉到 `lancet-audit::test_support`，`lancet-api` 内再无任何 `set_var("XDG_STATE_HOME")` 调用点，唯一写入者变成持 `ENV_MUTEX` 的 `ScopedXdgStateHome`。「一把锁守一个进程全局变量」的不变量由此从 crate 级升为 workspace 级；此处的锁在合并后已无消费者。
+
 ## 并发测试改写进程全局 CWD 导致的跨测试 flake（CI 双平台红）+ 依赖图与 crate 计数文档漂移 — 2026-07-27
 
 Severity: HIGH（阻断 CI 双平台）/ MEDIUM（文档漂移）。
@@ -226,6 +228,170 @@ Severity: test correctness (cross-checkout write) / release-evidence gap.
 
 **Changed files:**
 `crates/lancet-native/tests/cep_warn_harness.rs`; `.github/workflows/full-gate.yml`; `xtask/src/ci.rs`; `xtask/src/rollout.rs`; `Cargo.toml`; `crates/lattice-tool-prelude/Cargo.toml`; `tools/noop/Cargo.toml`; `docs/TESTING.md`; `FIX.md`.
+
+## GitHub #39: sink operator audit read into `lancet-audit` + four Local Workspace defects — 2026-07-27
+
+Severity: architecture / ownership boundary (half 1) + security-hardening and correctness (half 2).
+GitHub #39 = Codeberg #17; the bare `#37/#38/#39/#40` workstream-A references elsewhere in this
+file are Codeberg numbers (GitHub #59–#62) and are a different ticket.
+
+**Problem:**
+- **Half 1 — misplaced ownership.** `lancet-api::audit` owned the operator audit read
+  *behavior* (DTOs, the tail pagination loop, filter construction, wire projection, the replay
+  attestation comparison) even though every byte it touches belongs to `lancet-audit`'s store.
+  The external project-keyed store-path helpers sat in `lancet-api::config` for the same
+  accidental reason. Six operator-only DTOs squatted in `lancet-catalog/src/methods/audit.rs`,
+  inflating the central catalog surface that #34 has to delete, and inviting a future reading of
+  operator audit as a Tool contract. The "operator reads never compose a CEP server" invariant was
+  asserted by two source-string-scan tests that RFC #41 decision 6 had already deleted, leaving
+  three module doc comments pointing at nothing. Two byte-identical copies of the
+  `XDG_STATE_HOME` test helper (`lattice-api/src/test_env.rs`,
+  `lattice-cli/src/commands/test_env.rs`) each carried their own process-global env mutex — the
+  exact duplication shape that produced the ENV-OOM-02 flake.
+- **Half 2 — four PR #74 review defects in the Local Workspace** (`lancet-native`
+  `src/workspace/local.rs`): grep read whole files with `fs::read_to_string` (unbounded memory on
+  a large file, and one invalid UTF-8 byte discarded every match in the file); `list_dir` used
+  following `metadata()`, so a single dangling symlink failed the entire listing instead of
+  reporting `PathKind::Symlink`; `glob_match` was a substring/prefix approximation rather than a
+  real matcher; and the write path resolved securely but then re-touched the filesystem *by path*,
+  leaving a TOCTOU window between `resolve_secure` and `create`/`rename`/`unlink` in which a
+  parent component could be swapped for a symlink.
+
+**Fix:**
+- New `lancet-audit/src/operator.rs` owns `AuditRequest`, `AuditQueryOutput`, `AuditTailOutput`,
+  `AuditReplayRequest`, `AuditReplayResult`, `AUDIT_TAIL_MAX_ROWS`, `AUDIT_TAIL_MAX_BATCHES`,
+  `OperatorAuditError{Config,Internal}`, `OperatorAuditResult`, and async `query_audit` /
+  `tail_audit` / `replay_audit`. Error message strings are byte-identical to the old `lancet-api`
+  ones. New `operator_tests.rs` holds the moved contract tests; new `store_path.rs` holds
+  `ExternalAuditPathError`, `audit_state_root`, `project_storage_key`,
+  `audit_db_path_for_project`, `audit_db_path_for_project_in` and their tests.
+- New `lancet-audit/src/test_support.rs` behind feature `test-support` is now the single
+  workspace-wide `ScopedXdgStateHome`; both crate-local copies were deleted and `lattice-api` /
+  `lattice-cli` consume it as `lancet-audit = { workspace = true, features = ["test-support"] }`
+  dev-dependencies. `lancet-audit` gained `dirs` + `sha2` and optional `tempfile`.
+- `lancet-api/src/audit.rs` is now a facade: re-exports plus three one-line delegations mapping
+  `OperatorAuditError` → `LancetError`. `src/config.rs` keeps `AuditBacking` +
+  `LancetRuntimeConfig` and re-exports the moved path helpers; `src/lib.rs` re-exports
+  `AuditReplayResult` from `lancet_audit`. Every `lancet_api::*` public path is unchanged, and
+  the now-unused `dirs` / `sha2` deps were dropped.
+- `lancet-catalog/src/methods/audit.rs` deleted with its `methods/mod.rs` wiring, removing all six
+  operator DTOs (`AuditQueryParams`, `AuditQueryResult`, `AuditTailParams`, `AuditTailResult`,
+  `AuditReplayParams`, `AuditReplayResult`). None became a Tool descriptor, generated inventory
+  entry, Agent catalog method, or Component.
+- **Structural consequence:** `lancet-audit` depends only on `lancet-protocol`, `lancet-catalog`,
+  `blake3`, `dirs`, `rusqlite`, `serde`, `serde_json`, `sha2`, `thiserror`, `tokio`, `tracing`
+  (+ optional `tempfile`) — no `lancet-native` / `lancet-dispatch` / `lancet-cep` /
+  `lancet-runtime`. "Operator audit read never composes a CEP server" is therefore a crate
+  dependency-graph guarantee, not a source-string-scan assertion. Three module doc comments
+  (`lancet-audit/src/operator.rs`, `lancet-api/src/audit.rs`, `lattice-cli/src/commands/audit.rs`)
+  were rewritten to say exactly that, replacing the dangling references to the deleted scan tests.
+- **Grep byte budget:** `GREP_MAX_FILE_BYTES` (8 MiB), `GREP_MAX_TOTAL_BYTES` (64 MiB walk
+  aggregate), `GREP_MAX_LINE_BYTES` (64 KiB), `struct GrepBudget`; new `grep_file` streams with
+  `BufReader` + `Read::take`. Files above the per-file cap are skipped before being opened.
+- **`list_dir` symlinks:** uses `DirEntry::file_type()` (no following) via the new
+  `file_type_kind`, so symlinks — including dangling ones — list as `PathKind::Symlink` instead of
+  failing the whole listing. `metadata_kind` remains for the `resolve_secure` callers.
+- **`glob_match`:** rewritten as an iterative two-pointer fnmatch matcher supporting `*`, `?`, and
+  `[abc]` / `[a-z]` / `[!...]` classes (unclosed `[` is literal), with a `match_char_class` helper.
+  It backs both `find_files` patterns and grep's glob file filter.
+- **Write-path TOCTOU closed:** new private `LocalWorkspace::open_parent_dir_secure` walks the
+  parent chain component-by-component with `rustix` `openat`
+  (`O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`) relative to the already-pinned fd, with `mkdirat`
+  + EEXIST-tolerant retry when creating. `create_excl`, `install_atomic`, and `remove_file` now
+  reach the filesystem only through that pinned fd with single-component leaf names (`openat`
+  `O_CREAT|O_EXCL`, `renameat`, `unlinkat`, `fsync` on the dirfd); the path-based `fsync_dir` is
+  gone. Portable across Linux + macOS (no `openat2`/`O_PATH`). It is deliberately NOT claimed as
+  `openat2(RESOLVE_BENEATH)`-equivalent: adversarial review of this branch demonstrated (C replica)
+  that pinning defeats symlink substitution but NOT a rename of the pinned directory out of the
+  workspace between the pin and the leaf operation, because the fd follows the inode and nothing in
+  that attack is a symlink. Recorded as accepted residual `L-39-04`; the original reported defect
+  (a parent component swapped for a **symlink** after `resolve_secure`) is closed.
+  `rustix` (features `["fs"]`) added to root `[workspace.dependencies]` and
+  `crates/lancet-native/Cargo.toml`.
+- **`lancet-native` public surface contained:** `pub mod audit` now re-exports `lancet_audit::audit`
+  (persistence only) instead of globbing the `lancet_audit` crate root, which since this issue also
+  carries the operator read path — a root glob would have republished `query_audit` / `tail_audit` /
+  `replay_audit` as `lancet_native::audit::*`.
+- **New boundary gate:** `cargo xtask lancet-boundary` gained
+  `lancet_audit_forbidden_dependency_graph`, failing if `lancet-audit` ever gains a `lancet-native` /
+  `lancet-dispatch` / `lancet-cep` / `lancet-runtime` dependency (dev-dependencies included). The
+  triage ledger justified deleting the two source-string-scan boundary tests with
+  "架构边界由 crate 依赖/边界检查负责" — that owner did not previously exist. Negative-tested:
+  adding `lancet-cep` to `lancet-audit` makes the gate FAIL.
+- **Deliberate behavior deltas:** an over-cap file is silently skipped by grep (callers see fewer
+  matches, no error); grep keeps matches found before a mid-file IO/invalid-UTF-8 error instead of
+  dropping the whole file; a parent path component that is a regular file now surfaces as
+  `SymlinkRejected` (ENOTDIR from the `O_DIRECTORY` walk) rather than `Io`.
+- Ledger: 10 identities moved `lancet-api` → `lancet-audit` (decision/target-layer/reason
+  unchanged), 4 line-only refreshes stayed in `lancet-api`, and
+  `audit_replay_params_require_turn_id_field` flipped keep → delete with its DTO. Totals
+  keep 1191→1190 / delete 216→217 / elevate 42 unchanged (1449 identities unchanged).
+
+**Adversarial acceptance pass (13 agents, one skeptic per acceptance criterion plus a refuter
+per PASS).** 6 criteria PASS with the refutation upheld; the Local Workspace criterion came back
+PARTIAL and produced four real corrections, all applied here:
+- The `open_parent_dir_secure` doc claimed `openat2(RESOLVE_BENEATH)` equivalence. A C replica of
+  the walk disproved it (renaming the pinned directory out of the workspace between pin and leaf
+  op lands the create outside). Doc comment, `AGENTS.md`, and this entry corrected; residual filed
+  as `L-39-04`. The originally reported symlink-substitution defect remains closed.
+- `pub mod audit` in `lancet-native` globbed the `lancet_audit` crate ROOT, so this issue silently
+  republished `query_audit`/`tail_audit`/`replay_audit` as `lancet_native::audit::*`. Narrowed to
+  `lancet_audit::audit` (persistence only).
+- The install temp name had no `EEXIST` retry, so pid recycling after a SIGKILL (or two PID
+  namespaces over one bind-mounted workspace) surfaced a bare `Io` error. Now retries up to
+  `INSTALL_TMP_NAME_ATTEMPTS` fresh sequence numbers.
+- `lancet-api` carried `rusqlite` as an unused dev-dependency after the legacy-schema tests moved
+  out; removed. Three `lattice-api` integration fixtures still set `XDG_STATE_HOME` with a raw
+  unlocked `unsafe set_var`; converted to the shared `ScopedXdgStateHome` guard, so
+  `grep -rn 'set_var("XDG_STATE_HOME"' crates/` is now empty workspace-wide.
+- Two tail-cursor edges the move could have silently regressed had no test: added
+  `tail_audit_empty_result_keeps_requested_cursor` (the `unwrap_or(since)` fallback) and
+  `tail_audit_exactly_max_rows_is_a_single_batch` (the `>` vs `>=` cap boundary).
+- Remaining review findings accepted as residuals `L-39-04` … `L-39-07`.
+
+**Verification:**
+- `cargo fmt --all --check` — clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- `cargo test -p lancet-audit --features test-support` — 52 passed.
+- `cargo test -p lancet-api` — 7 passed.
+- `cargo test -p lancet-catalog` — 26 passed.
+- `cargo test -p lancet-native` — 139 lib + 16 integration passed (155 total).
+- `cargo test -p lattice-cli` — 108 lib + 4 integration passed.
+- `cargo test -p lattice-api` — 91 lib + 45 integration passed (136 total), including the three
+  converted `ScopedXdgStateHome` fixtures.
+- New gate `cargo xtask lancet-boundary` → `PASS [lancet-audit forbidden dependency graph
+  (operator read stays CEP-server-free)]`, negative-tested: adding `lancet-cep` to
+  `crates/lancet-audit/Cargo.toml` makes it FAIL.
+- Ledger recount: 1449 identities; keep 1190 / elevate 42 / delete 217; prose per-crate headers
+  and the §1 summary tables re-derived from `docs/test-triage-decisions.json` with zero mismatches.
+- `cargo xtask harness-boundary` / `lancet-boundary` / `tool-codegen --check` — all passed.
+- Operator audit black-box lanes (`LATTICE_BIN=target/debug/lattice`):
+  `cargo test -p lattice-system-harness --test fast_audit_cli` — 4 passed (missing-store
+  query json/text, tail, replay); `--test direct_operator` — 3 passed
+  (`direct_operator_audit_session_lancet_cross_validate` cross-validates a real seeded turn:
+  query rows + `--method` / `--verdict` filters + `--tail` + replay with
+  `stored_statement_match=true`; plus unknown-session-empty and unknown-turn-fails).
+- `cargo xtask ci` — **All checks passed** (`CARGO_BUILD_JOBS=4`; no `LATTICE_SKIP_KNOWN_HANGS`
+  needed). Run twice: once before the adversarial pass (2:58.82 wall) and once after its
+  corrections landed.
+
+**Changed files:**
+`Cargo.toml`; `Cargo.lock`;
+`xtask/src/lancet_boundary.rs`; `xtask/src/lancet_boundary/check.rs`;
+`crates/lancet-native/src/lib.rs`;
+`crates/lattice-api/tests/{audit_turn_provenance,dogfood_impact_matrix,release_e2e}.rs`;
+`crates/lancet-audit/Cargo.toml`; `crates/lancet-audit/src/lib.rs`;
+`crates/lancet-audit/src/{operator,operator_tests,store_path,test_support}.rs` (new);
+`crates/lancet-api/Cargo.toml`; `crates/lancet-api/src/{audit,config,lib}.rs`;
+`crates/lancet-catalog/src/methods/audit.rs` (deleted); `crates/lancet-catalog/src/methods/mod.rs`;
+`crates/lancet-native/Cargo.toml`; `crates/lancet-native/src/workspace/local.rs`;
+`crates/lattice-api/Cargo.toml`; `crates/lattice-api/src/lib.rs`;
+`crates/lattice-api/src/test_env.rs` (deleted); `crates/lattice-api/src/turn/{cep,cep_tests}.rs`;
+`crates/lattice-cli/Cargo.toml`; `crates/lattice-cli/src/commands/{audit,mod}.rs`;
+`crates/lattice-cli/src/commands/test_env.rs` (deleted);
+`docs/test-triage-decisions.json`; `docs/TEST-TRIAGE.md`; `docs/ARCHITECTURE.md`; `docs/LANCET.md`;
+`crates/{lancet-audit,lancet-api,lancet-catalog,lancet-native,lattice-api,lattice-cli}/AGENTS.md`;
+`AGENTS.md` (root); `FINDINGS.md`; `FIX.md`.
 
 ## GitHub #46 residual finalization: fetch capability pre-outbound + scenario tighten — 2026-07-24
 

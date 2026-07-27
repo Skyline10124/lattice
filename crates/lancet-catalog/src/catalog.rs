@@ -258,7 +258,8 @@ mod catalog_default_snapshot {
         }
     }
 
-    /// Regression test for issue #11: audit methods are operator-read only.
+    /// Regression test for issue #33 (Codeberg #11): audit methods are
+    /// operator-read only.
     #[test]
     fn catalog_excludes_audit_agent_methods() {
         for name in ["observe.audit", "observe.audit_replay"] {
@@ -269,9 +270,9 @@ mod catalog_default_snapshot {
         }
     }
 
-    /// Regression test for issue #4: `exec.command_run` is permanently retired
-    /// from the CEP catalog. The catalog must contain exactly 5 methods and
-    /// must NOT include `exec.command_run`.
+    /// Regression test for issue #26 (Codeberg #4): `exec.command_run` is
+    /// permanently retired from the CEP catalog. The catalog must contain
+    /// exactly 5 methods and must NOT include `exec.command_run`.
     #[test]
     fn catalog_retires_exec_command_run() {
         assert_eq!(catalog().len(), CATALOG_LEN);
@@ -281,8 +282,8 @@ mod catalog_default_snapshot {
         );
     }
 
-    /// Regression test for issue #15: `mutate.batch` is permanently retired from
-    /// the CEP catalog.
+    /// Regression test for issue #37 (Codeberg #15): `mutate.batch` is
+    /// permanently retired from the CEP catalog.
     #[test]
     fn catalog_retires_mutate_batch() {
         assert_eq!(catalog().len(), CATALOG_LEN);
