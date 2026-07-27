@@ -2,6 +2,231 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #111 部分收口：给两条断言强度不足的测试补上实质断言 — 2026-07-27
+
+Severity: LOW（**经对抗性复核下调，原评 HIGH 有误——见下方「严重度更正」**）。
+
+收口 **#111** 中 6 条的第 1、2 条（其余 4 条留 #111，见下方 Residual）。
+
+**严重度更正（同日，落地后复核）:** 本条目初稿评为 HIGH，理由是「两条安全不变量的回归网失效」。**该判断是错的**，已实测推翻，故在此更正而非删改原文（append-only）。两个不变量都另有测试守着，且都在每个 PR 必跑的 `cargo test --workspace` 里：
+
+- **deny-all 退化**：给 `decide()` 注入无条件 `Denied` 后，**修复前就存在的** `crates/lancet-authority/tests/policy_tests.rs` 立刻 5 条 FAILED（`allows_observation_without_denied_patterns`、`allows_mutation_with_no_denied_patterns`、`allows_mutation_not_in_deny_list`、`denies_network_host`、`denies_observation_budget_exhausted`）。全仓 `PolicyDecision::Allowed` 断言共 9 处，其中 `policy_tests.rs:50/63/74` 正是「blacklist 误改回 allowlist」的对偶断言，`lancet-native/tests/policy_integration.rs:63/97` 覆盖网络短路场景。fuzz 套件对该退化盲，但它不是唯一防线。
+- **System Path Exclusion 被删**：`crates/lattice-system-harness/tests/direct_mutation.rs:475` 的 sys_deny 场景用**空 extra_profile** 尝试写 `.lattice/evil.txt`，其拒绝完全依赖 `default.rs:156-160` 压入的前缀；该文件 `#[ignore]` 计数为 0，`.github/workflows/ci.yml:44` 的必需 job 就是 `cargo test --workspace`。且它验证的正是 effect region——`mutation.rs:226` 传给 `validate_path_facts` 的第三参数就是 `ctx.authorized_region`。
+
+因此本次改动的真实价值是**回归定位速度**（单元测试直接指出是 region 构造问题，而不必等一个 full-turn harness 场景失败后反推）与**测试诚实性**，不是补防护缺口。另外复核纠正了一处事实误读：`biased_allowed_inputs()` 并非「6 条应当放行的输入」——`exec.command_run` 的源码注释明写它预期 `NonDeterminable`，故原属性名 `..._stable` 与其文档串其实是自洽的，不存在初稿所称的「文档/代码矛盾」。
+
+**Problem:**
+
+1. **`guard_decide_fuzz` 的 allow 侧从不断言 `Allowed`。** `crates/lancet-authority/tests/guard_decide_fuzz.rs` 的文件头声明策略 1 是「biased_allowed — exercises positive policy branches」，`biased_allowed_inputs()` 精心构造了 6 条输入，但两个消费它的 proptest 属性只断言**同一输入两次调用结果相等**，全文件 `PolicyDecision::Allowed` 出现 **0 次**。而 `DefaultPolicyHook` 是纯函数（`decide` 直接委托 `decide_with_evidence`，结构体只持 `config` 与 `resolver`，无内部可变状态），所以「同一输入两次同结果」在任何实现下恒真——该断言**不可能失败**。deny 侧有实质断言 `matches!(.., Denied{..})`，allow 侧没有对偶。后果：策略若退化为「全部拒绝」（例如把 blacklist 语义误改回 allowlist，使空 `denied_write_patterns` 变成"什么都不许写"），256 个 case 全返回 Denied 但两两相等，整套 fuzz 零信号。
+
+2. **宣称验证 System Path Exclusion 的测试只断言 vec 非空。** `authorized_region_for("mutate.create", ..)`（`policy/default.rs:156-160`）无条件把 `SYSTEM_PATH_EXCLUSIONS`（`.git` / `.lattice`）压入 `denied_write_path_prefixes`，注释写明这是 host-enforced 且不可 profile 配置（ADR 0003）。唯一覆盖它的测试 `workspace_policy_applies_denied_patterns_to_mutate_region` 传入 `denied_write_patterns: vec!["crates/**"]` 后只断言 `assert!(!...is_empty())` —— 而 `"crates/**"` 自己就会推入**同一个** vec，因此该断言由 profile pattern 独力满足，与两条系统排除毫无关系。全仓确认无任何测试断言 `.git`/`.lattice` 确实在该 vec 中。后果：删掉那个 exclusion 循环，测试仍绿，而任何未显式列出 `.git/**` 的 profile 其 mutate effect region 都不再拒绝 `.git/`、`.lattice/` 写入。
+
+**Fix:**
+
+1. 新增 proptest 属性 `guard_decide_fuzz_biased_allowed_reaches_expected_decision`：对该集合逐条断言实际决策。先用一次性探针确认了各输入的真实决策（5 条 `Allowed`，`exec.command_run` 为 `Denied{NonDeterminable}`——与其源码注释一致，它是已退役方法，有意留在正向集合里），故断言按方法分支：退役方法必须是 `NonDeterminable`，其余必须是 `Allowed`。保留原幂等属性不动（它验证的是纯函数性，仍有价值），只是不再让它独自承担分类正确性。
+2. 把 `workspace_policy_applies_denied_patterns_to_mutate_region` 的断言改为按名检查 profile pattern 确实到位（`.any(|p| p.ends_with("crates"))`），并新增 `mutate_region_carries_system_path_exclusions_without_any_profile_pattern`：**故意配空 `denied_write_patterns`**，对 `mutate.create` 与 `mutate.edit` 各断言 `.git` 与 `.lattice` 逐条在 region 里。空 pattern 是关键——只有这样才能把系统排除与 profile 贡献彻底分离。
+
+**Verification:**
+- `cargo test -p lancet-authority` — 126 + 6 + 2 + 11 passed / 0 failed。
+- **反向验证（本修复的核心证据，两条各做一次）**：
+  - 删除 `default.rs:156-160` 的 `for exclusion in SYSTEM_PATH_EXCLUSIONS` 循环 → 新测试 FAILED 并报 `mutate.create: host-enforced exclusion ".git" missing from denied_write_path_prefixes: []`；**同时原有的 `!is_empty()` 断言仍然通过**，正是它当初漏掉这个缺陷的原因。
+  - 让 `decide()` 对所有输入返回 `Denied{NonDeterminable}` → 新属性 FAILED 并报 `positive-path input observe.workspace must be Allowed, got Denied{...}`；**同时两个原有幂等属性仍然通过**。
+  - 两次改动后均已确认 `git diff` 干净（源码逐字还原），并重跑全部测试为绿。
+- `cargo fmt --all --check`、`cargo clippy -p lancet-authority --all-targets -- -D warnings` — passed。
+
+**Residual:** #111 的其余 4 条留在该 issue 追踪，本次未动，因为它们需要的不是断言改写而是新增测试基础设施：**#111-3** `cep_warn_harness` 默认 CI 路径只读已提交 markdown（需把 `generate_warn_report()` 改为默认执行路径）；**#111-4** `fetch.web` 上限测试的 fixture（22 字节）小于上限（64 字节）且断言为析取（需换超限 fixture 并拆成合取）；**#111-5** `direct_secrets` 的 denied-content 哨兵场景 `tools.enabled = []` 致被读路径不存在（需启用 `observe.workspace` 并重写脚本）；**#111-6** Component deadline→`ToolTimeout` 无可失败测试（需要一个会自旋的 fixture guest，与 M-TOOL-02 相邻）。
+这 4 条的严重度**同样经复核下调为 LOW**，理由与上面两条同构——每条声称的「缺陷会静默通过」都被另一处测试切断：#111-3 被 `crates/lattice-api/tests/cep_mode_integration.rs:144-169` 对 `effect_warning` 的硬断言切断（且 `server/transport.rs:311-410` 的 effect 检查是方法无关的，无 per-method Warn 分支）；#111-4 被 `crates/lancet-native/src/handlers/external.rs:384-420` 的 `native_web_fetch_truncates_over_cap_response` 切断（500 字节 body 配 100 字节上限，断言 `body.len()==100` 且 `truncated==Some(true)`）——初稿的错误很具体：`rg max_web_response_bytes` 时把范围限定在 harness，漏掉产品 crate 内的真覆盖；#111-5 被 `crates/lattice-system-harness/tests/direct_observation.rs` 的完整读拒绝矩阵切断（`denied_read_patterns` 短路会让 `expected_ok`、无 JSON result、8 条 `GuardDenied` 三处同时变红），且该 world 的 extra_profile 为空、`private.txt` 已 tracked，按 `policy/visibility.rs:78-90` 它其实是 **Visible**，连「denied」都不是；#111-6 的危害论证不可达——当前封闭 world 无任何可阻塞的 host call（只 `import host-control`，`cancelled` 读 flag、`emit_event` 用 `try_send`，无 WASI/IO/sleep），故长跑 guest 必然消耗 wasm 指令并被 `set_fuel` 有界终止，deadline 是 fuel 之上的纵深；且 `EXPECTED_COMPONENTS` 为空使生产路径不可达，属有意的迁移中间态，已关闭的 #69 亦已在位记录该测试形态。复核另指出两个比原发现更有价值的方向：`direct_secrets` 相对 slice6 plan 真正缺的是 `audit query --tail`／`audit replay`／provenance JSON 三个 sink；epoch 回调的 **cancellation** 分支（`runtime.rs:269-272`）与 deadline 分支同样零覆盖。
+
+**Changed files:**
+`crates/lancet-authority/tests/guard_decide_fuzz.rs`; `crates/lancet-authority/tests/policy_tests.rs`; `FIX.md`.
+
+## 两把互不相干的 mutex 守同一个 `XDG_STATE_HOME`，且 poison 后 panic 放大失败 — 2026-07-27
+
+Severity: HIGH（CI 双平台红；本机复现率 11/40 ≈ 27%）。
+
+**Problem:**
+
+`cargo test -p lancet-api --lib` 在 CI 与本机随机失败，两种形态：
+
+- `replay: Config("audit database not found at /var/folders/.../lattice/projects/<hash>/cep_audit.db; run an agent turn in this project first")` —— 测试自己 seed 过的 DB 找不到了。
+- `xdg test lock: PoisonError { .. }` 一次性 **9 个测试**同时失败。
+
+根因两条，叠加：
+
+1. **两把互不相干的 mutex 守同一个进程全局变量。** `crates/lancet-api/src/config.rs:200` 的 `audit_state_root_prefers_absolute_xdg_state_home` 里有一把私有的 `static ENV_LOCK`，`crates/lancet-api/src/audit.rs:385` 的 `IsolatedProjectAudit::setup` 里有另一把 `static XDG_TEST_LOCK`。两者都 `set_var("XDG_STATE_HOME")`，而 `config.rs:46` 的 `audit_state_root()` 读它。两把锁**互不排斥** —— 同一 test binary 内并发时，`config` 那个测试把变量改成自己的 tempdir（甚至故意改成 `"relative/path"` 以验证 XDG 规范），持 `XDG_TEST_LOCK` 的 audit 测试随即解析到错误的 state root，于是"自己刚 seed 的 DB 不存在"。加锁给了**虚假的安全感**：代码看起来是串行化的，实际完全没有。
+
+2. **poison 后 panic，把一次失败放大成雪崩。** `audit.rs:395` 用 `.expect("xdg test lock")`。该 guard 跨断言持有，所以任何一个持锁测试失败都会 poison 这把锁，之后每个测试都以 `PoisonError` 失败 —— CI 上 9 failed 里只有 2 个是真失败，另外 7 个是噪音，而且**真正的首个失败被埋在噪音里**，这正是这条 flake 长期没被定位的原因。
+
+**Fix:**
+
+- 收敛为**一把** crate 级锁 `config::XDG_STATE_HOME_LOCK`，放在读取该变量的模块里，并提供 `config::lock_xdg_state_home()` 访问器。两处调用点改为共用它，删除 `audit.rs` 的 `XDG_TEST_LOCK`。
+- 访问器用 `unwrap_or_else(|poisoned| poisoned.into_inner())` —— guard 里的数据是 `()`，panic 不可能破坏任何不变量，因此 poison 容忍是正确语义而非将错就错。文档注释写明"永远不要用 `.unwrap()`/`.expect()` 取这把锁"及其原因，防止回归。
+- 在 `XDG_STATE_HOME_LOCK` 的 doc 注释里明确记下"必须是全 crate 唯一一把"，并附上这次的失败率数据作为反面教材。
+
+**Verification:**
+- **压测**：`cargo test -p lancet-api --lib` 连跑 **60 次 0 失败**（修复前 11/40 ≈ 27%）；修掉顺带的 unused import 后再跑 **40 次 0 失败**。
+- `cargo test -p lancet-api` 全 target 绿（18 passed）。
+- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings` — passed。
+- 顺带全仓 sweep 了同类模式：其余三处 env mutex（`lattice-llm`、`lattice-cli/commands/test_env.rs`、`lattice-api/src/test_env.rs`）分属不同 test binary，互不干扰，且后两者已是 poison 容忍的；`lattice-api/src/test_env.rs` 的注释已说明与 `lattice-cli` 副本需保持同步。无需改动。
+
+**Changed files:**
+`crates/lancet-api/src/config.rs`; `crates/lancet-api/src/audit.rs`; `FIX.md`.
+
+## 并发测试改写进程全局 CWD 导致的跨测试 flake（CI 双平台红）+ 依赖图与 crate 计数文档漂移 — 2026-07-27
+
+Severity: HIGH（阻断 CI 双平台）/ MEDIUM（文档漂移）。
+
+**Problem — CWD flake:**
+
+推送 #80 review 修复后 ordinary CI lane 在 **ubuntu 与 macos 同时**变红，失败形态是 `lattice-api` 的 `consistency` 测试报：
+
+```
+create session: Internal("git error: open repository: \"/var/folders/.../T/.tmpo3HKle/sessions\"
+does not appear to be a git repository; init_bare: Could not obtain the current directory")
+```
+
+诊断：**不是本轮改动引入的回归** —— `git diff 103478f8..HEAD` 对 `crates/lattice-api`、`crates/lattice-session` 零触碰。是一条既有 flake 被这次推送暴露。本机压测复现 **2/40**，与 CI 同签名。
+
+根因链：
+1. `crates/lattice-api/tests/{consistency,usage_turn,release_e2e,audit_turn_provenance}.rs` 的请求构造函数调用 `std::env::set_current_dir(&ws.root)` —— CWD 是**进程全局**的，而这些文件各有多个 `#[tokio::test]` 在同一进程内**并发**执行，每个持有自己的 `TempDir`。
+2. 测试 A 把进程 CWD 指向自己的 TempDir；A 结束、`TempDir` drop 删目录后，进程处于「CWD 指向已删除路径」状态。
+3. 此时并发的测试 B 调 `gix` —— **`gix` 即使对绝对路径也会读取进程 CWD**，于是 B 以 `Could not obtain the current directory` 失败，尽管 B 自己的目录完好无损。
+4. `crates/lattice-session/src/test_utils.rs:32-50` 已有针对该现象的恢复逻辑（且注释明确点名 lattice-api 的这三个 fixture 是肇事者），但**生产路径** `git_graph/mod.rs` 的两处 init 没有。
+
+**关键观察**：这四处 `set_current_dir` 全都是**多余的** —— 同一个请求结构体里已经显式传了 `test_project_root`（`consistency.rs:169` 等），而 `crates/lattice-api/src/turn/mapping.rs:36-43` 的 `resolve_project_root` 只在 `test_project_root` 为 `None` 时才回落到 `current_dir()`。也就是说这些测试从不依赖 CWD，纯粹在制造危害。
+
+**Fix:**
+
+1. **删掉四处多余的 `set_current_dir`**（治本：消除竞态源头，而非用 mutex 串行化掩盖）。每处留注释说明为何**故意不设** CWD，避免被"好意"加回。
+2. **给生产路径补 CWD 恢复**：`git_graph/mod.rs` 新增 `init_recovering_cwd()`，包裹 `gix::init_bare` 与 worktree init 两条路径。失败信息含 `CurrentDir` 时，把 CWD 指到 `temp_dir()` 后重试一次。这不只是测试便利 —— 真实用户在 checkout 被删、卷被卸载后会撞上同一个无从下手的错误。
+   实现中踩到并修掉一个坑：**朴素重试会失败**。gix 在需要 CWD 之前就已创建 `.git` 目录，所以首次失败会留下半成品，重试报 `Refusing to initialize the existing '...' directory`（压测实测到这一形态）。故 `init_recovering_cwd` 接受一个 `reopen` 闭包，第二次尝试失败时改为 `open` 已存在的仓库。
+
+**Problem — 文档漂移（顺带修，见 #102 / #86 / #108）:**
+
+- `AGENTS.md:45-62` 的分层依赖图与实际 `Cargo.toml` 有 **7 条差集**：`lattice-llm -> net-guard` 未画（且这使 `net-guard` 与 `lattice-llm` 不能同列 Layer 0）；`lattice-api` 实际还直连 `lancet-protocol`/`lancet-catalog`/`lancet-authority`/`lancet-native`，图里概括成 "+ lattice runtime crates"；`lattice-cli` 实际还直连 `lancet-api`。全部边都是**向下**的，不构成分层违规，但概括式表述无法与 `cargo metadata` 比对，因而藏住了这些边。
+- crate 计数在四份文档里各说各话：README 15、`docs/ARCHITECTURE.md` 15、`docs/DEVELOPMENT.md` 16、`docs/GETTING-STARTED.md` 16，实际 **19**；README 的 crate 表还漏了 `lancet-runtime`、`lattice-tool-prelude`、`lattice-system-harness` 三个。
+- `docs/DEVELOPMENT.md` 说需要 Rust **1.88+**，实际 `Cargo.toml` 要求 1.94、`rust-toolchain.toml` 钉 1.96.0。
+- README 的 `lancet-native` 角色写着 "verify, edit/shell/web helpers" —— `exec.command_run` 与 post-mutation verify 已由 #26/#37 **永久退役**，属活文档里的退役词汇。
+
+**Fix:** 逐条改正；`AGENTS.md` 与 README 的图改为**逐条列出每条真实边**（并说明为何不再用概括写法），补上 `lancet-runtime`，并注明 `lattice-tool-prelude`/`lattice-system-harness` 按契约不在图内（已核实二者确无 workspace 内部依赖）。新增门禁测试 `documented_crate_counts_match_the_crates_directory`，把四份文档的计数钉到 `crates/` 目录实际条目数。同时在 `AGENTS.md` 图下显式记录「今天只有一条边被机器检查」并指向 #108。
+
+**Verification:**
+- **压测（本修复的核心证据）**：`consistency` 连跑 **100 次 0 失败**（修复前 2/40 ≈ 5%）；`usage_turn` / `release_e2e` / `audit_turn_provenance` 各 30 次 0 失败。
+- `cargo test -p lattice-api` — 全部 target 绿（91 + 8 + 5 + 5 + 10 + 其余）。
+- `cargo test -p lattice-session` — 54 passed / 1 ignored。
+- `cargo test -p xtask` — 48 passed（含新增计数门禁）。
+- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings` — passed。
+- 计数门禁**反向验证**：把 `docs/GETTING-STARTED.md` 改成 "18 crates" → FAIL 并给出可执行提示；改回后 PASS。
+
+**Changed files:**
+`crates/lattice-api/tests/{consistency,usage_turn,release_e2e,audit_turn_provenance}.rs`; `crates/lattice-session/src/git_graph/mod.rs`; `AGENTS.md`; `README.md`; `docs/{ARCHITECTURE,DEVELOPMENT,GETTING-STARTED}.md`; `xtask/src/ci.rs`; `FIX.md`.
+
+## GitHub #80 review 收口：Component 里的宿主绝对路径、verify 证据丢失、encoder 指纹缺失 — 2026-07-27
+
+Severity: MEDIUM（阻断 #73 验收标准的结构性缺陷 + 证据收集失效）。
+
+对 PR #104（#80 的实现）做对抗性审查后落地的六项修复。三批独立 lens 高度重合地指向同一组缺陷，逐条实证核实后修复。推进 `FINDINGS.md` 的 **L-5-02**（仍为 ACCEPTED RESIDUAL，跨机证据未取得）。
+
+**Problem:**
+
+1. **committed `.wasm` 里烧进了维护者主机的 rustup sysroot 绝对路径（最严重）。** `xtask/src/tool_build.rs` 的 `build_guest` 只设了一条 `--remap-path-prefix`（workspace root），管不到 rustc 通过**本地 rustup 安装**解析的 std 源码路径。实测 `strings tools/noop/generated/noop_echo.component.wasm` 命中 `/home/astrin/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs` —— 而同一文件里其余 std 路径已被 rustc 规范化为 `/rustc/ac68faa2.../library/...`，唯独这一条漏网。后果：**任何跨机 `--verify` 都必然报 digest 漂移**，#80 刚接进 CI 的那条 lane 注定每晚误报，#73 要的跨机 bit-for-bit 证据在结构上无法取得。
+2. **verify 步骤缺 `if: always()`，且排在最易失败的 rollout 之后。** `.github/workflows/full-gate.yml` 把 `tool-build --verify` 放在 `cargo xtask rollout --channel alpha` 后面（意图是"跑最后，避免漂移警告掩盖前面的硬失败"），但没有 `if: always()`。rollout 是整条 lane 里最容易失败的 gating 步骤，它一失败 verify 直接被跳过 —— 恰好丢掉最值得检查的那些运行的证据。
+3. **verify 结果只存在于 job stdout。** 不进任何 `upload-artifact`，`#73` 所谓"可被引用的证据"实际取不回来。
+4. **步骤名标 `warn-only` 但该步骤有 6 条硬失败路径。** `tool_build.rs` 里只有 digest 不匹配是 warn（`:119-123`）；guest build、`wasm-tools component new`、`validate`、`wasi:*` import 断言、WIT world 一致性全部 `bail!`。名字与文档都在暗示"这步不会让 lane 变红"，与实际不符。
+5. **`EXPECTED_WASM_TOOLS` 的 doc 声称与 manifest 的 `[artifact] toolchain` 指纹保持同步，但该指纹里根本没有 wasm-tools**（原值 `rustc-1.96.0+wit-bindgen-0.59`）。而 encoder 恰恰决定 Component 字节，指纹漏掉它使 sha256 无法被解释。
+6. **`wasm_tools_version` probe 在工具缺失时仍写 `ok: true`**（`xtask/src/rollout.rs`），与紧邻的 `git_version`（探测失败写 `ok: false`）处理相反，release record 会声称成功探测了一个从未找到的工具。另外 `check_toolchain` 把"存在但不可用"也报成 `not found on PATH`，引导用户做无效重装。
+
+**Fix:**
+
+1. `build_guest` 改为设置**两条** `--remap-path-prefix`：workspace root，以及 `<sysroot>/lib/rustlib/src/rust` → `/rustc/<commit-hash>`（新增 `rustc_sysroot_and_commit_hash()` 从 `rustc --print sysroot` 与 `rustc -vV` 的 `commit-hash:` 读取，任一失败返回 `None` 而不影响构建 —— 少一条 remap 只损失可复现性，不该让构建失败）。映射到 rustc 自己用的同一前缀，使两种表示一致。重新 pin 后 digest 由 `6fcc7fc8...` 变为 `b677a9b3...`。
+2. verify 步骤补 `if: always()`，并在注释里写明理由（前置 rollout 最易失败，跳过就等于丢掉最该看的证据）。
+3. 输出 `tee` 到 `target/rollout/component-verify.log`，由既有的 `if: always()` upload 一并带走。用 `set -o pipefail` + `shell: bash`，否则 `tee` 会吞掉硬失败的退出码；`mkdir -p` 兜住 rollout 尚未创建目录的情况。
+4. 步骤名改为「Component 可复现性（digest 漂移 warn-only，#73 证据）」，并在 workflow 注释与 `docs/TESTING.md` 里明确列出 6 条硬失败路径 —— 是"漂移 warn-only"，不是"整步 warn-only"。
+5. `tools/noop/manifest.toml` 的指纹补为 `rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0`；`EXPECTED_WASM_TOOLS` 的 doc 改为列明必须一致的三处；新增门禁测试 `every_tool_manifest_fingerprint_names_the_expected_wasm_tools` 逐个 manifest 断言指纹含当前 encoder 版本，防止改 pin 而不重 pin 制品。
+6. probe 改为 `(value, ok)` 二元组，缺失时写 `ok: false` 并给出原因，与 `git_version` 对齐；新增 `WasmToolsProbe` 枚举区分 `NotOnPath`（仅 ENOENT）/ `Failed`（权限、非零退出、输出不可解析），`check_toolchain` 据此给出"安装"还是"修复"的正确指引。
+
+**顺带修复（由 1 触发的连带缺陷，实证了 #103）:** 重新 pin 后 `crates/lancet-runtime/src/generated/noop_fixture.rs` 里**手写**的两个 digest 与生成物脱节，composition gate 会 fail-closed 拒绝 fixture。该文件位于 `generated/` 目录下却无人生成、无人校验，正是 #103 记录的缺口。除同步两个 digest 外，新增 `fixture_digests_match_the_generated_expected_identity` 测试：`include_str!` 读入 `expected-identity.json` 并逐项比对 artifact/descriptor digest 与 abi-version，漂移时给出"跑完 `tool-build` 后把它抄过来"的可执行提示。反向验证：故意改末位一字符 → 测试 FAILED 且报出正确的期望值。
+
+**文档同步:** `docs/TESTING.md` 更正三处 —— pinned `wasm-tools` 安装不再被算作"ordinary lane 也跑的步骤"（ordinary lane 确实不装它）、补齐 warn-only 的准确边界、记录 `if: always()` 与 log 落盘位置。`CONTRIBUTING.md` 补齐两处 —— §2 新增 `wasm-tools 1.254.0` 前置（`cargo xtask ci` 缺它直接 fail，而这是强制的 pre-PR 门），§7 的 `xtask ci` 步骤清单由 5 步过时描述更正为实际 9 步（原先漏 toolchain precheck、`lancet-boundary`、`tool-codegen --check`、`tool-build --verify`，且顺序有误）。
+
+**Verification:**
+- `cargo fmt --all --check` — passed。
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed。
+- `cargo xtask tool-codegen --check` — passed（重新生成后一致）。
+- `cargo xtask lancet-boundary` / `harness-boundary` — passed。
+- `cargo xtask tool-build --verify` — `verify: noop-echo Component reproduces committed digest (b677a9b3...)`，即修复后本机仍幂等复现。
+- `strings` 核验：`/home/` 命中数由 1 降为 **0**；`core/src/str/pattern.rs` 现归入 `/rustc/ac68faa2.../` 与其余 std 路径一致。
+- `cargo test -p xtask` — 47 passed / 0 failed（含 2 条新增/相关门禁测试）。
+- `cargo test -p lancet-runtime --features test-utils` — lib 7 + 11 + 11 passed / 0 failed，含新增 digest 同步测试；负向验证该测试确实会 FAIL。
+
+**Residual:** 跨机 bit-for-bit 证据**仍未取得** —— 本次只是移除了让它必然失败的结构性阻碍（sysroot 路径）与让它无法被收集的流程缺陷（跳过、不上传）。需要一次 nightly full-gate 实跑产出 `component-verify.log`，把 runner 的 rebuilt digest 与本机 `b677a9b3...` 比对，才能按 #5 decision 1 escalation 决定是否把 `--verify` 升为硬门禁。详见 `FINDINGS.md` 的 **L-5-02**。另外 `noop_fixture.rs` 仍是"位于 generated/ 却手写"的状态，本次只加了漂移检测，真正的生成化归 **#103**。
+
+**Changed files:**
+`xtask/src/tool_build.rs`; `xtask/src/ci.rs`; `xtask/src/rollout.rs`; `.github/workflows/full-gate.yml`; `tools/noop/manifest.toml`; `tools/noop/generated/{descriptor.json,expected-identity.json,noop_echo.component.wasm}`; `crates/lancet-runtime/src/generated/noop_fixture.rs`; `docs/TESTING.md`; `CONTRIBUTING.md`; `FINDINGS.md`; `FIX.md`.
+
+## GitHub #105 / #106: harness 进程组信号 fail-closed + git_graph fixture 唯一路径 — 2026-07-27
+
+Severity: CI 阻塞（#105，整条 ubuntu lane 长期红）/ test isolation（#106）。
+
+收口 `FINDINGS.md` 的 **L-47-01** 与 **L-47-02**。
+
+**Problem:**
+- **#105** `crates/lattice-system-harness/src/driver.rs` 用 `kill -INT -<pgid>` 向整个进程组投递 SIGINT，pgid 直接取 `child.id()`（`:82`），等式仅在 `process_group(0)` 生效、子进程自成组长时成立，而代码里没有任何断言保护该前提。前提一旦不成立，`-<pgid>` 就落到**测试进程自己的进程组**，把 `cargo test` 一并 SIGINT。信号还经由外部 `kill(1)` 发送（`:269`），负号参数的解析多了一层 `kill` 实现差异，且广播错目标时 `kill` 仍返回成功——失败是静默的。实测后果：ubuntu-latest 上 `cargo test --workspace` 以 **exit 130** 终止而 **0 failed、无 panic**（PR #104 的 run 30222133081 停在 `lattice-system-harness` lib 的 `artifacts::tests::*` 中途），macos 同 commit 全绿，本地不复现。ordinary CI lane 的 ubuntu 作业因此长期红，#77/#78/#104 全卡在同一处。
+- **#106** `crates/lattice-session/src/git_graph/tests/mod.rs:23-29` 的 `temp_dir(name)` 拼出主机全局固定路径 `$TMPDIR/lattice-session-git-graph-tests/<name>` 并在返回前 `remove_dir_all` 它，唯一性只靠调用方传的 `name`。同主机并行的两个测试二进制（两个 `CARGO_TARGET_DIR`，或两个 git worktree）会互删对方正在用的 fixture，报 `Refusing to initialize the existing '...' directory` 或 `NotARepository`。这是仓内唯一不用 `tempfile` 的手写共享路径 fixture。
+
+**Fix:**
+- `driver.rs`：新增 `resolve_child_pgid()`，spawn 后用 `libc::getpgid(child_pid)` 从内核**回读**实际 pgid，不再假定等于 `child.id()`；`setpgid` 失败或不受支持时不会静默留下指向自身组的 pgid。
+- `driver.rs`：新增 `reject_own_process_group()`，任何组信号发送前先比对 `libc::getpgrp()`，命中自身组则返回 `Err` 而非广播。该守卫同时覆盖 SIGINT 路径与 `kill_process_group()` 的 SIGKILL 路径（后者广播错目标更致命）。
+- `driver.rs`：`signal_process_group` 改为直接 `libc::killpg(pgid, sig)`，删除 spawn `kill(1)`，消除负号参数在 coreutils/shell builtin/busybox 间的解释差异，并能拿到真实 `errno`。信号常量改用 `libc::SIGINT`/`libc::SIGKILL` 而非字符串。
+- `git_graph/tests/mod.rs`：`temp_dir()` 改为返回持有 `tempfile::TempDir` 的 `Fixture` 守卫，路径由 `tempfile` 保证唯一、drop 时自动清理；`name` 退化为可读前缀（`TempDir::with_prefix`）便于失败辨认。删除手写的 `remove_dir_all` 前置清理。30 个调用点机械改写为 `dir.path()`。
+
+**Verification:**
+- `cargo fmt --all --check` — passed。
+- `cargo clippy -p lattice-session -p lattice-system-harness --all-targets -- -D warnings` — passed。
+- `cargo test -p lattice-system-harness --lib` — 57 passed / 0 failed（含两条新增回归：`signalling_own_process_group_is_refused` 断言对自身组发信号被拒且 SIGKILL 包装保持 no-op；`spawned_child_pgid_is_read_back_and_distinct` 断言回读的 pgid 既不等于 harness 自身组、又等于子进程 pid）。
+- `cargo test -p lattice-system-harness --test direct_failures` — 8 passed / 0 failed，`direct_failure_sigint_while_stalled_commits_cancelled` 仍在跑且通过。SIGINT 协作取消的覆盖**未被削弱**（#46 cancellation 契约的核心证据保留）。
+- `cargo test -p lattice-session` — 54 passed / 0 failed / 1 ignored。
+- **#106 反向验证**：并行两份 `CARGO_TARGET_DIR=/tmp/lat-par-{a,b} cargo test -p lattice-session git_graph`，两侧各 29 passed / 0 failed。修复前同样的并行会有 2 个测试因 fixture 互删而失败。
+- `cargo xtask harness-boundary` — passed（3/3 组）。`cargo xtask lancet-boundary` — passed。
+
+**Note:** `libc` 在 harness 清单里写死 `"0.2"` 而不用 workspace 继承——`harness-boundary` 的 `manifest_workspace_inheritance` 检查是**逐行文本匹配**，连注释里出现该字面量也会 FAIL（其自身测试 `workspace_true_in_comment_still_detected` 正是有意如此），本次为此调整了注释措辞。
+
+**CI 实跑确认（2026-07-27，补记）:** ubuntu lane 已转绿，#105 建议清单第 4 步（`#[ignore]` + 专用 serial lane）确认**不需要**落地。证据是一组差一个提交的对照：PR #104（`44ceabc1` + `38af35bb`）在 ubuntu-latest 上仍以 `Process completed with exit code 130` 失败，失败日志中所有已报告测试均为 `ok`、无 FAILED、无 panic（run 30222133081 job 89944793831），同 run 的 macos-latest 通过；PR #107 在这两个提交之上仅多出本修复提交 `103478f8`，ubuntu-latest 与 macos-latest 双双通过（run 30257981171）。两次运行的唯一差异即本修复，故信号源确在 harness 内且已消除。
+
+**Changed files:**
+`crates/lattice-system-harness/src/driver.rs`; `crates/lattice-system-harness/Cargo.toml`; `crates/lattice-session/src/git_graph/tests/mod.rs`; `crates/lattice-session/src/git_graph/tests/{commit_turn,head_transcript,no_remote,pointer_ops,session_meta}.rs`; `FINDINGS.md`; `FIX.md`.
+
+## GitHub #79 / #80: harness repo-root determinism + Component 构建工具链身份 — 2026-07-27
+
+Severity: test correctness (cross-checkout write) / release-evidence gap.
+
+**Problem:**
+- **#79** `crates/lancet-native/tests/cep_warn_harness.rs` 的 `find_repo_root()` 向上搜索 `.planning/` 作为 repo root 标记。`.planning/` 被 `.gitignore:10` 忽略、被 `.githooks/pre-commit` 拦截强制添加，因此在 CI 与全新 clone 里**从不存在**——注释描述的机制只在维护者主检出上生效，其余环境全靠 fallback。更严重的是：`git worktree` 建在 `.claude/worktrees/<name>/` 下且没有 `.planning/`，向上搜索会越过工作树根命中**主检出**。实测从工作树运行时读的是 `/home/astrin/Dev/lattice/docs/lancet-warn-report.md`，`LATTICE_UPDATE_WARN_REPORT=1` 下会写进另一份检出的被跟踪文件。同文件 `:404` 的 doc 注释写 `all 8 CATALOG methods`，封闭目录实为 5 个。
+- **#80** `cargo xtask ci` 第 9 步跑 `tool-build --verify`（唯一把已提交 `.wasm` 绑回其源码的门），但 `.github/workflows/ci.yml` 与 `full-gate.yml` 都不调用它，且两条 lane 都不安装 `wasm-tools`——`#73` 验收标准 A 要求的「CI runner 上的跨机 bit-for-bit 证据」在结构上无法产生。`wasm-tools` 作为决定 Component 字节的编码器，既不在 `check_toolchain()` 的校验里、不在 rollout capability probes 里、也不是任何清单中的依赖。`wit-bindgen` 用 caret `"0.59"` 而非 `=` 精确 pin，与 wasmtime/inventory/jsonschema 的口径不一致。
+
+**Fix:**
+- `cep_warn_harness.rs`：`find_repo_root()` 改为编译期 `env!("CARGO_MANIFEST_DIR")` 上溯两级，删除运行时向上搜索与 fallback；注释写明为何不得再用标记目录。`:404` 的方法数改为 5。
+- `.github/workflows/full-gate.yml`：新增按 SHA 固定的 `taiki-e/install-action` 安装 `wasm-tools@1.254.0`；在 rollout 之后新增 `cargo xtask tool-build --verify` 步骤（warn-only，置于最后以免漂移告警掩盖更早的硬失败）。放 full-gate 而非 ordinary lane，以保持 PR 门轻量，同时让每晚一次的运行持续累积 `#73` 需要的跨机数据。
+- `xtask/src/ci.rs`：`check_toolchain()` 增加 `wasm-tools` 探测——缺失即 fail（早于第 9 步给出可操作错误），版本不符只告警（与 `#5` decision 1 的 warn-only 口径一致）。新增 `EXPECTED_WASM_TOOLS` 常量与可单测的 `parse_wasm_tools_version()` 纯函数。
+- `xtask/src/rollout.rs`：`collect_probes()` 增加非 gating 的 `wasm_tools_version` probe，让 release 记录能回答「这份 release 的 Component 由哪个编码器构建」。
+- `Cargo.toml`：`wit-bindgen = "=0.59.0"` 进 `[workspace.dependencies]`；`crates/lattice-tool-prelude` 与 `tools/noop` 改用 `{ workspace = true }`，单一 pin 源。顺带修正 prelude 中「guest 从不直接依赖 wit-bindgen」的失实注释（`FINDINGS.md` L-5-02 记录的正是相反事实）。
+- `docs/TESTING.md`：登记 `wasm-tools 1.254.0` 为构建 Source Tool 的外部前置依赖；同步 `xtask ci` 第 1 步、rollout capability probes 与 full-gate 步骤清单。
+
+**Verification:**
+- `cargo fmt --all --check` — passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed。
+- `cargo test -p xtask` — 46 passed（新增 3 条：版本解析正/负用例，以及断言 `EXPECTED_WASM_TOOLS` 与 full-gate 安装 pin 一致）。
+- `cargo test -p lancet-native --test cep_warn_harness -- --nocapture` — passed；输出路径由修复前的 `/home/astrin/Dev/lattice/docs/lancet-warn-report.md`（主检出）变为 `/home/astrin/Dev/lattice/.claude/worktrees/code-audit/docs/lancet-warn-report.md`（本工作树）。
+- 反向证明：在本工作树的报告尾部追加一行 `| probe | overreach | NO | fix-now |` 后该测试 FAILED（修复前不会失败，因为断言作用在另一份检出上）；文件已还原，`git diff` 干净。
+- `cargo xtask tool-codegen --check` — passed。
+- `cargo xtask tool-build --verify` — `verify: noop-echo Component reproduces committed digest (6fcc7fc8570be61f887278661f4a5a6353c3ca2c46e249dcc8de843500f73df4)`。该结果同时构成 `#73` 的一份追加证据：本次是在与原构建**不同的绝对路径**（git worktree）下复现的，说明 `--remap-path-prefix` 对路径差异有效；仍缺的是异构机器/CI runner 那一半。
+- `Cargo.lock` 无变化（`=0.59.0` 与既有锁定版本一致），committed `.wasm` digest 未变。
+
+**Residual:** `#80` 的「把 `wasm-tools` 版本写进 `tools/*/manifest.toml` 的 `[artifact] toolchain` 指纹」未在本次落地。原因：该字段进入 canonical descriptor，会改变 `descriptor-sha256`，进而需要手工同步 `crates/lancet-runtime/src/generated/noop_fixture.rs:30` 里手抄的常量（该目录名为 `generated/` 但无任何工具生成，见 #103）。留在 `#80` 内跟进。
+
+**Changed files:**
+`crates/lancet-native/tests/cep_warn_harness.rs`; `.github/workflows/full-gate.yml`; `xtask/src/ci.rs`; `xtask/src/rollout.rs`; `Cargo.toml`; `crates/lattice-tool-prelude/Cargo.toml`; `tools/noop/Cargo.toml`; `docs/TESTING.md`; `FIX.md`.
+
 ## GitHub #46 residual finalization: fetch capability pre-outbound + scenario tighten — 2026-07-24
 
 Severity: test refactor / product fail-closed / review closeout.
