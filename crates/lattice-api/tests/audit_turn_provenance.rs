@@ -141,7 +141,9 @@ fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String
 #[tokio::test]
 async fn full_turn_audit_rows_and_replay_fragment() {
     let ws = setup_workspace();
-    std::env::set_current_dir(&ws.root).unwrap();
+    // No `set_current_dir`: the request below pins `test_project_root`, and
+    // mutating the process-global CWD from concurrent tests made sibling tests
+    // fail once a `TempDir` dropped (see the note in `tests/consistency.rs`).
 
     let original = "pub fn answer() -> i32 { 1 }";
     let hash = format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex());

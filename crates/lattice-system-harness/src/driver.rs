@@ -64,6 +64,12 @@ pub struct LatticeCommand {
 ///
 /// The child is always its process-group leader on Unix. Timeout, interrupt,
 /// and drop cleanup therefore reach descendants as well as the direct child.
+///
+/// `pgid` is read back from the kernel with `getpgid(child_pid)` rather than
+/// assumed equal to the child pid: a group signal aimed at the wrong group
+/// would hit the test process itself, killing the whole `cargo test` run
+/// (#105). Every group signal additionally refuses to fire when the target
+/// group is this process's own group.
 pub struct RunningCommand {
     child: Option<Child>,
     pgid: u32,
@@ -79,7 +85,7 @@ impl RunningCommand {
         command.stderr(Stdio::piped());
         set_new_process_group(&mut command);
         let mut child = command.spawn()?;
-        let pgid = child.id();
+        let pgid = resolve_child_pgid(&child)?;
         let stdout = Some(drain_to_thread(child.stdout.take()));
         let stderr = Some(drain_to_thread(child.stderr.take()));
         Ok(Self {
@@ -97,7 +103,7 @@ impl RunningCommand {
 
     /// Deliver a controlled interrupt to the whole process group.
     pub fn interrupt(&mut self) -> std::io::Result<()> {
-        signal_process_group(self.pgid, "-INT")?;
+        interrupt_process_group(self.pgid)?;
         self.interrupted = true;
         Ok(())
     }
@@ -264,35 +270,79 @@ pub(crate) fn set_new_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 pub(crate) fn set_new_process_group(_cmd: &mut Command) {}
 
+/// Read the child's actual process group from the kernel.
+///
+/// `process_group(0)` makes the child its own group leader, so this normally
+/// equals the child pid. Reading it back keeps a failed or unsupported
+/// `setpgid` from silently leaving `pgid` pointing at the harness's own group.
 #[cfg(unix)]
-fn signal_process_group(pgid: u32, signal: &str) -> std::io::Result<()> {
-    let status = Command::new("kill")
-        .arg(signal)
-        .arg(format!("-{pgid}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "kill {signal} -{pgid} exited {status}"
-        )))
+fn resolve_child_pgid(child: &Child) -> std::io::Result<u32> {
+    let pid = child.id();
+    // SAFETY: `getpgid` only reads scheduler metadata for `pid`; it has no
+    // memory-safety preconditions and reports failure through `errno`.
+    let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+    if pgid < 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    let pgid = pgid as u32;
+    reject_own_process_group(pgid)?;
+    Ok(pgid)
 }
 
 #[cfg(not(unix))]
-fn signal_process_group(_pgid: u32, _signal: &str) -> std::io::Result<()> {
+fn resolve_child_pgid(child: &Child) -> std::io::Result<u32> {
+    Ok(child.id())
+}
+
+/// Refuse to treat this process's own group as a signal target.
+///
+/// Broadcasting into the harness's group interrupts the test binary itself:
+/// `cargo test` then dies with exit 130 while reporting zero failures (#105).
+/// Failing closed turns that silent, whole-run abort into a local error.
+#[cfg(unix)]
+fn reject_own_process_group(pgid: u32) -> std::io::Result<()> {
+    // SAFETY: `getpgrp` takes no arguments, reads only the caller's own
+    // process group, and cannot fail.
+    let own = unsafe { libc::getpgrp() } as u32;
+    if pgid == own {
+        return Err(std::io::Error::other(format!(
+            "refusing to signal process group {pgid}: it is this process's own group"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn signal_process_group(pgid: u32, signal: libc::c_int) -> std::io::Result<()> {
+    reject_own_process_group(pgid)?;
+    // SAFETY: `killpg` only delivers `signal` to the process group; it has no
+    // memory-safety preconditions and reports failure through `errno`.
+    if unsafe { libc::killpg(pgid as libc::pid_t, signal) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn interrupt_process_group(pgid: u32) -> std::io::Result<()> {
+    signal_process_group(pgid, libc::SIGINT)
+}
+
+#[cfg(not(unix))]
+fn interrupt_process_group(_pgid: u32) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "process-group signals require Unix",
     ))
 }
 
+#[cfg(unix)]
 pub(crate) fn kill_process_group(pgid: u32) {
-    let _ = signal_process_group(pgid, "-KILL");
+    let _ = signal_process_group(pgid, libc::SIGKILL);
 }
+
+#[cfg(not(unix))]
+pub(crate) fn kill_process_group(_pgid: u32) {}
 
 #[cfg(all(unix, target_os = "linux"))]
 pub fn processes_in_pgid(pgid: u32) -> Vec<u32> {
@@ -358,6 +408,46 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(processes_in_pgid(pgid).is_empty());
+    }
+
+    /// #105: a group signal aimed at the harness's own group would interrupt
+    /// the test binary itself. The guard must reject it instead of firing.
+    #[cfg(unix)]
+    #[test]
+    fn signalling_own_process_group_is_refused() {
+        // SAFETY: `getpgrp` reads only the caller's own process group.
+        let own = unsafe { libc::getpgrp() } as u32;
+        let err = signal_process_group(own, libc::SIGINT).expect_err("own group must be refused");
+        assert!(
+            err.to_string().contains("own group"),
+            "unexpected error: {err}"
+        );
+        // The SIGKILL wrapper swallows errors; it must stay a no-op here
+        // rather than tearing down the test run.
+        kill_process_group(own);
+    }
+
+    /// The spawned child must land in a group that is not the harness's own,
+    /// so `interrupt`/`kill` can never reach back into `cargo test`.
+    #[cfg(unix)]
+    #[test]
+    fn spawned_child_pgid_is_read_back_and_distinct() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30"]);
+        let running = RunningCommand::spawn(cmd).expect("spawn");
+        // SAFETY: `getpgrp` reads only the caller's own process group.
+        let own = unsafe { libc::getpgrp() } as u32;
+        assert_ne!(
+            running.pgid(),
+            own,
+            "child shares the harness process group"
+        );
+        let child_pid = running.child.as_ref().expect("running child").id();
+        assert_eq!(
+            running.pgid(),
+            child_pid,
+            "child should lead its own process group"
+        );
     }
 
     #[cfg(unix)]

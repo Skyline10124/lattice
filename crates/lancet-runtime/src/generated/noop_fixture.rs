@@ -26,16 +26,72 @@ pub fn registration() -> &'static EmbeddedTool {
 pub fn expected_identity() -> ExpectedToolIdentity {
     ExpectedToolIdentity {
         name: "noop.echo",
+        // These must equal `descriptor-sha256` / `artifact-sha256` in
+        // `tools/noop/generated/expected-identity.json`. Despite living under
+        // `generated/`, this file is hand-maintained and nothing regenerates or
+        // cross-checks it, so re-pinning a Component silently breaks the
+        // composition gate here until both digests are copied across by hand
+        // (see #103).
         descriptor_sha256: parse_hex_digest(
-            "17de570c1304cce5696c53b86bcb0f79e604c032ac5e37433995152a0b8870c3",
+            "5d9a09676e41362dfbc493f341b1bcc422488b621a570080cc2defc6f12d4e2d",
         ),
         artifact_sha256: parse_hex_digest(
-            "6fcc7fc8570be61f887278661f4a5a6353c3ca2c46e249dcc8de843500f73df4",
+            "b677a9b339c4703d8a02af54def031509ff17d73c66a83fc59176a528d646f08",
         ),
         abi_version: 1,
         // The component imports the `host-control` interface from
         // `lattice:tool-host@0.1.0`. The component binary records this as
         // an instance import named `lattice:tool-host/host-control@0.1.0`.
         imports: &["lattice:tool-host/host-control@0.1.0"],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The digests above are hand-copied from
+    /// `tools/noop/generated/expected-identity.json`, which `cargo xtask
+    /// tool-build` rewrites whenever a Component is re-pinned. Nothing
+    /// regenerates this file, so without this test a re-pin leaves the
+    /// composition gate rejecting the fixture with a digest mismatch and the
+    /// only clue is a failing integration test elsewhere (#103).
+    ///
+    /// Parsed from the same bytes the fixture embeds, so this cannot pass by
+    /// reading a stale copy.
+    #[test]
+    fn fixture_digests_match_the_generated_expected_identity() {
+        const IDENTITY_JSON: &str =
+            include_str!("../../../../tools/noop/generated/expected-identity.json");
+
+        let identity: serde_json::Value =
+            serde_json::from_str(IDENTITY_JSON).expect("expected-identity.json is valid JSON");
+        let expected = expected_identity();
+
+        let artifact = identity["artifact-sha256"]
+            .as_str()
+            .expect("artifact-sha256 is a string");
+        let descriptor = identity["descriptor-sha256"]
+            .as_str()
+            .expect("descriptor-sha256 is a string");
+
+        assert_eq!(
+            expected.artifact_sha256,
+            parse_hex_digest(artifact),
+            "artifact digest drifted from expected-identity.json ({artifact}); \
+             copy it into noop_fixture.rs after `cargo xtask tool-build`"
+        );
+        assert_eq!(
+            expected.descriptor_sha256,
+            parse_hex_digest(descriptor),
+            "descriptor digest drifted from expected-identity.json ({descriptor}); \
+             copy it into noop_fixture.rs after `cargo xtask tool-build`"
+        );
+        assert_eq!(
+            expected.abi_version,
+            identity["abi-version"]
+                .as_u64()
+                .expect("abi-version is a number") as u32,
+        );
     }
 }

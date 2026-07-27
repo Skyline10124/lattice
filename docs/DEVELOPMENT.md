@@ -11,8 +11,9 @@ For workspace-level architecture guidance aimed at contributors, read
 [AGENTS.md](../AGENTS.md) and the crate-local `AGENTS.md` in the
 `crates/<crate>/` directory you intend to edit.
 
-LATTICE is a Rust Cargo workspace of 16 crates (see `Cargo.toml`). It targets
-Rust **1.88+** (edition 2024). This is a Rust project — there is no
+LATTICE is a Rust Cargo workspace of 19 crates (see `Cargo.toml`). It requires
+Rust **1.94+** (edition 2024) and pins rustc **1.96.0** via
+`rust-toolchain.toml`. This is a Rust project — there is no
 `package.json` and no `npm` scripts; all developer commands are `cargo`
 commands or `cargo xtask` subcommands. The former `scripts/` shell gates were
 removed in #47 — see [docs/TESTING.md](./TESTING.md) "Retired lanes".

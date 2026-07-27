@@ -395,8 +395,10 @@ mod tests {
 
     impl IsolatedProjectAudit {
         fn setup() -> Self {
-            // Shared with `config`'s own `XDG_STATE_HOME` test: two locks over
-            // one process-global variable do not serialize anything.
+            // Crate-wide lock (see `config::lock_xdg_state_home`): `config.rs`
+            // also writes this variable, so a lock private to this module would
+            // not exclude it. Poison-tolerant, so one failing test does not
+            // cascade into `PoisonError` failures that hide it.
             let guard = lock_xdg_state_home();
             let state = TempDir::new().expect("state tempdir");
             let project = TempDir::new().expect("project tempdir");

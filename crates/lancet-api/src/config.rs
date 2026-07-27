@@ -54,21 +54,6 @@ pub fn audit_state_root() -> Option<PathBuf> {
     dirs::state_dir().or_else(dirs::data_local_dir)
 }
 
-/// Serializes every test in this crate that mutates `XDG_STATE_HOME`.
-///
-/// Environment variables are process-global, so one lock per module is one
-/// race per module pair: a test restoring the variable can blank it while a
-/// test in another module is mid-read, which resolves audit paths to the real
-/// user state directory. Poison is recovered rather than propagated — a
-/// panicking test must fail alone, not cascade through every later acquirer.
-#[cfg(test)]
-pub(crate) fn lock_xdg_state_home() -> std::sync::MutexGuard<'static, ()> {
-    static XDG_STATE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    XDG_STATE_HOME_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// Deterministic SHA-256 project key from the canonical project root identity.
 pub fn project_storage_key(project_root: &Path) -> Result<String, ExternalAuditPathError> {
     let canonical = std::fs::canonicalize(project_root)
@@ -193,6 +178,32 @@ impl LancetRuntimeConfig {
             runtime_version: String::new(),
         }
     }
+}
+
+/// The one lock serializing tests that write `XDG_STATE_HOME`.
+///
+/// `XDG_STATE_HOME` is process-global and [`audit_state_root`] reads it, so any
+/// test that sets it races every concurrently running test that resolves an
+/// audit path. This must be a **single** lock for the whole crate: two separate
+/// mutexes each guarding the same variable exclude nothing, which is exactly the
+/// bug this replaced — `config.rs` had a private `ENV_LOCK` while `audit.rs` had
+/// its own `XDG_TEST_LOCK`, and `cargo test -p lancet-api --lib` failed ~11/40
+/// runs as a result.
+///
+/// Always acquire with `lock_xdg_state_home()`, never `.unwrap()`/`.expect()`:
+/// this guard is held across assertions, so a failing test poisons the mutex,
+/// and panicking on the poison turns one real failure into a cascade of
+/// `PoisonError` failures that bury it (observed as 9 failed in one CI run).
+#[cfg(test)]
+static XDG_STATE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`XDG_STATE_HOME_LOCK`], tolerating poisoning from an earlier failed
+/// test. The data is `()`; there is no invariant a panic could have broken.
+#[cfg(test)]
+pub(crate) fn lock_xdg_state_home() -> std::sync::MutexGuard<'static, ()> {
+    XDG_STATE_HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

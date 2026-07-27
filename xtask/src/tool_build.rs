@@ -129,9 +129,27 @@ fn verify_build(root: &Path, manifest_path: &Path) -> anyhow::Result<()> {
 /// artifact is written to a unique temp path so `--verify` can compare without
 /// clobbering the committed Component.
 fn build_guest(root: &Path, pkg: &str, temp: bool) -> anyhow::Result<PathBuf> {
-    // --remap-path-prefix strips the workspace root from debug paths for
-    // reproducibility across machines.
-    let remap = format!("--remap-path-prefix={}=", root.display());
+    // --remap-path-prefix strips machine-specific absolute paths from debug
+    // info so the Component reproduces bit-for-bit across machines (#73).
+    //
+    // Two prefixes are needed, not one. The workspace root covers guest source
+    // paths. The toolchain sysroot covers std/core source paths that rustc
+    // resolves through the *local* rustup installation instead of its
+    // virtualized `/rustc/<commit-hash>/` prefix: without it the committed
+    // `.wasm` embeds e.g.
+    // `/home/<user>/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/
+    //  rustlib/src/rust/library/core/src/str/pattern.rs`
+    // — one maintainer-host path among otherwise already-normalized
+    // `/rustc/<hash>/library/...` entries, which alone makes every
+    // cross-machine `--verify` report a spurious digest drift. Remapping the
+    // sysroot onto the same `/rustc/<commit-hash>` prefix rustc uses for the
+    // rest of std makes the two representations agree.
+    let mut remap = format!("--remap-path-prefix={}=", root.display());
+    if let Some((sysroot, commit_hash)) = rustc_sysroot_and_commit_hash() {
+        remap.push_str(&format!(
+            " --remap-path-prefix={sysroot}/lib/rustlib/src/rust=/rustc/{commit_hash}"
+        ));
+    }
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root).env("RUSTFLAGS", &remap).args([
         "build",
@@ -169,6 +187,45 @@ fn build_guest(root: &Path, pkg: &str, temp: bool) -> anyhow::Result<PathBuf> {
         bail!("expected guest artifact at {}", module.display());
     }
     Ok(module)
+}
+
+/// Resolve the active toolchain's sysroot and its rustc commit hash, so std
+/// source paths can be remapped onto the same `/rustc/<commit-hash>` prefix
+/// rustc already uses for most of std. Returns `None` when either lookup fails
+/// — the workspace-root remap still applies, and a missing sysroot remap only
+/// costs reproducibility, so this must not fail the build.
+fn rustc_sysroot_and_commit_hash() -> Option<(String, String)> {
+    let sysroot = Command::new("rustc")
+        .arg("--print")
+        .arg("sysroot")
+        .output()
+        .ok()?;
+    if !sysroot.status.success() {
+        return None;
+    }
+    let sysroot = String::from_utf8(sysroot.stdout).ok()?.trim().to_owned();
+    if sysroot.is_empty() {
+        return None;
+    }
+
+    let verbose = Command::new("rustc")
+        .arg("--version")
+        .arg("--verbose")
+        .output()
+        .ok()?;
+    if !verbose.status.success() {
+        return None;
+    }
+    let commit_hash = String::from_utf8(verbose.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash: "))
+        .map(|h| h.trim().to_owned())?;
+    if commit_hash.is_empty() {
+        return None;
+    }
+
+    Some((sysroot, commit_hash))
 }
 
 fn encode_component(module: &Path, out: &Path) -> anyhow::Result<()> {

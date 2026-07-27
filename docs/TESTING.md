@@ -9,7 +9,12 @@ and no external test framework.
 
 The toolchain is pinned to `rustc 1.96.0` with the `wasm32-unknown-unknown`
 target installed (`rust-toolchain.toml`); `cargo xtask ci` and the rollout gate
-both assert this up front. Property/fuzz tests use `proptest` (a workspace
+both assert this up front. Building Source Tool Components additionally needs
+**`wasm-tools 1.254.0`** on `PATH` — it is not a Cargo dependency, so nothing
+installs it for you (`cargo install wasm-tools --version 1.254.0 --locked`).
+`cargo xtask ci` fails fast when it is missing and warns on a version mismatch,
+because the encoder determines the committed `.wasm` bytes (see `#73` / `#80`).
+Property/fuzz tests use `proptest` (a workspace
 dev-dependency, `proptest = "1"` in `Cargo.toml`); regression seeds live
 alongside the tests (e.g.
 `crates/lancet-authority/tests/guard_decide_fuzz.proptest-regressions`).
@@ -375,7 +380,9 @@ cargo xtask ci
 A local mirror of the ordinary CI lane. Steps, in order
 (`xtask/src/ci.rs`):
 
-1. toolchain precheck (pinned `rustc 1.96.0` + `wasm32-unknown-unknown`)
+1. toolchain precheck (pinned `rustc 1.96.0` + `wasm32-unknown-unknown` +
+   `wasm-tools` on `PATH`; a wrong `wasm-tools` version warns, a missing one
+   fails)
 2. `cargo fmt --all --check`
 3. `cargo clippy --workspace --all-targets -- -D warnings`
 4. `cargo build -p lattice-cli --bin lattice` (debug)
@@ -404,8 +411,8 @@ versioned JSON record. The plan (12 steps, `xtask/src/rollout.rs`):
    tracked dirt (staged or unstaged) is rejected. Untracked files are
    **not** fatal.
 2. `capability_probes` — `rustc_version` (gating, must contain `1.96.0`),
-   `wasm32_target_installed` (gating), plus informational `git_version`,
-   `dev_kvm_present` (never gating), `os`, `arch`.
+   `wasm32_target_installed` (gating), plus informational `wasm_tools_version`,
+   `git_version`, `dev_kvm_present` (never gating), `os`, `arch`.
 3. `build_release_locked` — `cargo build --locked --release -p lattice-cli
    --bin lattice`.
 4. `artifact_identity` — sha256 + size of `target/release/lattice`.
@@ -504,13 +511,34 @@ green on both matrix OSes.
 - **Steps:** everything the ordinary lane runs (checkout; rust-toolchain with
   `targets: wasm32-unknown-unknown`; rust-cache; fmt; clippy; debug build;
   `cargo test --workspace` with both env vars; `harness-boundary`;
-  `lancet-boundary`; `tool-codegen --check`), then:
+  `lancet-boundary`; `tool-codegen --check`), plus a **pinned `wasm-tools`
+  install** that only this lane needs (the ordinary lane does not install it —
+  nothing there shells out to the encoder), then:
   - `cargo test -p lancet-native fetch_effect_contract` — the explicit-network
     fetch-effect contract (positive + negative; real DNS/HTTP on the runner).
   - `cargo xtask rollout --channel alpha` — the layer-4 release-evidence lane.
+  - `cargo xtask tool-build --verify` — rebuilds each Source Tool Component and
+    compares its digest with the committed artifact. This is the only gate that
+    binds a committed `.wasm` to its source, and it is what accumulates the
+    cross-machine bit-for-bit evidence `#73` asks for. `wasm-tools` is installed
+    at a pinned version because the encoder determines the resulting bytes
+    (`#80`), and the same version is named in each manifest's `[artifact]
+    toolchain` fingerprint.
+
+    **Only digest drift is warn-only** per `#5` decision 1 — a mismatch prints a
+    warning and does not fail. Every other outcome is a hard failure: the guest
+    build, `wasm-tools component new`, `wasm-tools validate`, the `wasi:*`
+    import-surface assertion, and WIT world conformance all abort the step. So
+    this step can turn the nightly lane red.
+
+    It runs last so a drift warning never masks an earlier hard failure, and
+    carries `if: always()` — the preceding rollout gate is the lane's most
+    failure-prone step, and skipping verify on its failure would lose the
+    evidence from exactly the runs most worth inspecting. Output is teed to
+    `target/rollout/component-verify.log` so the upload below carries it.
   - `actions/upload-artifact@v4` (`if: always()`) uploads `target/rollout/` as
     `rollout-alpha-record` — the record is written even on rejection/failure,
-    alongside harness bundles and doctor evidence.
+    alongside harness bundles, doctor evidence, and the Component verify log.
   - `actions/upload-artifact@v4` (`if: failure()`) uploads
     `target/harness-failures/` as `harness-failures-full-gate`.
 

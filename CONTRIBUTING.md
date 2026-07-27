@@ -46,6 +46,20 @@ cargo build
 cargo test
 ```
 
+`cargo xtask ci` additionally requires **`wasm-tools 1.254.0`** on `PATH`. It is
+not a Cargo dependency, so nothing installs it for you, and `cargo xtask ci`
+fails fast without it (`cargo xtask tool-build` shells out to it to encode
+Source Tool Components and validate their import surface). Install it with:
+
+```sh
+cargo install wasm-tools --version 1.254.0 --locked
+```
+
+The version is pinned because the encoder determines the committed Component
+bytes; a different version warns rather than fails, since bit-for-bit
+reproducibility is still warn-only (see `#73` / `#80` and
+[docs/TESTING.md](docs/TESTING.md)).
+
 For any runtime testing that actually drives a model (e.g. `session send`, `tui`,
 end-to-end turn tests that hit a provider), set a provider environment variable:
 
@@ -192,16 +206,33 @@ Before opening a pull request, run the full local gate and make sure it is green
 cargo xtask ci
 ```
 
-`cargo xtask ci` is the canonical local CI replica. It runs, in order:
+`cargo xtask ci` is the canonical local CI replica. It runs, in order
+(`xtask/src/ci.rs`):
 
-1. `cargo fmt --all --check`
-2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo build -p lattice-cli --bin lattice` (builds the binary the
+1. toolchain precheck — pinned rustc 1.96.0, the `wasm32-unknown-unknown`
+   target, and `wasm-tools` on `PATH` (missing encoder fails; wrong version
+   warns)
+2. `cargo fmt --all --check`
+3. `cargo clippy --workspace --all-targets -- -D warnings`
+4. `cargo build -p lattice-cli --bin lattice` (builds the binary the
    `lattice-system-harness` black-box tests drive via `LATTICE_BIN`)
-4. `cargo xtask harness-boundary` (verifies the harness crate has
+5. `cargo xtask harness-boundary` (verifies the harness crate has
    no product-crate dependency, direct or transitive)
-5. `cargo test --workspace` with `LATTICE_BIN` defaulted to
-   `$(pwd)/target/debug/lattice`
+6. `cargo xtask lancet-boundary` (LANCET executor/dependency boundary checks)
+7. `cargo xtask tool-codegen --check` (generated Tool artifacts are in sync
+   with their source manifests)
+8. `cargo test --workspace` with `LATTICE_BIN` defaulted to
+   `$(pwd)/target/debug/lattice`, run per crate in dependency order under a
+   `CARGO_BUILD_JOBS` cap and a per-step timeout (see `ENV-OOM-01` in
+   `FINDINGS.md`)
+9. `cargo xtask tool-build --verify` — Component digest reproducibility;
+   **digest drift is warn-only**, but a failed guest build, encode, validate,
+   `wasi:*` import assertion, or WIT conformance check does fail the gate
+
+Note that the ordinary GitHub lane (`.github/workflows/ci.yml`) does **not** run
+step 1 or step 9; the nightly `full-gate` lane runs step 9 and installs the
+pinned `wasm-tools` for it. See [docs/TESTING.md](docs/TESTING.md) for the full
+lane-by-lane breakdown.
 
 CI (`.github/workflows/ci.yml`) runs the fmt/clippy/test gates across
 `ubuntu-latest` and `macos-latest` on pushes to `main` and on pull requests, so

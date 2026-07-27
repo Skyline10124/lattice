@@ -173,5 +173,48 @@ fn workspace_policy_applies_denied_patterns_to_mutate_region() {
     };
     let cep = lancet_authority::CepPolicyConfig::defaults_for_project_root("/tmp/project");
     let mutate_region = policy.authorized_region_for("mutate.create", &cep);
-    assert!(!mutate_region.denied_write_path_prefixes.is_empty());
+    // Assert the profile pattern by name, not merely that the vec is non-empty:
+    // System Path Exclusions push into this same vec, so `!is_empty()` was
+    // satisfiable without the profile pattern contributing anything at all.
+    assert!(
+        mutate_region
+            .denied_write_path_prefixes
+            .iter()
+            .any(|p| p.ends_with("crates")),
+        "profile denied_write_patterns must reach the mutate region: {:?}",
+        mutate_region.denied_write_path_prefixes
+    );
+}
+
+/// System Path Exclusions are host-enforced and NOT profile-configurable
+/// (AGENTS.md / ADR 0003), so they must be present in the mutate region even
+/// when the profile denies nothing.
+///
+/// Deliberately configures an empty `denied_write_patterns`: the previous
+/// assertion for this behavior only checked that
+/// `denied_write_path_prefixes` was non-empty while passing a profile pattern
+/// that populated the very same vec, so deleting the exclusion loop in
+/// `authorized_region_for` left it green — see #111.
+#[test]
+fn mutate_region_carries_system_path_exclusions_without_any_profile_pattern() {
+    let policy = WorkspacePolicy {
+        denied_write_patterns: vec![],
+        ..Default::default()
+    };
+    let cep = lancet_authority::CepPolicyConfig::defaults_for_project_root("/tmp/project");
+
+    for method in ["mutate.create", "mutate.edit"] {
+        let region = policy.authorized_region_for(method, &cep);
+        for exclusion in [".git", ".lattice"] {
+            assert!(
+                region
+                    .denied_write_path_prefixes
+                    .iter()
+                    .any(|p| p == std::path::Path::new(exclusion)),
+                "{method}: host-enforced exclusion {exclusion:?} missing from \
+                 denied_write_path_prefixes: {:?}",
+                region.denied_write_path_prefixes
+            );
+        }
+    }
 }

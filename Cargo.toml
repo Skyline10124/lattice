@@ -86,6 +86,11 @@ wasmtime = { version = "=46.0.1", default-features = false, features = [
 ] }
 inventory = "=0.3.24"
 jsonschema = "=0.48.1"
+# Source Tool guest bindings generator. Exact-pinned for the same reason as
+# wasmtime: its `generate!` output shapes the guest's core module, so a patch
+# bump changes the committed `.wasm` bytes and the digest the composition gate
+# verifies. Declared here so the prelude and every guest Tool share one pin.
+wit-bindgen = "=0.59.0"
 # Component binary parser for import inspection in the composition gate.
 wasmparser = "0.251"
 

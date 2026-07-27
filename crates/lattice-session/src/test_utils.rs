@@ -219,4 +219,63 @@ mod cwd_recovery_tests {
             "init_empty_repo must recover from a deleted CWD: {outcome:?}"
         );
     }
+
+    /// The production counterpart of the test above. `GitSessionGraphStore`
+    /// auto-initializes its repository on first access, and that init hits the
+    /// same `gix` CWD read — a user whose checkout was deleted or whose volume
+    /// was unmounted would otherwise get `Could not obtain the current
+    /// directory` from a store whose own directory is perfectly fine.
+    ///
+    /// Covers both init paths in `git_graph::GitSessionGraphStore::repo`:
+    /// the bare init taken for an empty directory, and the worktree init taken
+    /// when the directory already holds non-git content.
+    ///
+    /// Same `#[ignore]` rationale as above: invalidating the process-global CWD
+    /// races every fixture running in parallel in this binary.
+    #[test]
+    #[ignore = "mutates the process-global CWD; run with --test-threads=1"]
+    fn session_store_auto_init_recovers_from_deleted_cwd() {
+        use crate::git_graph::GitSessionGraphStore;
+        use crate::graph::SessionGraphStore;
+
+        for (label, seed_content) in [("empty_dir", false), ("non_empty_dir", true)] {
+            let original = std::env::current_dir().expect("cwd before test");
+            let target = tempfile::TempDir::new().expect("target");
+            let store_dir = target.path().join(label);
+            fs::create_dir_all(&store_dir).expect("create store dir");
+            if seed_content {
+                // Forces the worktree-init branch rather than the bare one.
+                fs::write(store_dir.join("stray.txt"), b"not a git dir")
+                    .expect("seed non-git content");
+            }
+
+            let doomed = tempfile::TempDir::new().expect("doomed cwd");
+            std::env::set_current_dir(doomed.path()).expect("chdir into doomed");
+            drop(doomed);
+            let cwd_is_invalid = std::env::current_dir().is_err();
+
+            let outcome = std::panic::catch_unwind(|| {
+                GitSessionGraphStore::new(&store_dir).create_session(
+                    "sess-cwd-recovery",
+                    None,
+                    "coder",
+                    "main",
+                )
+            });
+
+            // Restore before asserting so a failure cannot poison siblings.
+            std::env::set_current_dir(&original).expect("restore cwd");
+
+            assert!(
+                cwd_is_invalid,
+                "{label}: precondition: process CWD must be invalid"
+            );
+            match outcome {
+                Ok(Ok(session)) => assert_eq!(session.session_id, "sess-cwd-recovery"),
+                other => {
+                    panic!("{label}: session store must recover from a deleted CWD, got {other:?}")
+                }
+            }
+        }
+    }
 }
