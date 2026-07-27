@@ -2,6 +2,36 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #111 部分收口：给两条守护安全不变量的假绿测试补上实质断言 — 2026-07-27
+
+Severity: HIGH（两条安全不变量的回归网失效）。
+
+收口 **#111** 中 6 条假绿测试的第 1、2 条（其余 4 条留 #111，见下方 Residual）。
+
+**Problem:**
+
+1. **`guard_decide_fuzz` 的 allow 侧从不断言 `Allowed`。** `crates/lancet-authority/tests/guard_decide_fuzz.rs` 的文件头声明策略 1 是「biased_allowed — exercises positive policy branches」，`biased_allowed_inputs()` 精心构造了 6 条输入，但两个消费它的 proptest 属性只断言**同一输入两次调用结果相等**，全文件 `PolicyDecision::Allowed` 出现 **0 次**。而 `DefaultPolicyHook` 是纯函数（`decide` 直接委托 `decide_with_evidence`，结构体只持 `config` 与 `resolver`，无内部可变状态），所以「同一输入两次同结果」在任何实现下恒真——该断言**不可能失败**。deny 侧有实质断言 `matches!(.., Denied{..})`，allow 侧没有对偶。后果：策略若退化为「全部拒绝」（例如把 blacklist 语义误改回 allowlist，使空 `denied_write_patterns` 变成"什么都不许写"），256 个 case 全返回 Denied 但两两相等，整套 fuzz 零信号。
+
+2. **宣称验证 System Path Exclusion 的测试只断言 vec 非空。** `authorized_region_for("mutate.create", ..)`（`policy/default.rs:156-160`）无条件把 `SYSTEM_PATH_EXCLUSIONS`（`.git` / `.lattice`）压入 `denied_write_path_prefixes`，注释写明这是 host-enforced 且不可 profile 配置（ADR 0003）。唯一覆盖它的测试 `workspace_policy_applies_denied_patterns_to_mutate_region` 传入 `denied_write_patterns: vec!["crates/**"]` 后只断言 `assert!(!...is_empty())` —— 而 `"crates/**"` 自己就会推入**同一个** vec，因此该断言由 profile pattern 独力满足，与两条系统排除毫无关系。全仓确认无任何测试断言 `.git`/`.lattice` 确实在该 vec 中。后果：删掉那个 exclusion 循环，测试仍绿，而任何未显式列出 `.git/**` 的 profile 其 mutate effect region 都不再拒绝 `.git/`、`.lattice/` 写入。
+
+**Fix:**
+
+1. 新增 proptest 属性 `guard_decide_fuzz_biased_allowed_reaches_expected_decision`：对该集合逐条断言实际决策。先用一次性探针确认了各输入的真实决策（5 条 `Allowed`，`exec.command_run` 为 `Denied{NonDeterminable}`——与其源码注释一致，它是已退役方法，有意留在正向集合里），故断言按方法分支：退役方法必须是 `NonDeterminable`，其余必须是 `Allowed`。保留原幂等属性不动（它验证的是纯函数性，仍有价值），只是不再让它独自承担分类正确性。
+2. 把 `workspace_policy_applies_denied_patterns_to_mutate_region` 的断言改为按名检查 profile pattern 确实到位（`.any(|p| p.ends_with("crates"))`），并新增 `mutate_region_carries_system_path_exclusions_without_any_profile_pattern`：**故意配空 `denied_write_patterns`**，对 `mutate.create` 与 `mutate.edit` 各断言 `.git` 与 `.lattice` 逐条在 region 里。空 pattern 是关键——只有这样才能把系统排除与 profile 贡献彻底分离。
+
+**Verification:**
+- `cargo test -p lancet-authority` — 126 + 6 + 2 + 11 passed / 0 failed。
+- **反向验证（本修复的核心证据，两条各做一次）**：
+  - 删除 `default.rs:156-160` 的 `for exclusion in SYSTEM_PATH_EXCLUSIONS` 循环 → 新测试 FAILED 并报 `mutate.create: host-enforced exclusion ".git" missing from denied_write_path_prefixes: []`；**同时原有的 `!is_empty()` 断言仍然通过**，正是它当初漏掉这个缺陷的原因。
+  - 让 `decide()` 对所有输入返回 `Denied{NonDeterminable}` → 新属性 FAILED 并报 `positive-path input observe.workspace must be Allowed, got Denied{...}`；**同时两个原有幂等属性仍然通过**。
+  - 两次改动后均已确认 `git diff` 干净（源码逐字还原），并重跑全部测试为绿。
+- `cargo fmt --all --check`、`cargo clippy -p lancet-authority --all-targets -- -D warnings` — passed。
+
+**Residual:** #111 的其余 4 条留在该 issue 追踪，本次未动，因为它们需要的不是断言改写而是新增测试基础设施：**#111-3** `cep_warn_harness` 默认 CI 路径只读已提交 markdown（需把 `generate_warn_report()` 改为默认执行路径）；**#111-4** `fetch.web` 上限测试的 fixture（22 字节）小于上限（64 字节）且断言为析取（需换超限 fixture 并拆成合取）；**#111-5** `direct_secrets` 的 denied-content 哨兵场景 `tools.enabled = []` 致被读路径不存在（需启用 `observe.workspace` 并重写脚本）；**#111-6** Component deadline→`ToolTimeout` 无可失败测试（需要一个会自旋的 fixture guest，与 M-TOOL-02 相邻）。
+
+**Changed files:**
+`crates/lancet-authority/tests/guard_decide_fuzz.rs`; `crates/lancet-authority/tests/policy_tests.rs`; `FIX.md`.
+
 ## 两把互不相干的 mutex 守同一个 `XDG_STATE_HOME`，且 poison 后 panic 放大失败 — 2026-07-27
 
 Severity: HIGH（CI 双平台红；本机复现率 11/40 ≈ 27%）。
