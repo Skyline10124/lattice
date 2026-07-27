@@ -238,6 +238,60 @@ fn gate_rejects_missing_channel_adapter() {
     );
 }
 
+/// A synthetic tool over the committed noop component bytes whose descriptor
+/// declares exactly one capability, on the `session` scope.
+fn tool_with_capability(name: &'static str, capability: &str, ctx_op: &str) -> SyntheticTool {
+    let component_bytes: &'static [u8] =
+        include_bytes!("../../../tools/noop/generated/noop_echo.component.wasm");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&lancet_runtime::test_helpers::noop_descriptor_json(name, 1))
+            .expect("descriptor parses");
+    value["capabilities"] = serde_json::json!([
+        {"name": capability, "cell": {"ctx_op": ctx_op, "ext_impact": "none", "scope": "session"}}
+    ]);
+    // The gate compares the descriptor's artifact hash with the pinned one.
+    value["artifact"]["sha256"] = serde_json::json!(hex_sha256(component_bytes));
+    let descriptor_json: &'static [u8] = Box::leak(
+        serde_json::to_vec(&value)
+            .expect("descriptor serializes")
+            .into_boxed_slice(),
+    );
+    SyntheticTool::new(
+        name,
+        descriptor_json,
+        component_bytes,
+        1,
+        &["lattice:tool-host/host-control@0.1.0"],
+    )
+}
+
+/// C6: one capability name pointing at two different cells refuses startup —
+/// the name would otherwise mean two different authorizations depending on
+/// which tool a profile enabled.
+#[test]
+fn gate_rejects_capability_name_over_two_cells() {
+    let alloc = tool_with_capability("a.tool", "session.result", "alloc");
+    let mutate = tool_with_capability("b.tool", "session.result", "mutate");
+    let result = compose(&[&alloc, &mutate]);
+    assert!(
+        matches!(
+            result,
+            Err(CompositionError::CapabilityConflict { ref name, ref tools })
+                if name == "session.result" && tools == &["a.tool".to_string(), "b.tool".to_string()]
+        ),
+        "{result:?}"
+    );
+}
+
+/// The same name over the same cell is a permitted shared alias.
+#[test]
+fn gate_accepts_a_capability_name_shared_over_one_cell() {
+    let first = tool_with_capability("a.tool", "session.result", "alloc");
+    let second = tool_with_capability("b.tool", "session.result", "alloc");
+    let catalog = compose(&[&first, &second]).expect("shared alias composes");
+    assert_eq!(catalog.descriptor_names(), vec!["a.tool", "b.tool"]);
+}
+
 /// Closed catalog has no mutation API: the descriptors iterator is
 /// read-only and the catalog is immutable after compose.
 #[test]

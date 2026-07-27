@@ -595,6 +595,33 @@ x = 1
     }
 
     #[test]
+    fn lancet_capabilities_sub_table_is_not_the_forbidden_top_level_section() {
+        // `capabilities` is a forbidden *top-level* section; the pre-scan only
+        // inspects top-level keys, so the typed `[lancet.capabilities]`
+        // admission policy must still load.
+        let (_dir, path) = temp_profile(
+            r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[lancet.capabilities]
+deny = ["session.events"]
+max_boundary = "ex"
+
+"#,
+        );
+        let loaded = load_agent_profile(&path).unwrap();
+        let capabilities = loaded.profile.lancet.capabilities.as_ref().unwrap();
+        assert_eq!(capabilities.deny, vec!["session.events".to_string()]);
+    }
+
+    #[test]
     fn llm_retry_max_retries_zero_is_valid() {
         let (_dir, path) = temp_profile(
             r#"

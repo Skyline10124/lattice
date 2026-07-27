@@ -34,6 +34,13 @@ channel = "session"
 name = "session.result"
 cell = "alloc:none:session"
 
+# The guest calls `host-control::emit-event`; the host binds that operation to
+# Cell{Mutate, None, <session-channel scope>}, so the capability must be
+# declared for the operation to be admissible.
+[[capabilities]]
+name = "session.events"
+cell = "mutate:none:session"
+
 [artifact]
 # Written by `cargo xtask tool-build`; verified by the composition gate.
 sha256 = "b677a9b339c4703d8a02af54def031509ff17d73c66a83fc59176a528d646f08"

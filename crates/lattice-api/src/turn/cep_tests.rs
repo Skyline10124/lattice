@@ -302,6 +302,8 @@ cep_family_test!(
             ImpactKind::WorkspaceMutation,
         ],
         violations: vec!["observed workspace_mutation not in declared effect ceiling".into(),],
+        cell_ref: None,
+        capability: None,
     })),
     Retriability::Permanent
 );
@@ -568,7 +570,14 @@ mod component_adapter {
     async fn adapter_with_noop_component() -> CepExecutorAdapter {
         let components =
             Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op composition"));
-        let mut config = ServerRunConfig::in_memory_for_tests();
+        // #28: admission is fail-closed by default, so the fixture's tool has
+        // to be enabled for the adapter to reach it at all.
+        let mut config = ServerRunConfig::in_memory_for_tests().with_capability_admission(
+            lancet_protocol::CapabilityAdmissionPolicy {
+                enabled_tools: std::collections::BTreeSet::from(["noop.echo".to_string()]),
+                ..Default::default()
+            },
+        );
         config.components = Some(components);
 
         let mut registry = MethodRegistry::new();

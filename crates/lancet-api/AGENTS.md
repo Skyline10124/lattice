@@ -54,6 +54,14 @@ but delegates concrete composition to `lancet-runtime`.
 
 ## Recent Issues
 
+- ADDED #28 (Codeberg #6): `LancetRuntimeConfig.capability_admission` threads
+  the host's Component Tool admission policy into `CepPolicyConfig`;
+  `spawn_composed` validates it against the composed catalog, so an unknown deny
+  name fails composition instead of a spawned server task.
+  `store_turn_attestation` writes `statement_bytes` (canonical for v2, stored
+  serde order for v1) and `replay_audit` — now delegating into
+  `lancet_audit::operator` — rebuilds under the stored `predicate_type`, so a
+  turn attested as v1 never re-projects as v2.
 - ADDED #63: `LancetRuntimeConfig.workspace_history` selects the private
   mutation-history backing. `LancetRuntime::build` opens it before the server
   starts, threads it through `ServerRunConfig`, and exposes it via

@@ -36,7 +36,8 @@ pub use lancet_audit::{
 };
 pub use lancet_dispatch::{CepClient, CepServer, CepTransport, wire_code_for_error};
 pub use provenance::{
-    build_in_toto_statement, canonicalize_in_toto_statement, source_audit_range_hash,
+    build_in_toto_statement, canonicalize_in_toto_statement, rebuild_in_toto_statement,
+    source_audit_range_hash, statement_bytes,
 };
 pub use server::{
     CepServerNativeExt, HandlerContext, MethodRegistry, ServerRunConfig,

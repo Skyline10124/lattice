@@ -5,8 +5,13 @@
 
 use lancet_catalog::{RequiredCapability, catalog};
 use lancet_protocol::effect_types::ImpactKind;
+use lancet_protocol::evidence::{
+    AdmissionEvidence, DeniedOperation, DeniedOperationsRecord, ObservedEffect,
+    ObservedEffectsRecord,
+};
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,11 +26,64 @@ pub const SEMANTIC_STAGE_SCAFFOLD: &str = "scaffold";
 /// will return `MethodNotFound`, so no native handler or policy hook runs.
 pub const SEMANTIC_STAGE_UNROUTED: &str = "unrouted";
 
+/// Audit stage for a Component Tool call (#28): authorization is Cell capability
+/// admission, not the legacy method-impact path. Distinct from
+/// [`SEMANTIC_STAGE_UNROUTED`], which means the method has no handler at all.
+pub const SEMANTIC_STAGE_COMPONENT: &str = "cell_component";
+
+/// Guard stage for a Component Tool call: staged capability admission plus
+/// per-operation Cell authorization, never the native policy lifecycle.
+pub const GUARD_STAGE_COMPONENT: &str = "cell_admission";
+
+/// Finalize `semantic_status` for a Component Tool call that completed.
+pub const SEMANTIC_STATUS_COMPONENT: &str = "component_handler";
+
+/// Finalize `semantic_status` for a refused Component Tool call. A Component
+/// refusal is a Cell policy denial — the tool exists and was dispatched to, so
+/// it is never `method_not_found`.
+pub const SEMANTIC_STATUS_COMPONENT_DENIED: &str = "component_denied";
+
 /// Feature-gated scaffold methods (not in default `CATALOG` or production registry).
 pub const SCAFFOLD_METHODS: [&str; 2] = ["workspace.inspect", "workspace.navigate"];
 
 /// Hard upper bound for filtered audit reads requested through CEP-facing helpers.
 pub const AUDIT_QUERY_MAX_ROWS: usize = 10_000;
+
+/// Schema version stamped in `PRAGMA user_version`. Version 0 means a database
+/// written before audit schemas were versioned at all.
+pub const AUDIT_SCHEMA_VERSION: i64 = 1;
+
+/// `cep_audit_entries` columns an unversioned database must already have to be
+/// adopted. Only the NOT NULL columns are listed: `ended_at`,
+/// `result_or_error`, `semantic_status`, `metadata_json`, `model_id` and
+/// `runtime_version` are nullable and are restored by the additive DDL in
+/// [`CepAuditStore::init_schema`], but a missing NOT NULL column means the file
+/// predates the current row shape and no additive statement can repair it.
+const REQUIRED_AUDIT_COLUMNS: [&str; 10] = [
+    "audit_id",
+    "call_id",
+    "method",
+    "started_at",
+    "impact_kind",
+    "turn_id",
+    "session_id",
+    "semantic_stage",
+    "guard_stage",
+    "policy_enforced",
+];
+
+/// `attestation_records` columns an unversioned database must already have.
+/// Every column of this table is NOT NULL, so an older shape cannot be repaired
+/// additively either; detection covers both tables the store writes, not just
+/// the call rows (C5).
+const REQUIRED_ATTESTATION_COLUMNS: [&str; 6] = [
+    "turn_id",
+    "session_id",
+    "statement_json",
+    "predicate_type",
+    "generated_at",
+    "source_audit_range_or_hash",
+];
 
 /// Returns true when `method` is an inspect/navigate scaffold stub.
 pub fn is_scaffold_method(method: &str) -> bool {
@@ -70,6 +128,22 @@ impl CallAuditMetadata {
         }
     }
 
+    /// Component Tool call governed by Cell capability admission (#28).
+    ///
+    /// The tool is in the closed Component catalog, so the call is routed and
+    /// authorized — by the unified Cell path, not by method impact identity.
+    /// Labeling it `unrouted` would claim the opposite of both facts.
+    pub fn for_component_dispatch() -> Self {
+        Self {
+            semantic_stage: SEMANTIC_STAGE_COMPONENT.to_string(),
+            semantic_status: Some("started".to_string()),
+            guard_stage: GUARD_STAGE_COMPONENT.to_string(),
+            policy_enforced: true,
+            denial_source: None,
+            observation_source: None,
+        }
+    }
+
     /// Feature-gated inspect/navigate scaffold stub (no workspace access, no budget charge).
     pub fn scaffold_stub() -> Self {
         Self {
@@ -98,6 +172,9 @@ impl CallAuditMetadata {
     /// inspect/navigate scaffolds are stubs. A method that is neither (an unknown / stale
     /// tool name) will fail `MethodNotFound` without running a handler or policy hook, so it
     /// is labeled `unrouted` and must not claim enforcement.
+    ///
+    /// Component Tools are not in this catalog and must never reach this
+    /// constructor: they are labeled by [`Self::for_component_dispatch`].
     pub fn for_production_dispatch(method: &str) -> Self {
         if is_scaffold_method(method) {
             Self::scaffold_stub()
@@ -212,17 +289,37 @@ fn required_capability_for_method(method: &str) -> Option<RequiredCapability> {
         .map(|descriptor| descriptor.capability)
 }
 
+/// One Component Tool call's evidence, as recorded by the runtime ledger
+/// (#28 B5/A2). *Why* the call was authorized (`admission`) and *what actually
+/// happened* (`effects`, `denied`) travel separately and are persisted under
+/// separate metadata keys; a capability alias is admission evidence only and
+/// never becomes an effect. Native handler calls pass the default (no
+/// Component evidence).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ComponentCallEvidence<'a> {
+    pub admission: Option<&'a AdmissionEvidence>,
+    pub effects: Option<&'a ObservedEffectsRecord>,
+    pub denied: Option<&'a DeniedOperationsRecord>,
+}
+
 /// Merge transport and catalog summary keys into metadata JSON only.
 ///
-/// `component_cells` carries the 4-segment Cell audit keys
-/// (`ctx:ext:scope:trust`) produced by Component Tool calls (ADR 0004).
-/// Audit records cells, not capability names (spec §6.3). Native handler
-/// calls pass an empty slice.
+/// Component evidence lands under three keys — `admission_evidence`,
+/// `observed_effects`, and `denied_operations` — each a versioned object a
+/// reader gates on before interpreting. The inner arrays are written in
+/// `seq` order regardless of producer ordering, and
+/// `observed_capabilities` is ordered by label, so two runs of the same call
+/// produce identical bytes.
+///
+/// `component_cells` keeps carrying the 4-segment Cell audit keys
+/// (`ctx:ext:scope:trust`) for query compatibility (spec §6.3: audit records
+/// cells, not capability names), now derived from the observed effects so a
+/// multi-effect call cannot disagree with its own ledger (C8).
 pub fn merge_finalize_metadata(
     existing: Option<&str>,
     method: &str,
     observed_capabilities: &[RequiredCapability],
-    component_cells: &[String],
+    component: &ComponentCallEvidence<'_>,
 ) -> Option<String> {
     let mut obj = existing
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -240,10 +337,11 @@ pub fn merge_finalize_metadata(
     }
 
     if !observed_capabilities.is_empty() {
-        let mut caps = std::collections::HashSet::new();
-        for capability in observed_capabilities {
-            caps.insert(required_capability_label(*capability));
-        }
+        let caps: BTreeSet<&str> = observed_capabilities
+            .iter()
+            .copied()
+            .map(required_capability_label)
+            .collect();
         let list: Vec<_> = caps
             .into_iter()
             .map(|cap| serde_json::Value::String(cap.to_string()))
@@ -254,12 +352,39 @@ pub fn merge_finalize_metadata(
         );
     }
 
-    if !component_cells.is_empty() {
-        let list: Vec<_> = component_cells
+    if let Some(admission) = component.admission
+        && let Ok(value) = serde_json::to_value(admission)
+    {
+        obj_map.insert("admission_evidence".into(), value);
+    }
+
+    if let Some(record) = component.effects {
+        let mut effects: Vec<ObservedEffect> = record.effects.clone();
+        effects.sort_by_key(|effect| effect.seq);
+        let cells: Vec<_> = effects
             .iter()
-            .map(|cell| serde_json::Value::String(cell.clone()))
+            .map(|effect| serde_json::Value::String(effect.cell.audit_key(effect.scope.trust)))
             .collect();
-        obj_map.insert("component_cells".into(), serde_json::Value::Array(list));
+        if !cells.is_empty() {
+            obj_map.insert("component_cells".into(), serde_json::Value::Array(cells));
+        }
+        if let Ok(value) = serde_json::to_value(ObservedEffectsRecord {
+            version: record.version,
+            effects,
+        }) {
+            obj_map.insert("observed_effects".into(), value);
+        }
+    }
+
+    if let Some(record) = component.denied.filter(|record| !record.denied.is_empty()) {
+        let mut denied: Vec<DeniedOperation> = record.denied.clone();
+        denied.sort_by_key(|operation| operation.seq);
+        if let Ok(value) = serde_json::to_value(DeniedOperationsRecord {
+            version: record.version,
+            denied,
+        }) {
+            obj_map.insert("denied_operations".into(), value);
+        }
     }
 
     serde_json::to_string(&obj).ok()
@@ -289,6 +414,11 @@ pub enum AuditError {
     },
     #[error("unsafe audit database path at {path}: {reason}")]
     UnsafePath { path: PathBuf, reason: String },
+    /// The store refuses to open a database whose schema it cannot write
+    /// without rewriting or dropping existing history; the message carries the
+    /// operator action.
+    #[error("incompatible audit schema at {path}: {reason}")]
+    IncompatibleSchema { path: PathBuf, reason: String },
 }
 
 /// Durable flat SQLite store for CEP call audit rows.
@@ -340,8 +470,40 @@ impl CepAuditStore {
         Ok(store)
     }
 
+    /// Create or adopt the schema and stamp [`AUDIT_SCHEMA_VERSION`].
+    ///
+    /// An unversioned database is adopted only when both `cep_audit_entries`
+    /// and `attestation_records` still carry every required column; an older
+    /// shape is reported with an operator action instead of being altered, so
+    /// audit history is never silently dropped or rewritten (the read-only
+    /// legacy import stays the supported way to carry it forward). Detection is
+    /// by column name: a table whose names match but whose column types differ
+    /// is still adopted and fails later at INSERT.
     fn init_schema(&self) -> Result<(), AuditError> {
         let conn = self.conn.lock().expect("audit mutex poisoned");
+        let version = self.schema_version(&conn)?;
+        if version > AUDIT_SCHEMA_VERSION {
+            return Err(AuditError::IncompatibleSchema {
+                path: self.path.clone(),
+                reason: format!(
+                    "database reports schema version {version}, this binary writes \
+                     {AUDIT_SCHEMA_VERSION}; upgrade the binary or move the database aside"
+                ),
+            });
+        }
+        if version == 0
+            && let Some(missing) = self.missing_required_columns(&conn)?
+        {
+            return Err(AuditError::IncompatibleSchema {
+                path: self.path.clone(),
+                reason: format!(
+                    "unversioned database is missing required column(s) {missing}; \
+                     the database is left untouched — move it aside so a new one is created, \
+                     then bring the history over with the read-only legacy import"
+                ),
+            });
+        }
+
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -382,7 +544,66 @@ impl CepAuditStore {
         ] {
             let _ = conn.execute(ddl, []);
         }
+        if version != AUDIT_SCHEMA_VERSION {
+            conn.pragma_update(None, "user_version", AUDIT_SCHEMA_VERSION)
+                .map_err(|source| AuditError::Database {
+                    path: self.path.clone(),
+                    source,
+                })?;
+        }
         Ok(())
+    }
+
+    fn schema_version(&self, conn: &Connection) -> Result<i64, AuditError> {
+        conn.pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|source| AuditError::Database {
+                path: self.path.clone(),
+                source,
+            })
+    }
+
+    /// Required columns absent from either table this store writes, qualified by
+    /// table name, or `None` when both are complete or absent (fresh file).
+    fn missing_required_columns(&self, conn: &Connection) -> Result<Option<String>, AuditError> {
+        let mut missing = Vec::new();
+        for (table, required) in [
+            ("cep_audit_entries", &REQUIRED_AUDIT_COLUMNS[..]),
+            ("attestation_records", &REQUIRED_ATTESTATION_COLUMNS[..]),
+        ] {
+            missing.extend(self.missing_columns_of(conn, table, required)?);
+        }
+        if missing.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(missing.join(", ")))
+        }
+    }
+
+    /// Required columns of one table that the file does not have. An absent
+    /// table reports nothing: `CREATE TABLE IF NOT EXISTS` will create it.
+    fn missing_columns_of(
+        &self,
+        conn: &Connection,
+        table: &str,
+        required: &[&str],
+    ) -> Result<Vec<String>, AuditError> {
+        let mut present = BTreeSet::new();
+        conn.pragma(None, "table_info", table, |row| {
+            present.insert(row.get::<_, String>("name")?);
+            Ok(())
+        })
+        .map_err(|source| AuditError::Database {
+            path: self.path.clone(),
+            source,
+        })?;
+        if present.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(required
+            .iter()
+            .filter(|column| !present.contains(**column))
+            .map(|column| format!("{table}.{column}"))
+            .collect())
     }
 
     /// Append a new audit row before handler dispatch when possible.
@@ -554,14 +775,21 @@ impl CepAuditStore {
         if let Some(verdict) = &filters.verdict {
             match verdict.as_str() {
                 "success" => {
-                    sql.push_str(" AND semantic_status = ? AND result_or_error LIKE ?");
+                    sql.push_str(" AND semantic_status IN (?, ?) AND result_or_error LIKE ?");
                     bind.push(Box::new("native_handler".to_string()));
+                    bind.push(Box::new(SEMANTIC_STATUS_COMPONENT.to_string()));
                     bind.push(Box::new("success:%".to_string()));
                 }
                 "denied" => {
-                    sql.push_str(
-                        " AND semantic_status IN ('native_handler_denied', 'method_not_found', 'scaffold_stub')",
-                    );
+                    sql.push_str(" AND semantic_status IN (?, ?, ?, ?)");
+                    for status in [
+                        "native_handler_denied",
+                        "method_not_found",
+                        "scaffold_stub",
+                        SEMANTIC_STATUS_COMPONENT_DENIED,
+                    ] {
+                        bind.push(Box::new(status.to_string()));
+                    }
                 }
                 "error" => {
                     sql.push_str(" AND result_or_error LIKE ?");

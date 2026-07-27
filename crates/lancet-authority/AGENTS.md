@@ -36,6 +36,11 @@ data, effect checking, effect ledger helpers, and boundary-credit validation.
 
 ## Recent Issues
 
+- ADDED #28: `CepPolicyConfig` carries `capability_admission`
+  (`CapabilityAdmissionPolicy`), the Component Tool admission inputs the native
+  transport reads per call. Every constructor initializes it fail-closed. This
+  crate does not interpret it — Cell admission lives in `lancet-runtime` and is
+  unconditional, so `CepMode` still gates only the legacy effect-region checks.
 - FIXED M-24-04: catalog descriptors declare method-local base authority
   requirements applied through `lancet-cep::BaseAuthorityPlan`; this crate
   remains the policy/guard/effect authority implementation.
@@ -61,7 +66,8 @@ data, effect checking, effect ledger helpers, and boundary-credit validation.
   handling change.
 - Retire legacy envelope/base-authority/effect-region vocabulary only after all
   behavior consumers use the Cell path; do not run permanent dual authority
-  models.
+  models. The four deletion preconditions are in root `AGENTS.md` (full record:
+  #28 design §11).
 
 ## Record Maintenance
 
