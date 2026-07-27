@@ -33,7 +33,7 @@ pub fn expected_identity() -> ExpectedToolIdentity {
         // composition gate here until both digests are copied across by hand
         // (see #103).
         descriptor_sha256: parse_hex_digest(
-            "d80977cbf0b61c937d93692f2a5b07b5d3a408230498f16bea83a833dbe504ad",
+            "5d9a09676e41362dfbc493f341b1bcc422488b621a570080cc2defc6f12d4e2d",
         ),
         artifact_sha256: parse_hex_digest(
             "b677a9b339c4703d8a02af54def031509ff17d73c66a83fc59176a528d646f08",

@@ -19,6 +19,7 @@ pub use budget::{
     BudgetExhausted, BudgetLimits, ObservationBudgetSnapshot, ObservationBudgetTracker,
 };
 use lancet_protocol::effect_types::ImpactKind;
+use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 pub use network::NetworkPolicyConfig;
 pub use observation::ObservationPolicyConfig;
 
@@ -30,6 +31,10 @@ pub struct CepPolicyConfig {
     pub network: NetworkPolicyConfig,
     pub budget: BudgetLimits,
     pub denied_effect_kinds: BTreeSet<ImpactKind>,
+    /// Component Tool admission inputs (#28). Carried here so the native
+    /// transport reaches one policy per turn; the legacy `denied_effect_kinds`
+    /// path above is untouched and stays native-only.
+    pub capability_admission: CapabilityAdmissionPolicy,
 }
 
 impl CepPolicyConfig {
@@ -51,6 +56,8 @@ impl CepPolicyConfig {
             network: NetworkPolicyConfig::safe_defaults(),
             budget,
             denied_effect_kinds: BTreeSet::new(),
+            // Fail closed: no tool is enabled until an operator policy says so.
+            capability_admission: CapabilityAdmissionPolicy::default(),
         }
     }
 

@@ -185,6 +185,16 @@ append-only row. **PROV-DM** structure (`Activity`, `Entity`, `Agent`, relations
 is **not** stored as a graph; it is **projected** at read time into a
 `ProvGraphFragment` wire type (operator `query_audit` / `replay_audit`).
 
+The database carries its schema version in `PRAGMA user_version`. A newer
+version, or an unversioned database whose `cep_audit_entries` or
+`attestation_records` shape predates the current columns, fails the open with an
+actionable error naming the path and the missing table-qualified columns; the
+file is never altered, so audit history is neither dropped nor rewritten. The
+read-only legacy import path is unaffected. Failing with an action is the
+deliberate choice over opening the old database read-only beside a fresh one:
+one project root keeps one append-only history, and no reader joins two files
+for a turn's replay or attestation range.
+
 ### Agent Triple
 
 Rows carry `session_id`, `turn_id`, and nullable `model_id` / `runtime_version` columns populated from `CepAuditContext` at `start_call` so replay can reconstruct the Agent node from audit alone.
@@ -218,9 +228,24 @@ making preflight and approval evidence visible to replay clients.
 
 Transport finalize merges catalog `required_capability` and effect-ledger `observed_capabilities` without changing the audit write lifecycle.
 
+Component Tool calls record why the call was authorized apart from what it did:
+`admission_evidence` holds the approved/denied/boundary-excluded capability
+names, `observed_effects` the actual Cell + `ObservedScope` + concrete target
+entries, and `denied_operations` the per-operation refusals. All three are
+versioned objects with seq-ordered inner arrays, so a reader checks `version`
+before interpreting any of them. `component_cells` remains the 4-segment query key and is
+derived from the effect ledger, so a multi-effect call cannot disagree with
+itself. Operator audit APIs and `replay_audit` project all three into PROV
+activity attributes.
+
 ### Attestations
 
 Per-turn **unsigned in-toto** statements are stored in `attestation_records` in the same audit database (not git-tracked files). Signing and key management are deferred beyond alpha; wire shapes remain forward-compatible.
+
+Predicate versions coexist. A turn is attested with the v2 predicate iff one of
+its rows carries versioned evidence metadata, else v1; v2 statement bytes are
+canonical JSON. On replay the stored `predicate_type` wins, so a stored v1
+statement is never re-projected as v2 and a v2 statement compares byte for byte.
 
 ### Time-Range Proxy
 

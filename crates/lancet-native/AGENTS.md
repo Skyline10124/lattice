@@ -47,6 +47,27 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Recent Issues
 
+- ADDED #28 (Codeberg #6): the Component branch of `transport.rs` runs `admit_tool` against
+  `cep_context.policy.capability_admission` before `rt.call`. A denial answers
+  `CapabilityNotGranted` and still finalizes the audit row with its
+  `AdmissionEvidence` — a Component call never finalizes with absent metadata.
+  An admitted call carries the admitted set into `ComponentCallContext`, and
+  finalize merges admission evidence, observed effects, and denied operations.
+  `ServerRunConfig::validate_capability_admission` makes an unknown deny name a
+  startup error at `run_native`. Admission is unconditional: `CepMode` is not
+  consulted. The legacy pre-dispatch deny and all native handlers are untouched.
+  The dispatch split also picks the audit vocabulary:
+  `CallAuditMetadata::for_component_dispatch` for a catalogued Component (never
+  the legacy `unrouted` labeling), finalizing as `component_handler` or
+  `component_denied` — a Component refusal is a Cell policy denial, never
+  `method_not_found`. Every finalize arm, cancellation included, persists the
+  merged evidence metadata: an outcome ends the call, it does not unmake the
+  evidence the call already produced. Nothing forbids a Component name that
+  collides with a native catalog method: the legacy pre-dispatch effect-kind
+  deny runs for any method `lancet_catalog` knows, before the split, so a
+  collision would arm both vocabularies in one call. Unreachable while the
+  Component catalog is empty — read #28 design §11 before migrating a native
+  method.
 - FIXED GitHub #39 (= Codeberg #17; PR #74 review defects) — four
   `src/workspace/local.rs` fixes. NOTE: #39 here is the operator audit sink
   ticket, not the Direct-Local workspace tickets #59/#60/#61 cited above and
@@ -102,10 +123,6 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   descendant are navigable but not emitted by list/find; successful
   read/list/grep/find audit metadata now records content-free visibility rule
   categories without hidden paths, content, counts, or hashes.
-- FIXED M-24-02: command workspace snapshots and artifact lower rechecks run in
-  the blocking pool with entry/depth limits.
-- FIXED M-24-03: `ToolLimits` was removed; shell timeouts are explicit and
-  patch write size is owned by `PatchApplyLimits`.
 - FIXED L-30/L-31: cleanup metadata records all cleanup failures, and positive
   commit-baseline hunk summaries are recorded when evidence exists.
 - PARTIAL M-05: web fetch rebinding defense uses request-time pinned IP plus a

@@ -29,6 +29,12 @@ LANCET profile sections, and pure lowering data consumed by API/authority.
 
 ## Recent Issues
 
+- ADDED #28 (Codeberg #6): `[lancet.capabilities]` (`deny`, `max_boundary`,
+  default `in`) is a typed sub-table, so a Component Tool admission policy can
+  never fall into `extensions`. `AgentProfile::capability_admission_policy`
+  lowers it plus `[tools].enabled` into `CapabilityAdmissionPolicy`; unknown
+  `deny` names fail at server construction, not here. `[lancet.effects]` stays
+  native-path only.
 - FIXED #62 (Codeberg #40): the Upper microVM `[workspace]` section
   (`WorkspaceSection`, `EgressPolicyConfig`, `CredentialRef`, lifecycle-limit
   constants) was removed. Legacy profiles declaring `[workspace]` now fail

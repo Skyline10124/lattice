@@ -199,6 +199,9 @@ fn effect_violation_error(
             authorized_effect: authorized_kinds,
             observed_effects: observed_kinds,
             violations,
+            // Legacy ImpactKind path: the Cell fields stay unset.
+            cell_ref: None,
+            capability: None,
         })),
         Retriability::Permanent,
     )

@@ -5,6 +5,10 @@
 
 use super::*;
 use crate::audit::{AttestationRecord, AuditOutcome, CallAuditMetadata, CepAuditContext};
+// The write path: seeding an attestation picks v1/v2 from row evidence, the
+// same as a real attest. `replay_audit` re-derives under the stored
+// `predicate_type` (#28 D8), so the two are deliberately different functions.
+use crate::provenance::build_in_toto_statement;
 use crate::store_path::audit_db_path_for_project_in;
 use crate::test_support::ScopedXdgStateHome;
 use lancet_catalog::CepMethod;

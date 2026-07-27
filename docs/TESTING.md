@@ -168,6 +168,15 @@ cargo build -p lattice-cli --bin lattice
 export LATTICE_BIN="$(pwd)/target/debug/lattice"
 ```
 
+**Git worktrees:** `xtask ci` only fills `LATTICE_BIN` in when it is *unset*, so
+a value exported for the main checkout (by `direnv`, a shell profile, or an
+earlier session) survives into a worktree run and points at the main
+checkout's `target/`. The gate then builds the worktree binary, runs the
+harness against the stale path, and every Layer 2–4 test fails with
+`BinaryNotFound` — a green branch reads as broken. Either unset it
+(`env -u LATTICE_BIN cargo xtask ci`, letting the gate resolve its own) or
+point it at the worktree.
+
 ---
 
 ## 3. Fixture rules

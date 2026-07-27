@@ -41,6 +41,8 @@ fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
         project_root: root.to_path_buf(),
         enabled_tools: enabled,
         policy,
+        // Native catalog methods only; no Component Tool is admitted.
+        capability_admission: Default::default(),
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: lancet_api::AuditBacking::InMemory,
         model_id: "test".into(),
@@ -181,6 +183,8 @@ async fn policy_deny_blocks_create_on_direct_local() {
         project_root: dir.path().to_path_buf(),
         enabled_tools: enabled,
         policy,
+        // Native catalog methods only; no Component Tool is admitted.
+        capability_admission: Default::default(),
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: lancet_api::AuditBacking::InMemory,
         model_id: "test".into(),

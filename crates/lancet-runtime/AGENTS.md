@@ -4,24 +4,37 @@ Crate-local guidance for `lancet-runtime`.
 
 ## Role
 
-ADR 0004 Component engine, closed composition gate, and minimal ToolHost
-for LATTICE Source Tools (#27 (Codeberg #5) slices C–D). Owns the wasmtime
-engine, embedded inventory collection, the fail-closed composition gate,
-the control-only ToolHost, the `call` execution path with result/effect
-validation, and the `contains`/`descriptors` surface that `lancet-native`
-and `lancet-api` use for the D.3 dispatch split and D.4 LLM projection.
+ADR 0004 Component engine, closed composition gate, Cell capability
+admission, and minimal ToolHost for LATTICE Source Tools (#27 (Codeberg #5)
+slices C–D, #28 (Codeberg #6)). Owns the wasmtime engine, embedded inventory
+collection, the fail-closed composition gate, the admission/authorization
+authority, the control-only ToolHost, the `call` execution path with
+result/effect validation, and the `contains`/`descriptors`/`descriptor`
+surface that `lancet-native` and `lancet-api` use for the D.3 dispatch split,
+the D.4 LLM projection, and the per-call admission step.
 
 ## Sub-Architecture
 
 - `src/composition.rs` owns `EmbeddedTool`, `ExpectedToolIdentity`,
   `CompositionError`, `ClosedCatalog`, and the `compose` gate. The gate
   verifies descriptor digest, artifact digest, ABI, imports, and channel
-  adapters at startup. The catalog is immutable after `compose`.
+  adapters at startup, and refuses a catalog where one capability name maps
+  to different cells (#28 C2). It cannot see `lancet-catalog`: a Component
+  method name colliding with a native method would arm both vocabularies in
+  one call (#28 design §11 hazard) — unreachable while `EXPECTED_COMPONENTS`
+  is empty. The catalog is immutable after `compose`.
+- `src/admission.rs` owns `admit_tool` (the fixed enabled → deny → boundary
+  stage order), `AdmittedTool`, `AdmissionDenial` (which always carries its
+  `AdmissionEvidence`), the per-operation `authorize_operation`, host-owned
+  `resolve_scope`, and `validate_policy_against_catalog` (unknown deny name
+  = startup error). This is the only authorization authority for Component
+  Tools; `CepMode` never softens it.
 - `src/runtime.rs` owns `ComponentRuntime`, `ComponentCallContext`,
   `StoreState`, the engine/linker/ticker construction, and the `call`
   method (params validation, pre-cancel short-circuit, instantiation,
-  cancellation-aware guest-error mapping, result CellRef validation,
-  result schema validation, Cell evidence recording). Call-scoped
+  cancellation-aware guest-error mapping, result CellRef validation against
+  the descriptor ceiling *and* the admitted set, result schema validation,
+  host-computed context measure, Cell evidence recording). Call-scoped
   cancellation state is the sole cancellation authority (#70 (Codeberg #48)):
   pre-call check, guest logical-error path, and epoch abort all converge on
   one shared `CallCancelled` error. `call` takes `&self`
@@ -31,13 +44,17 @@ and `lancet-api` use for the D.3 dispatch split and D.4 LLM projection.
 - `src/bindings.rs` owns the `wasmtime::component::bindgen!` expansion for
   the Tool Host WIT world (`lattice:tool-host@0.1.0`).
 - `src/host.rs` implements the `host-control` interface on `StoreState`
-  (cancellation probe + structured events).
+  (cancellation probe + structured events) and binds each effectful import
+  to its cell: `emit-event ⇒ Cell{Mutate, None, <session-channel scope>}`
+  with target `Session{turn_id}`. `cancelled` is a pure control probe and is
+  never gated.
 - `src/limits.rs` owns `ExecutionLimits`, `RecordingLimits`, and
   `AbortReason`. Resource limits use `StoreLimits` + epoch interruption +
   fuel.
 - `src/evidence.rs` owns `CellEvidenceLedger` — `Arc<Mutex>`-backed
-  recorder for one call's `(Cell, Trust)` pairs. Clones share the
-  underlying records so the caller can read `snapshot_keys()` after the
+  recorder for one call's admission evidence, observed effects, and denied
+  operations, ordered by a shared `seq`. Clones share the underlying
+  records so the caller can read `snapshot()`/`snapshot_keys()` after the
   call moves one clone into the wasmtime `Store` (D.3).
 - `src/error_map.rs` maps wasmtime traps/limits/aborts to structured
   `CepError` codes (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/
@@ -61,8 +78,20 @@ and `lancet-api` use for the D.3 dispatch split and D.4 LLM projection.
 - `test-utils` feature exposes only the fixed no-op fixture constructor
   and synthetic test helpers. Production code never enables it.
 - The `host-control` interface is control-only (cancellation + events).
-  No workspace/network/session domain operation before #28 (Codeberg #6)
-  capability admission.
+  No workspace/network/session domain operation before the domain slices add
+  handle-per-capability domain imports; each will bind its own cell through
+  the same `authorize_operation` seam.
+- Every effectful Tool Host import is gated by its host-bound cell and
+  concrete target. A denial rejects only that operation: the host facility
+  is never invoked, the call continues, and a `DeniedOperation` is recorded
+  instead of an effect. Path/host targets are refused outright until a
+  domain channel can produce them.
+- Admission runs per call, outside this crate (the transport), and is
+  handed in through `ComponentCallContext::admitted`. The runtime never
+  admits a tool itself, and no legacy effect type takes part in a decision
+  here — `error_map.rs` only fills the legacy `EffectErrorData` wire shape
+  (its `Vec<ImpactKind>` fields stay empty), which is a named error surface,
+  never an authorization input.
 - `call` is `&self`: the epoch ticker is lazily spawned on first call via
   `OnceLock` (requires a tokio runtime context; composition does not).
   `set_limits` remains `&mut self` (tests only).

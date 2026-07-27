@@ -101,6 +101,14 @@ impl LancetServer {
     ) -> Result<(CepClient, ServerLifecycle), LancetError> {
         config.components = Some(Arc::clone(&components));
 
+        // #28 C2: catalog and admission policy first coexist here. The server
+        // run refuses an unknown deny name too, but surfacing it during
+        // composition is what turns it into a build error instead of a server
+        // task that dies after the client is already handed out.
+        config.validate_capability_admission().map_err(|err| {
+            LancetError::Internal(format!("capability admission: {}", err.message))
+        })?;
+
         let mut registry = MethodRegistry::new();
         register_production_method_registry(&mut registry).map_err(|err| {
             LancetError::Internal(format!("production method registry registration: {err:?}"))
@@ -162,6 +170,7 @@ impl LancetRuntime {
             project_root,
             enabled_tools,
             policy,
+            capability_admission,
             cep_mode,
             audit,
             model_id,
@@ -192,6 +201,7 @@ impl LancetRuntime {
             network: policy.network.clone(),
             budget: policy.budget.clone(),
             denied_effect_kinds: policy.denied_effect_kinds.clone(),
+            capability_admission,
         };
 
         // ADR 0003 / #38: the runtime carries no execution-routing field.

@@ -393,6 +393,45 @@ PARTIAL and produced four real corrections, all applied here:
 `crates/{lancet-audit,lancet-api,lancet-catalog,lancet-native,lattice-api,lattice-cli}/AGENTS.md`;
 `AGENTS.md` (root); `FINDINGS.md`; `FIX.md`.
 
+## ENV-OOM-02 third occurrence: `lancet-api` audit tests race `config`'s `XDG_STATE_HOME` test — 2026-07-27
+
+Severity: test flakiness / gate-blocking.
+
+**Problem:** The second `cargo xtask ci` run of the #28 sweep failed `cargo test -p lancet-api` (exit 101, 9 failures) where the first run passed. `config.rs`'s `audit_state_root_prefers_absolute_xdg_state_home` and `audit.rs`'s `IsolatedProjectAudit` each guarded `XDG_STATE_HOME` with their **own** mutex, which serializes nothing: the config test's restore path (`remove_var`, since the outer environment has no such variable) landed inside an audit test's read window, so `tail_audit` resolved the real `~/.local/state/lattice/…` path and panicked with "audit database not found". The panic then poisoned `XDG_TEST_LOCK`, and `expect("xdg test lock")` turned one failure into nine. Pre-existing: both tests and both locks are unchanged at base `538b476e`; #28 only altered the scheduling around them.
+
+**Fix:** One process-wide `config::lock_xdg_state_home()` shared by both modules, recovering poison instead of propagating it (`unwrap_or_else(|p| p.into_inner())`) so a panicking test fails alone. Test-only change; no product behavior.
+
+**Verification:**
+- `cargo test -p lancet-api` — 20 passed.
+- `cargo test -p lancet-api --lib` ×25 — 25/25 green (0 failures).
+- `cargo xtask ci` — All checks passed.
+
+**Changed files:** `crates/lancet-api/src/{config,audit}.rs`; `FINDINGS.md` (ENV-OOM-02 third occurrence); `FIX.md`.
+
+**合并说明（#28 与 #111 分支合并时）:** 上方同日条目「两把互不相干的 mutex 守同一个 `XDG_STATE_HOME`」是 **#111** 对同一处缺陷的独立发现与独立修复。两侧修法语义相同（单锁 + poison 恢复），合并时保留 #111 那一份实现（doc 注释含失败率数据与「必须全 crate 唯一」的回归告警），删除本条引入的重复 `lock_xdg_state_home` 定义——否则同一 crate 内两个同名函数直接编译失败。两条记录均按 append-only 保留。
+
+## GitHub #28: Cell capability admission, effect ledger, audit/provenance evidence — 2026-07-27
+
+Severity: feature / fail-closed authorization / audit schema.
+
+**Problem:** #27 landed the WASM Component substrate, but a Component Tool call had no authorization step of its own: nothing decided which declared capabilities an operator had approved, every Tool Host import ran unconditionally, the result Cell was checked only against the descriptor, and audit compressed a whole call into one `component_cells` key that mixed "why authorized" with "what happened". Design: `docs/specs/2026-07-26-issue28-cell-admission-design.md`.
+
+**Fix (per crate):**
+- `lancet-protocol`: `evidence` (admission evidence kept separate from the observed-effect ledger, plus `ObservedScope`/`ObservedTarget` and the fail-closed `CapabilityAdmissionPolicy`), `canonical::canonical_json` (one canonical-bytes writer), dotted capability-name grammar as the first check in `ToolDescriptor::validate`, additive `EffectErrorData` cell fields, v2 attestation predicate constant. No new error-code variants.
+- `lattice-profile`: typed `[lancet.capabilities]` (`deny`, `max_boundary`, default `in`) that can never fall into `extensions`; `AgentProfile::capability_admission_policy` lowers it plus `[tools].enabled`.
+- `lancet-runtime`: `admission.rs` — `admit_tool` with the fixed enabled → deny → boundary stage order, `authorize_operation` per Tool Host import, host-owned `resolve_scope` (undeclared trust = `ex`), `validate_policy_against_catalog`; `emit-event` bound to `Cell{Mutate, None, session-scope}` with a `Session{turn_id}` target; result Cell checked against descriptor ceiling *and* admitted set; host-computed `context_measure`; composition refuses one capability name over two cells.
+- `lancet-audit`: `PRAGMA user_version` with actionable open errors for newer/old-shape databases (file untouched); `admission_evidence` / `observed_effects` / `denied_operations` recorded separately with `component_cells` derived from the ledger; turn-granular v1/v2 attestation selection with stored `predicate_type` winning on replay.
+- `lancet-authority`/`lancet-native`/`lancet-api`/`lattice-api`: `CepPolicyConfig.capability_admission` threaded fail-closed from profile to transport; the Component branch admits before `rt.call`, answers `CapabilityNotGranted` with evidence on denial, and merges evidence at finalize; unknown deny names fail server construction.
+- Legacy vocabulary is **not** deleted (design §11): the `transport.rs` dispatch split stays the single documented seam and Component Tools never consult the legacy types.
+
+**Verification:**
+- `cargo xtask ci` — All checks passed (fmt, clippy `-D warnings`, debug build, harness/lancet boundaries, `tool-codegen --check`, 18 crates × `cargo test -p`, `tool-build --verify`): 88 test binaries, 1242 tests, 0 failures.
+- `cargo test -p xtask` — 43 passed (the gate excludes `xtask` from its per-crate test list).
+- Design §10 scenario sweep: capability alias, partial admission, uncovered operation, default `ex` + `max_boundary=in`, scope escape, result-cell drift, effect ceiling, `Free` measure `None`, old-shape audit DB, audit attribution, attestation determinism, capability/cell conflict, multi-capability + multi-effect call, unknown profile capability, and the noop B11 e2e all have tests.
+- Pre-existing, unrelated: `cargo check --workspace --all-features` fails on the `inspect-scaffold` scaffold test (also broken at base `538b476e`) — recorded as FINDINGS `L-38-01`.
+
+**Changed files:** `crates/lancet-protocol/src/{evidence,canonical,cell,error,provenance,lib}.rs`; `crates/lattice-profile/src/{schema,load,lib}.rs`; `crates/lancet-runtime/src/{admission,composition,evidence,host,runtime,error_map,lib}.rs` + `tests/{call,gate,negative}.rs`; `crates/lancet-audit/src/{audit,audit_tests}.rs` + `src/provenance/{attestation,canonicalize,projector,mod}.rs`; `crates/lancet-authority/src/policy/{mod,default}.rs`; `crates/lancet-native/src/server/transport.rs` + `tests/{cep_component_round_trip,prov_isomorphism}.rs`; `crates/lancet-api/src/{attestation,audit,config,runtime}.rs`; `crates/lattice-api/src/turn/cep.rs` + `tests/{audit_turn_provenance,direct_local_acceptance}.rs`; `tools/noop/manifest.toml` + `generated/`; `docs/{CONFIGURATION,LANCET}.md`; crate `AGENTS.md` files; `FINDINGS.md`; `FIX.md`.
+
 ## GitHub #46 residual finalization: fetch capability pre-outbound + scenario tighten — 2026-07-24
 
 Severity: test refactor / product fail-closed / review closeout.

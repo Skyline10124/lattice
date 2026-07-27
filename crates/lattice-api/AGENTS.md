@@ -41,6 +41,13 @@ agent loop over `lancet-api`'s CEP runtime.
 
 ## Recent Issues
 
+- ADDED #28 (Codeberg #6): `build_production_turn_deps` lowers the loaded
+  profile into `CapabilityAdmissionPolicy` via
+  `AgentProfile::capability_admission_policy` (`[tools].enabled` is the stage-1
+  grant, `[lancet.capabilities]` subtracts) and hands it to
+  `LancetRuntimeConfig`. Without a loaded profile nothing is admitted.
+  `cep_policy_from_profile` only carries executor policy, so it leaves the
+  admission field at its fail-closed default.
 - FIXED #39: the crate-local `src/test_env.rs` XDG helper was deleted; this
   crate now consumes the single workspace-wide `lancet_audit::ScopedXdgStateHome`
   through the `test-support` dev-dependency feature. Do not reintroduce a local

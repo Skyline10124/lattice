@@ -55,7 +55,7 @@ use crate::audit::{
     impact_kind_label,
 };
 use crate::provenance::{
-    build_in_toto_statement, project_rows, project_turn_trace, source_audit_range_hash,
+    project_rows, project_turn_trace, rebuild_in_toto_statement, source_audit_range_hash,
 };
 use crate::store_path::audit_db_path_for_project;
 
@@ -332,13 +332,19 @@ pub async fn replay_audit(request: AuditReplayRequest) -> OperatorAuditResult<Au
         .to_string();
 
     let trace = project_turn_trace(&request.turn_id, &rows);
-    let statement = Some(build_in_toto_statement(&request.turn_id, &rows, &runtime));
-    let stored_statement_match = match store.attestation_for_turn(&request.turn_id) {
-        Ok(Some(record)) => {
-            stored_statement_matches_derived(&record.statement_json, statement.as_ref())
-        }
-        _ => None,
-    };
+    // #28 D8: the stored `predicate_type` is the authority on replay, so a
+    // turn attested as v1 re-projects as v1 even on a binary that would emit
+    // v2 for the same rows. An unattested turn falls back to row evidence.
+    let stored = store.attestation_for_turn(&request.turn_id).ok().flatten();
+    let statement = Some(rebuild_in_toto_statement(
+        &request.turn_id,
+        &rows,
+        &runtime,
+        stored.as_ref().map(|record| record.predicate_type.as_str()),
+    ));
+    let stored_statement_match = stored.as_ref().and_then(|record| {
+        stored_statement_matches_derived(&record.statement_json, statement.as_ref())
+    });
     let range_hash = source_audit_range_hash(&rows);
 
     Ok(AuditReplayResult {

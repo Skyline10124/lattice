@@ -54,6 +54,14 @@ but delegates concrete composition to `lancet-runtime`.
 
 ## Recent Issues
 
+- ADDED #28 (Codeberg #6): `LancetRuntimeConfig.capability_admission` threads
+  the host's Component Tool admission policy into `CepPolicyConfig`;
+  `spawn_composed` validates it against the composed catalog, so an unknown deny
+  name fails composition instead of a spawned server task.
+  `store_turn_attestation` writes `statement_bytes` (canonical for v2, stored
+  serde order for v1) and `replay_audit` — now delegating into
+  `lancet_audit::operator` — rebuilds under the stored `predicate_type`, so a
+  turn attested as v1 never re-projects as v2.
 - FIXED GitHub #39 (= Codeberg #17): operator audit read sank into `lancet-audit`.
   `src/audit.rs` is now a re-export + three one-line delegations; the
   pagination loop, filter construction, wire projection, attestation

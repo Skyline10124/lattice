@@ -111,6 +111,8 @@ pub enum CellKeyError {
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DescriptorError {
+    #[error("capability name {0} must be lowercase dotted with at least two [a-z0-9_-] segments")]
+    InvalidCapabilityName(String),
     #[error("capability {capability} references undeclared scope {scope}")]
     UndeclaredScope { capability: String, scope: String },
     #[error("duplicate capability name {0}")]
@@ -208,10 +210,33 @@ pub fn parse_cell_ref(key: &str) -> Result<Cell, CellKeyError> {
     })
 }
 
+/// Capability-name grammar `^[a-z0-9_-]+(\.[a-z0-9_-]+)+$`: lowercase
+/// dotted, at least two segments, so every capability carries a stable
+/// namespace across tools and the cross-tool conflict rule compares
+/// like with like.
+fn is_valid_capability_name(name: &str) -> bool {
+    let mut segments = 0usize;
+    for segment in name.split('.') {
+        if segment.is_empty()
+            || !segment
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 2
+}
+
 impl ToolDescriptor {
     /// Registration-time consistency: every capability cell must root in a
     /// declared scope; names must be unique. Channels derive from scopes —
     /// there is no independent channels field (spec §11.3).
+    ///
+    /// Per-capability check order is fixed: grammar, then duplicate name,
+    /// then undeclared scope — an ill-formed name is reported as such and
+    /// never as a downstream scope or duplication problem.
     pub fn validate(&self) -> Result<(), DescriptorError> {
         // Duplicate scope names first, so undeclared-scope lookups below
         // never silently match the wrong copy of a duplicated name.
@@ -223,6 +248,9 @@ impl ToolDescriptor {
         }
         let mut seen_caps = BTreeSet::new();
         for c in &self.capabilities {
+            if !is_valid_capability_name(&c.name) {
+                return Err(DescriptorError::InvalidCapabilityName(c.name.clone()));
+            }
             if !seen_caps.insert(c.name.as_str()) {
                 return Err(DescriptorError::DuplicateCapability(c.name.clone()));
             }
@@ -357,7 +385,7 @@ mod tests {
                 channel: ChannelKind::Session,
             }],
             capabilities: vec![Capability {
-                name: "ghost-read".into(),
+                name: "ghost.read".into(),
                 cell: Cell {
                     ctx_op: CtxOp::Alloc,
                     ext_impact: ExtImpact::Read,
@@ -370,7 +398,7 @@ mod tests {
         assert_eq!(
             desc.validate(),
             Err(DescriptorError::UndeclaredScope {
-                capability: "ghost-read".into(),
+                capability: "ghost.read".into(),
                 scope: "nope".into(),
             })
         );
@@ -408,7 +436,7 @@ mod tests {
 
         // Duplicate capability name.
         let cap = Capability {
-            name: "todo-write".into(),
+            name: "todo.write".into(),
             cell: cell.clone(),
         };
         let dup_cap = ToolDescriptor {
@@ -424,7 +452,90 @@ mod tests {
         };
         assert_eq!(
             dup_cap.validate(),
-            Err(DescriptorError::DuplicateCapability("todo-write".into()))
+            Err(DescriptorError::DuplicateCapability("todo.write".into()))
+        );
+    }
+
+    fn descriptor_with_capability(name: &str) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "grammar".into(),
+            version: "0.1.0".into(),
+            description: "capability name grammar".into(),
+            params_schema: serde_json::Value::Null,
+            result_schema: serde_json::Value::Null,
+            scopes: vec![ScopeDecl {
+                name: "session".into(),
+                trust: Trust::In,
+                channel: ChannelKind::Session,
+            }],
+            capabilities: vec![Capability {
+                name: name.into(),
+                cell: Cell {
+                    ctx_op: CtxOp::Alloc,
+                    ext_impact: ExtImpact::None,
+                    scope: "session".into(),
+                },
+            }],
+            artifact: artifact(),
+            abi_version: 1,
+        }
+    }
+
+    #[test]
+    fn descriptor_accepts_dotted_capability_names() {
+        for name in [
+            "session.result",
+            "session.events",
+            "net.fetch.web",
+            "a.b",
+            "todo_write.v2",
+            "mutate-edit.file0",
+        ] {
+            assert_eq!(
+                descriptor_with_capability(name).validate(),
+                Ok(()),
+                "{name} conforms to the capability grammar"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_rejects_malformed_capability_names() {
+        for name in [
+            "session",         // single segment: no namespace
+            "Session.Result",  // uppercase
+            "session..result", // empty middle segment
+            ".session",        // leading dot
+            "session.",        // trailing dot
+            "",                // empty
+            "session result",  // space
+            "session:result",  // cell-ref separator
+        ] {
+            assert_eq!(
+                descriptor_with_capability(name).validate(),
+                Err(DescriptorError::InvalidCapabilityName(name.into())),
+                "{name} violates the capability grammar"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_grammar_precedes_other_capability_checks() {
+        // An ill-formed name must surface as InvalidCapabilityName even when
+        // it is also duplicated and roots in an undeclared scope.
+        let bad = Capability {
+            name: "BAD".into(),
+            cell: Cell {
+                ctx_op: CtxOp::Alloc,
+                ext_impact: ExtImpact::None,
+                scope: "nope".into(),
+            },
+        };
+        let mut desc = descriptor_with_capability("session.result");
+        desc.capabilities = vec![bad.clone(), bad];
+        assert_eq!(
+            desc.validate(),
+            Err(DescriptorError::InvalidCapabilityName("BAD".into()))
         );
     }
 
