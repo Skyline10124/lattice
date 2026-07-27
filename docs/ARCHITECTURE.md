@@ -28,8 +28,11 @@ session graph store is git-backed (`GitSessionGraphStore` over the project's
 `git2` object database); the previous SQLite graph store has been removed.
 ## 2. Component diagram
 
-The workspace has 15 crates grouped into layers. Arrows point from a higher
-layer toward the lower-layer crates it depends on.
+The workspace has 19 crates grouped into layers. Arrows point from a higher
+layer toward the lower-layer crates it depends on. The diagram below shows the
+runtime crates; `lattice-tool-prelude` (guest SDK) and
+`lattice-system-harness` (black-box tests) sit outside it by contract.
+`AGENTS.md` carries the authoritative edge list.
 ```mermaid
 graph TD
     %% Layer 5 — presentation / entry

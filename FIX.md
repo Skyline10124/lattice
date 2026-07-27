@@ -2,6 +2,55 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## 并发测试改写进程全局 CWD 导致的跨测试 flake（CI 双平台红）+ 依赖图与 crate 计数文档漂移 — 2026-07-27
+
+Severity: HIGH（阻断 CI 双平台）/ MEDIUM（文档漂移）。
+
+**Problem — CWD flake:**
+
+推送 #80 review 修复后 ordinary CI lane 在 **ubuntu 与 macos 同时**变红，失败形态是 `lattice-api` 的 `consistency` 测试报：
+
+```
+create session: Internal("git error: open repository: \"/var/folders/.../T/.tmpo3HKle/sessions\"
+does not appear to be a git repository; init_bare: Could not obtain the current directory")
+```
+
+诊断：**不是本轮改动引入的回归** —— `git diff 103478f8..HEAD` 对 `crates/lattice-api`、`crates/lattice-session` 零触碰。是一条既有 flake 被这次推送暴露。本机压测复现 **2/40**，与 CI 同签名。
+
+根因链：
+1. `crates/lattice-api/tests/{consistency,usage_turn,release_e2e,audit_turn_provenance}.rs` 的请求构造函数调用 `std::env::set_current_dir(&ws.root)` —— CWD 是**进程全局**的，而这些文件各有多个 `#[tokio::test]` 在同一进程内**并发**执行，每个持有自己的 `TempDir`。
+2. 测试 A 把进程 CWD 指向自己的 TempDir；A 结束、`TempDir` drop 删目录后，进程处于「CWD 指向已删除路径」状态。
+3. 此时并发的测试 B 调 `gix` —— **`gix` 即使对绝对路径也会读取进程 CWD**，于是 B 以 `Could not obtain the current directory` 失败，尽管 B 自己的目录完好无损。
+4. `crates/lattice-session/src/test_utils.rs:32-50` 已有针对该现象的恢复逻辑（且注释明确点名 lattice-api 的这三个 fixture 是肇事者），但**生产路径** `git_graph/mod.rs` 的两处 init 没有。
+
+**关键观察**：这四处 `set_current_dir` 全都是**多余的** —— 同一个请求结构体里已经显式传了 `test_project_root`（`consistency.rs:169` 等），而 `crates/lattice-api/src/turn/mapping.rs:36-43` 的 `resolve_project_root` 只在 `test_project_root` 为 `None` 时才回落到 `current_dir()`。也就是说这些测试从不依赖 CWD，纯粹在制造危害。
+
+**Fix:**
+
+1. **删掉四处多余的 `set_current_dir`**（治本：消除竞态源头，而非用 mutex 串行化掩盖）。每处留注释说明为何**故意不设** CWD，避免被"好意"加回。
+2. **给生产路径补 CWD 恢复**：`git_graph/mod.rs` 新增 `init_recovering_cwd()`，包裹 `gix::init_bare` 与 worktree init 两条路径。失败信息含 `CurrentDir` 时，把 CWD 指到 `temp_dir()` 后重试一次。这不只是测试便利 —— 真实用户在 checkout 被删、卷被卸载后会撞上同一个无从下手的错误。
+   实现中踩到并修掉一个坑：**朴素重试会失败**。gix 在需要 CWD 之前就已创建 `.git` 目录，所以首次失败会留下半成品，重试报 `Refusing to initialize the existing '...' directory`（压测实测到这一形态）。故 `init_recovering_cwd` 接受一个 `reopen` 闭包，第二次尝试失败时改为 `open` 已存在的仓库。
+
+**Problem — 文档漂移（顺带修，见 #102 / #86 / #108）:**
+
+- `AGENTS.md:45-62` 的分层依赖图与实际 `Cargo.toml` 有 **7 条差集**：`lattice-llm -> net-guard` 未画（且这使 `net-guard` 与 `lattice-llm` 不能同列 Layer 0）；`lattice-api` 实际还直连 `lancet-protocol`/`lancet-catalog`/`lancet-authority`/`lancet-native`，图里概括成 "+ lattice runtime crates"；`lattice-cli` 实际还直连 `lancet-api`。全部边都是**向下**的，不构成分层违规，但概括式表述无法与 `cargo metadata` 比对，因而藏住了这些边。
+- crate 计数在四份文档里各说各话：README 15、`docs/ARCHITECTURE.md` 15、`docs/DEVELOPMENT.md` 16、`docs/GETTING-STARTED.md` 16，实际 **19**；README 的 crate 表还漏了 `lancet-runtime`、`lattice-tool-prelude`、`lattice-system-harness` 三个。
+- `docs/DEVELOPMENT.md` 说需要 Rust **1.88+**，实际 `Cargo.toml` 要求 1.94、`rust-toolchain.toml` 钉 1.96.0。
+- README 的 `lancet-native` 角色写着 "verify, edit/shell/web helpers" —— `exec.command_run` 与 post-mutation verify 已由 #26/#37 **永久退役**，属活文档里的退役词汇。
+
+**Fix:** 逐条改正；`AGENTS.md` 与 README 的图改为**逐条列出每条真实边**（并说明为何不再用概括写法），补上 `lancet-runtime`，并注明 `lattice-tool-prelude`/`lattice-system-harness` 按契约不在图内（已核实二者确无 workspace 内部依赖）。新增门禁测试 `documented_crate_counts_match_the_crates_directory`，把四份文档的计数钉到 `crates/` 目录实际条目数。同时在 `AGENTS.md` 图下显式记录「今天只有一条边被机器检查」并指向 #108。
+
+**Verification:**
+- **压测（本修复的核心证据）**：`consistency` 连跑 **100 次 0 失败**（修复前 2/40 ≈ 5%）；`usage_turn` / `release_e2e` / `audit_turn_provenance` 各 30 次 0 失败。
+- `cargo test -p lattice-api` — 全部 target 绿（91 + 8 + 5 + 5 + 10 + 其余）。
+- `cargo test -p lattice-session` — 54 passed / 1 ignored。
+- `cargo test -p xtask` — 48 passed（含新增计数门禁）。
+- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings` — passed。
+- 计数门禁**反向验证**：把 `docs/GETTING-STARTED.md` 改成 "18 crates" → FAIL 并给出可执行提示；改回后 PASS。
+
+**Changed files:**
+`crates/lattice-api/tests/{consistency,usage_turn,release_e2e,audit_turn_provenance}.rs`; `crates/lattice-session/src/git_graph/mod.rs`; `AGENTS.md`; `README.md`; `docs/{ARCHITECTURE,DEVELOPMENT,GETTING-STARTED}.md`; `xtask/src/ci.rs`; `FIX.md`.
+
 ## GitHub #80 review 收口：Component 里的宿主绝对路径、verify 证据丢失、encoder 指纹缺失 — 2026-07-27
 
 Severity: MEDIUM（阻断 #73 验收标准的结构性缺陷 + 证据收集失效）。

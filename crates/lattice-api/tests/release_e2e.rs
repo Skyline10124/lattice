@@ -132,7 +132,9 @@ fn make_release_e2e_request(
     session_id: &str,
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
-    std::env::set_current_dir(&ws.root).expect("set workspace cwd");
+    // No `set_current_dir` here: `test_project_root` already pins the root, and
+    // mutating the process-global CWD from concurrent tests made sibling tests
+    // fail once a `TempDir` dropped (see the note in `tests/consistency.rs`).
     RunTurnRequest {
         input: input.to_string(),
         session_id: session_id.to_string(),

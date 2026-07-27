@@ -475,6 +475,38 @@ mod tests {
         );
     }
 
+    /// Four docs state the crate count in prose and all four had drifted apart
+    /// (15 / 16 / 16 / "15 crates" against an actual 19), with three crates
+    /// missing from the README table entirely — see #102. Prose counts have no
+    /// other consistency mechanism, so pin them to the filesystem here.
+    #[test]
+    fn documented_crate_counts_match_the_crates_directory() {
+        let root = repo_root::repo_root().unwrap();
+        let actual = std::fs::read_dir(root.join("crates"))
+            .expect("crates/ is readable")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .count();
+
+        // Every doc that states the count in prose.
+        for rel in [
+            "README.md",
+            "docs/ARCHITECTURE.md",
+            "docs/DEVELOPMENT.md",
+            "docs/GETTING-STARTED.md",
+        ] {
+            let text =
+                std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            let claim = format!("{actual} crates");
+            assert!(
+                text.contains(&claim),
+                "{rel} does not say {claim:?}; crates/ has {actual} directories. \
+                 Update the prose (and the README crate table) when adding or \
+                 removing a crate."
+            );
+        }
+    }
+
     /// The encoder determines the committed Component's bytes, so every
     /// manifest's `[artifact] toolchain` fingerprint must name the encoder its
     /// pinned `sha256` was produced with. Without this the fingerprint claims
