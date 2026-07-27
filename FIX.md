@@ -2,6 +2,38 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #105 / #106: harness 进程组信号 fail-closed + git_graph fixture 唯一路径 — 2026-07-27
+
+Severity: CI 阻塞（#105，整条 ubuntu lane 长期红）/ test isolation（#106）。
+
+收口 `FINDINGS.md` 的 **L-47-01** 与 **L-47-02**。
+
+**Problem:**
+- **#105** `crates/lattice-system-harness/src/driver.rs` 用 `kill -INT -<pgid>` 向整个进程组投递 SIGINT，pgid 直接取 `child.id()`（`:82`），等式仅在 `process_group(0)` 生效、子进程自成组长时成立，而代码里没有任何断言保护该前提。前提一旦不成立，`-<pgid>` 就落到**测试进程自己的进程组**，把 `cargo test` 一并 SIGINT。信号还经由外部 `kill(1)` 发送（`:269`），负号参数的解析多了一层 `kill` 实现差异，且广播错目标时 `kill` 仍返回成功——失败是静默的。实测后果：ubuntu-latest 上 `cargo test --workspace` 以 **exit 130** 终止而 **0 failed、无 panic**（PR #104 的 run 30222133081 停在 `lattice-system-harness` lib 的 `artifacts::tests::*` 中途），macos 同 commit 全绿，本地不复现。ordinary CI lane 的 ubuntu 作业因此长期红，#77/#78/#104 全卡在同一处。
+- **#106** `crates/lattice-session/src/git_graph/tests/mod.rs:23-29` 的 `temp_dir(name)` 拼出主机全局固定路径 `$TMPDIR/lattice-session-git-graph-tests/<name>` 并在返回前 `remove_dir_all` 它，唯一性只靠调用方传的 `name`。同主机并行的两个测试二进制（两个 `CARGO_TARGET_DIR`，或两个 git worktree）会互删对方正在用的 fixture，报 `Refusing to initialize the existing '...' directory` 或 `NotARepository`。这是仓内唯一不用 `tempfile` 的手写共享路径 fixture。
+
+**Fix:**
+- `driver.rs`：新增 `resolve_child_pgid()`，spawn 后用 `libc::getpgid(child_pid)` 从内核**回读**实际 pgid，不再假定等于 `child.id()`；`setpgid` 失败或不受支持时不会静默留下指向自身组的 pgid。
+- `driver.rs`：新增 `reject_own_process_group()`，任何组信号发送前先比对 `libc::getpgrp()`，命中自身组则返回 `Err` 而非广播。该守卫同时覆盖 SIGINT 路径与 `kill_process_group()` 的 SIGKILL 路径（后者广播错目标更致命）。
+- `driver.rs`：`signal_process_group` 改为直接 `libc::killpg(pgid, sig)`，删除 spawn `kill(1)`，消除负号参数在 coreutils/shell builtin/busybox 间的解释差异，并能拿到真实 `errno`。信号常量改用 `libc::SIGINT`/`libc::SIGKILL` 而非字符串。
+- `git_graph/tests/mod.rs`：`temp_dir()` 改为返回持有 `tempfile::TempDir` 的 `Fixture` 守卫，路径由 `tempfile` 保证唯一、drop 时自动清理；`name` 退化为可读前缀（`TempDir::with_prefix`）便于失败辨认。删除手写的 `remove_dir_all` 前置清理。30 个调用点机械改写为 `dir.path()`。
+
+**Verification:**
+- `cargo fmt --all --check` — passed。
+- `cargo clippy -p lattice-session -p lattice-system-harness --all-targets -- -D warnings` — passed。
+- `cargo test -p lattice-system-harness --lib` — 57 passed / 0 failed（含两条新增回归：`signalling_own_process_group_is_refused` 断言对自身组发信号被拒且 SIGKILL 包装保持 no-op；`spawned_child_pgid_is_read_back_and_distinct` 断言回读的 pgid 既不等于 harness 自身组、又等于子进程 pid）。
+- `cargo test -p lattice-system-harness --test direct_failures` — 8 passed / 0 failed，`direct_failure_sigint_while_stalled_commits_cancelled` 仍在跑且通过。SIGINT 协作取消的覆盖**未被削弱**（#46 cancellation 契约的核心证据保留）。
+- `cargo test -p lattice-session` — 54 passed / 0 failed / 1 ignored。
+- **#106 反向验证**：并行两份 `CARGO_TARGET_DIR=/tmp/lat-par-{a,b} cargo test -p lattice-session git_graph`，两侧各 29 passed / 0 failed。修复前同样的并行会有 2 个测试因 fixture 互删而失败。
+- `cargo xtask harness-boundary` — passed（3/3 组）。`cargo xtask lancet-boundary` — passed。
+
+**Note:** `libc` 在 harness 清单里写死 `"0.2"` 而不用 workspace 继承——`harness-boundary` 的 `manifest_workspace_inheritance` 检查是**逐行文本匹配**，连注释里出现该字面量也会 FAIL（其自身测试 `workspace_true_in_comment_still_detected` 正是有意如此），本次为此调整了注释措辞。
+
+**Residual:** #105 建议清单里的第 4 步（若 ubuntu 仍不稳则给该场景加 `#[ignore]` + 专用 serial lane）未落地，也不应预先落地：本次修复把静默广播变成了本地可见错误，需先由 CI 实跑确认 ubuntu lane 转绿。若回读 pgid + fail-closed 后 ubuntu 仍出现 exit 130，则说明信号源不在 harness 内，届时再按 #105 第 4 步处置。
+
+**Changed files:**
+`crates/lattice-system-harness/src/driver.rs`; `crates/lattice-system-harness/Cargo.toml`; `crates/lattice-session/src/git_graph/tests/mod.rs`; `crates/lattice-session/src/git_graph/tests/{commit_turn,head_transcript,no_remote,pointer_ops,session_meta}.rs`; `FINDINGS.md`; `FIX.md`.
+
 ## GitHub #79 / #80: harness repo-root determinism + Component 构建工具链身份 — 2026-07-27
 
 Severity: test correctness (cross-checkout write) / release-evidence gap.

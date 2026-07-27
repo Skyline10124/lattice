@@ -13,8 +13,8 @@ use crate::graph::{
 #[test]
 fn test_branch_create() {
     let dir = temp_dir("branch_create");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-branch", 1, None);
     let head = ids[0].clone();
 
@@ -24,7 +24,7 @@ fn test_branch_create() {
     assert_eq!(graph_ref.name, "feature");
     assert_eq!(graph_ref.commit_id, Some(head.clone()));
 
-    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
+    let repo = gix::open_opts(dir.path(), gix::open::Options::isolated()).expect("open repo");
     let reference = repo
         .find_reference("refs/lattice/sessions/sess-branch/feature")
         .expect("find feature ref");
@@ -37,8 +37,8 @@ fn test_branch_create() {
 #[test]
 fn test_branch_from_commit() {
     let dir = temp_dir("branch_from_commit");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-from", 2, None);
     let first = ids[0].clone();
 
@@ -51,8 +51,8 @@ fn test_branch_from_commit() {
 #[test]
 fn test_branch_duplicate_rejected() {
     let dir = temp_dir("branch_duplicate");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     setup_session_with_commits(&store, "sess-dup", 1, None);
     store
         .branch("sess-dup", "feature", None)
@@ -65,8 +65,8 @@ fn test_branch_duplicate_rejected() {
 #[test]
 fn test_checkout_branch() {
     let dir = temp_dir("checkout_branch");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     setup_session_with_commits(&store, "sess-checkout", 1, None);
     store
         .branch("sess-checkout", "feature", None)
@@ -84,8 +84,8 @@ fn test_checkout_branch() {
 #[test]
 fn test_checkout_detached() {
     let dir = temp_dir("checkout_detached");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-detached", 1, None);
     let oid = ids[0].clone();
 
@@ -98,8 +98,8 @@ fn test_checkout_detached() {
 #[test]
 fn test_reset() {
     let dir = temp_dir("reset");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-reset", 3, None);
     let first = ids[0].clone();
     let third = ids[2].clone();
@@ -108,7 +108,7 @@ fn test_reset() {
     assert_eq!(result.old_commit_id, Some(third.clone()));
     assert_eq!(result.new_commit_id, first.clone());
 
-    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
+    let repo = gix::open_opts(dir.path(), gix::open::Options::isolated()).expect("open repo");
     let reference = repo
         .find_reference("refs/lattice/sessions/sess-reset/main")
         .expect("find main");
@@ -125,8 +125,8 @@ fn test_reset() {
 #[test]
 fn test_reset_detached_conflict() {
     let dir = temp_dir("reset_detached");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-reset-detached", 1, None);
     let oid = ids[0].clone();
     store
@@ -140,8 +140,8 @@ fn test_reset_detached_conflict() {
 #[test]
 fn test_diff_linear() {
     let dir = temp_dir("diff_linear");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-diff-linear", 3, None);
     let first = ids[0].clone();
     let third = ids[2].clone();
@@ -158,8 +158,8 @@ fn test_diff_linear() {
 #[test]
 fn test_diff_merge_base() {
     let dir = temp_dir("diff_merge_base");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-diff-merge", 2, None);
     let second = ids[1].clone();
 
@@ -206,8 +206,8 @@ fn test_diff_merge_base() {
 #[test]
 fn test_diff_no_common_ancestor() {
     let dir = temp_dir("diff_no_common");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
 
     store
         .create_session("sess-a", None, "coder", "main")
@@ -234,8 +234,8 @@ fn test_diff_no_common_ancestor() {
 #[test]
 fn test_candidate_ref_created() {
     let dir = temp_dir("candidate_ref");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     store
         .create_session("sess-cand", None, "coder", "main")
         .expect("create");
@@ -255,7 +255,7 @@ fn test_candidate_ref_created() {
     input.disposition = WorkspaceDisposition::PendingPromotion;
     let commit = store.commit_turn(input).expect("commit");
 
-    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
+    let repo = gix::open_opts(dir.path(), gix::open::Options::isolated()).expect("open repo");
     let git_commit = repo
         .find_commit(gix::ObjectId::from_hex(commit.commit_id.as_bytes()).expect("parse"))
         .expect("find commit");
@@ -281,8 +281,8 @@ fn test_candidate_ref_created() {
 #[test]
 fn test_head_transcript_branched() {
     let dir = temp_dir("transcript_branched");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-trans-branch", 2, None);
     let second = ids[1].clone();
 
@@ -311,8 +311,8 @@ fn test_head_transcript_branched() {
 #[test]
 fn test_head_transcript_reset() {
     let dir = temp_dir("transcript_reset");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-trans-reset", 3, None);
     let first = ids[0].clone();
 
@@ -326,8 +326,8 @@ fn test_head_transcript_reset() {
 #[test]
 fn test_branch_reset_checkout_diff() {
     let dir = temp_dir("combined_topology");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     let ids = setup_session_with_commits(&store, "sess-combined", 2, None);
     let second = ids[1].clone();
 

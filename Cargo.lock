@@ -2914,6 +2914,7 @@ name = "lattice-system-harness"
 version = "0.1.0"
 dependencies = [
  "gix",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",
