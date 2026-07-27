@@ -379,10 +379,7 @@ mod tests {
     use lancet_catalog::CepMethod;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
     use rusqlite::Connection;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static XDG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct IsolatedProjectAudit {
         _state: TempDir,
@@ -392,7 +389,11 @@ mod tests {
 
     impl IsolatedProjectAudit {
         fn setup() -> Self {
-            let guard = XDG_TEST_LOCK.lock().expect("xdg test lock");
+            // Crate-wide lock (see `config::lock_xdg_state_home`): `config.rs`
+            // also writes this variable, so a lock private to this module would
+            // not exclude it. Poison-tolerant, so one failing test does not
+            // cascade into `PoisonError` failures that hide it.
+            let guard = crate::config::lock_xdg_state_home();
             let state = TempDir::new().expect("state tempdir");
             let project = TempDir::new().expect("project tempdir");
             unsafe {

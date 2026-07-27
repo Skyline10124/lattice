@@ -2,6 +2,38 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## 两把互不相干的 mutex 守同一个 `XDG_STATE_HOME`，且 poison 后 panic 放大失败 — 2026-07-27
+
+Severity: HIGH（CI 双平台红；本机复现率 11/40 ≈ 27%）。
+
+**Problem:**
+
+`cargo test -p lancet-api --lib` 在 CI 与本机随机失败，两种形态：
+
+- `replay: Config("audit database not found at /var/folders/.../lattice/projects/<hash>/cep_audit.db; run an agent turn in this project first")` —— 测试自己 seed 过的 DB 找不到了。
+- `xdg test lock: PoisonError { .. }` 一次性 **9 个测试**同时失败。
+
+根因两条，叠加：
+
+1. **两把互不相干的 mutex 守同一个进程全局变量。** `crates/lancet-api/src/config.rs:200` 的 `audit_state_root_prefers_absolute_xdg_state_home` 里有一把私有的 `static ENV_LOCK`，`crates/lancet-api/src/audit.rs:385` 的 `IsolatedProjectAudit::setup` 里有另一把 `static XDG_TEST_LOCK`。两者都 `set_var("XDG_STATE_HOME")`，而 `config.rs:46` 的 `audit_state_root()` 读它。两把锁**互不排斥** —— 同一 test binary 内并发时，`config` 那个测试把变量改成自己的 tempdir（甚至故意改成 `"relative/path"` 以验证 XDG 规范），持 `XDG_TEST_LOCK` 的 audit 测试随即解析到错误的 state root，于是"自己刚 seed 的 DB 不存在"。加锁给了**虚假的安全感**：代码看起来是串行化的，实际完全没有。
+
+2. **poison 后 panic，把一次失败放大成雪崩。** `audit.rs:395` 用 `.expect("xdg test lock")`。该 guard 跨断言持有，所以任何一个持锁测试失败都会 poison 这把锁，之后每个测试都以 `PoisonError` 失败 —— CI 上 9 failed 里只有 2 个是真失败，另外 7 个是噪音，而且**真正的首个失败被埋在噪音里**，这正是这条 flake 长期没被定位的原因。
+
+**Fix:**
+
+- 收敛为**一把** crate 级锁 `config::XDG_STATE_HOME_LOCK`，放在读取该变量的模块里，并提供 `config::lock_xdg_state_home()` 访问器。两处调用点改为共用它，删除 `audit.rs` 的 `XDG_TEST_LOCK`。
+- 访问器用 `unwrap_or_else(|poisoned| poisoned.into_inner())` —— guard 里的数据是 `()`，panic 不可能破坏任何不变量，因此 poison 容忍是正确语义而非将错就错。文档注释写明"永远不要用 `.unwrap()`/`.expect()` 取这把锁"及其原因，防止回归。
+- 在 `XDG_STATE_HOME_LOCK` 的 doc 注释里明确记下"必须是全 crate 唯一一把"，并附上这次的失败率数据作为反面教材。
+
+**Verification:**
+- **压测**：`cargo test -p lancet-api --lib` 连跑 **60 次 0 失败**（修复前 11/40 ≈ 27%）；修掉顺带的 unused import 后再跑 **40 次 0 失败**。
+- `cargo test -p lancet-api` 全 target 绿（18 passed）。
+- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings` — passed。
+- 顺带全仓 sweep 了同类模式：其余三处 env mutex（`lattice-llm`、`lattice-cli/commands/test_env.rs`、`lattice-api/src/test_env.rs`）分属不同 test binary，互不干扰，且后两者已是 poison 容忍的；`lattice-api/src/test_env.rs` 的注释已说明与 `lattice-cli` 副本需保持同步。无需改动。
+
+**Changed files:**
+`crates/lancet-api/src/config.rs`; `crates/lancet-api/src/audit.rs`; `FIX.md`.
+
 ## 并发测试改写进程全局 CWD 导致的跨测试 flake（CI 双平台红）+ 依赖图与 crate 计数文档漂移 — 2026-07-27
 
 Severity: HIGH（阻断 CI 双平台）/ MEDIUM（文档漂移）。

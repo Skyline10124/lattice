@@ -175,6 +175,32 @@ impl LancetRuntimeConfig {
     }
 }
 
+/// The one lock serializing tests that write `XDG_STATE_HOME`.
+///
+/// `XDG_STATE_HOME` is process-global and [`audit_state_root`] reads it, so any
+/// test that sets it races every concurrently running test that resolves an
+/// audit path. This must be a **single** lock for the whole crate: two separate
+/// mutexes each guarding the same variable exclude nothing, which is exactly the
+/// bug this replaced — `config.rs` had a private `ENV_LOCK` while `audit.rs` had
+/// its own `XDG_TEST_LOCK`, and `cargo test -p lancet-api --lib` failed ~11/40
+/// runs as a result.
+///
+/// Always acquire with `lock_xdg_state_home()`, never `.unwrap()`/`.expect()`:
+/// this guard is held across assertions, so a failing test poisons the mutex,
+/// and panicking on the poison turns one real failure into a cascade of
+/// `PoisonError` failures that bury it (observed as 9 failed in one CI run).
+#[cfg(test)]
+static XDG_STATE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`XDG_STATE_HOME_LOCK`], tolerating poisoning from an earlier failed
+/// test. The data is `()`; there is no invariant a panic could have broken.
+#[cfg(test)]
+pub(crate) fn lock_xdg_state_home() -> std::sync::MutexGuard<'static, ()> {
+    XDG_STATE_HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod external_audit_tests {
     use super::*;
@@ -197,8 +223,7 @@ mod external_audit_tests {
     /// outside their temp dir (observed as CI failures on macos-latest).
     #[test]
     fn audit_state_root_prefers_absolute_xdg_state_home() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_xdg_state_home();
         let dir = TempDir::new().unwrap();
         let prev = std::env::var_os("XDG_STATE_HOME");
 
