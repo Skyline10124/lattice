@@ -1490,3 +1490,99 @@ fn import_legacy_read_only_if_empty_is_noop_when_destination_has_rows() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ─── Rewind records (#64) ───────────────────────────────────────────────────
+
+fn rewind_record(session: &str, outcome: &str) -> RewindAuditRecord {
+    RewindAuditRecord {
+        session_id: session.to_string(),
+        target_turn_id: "turn-commit-1".to_string(),
+        target_history_oid: Some("a".repeat(40)),
+        from_history_oid: Some("b".repeat(40)),
+        outcome: outcome.to_string(),
+        steps_json: r#"[{"commit_id":"c","method":"mutate.edit","turn_id":"t","call_id":1,"path":"src/a.rs"}]"#.to_string(),
+        preflight_json: r#"[{"path":"src/a.rs","expected_revision":"blake3:00","observed_revision":"blake3:00","diverged":false}]"#.to_string(),
+        restored_json: Some(r#"[{"path":"src/a.rs","restored_revision":"blake3:11"}]"#.to_string()),
+        conflicts_json: None,
+        recorded_at: "2026-07-26T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn rewind_records_persist_and_reopen() {
+    let root = unique_test_dir("rewind-records-persist");
+    let db = root.join("cep_audit.db");
+    {
+        let store = CepAuditStore::open(&db).unwrap();
+        store
+            .insert_rewind_record(&rewind_record("sess-1", "success"))
+            .unwrap();
+        store
+            .insert_rewind_record(&rewind_record("sess-1", "conflict"))
+            .unwrap();
+        store
+            .insert_rewind_record(&rewind_record("sess-2", "success"))
+            .unwrap();
+    }
+    // A fresh handle stands in for a process restart: the records are
+    // durable, ordered, and scoped by session.
+    let reopened = CepAuditStore::open(&db).unwrap();
+    let rows = reopened.rewind_records_for_session("sess-1").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].outcome, "success");
+    assert_eq!(rows[1].outcome, "conflict");
+    assert_eq!(rows[0].target_turn_id, "turn-commit-1");
+    assert_eq!(
+        rows[0].restored_json.as_deref(),
+        Some(r#"[{"path":"src/a.rs","restored_revision":"blake3:11"}]"#)
+    );
+    assert!(
+        reopened
+            .rewind_records_for_session("sess-3")
+            .unwrap()
+            .is_empty()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn rewind_table_is_added_to_a_pre_rewind_database() {
+    // A database created before #64 (no rewind_records table) must accept
+    // rewind records after reopen — init_schema is additive.
+    let root = unique_test_dir("rewind-records-compat");
+    let db = root.join("cep_audit.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cep_audit_entries (
+                audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id INTEGER NOT NULL,
+                method TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                result_or_error TEXT,
+                impact_kind TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                semantic_stage TEXT NOT NULL,
+                semantic_status TEXT,
+                guard_stage TEXT NOT NULL,
+                policy_enforced INTEGER NOT NULL,
+                metadata_json TEXT
+             );",
+        )
+        .unwrap();
+    }
+    let store = CepAuditStore::open(&db).unwrap();
+    store
+        .insert_rewind_record(&rewind_record("sess-compat", "success"))
+        .unwrap();
+    assert_eq!(
+        store
+            .rewind_records_for_session("sess-compat")
+            .unwrap()
+            .len(),
+        1
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

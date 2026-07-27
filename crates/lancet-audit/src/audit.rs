@@ -269,6 +269,36 @@ pub struct AttestationRecord {
     pub source_audit_range_or_hash: String,
 }
 
+/// Durable record of one explicit Rewind (GitHub #64).
+///
+/// Captures the target, the reversed steps, the per-path preflight
+/// revisions, and the outcome — hashes, paths, and object ids only, never
+/// file content. Written on success, on structured conflict, and on a ref
+/// durability failure alike.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RewindAuditRecord {
+    /// Session the Rewind ran in.
+    pub session_id: String,
+    /// The selected target Turn's commit id.
+    pub target_turn_id: String,
+    /// Workspace-history identity the Rewind moved to (`None` = empty).
+    pub target_history_oid: Option<String>,
+    /// Workspace-history identity the Rewind started from (`None` = empty).
+    pub from_history_oid: Option<String>,
+    /// `success`, `conflict`, `history_ref_failure`, or `session_ref_failure`.
+    pub outcome: String,
+    /// JSON array of reversed steps (commit/method/turn/call/path/hash).
+    pub steps_json: String,
+    /// JSON array of per-path preflight observations (revisions only).
+    pub preflight_json: String,
+    /// JSON array of restored paths and their post-restore revisions.
+    pub restored_json: Option<String>,
+    /// JSON array of divergent paths when the outcome is a conflict.
+    pub conflicts_json: Option<String>,
+    /// RFC 3339 timestamp supplied by the writer.
+    pub recorded_at: String,
+}
+
 /// Snake-case label for a catalog [`RequiredCapability`] (metadata + query filters).
 pub fn required_capability_label(cap: RequiredCapability) -> &'static str {
     match cap {
@@ -532,6 +562,19 @@ impl CepAuditStore {
                 predicate_type TEXT NOT NULL,
                 generated_at TEXT NOT NULL,
                 source_audit_range_or_hash TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS rewind_records (
+                rewind_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                target_turn_id TEXT NOT NULL,
+                target_history_oid TEXT,
+                from_history_oid TEXT,
+                outcome TEXT NOT NULL,
+                steps_json TEXT NOT NULL,
+                preflight_json TEXT NOT NULL,
+                restored_json TEXT,
+                conflicts_json TEXT,
+                recorded_at TEXT NOT NULL
              );",
         )
         .map_err(|source| AuditError::Database {
@@ -888,6 +931,81 @@ impl CepAuditStore {
                 source,
             }),
         }
+    }
+
+    /// Append one durable Rewind record (#64).
+    pub fn insert_rewind_record(&self, record: &RewindAuditRecord) -> Result<(), AuditError> {
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        conn.execute(
+            "INSERT INTO rewind_records (
+                session_id, target_turn_id, target_history_oid, from_history_oid,
+                outcome, steps_json, preflight_json, restored_json, conflicts_json,
+                recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                record.session_id,
+                record.target_turn_id,
+                record.target_history_oid,
+                record.from_history_oid,
+                record.outcome,
+                record.steps_json,
+                record.preflight_json,
+                record.restored_json,
+                record.conflicts_json,
+                record.recorded_at,
+            ],
+        )
+        .map_err(|source| AuditError::Database {
+            path: self.path.clone(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    /// All Rewind records for a session, oldest first.
+    pub fn rewind_records_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<RewindAuditRecord>, AuditError> {
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, target_turn_id, target_history_oid, from_history_oid,
+                        outcome, steps_json, preflight_json, restored_json, conflicts_json,
+                        recorded_at
+                 FROM rewind_records WHERE session_id = ?1 ORDER BY rewind_id ASC",
+            )
+            .map_err(|source| AuditError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                Ok(RewindAuditRecord {
+                    session_id: row.get(0)?,
+                    target_turn_id: row.get(1)?,
+                    target_history_oid: row.get(2)?,
+                    from_history_oid: row.get(3)?,
+                    outcome: row.get(4)?,
+                    steps_json: row.get(5)?,
+                    preflight_json: row.get(6)?,
+                    restored_json: row.get(7)?,
+                    conflicts_json: row.get(8)?,
+                    recorded_at: row.get(9)?,
+                })
+            })
+            .map_err(|source| AuditError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|source| AuditError::Database {
+                path: self.path.clone(),
+                source,
+            })?);
+        }
+        Ok(out)
     }
 
     pub fn delete_attestation_for_turn(&self, turn_id: &str) -> Result<(), AuditError> {

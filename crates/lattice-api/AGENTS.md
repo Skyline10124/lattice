@@ -48,6 +48,16 @@ agent loop over `lancet-api`'s CEP runtime.
   `LancetRuntimeConfig`. Without a loaded profile nothing is admitted.
   `cep_policy_from_profile` only carries executor policy, so it leaves the
   admission field at its fail-closed default.
+- ADDED #64: `rewind_to_turn` is the product-level explicit Rewind. It
+  resolves the target Turn in the current session (nonexistent, foreign, and
+  unreachable targets are refused before anything is read), refuses a Turn
+  whose workspace-history identity is unavailable rather than guessing,
+  delegates the workspace half to `lancet_api::rewind_workspace`, and only
+  then moves the Session History ref — pinning the abandoned head first. A
+  same-path conflict returns structured data with nothing moved; a ref
+  durability failure is an error carrying the partial state, never a
+  success. It is a free function, not a `SessionApi` method: the session
+  facade stays pointer-movement only.
 - ADDED #63: `build_production_turn_deps` resolves the private workspace
   history alongside the external audit store — an ephemeral (in-memory audit)
   run records no durable history, so it never touches the user's state

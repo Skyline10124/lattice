@@ -27,6 +27,19 @@ pub mod provenance {
 mod server;
 pub(crate) mod workspace;
 
+/// Explicit Rewind restore executor (GitHub #64).
+///
+/// Host-side operator surface: preflights every affected path against its
+/// recorded post-state and restores parent-tree content with the same safety
+/// primitives the mutation path uses. Not a CEP method — the Agent-visible
+/// catalog gains nothing here.
+pub mod rewind {
+    pub use crate::workspace::rewind::{
+        RestoredPath, RewindPathConflict, RewindPathPreflight, RewindRestoreError,
+        RewindRestoreOutcome, preflight_and_restore,
+    };
+}
+
 #[cfg(feature = "inspect-scaffold")]
 pub use handlers::register_inspect_scaffold_methods;
 pub use lancet_audit::{

@@ -48,6 +48,12 @@ layers.
   reconstructs turn provenance; `lattice audit` (no subcommand) and
   `lattice audit query` do row query/tail.
 
+- ADDED #64: `lattice session rewind <session> <turn>` is the explicit Rewind
+  surface over `lattice_api::rewind_to_turn`, with `--json` emitting the
+  success or conflict report verbatim. Exit codes follow the pinned
+  contract: unresolvable/unreachable targets are input errors (2), a
+  structured same-path conflict is a runtime outcome (1). `run_with_api`
+  now returns `ExitCode` so a conflict can be reported without an error.
 - FIXED L-18-03: turn stream rendering now has a five-minute idle timeout for
   hung providers.
 - FIXED L-18-02: `TurnEvent` JSONL serialization no longer panics through

@@ -110,6 +110,17 @@ pub enum SessionAction {
         /// Commit id to reset to.
         target: String,
     },
+    /// Rewind to an earlier Turn, reversing only LATTICE's own mutations.
+    ///
+    /// External changes LATTICE never touched are preserved. If a path
+    /// LATTICE changed has since diverged, the whole rewind reports a
+    /// conflict and nothing moves.
+    Rewind {
+        /// Session id (required).
+        session_id: String,
+        /// Turn commit id to rewind to.
+        target: String,
+    },
 }
 
 /// Run the `session` command.
@@ -136,10 +147,7 @@ pub async fn run(
             let exit = cmd_send_api(&api, &session_id, prompt, json, verbose).await;
             Ok(exit)
         }
-        other => {
-            run_with_api(&api, other, json)?;
-            Ok(std::process::ExitCode::SUCCESS)
-        }
+        other => run_with_api(&api, other, json),
     }
 }
 
@@ -147,7 +155,11 @@ pub async fn run(
 ///
 /// This is the testable seam: production `run()` constructs the default API
 /// and delegates here. Tests pass a temp-backed `SessionApi` directly.
-pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) -> Result<()> {
+pub(crate) fn run_with_api(
+    api: &SessionApi,
+    action: SessionAction,
+    json: bool,
+) -> Result<std::process::ExitCode> {
     match action {
         SessionAction::New {
             agent,
@@ -181,8 +193,11 @@ pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) 
         SessionAction::Reset { session_id, target } => {
             cmd_reset_api(api, &session_id, &target, json)?
         }
+        SessionAction::Rewind { session_id, target } => {
+            return cmd_rewind_api(api, &session_id, &target, json);
+        }
     }
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 fn load_agent_checked(agent: &str) -> Result<lattice_api::LoadedAgentProfile> {
@@ -590,6 +605,69 @@ fn cmd_reset_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -
     Ok(())
 }
 
+/// Run an explicit Rewind (#64).
+///
+/// Exit codes follow the pinned CLI contract: a target that does not exist or
+/// is unreachable is an input error (2); a structured same-path conflict is a
+/// runtime outcome (1), reported in full so the user can resolve it.
+fn cmd_rewind_api(
+    api: &SessionApi,
+    session_id: &str,
+    target: &str,
+    json: bool,
+) -> Result<std::process::ExitCode> {
+    let project_root = std::env::current_dir()?;
+    let outcome = match lattice_api::rewind_to_turn(api, session_id, target, &project_root) {
+        Ok(outcome) => outcome,
+        Err(err @ (lattice_api::ApiError::NotFound(_) | lattice_api::ApiError::BadRequest(_))) => {
+            eprintln!("{}: {:#}", "error".red(), err);
+            return Ok(std::process::ExitCode::from(2));
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    match outcome {
+        lattice_api::RewindOutcome::Success(success) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&success)?);
+            } else {
+                println!(
+                    "{} Rewound session {} to {} ({} mutation(s) reversed, {} path(s) restored).",
+                    "\u{2713}".green(),
+                    display_id(&success.session_id).cyan(),
+                    display_id(&success.target_commit_id).bold(),
+                    success.steps.len(),
+                    success.restored.len(),
+                );
+                for path in &success.restored {
+                    let verb = if path.restored_revision.is_some() {
+                        "restored"
+                    } else {
+                        "removed"
+                    };
+                    println!("  {verb} {}", path.path);
+                }
+            }
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+        lattice_api::RewindOutcome::Conflict(conflict) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&conflict)?);
+            } else {
+                eprintln!(
+                    "{}: rewind to {} conflicts; nothing was changed.",
+                    "conflict".red(),
+                    display_id(&conflict.target_commit_id).bold(),
+                );
+                for path in &conflict.conflicts {
+                    eprintln!("  {} — {}", path.path, path.detail);
+                }
+            }
+            Ok(std::process::ExitCode::from(1))
+        }
+    }
+}
+
 fn display_id(id: &str) -> String {
     if id.len() > 8 {
         let end = id.char_indices().nth(8).map(|(i, _)| i).unwrap_or(id.len());
@@ -837,6 +915,25 @@ mod session_cli {
     fn parse_reset_missing_session_id_fails() {
         let action = try_parse(&["reset"]);
         assert!(action.is_err(), "reset should require session_id");
+    }
+
+    #[test]
+    fn parse_rewind() {
+        let action = try_parse(&["rewind", "sess-abc", "commit-xyz"]);
+        assert!(action.is_ok());
+        match action.unwrap() {
+            SessionAction::Rewind { session_id, target } => {
+                assert_eq!(session_id, "sess-abc");
+                assert_eq!(target, "commit-xyz");
+            }
+            _ => panic!("expected Rewind"),
+        }
+    }
+
+    #[test]
+    fn parse_rewind_requires_session_and_target() {
+        assert!(try_parse(&["rewind"]).is_err());
+        assert!(try_parse(&["rewind", "sess-abc"]).is_err());
     }
 
     #[test]

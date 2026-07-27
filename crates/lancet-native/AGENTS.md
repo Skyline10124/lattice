@@ -69,6 +69,17 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   collision would arm both vocabularies in one call. Unreachable while the
   Component catalog is empty — read #28 design §11 before migrating a native
   method.
+- ADDED #64: `workspace::rewind::preflight_and_restore` (re-exported as
+  `lancet_native::rewind`) applies an explicit Rewind's per-path restores.
+  It is a host-side operator surface, not a CEP method — the catalog gains
+  no `workspace.rewind`. Phase 1 verifies every affected path against its
+  recorded post-state through `WorkspacePath::parse`, System Path Exclusion,
+  and the same symlink-rejecting secure walk mutations use, reporting a
+  structured conflict for any divergence and writing nothing. Phase 2 runs
+  only after every path verified, reusing `install_atomic_sync` /
+  `remove_file_sync` (the shared synchronous cores of the async mutation
+  primitives). The executor never records history: reversing a mutation must
+  not append compensation commits.
 - ADDED #63: every successfully installed Atomic Local Mutation is appended to
   the run's private `lancet_runtime::WorkspaceHistory`. `ServerRunConfig`
   carries the history, `run_native` attaches it to the one `LocalWorkspace`,
