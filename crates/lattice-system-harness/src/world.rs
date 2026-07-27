@@ -78,6 +78,18 @@ impl ScenarioWorld {
             "XDG_CACHE_HOME".into(),
             home.join(".cache").display().to_string(),
         );
+        // Must be explicit, unlike the three above: the audit database and the
+        // private workspace history resolve through `audit_state_root()`, which
+        // only falls back to `dirs::state_dir()` — Linux-only — before landing
+        // on `dirs::data_local_dir()`. Without this, the isolated HOME yields
+        // `<home>/.local/state` on Linux but `<home>/Library/Application
+        // Support` on macOS, so any scenario naming the state path is
+        // platform-dependent (observed as two `direct_rewind` failures on
+        // macos-latest while ubuntu-latest was green).
+        allowed_env.insert(
+            "XDG_STATE_HOME".into(),
+            home.join(".local/state").display().to_string(),
+        );
         allowed_env.insert("LATTICE_AGENTS_DIR".into(), String::new());
 
         Ok(Self {
