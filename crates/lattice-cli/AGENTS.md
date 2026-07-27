@@ -21,7 +21,10 @@ layers.
 - `src/commands/doctor.rs` owns diagnostics.
 - `src/commands/audit.rs` and `lancet.rs` own audit and LANCET inspection
   surfaces.
-- `src/commands/test_env.rs` owns CLI test environment helpers.
+- CLI audit/status tests serialise `XDG_STATE_HOME` through
+  `lancet_audit::ScopedXdgStateHome`, pulled in via
+  `[dev-dependencies] lancet-audit = { features = ["test-support"] }`. The
+  crate-local `src/commands/test_env.rs` copy was deleted in GitHub #39.
 - Integration tests cover cutover and release smoke behavior.
 
 ## Boundaries
@@ -31,9 +34,18 @@ layers.
 - Keep JSONL output aligned with public `TurnEvent` values from `lattice-api`.
 - Command parsing belongs here; durable runtime semantics belong below the CLI.
 
-- FIXED issue #11: `lattice audit` uses `lancet-api::{query_audit, tail_audit,
-  replay_audit}` only (no CEP server for audit reads). `lattice audit replay
-  --turn <id>` reconstructs turn provenance; `lattice audit` (no subcommand) and
+- FIXED #39: the crate-local `src/commands/test_env.rs` XDG helper was deleted;
+  CLI tests now use the single workspace-wide `lancet_audit::ScopedXdgStateHome`
+  via the `test-support` dev-dependency feature. Do not reintroduce a local
+  copy. `src/commands/audit.rs` module docs now state the CEP-server-free
+  guarantee structurally (`lancet-audit` has no native/dispatch/cep/runtime
+  dependency) instead of pointing at the retired source-scan test.
+
+- FIXED issue #33 (Codeberg #11): `lattice audit` uses
+  `lancet-api::{query_audit, tail_audit, replay_audit}` only (no CEP server
+  for audit reads); those entry points now delegate to
+  `lancet_audit::operator`. `lattice audit replay --turn <id>`
+  reconstructs turn provenance; `lattice audit` (no subcommand) and
   `lattice audit query` do row query/tail.
 
 - FIXED L-18-03: turn stream rendering now has a five-minute idle timeout for
@@ -41,9 +53,10 @@ layers.
 - FIXED L-18-02: `TurnEvent` JSONL serialization no longer panics through
   `.expect()`.
 - FIXED M-18-02: dead `status_to_exit_code` logic and legacy tests were removed.
-- FIXED #23: pre-stream input/config errors (`ApiError::NotFound` and
-  `ApiError::BadRequest`) use exit 2; runtime/tool/provider/commit failures use
-  exit 1. Fast binary tests pin missing-session, profile, and credential paths.
+- FIXED #45 (Codeberg #23): pre-stream input/config errors
+  (`ApiError::NotFound` and `ApiError::BadRequest`) use exit 2;
+  runtime/tool/provider/commit failures use exit 1. Fast binary tests pin
+  missing-session, profile, and credential paths.
 - WATCH H-06/M-19b: CLI turn send relies on API live streaming and backpressure
   behavior.
 - WATCH: `session send` still needs an existing session, matching agent profile,

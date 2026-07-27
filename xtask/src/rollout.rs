@@ -626,6 +626,26 @@ fn collect_probes() -> Vec<CapabilityProbe> {
         ok,
     });
 
+    // The Component encoder. Non-gating (rollout builds the CLI, not the
+    // Source Tool Components), but recorded so a release record can answer
+    // "which encoder produced the embedded Components" — the `[artifact]
+    // toolchain` fingerprint does not carry it yet. See #73 / #80.
+    // `ok` tracks whether the probe *answered*, not whether the capability is
+    // required — same convention as `git_version` below. A missing encoder
+    // still must not gate (rollout builds the CLI, not the Components), but
+    // recording ok:true for "not installed" would make the release record
+    // claim a successful probe of a tool that was never found.
+    let (value, ok) = match crate::ci::wasm_tools_version() {
+        Some(v) => (v, true),
+        None => ("`wasm-tools --version` unavailable".to_owned(), false),
+    };
+    probes.push(CapabilityProbe {
+        name: "wasm_tools_version".into(),
+        value,
+        gating: false,
+        ok,
+    });
+
     let git = Command::new("git").arg("--version").output();
     let (value, ok) = match git {
         Ok(o) if o.status.success() => (String::from_utf8_lossy(&o.stdout).trim().to_owned(), true),

@@ -8,7 +8,7 @@
 //! `OPENAI_COMPATIBLE_MODEL` / `OPENAI_COMPATIBLE_API_KEY` configuration —
 //! there is no test-only provider, hidden flag, or product-side change.
 //!
-//! The server does two things (RFC #19 decision four):
+//! The server does two things (RFC #41, Codeberg #19, decision four):
 //!
 //! 1. Captures the real Chat Completions request (model, messages, tool names)
 //!    so scenarios can assert on what the product actually sent.
@@ -89,9 +89,11 @@ pub enum SseScript {
     IllegalResponse { body: String },
     /// Serve each inner script to exactly one request, in order. Requests
     /// beyond the sequence length repeat the last script. This is the
-    /// multi-round foundation for Direct-Local tool scenarios (#40 skeletons,
-    /// expanded in #24): first request -> tool call, second request -> plain
-    /// text, so a turn that uses a Tool still terminates cleanly.
+    /// multi-round foundation for Direct-Local tool scenarios (skeletons in
+    /// #62 (Codeberg #40), expanded in #46 (Codeberg #24)): first request ->
+    /// tool call, second
+    /// request -> plain text, so a turn that uses a Tool still terminates
+    /// cleanly.
     Sequence { scripts: Vec<SseScript> },
 }
 

@@ -37,6 +37,9 @@
 
 ## LOW
 
+> 下列 `L-39-*` / `ENV-WASM-01` / `T-39-01` 中的 `#39` 一律指 **GitHub #39**(= Codeberg #17,
+> operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
+> `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
 
 ### L-63-01: two pre-existing test-isolation races surface under `cargo test --workspace` — `robustness` / test-hygiene / `lattice-session` / `lattice-api`
 - **Location**: `crates/lattice-session/src/test_utils.rs:20-50` (`init_empty_repo`) with the fixed fixture root `/tmp/lattice-session-git-graph-tests/<name>`; `crates/lattice-api/tests/consistency.rs:162` and the sibling `usage_turn.rs` / `release_e2e.rs` fixtures (`std::env::set_current_dir`).
@@ -46,19 +49,79 @@
 - **Current status**: OPEN, pre-existing, low impact. Observed roughly 1 run in 3 of `cargo test --workspace` on a loaded 24-core dev machine; **not** reproducible per crate — `cargo test -p lattice-session` and `-p lattice-api` passed 8/8 and 10/10 consecutive runs, and the sanctioned `cargo xtask ci` gate runs per crate (see `ENV-OOM-01`), so CI is unaffected.
 - **Plan**: (a) give the git-graph fixtures a `TempDir` root, or extend the `DirectoryExists` recovery to the top-level match; (b) either drop `set_current_dir` from the API fixtures (they already pass `test_project_root` explicitly) or serialize them behind the same global env lock `ScopedXdgStateHome` uses. Until then, prefer `cargo xtask ci` over `cargo test --workspace` locally, and `rm -rf /tmp/lattice-session-git-graph-tests` between full-workspace runs.
 
-### L-47-01: `direct_failures` SIGINT scenario interrupts the whole `cargo test` run on CI — `robustness` / offline-ci / harness / #47
-- **位置**: `crates/lattice-system-harness/src/driver.rs:99-101` (`interrupt` → `signal_process_group(self.pgid, "-INT")`)，`:259-262` (`set_new_process_group` → `Command::process_group(0)`)；`crates/lattice-system-harness/tests/direct_failures.rs:324-360` (`direct_failure_sigint_while_stalled_commits_cancelled`)。
-- **问题**: harness 用 `kill -INT -<pgid>` 向整个进程组发 SIGINT，pgid 取自 `child.id()`，前提是 `process_group(0)` 已生效、子进程自成组长。若该前提在某些时序下不成立，负号 pgid 会落到**测试进程自己所在的进程组**，把 `cargo test` 一并 SIGINT。ubuntu-latest 上观察到 `cargo test --workspace` 以 **exit 130（SIGINT）** 终止，而当时已报告 **1059 passed / 0 failed**、无任何 FAILED 条目、无 panic——即没有测试失败，是作业被信号中断。
-- **当前状态**: OPEN（CI 阻塞）。本地 Linux 不复现（单独跑 `direct_failures` 与全量 `cargo test --workspace` 均绿，1258 passed / 0 failed）；macos-latest 已全绿。仅在 ubuntu-latest runner 上出现，指向运行器的进程/会话拓扑差异（runner 中 `cargo test` 自身的进程组归属与本地不同）。#47 的其余七类 CI 失败均已修复并验证。
-- **升级条件**: 已阻塞 ordinary CI lane 绿灯，若要求 CI 必须全绿才能合并 → 升为 HIGH。
-- **计划**: （a）在 `interrupt()` 中断言 pgid 确实不等于测试进程自身的 pgid（`libc::getpgrp()`），不成立则 fail-closed 而非广播信号；（b）改用 `libc::killpg` 直接调用而非 `Command::new("kill")`，避开 shell 层对负号参数的解释差异；（c）若仍不稳，给该场景加 `#[ignore]` + 专用 serial lane。不要为绕开而删除 SIGINT 协作取消的覆盖——那是 #46 cancellation 契约的核心证据。
+- **收口（2026-07-27）**: 两条 race 均已修复并落地 main —— (a) git-graph fixture 改用 `TempDir` 唯一路径（#106，收口 `L-47-02`）；(b) `lattice-api` fixture 的多余 `set_current_dir` 被删除，生产 `init_bare` 路径补上 CWD 恢复（#109）。本条保留为记录，不再是 OPEN。
 
-### L-47-02: `git_graph` 测试 fixture 使用固定共享路径 `/tmp/lattice-session-git-graph-tests/` — `robustness` / test-isolation / #47
-- **位置**: `crates/lattice-session/src/git_graph/tests/mod.rs:23-29` (`temp_dir`)。
-- **问题**: `temp_dir(name)` 拼接 `env::temp_dir()/lattice-session-git-graph-tests/<name>` 并在进入前 `remove_dir_all`，而非用 `TempDir` 取唯一路径。同一主机上并行的两个测试二进制（例如不同 `CARGO_TARGET_DIR` 的两次 `cargo test`）会互相删除对方的 fixture，表现为 `Refusing to initialize the existing '...' directory` 或 `NotARepository`。实测复现：并行两份测试时 2 个测试失败，清理共享目录后 55/55 通过。
-- **当前状态**: ACCEPTED RESIDUAL。单份 `cargo test` 下不发生（各测试 `name` 不同），CI 也只跑一份，故不阻塞。仅在本地并行多份测试时暴露。
-- **升级条件**: 若 CI 引入 matrix 内并行或 nextest 分片共享主机 → 升为 MEDIUM。
-- **计划**: 改用 `tempfile::TempDir` 取唯一路径（与仓内其他 fixture 一致），删除手写的 `remove_dir_all` 前置清理。
+### L-39-01: Local Workspace 读/观察路径仍是 `resolve_secure`-only,只有写路径钉住了 dirfd — `security` / `lancet-native` / GitHub #39
+- **位置**: `crates/lancet-native/src/workspace/local.rs`:`resolve_secure`(约 L88 起)与其调用方 `read_file` / `list_dir` / `grep` / `find_files`;`open_parent_dir_secure`(约 L244 起)目前只服务 `create_excl` / `install_atomic` / `remove_file`。
+- **问题**: #39 只把**写**路径改成 pinned-dirfd(`openat`/`renameat`/`unlinkat`,`O_NOFOLLOW|O_DIRECTORY`)。读/观察路径仍是「逐段 `symlink_metadata` 校验 → 拿最终 `PathBuf` 去 `File::open`」的两段式模型,校验与打开之间存在 TOCTOU 窗口:本地攻击者在 resolve 之后把某个父组件换成 symlink,可以把一次 **READ** 重定向到 workspace root 之外。写路径的同类窗口已闭合,读路径没有。
+- **当前状态**: ACCEPTED RESIDUAL。威胁模型要求攻击者已对项目目录有并发写权限;此时读被重定向只泄露内容,不改写 Local bytes,而唯一能持久改变宿主状态的写路径已结构性闭合。项目根在构造时 canonicalize,逐段 `symlink_metadata` 仍然挡掉所有**静态**存在的 symlink 组件。
+- **升级条件**: 若 Local Workspace 需要在多租户 / 不可信共存目录下运行,或读取结果被当作安全决策输入(例如把读到的内容喂给 policy) → 升为 MEDIUM。
+- **计划**: 复用现成的 `open_parent_dir_secure` + `dir_open_flags()` 把叶子 fd 交给读路径,`grep_walk`/`find_walk` 改为 `openat`-relative 递归。**不要**为此引入第二套路径解析实现——单一解析权威是 ADR 0003 的前提。
+
+### L-39-02: `grep_walk` / `find_walk` 递归无显式深度上限 — `robustness` / `lancet-native` / GitHub #39
+- **位置**: `crates/lancet-native/src/workspace/local.rs`:`grep_walk`(约 L822 起)、`find_walk`(约 L949 起)。
+- **问题**: 两者都是对 `fs::read_dir` 的直接递归,只在 `out.len() >= max_results` 与 `GrepBudget::exhausted()` 时提前返回。#39 引入的 byte budget(`GREP_MAX_FILE_BYTES` / `GREP_MAX_TOTAL_BYTES` / `GREP_MAX_LINE_BYTES`)限住了 IO 与内存,但**不限栈深度**:目录嵌套深度直接等于递归深度,`find_walk` 更是连 byte budget 都没有。
+- **当前状态**: ACCEPTED RESIDUAL。当前 walk 不进入目录 symlink(见 L-39-03),因此不存在环路;真实深度被文件系统路径长度上限约束(Linux `PATH_MAX` 4096,每层至少两字节),在默认栈上不足以溢出。
+- **升级条件**: 若 walk 改为跟随目录 symlink(环路可无限深)、或观察路径被搬到栈更小的 worker 线程 → 升为 MEDIUM。
+- **计划**: 给两个 walk 加显式 `max_depth` 常量与参数,超限按「静默截断」处理(与 over-cap 文件同口径),不要报错。
+
+### L-39-03: grep/find walk 对目录 symlink 既不进入也不报告,与 `list_dir` 口径不一致 — `api-shape` / `lancet-native`(pre-existing)
+- **位置**: `crates/lancet-native/src/workspace/local.rs`:`grep_walk` / `find_walk` 中的 `fs::symlink_metadata` + `meta.is_dir()` / `meta.is_file()` 分支;对照 `list_dir` 的 `file_type_kind`。
+- **问题**: symlink 条目的 `symlink_metadata` 既不是 dir 也不是 file,两个 walk 的 if/else-if 因此整条跳过。不递归是符合 root-escape 防御预期的,但**也不出现在结果里**——哪怕 `find_files` 的 pattern 精确匹配它的文件名。#39 之后 `list_dir` 会把同一条目报成 `PathKind::Symlink`,于是同一个 symlink 在 list 与 find 下有两种可见性答案。
+- **当前状态**: ACCEPTED RESIDUAL,pre-existing——该行为早于 #39,#39 只修了 `list_dir` 一侧,没有(也不打算在本票)统一 walk 一侧。
+- **升级条件**: 若用户报告 `find_files` 漏掉可见 symlink,或 Policy-Visible Workspace 要求 read/list/grep/find 四条路径给出同一可见性答案 → 升为 LOW-MEDIUM。
+- **计划**: 让两个 walk 复用 `file_type_kind` 分类:visibility 允许时把 symlink 条目**报告**出来,但仍然不递归进入。
+
+### L-39-04: pinned-dirfd 写路径挡不住"把 pinned 目录整体 rename 出工作区" — `security` / `lancet-native` / GitHub #39
+- **位置**: `crates/lancet-native/src/workspace/local.rs`:`open_parent_dir_secure`(约 L244 起)与三个写入调用方 `create_excl` / `install_atomic` / `remove_file`。
+- **问题**: #39 的 pinned-dirfd walk 分两步——先解析父目录拿到 fd,再对叶子做 `openat`/`renameat`/`unlinkat`。`openat2(RESOLVE_BENEATH)` 是把父与叶子在一次内核调用里原子解析,本实现不是。攻击者在 pin 与叶子操作之间把**被 pin 的目录本身** rename 到工作区外,fd 跟随 inode,叶子就落在工作区外。整个过程没有任何 symlink,`O_NOFOLLOW` 不会触发,且 pin 之后没有任何 containment 复检。本分支的对抗性复核用一份 C 复刻实测确认:pin 住 `root/a/b` 后把 `root/a/b` 移出工作区,create 落到 `.../outside/stolen/victim.txt`。
+- **当前状态**: ACCEPTED RESIDUAL。**#39 报告的原缺陷已闭合**——"父目录组件在校验后被替换为 symlink"这一向量被 pin 结构性挡住。本条是复核新发现的、更窄的另一向量:要求攻击者已对项目目录持有并发写权限(与 L-39-01 同一威胁模型前提)。相关 doc comment 已就地改写,不再声称 `RESOLVE_BENEATH` 等价。
+- **升级条件**: 若 Local Workspace 要在多租户 / 不可信共存目录下运行,或写路径被用于安全敏感落盘(凭据、策略文件)→ 升为 MEDIUM。
+- **计划**: Linux 上改用 `openat2(RESOLVE_BENEATH)` 对整条路径做原子解析,本 pinned walk 降级为 macOS fallback。**不要**用"pin 后沿 `..` 走回 root 比对 dev/ino"来充数——那本身仍是 TOCTOU,只是把窗口变窄,会带来已闭合的错觉。
+
+### L-39-05: grep 返回载荷无聚合上限,`GREP_MAX_LINE_BYTES` 只约束单行 — `robustness` / `lancet-native` / GitHub #39
+- **位置**: `crates/lancet-native/src/workspace/local.rs`:`GREP_MAX_LINE_BYTES` 及其 doc comment;`crates/lancet-native/src/handlers/observation.rs` 的 `charge_observation_bytes`;`crates/lancet-authority/src/policy/observation.rs` 的 `max_grep_matches`(默认 1000)。
+- **问题**: #39 的 byte budget 约束的是**读入**字节数,不约束**返回**载荷。单条匹配行上限 64 KiB × 默认 1000 条上限 ≈ 64 MiB 可以在 `charge_observation_bytes` 被调用之前就堆在 `out` 里。复核实测该形状峰值 RSS 66,604 KB。`GREP_MAX_LINE_BYTES` 的 doc comment 声称"单条病态长行无法撑爆 GrepMatch 载荷"——按单行成立,按聚合不成立。
+- **当前状态**: ACCEPTED RESIDUAL。相对原缺陷(单文件 200 MB → RSS +400 MB,且与 `max_results` 无关)已是数量级改善,且现在有确定性上界(64 KiB × `max_results`),不再随文件大小无界增长。
+- **升级条件**: 若 `max_grep_matches` 默认值调高,或 grep 结果进入长驻内存 / 并发多路 → 升为 MEDIUM。
+- **计划**: 给 `out` 加聚合字节预算(命中即停,与 over-cap 文件同口径静默截断),并把 `GREP_MAX_LINE_BYTES` 的 doc comment 改成只声称单行上界。
+
+### ENV-DISK-01: 多 worktree 并行编译撑爆磁盘,`xtask ci` 逐 crate 超时/配额失败(非代码问题)— `environment` / dev-loop
+- **位置**: 开发机环境,非 repo 代码。`xtask/src/ci.rs` 的 per-step 超时(`LATTICE_TEST_TIMEOUT_SECS`,默认 300s)与 cargo 全局包缓存锁 `~/.cargo/.package-cache` 是放大器。
+- **问题**: 2026-07-27 一次 `cargo xtask ci` 报 `cargo test failed for 3 crate(s): lancet-native, lattice-api, lattice-tui`。逐条查明**全部为环境所致,无一为代码回归**:(1) `lancet-native` 与 `lattice-api` 是 `timed out after 300s` —— 另一个 Claude 会话正在 `issue-28-cell-capability` worktree 里跑 `cargo test`,两边争用**全局** `~/.cargo/.package-cache` 锁,反复 `Blocking waiting for file lock on package cache`,编译阶段被拖过 300s 硬超时;(2) `lattice-tui` 是 rustdoc 写临时文件失败 `Os { code: 122, kind: QuotaExceeded, message: "Disk quota exceeded" }`。实测:根分区 938G 已用 880G(**95%**),`/tmp` tmpfs 16G 仅剩 4.8G;lattice 各 target 目录合计约 **217 GB**(主仓 108G + `issue-28-cell-capability` 38G + `issue-39-audit-sink` 37G + `issue-64-rewind` 34G)。三个 crate 在串行、低并发(`CARGO_BUILD_JOBS=2`)下单独重跑全绿:lancet-native 155、lattice-api 136、lattice-tui 3。
+- **当前状态**: ACCEPTED RESIDUAL(环境侧)。与 ENV-OOM-01 同源——常驻多 worktree + 并行会话超售本机资源;那一条是内存,这一条是磁盘与全局 cargo 锁。CI(ubuntu/macos-latest,单 worktree、独占 runner)不受影响。
+- **升级条件**: 若在**无**并行会话、磁盘充裕时仍出现 300s 超时或配额失败 → 升为 MEDIUM 并排查是否有测试真的变慢。
+- **计划**: (a) 跑门禁前先确认没有其他会话在编译,或用 `LATTICE_TEST_TIMEOUT_SECS` 抬高超时;(b) 定期 `cargo clean` 不活跃的 worktree target(单个 34–38 GB);(c) **不要**因为这条去删别人正在用的 worktree target;(d) 若要根治并行争用,给各 worktree 配独立 `CARGO_HOME`(锁即不再全局),代价是依赖缓存不复用、磁盘占用更高——在当前 95% 占用下不划算。
+
+### ENV-WASM-01: 不过滤的 `cargo build --workspace` 在本开发机 host-link `noop-echo` cdylib 失败 — `environment` / dev-loop(pre-existing)
+- **位置**: `tools/noop`(`noop-echo`,`[lib] crate-type = ["cdylib"]`,真实目标 `wasm32-unknown-unknown`),它是根 `Cargo.toml` 的 workspace member;任何不带 `-p` / `--exclude` 的 `cargo build --workspace`。
+- **问题**: unfiltered workspace build 会拿**宿主**目标去链接这个 wasm guest cdylib 并失败。它只在 `xtask tool-build` 的 wasm 目标下才有意义。
+- **当前状态**: ACCEPTED RESIDUAL,pre-existing——在本分支的 baseline 上以完全相同方式失败,非 #39 引入。CI 与 `xtask ci` 的 fmt/clippy/test 门都不 host-link 它(`xtask ci` 的 test step 逐 crate 跑 `cargo test -p <crate>`,见 ENV-OOM-01),因此不阻塞任何门禁。
+- **升级条件**: 若任何门禁步骤引入 unfiltered `cargo build --workspace` → 升为 MEDIUM。
+- **计划**: 验证时一律用 `-p <crate>` 或 `--exclude noop-echo`。若要根治,给 guest crate 加目标约束(`[target.'cfg(target_arch = "wasm32")']` 形态或独立 workspace),**不要**为让宿主链接通过而改它的 `crate-type`——`.wasm` 产物的字节可复现性依赖当前配置(见 L-5-02)。
+
+### L-39-06: `lattice audit --tail` 在 turn 进行中可能漏行;多批次分页无黑盒覆盖 — `robustness` / operator-path(pre-existing)
+- **位置**: `crates/lancet-audit/src/operator.rs`:`tail_audit` 批次循环的游标(每批 `since_audit_id = since + 1`);覆盖面对照 `crates/lattice-system-harness/tests/{fast_audit_cli,direct_operator}.rs`。
+- **问题**: 两条,同源于 tail 的游标语义。(1) **漏行**:某次 call 若在低 `audit_id` 上 `start_call`、而在游标已越过该 id 之后才 `finalize_call`,它永远不会被 emit——`query_rows` 只返回 finalized 行,而游标不会回退。并发测试只断言"批内无重复 `audit_id`",从不断言"无遗漏"。这满足验收要求的"排除未 finalize 行",但不满足操作员可能默认的"`--tail` 会抽干一切"。(2) **黑盒缺口**:多批次分页只在 `lancet-audit` 单元层覆盖;黑盒侧 `direct_operator` 的 tail 断言是 2-turn store 上的 `tail_rows > 0`(单批次),`fast_audit_cli` 只走缺失 store 路径。RFC #41 禁止 harness 直接植入内部 audit DB,而真实 turn 不会产生 >1000 行,所以黑盒无法自然覆盖。
+- **当前状态**: ACCEPTED RESIDUAL。(1) 与 HEAD 逐字节一致,非 #39 引入;#39 只是把行为搬了个位置。(2) #39 期间曾加过一条 CLI 层多批次测试,因与账本既有判决(`audit_tail_streams_rows_for_seeded_db` = 删除)冲突且只能断言 `Ok`(`run_async` 直接打印 stdout,拿不到 row count)而移除;真实契约由 `operator::tests::tail_audit_paginates_large_result_without_cep_server` 及本次新增的两条边界测试(空批游标回退、恰好 `AUDIT_TAIL_MAX_ROWS` 单批次)持有。复核已手工验证 1001 行经真实 `lattice` 二进制得到 rows 1001 / batches 2 / done true。
+- **升级条件**: 若 `--tail` 被接入长驻 streaming 消费方(漏行会累积)、或 `render_tail_output` 需要 CLI 侧自有分页/截断逻辑(那时黑盒缺口变成真实回归面)→ 升为 MEDIUM。
+- **计划**: (a) 在 `tail_audit` doc comment 里显式写明"turn 进行中不保证完整抽干,完整性以 turn 结束后重跑为准";(b) 若要覆盖 CLI 侧,把渲染从 `println!` 抽成对 `impl Write` 的函数,再对渲染输出而非 `run_async` 的返回值断言。
+
+### L-39-07: `OperatorAuditError::Config` 与 `LancetError::Config` 的 Display 前缀不一致 — `api-shape` / `lancet-audit` / GitHub #39
+- **位置**: `crates/lancet-audit/src/operator.rs`(`#[error("{0}")]`)对照 `crates/lancet-api/src/error.rs`(`invalid lancet configuration: {0}`)。
+- **问题**: 逐字透传的 Display 正是"经门面映射后错误文本逐字节不变"的实现手段,当前在树内成立(所有消费方都走 `lancet-api` 门面)。但 #39 之后同一行为多了第二个入口:直接调 `lancet_audit::query_audit` 的未来调用方会打印不带 `invalid lancet configuration: ` 前缀的文本。
+- **当前状态**: ACCEPTED RESIDUAL,非兼容性破坏——树内零个直连消费方,`fast_audit_cli` 对 stderr 的断言仍然命中。
+- **升级条件**: 若出现绕过 `lancet-api` 门面直连 `lancet_audit::operator` 的生产消费方 → 升为 LOW-MEDIUM,届时需决定前缀归属。
+- **计划**: 维持逐字 Display(它保证了本次迁移的字节级兼容);若将来出现直连消费方,由该消费方自己决定前缀,不要改 `OperatorAuditError`。
+
+### T-39-01: `docs/TEST-TRIAGE.md` 早期批次说明的 running total 与 machine ledger 相差 2 — `documentation` / test-triage
+- **位置**: `docs/TEST-TRIAGE.md` §1.9「#46 residual elevate closeout」的 `counts 变更`(散文写「删除 211->214」);对照 `docs/test-triage-decisions.json` 与 §1 汇总表、§1.5 决定分布表。
+- **问题**: 各批次说明里的「全量」running total 是逐批手算累加的,与 machine ledger 的真实计数存在 **2 条固定偏差**:#39 改动前 JSON 的实际基线是 keep 1191 / elevate 42 / **delete 216**,而 §1.9 散文写的是 `211->214`。汇总表(§1、§1.5)一直对齐 JSON,只有批次说明的 running total 漂移。
+- **当前状态**: ACCEPTED RESIDUAL,pre-existing——偏差在 #39 之前就已存在,#39 未引入也未放大。#39 新增的 §1.12 `counts 变更` 显式使用 JSON 真实基线(216->217)并就地标注了这 2 条偏差。历史批次说明属 append-only 执行记录,不回写。
+- **升级条件**: 若有人把批次说明的 running total 当成权威计数来源(而非把 JSON / 汇总表当权威)→ 升为 MEDIUM 并一次性重算所有批次说明。
+- **计划**: 不回写历史批次说明。今后新增批次说明一律引用 JSON 真实基线,并保持 §1 汇总表、§1.5 决定分布表、按 crate 表与 JSON 逐条一致(可用一次性脚本重新派生校验)。
+
+（L-47-01 与 L-47-02 已于 2026-07-27 收口，见下方 OBSOLETE / CLOSED 段与 FIX.md `#105 / #106`。）
 
 ### L-5-01: `lancet-protocol` Cell core coexists add-only with legacy `ImpactKind` — `architecture` / #5 / #6 / #12
 - **位置**: `crates/lancet-protocol/src/cell.rs` (new ADR 0004 closed core: `CtxOp`/`ExtImpact`/`Trust`/`ChannelKind`/`ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`/`ToolOutput`); `crates/lancet-protocol/src/effect_types.rs` (`ImpactKind`/`EffectScopeKind`/`OverlayBehavior`/`FailureSemantics`/`EffectDecl`, still consumed by production handlers).
@@ -67,10 +130,11 @@
 - **计划**: Do not extend `effect_types.rs` for new ADR 0004 needs. Slices B–D (#5) landed manifest→codegen→Component engine→CEP round-trip over `cell.rs`; #6 unifies Cell authorization/evidence and retires `ImpactKind`-keyed authority; #12 deletes `effect_types.rs` and the migration crates once production Tools migrate (#7–#10).
 
 ### L-5-02: #5 slice B toolchain-authority divergences + cross-machine reproducibility unverified — `tooling` / #5 slice B / #73
-- **位置**: `tools/noop/manifest.toml` (`toolchain = "rustc-1.96.0+wit-bindgen-0.59"`); `xtask/src/tool_codegen.rs` (WIT `,` separators); `tools/noop/src/lib.rs` (direct `wit-bindgen` dep, `export_tool!` invoked inside `mod bindings`); `crates/lattice-tool-prelude/src/lib.rs` (`export_tool!` doc).
+- **位置**: `tools/noop/manifest.toml` (`toolchain = "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"`); `xtask/src/tool_codegen.rs` (WIT `,` separators); `tools/noop/src/lib.rs` (direct `wit-bindgen` dep, `export_tool!` invoked inside `mod bindings`); `crates/lattice-tool-prelude/src/lib.rs` (`export_tool!` doc); `xtask/src/tool_build.rs` (`build_guest` 的双 `--remap-path-prefix`)。
 - **问题**: #5 slice B diverged from the plan sketch where the actual installed toolchain is authoritative: (1) WIT record fields use `,` not the plan's `;` (wasm-tools 1.254/wit-bindgen 0.59 grammar); (2) `wit-bindgen` is a direct guest dep because `generate!` emits `wit_bindgen::rt::...` by bare crate path a prelude re-export cannot satisfy (plan said guests never depend on it directly); (3) `export_tool!` is invoked inside `mod bindings` because wit-bindgen's `export!` resolves `self` at the call site; (4) toolchain fingerprint records wit-bindgen-0.59 not 0.57. Separately, `.wasm` bit-for-bit reproducibility was verified only on this machine (`tool-build --verify` reproduces 6fcc7fc8...); cross-machine/cross-build reproducibility is unverified and the `--verify` lane is intentionally warn-only (decision 1) until proven stable.
 - **当前状态**: ACCEPTED RESIDUAL (by plan); tracked by **#73**. All divergences are toolchain-fact-driven, not design regressions; every #5 slice B acceptance criterion is met. The `--verify` warn-only lane collects reproducibility data without blocking. Slice C already embeds the committed `.wasm`; hard-gate promotion still waits on cross-machine bit-for-bit evidence.
-- **计划**: Own in #73. Keep the actual toolchain authoritative; do not back-fit the plan's `;`/0.57 sketch. Confirm cross-machine/CI bit-for-bit reproduction, then either promote `tool-build --verify` to a hard gate (decision 1 escalation) or document an explicit non-bit-for-bit alternative. Revisit the wit-bindgen direct-dep / `export_tool!`-inside-bindings pattern if a later wit-bindgen release restores a re-export-only or root-callable export seam.
+  **2026-07-27 部分推进（#80，PR #104/#109）**：跨机可复现性的两个**结构性阻碍**已消除，但跨机证据本身仍未取得。已做：(a) 发现并修复 committed `.wasm` 里烧进维护者主机 rustup sysroot 绝对路径的问题 —— `build_guest` 原先只 remap workspace root，`core/src/str/pattern.rs` 因此以 `/home/<user>/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/...` 形式入档，而同文件其余 std 路径已被 rustc 规范化为 `/rustc/<commit-hash>/`；现补第二条 `--remap-path-prefix` 把 sysroot 映射到同一前缀，`strings` 核验宿主路径归零，digest 由 `6fcc7fc8...` 变为 `b677a9b3...`。**在此之前任何跨机 `--verify` 都必然误报漂移**，#73 的验收标准结构上无法达成。(b) full-gate 的 verify 步骤补 `if: always()`（原先排在最易失败的 rollout 之后，rollout 一失败就永久收不到证据）并把输出 tee 到 `target/rollout/component-verify.log` 以进 artifact 上传（原先只在 job stdout，取不回来）。(c) `[artifact] toolchain` 指纹补入 `wasm-tools-1.254.0` 并加门禁测试锁定三处（常量／full-gate 安装器／manifest 指纹）一致。**未做**：真正的跨机 bit-for-bit 证据 —— 需 nightly full-gate 实跑至少一次并与本机 digest 比对；在此之前 warn-only 不可升级为硬门禁。
+- **计划**: Own in #73. Keep the actual toolchain authoritative; do not back-fit the plan's `;`/0.57 sketch. 下一步是等一次 nightly full-gate 跑出 `component-verify.log`，把 runner 上的 rebuilt digest 与本机 `b677a9b3...` 比对：一致则按 decision 1 escalation 把 `tool-build --verify` 升为硬门禁；不一致则以该 log 为据定位剩余的不确定性来源（不要再假定只剩路径问题——sysroot 一条已排除）。若最终证明存在无法消除的差异，则文档化显式的非 bit-for-bit 替代方案。Revisit the wit-bindgen direct-dep / `export_tool!`-inside-bindings pattern if a later wit-bindgen release restores a re-export-only or root-callable export seam.
 
 
 ### L-21-03: `net_guard::validate_base_url` 拒绝 `127.0.0.1`/`::1` IP 字面量但放行 `localhost` hostname — localhost 政策不对称 — `security` / net-guard / llm
@@ -91,16 +155,16 @@
 - **计划**: （a）短期不改测试行为，接受正常 CI 下通过；（b）可选加固 `is_private_or_reserved` 覆盖 198.18.0.0/15（与现有 169.254/127/0 段同列拒绝），作为 SSRF 纵深而非本测试的主修复；（c）若要彻底消除离线环境对 `lancet-native` 的阻断，给 `fetch_effect_contract_negative` 加 `#[ignore]` 或 env-gated 跳过（如 `LATTICE_SKIP_NETWORK_TESTS=1`），但需权衡是否弱化正常环境下对该契约的覆盖。本 finding 不阻塞 #26 迁移收尾。
 
 ### L-11-01: `tail_audit` 批次循环有 `yield_now` 但无专用 `CancellationToken` + CLI 接线 — `robustness` / operator-path
-- **位置**: `crates/lancet-api/src/audit.rs`（`tail_audit` 批次循环,`tokio::task::yield_now().await` 在 L235;循环体 `query_rows` 同步）
+- **位置**: `crates/lancet-audit/src/operator.rs`（`tail_audit` 批次循环,`tokio::task::yield_now().await` 在 L279;循环体 `query_rows` 同步）。GitHub #39 起该行为下沉到 `lancet-audit`;`crates/lancet-api/src/audit.rs` 仅剩一行委托,不再是本 finding 的位置。
 - **问题**: 批次循环底部已加 `tokio::task::yield_now().await`,drop-future 取消可在批次边界生效。但无专用 `CancellationToken` 从 CLI 接入 `tail_audit`,`lattice audit --tail` 的 Ctrl-C 仅靠默认 future-drop,无显式信号接线。退役前的 native handler 经 `HandlerContext { cancellation: Cancellation }` 有 per-batch watch 检查;direct-store 路径用 `yield_now` 兜底但未做专用 token + CLI 接线。
 - **当前状态**: ACCEPTED RESIDUAL(downgraded from LOW-MEDIUM → LOW)。已做:`yield_now().await` 批次间 yield(取消可在批次边界生效)。未做(最优处理):专用 `CancellationToken` + `lattice audit --tail` Ctrl-C 信号接线。最坏工作量由 `AUDIT_TAIL_MAX_BATCHES × AUDIT_TAIL_MAX_ROWS`(1000 × 1000)硬上限兜底;超限返回 `LancetError::Config` 并带 `last_audit_id` 供 `--since` resume。`--tail` 是操作员路径,典型 store 量级毫秒级完成。`tail_audit` doc comment 已显式写明该降级契约。
 - **升级条件**: 若 audit store 量级进入百万行常态、或 `--tail` 被接入长驻 UI/streaming 消费方需要即时取消响应 → 升为 MEDIUM 并加 `CancellationToken` + CLI 信号接线。
 - **计划**: 暂不实现专用 token + CLI 接线;维持 `yield_now` + 批次上限兜底 + 显式契约文档。
 
 ### L-11-02: 活跃 turn 并发读取仅由合成 writer 测试覆盖,无 live-turn 集成测试 — `verification` / concurrency-invariant
-- **位置**: `crates/lancet-api/src/audit.rs`(`operator_audit_reads_concurrent_with_active_writer`,约 514–627 行);`crates/lancet-audit/src/audit.rs`(`query_rows` SQL 谓词 + `init_schema` WAL)
+- **位置**: `crates/lancet-audit/src/operator_tests.rs`(`operator_audit_reads_concurrent_with_active_writer`,约 288–399 行);降级契约文档在 `crates/lancet-audit/src/operator.rs` module doc;`crates/lancet-audit/src/audit.rs`(`query_rows` SQL 谓词 + `init_schema` WAL)。GitHub #39 起测试与契约文档均已离开 `crates/lancet-api/src/audit.rs`。
 - **问题**: 并发读不变量(读不阻塞 writer、只返回 finalized 行、单次读 snapshot 一致)由结构性保证(SQL `ended_at IS NOT NULL AND result_or_error IS NOT NULL` + WAL 语句级 snapshot)+ `operator_audit_reads_concurrent_with_active_writer` 回归测试覆盖。但该测试的 writer 是**合成**的 —— 直接调 `CepAuditStore::start_call`/`finalize_call`,不 spawn 活跃 `LancetRuntime`/`stream_turn`。无 live-turn 集成测试验证"真 turn 在另一 task 写 audit store 的同时从并发 task 调 `query_audit`/`tail_audit`"的端到端并发读行为。
-- **当前状态**: ACCEPTED RESIDUAL(downgraded from MEDIUM → LOW)。合成 writer 测试在 store 并发边界(SQLite WAL + finalize 谓词)上与 live turn 等价 —— live turn 最终也走同一 `CepAuditStore` API,无额外并发 hazard —— 故接受合成 writer 测试为充分兜底(downgrade),不补 live-turn 集成测试(最优处理)。`audit.rs` module doc 已显式写明该降级契约。
+- **当前状态**: ACCEPTED RESIDUAL(downgraded from MEDIUM → LOW)。合成 writer 测试在 store 并发边界(SQLite WAL + finalize 谓词)上与 live turn 等价 —— live turn 最终也走同一 `CepAuditStore` API,无额外并发 hazard —— 故接受合成 writer 测试为充分兜底(downgrade),不补 live-turn 集成测试(最优处理)。`operator.rs` module doc 已显式写明该降级契约。
 - **升级条件**: 若 audit 写路径引入 `CepAuditStore` 之外的并发 hazard(如跨进程写、外部锁、非 WAL journal mode)、或 `query_rows` 改为跨多次 `SELECT` 拼接而中间释放 snapshot → 升为 MEDIUM 并补 live-turn (`LancetRuntime`/`stream_turn`) 并发读集成测试。
 - **计划**: 暂不补 live-turn 集成测试;维持合成 writer 测试 + 结构保证 + 显式契约文档。
 
@@ -166,6 +230,12 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
 
+### L-47-01: harness SIGINT 广播到测试进程自身的进程组，使 ubuntu CI 以 exit 130 中断 — `robustness` / harness / #47 / #105
+- **当前状态**: 2026-07-27 closed — 由 **#105** 修复。`driver.rs` 现在用 `libc::getpgid(child_pid)` 从内核回读实际 pgid（不再假定等于 `child.id()`），任何组信号发送前先用 `libc::getpgrp()` 比对并在命中自身组时 fail-closed，且改用 `libc::killpg` 直接投递而非 spawn `kill(1)`（消除负号参数在不同 `kill` 实现间的解释差异）。新增两条回归测试锁定该契约；`direct_failure_sigint_while_stalled_commits_cancelled` 保留并通过，SIGINT 协作取消覆盖未削弱。**CI 实跑确认（2026-07-27）**：ubuntu lane 已转绿。同一对上游提交（`44ceabc1` + `38af35bb`）在 PR #104 上 ubuntu-latest 仍以 exit 130 失败（run 30222133081，macos 通过），而叠加本修复的 PR #107 ubuntu-latest 与 macos-latest 双双通过（run 30257981171）；两次运行只差这一个提交，坐实信号源在 harness 内且已消除，无需启用 #105 计划第 4 步的 `#[ignore]` + serial lane 退路。完整记录见 FIX.md `#105 / #106`。
+
+### L-47-02: `git_graph` 测试 fixture 使用固定共享路径 — `robustness` / test-isolation / #47 / #106
+- **当前状态**: 2026-07-27 closed — 由 **#106** 修复。`temp_dir()` 改为返回持有 `tempfile::TempDir` 的 `Fixture` 守卫，路径唯一且 drop 时自动清理，`name` 退化为可读前缀；删除手写 `remove_dir_all` 前置清理，30 个调用点改用 `dir.path()`。反向验证：并行两份 `CARGO_TARGET_DIR` 各 29 passed / 0 failed（修复前有 2 个失败）。完整记录见 FIX.md `#105 / #106`。
+
 ### T-24-01: Direct-Local observation root-escape acceptance coverage — `verification` / #24
 - **Current status**: 2026-07-23 closed — `direct_observation` now drives traversal and absolute outside-root paths through read/list/grep/find (8 calls), requires public `GuardDenied` CEP finishes, exact denial text, no canary leakage, unchanged outside bytes, and a completed Turn. Focused and full harness runs passed.
 
@@ -215,7 +285,8 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 
 ### ENV-OOM-02: 并行测试暴露的 `unsafe env::set_var` 竞态 flake — `test-flakiness` / env-race
 - **当前状态**: 2026-07-12 fixed。两处 flake 均压测复现后修复归零：(1) `layer_guard.rs` 两个 `MSB_ENV` 测试竞态（复现 232/2000 ≈12%）——加 `static MSB_ENV_LOCK: Mutex<()>` 串行化；(2) `lattice-api` `turn_runtime_constructs_one_adapter_per_turn` 的 `disk I/O error`（复现 8/500 ≈1.6%，错误路径落在别的测试的 `/tmp/.tmpXXXXXX` tempdir 下，坐实 XDG_STATE_HOME 竞态假设：第二次 `build_test_production_deps(persist_audit)` 经 `dirs::state_dir()` 无锁读 XDG，与持 `ENV_MUTEX` 的 `ScopedXdgStateHome` 邻居测试互踩）——给该测试加 `ScopedXdgStateHome`，同时把持久 audit DB 隔离进 tempdir（不再写真实平台 state 目录）。修复后同样压测循环 0/2000、0/500。这也解释了 FIX.md #20 条目记录的历史 `ci-local.sh` "disk I/O error" flake。完整记录见 FIX.md `ENV-OOM-02`（2026-07-12）。
-- **残留（latent，非已知 flake）**: `lattice-api/tests/upper_routing.rs` 的 `upper_routing_e2e` 仍裸 `set_var(TEST_SECRET/XDG_STATE_HOME)`（同二进制 7 个测试，无兄弟测试读这两个变量；理论上与 tempfile 的 `TMPDIR` getenv 存在 glibc setenv/getenv hazard）。若该二进制未来新增读 env 的测试或出现崩溃 flake → 按同一 mutex 模式收口。
+- **残留（2026-07-27 复核后更新）**: 原记录指向 `lattice-api/tests/upper_routing.rs` 的 `upper_routing_e2e`——该文件已随 #40 删除，那条残留作废。当前 `crates/lattice-api/tests/` 下仍裸调 `set_var("XDG_STATE_HOME")` 的是 `audit_turn_provenance.rs:61`、`release_e2e.rs:84`、`dogfood_impact_matrix.rs:126`，但三者**各自所在的 test binary 里只有 1 个测试**，无并发兄弟可竞争，故不构成 hazard（与原记录"同二进制 7 个测试"的情形不同）。升级条件：若这三个二进制中任何一个新增第二个测试 → 按同一 mutex / `ScopedXdgStateHome` 模式收口。
+- **同类（已修）**: 进程全局状态竞态的另一实例是 CWD 而非 env —— `lattice-api` 四个测试文件裸调 `set_current_dir` 导致并发测试互相破坏，2026-07-27 由 **#109** 修复（删除多余的 CWD 修改 + 给生产 gix init 补恢复）。见 FIX.md 对应条目。
 
 ### L-21-01: `tests/msb_full_turn.rs` / `tests/pty_tui_smoke.rs` 真实 MSB 实跑 — `verification` / full-gate / owner-side
 - **当前状态**: 2026-07-06 closed — owner KVM 实跑通过。`msb_plain_text_turn_commits_and_exit_zero` 在本机 KVM 完整门跑通：`turn_started → model_started → token_delta:"ok" → model_finished → turn_committed{status:"completed"}`，fake LLM 收到真 Chat Completions 请求，`session log --json` 交叉验证 commit_id 一致，exit 0。实跑过程中修了 6 个独立问题（`LATTICE_MSB_IMAGE` 未接线、`init_git_project` unborn HEAD、microsandbox `prebuilt` feature 关闭 + `MSB_HOME` 未注入、fake LLM base_url 用 `127.0.0.1` 被 net-guard 拒、`session log` 断言找错字符串），见 FIX.md `#21` 系列条目。L-21-02（探针探 audit 不探 MSB）和 L-21-03（net-guard localhost 政策不对称）作为独立 finding 保留。

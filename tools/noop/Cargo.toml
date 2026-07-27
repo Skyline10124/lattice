@@ -17,5 +17,6 @@ default = []
 lattice-tool-prelude = { workspace = true }
 # wit-bindgen is also a direct dep: its `generate!` macro emits code that
 # references `wit_bindgen::rt::...` by bare crate path, so the crate must be
-# linked. The version is pinned through the prelude's re-export + workspace.
-wit-bindgen = "0.59"
+# linked. The version comes from the exact `=` pin in
+# `[workspace.dependencies]`, shared with the prelude's re-export.
+wit-bindgen = { workspace = true }

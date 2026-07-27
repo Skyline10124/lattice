@@ -76,6 +76,10 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
+# fd-relative filesystem ops (openat/mkdirat/renameat/unlinkat) for the
+# TOCTOU-safe Local Workspace write path (#39). Portable across Linux and
+# macOS — deliberately no Linux-only openat2/RESOLVE_BENEATH usage.
+rustix = { version = "1.1.4", features = ["fs"] }
 gix = { version = "0.85", features = ["tree-editor"] }
 schemars = "1.2"
 bytes = "1"
@@ -86,6 +90,11 @@ wasmtime = { version = "=46.0.1", default-features = false, features = [
 ] }
 inventory = "=0.3.24"
 jsonschema = "=0.48.1"
+# Source Tool guest bindings generator. Exact-pinned for the same reason as
+# wasmtime: its `generate!` output shapes the guest's core module, so a patch
+# bump changes the committed `.wasm` bytes and the digest the composition gate
+# verifies. Declared here so the prelude and every guest Tool share one pin.
+wit-bindgen = "=0.59.0"
 # Component binary parser for import inspection in the composition gate.
 wasmparser = "0.251"
 

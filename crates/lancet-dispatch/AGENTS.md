@@ -7,7 +7,7 @@ Crate-local guidance for `lancet-dispatch`.
 This crate owns the current generic CEP dispatch path: typed registration,
 JSON-RPC transport, client/server channels, event sinks, call control,
 cancellation, and server runtime plumbing. ADR 0004 absorbs this behavior into
-`lancet-runtime` in #12; the crate is migration infrastructure.
+`lancet-runtime` in #34 (Codeberg #12); the crate is migration infrastructure.
 
 ## Sub-Architecture
 
@@ -28,26 +28,26 @@ cancellation, and server runtime plumbing. ADR 0004 absorbs this behavior into
 - Preserve cancellation and event ordering when changing transport internals.
 - Avoid adding dependencies that would make this crate a runtime policy layer.
 - Do not add a runtime plugin registry, dynamic Component loader, or new public
-  abstraction intended to survive #12. Preserve current behavior while the
+  abstraction intended to survive #34. Preserve current behavior while the
   generated closed-catalog runtime replaces this crate.
 
 ## Recent Issues
 
-- CHANGED #48: after cancellation the client call future resolves with the
-  server-mapped structured outcome (the server observes the same watch and is
-  the outcome authority); the client-synthesized `call_cancelled()` and its
-  re-exports are deleted, and `start_call_raw` is `#[doc(hidden)] pub`.
-  Drop-future `CancelGuard` semantics are unchanged.
-- ADDED #5 slice D: `CepClient::call_named<P, R>` — name-dynamic, type-static
-  params, sends a raw JSON-RPC call, and deserializes the result without
-  carrying a JSON Schema; Component params/result validation is done by
-  generated descriptor validators on the server side. #12 absorbs this
-  helper into `lancet-runtime`.
+- CHANGED #70 (Codeberg #48): after cancellation the client call future
+  resolves with the server-mapped structured outcome (the server observes the
+  same watch and is the outcome authority); the client-synthesized
+  `call_cancelled()` and its re-exports are deleted, and `start_call_raw` is
+  `#[doc(hidden)] pub`. Drop-future `CancelGuard` semantics are unchanged.
+- ADDED #27 (Codeberg #5) slice D: `CepClient::call_named<P, R>` —
+  name-dynamic, type-static params, sends a raw JSON-RPC call, and
+  deserializes the result without carrying a JSON Schema; Component
+  params/result validation is done by generated descriptor validators on the
+  server side. #34 absorbs this helper into `lancet-runtime`.
 - FIXED P19-CR-01: cancellation senders were previously tracked by vector
   truncation; unordered completion could lose live handler cancel handles.
 - FIXED P19-CR-02: `EventSink::emit` previously awaited on bounded channels and
   could deadlock ordinary calls that did not drain progress events.
-- ADDED #5 slice C: `EventSink::emit_sync` — synchronous event emit for
+- ADDED #27 slice C: `EventSink::emit_sync` — synchronous event emit for
   Component ToolHost imports that run inside synchronous wasmtime calls.
   Same best-effort semantics as `emit` (closed/full channel doesn't fail).
 - WATCH: native and API live streaming depend on dispatch not blocking server

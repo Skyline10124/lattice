@@ -10,8 +10,8 @@ use crate::git_graph::GitSessionGraphStore;
 #[test]
 fn test_create_session() {
     let dir = temp_dir("create_session");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
 
     let session = store
         .create_session("sess-create", Some("label"), "coder", "main")
@@ -22,6 +22,7 @@ fn test_create_session() {
     assert_eq!(session.project_target_branch, Some("main".to_string()));
 
     let meta_path = dir
+        .path()
         .join(".lattice")
         .join("sessions")
         .join("sess-create")
@@ -32,8 +33,8 @@ fn test_create_session() {
 #[test]
 fn test_open_session() {
     let dir = temp_dir("open_session");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     store
         .create_session("sess-open", None, "coder", "main")
         .expect("create");
@@ -46,8 +47,8 @@ fn test_open_session() {
 #[test]
 fn test_open_session_not_found() {
     let dir = temp_dir("open_not_found");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
 
     let err = store.open_session("sess-missing").unwrap_err();
     assert!(matches!(err, SessionError::NotFound(_)));
@@ -56,8 +57,8 @@ fn test_open_session_not_found() {
 #[test]
 fn test_set_active_agent() {
     let dir = temp_dir("set_active_agent");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     store
         .create_session("sess-agent", None, "coder", "main")
         .expect("create");
@@ -74,8 +75,8 @@ fn test_set_active_agent() {
 #[test]
 fn test_list_sessions() {
     let dir = temp_dir("list_sessions");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     store
         .create_session("sess-a", None, "coder", "main")
         .expect("create a");
@@ -93,8 +94,8 @@ fn test_list_sessions() {
 #[test]
 fn test_status_empty_session() {
     let dir = temp_dir("status_empty");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     store
         .create_session("sess-empty", None, "coder", "main")
         .expect("create");
@@ -112,7 +113,7 @@ fn test_repo_auto_init_bare_on_fresh_dir() {
     // This is the safety net for after Plan 07 deletes SessionApi::sqlite().
     let dir = temp_dir("auto_init_bare");
     // Intentionally do NOT call setup_git_repo — dir does not exist yet.
-    let store = GitSessionGraphStore::new(&dir);
+    let store = GitSessionGraphStore::new(dir.path());
 
     // First session creation triggers repo() which auto-inits the bare repo.
     store

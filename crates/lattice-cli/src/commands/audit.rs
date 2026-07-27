@@ -5,8 +5,10 @@
 //!
 //! Audit readers resolve the external project-keyed path via
 //! `audit_db_path_for_project` (XDG state: `lattice/projects/<key>/cep_audit.db`).
-//! No path here composes a CEP server; all readers call `lancet-api` store
-//! readers directly (see `audit_command_source_does_not_reference_cep_server`).
+//! No path here composes a CEP server: every reader calls the `lancet-api`
+//! facade, which delegates to `lancet-audit` — a crate that depends on none of
+//! `lancet-native`, `lancet-dispatch`, `lancet-cep`, or `lancet-runtime`, so the
+//! read path cannot reach server, transport, or registry types at all.
 
 use std::path::Path;
 
@@ -241,11 +243,12 @@ fn render_replay_output(replay: &lancet_api::AuditReplayResult, json: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::test_env::ScopedXdgStateHome;
     use lancet_api::audit_db_path_for_project;
+    use lancet_audit::ScopedXdgStateHome;
     use lancet_catalog::CepMethod;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
     use tempfile::TempDir;
+
     fn query_cmd(session: &str, json: bool) -> AuditCmd {
         AuditCmd {
             action: None,
@@ -262,7 +265,15 @@ mod tests {
             },
         }
     }
+
     /// Legacy audit SQLite (no `model_id` / `runtime_version` columns) remains readable.
+    ///
+    /// Kept crate-internal on purpose (triage ledger: `keep`, 局部不变量): the
+    /// Direct-Local harness may not hand-seed the internal audit DB, and a real
+    /// turn only ever writes the current schema, so no black-box scenario can
+    /// reach this state. The seeded-store, missing-store, and replay surfaces of
+    /// `lattice audit` are covered by `fast_audit_cli` and `direct_operator_*`
+    /// in `lattice-system-harness`.
     #[tokio::test]
     async fn audit_query_reads_legacy_schema_store() {
         let _xdg = ScopedXdgStateHome::new();

@@ -19,10 +19,11 @@
 //! callback and are classified from the tool's static footprint (never from a
 //! wasmtime/guest error string).
 //!
-//! Call-scoped cancellation state is the sole cancellation authority (#48):
-//! the epoch-abort path here, the pre-call check, and the guest-logical-error
-//! path in `runtime::call` all produce the shared [`cancelled_error`]; a
-//! guest-controlled error string never classifies a cancellation.
+//! Call-scoped cancellation state is the sole cancellation authority
+//! (#70, Codeberg #48): the epoch-abort path here, the pre-call check, and
+//! the guest-logical-error path in `runtime::call` all produce the shared
+//! [`cancelled_error`]; a guest-controlled error string never classifies a
+//! cancellation.
 //!
 //! No guest backtrace, host path, or secret is exposed.
 
@@ -86,7 +87,7 @@ pub(crate) fn map_component_error(
     )
 }
 
-/// Build the shared structured cancellation error (#48). Every call-scoped
+/// Build the shared structured cancellation error (#70). Every call-scoped
 /// cancellation observation point (host pre-check, guest cooperative exit,
 /// epoch interruption) maps to this exact error.
 pub(crate) fn cancelled_error(method: &str) -> CepError {

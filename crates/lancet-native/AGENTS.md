@@ -18,14 +18,14 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   patch write limits.
-- `src/workspace/` owns the one concrete `LocalWorkspace` (#37/#38/#39/#63):
-  secure per-segment path resolution, Policy-Visible Workspace filtering (gix
-  Git facts + authority read policy), bounded read/list/grep/find, content
-  hashing (Local Revision), no-replace create, atomic edit install, private
-  mutation-history recording (`with_history` / `record_mutation`), filesystem
-  error normalization, and the Local operation vocabulary (`WorkspacePath`,
-  `PathFacts`, `PathIntent`, requests). ADR 0004 moves this into
-  `lancet-runtime`.
+- `src/workspace/` owns the one concrete `LocalWorkspace` (#59/#60/#61,
+  Codeberg #37/#38/#39; plus #63): secure per-segment path resolution,
+  Policy-Visible Workspace filtering (gix Git facts + authority read policy),
+  bounded read/list/grep/find, content hashing (Local Revision), no-replace
+  create, atomic edit install, private mutation-history recording
+  (`with_history` / `record_mutation`), filesystem error normalization, and the
+  Local operation vocabulary (`WorkspacePath`, `PathFacts`, `PathIntent`,
+  requests). ADR 0004 moves this into `lancet-runtime`.
 - `src/executor/` owns crate-private web/render helpers and output limits.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 
@@ -41,10 +41,10 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   contracts start in Source manifests; Components receive authority only through
   Tool Host imports.
 - The concrete guarded Local Workspace is the single workspace path. The
-  `ExecutionBackend`/routing seam was deleted in #38 — do not reintroduce a
+  `ExecutionBackend`/routing seam was deleted in #60 — do not reintroduce a
   pluggable workspace implementation, routing enum, fallback, or parallel
-  path. #12 moves the concrete host module into `lancet-runtime` after Tool
-  migration.
+  path. #34 (Codeberg #12) moves the concrete host module into
+  `lancet-runtime` after Tool migration.
 
 ## Recent Issues
 
@@ -57,26 +57,58 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   recorded commit ids land in durable audit metadata under
   `workspace_history`. A history failure after a successful install is
   recorded as evidence and never triggers a compensating write.
-- FIXED #48: call-scoped cancellation is audited from the structured code,
-  not a message string — `finalize_audit_for_dispatch` records
+- FIXED GitHub #39 (= Codeberg #17; PR #74 review defects) — four
+  `src/workspace/local.rs` fixes. NOTE: #39 here is the operator audit sink
+  ticket, not the Direct-Local workspace tickets #59/#60/#61 cited above and
+  below.
+  (1) Grep byte budget: `GREP_MAX_FILE_BYTES` 8 MiB / `GREP_MAX_TOTAL_BYTES`
+  64 MiB walk aggregate / `GREP_MAX_LINE_BYTES` 64 KiB + `struct GrepBudget`;
+  `grep_file` streams via `BufReader` + `Read::take` instead of
+  `fs::read_to_string`, and over-cap files are skipped before being opened.
+  (2) `list_dir` uses non-following `DirEntry::file_type()` via `file_type_kind`,
+  so symlinks (including dangling ones) list as `PathKind::Symlink` instead of
+  failing the whole listing; `metadata_kind` stays for `resolve_secure` callers.
+  (3) `glob_match` is a real iterative two-pointer fnmatch matcher (`*`, `?`,
+  `[abc]`, `[a-z]`, `[!...]`; unclosed `[` literal) plus `match_char_class`,
+  backing both `find_files` patterns and grep's glob filter.
+  (4) Write-path TOCTOU closed: private `open_parent_dir_secure` walks the
+  parent chain with `rustix` `openat`
+  (`O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`) relative to the already-pinned
+  fd (`mkdirat` + EEXIST-tolerant retry when creating), and `create_excl` /
+  `install_atomic` / `remove_file` reach the filesystem only through that fd
+  with single-component leaf names (`openat O_CREAT|O_EXCL`, `renameat`,
+  `unlinkat`, `fsync` on the dirfd; path-based `fsync_dir` is gone). Portable
+  (Linux + macOS; no `openat2`/`O_PATH`). It is NOT `openat2(RESOLVE_BENEATH)`:
+  pinning defeats symlink substitution but not a rename of the pinned directory
+  out of the workspace between pin and leaf op — accepted residual L-39-04.
+  Adds `rustix` (features `["fs"]`) to the root workspace deps and here.
+  Deliberate deltas: over-cap files are silently skipped by grep (fewer matches,
+  no error); grep keeps matches found before a mid-file IO/invalid-UTF-8 error
+  instead of dropping the file; a regular-file parent component now surfaces as
+  `SymlinkRejected` (ENOTDIR from the `O_DIRECTORY` walk), not `Io`.
+  Read/observation paths remain `resolve_secure`-only — accepted residual
+  L-39-01, plus L-39-02/L-39-03 on walk depth and symlink reporting.
+- FIXED #70 (Codeberg #48): call-scoped cancellation is audited from the
+  structured code, not a message string — `finalize_audit_for_dispatch` records
   `AuditOutcome::Cancelled` on `CepErrorCode::CallCancelled` (the old
   exact-message arm was unreachable dead code), and `is_incomplete_dispatch`
   matches the code only. Component and (future) native cancellations share
   one classification authority.
-- ADDED #5 slice D: `ServerRunConfig` carries `Option<Arc<ComponentRuntime>>`.
-  `handle_request` branches Component vs native dispatch after audit start
-  and before finalize, sharing one durable audit path. Component calls
-  produce Cell evidence (`component_cells` in audit metadata); native calls
-  produce effect-ledger evidence as before. Production `from_embedded()`
-  yields an empty Component catalog so all 5 native methods are unchanged.
-- FIXED #38: `ExecutionBackend`/`ExecutionRouting`/`UpperContext`/
+- ADDED #27 (Codeberg #5) slice D: `ServerRunConfig` carries
+  `Option<Arc<ComponentRuntime>>`. `handle_request` branches Component vs
+  native dispatch after audit start and before finalize, sharing one durable
+  audit path. Component calls produce Cell evidence (`component_cells` in
+  audit metadata); native calls produce effect-ledger evidence as before.
+  Production `from_embedded()` yields an empty Component catalog so all 5
+  native methods are unchanged.
+- FIXED #60: `ExecutionBackend`/`ExecutionRouting`/`UpperContext`/
   `RoutingInvocationState`/`NullExecutionBackend` and all spy backends
   deleted; handlers and the edit engine call the concrete `LocalWorkspace`
   directly; audit routing metadata replaced with method-local evidence
   (guarded path, `local_revision`, post-install content hash,
   `PathGuard`/`LocalIo` rejection stages); narrow one-shot
   `fail_next_install` fault injection is the only test seam.
-- FIXED #39 follow-up: ignored ancestors reachable only for an exact included
+- FIXED #61 follow-up: ignored ancestors reachable only for an exact included
   descendant are navigable but not emitted by list/find; successful
   read/list/grep/find audit metadata now records content-free visibility rule
   categories without hidden paths, content, counts, or hashes.

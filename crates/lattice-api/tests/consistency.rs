@@ -159,7 +159,15 @@ fn make_request(
     session_id: &str,
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
-    std::env::set_current_dir(&ws.root).expect("set workspace cwd");
+    // Deliberately does NOT `set_current_dir`. `test_project_root` below already
+    // pins the root, so `resolve_project_root` never consults the CWD — but the
+    // CWD is process-global while the five `#[tokio::test]`s in this binary run
+    // concurrently, each owning its own `TempDir`. Pointing the process at one
+    // test's temp dir let a sibling's `TempDir` drop leave the process with no
+    // valid CWD, and `gix` reads the CWD even for absolute paths, so unrelated
+    // tests failed with `Could not obtain the current directory` (~5% locally,
+    // and it took down both CI lanes). The redundant mutation is the whole
+    // hazard, so it is gone.
     RunTurnRequest {
         input: input.to_string(),
         session_id: session_id.to_string(),

@@ -5,11 +5,11 @@ Crate-local guidance for `lancet-runtime`.
 ## Role
 
 ADR 0004 Component engine, closed composition gate, and minimal ToolHost
-for LATTICE Source Tools (#5 slices C–D). Owns the wasmtime engine, embedded
-inventory collection, the fail-closed composition gate, the control-only
-ToolHost, the `call` execution path with result/effect validation, and the
-`contains`/`descriptors` surface that `lancet-native` and `lancet-api` use
-for the D.3 dispatch split and D.4 LLM projection.
+for LATTICE Source Tools (#27 (Codeberg #5) slices C–D). Owns the wasmtime
+engine, embedded inventory collection, the fail-closed composition gate,
+the control-only ToolHost, the `call` execution path with result/effect
+validation, and the `contains`/`descriptors` surface that `lancet-native`
+and `lancet-api` use for the D.3 dispatch split and D.4 LLM projection.
 
 ## Sub-Architecture
 
@@ -22,9 +22,9 @@ for the D.3 dispatch split and D.4 LLM projection.
   method (params validation, pre-cancel short-circuit, instantiation,
   cancellation-aware guest-error mapping, result CellRef validation,
   result schema validation, Cell evidence recording). Call-scoped
-  cancellation state is the sole cancellation authority (#48): pre-call
-  check, guest logical-error path, and epoch abort all converge on one
-  shared `CallCancelled` error. `call` takes `&self`
+  cancellation state is the sole cancellation authority (#70 (Codeberg #48)):
+  pre-call check, guest logical-error path, and epoch abort all converge on
+  one shared `CallCancelled` error. `call` takes `&self`
   (the epoch ticker is lazily spawned via `OnceLock`); an
   `Arc<ComponentRuntime>` can be shared across the projection (D.4) and
   server dispatch (D.3) paths.
@@ -53,10 +53,10 @@ for the D.3 dispatch split and D.4 LLM projection.
 - `src/error_map.rs` maps wasmtime traps/limits/aborts to structured
   `CepError` codes (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/
   `CallCancelled`) and owns the shared `cancelled_error` used by every
-  cancellation observation point (#48). No guest backtrace/host path/secret
+  cancellation observation point (#70). No guest backtrace/host path/secret
   is exposed.
 - `src/generated/` owns the production `EXPECTED_COMPONENTS` list (empty
-  until #7–#10) and the `test-utils` no-op fixture.
+  until #29–#32 (Codeberg #7–#10)) and the `test-utils` no-op fixture.
 - `src/test_helpers.rs` (`test-utils` feature) provides synthetic
   registration/identity construction for gate negative-case tests.
 
@@ -75,8 +75,8 @@ for the D.3 dispatch split and D.4 LLM projection.
 - `test-utils` feature exposes only the fixed no-op fixture constructor
   and synthetic test helpers. Production code never enables it.
 - The `host-control` interface is control-only (cancellation + events).
-  No workspace/network/session domain operation before #6 capability
-  admission.
+  No workspace/network/session domain operation before #28 (Codeberg #6)
+  capability admission.
 - `call` is `&self`: the epoch ticker is lazily spawned on first call via
   `OnceLock` (requires a tokio runtime context; composition does not).
   `set_limits` remains `&mut self` (tests only).

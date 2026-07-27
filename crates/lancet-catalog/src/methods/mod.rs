@@ -3,17 +3,12 @@
 
 //! CEP CEP catalog method types.
 
-pub mod audit;
 pub mod external;
 #[cfg(feature = "inspect-scaffold")]
 pub mod scaffold;
 pub mod session;
 pub mod workspace;
 
-pub use audit::{
-    AuditQueryParams, AuditQueryResult, AuditReplayParams, AuditReplayResult, AuditTailParams,
-    AuditTailResult,
-};
 pub use external::Fetch;
 pub use session::TodoWrite;
 pub use workspace::{

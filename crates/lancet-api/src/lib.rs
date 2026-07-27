@@ -56,7 +56,7 @@ pub use config::{
 };
 pub use doctor::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 pub use error::{LancetError, LancetResult};
-pub use lancet_catalog::methods::audit::AuditReplayResult;
+pub use lancet_audit::AuditReplayResult;
 pub use runtime::{
     DEFAULT_CHANNEL_CAPACITY, LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle,
 };

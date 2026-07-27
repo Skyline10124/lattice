@@ -1,7 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Host-side Policy-Visible Workspace engine (ADR 0003 decision 5 / #39).
+//! Host-side Policy-Visible Workspace engine (ADR 0003 decision 5 / #61,
+//! Codeberg #39).
 //!
 //! Built once per Tool call from the current Local state. Git index and
 //! exclude stacks are not cached across Tool calls so `.gitignore` and

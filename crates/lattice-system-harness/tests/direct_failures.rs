@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Direct-Local provider failures, public cancellation, and deadline
-//! (issue #24 slice 5).
+//! (issue #46 (Codeberg #24) slice 5).
 //!
 //! Black-box coverage of terminal failure/cancellation/deadline paths through
 //! the real `session send` binary, plus the "mutation survives provider

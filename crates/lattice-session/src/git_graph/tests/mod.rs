@@ -9,9 +9,9 @@ mod no_remote;
 mod pointer_ops;
 mod session_meta;
 
-use std::env;
-use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
+
+use tempfile::TempDir;
 
 use crate::graph::{
     GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus, WorkspaceDisposition,
@@ -20,12 +20,35 @@ use crate::graph::{
 use crate::test_helpers::{assistant_msg, user_msg};
 use crate::test_utils::init_empty_repo;
 
-pub(crate) fn temp_dir(name: &str) -> PathBuf {
-    let dir = env::temp_dir()
-        .join("lattice-session-git-graph-tests")
-        .join(name);
-    let _ = fs::remove_dir_all(&dir);
-    dir
+/// A fixture directory that lives only as long as the test holds it.
+///
+/// Earlier revisions built a host-global path
+/// (`$TMPDIR/lattice-session-git-graph-tests/<name>`) and `remove_dir_all`'d it
+/// on the way in, so two test binaries running concurrently on one host — two
+/// `CARGO_TARGET_DIR`s, or two git worktrees — deleted each other's fixtures
+/// mid-run (#106). `TempDir` gives each run its own path and cleans up on drop.
+pub(crate) struct Fixture {
+    dir: TempDir,
+}
+
+impl Fixture {
+    pub(crate) fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+impl AsRef<Path> for Fixture {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
+/// Create a uniquely named fixture directory. `name` survives only as a
+/// human-readable prefix so failures stay identifiable.
+pub(crate) fn temp_dir(name: &str) -> Fixture {
+    let dir =
+        TempDir::with_prefix(format!("lattice-session-{name}-")).expect("create fixture temp dir");
+    Fixture { dir }
 }
 
 pub(crate) fn setup_git_repo(dir: &std::path::Path) -> gix::Repository {

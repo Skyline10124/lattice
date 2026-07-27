@@ -122,7 +122,7 @@ impl CepClient {
     /// Begin a typed call. Dropping the future or calling [`CallControl::cancel`]
     /// signals cancellation; a pending call then resolves with the server-mapped
     /// structured outcome (the server observes the same cancellation watch), not
-    /// a client-synthesized error (#48).
+    /// a client-synthesized error (#70, Codeberg #48).
     #[doc(hidden)]
     pub fn start_call<M>(&self, params: M::Params) -> (BoxCallFuture<M::Result>, CallControl)
     where
@@ -160,7 +160,7 @@ impl CepClient {
 
     /// Begin a raw JSON call, returning the pending future and its cancellation
     /// control. After cancellation the future resolves with the server-mapped
-    /// structured outcome (#48).
+    /// structured outcome (#70).
     #[doc(hidden)]
     pub fn start_call_raw(
         &self,
@@ -205,7 +205,7 @@ impl CepClient {
                 }
                 _ = wait_cancelled(&mut cancel_rx) => {
                     // Cancellation requested: the server observes the same
-                    // watch and maps the call outcome authoritatively (#48).
+                    // watch and maps the call outcome authoritatively (#70, Codeberg #48).
                     // Await its structured response instead of synthesizing
                     // a client-side error.
                     response_rx
@@ -615,7 +615,7 @@ mod tests {
         task.abort();
     }
 
-    /// #48: after cancellation the pending call resolves with the
+    /// #70: after cancellation the pending call resolves with the
     /// server-mapped structured error, not a client-synthesized one. The
     /// server observes the same cancellation watch and is the authority
     /// for the call outcome.
@@ -657,7 +657,7 @@ mod tests {
         task.abort();
     }
 
-    /// #48: dropping the call future still signals cancellation to the
+    /// #70: dropping the call future still signals cancellation to the
     /// server-side handler through `CancelGuard` (unchanged semantics).
     #[tokio::test]
     async fn drop_future_signals_cancellation_to_server() {

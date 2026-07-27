@@ -10,6 +10,7 @@ use lancet_api::{AuditReplayRequest, replay_audit};
 use lancet_native::{AuditQueryFilters, CepAuditStore};
 use lancet_protocol::effect_types::ImpactKind;
 
+use lancet_audit::ScopedXdgStateHome;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
@@ -49,17 +50,16 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
 
 struct Workspace {
     _dir: TempDir,
-    _state: TempDir,
+    /// Holds the shared env lock and points `XDG_STATE_HOME` at a temp state
+    /// root for the whole fixture lifetime, restoring the previous value on drop.
+    _state: ScopedXdgStateHome,
     root: std::path::PathBuf,
     loaded: LoadedAgentProfile,
     target_branch: String,
 }
 
 fn setup_workspace() -> Workspace {
-    let state = TempDir::new().unwrap();
-    unsafe {
-        std::env::set_var("XDG_STATE_HOME", state.path());
-    }
+    let state = ScopedXdgStateHome::new();
     let ws = TempDir::new().unwrap();
     let root = ws.path().to_path_buf();
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -136,7 +136,9 @@ fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String
 #[tokio::test]
 async fn full_turn_audit_rows_and_replay_fragment() {
     let ws = setup_workspace();
-    std::env::set_current_dir(&ws.root).unwrap();
+    // No `set_current_dir`: the request below pins `test_project_root`, and
+    // mutating the process-global CWD from concurrent tests made sibling tests
+    // fail once a `TempDir` dropped (see the note in `tests/consistency.rs`).
 
     let original = "pub fn answer() -> i32 { 1 }";
     let hash = format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex());

@@ -12,8 +12,8 @@ use crate::graph::{
 #[test]
 fn test_no_remote_push_refspec() {
     let dir = temp_dir("no_remote_refspec");
-    setup_git_repo(&dir);
-    let store = GitSessionGraphStore::new(&dir);
+    setup_git_repo(dir.path());
+    let store = GitSessionGraphStore::new(dir.path());
     store
         .create_session("sess-remote", None, "coder", "main")
         .expect("create session");
@@ -35,7 +35,7 @@ fn test_no_remote_push_refspec() {
 
     // Inspect the repository config via gix — there must be no remote and no
     // push refspec that mentions refs/lattice.
-    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
+    let repo = gix::open_opts(dir.path(), gix::open::Options::isolated()).expect("open repo");
     let remotes: Vec<_> = repo.remote_names().into_iter().collect();
     assert!(
         remotes.is_empty(),
@@ -43,7 +43,7 @@ fn test_no_remote_push_refspec() {
     );
 
     // Also scan raw config for any push refspec mentioning refs/lattice.
-    let config_path = dir.join(".git").join("config");
+    let config_path = dir.path().join(".git").join("config");
     if config_path.is_file() {
         let text = std::fs::read_to_string(&config_path).expect("read git config");
         assert!(
