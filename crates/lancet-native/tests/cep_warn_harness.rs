@@ -209,27 +209,23 @@ where
 
 // ── Repo root helper ─────────────────────────────────────────────────────────
 
-/// Walk up from CARGO_MANIFEST_DIR to find the repo root (has `.planning/`).
+/// The workspace root of *this* source tree: `crates/lancet-native` -> `crates`
+/// -> repo root.
+///
+/// `CARGO_MANIFEST_DIR` is baked in at compile time, so it always names the
+/// tree this test binary was built from. Do not search upward for a marker
+/// directory: the previous implementation looked for `.planning/`, which is
+/// gitignored (`.gitignore`) and force-add-blocked (`.githooks/pre-commit`).
+/// It therefore never exists in CI or a fresh clone — and when the same
+/// repository is checked out as a `git worktree` under `.claude/worktrees/`,
+/// the upward walk escaped the worktree and resolved to the *main* checkout,
+/// so the harness read (and with `LATTICE_UPDATE_WARN_REPORT=1` wrote) another
+/// checkout's `docs/lancet-warn-report.md`. See GitHub #79.
 fn find_repo_root() -> PathBuf {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap());
-
-    let mut dir = manifest.as_path();
-    loop {
-        if dir.join(".planning").exists() {
-            return dir.to_path_buf();
-        }
-        match dir.parent() {
-            Some(p) => dir = p,
-            None => break,
-        }
-    }
-    // Fallback: assume workspace root is two dirs up from crate manifest
-    manifest
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
-        .unwrap_or(&manifest)
+        .expect("crate manifest lives two levels below the workspace root")
         .to_path_buf()
 }
 
@@ -401,7 +397,7 @@ async fn generate_warn_report() -> String {
 /// **Default CI path:** reads `docs/lancet-warn-report.md` and asserts no
 /// `fix-now` entries are present.
 ///
-/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs all 8 CATALOG methods
+/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs all 5 CATALOG methods
 /// in `CepMode::Warn`, checks audit metadata, and rewrites the committed report.
 #[tokio::test]
 async fn cep_warn_harness() {

@@ -32,6 +32,14 @@ jobs:
           # require it (same contract as `cargo xtask ci`'s precheck).
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # `wasm-tools` is an implicit external build dependency of `cargo xtask
+      # tool-build`: it encodes the core module into a Component and validates
+      # the import surface. It is not a Cargo dependency, so nothing installs
+      # it for us. The version is pinned because the encoder determines the
+      # committed Component's bytes — see #80.
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        with:
+          tool: wasm-tools@1.254.0
       # Everything the ordinary lane does.
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -50,6 +58,34 @@ jobs:
         run: cargo test -p lancet-native fetch_effect_contract
       - name: alpha rollout (locked release binary, JSON record)
         run: cargo xtask rollout --channel alpha
+      # Component reproducibility evidence for #73. `cargo xtask ci` runs this
+      # locally (ci.rs), but no GitHub lane did — so the cross-machine
+      # bit-for-bit data #73's acceptance criterion asks for could never
+      # accumulate. Runs last so a digest-drift warning never masks an earlier
+      # hard failure.
+      #
+      # `if: always()` because this step's whole purpose is collecting evidence:
+      # the preceding rollout gate is the most failure-prone step in the lane,
+      # and without this the very runs most worth inspecting would produce no
+      # reproducibility data at all.
+      #
+      # Only *digest drift* is warn-only (#5 decision 1). Everything else in
+      # `tool-build --verify` is a hard failure — guest build, `wasm-tools
+      # component new`, `validate`, the `wasi:*` import-surface assertion, and
+      # WIT world conformance all `bail!`. So this step can legitimately turn
+      # the lane red; the name says "drift warn-only", not "step warn-only".
+      # The log is written under target/rollout/ so the existing `if: always()`
+      # upload carries it — without that, the verify result lived only in job
+      # stdout and #73 had no artifact to cite. `pipefail` is required: the
+      # default `bash -e` would let `tee` mask a hard failure's exit code.
+      - name: Component 可复现性（digest 漂移 warn-only，#73 证据）
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target/rollout
+          cargo xtask tool-build --verify 2>&1 \
+            | tee target/rollout/component-verify.log
       # The rollout record is written even on rejection/failure, so upload
       # unconditionally: record + harness failure bundles + doctor evidence
       # all land under target/rollout/.

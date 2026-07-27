@@ -42,8 +42,15 @@ below describes the current transition state. ADR 0004 absorbs or retires the
 central catalog, CEP, dispatch, and native surfaces through `lancet-runtime`
 after Component Tool migration.
 
+Every edge below is a real `workspace = true` dependency in that crate's
+`[dependencies]`. Spell edges out rather than summarizing them as "+ lattice
+runtime crates": a summarized edge cannot be checked against
+`cargo metadata`, and the previous summary hid seven live edges.
+
 ```text
-Layer 0 (leaf):  lancet-protocol   net-guard   lattice-llm   lattice-session
+Layer 0 (leaf):  lancet-protocol   lattice-session
+Layer 0.5:       net-guard                       (no workspace deps; see note)
+                 lattice-llm(->net-guard)
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
                  lattice-agent(->llm,session)
@@ -54,12 +61,41 @@ Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
                  lancet-runtime(->protocol,dispatch)
 Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
                                authority,net-guard,runtime)
-Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,
+Layer 3.5:       lancet-api(->protocol,catalog,dispatch,cep,audit,
                             authority,native,runtime)
-Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
-Layer 5:         lattice-tui(-> api + presentation dependencies)
-                 lattice-cli(-> api,tui + presentation dependencies)
+Layer 4:         lattice-api(->lancet-api,lancet-protocol,lancet-catalog,
+                             lancet-authority,lancet-native,
+                             lattice-agent,lattice-llm,lattice-profile,
+                             lattice-session)
+Layer 5:         lattice-tui(->lattice-api + presentation dependencies)
+                 lattice-cli(->lattice-api,lattice-session,lattice-tui,
+                              lancet-api + presentation dependencies)
+
+Not in the graph: lattice-tool-prelude and lattice-system-harness have no
+workspace-internal dependencies by contract. The prelude is a guest SDK
+(`wit-bindgen` only); the harness must stay free of product crates so it can
+only reach the product through the built binary (`cargo xtask
+harness-boundary` enforces this, transitively).
 ```
+
+`net-guard` and `lattice-llm` sit at 0.5 rather than 0 because `lattice-llm`
+depends on `net-guard`. Only `net-guard` is a true leaf of that pair;
+`lancet-protocol` and `lattice-session` are the crates with no
+workspace-internal dependencies at all.
+
+`lattice-api` and `lattice-cli` reach past the `lancet-api` facade into
+individual LANCET crates. Those edges point downward, so they are not layering
+violations, but they are load-bearing: `lattice-api` owns the profile→policy
+translation and needs policy types (`lancet-authority`) and error/impact
+mapping (`lancet-native`) that `lancet-api` does not re-export, and
+`lattice-cli` drives operator audit commands through `lancet-api` directly.
+Prefer naming a type through `lancet-api` when it re-exports it; do not add new
+crates to these edge sets without a reason recorded here.
+
+Note that only one edge in this graph is machine-checked today
+(`lattice-agent -> lancet-native`, by `cargo xtask lancet-boundary`). GitHub
+#108 tracks turning this diagram into gate data so drift fails CI instead of
+accumulating.
 
 ## Crate Roles
 

@@ -14,11 +14,14 @@ policy gating, path guards, effect checks, and an audit trail.
 
 ## Workspace
 
-LATTICE is a Cargo workspace of 15 crates, layered so dependencies always
-point from higher layers down.
+LATTICE is a Cargo workspace of 19 crates, layered so dependencies always
+point from higher layers down. See [AGENTS.md](AGENTS.md) for the authoritative
+graph with every edge spelled out.
 
 ```text
-Layer 0 (leaf):  lancet-protocol   net-guard   lattice-llm   lattice-session
+Layer 0 (leaf):  lancet-protocol   lattice-session
+Layer 0.5:       net-guard
+                 lattice-llm(->net-guard)
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
                  lattice-agent(->llm,session)
@@ -26,11 +29,20 @@ Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
                  lancet-authority(->protocol,catalog,net-guard)
 Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
-Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,authority,net-guard)
-Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,authority,native)
-Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
-Layer 5:         lattice-tui(-> api + presentation deps)
-                 lattice-cli(-> api,tui + presentation deps)
+                 lancet-runtime(->protocol,dispatch)
+Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,authority,
+                               net-guard,runtime)
+Layer 3.5:       lancet-api(->protocol,catalog,dispatch,cep,audit,authority,
+                            native,runtime)
+Layer 4:         lattice-api(->lancet-api,lancet-protocol,lancet-catalog,
+                             lancet-authority,lancet-native,lattice-agent,
+                             lattice-llm,lattice-profile,lattice-session)
+Layer 5:         lattice-tui(->lattice-api + presentation deps)
+                 lattice-cli(->lattice-api,lattice-session,lattice-tui,
+                              lancet-api + presentation deps)
+
+Outside the graph: lattice-tool-prelude (guest SDK, wit-bindgen only) and
+lattice-system-harness (black-box tests; must not depend on product crates).
 ```
 
 | Crate | Role |
@@ -41,7 +53,8 @@ Layer 5:         lattice-tui(-> api + presentation deps)
 | `lancet-cep` | Public CEP facade; projects LLM-facing tool schemas from the catalog. |
 | `lancet-audit` | CEP audit persistence, query filters, attestation persistence. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger. |
-| `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers. |
+| `lancet-native` | Production native handlers, server lifecycle, and the concrete guarded Local Workspace (observation, mutation, fetch). |
+| `lancet-runtime` | ADR 0004 target: WASM Component engine, closed composition gate, Tool Host enforcement. Not yet the production path. |
 | `lancet-api` | Unified LANCET public API composing the CEP runtime (`LancetRuntime`/`LancetServer`). |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, private/reserved IP checks. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security. |
@@ -51,6 +64,8 @@ Layer 5:         lattice-tui(-> api + presentation deps)
 | `lattice-api` | Thin public facade for session creation/opening and turn execution (`stream_turn`). |
 | `lattice-tui` | Inline CLI chat REPL over `lattice-api` via `rustyline` (no alternate screen). |
 | `lattice-cli` | The `lattice` binary: clap command surface and dispatch. |
+| `lattice-tool-prelude` | ADR 0004 guest SDK for Source Tools: generated WIT bindings, descriptor helpers. |
+| `lattice-system-harness` | Black-box test harness driving the built binary via `LATTICE_BIN`; takes no product-crate dependency. |
 
 ### CEP method catalog
 

@@ -33,7 +33,7 @@ that could not be confirmed from the repo are marked with
 
 ## 2. Installation
 
-LATTICE is a Cargo workspace of 16 crates. Clone the repository and build it
+LATTICE is a Cargo workspace of 19 crates. Clone the repository and build it
 with cargo.
 
 1. Clone the repo:

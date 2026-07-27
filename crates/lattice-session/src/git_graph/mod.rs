@@ -94,8 +94,16 @@ impl GitSessionGraphStore {
                     let is_empty = std::fs::read_dir(&self.dir)
                         .map(|mut d| d.next().is_none())
                         .unwrap_or(true);
+                    // Reopening after a CWD-recovered retry: the partially
+                    // created repo is on disk, so plain `open` is the right
+                    // resolution for both layouts.
+                    let reopen = || {
+                        gix::open_opts(&self.dir, gix::open::Options::isolated())
+                            .map_err(|e| format!("{e:?}"))
+                    };
                     if is_empty {
-                        match gix::init_bare(&self.dir) {
+                        let init_bare = || gix::init_bare(&self.dir).map_err(|e| format!("{e:?}"));
+                        match init_recovering_cwd(init_bare, reopen) {
                             Ok(r) => r,
                             Err(init_err) => {
                                 return Err(SessionError::Git(format!(
@@ -104,15 +112,20 @@ impl GitSessionGraphStore {
                             }
                         }
                     } else {
-                        match gix::ThreadSafeRepository::init(
-                            &self.dir,
-                            gix::create::Kind::WithWorktree,
-                            gix::create::Options {
-                                destination_must_be_empty: Some(false),
-                                ..Default::default()
-                            },
-                        ) {
-                            Ok(r) => r.to_thread_local(),
+                        let init_worktree = || {
+                            gix::ThreadSafeRepository::init(
+                                &self.dir,
+                                gix::create::Kind::WithWorktree,
+                                gix::create::Options {
+                                    destination_must_be_empty: Some(false),
+                                    ..Default::default()
+                                },
+                            )
+                            .map(|r| r.to_thread_local())
+                            .map_err(|e| format!("{e:?}"))
+                        };
+                        match init_recovering_cwd(init_worktree, reopen) {
+                            Ok(r) => r,
                             Err(init_err) => {
                                 return Err(SessionError::Git(format!(
                                     "open repository: {open_err}; init: {init_err}"
@@ -125,6 +138,52 @@ impl GitSessionGraphStore {
             *guard = Some(repo);
         }
         Ok(RepoHandle { guard })
+    }
+}
+
+/// Run a `gix` init, retrying once from a known-good directory if it failed
+/// only because the process has no valid current directory.
+///
+/// `gix` reads the process CWD even when the target path is absolute, so an
+/// init into an absolute path fails with `Could not obtain the current
+/// directory` once the CWD has been removed underneath the process — a deleted
+/// checkout, an unmounted volume, or (in tests) a dropped `TempDir` that some
+/// other test had `set_current_dir`'d into. The store's own target directory is
+/// unaffected, so the operation is retryable: point the CWD somewhere that
+/// exists and try again.
+///
+/// Pre-checking `current_dir()` would be a TOCTOU race — the directory can be
+/// removed between the check and gix's own read — so this recovers from the
+/// failure instead of predicting it.
+///
+/// The retry must tolerate an already-created repository: gix creates the `.git`
+/// directory *before* the step that needs the CWD, so the failed first attempt
+/// leaves it behind and a naive retry fails with `Refusing to initialize the
+/// existing '...' directory`. `reopen` is therefore consulted on any
+/// second-attempt failure, and only its own failure is reported.
+///
+/// `lattice-session`'s test fixtures carry the same recovery
+/// (`test_utils::init_empty_repo`); this is the production counterpart.
+fn init_recovering_cwd<T, E: std::fmt::Debug>(
+    mut init: impl FnMut() -> std::result::Result<T, E>,
+    reopen: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    match init() {
+        Ok(repo) => Ok(repo),
+        // Match on the rendered form: the variant nesting differs between the
+        // bare and worktree init error types, and a gix bump may reshape it.
+        Err(err) if format!("{err:?}").contains("CurrentDir") => {
+            if std::env::set_current_dir(std::env::temp_dir()).is_err() {
+                return Err(err);
+            }
+            match init() {
+                Ok(repo) => Ok(repo),
+                // The partially-created repo from the first attempt is the
+                // expected state here, not an error.
+                Err(_) => reopen(),
+            }
+        }
+        Err(err) => Err(err),
     }
 }
 

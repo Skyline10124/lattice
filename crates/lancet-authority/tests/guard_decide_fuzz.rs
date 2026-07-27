@@ -209,6 +209,46 @@ proptest! {
         let d2 = hook.decide(&input);
         prop_assert_eq!(d1, d2);
     }
+
+    /// Property: biased-allowed inputs actually reach the decision the set was
+    /// built to exercise.
+    ///
+    /// The stability property above cannot carry this: `DefaultPolicyHook` is a
+    /// pure function (`decide` just unwraps `decide_with_evidence`, and the
+    /// struct holds only config plus a resolver), so "same input, same decision"
+    /// holds under *any* implementation — including one that denies everything.
+    /// Without this property the deny direction was asserted and the allow
+    /// direction was not, so a policy regressing to deny-all would leave all 256
+    /// cases green.
+    ///
+    /// `exec.command_run` is in this set deliberately: it is a retired method, so
+    /// the positive-path set pins it as `NonDeterminable` rather than pretending
+    /// it is allowed.
+    #[test]
+    fn guard_decide_fuzz_biased_allowed_reaches_expected_decision(
+        input in arb_biased_allowed_input()
+    ) {
+        let hook = DefaultPolicyHook::new(test_config());
+        let decision = hook.decide(&input);
+        if input.method == "exec.command_run" {
+            prop_assert!(
+                matches!(
+                    decision,
+                    PolicyDecision::Denied { reason_code: PolicyReasonCode::NonDeterminable, .. }
+                ),
+                "retired method must be NonDeterminable, got {:?}",
+                decision
+            );
+        } else {
+            prop_assert_eq!(
+                &decision,
+                &PolicyDecision::Allowed,
+                "positive-path input {} must be Allowed, got {:?}",
+                input.method,
+                decision
+            );
+        }
+    }
 }
 
 // ── Pinned regression tests ────────────────────────────────────────────

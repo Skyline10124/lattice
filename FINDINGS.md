@@ -111,19 +111,7 @@
 - **升级条件**: 若有人把批次说明的 running total 当成权威计数来源(而非把 JSON / 汇总表当权威)→ 升为 MEDIUM 并一次性重算所有批次说明。
 - **计划**: 不回写历史批次说明。今后新增批次说明一律引用 JSON 真实基线,并保持 §1 汇总表、§1.5 决定分布表、按 crate 表与 JSON 逐条一致(可用一次性脚本重新派生校验)。
 
-### L-47-01: `direct_failures` SIGINT scenario interrupts the whole `cargo test` run on CI — `robustness` / offline-ci / harness / #47
-- **位置**: `crates/lattice-system-harness/src/driver.rs:99-101` (`interrupt` → `signal_process_group(self.pgid, "-INT")`)，`:259-262` (`set_new_process_group` → `Command::process_group(0)`)；`crates/lattice-system-harness/tests/direct_failures.rs:324-360` (`direct_failure_sigint_while_stalled_commits_cancelled`)。
-- **问题**: harness 用 `kill -INT -<pgid>` 向整个进程组发 SIGINT，pgid 取自 `child.id()`，前提是 `process_group(0)` 已生效、子进程自成组长。若该前提在某些时序下不成立，负号 pgid 会落到**测试进程自己所在的进程组**，把 `cargo test` 一并 SIGINT。ubuntu-latest 上观察到 `cargo test --workspace` 以 **exit 130（SIGINT）** 终止，而当时已报告 **1059 passed / 0 failed**、无任何 FAILED 条目、无 panic——即没有测试失败，是作业被信号中断。
-- **当前状态**: OPEN（CI 阻塞）。本地 Linux 不复现（单独跑 `direct_failures` 与全量 `cargo test --workspace` 均绿，1258 passed / 0 failed）；macos-latest 已全绿。仅在 ubuntu-latest runner 上出现，指向运行器的进程/会话拓扑差异（runner 中 `cargo test` 自身的进程组归属与本地不同）。#47 的其余七类 CI 失败均已修复并验证。
-- **升级条件**: 已阻塞 ordinary CI lane 绿灯，若要求 CI 必须全绿才能合并 → 升为 HIGH。
-- **计划**: （a）在 `interrupt()` 中断言 pgid 确实不等于测试进程自身的 pgid（`libc::getpgrp()`），不成立则 fail-closed 而非广播信号；（b）改用 `libc::killpg` 直接调用而非 `Command::new("kill")`，避开 shell 层对负号参数的解释差异；（c）若仍不稳，给该场景加 `#[ignore]` + 专用 serial lane。不要为绕开而删除 SIGINT 协作取消的覆盖——那是 #46 cancellation 契约的核心证据。
-
-### L-47-02: `git_graph` 测试 fixture 使用固定共享路径 `/tmp/lattice-session-git-graph-tests/` — `robustness` / test-isolation / #47
-- **位置**: `crates/lattice-session/src/git_graph/tests/mod.rs:23-29` (`temp_dir`)。
-- **问题**: `temp_dir(name)` 拼接 `env::temp_dir()/lattice-session-git-graph-tests/<name>` 并在进入前 `remove_dir_all`，而非用 `TempDir` 取唯一路径。同一主机上并行的两个测试二进制（例如不同 `CARGO_TARGET_DIR` 的两次 `cargo test`）会互相删除对方的 fixture，表现为 `Refusing to initialize the existing '...' directory` 或 `NotARepository`。实测复现：并行两份测试时 2 个测试失败，清理共享目录后 55/55 通过。
-- **当前状态**: ACCEPTED RESIDUAL。单份 `cargo test` 下不发生（各测试 `name` 不同），CI 也只跑一份，故不阻塞。仅在本地并行多份测试时暴露。
-- **升级条件**: 若 CI 引入 matrix 内并行或 nextest 分片共享主机 → 升为 MEDIUM。
-- **计划**: 改用 `tempfile::TempDir` 取唯一路径（与仓内其他 fixture 一致），删除手写的 `remove_dir_all` 前置清理。
+（L-47-01 与 L-47-02 已于 2026-07-27 收口，见下方 OBSOLETE / CLOSED 段与 FIX.md `#105 / #106`。）
 
 ### L-5-01: `lancet-protocol` Cell core coexists add-only with legacy `ImpactKind` — `architecture` / #5 / #6 / #12
 - **位置**: `crates/lancet-protocol/src/cell.rs` (new ADR 0004 closed core: `CtxOp`/`ExtImpact`/`Trust`/`ChannelKind`/`ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`/`ToolOutput`); `crates/lancet-protocol/src/effect_types.rs` (`ImpactKind`/`EffectScopeKind`/`OverlayBehavior`/`FailureSemantics`/`EffectDecl`, still consumed by production handlers).
@@ -132,10 +120,11 @@
 - **计划**: Do not extend `effect_types.rs` for new ADR 0004 needs. Slices B–D (#5) landed manifest→codegen→Component engine→CEP round-trip over `cell.rs`; #6 unifies Cell authorization/evidence and retires `ImpactKind`-keyed authority; #12 deletes `effect_types.rs` and the migration crates once production Tools migrate (#7–#10).
 
 ### L-5-02: #5 slice B toolchain-authority divergences + cross-machine reproducibility unverified — `tooling` / #5 slice B / #73
-- **位置**: `tools/noop/manifest.toml` (`toolchain = "rustc-1.96.0+wit-bindgen-0.59"`); `xtask/src/tool_codegen.rs` (WIT `,` separators); `tools/noop/src/lib.rs` (direct `wit-bindgen` dep, `export_tool!` invoked inside `mod bindings`); `crates/lattice-tool-prelude/src/lib.rs` (`export_tool!` doc).
+- **位置**: `tools/noop/manifest.toml` (`toolchain = "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"`); `xtask/src/tool_codegen.rs` (WIT `,` separators); `tools/noop/src/lib.rs` (direct `wit-bindgen` dep, `export_tool!` invoked inside `mod bindings`); `crates/lattice-tool-prelude/src/lib.rs` (`export_tool!` doc); `xtask/src/tool_build.rs` (`build_guest` 的双 `--remap-path-prefix`)。
 - **问题**: #5 slice B diverged from the plan sketch where the actual installed toolchain is authoritative: (1) WIT record fields use `,` not the plan's `;` (wasm-tools 1.254/wit-bindgen 0.59 grammar); (2) `wit-bindgen` is a direct guest dep because `generate!` emits `wit_bindgen::rt::...` by bare crate path a prelude re-export cannot satisfy (plan said guests never depend on it directly); (3) `export_tool!` is invoked inside `mod bindings` because wit-bindgen's `export!` resolves `self` at the call site; (4) toolchain fingerprint records wit-bindgen-0.59 not 0.57. Separately, `.wasm` bit-for-bit reproducibility was verified only on this machine (`tool-build --verify` reproduces 6fcc7fc8...); cross-machine/cross-build reproducibility is unverified and the `--verify` lane is intentionally warn-only (decision 1) until proven stable.
 - **当前状态**: ACCEPTED RESIDUAL (by plan); tracked by **#73**. All divergences are toolchain-fact-driven, not design regressions; every #5 slice B acceptance criterion is met. The `--verify` warn-only lane collects reproducibility data without blocking. Slice C already embeds the committed `.wasm`; hard-gate promotion still waits on cross-machine bit-for-bit evidence.
-- **计划**: Own in #73. Keep the actual toolchain authoritative; do not back-fit the plan's `;`/0.57 sketch. Confirm cross-machine/CI bit-for-bit reproduction, then either promote `tool-build --verify` to a hard gate (decision 1 escalation) or document an explicit non-bit-for-bit alternative. Revisit the wit-bindgen direct-dep / `export_tool!`-inside-bindings pattern if a later wit-bindgen release restores a re-export-only or root-callable export seam.
+  **2026-07-27 部分推进（#80，PR #104/#109）**：跨机可复现性的两个**结构性阻碍**已消除，但跨机证据本身仍未取得。已做：(a) 发现并修复 committed `.wasm` 里烧进维护者主机 rustup sysroot 绝对路径的问题 —— `build_guest` 原先只 remap workspace root，`core/src/str/pattern.rs` 因此以 `/home/<user>/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/...` 形式入档，而同文件其余 std 路径已被 rustc 规范化为 `/rustc/<commit-hash>/`；现补第二条 `--remap-path-prefix` 把 sysroot 映射到同一前缀，`strings` 核验宿主路径归零，digest 由 `6fcc7fc8...` 变为 `b677a9b3...`。**在此之前任何跨机 `--verify` 都必然误报漂移**，#73 的验收标准结构上无法达成。(b) full-gate 的 verify 步骤补 `if: always()`（原先排在最易失败的 rollout 之后，rollout 一失败就永久收不到证据）并把输出 tee 到 `target/rollout/component-verify.log` 以进 artifact 上传（原先只在 job stdout，取不回来）。(c) `[artifact] toolchain` 指纹补入 `wasm-tools-1.254.0` 并加门禁测试锁定三处（常量／full-gate 安装器／manifest 指纹）一致。**未做**：真正的跨机 bit-for-bit 证据 —— 需 nightly full-gate 实跑至少一次并与本机 digest 比对；在此之前 warn-only 不可升级为硬门禁。
+- **计划**: Own in #73. Keep the actual toolchain authoritative; do not back-fit the plan's `;`/0.57 sketch. 下一步是等一次 nightly full-gate 跑出 `component-verify.log`，把 runner 上的 rebuilt digest 与本机 `b677a9b3...` 比对：一致则按 decision 1 escalation 把 `tool-build --verify` 升为硬门禁；不一致则以该 log 为据定位剩余的不确定性来源（不要再假定只剩路径问题——sysroot 一条已排除）。若最终证明存在无法消除的差异，则文档化显式的非 bit-for-bit 替代方案。Revisit the wit-bindgen direct-dep / `export_tool!`-inside-bindings pattern if a later wit-bindgen release restores a re-export-only or root-callable export seam.
 
 
 ### L-21-03: `net_guard::validate_base_url` 拒绝 `127.0.0.1`/`::1` IP 字面量但放行 `localhost` hostname — localhost 政策不对称 — `security` / net-guard / llm
@@ -231,6 +220,12 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
 
+### L-47-01: harness SIGINT 广播到测试进程自身的进程组，使 ubuntu CI 以 exit 130 中断 — `robustness` / harness / #47 / #105
+- **当前状态**: 2026-07-27 closed — 由 **#105** 修复。`driver.rs` 现在用 `libc::getpgid(child_pid)` 从内核回读实际 pgid（不再假定等于 `child.id()`），任何组信号发送前先用 `libc::getpgrp()` 比对并在命中自身组时 fail-closed，且改用 `libc::killpg` 直接投递而非 spawn `kill(1)`（消除负号参数在不同 `kill` 实现间的解释差异）。新增两条回归测试锁定该契约；`direct_failure_sigint_while_stalled_commits_cancelled` 保留并通过，SIGINT 协作取消覆盖未削弱。**CI 实跑确认（2026-07-27）**：ubuntu lane 已转绿。同一对上游提交（`44ceabc1` + `38af35bb`）在 PR #104 上 ubuntu-latest 仍以 exit 130 失败（run 30222133081，macos 通过），而叠加本修复的 PR #107 ubuntu-latest 与 macos-latest 双双通过（run 30257981171）；两次运行只差这一个提交，坐实信号源在 harness 内且已消除，无需启用 #105 计划第 4 步的 `#[ignore]` + serial lane 退路。完整记录见 FIX.md `#105 / #106`。
+
+### L-47-02: `git_graph` 测试 fixture 使用固定共享路径 — `robustness` / test-isolation / #47 / #106
+- **当前状态**: 2026-07-27 closed — 由 **#106** 修复。`temp_dir()` 改为返回持有 `tempfile::TempDir` 的 `Fixture` 守卫，路径唯一且 drop 时自动清理，`name` 退化为可读前缀；删除手写 `remove_dir_all` 前置清理，30 个调用点改用 `dir.path()`。反向验证：并行两份 `CARGO_TARGET_DIR` 各 29 passed / 0 failed（修复前有 2 个失败）。完整记录见 FIX.md `#105 / #106`。
+
 ### T-24-01: Direct-Local observation root-escape acceptance coverage — `verification` / #24
 - **Current status**: 2026-07-23 closed — `direct_observation` now drives traversal and absolute outside-root paths through read/list/grep/find (8 calls), requires public `GuardDenied` CEP finishes, exact denial text, no canary leakage, unchanged outside bytes, and a completed Turn. Focused and full harness runs passed.
 
@@ -280,7 +275,8 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 
 ### ENV-OOM-02: 并行测试暴露的 `unsafe env::set_var` 竞态 flake — `test-flakiness` / env-race
 - **当前状态**: 2026-07-12 fixed。两处 flake 均压测复现后修复归零：(1) `layer_guard.rs` 两个 `MSB_ENV` 测试竞态（复现 232/2000 ≈12%）——加 `static MSB_ENV_LOCK: Mutex<()>` 串行化；(2) `lattice-api` `turn_runtime_constructs_one_adapter_per_turn` 的 `disk I/O error`（复现 8/500 ≈1.6%，错误路径落在别的测试的 `/tmp/.tmpXXXXXX` tempdir 下，坐实 XDG_STATE_HOME 竞态假设：第二次 `build_test_production_deps(persist_audit)` 经 `dirs::state_dir()` 无锁读 XDG，与持 `ENV_MUTEX` 的 `ScopedXdgStateHome` 邻居测试互踩）——给该测试加 `ScopedXdgStateHome`，同时把持久 audit DB 隔离进 tempdir（不再写真实平台 state 目录）。修复后同样压测循环 0/2000、0/500。这也解释了 FIX.md #20 条目记录的历史 `ci-local.sh` "disk I/O error" flake。完整记录见 FIX.md `ENV-OOM-02`（2026-07-12）。
-- **残留（latent，非已知 flake）**: `lattice-api/tests/upper_routing.rs` 的 `upper_routing_e2e` 仍裸 `set_var(TEST_SECRET/XDG_STATE_HOME)`（同二进制 7 个测试，无兄弟测试读这两个变量；理论上与 tempfile 的 `TMPDIR` getenv 存在 glibc setenv/getenv hazard）。若该二进制未来新增读 env 的测试或出现崩溃 flake → 按同一 mutex 模式收口。
+- **残留（2026-07-27 复核后更新）**: 原记录指向 `lattice-api/tests/upper_routing.rs` 的 `upper_routing_e2e`——该文件已随 #40 删除，那条残留作废。当前 `crates/lattice-api/tests/` 下仍裸调 `set_var("XDG_STATE_HOME")` 的是 `audit_turn_provenance.rs:61`、`release_e2e.rs:84`、`dogfood_impact_matrix.rs:126`，但三者**各自所在的 test binary 里只有 1 个测试**，无并发兄弟可竞争，故不构成 hazard（与原记录"同二进制 7 个测试"的情形不同）。升级条件：若这三个二进制中任何一个新增第二个测试 → 按同一 mutex / `ScopedXdgStateHome` 模式收口。
+- **同类（已修）**: 进程全局状态竞态的另一实例是 CWD 而非 env —— `lattice-api` 四个测试文件裸调 `set_current_dir` 导致并发测试互相破坏，2026-07-27 由 **#109** 修复（删除多余的 CWD 修改 + 给生产 gix init 补恢复）。见 FIX.md 对应条目。
 
 ### L-21-01: `tests/msb_full_turn.rs` / `tests/pty_tui_smoke.rs` 真实 MSB 实跑 — `verification` / full-gate / owner-side
 - **当前状态**: 2026-07-06 closed — owner KVM 实跑通过。`msb_plain_text_turn_commits_and_exit_zero` 在本机 KVM 完整门跑通：`turn_started → model_started → token_delta:"ok" → model_finished → turn_committed{status:"completed"}`，fake LLM 收到真 Chat Completions 请求，`session log --json` 交叉验证 commit_id 一致，exit 0。实跑过程中修了 6 个独立问题（`LATTICE_MSB_IMAGE` 未接线、`init_git_project` unborn HEAD、microsandbox `prebuilt` feature 关闭 + `MSB_HOME` 未注入、fake LLM base_url 用 `127.0.0.1` 被 net-guard 拒、`session log` 断言找错字符串），见 FIX.md `#21` 系列条目。L-21-02（探针探 audit 不探 MSB）和 L-21-03（net-guard localhost 政策不对称）作为独立 finding 保留。
