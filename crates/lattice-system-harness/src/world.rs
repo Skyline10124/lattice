@@ -136,15 +136,16 @@ impl ScenarioWorld {
 
     /// Write a minimal agent profile to `.lattice/agents/<name>/agent.toml` in
     /// the project, consolidating the agent-profile fixture that would
-    /// otherwise be hand-rolled in every scenario (issue #23 fixture
-    /// consolidation). The TOML is hand-written rather than produced via
-    /// `lattice-profile` because the harness boundary
+    /// otherwise be hand-rolled in every scenario (issue #45 (Codeberg #23)
+    /// fixture consolidation). The TOML is hand-written rather than produced
+    /// via `lattice-profile` because the harness boundary
     /// (`cargo xtask harness-boundary`) forbids depending on any product
     /// crate; the product reads the same file a user would write.
     ///
     /// The profile is the Direct-Local end-state shape: no `[workspace]`
-    /// section (removed in #40), no enabled tools. Turn scenarios that need
-    /// catalog tools write their own profile via `write_project_file`.
+    /// section (removed in #62, Codeberg #40), no enabled tools. Turn
+    /// scenarios that need catalog tools write their own profile via
+    /// `write_project_file`.
     pub fn write_agent_profile(&self, name: &str, model: &str) -> Result<(), WorldError> {
         let toml = format!(
             "schema_version = 1\n\n[agent]\nname = \"{name}\"\nmodel = \"{model}\"\n\n[prompt]\nsystem = \"harness agent\"\n\n[tools]\nenabled = []\n"

@@ -2,7 +2,7 @@
   {
     "crate": "lancet-api",
     "file": "crates/lancet-api/src/audit.rs",
-    "line": 450,
+    "line": 145,
     "name": "query_audit_reads_store_without_cep_server",
     "ignored": false,
     "async": true,
@@ -12,9 +12,9 @@
     "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/audit.rs",
-    "line": 463,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/operator_tests.rs",
+    "line": 87,
     "name": "tail_audit_paginates_large_result_without_cep_server",
     "ignored": false,
     "async": true,
@@ -26,7 +26,7 @@
   {
     "crate": "lancet-api",
     "file": "crates/lancet-api/src/audit.rs",
-    "line": 505,
+    "line": 160,
     "name": "query_audit_errors_when_store_missing",
     "ignored": false,
     "async": true,
@@ -36,9 +36,9 @@
     "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/audit.rs",
-    "line": 513,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/operator_tests.rs",
+    "line": 137,
     "name": "replay_audit_returns_trace_for_turn",
     "ignored": false,
     "async": true,
@@ -50,7 +50,7 @@
   {
     "crate": "lancet-api",
     "file": "crates/lancet-api/src/audit.rs",
-    "line": 529,
+    "line": 172,
     "name": "replay_audit_matches_stored_attestation",
     "ignored": false,
     "async": true,
@@ -60,9 +60,9 @@
     "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/audit.rs",
-    "line": 580,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/operator_tests.rs",
+    "line": 238,
     "name": "query_audit_excludes_unfinalized_rows_during_active_turn",
     "ignored": false,
     "async": true,
@@ -72,9 +72,9 @@
     "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/audit.rs",
-    "line": 630,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/operator_tests.rs",
+    "line": 288,
     "name": "operator_audit_reads_concurrent_with_active_writer",
     "ignored": false,
     "async": true,
@@ -96,9 +96,9 @@
     "reason": "扫描源码字符串/import 的架构检查；删除（RFC #19 决定六）"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/audit.rs",
-    "line": 768,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/operator_tests.rs",
+    "line": 403,
     "name": "query_audit_reads_legacy_table_missing_optional_columns",
     "ignored": false,
     "async": true,
@@ -108,9 +108,9 @@
     "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/audit.rs",
-    "line": 830,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/operator_tests.rs",
+    "line": 465,
     "name": "query_audit_reads_legacy_table_without_attestation_records",
     "ignored": false,
     "async": true,
@@ -120,9 +120,9 @@
     "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/config.rs",
-    "line": 176,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/store_path.rs",
+    "line": 137,
     "name": "external_audit_distinct_project_keys",
     "ignored": false,
     "async": false,
@@ -132,9 +132,9 @@
     "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/config.rs",
-    "line": 193,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/store_path.rs",
+    "line": 154,
     "name": "external_audit_symlink_canonical_identity",
     "ignored": false,
     "async": false,
@@ -146,7 +146,7 @@
   {
     "crate": "lancet-api",
     "file": "crates/lancet-api/src/config.rs",
-    "line": 205,
+    "line": 116,
     "name": "external_audit_external_for_project_in_resolves_under_state_root",
     "ignored": false,
     "async": false,
@@ -156,9 +156,9 @@
     "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/config.rs",
-    "line": 219,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/store_path.rs",
+    "line": 166,
     "name": "external_audit_invalid_canonical_identity_errors",
     "ignored": false,
     "async": false,
@@ -168,9 +168,9 @@
     "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
   },
   {
-    "crate": "lancet-api",
-    "file": "crates/lancet-api/src/config.rs",
-    "line": 227,
+    "crate": "lancet-audit",
+    "file": "crates/lancet-audit/src/store_path.rs",
+    "line": 174,
     "name": "external_audit_imports_legacy_read_only_once",
     "ignored": false,
     "async": false,
@@ -2466,10 +2466,10 @@
     "name": "audit_replay_params_require_turn_id_field",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "typed method contracts/schema/descriptor 局部不变量；保留"
+    "replacement": "n/a — 被测 DTO 随 #39 一并删除",
+    "reason": "#39：operator audit DTO 下沉到 lancet-audit，crates/lancet-catalog/src/methods/audit.rs 整体删除，AuditReplayParams 及本测试随之消失（无替代场景）。"
   },
   {
     "crate": "lancet-catalog",

@@ -1,11 +1,11 @@
 {
   "abi-version": 1,
-  "artifact-sha256": "6fcc7fc8570be61f887278661f4a5a6353c3ca2c46e249dcc8de843500f73df4",
-  "descriptor-sha256": "c452ffe16c8837746ea1088224422e5047baaf110adb7c862c454a3f4259e6ca",
+  "artifact-sha256": "b677a9b339c4703d8a02af54def031509ff17d73c66a83fc59176a528d646f08",
+  "descriptor-sha256": "5d9a09676e41362dfbc493f341b1bcc422488b621a570080cc2defc6f12d4e2d",
   "expected-imports": [
     "host-control"
   ],
   "name": "noop.echo",
-  "toolchain": "rustc-1.96.0+wit-bindgen-0.59",
+  "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0",
   "version": "0.1.0"
 }

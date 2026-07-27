@@ -57,7 +57,7 @@ pub use config::{
 };
 pub use doctor::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 pub use error::{LancetError, LancetResult};
-pub use lancet_catalog::methods::audit::AuditReplayResult;
+pub use lancet_audit::AuditReplayResult;
 pub use rewind::{
     WorkspaceRewindConflict, WorkspaceRewindError, WorkspaceRewindOutcome, WorkspaceRewindReport,
     plan_workspace_rewind, record_rewind_audit, rewind_audit_records, rewind_workspace,
@@ -83,7 +83,7 @@ pub use lancet_native::{
     AuditQueryFilters, CepAuditContext, CepAuditStore, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
 };
-pub use lancet_protocol::CepError;
+pub use lancet_protocol::{CapabilityAdmissionPolicy, CepError};
 pub use lancet_runtime::{
     HistorySnapshot, RewindPlan, RewindStep, WorkspaceHistory, WorkspaceHistoryBacking,
     WorkspaceHistoryError,

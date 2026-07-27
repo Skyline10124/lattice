@@ -1,10 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local completed-Turn contract (issue #24 slice 1): one vertical
-//! external-binary scenario over two turns of one session, asserting only the
-//! public surface — the `session send` JSONL stream, the captured Chat
-//! Completions requests, and `session log/status --json`.
+//! Direct-Local completed-Turn contract (issue #46 (Codeberg #24) slice 1):
+//! one vertical external-binary scenario over two turns of one session,
+//! asserting only the public surface — the `session send` JSONL stream, the
+//! captured Chat Completions requests, and `session log/status --json`.
 //!
 //! Observable assertions (separate named blocks below, one shared world):
 //!
@@ -26,7 +26,7 @@
 //!   no JSONL Turn events on stdout.
 //!
 //! No full event golden: unknown additive events are allowed between the
-//! required events (RFC #19 decision five).
+//! required events (RFC #41 (Codeberg #19) decision five).
 
 #![cfg(unix)]
 

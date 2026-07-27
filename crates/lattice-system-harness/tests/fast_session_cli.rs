@@ -1,15 +1,16 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fast binary black-box: session command surface (issue #18 "fast binary
-//! black-box" matrix; triage replacement target `planned_session_cli`).
+//! Fast binary black-box: session command surface (issue #40, Codeberg #18,
+//! "fast binary black-box" matrix; triage replacement target
+//! `planned_session_cli`).
 //!
 //! Drives the built `lattice` binary for the no-turn session surface:
 //! `session new`, `list`, `status`, `log`, and `branch`. Creating a session
 //! only writes the session graph record, so these scenarios need no turn
 //! runtime. Turn-bearing behaviours (plain-text turns, session reopen, policy
 //! denial) run Direct-Local in `tests/direct_local_turn.rs` — no KVM, no MSB
-//! daemon, no OCI image (#40).
+//! daemon, no OCI image (#62, Codeberg #40).
 //!
 //! These scenarios supersede the crate-internal `session_*` and
 //! `smoke_session_*` unit tests in `lattice-cli` whose behaviour is fully
@@ -314,7 +315,7 @@ fn fast_session_status_new_session_shows_zero_commits_and_agent() {
 fn fast_session_status_json_stable_contract() {
     // Public JSON contract for a fresh session: object shape plus the stable
     // no-turn fields. Deleting or renaming any asserted field here must fail
-    // this black-box scenario (issue #18). Mirrors the renderer at
+    // this black-box scenario (issue #40). Mirrors the renderer at
     // `crates/lattice-cli/src/commands/session.rs:435-448`.
     let (world, spec) = project_with_agent("fast-session-status-json");
     let session_id = create_session(&world, &spec);

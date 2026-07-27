@@ -55,7 +55,7 @@ pub enum CepErrorCode {
     ExecutionFailed,
     CommandTimeout,
     ChildKillFailed,
-    // Component Tool execution failures (#5 slice C).
+    // Component Tool execution failures (#27, Codeberg #5, slice C).
     ToolTrap,
     ToolTimeout,
     ToolResourceExhausted,
@@ -182,7 +182,8 @@ pub struct ExecutionErrorData {
     pub stderr: Option<String>,
 }
 
-/// Structured error data for Component Tool execution failures (#5 slice C).
+/// Structured error data for Component Tool execution failures
+/// (#27 (Codeberg #5) slice C).
 ///
 /// Carries the tool `method`, a coarse `category` (`"trap"`, `"timeout"`,
 /// `"resource_exhausted"`, `"cancelled"`), and an optional `resource` name
@@ -207,6 +208,10 @@ pub struct GuardErrorData {
     pub reason: String,
 }
 
+/// Effect violation data. The `*_effect` vectors describe the legacy
+/// `ImpactKind` path; the Cell path (#28) adds the two optional fields
+/// below and carries its detail in `CepError::message`. Both are additive:
+/// payloads written before them parse with `None`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EffectErrorData {
     pub method: String,
@@ -214,6 +219,13 @@ pub struct EffectErrorData {
     pub authorized_effect: Vec<ImpactKind>,
     pub observed_effects: Vec<ImpactKind>,
     pub violations: Vec<String>,
+    /// Trust-free CellRef (`ctx:ext:scope`) that failed the ceiling or
+    /// admitted-set check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_ref: Option<String>,
+    /// Capability name the call lacked, when the violation names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -272,7 +284,7 @@ impl CepError {
         invalid_params(message)
     }
 
-    /// Build a Component Tool execution error (#5 slice C). `method` is the
+    /// Build a Component Tool execution error (#27 slice C). `method` is the
     /// tool name, `category` is the coarse failure class (`"trap"`, `"timeout"`,
     /// `"resource_exhausted"`, `"cancelled"`), and `resource` names the
     /// exhausted resource for resource-exhaustion cases.
@@ -487,6 +499,8 @@ mod tests {
                     violations: vec![
                         "observed workspace_mutation not in declared effect ceiling".into(),
                     ],
+                    cell_ref: None,
+                    capability: None,
                 })),
             ),
             (
@@ -538,6 +552,42 @@ mod tests {
         let bad = json!({"free_form": true, "message": "oops"});
         let result: Result<CepErrorData, _> = serde_json::from_value(bad);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn effect_error_data_cell_fields_are_additive() {
+        // A payload written before the Cell path must still parse, with the
+        // new fields absent == None.
+        let legacy = json!({
+            "kind": "effect",
+            "method": "observe.workspace",
+            "declared_effect": ["workspace_observation"],
+            "authorized_effect": ["workspace_observation"],
+            "observed_effects": ["workspace_observation"],
+            "violations": []
+        });
+        let parsed: CepErrorData = serde_json::from_value(legacy).unwrap();
+        let CepErrorData::Effect(data) = parsed else {
+            panic!("expected effect data");
+        };
+        assert_eq!(data.cell_ref, None);
+        assert_eq!(data.capability, None);
+
+        // Unset fields stay off the wire, so legacy-path errors serialize
+        // byte-identically to before.
+        let bare = serde_json::to_value(CepErrorData::Effect(data.clone())).unwrap();
+        assert!(bare.get("cell_ref").is_none());
+        assert!(bare.get("capability").is_none());
+
+        let mut filled = *data;
+        filled.cell_ref = Some("alloc:none:session".into());
+        filled.capability = Some("session.result".into());
+        let wrapped = CepErrorData::Effect(Box::new(filled));
+        let serialized = serde_json::to_string(&wrapped).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CepErrorData>(&serialized).unwrap(),
+            wrapped
+        );
     }
 
     #[test]
@@ -641,7 +691,7 @@ mod tests {
 
     #[test]
     fn tool_execution_codes_are_in_execution_family_range() {
-        // #5 slice C: new Execution-family codes for Component tool failures.
+        // #27 slice C: new Execution-family codes for Component tool failures.
         // Each must sit in -32020..-32029, map to the Execution family, and
         // round-trip through as_i32/from_i32.
         let new_codes = [
@@ -746,6 +796,8 @@ mod tests {
                 ImpactKind::WorkspaceMutation,
             ],
             violations: vec!["observed workspace_mutation not in declared effect ceiling".into()],
+            cell_ref: None,
+            capability: None,
         };
 
         let wrapped = CepErrorData::Effect(Box::new(data.clone()));

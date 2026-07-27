@@ -26,6 +26,7 @@ unicode-width = { workspace = true }
 dotenvy = { workspace = true }
 
 [dev-dependencies]
+lancet-audit = { workspace = true, features = ["test-support"] }
 lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-profile = { workspace = true }
 lattice-llm = { workspace = true }

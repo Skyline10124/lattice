@@ -34,7 +34,7 @@ use crate::scenario::{ScenarioBudget, ScenarioSpec};
 use crate::world::ScenarioWorld;
 
 /// Exit code contract for `lattice --json session send` (public, documented
-/// in `run.rs` and the issue #19 RFC decision three).
+/// in `run.rs` and the issue #41 (Codeberg #19) RFC decision three).
 ///
 /// - `0` — turn committed (`RunTurnStatus::Completed`).
 /// - `1` — provider/tool/commit/runtime failure, or stream ended without a
@@ -398,7 +398,7 @@ impl SendOutcome {
     }
 
     /// The subsequence of event type names, in arrival order. Useful for
-    /// asserting a required event subsequence (RFC #19 decision five: no
+    /// asserting a required event subsequence (RFC #41 decision five: no
     /// full golden, only required sub-sequences).
     pub fn type_sequence(&self) -> Vec<&'static str> {
         self.events.iter().map(|e| e.type_name()).collect()
@@ -653,7 +653,7 @@ impl<'a> SessionSendDriver<'a> {
 }
 
 /// Helper for scenarios: assert that a required event-type subsequence
-/// appears in the outcome's event stream, in order (RFC #19 decision five:
+/// appears in the outcome's event stream, in order (RFC #41 decision five:
 /// no full golden, only required sub-sequences). Returns the index of the
 /// first event of each required type, or `None` if the subsequence is not
 /// satisfied.

@@ -15,8 +15,8 @@ data, effect checking, effect ledger helpers, and boundary-credit validation.
 - `src/policy/capability.rs` checks required capabilities.
 - `src/policy/network.rs`, `observation.rs`, and `budget.rs` own
   domain-specific policy decisions. Command policy was permanently retired with
-  `exec.command_run` (issue #4); do not reintroduce `policy/command.rs` or
-  `shell_ast.rs`.
+  `exec.command_run` (issue #26, Codeberg #4); do not reintroduce
+  `policy/command.rs` or `shell_ast.rs`.
 - `src/policy/resolved.rs` owns merged/resolved policy state.
 - `src/guard.rs` owns Guard L1 path and scope verdicts.
 - `src/effect/region.rs`, `checker.rs`, and `ledger.rs` own effect regions and
@@ -36,11 +36,17 @@ data, effect checking, effect ledger helpers, and boundary-credit validation.
 
 ## Recent Issues
 
+- ADDED #28: `CepPolicyConfig` carries `capability_admission`
+  (`CapabilityAdmissionPolicy`), the Component Tool admission inputs the native
+  transport reads per call. Every constructor initializes it fail-closed. This
+  crate does not interpret it — Cell admission lives in `lancet-runtime` and is
+  unconditional, so `CepMode` still gates only the legacy effect-region checks.
 - FIXED M-24-04: catalog descriptors declare method-local base authority
   requirements applied through `lancet-cep::BaseAuthorityPlan`; this crate
   remains the policy/guard/effect authority implementation.
-- FIXED #24: declared denied effect kinds are rejected before handler dispatch;
-  observed-effect checks remain post-dispatch defense in depth.
+- FIXED #46 (Codeberg #24): declared denied effect kinds are rejected before
+  handler dispatch; observed-effect checks remain post-dispatch defense in
+  depth.
 - WATCH M-24-01: host capability semantics must align with protocol field names
   and native effect-region matching.
 - WATCH: `mode = off` skips effect-region checks only; policy, capability,
@@ -60,7 +66,8 @@ data, effect checking, effect ledger helpers, and boundary-credit validation.
   handling change.
 - Retire legacy envelope/base-authority/effect-region vocabulary only after all
   behavior consumers use the Cell path; do not run permanent dual authority
-  models.
+  models. The four deletion preconditions are in root `AGENTS.md` (full record:
+  #28 design §11).
 
 ## Record Maintenance
 

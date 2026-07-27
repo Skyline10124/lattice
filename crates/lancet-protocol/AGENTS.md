@@ -17,6 +17,12 @@ types.
   `ExecutionEnvelope`.
 - `src/cell.rs` owns the ADR 0004 Cell effect core (`CtxOp`/`ExtImpact`/`Trust`/
   `ScopeDecl`/`Cell`/`Capability`/`ToolDescriptor`) + trust-free CellRef layering.
+- `src/evidence.rs` owns the #28 admission/effect evidence vocabulary
+  (`AdmissionEvidence`, `ObservedEffect`(`sRecord`), `DeniedOperation`(`sRecord`),
+  `ObservedScope`/`ObservedTarget`, `CapabilityAdmissionPolicy`). Every
+  persisted root carries a `version` a reader checks before interpreting it.
+- `src/canonical.rs` owns `canonical_json` — the single canonical-bytes writer
+  behind context measures and v2 attestation statements.
 - `src/capability.rs` owns required-capability patterns and resolution errors.
 - `src/error.rs` owns `CepError`, families, wire codes, and retriability.
 - `src/policy.rs` owns deterministic policy hook input/output data.
@@ -39,10 +45,6 @@ types.
 
 - FIXED M-24-01: `Capability::FetchUrl` uses the explicit `host` field; do not
   reintroduce wildcard/pattern naming unless matching semantics are implemented.
-- FIXED P19: JSON-RPC helper, wire-code, and error-object mapping were made
-  consistent after review of the old CEP core.
-- FIXED P19: catalog sealing doctest coverage was corrected so compile-fail
-  proves the intended trait boundary.
 - WATCH: boundary/provenance wire additions must remain deterministic because
   audit attestations depend on stable serialized shapes.
 
@@ -55,12 +57,20 @@ types.
   in the same series.
 - When adding boundary evidence fields, update authority validation and native
   host/runtime projection together.
-- ADR 0004 Cell core landed add-only in `src/cell.rs` (#5 slice A); legacy
-  `ImpactKind` in `effect_types.rs` coexists, retired by #6/#12 — do not extend.
+- ADR 0004 Cell core landed add-only in `src/cell.rs` (#27 (Codeberg #5)
+  slice A); legacy `ImpactKind` in `effect_types.rs` coexists, retired by
+  #28/#34 (Codeberg #6/#12) — do not extend. Deleting it requires the four
+  preconditions in root `AGENTS.md` (full record: #28 design §11);
+  `EffectErrorData`'s `Vec<ImpactKind>` fields are one of the serialized
+  surfaces that must be reshaped first.
 - Component Tool execution error codes (`ToolTrap`/`ToolTimeout`/
   `ToolResourceExhausted`/`CallCancelled`) + `ToolExecutionErrorData` landed
-  in `src/error.rs` Execution family (#5 slice C). No guest backtrace/host
+  in `src/error.rs` Execution family (#27 slice C). No guest backtrace/host
   path/secret in the data.
+- #28 protocol slice: capability-name grammar is the first per-capability check
+  in `ToolDescriptor::validate`; evidence roots stay free of
+  `deny_unknown_fields` (persisted surface — gate content on `version`); no new
+  `CepErrorCode`/`PolicyReasonCode` variants for Cell admission.
 
 ## Record Maintenance
 

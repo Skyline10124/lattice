@@ -9,29 +9,39 @@
 //! Each call gets a fresh `Store` with per-call limits, fuel, and epoch
 //! deadline. The shared engine's epoch ticker runs in a background task.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use lancet_dispatch::{Cancellation, EventSink};
-use lancet_protocol::cell::{Cell, parse_cell_ref};
+use lancet_protocol::canonical::canonical_json;
+use lancet_protocol::cell::{Cell, ChannelKind, ToolDescriptor, parse_cell_ref};
+use lancet_protocol::evidence::{EffectSource, ObservedTarget};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use wasmtime::component::Linker;
 use wasmtime::{Engine, Store, UpdateDeadline};
 
+use crate::admission::{AdmittedTool, resolve_scope};
 use crate::bindings;
 use crate::composition::{ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity};
-use crate::error_map::{cancelled_error, effect_violation, map_component_error, schema_mismatch};
+use crate::error_map::{
+    cancelled_error, effect_not_admitted, effect_violation, map_component_error, schema_mismatch,
+};
 use crate::evidence::CellEvidenceLedger;
 use crate::generated;
 use crate::limits::{AbortReason, ExecutionLimits, RecordingLimits, ResourceFootprint};
 
 /// Call-scoped context passed to `ComponentRuntime::call`.
+///
+/// `admitted` is the outcome of the per-call admission step (D1) that runs
+/// before the runtime is entered; it is the sole authorization authority for
+/// this call's operations and result cell.
 pub struct ComponentCallContext {
     pub call_id: u64,
     pub turn_id: String,
     pub events: EventSink,
     pub cancellation: Cancellation,
     pub evidence: CellEvidenceLedger,
+    pub admitted: Arc<AdmittedTool>,
 }
 
 /// Per-store state: the call context, resource limits, deadline, and abort
@@ -122,8 +132,15 @@ impl ComponentRuntime {
     }
 
     /// The tool descriptors in the closed catalog.
-    pub fn descriptors(&self) -> impl Iterator<Item = &lancet_protocol::cell::ToolDescriptor> {
+    pub fn descriptors(&self) -> impl Iterator<Item = &ToolDescriptor> {
         self.catalog.descriptors()
+    }
+
+    /// The shared descriptor for a Component method. The admission step (D1)
+    /// runs against it before `call`, so it is handed out by `Arc` rather
+    /// than cloned per call.
+    pub fn descriptor(&self, name: &str) -> Option<Arc<ToolDescriptor>> {
+        self.catalog.get(name).map(|tool| tool.descriptor.clone())
     }
 
     /// True if `name` is a Component method in the closed catalog.
@@ -147,9 +164,11 @@ impl ComponentRuntime {
     /// 5. Call `tool-api.run`; a guest logical error while cancellation is
     ///    set maps to `CallCancelled` (state, not the guest's string).
     /// 6. Parse the result CellRef (reject 4-segment guest-supplied trust).
-    /// 7. Verify the result cell is in the descriptor's capabilities.
+    /// 7. Verify the result cell is in the descriptor's capabilities and in
+    ///    the call's admitted set (D3: exact membership in both).
     /// 8. Validate the result value against the descriptor's JSON Schema.
-    /// 9. Derive trust from the descriptor's scope and record Cell evidence.
+    /// 9. Measure the returned value host-side (D12) and record the result
+    ///    effect with host-derived trust.
     pub async fn call(
         &self,
         name: &str,
@@ -171,7 +190,7 @@ impl ComponentRuntime {
             .map_err(|e| schema_mismatch(name, format!("params: {e}")))?;
 
         // Pre-cancelled call: cancellation state is the authority; never
-        // enter Wasmtime (#48).
+        // enter Wasmtime (#70, Codeberg #48).
         if ctx.cancellation.is_cancelled() {
             return Err(cancelled_error(name));
         }
@@ -197,7 +216,7 @@ impl ComponentRuntime {
         // wasmtime's (traps), the inner is the guest's logical error. A
         // logical error while call-scoped cancellation is set maps to
         // `CallCancelled` — cancellation state, not the guest-controlled
-        // error string, is the classification authority (#48).
+        // error string, is the classification authority (#70).
         let cancelled = store.data().call.cancellation.is_cancelled();
         let raw = map_guest_logical_result(name, raw, cancelled)?;
 
@@ -208,25 +227,32 @@ impl ComponentRuntime {
         let result_value: serde_json::Value = serde_json::from_str(&raw.value_json)
             .map_err(|e| schema_mismatch(name, format!("result value: {e}")))?;
 
-        // Verify the result cell is in the descriptor's capability cells.
-        let cell_ref = result_cell.reference();
-        let declared = tool
-            .descriptor
-            .capabilities
-            .iter()
-            .any(|cap| cap.cell == result_cell);
-        if !declared {
-            return Err(effect_violation(name, &cell_ref));
-        }
+        // Result-cell ceiling: declared by the descriptor *and* admitted for
+        // this call. A violation fails closed — the result effect is never
+        // recorded, while operation effects already in the ledger survive
+        // into audit (B5).
+        check_result_cell(
+            name,
+            &tool.descriptor,
+            &store.data().call.admitted,
+            &result_cell,
+        )?;
 
         // Validate the result value against the descriptor's JSON Schema.
         tool.result_validator
             .validate(&result_value)
             .map_err(|e| schema_mismatch(name, format!("result: {e}")))?;
 
-        // Derive trust from the descriptor's scope and record evidence.
-        let trust = tool.descriptor.trust_of(&result_cell.scope);
-        store.data_mut().call.evidence.record(result_cell, trust);
+        // Host-derived scope/trust and host-computed measure: the guest has
+        // no numeric channel and its scope claim is never trusted.
+        let state = store.data();
+        record_result_effect(
+            &tool.descriptor,
+            &state.call.evidence,
+            &state.call.turn_id,
+            result_cell,
+            &result_value,
+        );
 
         Ok(result_value)
     }
@@ -281,7 +307,68 @@ impl ComponentRuntime {
     }
 }
 
-/// Map the guest's logical result to the host-visible result (#48).
+/// Result-cell ceiling (D3): the cell must be exactly one of the
+/// descriptor's declared capability cells **and** exactly one of the cells
+/// admitted for this call. There is no partial order over
+/// `CtxOp × ExtImpact` — membership is set membership, in both directions.
+fn check_result_cell(
+    name: &str,
+    descriptor: &ToolDescriptor,
+    admitted: &AdmittedTool,
+    result_cell: &Cell,
+) -> Result<(), CepError> {
+    let cell_ref = result_cell.reference();
+    if !descriptor
+        .capabilities
+        .iter()
+        .any(|cap| &cap.cell == result_cell)
+    {
+        return Err(effect_violation(name, &cell_ref));
+    }
+    if !admitted.covers(result_cell) {
+        return Err(effect_not_admitted(name, &cell_ref));
+    }
+    Ok(())
+}
+
+/// Record the result effect with host-derived scope/trust and the host-computed
+/// measure. The measure is taken for every result cell, so the declared
+/// `ctx_op` cannot reach it.
+fn record_result_effect(
+    descriptor: &ToolDescriptor,
+    evidence: &CellEvidenceLedger,
+    turn_id: &str,
+    result_cell: Cell,
+    value: &serde_json::Value,
+) {
+    let scope = resolve_scope(descriptor, &result_cell.scope, ChannelKind::Session);
+    evidence.record_effect(
+        result_cell,
+        scope,
+        ObservedTarget::Session {
+            turn_id: turn_id.to_owned(),
+        },
+        EffectSource::Result,
+        Some(context_measure(value)),
+    );
+}
+
+/// Deterministic context measure (D12): the byte length of the returned
+/// value's canonical JSON, computed host-side for **every** result effect
+/// whatever `ctx_op` the guest declared.
+///
+/// Branching on the declared `ctx_op` would make metering guest-switchable —
+/// a tool declaring an `alloc` and a `mutate` capability over one scope (the
+/// shipped `noop.echo` does) could relabel its result cell and be recorded
+/// unmeasured. The declared `ctx_op` states charge intent for #6's
+/// charge/credit seam only. Operation effects carry no measure: they return
+/// no value.
+fn context_measure(value: &serde_json::Value) -> u64 {
+    canonical_json(value).len() as u64
+}
+
+/// Map the guest's logical result to the host-visible result
+/// (#70, Codeberg #48).
 ///
 /// Call-scoped cancellation state is the sole classification authority: a
 /// guest logical `Err` while cancellation is set maps to `CallCancelled`,
@@ -351,7 +438,15 @@ fn spawn_epoch_ticker(engine: Engine, mut stop: tokio::sync::watch::Receiver<boo
 mod tests {
     use super::*;
 
+    use std::collections::BTreeSet;
+
     use bindings::exports::lattice::tool_host::tool_api::ToolOutput;
+    use lancet_protocol::cell::{
+        ArtifactIdentity, Capability, CtxOp, ExtImpact, ScopeDecl, ToolDescriptor, Trust,
+    };
+    use lancet_protocol::evidence::CapabilityAdmissionPolicy;
+
+    use crate::admission::admit_tool;
 
     fn tool_output() -> ToolOutput {
         ToolOutput {
@@ -360,7 +455,203 @@ mod tests {
         }
     }
 
-    /// #48: a guest logical error while call-scoped cancellation is set
+    fn scoped_cell(ctx_op: CtxOp, scope: &str) -> Cell {
+        Cell {
+            ctx_op,
+            ext_impact: ExtImpact::None,
+            scope: scope.into(),
+        }
+    }
+
+    fn cell(ctx_op: CtxOp) -> Cell {
+        scoped_cell(ctx_op, "session")
+    }
+
+    /// The value every measure assertion below is taken over:
+    /// `{"echoed":"hello"}` — 18 canonical bytes.
+    fn result_value() -> serde_json::Value {
+        serde_json::json!({"echoed": "hello"})
+    }
+
+    /// A synthetic descriptor declaring one capability over `session/in`. Two
+    /// `in` scopes are declared so scope-crossing cases are expressible.
+    fn descriptor(capability: &str, ctx_op: CtxOp) -> Arc<ToolDescriptor> {
+        Arc::new(ToolDescriptor {
+            name: "synthetic.tool".into(),
+            version: "0.1.0".into(),
+            description: "result-cell fixture".into(),
+            params_schema: serde_json::Value::Null,
+            result_schema: serde_json::Value::Null,
+            scopes: vec![
+                ScopeDecl {
+                    name: "session".into(),
+                    trust: Trust::In,
+                    channel: ChannelKind::Session,
+                },
+                ScopeDecl {
+                    name: "workspace".into(),
+                    trust: Trust::In,
+                    channel: ChannelKind::Workspace,
+                },
+            ],
+            capabilities: vec![Capability {
+                name: capability.into(),
+                cell: cell(ctx_op),
+            }],
+            artifact: ArtifactIdentity {
+                sha256: "0".repeat(64),
+                toolchain: "test".into(),
+            },
+            abi_version: 1,
+        })
+    }
+
+    fn admitted(descriptor: Arc<ToolDescriptor>, deny: &[&str]) -> AdmittedTool {
+        let policy = CapabilityAdmissionPolicy {
+            enabled_tools: BTreeSet::from([descriptor.name.clone()]),
+            denied_capabilities: deny.iter().map(|s| (*s).to_string()).collect(),
+            max_boundary: Trust::In,
+        };
+        admit_tool(descriptor, &policy).expect("fixture admits")
+    }
+
+    /// The measure the result path actually records for `result_cell`, read
+    /// back from the ledger the production seam writes to.
+    fn recorded_measure(descriptor: &ToolDescriptor, result_cell: Cell) -> Option<u64> {
+        let ledger = CellEvidenceLedger::new();
+        record_result_effect(descriptor, &ledger, "turn-1", result_cell, &result_value());
+        let (_, effects, _) = ledger.snapshot();
+        effects.effects[0].context_measure
+    }
+
+    /// §10: a declared `free:none:session` result cell is accepted, and it is
+    /// measured like every other result. `Free`/`Mutate` differ from `Alloc`
+    /// in how #6 charges the number, not in whether the host records one.
+    #[test]
+    fn free_result_cell_is_accepted_and_still_measured() {
+        let descriptor = descriptor("session.free", CtxOp::Free);
+        let admitted = admitted(descriptor.clone(), &[]);
+        assert_eq!(
+            check_result_cell("synthetic.tool", &descriptor, &admitted, &cell(CtxOp::Free)),
+            Ok(())
+        );
+        assert_eq!(recorded_measure(&descriptor, cell(CtxOp::Free)), Some(18));
+    }
+
+    /// A3: the shipped `noop.echo` declares an `alloc` **and** a `mutate`
+    /// capability over one scope, and both are admitted — so a guest can
+    /// relabel its result cell and still pass the ceiling. Metering is not
+    /// its to switch off: the relabelled result is measured all the same.
+    #[test]
+    fn a_relabelled_result_cell_is_still_measured() {
+        let descriptor: Arc<ToolDescriptor> = Arc::new(
+            serde_json::from_str(include_str!(
+                "../../../tools/noop/generated/descriptor.json"
+            ))
+            .expect("the committed noop descriptor parses"),
+        );
+        let admitted = admitted(descriptor.clone(), &[]);
+        assert_eq!(
+            admitted.evidence.approved_capabilities,
+            vec!["session.events".to_string(), "session.result".to_string()]
+        );
+
+        let relabelled = cell(CtxOp::Mutate);
+        assert_eq!(
+            check_result_cell("noop.echo", &descriptor, &admitted, &relabelled),
+            Ok(())
+        );
+        assert_eq!(recorded_measure(&descriptor, relabelled), Some(18));
+    }
+
+    /// D12: the measure is the canonical-JSON byte length, so it is
+    /// independent of the guest's key order.
+    #[test]
+    fn context_measure_is_the_canonical_json_byte_length() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"b":1,"a":"xy"}"#).expect("value parses");
+        let reordered: serde_json::Value =
+            serde_json::from_str(r#"{"a":"xy","b":1}"#).expect("value parses");
+        // `{"a":"xy","b":1}` — 16 bytes.
+        assert_eq!(context_measure(&value), 16);
+        assert_eq!(context_measure(&value), context_measure(&reordered));
+    }
+
+    /// The ceiling is an intersection: an undeclared cell is a declaration
+    /// violation, a declared-but-denied cell is an admission violation, and
+    /// both fail the call closed. The two branches are discriminated by their
+    /// message, so neither can stand in for the other.
+    #[test]
+    fn result_cell_outside_the_ceiling_is_refused() {
+        let descriptor = descriptor("session.result", CtxOp::Alloc);
+
+        let undeclared = check_result_cell(
+            "synthetic.tool",
+            &descriptor,
+            &admitted(descriptor.clone(), &[]),
+            &cell(CtxOp::Mutate),
+        )
+        .expect_err("undeclared result cell must fail");
+        assert_eq!(undeclared.code, CepErrorCode::EffectViolation);
+        assert!(
+            undeclared.message.contains("not in declared capabilities"),
+            "{}",
+            undeclared.message
+        );
+
+        // Denying the only capability leaves nothing admitted, so admission
+        // itself refuses the tool — build the admitted set from a second
+        // capability to isolate the effect-ceiling check.
+        let mut two_caps = (*descriptor).clone();
+        two_caps.capabilities.push(Capability {
+            name: "session.events".into(),
+            cell: cell(CtxOp::Mutate),
+        });
+        let two_caps = Arc::new(two_caps);
+        let not_admitted = check_result_cell(
+            "synthetic.tool",
+            &two_caps,
+            &admitted(two_caps.clone(), &["session.result"]),
+            &cell(CtxOp::Alloc),
+        )
+        .expect_err("declared but not admitted must fail");
+        assert_eq!(not_admitted.code, CepErrorCode::EffectViolation);
+        assert!(
+            not_admitted.message.contains("not in the admitted"),
+            "{}",
+            not_admitted.message
+        );
+    }
+
+    /// B10/b1: the ceiling is exact on the scope axis. Two capabilities differ
+    /// only by scope and one is denied, so a coverage predicate that ignored
+    /// scope would admit the denied twin's cell.
+    #[test]
+    fn result_cell_on_a_denied_scope_is_not_covered_by_its_twin() {
+        let mut two_scopes = (*descriptor("session.result", CtxOp::Alloc)).clone();
+        two_scopes.capabilities.push(Capability {
+            name: "workspace.result".into(),
+            cell: scoped_cell(CtxOp::Alloc, "workspace"),
+        });
+        let two_scopes = Arc::new(two_scopes);
+
+        let err = check_result_cell(
+            "synthetic.tool",
+            &two_scopes,
+            &admitted(two_scopes.clone(), &["workspace.result"]),
+            &scoped_cell(CtxOp::Alloc, "workspace"),
+        )
+        .expect_err("a declared cell on a denied scope must fail");
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert!(
+            err.message.contains("not in the admitted"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// #70 (Codeberg #48): a guest logical error while call-scoped
+    /// cancellation is set
     /// maps to the shared `CallCancelled` error — the guest-controlled
     /// error string plays no role.
     #[test]
@@ -371,7 +662,7 @@ mod tests {
         assert_eq!(err.message, "tool noop.echo failed: cancelled");
     }
 
-    /// #48: a guest logical error without cancellation keeps the
+    /// #70: a guest logical error without cancellation keeps the
     /// `ExecutionFailed` semantics.
     #[test]
     fn guest_error_without_cancellation_stays_execution_failed() {

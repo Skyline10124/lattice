@@ -101,10 +101,10 @@ fn step(name: &str, run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<
 }
 
 /// Assert the Source Tool build prerequisites (#5 slice B decision 1): the
-/// pinned rustc from `rust-toolchain.toml` and the `wasm32-unknown-unknown`
-/// target std. `tool-codegen`/`tool-build` and the guest crate both need the
-/// wasm target installed; a missing target would otherwise surface as an
-/// opaque linker error deep in `tool-build`.
+/// pinned rustc from `rust-toolchain.toml`, the `wasm32-unknown-unknown`
+/// target std, and the `wasm-tools` encoder. `tool-codegen`/`tool-build` and
+/// the guest crate both need the wasm target installed; a missing target would
+/// otherwise surface as an opaque linker error deep in `tool-build`.
 fn check_toolchain() -> anyhow::Result<()> {
     let rustc_out = Command::new("rustc")
         .arg("--version")
@@ -139,7 +139,97 @@ fn check_toolchain() -> anyhow::Result<()> {
             "wasm32-unknown-unknown target not installed; run `rustup target add wasm32-unknown-unknown`"
         );
     }
+
+    // `wasm-tools` is an implicit external build dependency: `tool-build`
+    // shells out to it to encode the core module into a Component and to
+    // validate the import surface. It is not a Cargo dependency, so nothing
+    // installs it for us, and the encoder determines the committed
+    // Component's bytes. Absence is fatal here (the gate's last step would
+    // fail anyway, but ~9 steps later); a version mismatch is a warning
+    // because reproducibility is still warn-only per #5 decision 1 / #73.
+    match probe_wasm_tools() {
+        WasmToolsProbe::Version(version) => {
+            if version != EXPECTED_WASM_TOOLS {
+                println!(
+                    "warn: wasm-tools {version} installed, expected {EXPECTED_WASM_TOOLS}; \
+                     Component digests may drift (see #73)"
+                );
+            }
+        }
+        WasmToolsProbe::NotOnPath => anyhow::bail!(
+            "wasm-tools not found on PATH; `cargo xtask tool-build` needs it to encode and \
+             validate Source Tool Components. Install {EXPECTED_WASM_TOOLS} (for example \
+             `cargo install wasm-tools --version {EXPECTED_WASM_TOOLS} --locked`)."
+        ),
+        // Present but unusable: reinstalling the same version is the wrong
+        // advice, so report what actually happened instead.
+        WasmToolsProbe::Failed(why) => anyhow::bail!(
+            "wasm-tools is on PATH but {why}; `cargo xtask tool-build` needs a working \
+             {EXPECTED_WASM_TOOLS} encoder. Repair the installation, then re-run."
+        ),
+    }
+
     Ok(())
+}
+
+/// The `wasm-tools` release the committed Component artifacts were encoded
+/// with. Three places must agree, each asserted by a test below: this constant,
+/// the pinned installer in `.github/workflows/full-gate.yml`, and the
+/// `[artifact] toolchain` fingerprint in `tools/*/manifest.toml`.
+pub(crate) const EXPECTED_WASM_TOOLS: &str = "1.254.0";
+
+/// Why `wasm-tools --version` could not be answered. Distinguished so the
+/// caller can tell a user to *install* the encoder versus *repair* it —
+/// collapsing all three into "not found on PATH" sends someone whose binary is
+/// present but broken off to do a reinstall that changes nothing.
+pub(crate) enum WasmToolsProbe {
+    Version(String),
+    NotOnPath,
+    Failed(String),
+}
+
+/// The installed `wasm-tools` version, or `None` when the binary is missing,
+/// exits non-zero, or prints output this can't parse. Prefer
+/// [`probe_wasm_tools`] when the distinction matters.
+pub(crate) fn wasm_tools_version() -> Option<String> {
+    match probe_wasm_tools() {
+        WasmToolsProbe::Version(v) => Some(v),
+        _ => None,
+    }
+}
+
+pub(crate) fn probe_wasm_tools() -> WasmToolsProbe {
+    let out = match Command::new("wasm-tools")
+        .arg("--version")
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(out) => out,
+        // Only ENOENT means "not installed"; anything else (permissions, exec
+        // format) is a broken installation.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return WasmToolsProbe::NotOnPath,
+        Err(e) => return WasmToolsProbe::Failed(format!("could not be executed: {e}")),
+    };
+    if !out.status.success() {
+        return WasmToolsProbe::Failed(format!(
+            "`wasm-tools --version` exited with {}",
+            out.status
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    match parse_wasm_tools_version(&stdout) {
+        Some(v) => WasmToolsProbe::Version(v),
+        None => WasmToolsProbe::Failed(format!(
+            "`wasm-tools --version` printed unparseable output: {:?}",
+            stdout.trim()
+        )),
+    }
+}
+
+/// `wasm-tools --version` prints `wasm-tools <semver>`. Split out from the
+/// process call so the parse is unit-testable without the binary installed.
+fn parse_wasm_tools_version(stdout: &str) -> Option<String> {
+    stdout.split_whitespace().nth(1).map(str::to_owned)
 }
 
 fn run_cargo(root: &std::path::Path, args: &[&str], build_jobs: &str) -> anyhow::Result<()> {
@@ -356,6 +446,98 @@ fn ordered_test_crates(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_version_out_of_wasm_tools_version_output() {
+        assert_eq!(
+            parse_wasm_tools_version("wasm-tools 1.254.0\n").as_deref(),
+            Some("1.254.0")
+        );
+    }
+
+    #[test]
+    fn wasm_tools_version_parse_rejects_output_without_a_version_field() {
+        assert_eq!(parse_wasm_tools_version("wasm-tools\n"), None);
+        assert_eq!(parse_wasm_tools_version(""), None);
+    }
+
+    /// The pinned version must stay in step with the installer in
+    /// `.github/workflows/full-gate.yml`; a silent divergence would make the
+    /// local gate warn on exactly the version CI uses (see #80).
+    #[test]
+    fn expected_wasm_tools_matches_the_full_gate_installer_pin() {
+        let root = repo_root::repo_root().unwrap();
+        let workflow =
+            std::fs::read_to_string(root.join(".github/workflows/full-gate.yml")).unwrap();
+        assert!(
+            workflow.contains(&format!("wasm-tools@{EXPECTED_WASM_TOOLS}")),
+            "full-gate.yml must install wasm-tools@{EXPECTED_WASM_TOOLS}"
+        );
+    }
+
+    /// Four docs state the crate count in prose and all four had drifted apart
+    /// (15 / 16 / 16 / "15 crates" against an actual 19), with three crates
+    /// missing from the README table entirely — see #102. Prose counts have no
+    /// other consistency mechanism, so pin them to the filesystem here.
+    #[test]
+    fn documented_crate_counts_match_the_crates_directory() {
+        let root = repo_root::repo_root().unwrap();
+        let actual = std::fs::read_dir(root.join("crates"))
+            .expect("crates/ is readable")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .count();
+
+        // Every doc that states the count in prose.
+        for rel in [
+            "README.md",
+            "docs/ARCHITECTURE.md",
+            "docs/DEVELOPMENT.md",
+            "docs/GETTING-STARTED.md",
+        ] {
+            let text =
+                std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            let claim = format!("{actual} crates");
+            assert!(
+                text.contains(&claim),
+                "{rel} does not say {claim:?}; crates/ has {actual} directories. \
+                 Update the prose (and the README crate table) when adding or \
+                 removing a crate."
+            );
+        }
+    }
+
+    /// The encoder determines the committed Component's bytes, so every
+    /// manifest's `[artifact] toolchain` fingerprint must name the encoder its
+    /// pinned `sha256` was produced with. Without this the fingerprint claims
+    /// to identify the build while omitting a factor that changes the digest
+    /// (see #80), and `EXPECTED_WASM_TOOLS` could be bumped without anyone
+    /// re-pinning the artifacts.
+    #[test]
+    fn every_tool_manifest_fingerprint_names_the_expected_wasm_tools() {
+        let root = repo_root::repo_root().unwrap();
+        let manifests =
+            crate::tool_codegen::discover_tool_manifests(&root).expect("discover manifests");
+        assert!(
+            !manifests.is_empty(),
+            "expected at least one tools/*/manifest.toml"
+        );
+        let needle = format!("wasm-tools-{EXPECTED_WASM_TOOLS}");
+        for manifest in manifests {
+            let raw = std::fs::read_to_string(&manifest).unwrap();
+            let toolchain = raw
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("toolchain = "))
+                .unwrap_or_else(|| panic!("{} has no [artifact] toolchain", manifest.display()))
+                .trim_matches('"');
+            assert!(
+                toolchain.contains(&needle),
+                "{}: [artifact] toolchain is {toolchain:?}, which does not name {needle}; \
+                 re-run `cargo xtask tool-build` after changing the encoder pin",
+                manifest.display()
+            );
+        }
+    }
 
     #[test]
     fn ordered_test_crates_is_deterministic_and_excludes_xtask() {

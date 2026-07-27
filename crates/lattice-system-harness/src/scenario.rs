@@ -7,11 +7,11 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
-/// Harness test layer (see RFC #19).
+/// Harness test layer (see RFC #41, Codeberg #19).
 ///
-/// After #40 there is no Microsandbox layer: every scenario runs Direct-Local
-/// against the canonical project root — no KVM, no MSB daemon, no OCI image.
-/// `PtySmoke` remains as the TUI-entrypoint layer.
+/// After #62 (Codeberg #40) there is no Microsandbox layer: every scenario
+/// runs Direct-Local against the canonical project root — no KVM, no MSB
+/// daemon, no OCI image. `PtySmoke` remains as the TUI-entrypoint layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScenarioLayer {
@@ -24,12 +24,12 @@ pub enum ScenarioLayer {
 /// `step_timeout_secs` is the per-command timeout enforced by
 /// `LatticeDriver::run` for every invocation derived from this spec.
 /// `total_timeout_secs` is an optional whole-scenario wall-clock budget
-/// (PRD user story 19, RFC #19 decision eight): a multi-step scenario
+/// (PRD user story 19, RFC #41 decision eight): a multi-step scenario
 /// records its start time and asserts the budget has not elapsed before each
 /// step, so a sequence of steps that each finish within their step timeout
 /// but never terminates is still bounded. `None` (the default) leaves only
-/// the per-command timeout in effect, preserving the #20 single-step
-/// behavior for fast scenarios.
+/// the per-command timeout in effect, preserving the #42 (Codeberg #20)
+/// single-step behavior for fast scenarios.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScenarioSpec {
     pub name: String,
@@ -99,7 +99,7 @@ impl ScenarioSpec {
     }
 }
 
-/// Whole-scenario wall-clock budget (PRD user story 19, RFC #19 decision
+/// Whole-scenario wall-clock budget (PRD user story 19, RFC #41 decision
 /// eight). Created from `ScenarioSpec::start_budget`; call `check` before
 /// each step of a multi-step scenario. If the budget has elapsed, `check`
 /// panics with a clear message — a runaway multi-step sequence must fail

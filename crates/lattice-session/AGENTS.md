@@ -28,8 +28,8 @@ were retired; the git-backed store is the only production path (gix).
   coverage.
 - `src/test_utils.rs` (feature `test-utils`) owns shared gix fixture helpers
   for downstream crate tests.
-- #40 removed `src/promotion.rs` (promoted-commit builder) and the
-  `set_snapshot_lost`/`get_snapshot_lost` retained-snapshot ops-state chain
+- #62 (Codeberg #40) removed `src/promotion.rs` (promoted-commit builder) and
+  the `set_snapshot_lost`/`get_snapshot_lost` retained-snapshot ops-state chain
   (`ops/<oid>.json`); both only served the deleted Upper promotion path.
 
 ## Boundaries
@@ -45,7 +45,7 @@ were retired; the git-backed store is the only production path (gix).
   for `refs/lattice/**`.
 - Mutable session metadata lives in sidecar files, never in Git objects.
 - The Git store performs single-ref operations only; the `lattice-workspace`
-  multi-ref promotion transaction surface was deleted with that crate in #40.
+  multi-ref promotion transaction surface was deleted with that crate in #62.
 
 ## Recent Issues
 

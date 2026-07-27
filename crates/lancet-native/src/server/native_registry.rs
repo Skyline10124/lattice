@@ -249,9 +249,9 @@ mod cep_native_registry_tests {
         server_task.abort();
     }
 
-    /// Issue #24 slice 3: pre-dispatch effect-kind denial must never call the
-    /// mutation backend. A denied `mutate.create` leaves no file and records a
-    /// denied audit row.
+    /// Issue #46 (Codeberg #24) slice 3: pre-dispatch effect-kind denial must
+    /// never call the mutation backend. A denied `mutate.create` leaves no
+    /// file and records a denied audit row.
     #[tokio::test]
     async fn denied_effect_kind_blocks_mutate_create_before_backend() {
         let dir = TempDir::new().unwrap();

@@ -1,7 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local public session graph isolation (issue #24 slice 7).
+//! Direct-Local public session graph isolation
+//! (issue #46 (Codeberg #24) slice 7).
 //!
 //! Two sessions created through `session new`, each seeded with two real
 //! completed Turns, then branch/checkout/reset/diff operations scoped to the

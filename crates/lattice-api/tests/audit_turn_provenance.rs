@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Full-turn audit rows carry PROV-relevant fields after a live CEP turn.
+//!
+//! #28 B11 adds the Component leg: a Cell-admitted Tool call records its
+//! admission evidence apart from its observed effects, both survive the replay
+//! projection as separate PROV activity attributes, and the turn attests under
+//! the v2 predicate.
 
 use std::sync::Arc;
 
@@ -10,6 +15,7 @@ use lancet_api::{AuditReplayRequest, replay_audit};
 use lancet_native::{AuditQueryFilters, CepAuditStore};
 use lancet_protocol::effect_types::ImpactKind;
 
+use lancet_audit::ScopedXdgStateHome;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
@@ -49,17 +55,16 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
 
 struct Workspace {
     _dir: TempDir,
-    _state: TempDir,
+    /// Holds the shared env lock and points `XDG_STATE_HOME` at a temp state
+    /// root for the whole fixture lifetime, restoring the previous value on drop.
+    _state: ScopedXdgStateHome,
     root: std::path::PathBuf,
     loaded: LoadedAgentProfile,
     target_branch: String,
 }
 
 fn setup_workspace() -> Workspace {
-    let state = TempDir::new().unwrap();
-    unsafe {
-        std::env::set_var("XDG_STATE_HOME", state.path());
-    }
+    let state = ScopedXdgStateHome::new();
     let ws = TempDir::new().unwrap();
     let root = ws.path().to_path_buf();
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -136,7 +141,9 @@ fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String
 #[tokio::test]
 async fn full_turn_audit_rows_and_replay_fragment() {
     let ws = setup_workspace();
-    std::env::set_current_dir(&ws.root).unwrap();
+    // No `set_current_dir`: the request below pins `test_project_root`, and
+    // mutating the process-global CWD from concurrent tests made sibling tests
+    // fail once a `TempDir` dropped (see the note in `tests/consistency.rs`).
 
     let original = "pub fn answer() -> i32 { 1 }";
     let hash = format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex());
@@ -254,4 +261,86 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             .any(|a| { !a.method.is_empty() && a.impact_kind != ImpactKind::AuditObservation }),
         "replay fragment must include tool activities"
     );
+}
+
+/// #28 B11 Component leg: one admitted `noop.echo` call produces two effects
+/// (the gated `emit-event` operation and the result), the audit row separates
+/// "why authorized" from "what happened", the replay projection carries both
+/// as distinct PROV activity attributes, and the turn attests as v2.
+#[tokio::test]
+async fn component_turn_projects_admission_and_effects_and_attests_v2() {
+    use lancet_native::provenance::project_turn_trace;
+    use lancet_native::{
+        CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
+        register_production_method_registry,
+    };
+    use lancet_protocol::provenance::CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2;
+    use lancet_runtime::ComponentRuntime;
+
+    let components =
+        Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
+    let mut config = ServerRunConfig::in_memory_for_tests().with_capability_admission(
+        lancet_protocol::CapabilityAdmissionPolicy {
+            enabled_tools: std::collections::BTreeSet::from(["noop.echo".to_string()]),
+            ..Default::default()
+        },
+    );
+    config.components = Some(components);
+    let audit = Arc::clone(&config.audit);
+    let ctx = config.audit_context.read().await.clone();
+
+    let mut registry = MethodRegistry::new();
+    register_production_method_registry(&mut registry).expect("production registry");
+    let (client, server) = CepTransport::pair(64);
+    let server_task = tokio::spawn(async move {
+        let _ = server.run_native(registry, config).await;
+    });
+
+    let value: serde_json::Value = client
+        .call_named("noop.echo", serde_json::json!({ "message": "provenance" }))
+        .await
+        .expect("component call");
+    assert_eq!(value, serde_json::json!({ "echoed": "provenance" }));
+    audit.await_pending().await;
+
+    let rows = audit
+        .query_rows(&AuditQueryFilters {
+            session_id: Some(ctx.session_id.clone()),
+            turn_id: Some(ctx.turn_id.clone()),
+            method: Some("noop.echo".to_string()),
+            ..Default::default()
+        })
+        .expect("query rows");
+    assert_eq!(rows.len(), 1, "exactly one noop.echo audit row");
+
+    // B6: the replay projection keeps the two evidence families apart.
+    let trace = project_turn_trace(&ctx.turn_id, &rows);
+    let attributes = &trace.fragment.activities[0].attributes;
+    assert_eq!(
+        attributes["admission_evidence"]["approved_capabilities"],
+        serde_json::json!(["session.events", "session.result"])
+    );
+    assert_eq!(
+        attributes["observed_effects"]["effects"]
+            .as_array()
+            .expect("observed effects array")
+            .len(),
+        2
+    );
+    assert!(
+        attributes.get("denied_operations").is_none(),
+        "nothing was refused on the allow path"
+    );
+
+    lancet_api::store_turn_attestation(&audit, &ctx, &ctx.turn_id).expect("store attestation");
+    let stored = audit
+        .attestation_for_turn(&ctx.turn_id)
+        .expect("attestation lookup")
+        .expect("attestation stored");
+    assert_eq!(
+        stored.predicate_type, CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2,
+        "a turn carrying Cell evidence attests as v2"
+    );
+
+    server_task.abort();
 }

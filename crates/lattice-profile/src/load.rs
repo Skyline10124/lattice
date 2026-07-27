@@ -17,9 +17,9 @@ pub struct LoadedAgentProfile {
 
 /// Forbidden top-level sections that must be rejected before deserialization.
 ///
-/// `workspace` is the retired Upper microVM section (#40): legacy profiles
-/// that still declare it fail here with a named, actionable error rather
-/// than a bare `deny_unknown_fields` rejection.
+/// `workspace` is the retired Upper microVM section (#62, Codeberg #40):
+/// legacy profiles that still declare it fail here with a named, actionable
+/// error rather than a bare `deny_unknown_fields` rejection.
 const FORBIDDEN_SECTIONS: &[&str] = &[
     "capabilities",
     "handoff",
@@ -592,6 +592,33 @@ x = 1
                 "expected '{section}' in error, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn lancet_capabilities_sub_table_is_not_the_forbidden_top_level_section() {
+        // `capabilities` is a forbidden *top-level* section; the pre-scan only
+        // inspects top-level keys, so the typed `[lancet.capabilities]`
+        // admission policy must still load.
+        let (_dir, path) = temp_profile(
+            r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[lancet.capabilities]
+deny = ["session.events"]
+max_boundary = "ex"
+
+"#,
+        );
+        let loaded = load_agent_profile(&path).unwrap();
+        let capabilities = loaded.profile.lancet.capabilities.as_ref().unwrap();
+        assert_eq!(capabilities.deny, vec!["session.events".to_string()]);
     }
 
     #[test]

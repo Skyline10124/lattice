@@ -15,14 +15,17 @@ lancet-audit = { workspace = true }
 lancet-authority = { workspace = true }
 lancet-native = { workspace = true }
 lancet-runtime = { workspace = true }
-dirs = { workspace = true }
-sha2 = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Normal dependency above; the dev-entry adds the `test-support` feature so
+# test builds get `ScopedXdgStateHome` (shared XDG/env test isolation).
+lancet-audit = { workspace = true, features = ["test-support"] }
 lancet-catalog = { workspace = true }
-rusqlite = { workspace = true }
+# `test-utils` exposes `ComponentRuntime::noop_fixture()`, which the #28
+# attestation tests compose a server over.
+lancet-runtime = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }

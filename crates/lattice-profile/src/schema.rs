@@ -3,6 +3,8 @@
 
 use lancet_protocol::CepMode;
 use lancet_protocol::ImpactKind;
+use lancet_protocol::cell::Trust;
+use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use serde::{Deserialize, Serialize, de};
 use std::collections::BTreeMap;
 
@@ -24,10 +26,30 @@ pub struct AgentProfile {
     pub lancet: LancetSection,
 }
 
+impl AgentProfile {
+    /// Lower the profile into the Component Tool admission inputs.
+    ///
+    /// `enabled_tools` is `[tools].enabled` — the exposure list is also the
+    /// stage-1 capability grant. An absent `[lancet.capabilities]` is the
+    /// typed default: nothing denied, `max_boundary = in`.
+    pub fn capability_admission_policy(&self) -> CapabilityAdmissionPolicy {
+        let capabilities = self.lancet.capabilities.as_ref();
+        CapabilityAdmissionPolicy {
+            enabled_tools: self.tools.enabled.iter().cloned().collect(),
+            denied_capabilities: capabilities
+                .map(|section| section.deny.iter().cloned().collect())
+                .unwrap_or_default(),
+            max_boundary: capabilities.map_or_else(default_max_boundary, |s| s.max_boundary),
+        }
+    }
+}
+
 /// LANCET `[lancet]` profile section with typed policy sub-tables.
 ///
-/// Known sub-tables (`project_root`, `observation`, `network`) deserialize into
-/// typed fields. Other future sub-tables remain in `extensions`.
+/// Known sub-tables (`project_root`, `observation`, `network`, `policy`,
+/// `effects`, `capabilities`, `workspace`) deserialize into typed fields and
+/// are therefore strictly validated. Other future sub-tables remain in
+/// `extensions`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LancetSection {
     #[serde(default = "default_lancet_mode")]
@@ -42,6 +64,8 @@ pub struct LancetSection {
     pub policy: Option<LancetPolicySection>,
     #[serde(default)]
     pub effects: Option<LancetEffectsSection>,
+    #[serde(default)]
+    pub capabilities: Option<LancetCapabilitiesSection>,
     #[serde(default)]
     pub workspace: Option<LancetWorkspacePolicySection>,
     #[serde(flatten)]
@@ -108,6 +132,11 @@ pub struct LancetWorkspacePolicySection {
 }
 
 /// `[lancet.effects]` — runtime effect-kind deny switch.
+///
+/// Native-path only: it denies method *impact kinds* on the legacy
+/// authorization path. Component Tool policy lives in
+/// `[lancet.capabilities]` and never names method impact identity (B8); this
+/// section is retired only once every consumer has migrated.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LancetEffectsSection {
@@ -115,8 +144,51 @@ pub struct LancetEffectsSection {
     pub deny: Vec<ImpactKind>,
 }
 
+/// `[lancet.capabilities]` — Component Tool capability admission policy.
+///
+/// Admission runs in a fixed stage order: the enabled tools' declared
+/// capabilities form the grant (there is no independent allow-list, so
+/// profiles stay portable), `deny` subtracts from it, `max_boundary` removes
+/// every capability whose scope trust resolves to `ex`, and the concrete
+/// per-operation target check runs at call time. A tool left with no
+/// capability is not callable.
+///
+/// Every `deny` entry must name a capability of the composed Component
+/// catalog. An unknown name is a hard error at server construction, never a
+/// warning: a deny typo that silently keeps a grant is fail-open. On a binary
+/// whose Component catalog is empty, *any* `deny` entry therefore fails
+/// startup.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LancetCapabilitiesSection {
+    /// Capability names subtracted from the enabled tools' declared set.
+    #[serde(default)]
+    pub deny: Vec<String>,
+    /// Highest trust boundary an admitted capability may cross. `in` keeps
+    /// every operation inside the Tool Host's control and accounting domain;
+    /// `ex` opts into capabilities that reach the external world.
+    #[serde(default = "default_max_boundary")]
+    pub max_boundary: Trust,
+}
+
+impl Default for LancetCapabilitiesSection {
+    /// Explicit, because `Trust::default()` is `Ex`: an undeclared *scope* is
+    /// fail-closed as external, while an unset *boundary* is fail-closed as
+    /// `in`. A derived `Default` would admit every `ex` capability.
+    fn default() -> Self {
+        Self {
+            deny: Vec::new(),
+            max_boundary: default_max_boundary(),
+        }
+    }
+}
+
 fn default_lancet_mode() -> CepMode {
     CepMode::Enforce
+}
+
+fn default_max_boundary() -> Trust {
+    Trust::In
 }
 
 impl Default for LancetSection {
@@ -128,6 +200,7 @@ impl Default for LancetSection {
             network: None,
             policy: None,
             effects: None,
+            capabilities: None,
             workspace: None,
             extensions: BTreeMap::new(),
         }
@@ -173,6 +246,12 @@ impl<'de> Deserialize<'de> for LancetSection {
             .remove("effects")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
+        // Typed here so an admission policy can never fall into `extensions`
+        // and be silently ignored.
+        let capabilities = raw
+            .remove("capabilities")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
         let workspace = raw
             .remove("workspace")
             .map(|value| value.try_into().map_err(de::Error::custom))
@@ -185,6 +264,7 @@ impl<'de> Deserialize<'de> for LancetSection {
             network,
             policy,
             effects,
+            capabilities,
             workspace,
             extensions: raw,
         })
@@ -272,6 +352,7 @@ fn default_llm_retry_max_delay_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn parse(toml_str: &str) -> Result<AgentProfile, toml::de::Error> {
         toml::from_str::<AgentProfile>(toml_str)
@@ -811,6 +892,7 @@ max_web_response_bytes = 1024
             network: None,
             policy: None,
             effects: None,
+            capabilities: None,
             workspace: None,
             extensions,
         };
@@ -980,5 +1062,175 @@ unknown = true
             err.to_string().contains("unknown"),
             "should reject unknown field, got: {err}"
         );
+    }
+
+    // ── [lancet.capabilities] admission policy ─────────────────────────
+
+    #[test]
+    fn lancet_capabilities_parses_deny_and_boundary() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.capabilities]
+deny = ["session.events", "net.fetch"]
+max_boundary = "ex"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let capabilities = profile.lancet.capabilities.as_ref().unwrap();
+        assert_eq!(
+            capabilities.deny,
+            vec!["session.events".to_string(), "net.fetch".to_string()]
+        );
+        assert_eq!(capabilities.max_boundary, Trust::Ex);
+    }
+
+    #[test]
+    fn lancet_capabilities_round_trips_through_toml() {
+        let toml = format!(
+            r#"{prefix}
+
+[tools]
+enabled = ["noop.echo"]
+
+[lancet.capabilities]
+deny = ["session.events"]
+max_boundary = "ex"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let serialized = toml::to_string(&profile).unwrap();
+        assert!(
+            serialized.contains("[lancet.capabilities]"),
+            "got: {serialized}"
+        );
+        assert_eq!(parse(&serialized).unwrap(), profile);
+    }
+
+    #[test]
+    fn lancet_capabilities_max_boundary_defaults_to_in() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.capabilities]
+deny = ["session.events"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        // Boundary fail-closed is `in`, the opposite of `Trust::default()`.
+        assert_eq!(
+            profile.lancet.capabilities.as_ref().unwrap().max_boundary,
+            Trust::In
+        );
+        assert_eq!(LancetCapabilitiesSection::default().max_boundary, Trust::In);
+    }
+
+    #[test]
+    fn lancet_capabilities_absent_section_is_none() {
+        let profile = parse(minimal_profile_prefix()).unwrap();
+        assert!(profile.lancet.capabilities.is_none());
+    }
+
+    #[test]
+    fn lancet_capabilities_rejects_unknown_field() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.capabilities]
+allow = ["session.events"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(err.to_string().contains("allow"), "got: {err}");
+    }
+
+    #[test]
+    fn lancet_capabilities_rejects_unknown_boundary_value() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.capabilities]
+max_boundary = "upper"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        assert!(parse(&toml).is_err());
+    }
+
+    #[test]
+    fn lancet_capabilities_never_lands_in_extensions() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.capabilities]
+deny = ["session.events"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert!(profile.lancet.capabilities.is_some());
+        assert!(
+            profile.lancet.extensions.is_empty(),
+            "typed sub-table must not fall through: {:?}",
+            profile.lancet.extensions
+        );
+    }
+
+    #[test]
+    fn capability_admission_policy_lowers_enabled_tools_and_deny() {
+        let toml = format!(
+            r#"{prefix}
+
+[tools]
+enabled = ["noop.echo", "fetch.web"]
+
+[lancet.capabilities]
+deny = ["session.events"]
+max_boundary = "ex"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let policy = parse(&toml).unwrap().capability_admission_policy();
+        assert_eq!(
+            policy.enabled_tools,
+            BTreeSet::from(["fetch.web".to_string(), "noop.echo".to_string()])
+        );
+        assert_eq!(
+            policy.denied_capabilities,
+            BTreeSet::from(["session.events".to_string()])
+        );
+        assert_eq!(policy.max_boundary, Trust::Ex);
+    }
+
+    #[test]
+    fn capability_admission_policy_without_section_keeps_in_boundary() {
+        let toml = format!(
+            r#"{prefix}
+
+[tools]
+enabled = ["noop.echo"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let policy = parse(&toml).unwrap().capability_admission_policy();
+        assert_eq!(
+            policy.enabled_tools,
+            BTreeSet::from(["noop.echo".to_string()])
+        );
+        assert!(policy.denied_capabilities.is_empty());
+        assert_eq!(policy.max_boundary, Trust::In);
+    }
+
+    #[test]
+    fn capability_admission_policy_without_enabled_tools_admits_nothing() {
+        let policy = parse(minimal_profile_prefix())
+            .unwrap()
+            .capability_admission_policy();
+        assert!(policy.enabled_tools.is_empty());
+        assert_eq!(policy, CapabilityAdmissionPolicy::default());
     }
 }

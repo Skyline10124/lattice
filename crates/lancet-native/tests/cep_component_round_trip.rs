@@ -1,8 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! #5 slice D.6: end-to-end Component dispatch round-trip through the
-//! existing native CEP server lifecycle.
+//! #27 (Codeberg #5) slice D.6: end-to-end Component dispatch round-trip
+//! through the existing native CEP server lifecycle.
 //!
 //! These tests prove the D.3 dispatch split works: a no-op Component Tool
 //! (`noop.echo`) round-trips through the same `CepServer`/audit lifecycle
@@ -13,14 +13,31 @@
 //! The fixed no-op fixture comes from `lancet_runtime::ComponentRuntime::noop_fixture()`
 //! (`test-utils` feature). The caller cannot inject bytes, registrations,
 //! handlers, paths, or an approval set.
+//!
+//! #28 B11: the same lifecycle also carries the Cell admission end-to-end
+//! scenarios — allow, partial deny, and full deny — with their audit evidence.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use lancet_authority::CepTurnContext;
 use lancet_native::{
     AuditQueryFilters, CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry,
     ServerRunConfig, register_production_method_registry,
 };
+use lancet_protocol::effect_types::ImpactKind;
+use lancet_protocol::{CapabilityAdmissionPolicy, CepErrorCode, Trust};
 use lancet_runtime::ComponentRuntime;
+
+/// The noop fixture's admission policy: the tool is enabled, and `deny`
+/// subtracts capability names by the profile's stage-2 rule.
+fn admission(deny: &[&str]) -> CapabilityAdmissionPolicy {
+    CapabilityAdmissionPolicy {
+        enabled_tools: BTreeSet::from(["noop.echo".to_string()]),
+        denied_capabilities: deny.iter().map(|name| (*name).to_string()).collect(),
+        max_boundary: Trust::In,
+    }
+}
 
 /// Spawn a native CEP server with the no-op Component fixture composed in,
 /// plus the production native method registry. Returns the client, audit
@@ -30,9 +47,37 @@ async fn spawn_native_with_noop() -> (
     Arc<CepAuditStore>,
     tokio::task::JoinHandle<()>,
 ) {
+    spawn_native_with_admission(admission(&[])).await
+}
+
+/// As above, under an explicit admission policy. The fail-closed default
+/// admits no tool at all, so every Component scenario names its policy.
+async fn spawn_native_with_admission(
+    policy: CapabilityAdmissionPolicy,
+) -> (
+    lancet_native::CepClient,
+    Arc<CepAuditStore>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_native_with_policies(policy, BTreeSet::new()).await
+}
+
+/// One server run carrying **both** vocabularies' policies: the Cell
+/// admission policy and the legacy `[lancet.effects]` deny list.
+async fn spawn_native_with_policies(
+    policy: CapabilityAdmissionPolicy,
+    denied_effect_kinds: BTreeSet<ImpactKind>,
+) -> (
+    lancet_native::CepClient,
+    Arc<CepAuditStore>,
+    tokio::task::JoinHandle<()>,
+) {
     let components =
         Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
-    let mut config = ServerRunConfig::in_memory_for_tests();
+    let mut config = ServerRunConfig::in_memory_for_tests().with_capability_admission(policy);
+    let mut turn_policy = config.cep_context.policy.clone();
+    turn_policy.denied_effect_kinds = denied_effect_kinds;
+    config.cep_context = Arc::new(CepTurnContext::from_policy(turn_policy));
     config.components = Some(components);
 
     let mut registry = MethodRegistry::new();
@@ -47,9 +92,33 @@ async fn spawn_native_with_noop() -> (
     (client, audit, task)
 }
 
-/// D.6 tracer: `noop.echo` round-trips through CEP + audit.
-/// The Component result is `{"echoed":"ping"}` and the audit row records
-/// Cell evidence (`alloc:none:session:in`).
+/// The single `noop.echo` audit row.
+async fn noop_row(audit: &CepAuditStore) -> lancet_native::audit::AuditRow {
+    audit.await_pending().await;
+    let mut rows = audit
+        .query_rows(&AuditQueryFilters {
+            method: Some("noop.echo".to_string()),
+            ..Default::default()
+        })
+        .expect("audit query");
+    assert_eq!(rows.len(), 1, "exactly one noop.echo audit row");
+    rows.remove(0)
+}
+
+/// The single `noop.echo` audit row's metadata, parsed.
+async fn noop_metadata(audit: &CepAuditStore) -> serde_json::Value {
+    let row = noop_row(audit).await;
+    let metadata = row
+        .metadata_json
+        .as_deref()
+        .expect("a Component call always finalizes with evidence metadata");
+    serde_json::from_str(metadata).expect("metadata is JSON")
+}
+
+/// D.6 tracer + #28 B11 allow path: `noop.echo` round-trips through CEP +
+/// audit with both capabilities admitted, so one call produces two effects
+/// (the gated `emit-event` operation and the result) and the audit row keeps
+/// "why authorized" apart from "what happened".
 #[tokio::test]
 async fn embedded_noop_round_trips_through_cep_and_audit() {
     let (client, audit, _task) = spawn_native_with_noop().await;
@@ -74,10 +143,286 @@ async fn embedded_noop_round_trips_through_cep_and_audit() {
         result.starts_with("success:"),
         "audit outcome must be success, got: {result}"
     );
-    let metadata = row.metadata_json.as_deref().unwrap_or("");
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(row.metadata_json.as_deref().expect("evidence metadata"))
+            .expect("metadata is JSON");
+    // C8: a multi-effect call keeps every cell, in seq order.
+    assert_eq!(
+        metadata["component_cells"],
+        serde_json::json!(["mutate:none:session:in", "alloc:none:session:in"])
+    );
+    // B5/A2: approved capability names are admission evidence only.
+    assert_eq!(
+        metadata["admission_evidence"]["approved_capabilities"],
+        serde_json::json!(["session.events", "session.result"])
+    );
+    assert_eq!(metadata["admission_evidence"]["max_boundary"], "in");
+    let effects = metadata["observed_effects"]["effects"]
+        .as_array()
+        .expect("observed effects array");
+    assert_eq!(effects.len(), 2, "emit-event operation + result");
+    assert_eq!(effects[0]["source"], "operation");
+    assert_eq!(effects[0]["target"]["turn_id"], "test-turn");
+    assert_eq!(effects[0]["context_measure"], serde_json::Value::Null);
+    assert_eq!(effects[1]["source"], "result");
+    // D12: the host measures the canonical result bytes itself.
+    assert_eq!(
+        effects[1]["context_measure"],
+        serde_json::json!(r#"{"echoed":"ping"}"#.len())
+    );
     assert!(
-        metadata.contains("alloc:none:session:in"),
-        "audit metadata must contain the Cell audit key, got: {metadata}"
+        metadata.get("denied_operations").is_none(),
+        "nothing was refused on the allow path: {metadata}"
+    );
+}
+
+/// B11 partial deny: subtracting `session.events` leaves the tool callable,
+/// but its `emit-event` operation is refused. The call still succeeds, one
+/// effect (the result) is recorded, and the refusal is recorded as evidence.
+#[tokio::test]
+async fn partial_admission_denies_only_the_uncovered_operation() {
+    let (client, audit, _task) = spawn_native_with_admission(admission(&["session.events"])).await;
+
+    let events = client.events();
+    let value: serde_json::Value = client
+        .call_named("noop.echo", serde_json::json!({ "message": "partial" }))
+        .await
+        .expect("the tool stays callable with one capability");
+    assert_eq!(value, serde_json::json!({ "echoed": "partial" }));
+
+    // B3: the host facility is never reached, so no tool event is emitted.
+    let mut guard = events.lock().await;
+    while let Ok(event) = guard.try_recv() {
+        assert_ne!(
+            event.method, "tool.event",
+            "a denied operation must not reach the event sink"
+        );
+    }
+    drop(guard);
+
+    let metadata = noop_metadata(&audit).await;
+    assert_eq!(
+        metadata["admission_evidence"]["approved_capabilities"],
+        serde_json::json!(["session.result"])
+    );
+    assert_eq!(
+        metadata["admission_evidence"]["denied_capabilities"],
+        serde_json::json!(["session.events"])
+    );
+    assert_eq!(
+        metadata["component_cells"],
+        serde_json::json!(["alloc:none:session:in"])
+    );
+    assert_eq!(
+        metadata["denied_operations"]["version"],
+        serde_json::json!(1)
+    );
+    let denied = metadata["denied_operations"]["denied"]
+        .as_array()
+        .expect("denied operations array");
+    assert_eq!(denied.len(), 1);
+    assert_eq!(denied[0]["cell"]["ctx_op"], "mutate");
+    assert!(
+        denied[0]["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("not covered by an admitted capability"),
+        "denial reason must name the uncovered cell: {}",
+        denied[0]["reason"]
+    );
+}
+
+/// B11 full deny, stage 1: a tool outside `[tools].enabled` has no capability
+/// at all. Wasmtime is never entered, the client sees `CapabilityNotGranted`,
+/// and the audit row still carries the admission evidence that explains it.
+#[tokio::test]
+async fn unenabled_tool_is_denied_before_the_runtime_is_entered() {
+    let (client, audit, _task) =
+        spawn_native_with_admission(CapabilityAdmissionPolicy::default()).await;
+
+    let events = client.events();
+    let err = client
+        .call_raw("noop.echo", serde_json::json!({ "message": "denied" }))
+        .await
+        .expect_err("the fail-closed default enables no tool");
+    assert_eq!(
+        err.code,
+        lancet_protocol::CepErrorCode::CapabilityNotGranted
+    );
+    assert!(
+        err.message.contains("noop.echo") && err.message.contains("not enabled"),
+        "the error must name the tool and the refusing stage: {}",
+        err.message
+    );
+
+    let mut guard = events.lock().await;
+    while let Ok(event) = guard.try_recv() {
+        assert_ne!(
+            event.method, "tool.event",
+            "a denied call must never instantiate the Component"
+        );
+    }
+    drop(guard);
+
+    let metadata = noop_metadata(&audit).await;
+    assert_eq!(metadata["admission_evidence"]["tool"], "noop.echo");
+    assert_eq!(
+        metadata["admission_evidence"]["approved_capabilities"],
+        serde_json::json!([])
+    );
+    assert!(
+        metadata.get("component_cells").is_none(),
+        "a call that never ran produced no effect: {metadata}"
+    );
+}
+
+/// B11 full deny, effect ceiling: with `session.result` subtracted the tool is
+/// still admitted for its event capability, but its declared result cell is
+/// outside the admitted set. The result fails closed with `EffectViolation`
+/// while the operation effect already recorded survives into audit (B5).
+#[tokio::test]
+async fn denied_result_capability_fails_the_call_and_keeps_operation_evidence() {
+    let (client, audit, _task) = spawn_native_with_admission(admission(&["session.result"])).await;
+
+    let err = client
+        .call_raw("noop.echo", serde_json::json!({ "message": "ceiling" }))
+        .await
+        .expect_err("an unadmitted result cell fails the call");
+    assert_eq!(err.code, lancet_protocol::CepErrorCode::EffectViolation);
+
+    let metadata = noop_metadata(&audit).await;
+    assert_eq!(
+        metadata["admission_evidence"]["approved_capabilities"],
+        serde_json::json!(["session.events"])
+    );
+    assert_eq!(
+        metadata["component_cells"],
+        serde_json::json!(["mutate:none:session:in"]),
+        "the emit-event effect survives the result-cell violation"
+    );
+    let effects = metadata["observed_effects"]["effects"]
+        .as_array()
+        .expect("observed effects array");
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0]["source"], "operation");
+}
+
+/// #28 b8: a Component row is labeled by the vocabulary that actually governed
+/// it. The legacy catalog lookup would call `noop.echo` `unrouted` and claim no
+/// policy ran, and its refusal `method_not_found` — the tool is in the closed
+/// Component catalog and Cell admission is what decided.
+#[tokio::test]
+async fn component_rows_are_labeled_cell_governed_not_unrouted() {
+    let (client, audit, _task) = spawn_native_with_noop().await;
+    let _: serde_json::Value = client
+        .call_named("noop.echo", serde_json::json!({ "message": "labels" }))
+        .await
+        .expect("component round trip");
+
+    let row = noop_row(&audit).await;
+    assert_eq!(row.semantic_stage, "cell_component");
+    assert_eq!(row.guard_stage, "cell_admission");
+    assert!(
+        row.policy_enforced,
+        "Cell admission ran and allowed the call"
+    );
+    assert_eq!(row.semantic_status.as_deref(), Some("component_handler"));
+
+    // An admission denial is a policy denial, not a missing method.
+    let (client, audit, _task) =
+        spawn_native_with_admission(CapabilityAdmissionPolicy::default()).await;
+    client
+        .call_raw("noop.echo", serde_json::json!({ "message": "denied" }))
+        .await
+        .expect_err("the fail-closed default enables no tool");
+    let denied = noop_row(&audit).await;
+    assert_eq!(denied.semantic_status.as_deref(), Some("component_denied"));
+    assert!(
+        denied.policy_enforced,
+        "the denial is itself the policy decision"
+    );
+
+    // Operator "denied" queries still reach it.
+    let denied_rows = audit
+        .query_rows(&AuditQueryFilters {
+            verdict: Some("denied".into()),
+            ..Default::default()
+        })
+        .expect("audit query");
+    assert_eq!(denied_rows.len(), 1);
+    assert_eq!(denied_rows[0].method, "noop.echo");
+}
+
+/// #28 b22 / A2 / B11: a real partial-deny call carries its denial all the way
+/// into the PROV activity attributes and the v2 attestation predicate — no
+/// hand-built audit row anywhere in this path.
+#[tokio::test]
+async fn real_denial_reaches_prov_attributes_and_the_v2_predicate() {
+    use lancet_native::build_in_toto_statement;
+    use lancet_native::provenance::project_rows;
+    use lancet_protocol::provenance::CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2;
+
+    let (client, audit, _task) = spawn_native_with_admission(admission(&["session.events"])).await;
+    let _: serde_json::Value = client
+        .call_named("noop.echo", serde_json::json!({ "message": "denied-op" }))
+        .await
+        .expect("the tool stays callable with one capability");
+    audit.await_pending().await;
+
+    let rows = audit
+        .query_rows(&AuditQueryFilters {
+            turn_id: Some("test-turn".to_string()),
+            ..Default::default()
+        })
+        .expect("audit query");
+
+    let attributes = &project_rows(&rows).activities[0].attributes;
+    let denied = attributes["denied_operations"]["denied"]
+        .as_array()
+        .expect("the denial reaches the PROV activity attributes");
+    assert_eq!(denied.len(), 1);
+    assert_eq!(denied[0]["cell"]["ctx_op"], "mutate");
+    assert_eq!(denied[0]["target"]["turn_id"], "test-turn");
+    let reason = denied[0]["reason"].as_str().expect("denial reason");
+    assert!(
+        reason.contains("not covered by an admitted capability"),
+        "the projected reason must be the one the host recorded: {reason}"
+    );
+
+    let statement = build_in_toto_statement("test-turn", &rows, "lattice-test/1");
+    assert_eq!(
+        statement.predicate_type,
+        CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2
+    );
+    let evidence = &statement.predicate["evidence"][0];
+    assert_eq!(evidence["denied_operations"]["denied"][0]["reason"], reason);
+    assert_eq!(
+        evidence["admission"]["denied_capabilities"],
+        serde_json::json!(["session.events"]),
+        "'why authorized' stays a field of its own beside the denial"
+    );
+}
+
+/// C2 at the server-construction seam: a deny entry naming no composed
+/// capability is a startup error, so the run never begins.
+#[tokio::test]
+async fn unknown_deny_name_fails_server_construction() {
+    let components =
+        Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
+    let mut config = ServerRunConfig::in_memory_for_tests()
+        .with_capability_admission(admission(&["session.tyop"]));
+    config.components = Some(components);
+
+    let (_client, server) = CepTransport::pair(64);
+    let err = server
+        .run_native(MethodRegistry::new(), config)
+        .await
+        .expect_err("an unknown deny name must refuse startup");
+    assert!(
+        err.message.contains("session.tyop"),
+        "the startup error must name the unknown deny entry: {}",
+        err.message
     );
 }
 
@@ -107,6 +452,90 @@ async fn native_method_still_works_alongside_component() {
         result.get("todos").is_some(),
         "todo_write result must have todos field"
     );
+}
+
+/// Every legacy `ImpactKind`. Cross-checked against the native catalog by the
+/// isolation tests, so a narrowed fixture cannot quietly leave a native method
+/// authorized and make the Component leg look isolated when it is not.
+fn all_impact_kinds() -> BTreeSet<ImpactKind> {
+    BTreeSet::from([
+        ImpactKind::WorkspaceObservation,
+        ImpactKind::WorkspaceMutation,
+        ImpactKind::CommandExecution,
+        ImpactKind::ExternalObservation,
+        ImpactKind::SessionStateMutation,
+        ImpactKind::AuditObservation,
+    ])
+}
+
+fn todo_params() -> serde_json::Value {
+    serde_json::json!({"todos": [{"content": "isolation", "status": "pending"}]})
+}
+
+/// B8/B9/A4: the two authorization vocabularies never cross-authorize.
+///
+/// One server run, one turn policy: every legacy `ImpactKind` denied by
+/// `[lancet.effects]`, every Cell capability admitted. The native method is
+/// refused by that deny list and the Component call still succeeds in the
+/// same run — proving the legacy vocabulary is not a second authority over
+/// Cell admission. A refactor that routed Component dispatch through the
+/// `lancet_catalog::catalog()` lookup would kill the Component leg here.
+#[tokio::test]
+async fn legacy_effect_deny_refuses_native_methods_and_never_component_calls() {
+    let denied = all_impact_kinds();
+    assert!(
+        lancet_catalog::catalog().iter().all(|descriptor| descriptor
+            .effect
+            .kinds
+            .0
+            .iter()
+            .all(|k| denied.contains(k))),
+        "the fixture must deny every kind the native catalog declares"
+    );
+
+    let (client, audit, _task) = spawn_native_with_policies(admission(&[]), denied).await;
+
+    let err = client
+        .call_raw("session.todo_write", todo_params())
+        .await
+        .expect_err("every declared impact kind is denied");
+    assert_eq!(err.code, CepErrorCode::EffectViolation);
+
+    let value = client
+        .call_raw("noop.echo", serde_json::json!({"message": "isolated"}))
+        .await
+        .expect("the legacy deny list has no authority over a Cell-admitted Tool");
+    assert_eq!(value, serde_json::json!({"echoed": "isolated"}));
+
+    // The Component row still carries its own evidence: the call went through
+    // Cell admission, not through a legacy allowance.
+    let metadata = noop_metadata(&audit).await;
+    assert_eq!(
+        metadata["admission_evidence"]["approved_capabilities"],
+        serde_json::json!(["session.events", "session.result"])
+    );
+    audit.await_pending().await;
+}
+
+/// The converse leg: a Cell admission policy that admits nothing refuses the
+/// Component Tool and leaves the native methods untouched. `[lancet
+/// .capabilities]` is not a second authority over the legacy path either.
+#[tokio::test]
+async fn cell_admission_denial_never_refuses_a_native_method() {
+    let (client, _audit, _task) =
+        spawn_native_with_policies(CapabilityAdmissionPolicy::default(), BTreeSet::new()).await;
+
+    let err = client
+        .call_raw("noop.echo", serde_json::json!({"message": "refused"}))
+        .await
+        .expect_err("no tool is enabled");
+    assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
+
+    let result = client
+        .call_raw("session.todo_write", todo_params())
+        .await
+        .expect("Cell admission has no authority over a native method");
+    assert!(result.get("todos").is_some());
 }
 
 /// D.6: the Component call emits events through the CEP event stream.
@@ -158,10 +587,10 @@ async fn component_call_emits_events_with_consistent_call_id() {
     );
 }
 
-/// #48: a cancelled Component call converges on `CallCancelled` end to end:
-/// the client receives the server-mapped structured error, the audit
-/// finalizer records `AuditOutcome::Cancelled`, and the server survives to
-/// serve the next call. Cancellation state (never a guest error string) is
+/// #70 (Codeberg #48): a cancelled Component call converges on `CallCancelled`
+/// end to end: the client receives the server-mapped structured error, the
+/// audit finalizer records `AuditOutcome::Cancelled`, and the server survives
+/// to serve the next call. Cancellation state (never a guest error string) is
 /// the classification authority at every observation point.
 #[tokio::test]
 async fn cancelled_component_call_returns_call_cancelled_and_audits_cancelled() {
@@ -210,8 +639,44 @@ async fn cancelled_component_call_returns_call_cancelled_and_audits_cancelled() 
     assert_eq!(value, serde_json::json!({ "echoed": "after-cancel" }));
 }
 
-/// #48: dropping the call future mid-flight funnels through the same
-/// server-side cancellation mapping (CancelGuard semantics unchanged): the
+/// #28 b2 / A2: a cancellation ends the call, it does not unmake the evidence.
+/// The cancelled row keeps the `AdmissionEvidence` that admission already
+/// produced, so "why was this Tool allowed to start" survives the outcome.
+#[tokio::test]
+async fn cancelled_component_call_keeps_its_admission_evidence() {
+    let (client, audit, _task) = spawn_native_with_noop().await;
+
+    let (call, control) = client.start_call_raw(
+        "noop.echo".to_string(),
+        serde_json::json!({ "message": "cancel" }),
+    );
+    control.cancel();
+    let err = call.await.expect_err("cancelled call must fail");
+    assert_eq!(err.code, lancet_protocol::CepErrorCode::CallCancelled);
+
+    let row = noop_row(&audit).await;
+    assert_eq!(row.result_or_error.as_deref(), Some("cancelled"));
+    let metadata: serde_json::Value = serde_json::from_str(
+        row.metadata_json
+            .as_deref()
+            .expect("a cancelled Component call still finalizes with its evidence"),
+    )
+    .expect("metadata is JSON");
+    assert_eq!(metadata["admission_evidence"]["tool"], "noop.echo");
+    assert_eq!(
+        metadata["admission_evidence"]["approved_capabilities"],
+        serde_json::json!(["session.events", "session.result"])
+    );
+    // Pre-cancelled: Wasmtime is never entered, so the ledger is empty — but
+    // the record itself is present and would carry any effect that had been.
+    assert_eq!(
+        metadata["observed_effects"]["effects"],
+        serde_json::json!([])
+    );
+}
+
+/// #70 (Codeberg #48): dropping the call future mid-flight funnels through the
+/// same server-side cancellation mapping (CancelGuard semantics unchanged): the
 /// audit row records `cancelled` and the server survives.
 #[tokio::test]
 async fn dropped_component_call_audits_cancelled_and_server_survives() {

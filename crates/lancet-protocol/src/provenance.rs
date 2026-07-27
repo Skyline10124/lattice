@@ -15,6 +15,13 @@ use std::collections::BTreeMap;
 /// Stable in-toto `predicateType` URI for per-turn CEP attestations (unsigned in alpha).
 pub const CEP_TURN_ATTESTATION_PREDICATE_TYPE: &str = "https://lattice.dev/attestation/cep-turn/v1";
 
+/// v2 predicate type (#28 C4/D8): the statement separates per-call admission
+/// evidence from observed effects, so it cannot share v1's type. Stored v1
+/// rows keep their own predicate type and bytes; the statement builder picks
+/// the version per turn.
+pub const CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2: &str =
+    "https://lattice.dev/attestation/cep-turn/v2";
+
 /// PROV Activity node — one CEP call / audit row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProvActivity {
@@ -213,6 +220,23 @@ mod tests {
         .unwrap();
 
         assert!(fragment.activities[0].attributes.is_empty());
+    }
+
+    #[test]
+    fn predicate_types_are_pinned_and_distinct() {
+        // v1 is a stored-row identity: changing the string orphans history.
+        assert_eq!(
+            CEP_TURN_ATTESTATION_PREDICATE_TYPE,
+            "https://lattice.dev/attestation/cep-turn/v1"
+        );
+        assert_eq!(
+            CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2,
+            "https://lattice.dev/attestation/cep-turn/v2"
+        );
+        assert_ne!(
+            CEP_TURN_ATTESTATION_PREDICATE_TYPE,
+            CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2
+        );
     }
 
     #[test]

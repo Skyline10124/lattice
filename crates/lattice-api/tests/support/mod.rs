@@ -3,8 +3,9 @@
 
 //! Shared helpers for lattice-api integration tests.
 //!
-//! #37 removed the Upper workspace override surface; these helpers now only
-//! provide the git-repo bootstrap used by Direct-Local test fixtures.
+//! #59 (Codeberg #37) removed the Upper workspace override surface; these
+//! helpers now only provide the git-repo bootstrap used by Direct-Local test
+//! fixtures.
 use std::path::Path;
 
 use lattice_session::test_utils::init_fixture_repo;

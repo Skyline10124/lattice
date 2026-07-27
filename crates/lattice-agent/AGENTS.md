@@ -42,8 +42,9 @@ traits.
   rounds.
 - FIXED M-19a: live mirror emission uses best-effort `try_send` so a full live
   sink does not block the agent loop.
-- FIXED #24: stalled provider stream creation/consumption races both the turn
-  deadline and cooperative cancellation; the cancel poll has no impossible fallback.
+- FIXED #46 (Codeberg #24): stalled provider stream creation/consumption races
+  both the turn deadline and cooperative cancellation; the cancel poll has no
+  impossible fallback.
 
 ## Next Actions
 

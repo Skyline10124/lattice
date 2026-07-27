@@ -24,6 +24,12 @@ thiserror = "2"
 # satisfies `cargo xtask harness-boundary`. Unix-only target gating keeps
 # the Windows PTY backend out of the dependency graph on the committed
 # platforms.
+#
+# `libc` delivers process-group signals through `killpg`/`getpgid` instead of
+# spawning `kill(1)` with a negative pgid argument (#105). The version is
+# spelled out rather than inherited from the workspace: `cargo xtask
+# harness-boundary` rejects workspace dependency inheritance in this manifest.
 [target.'cfg(unix)'.dependencies]
 portable-pty = "0.9"
+libc = "0.2"
 

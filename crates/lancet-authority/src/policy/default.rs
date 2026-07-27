@@ -357,6 +357,10 @@ impl PolicyConfig {
 
     /// Construct a `CepPolicyConfig` for backward compatibility with
     /// existing CEP handlers.
+    ///
+    /// This config carries no Component Tool admission inputs, so the result
+    /// admits nothing (#28 fail-closed default); callers that dispatch
+    /// Component Tools set `capability_admission` from the operator profile.
     pub fn to_cep_policy_config(&self) -> super::CepPolicyConfig {
         super::CepPolicyConfig {
             project_root: self.project_root.clone(),
@@ -364,6 +368,7 @@ impl PolicyConfig {
             network: self.network.clone(),
             budget: self.budget.clone(),
             denied_effect_kinds: self.denied_effect_kinds.clone(),
+            capability_admission: Default::default(),
         }
     }
 }

@@ -102,6 +102,9 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntim
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: AuditBacking::InMemory,
+        // Native catalog mutations only; no Component Tool is called, so the
+        // fail-closed default admission policy is the right one here.
+        capability_admission: Default::default(),
         workspace_history: history.clone(),
         model_id: "test".into(),
         runtime_version: "test".into(),
