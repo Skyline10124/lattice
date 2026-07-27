@@ -26,6 +26,66 @@ pub const COMPOSITE_EXECUTOR_ALLOWLIST: &[&str] = &[
 
 const CLI_PRODUCTION_ALLOWLIST: &[&str] = &["crates/lattice-cli/src/commands/run_tests.rs"];
 
+/// Crates whose presence in `lancet-audit`'s dependency graph would make CEP
+/// server, transport, and registry types nameable from the operator audit read
+/// path.
+const AUDIT_FORBIDDEN_DEPS: &[&str] = &[
+    "lancet-native",
+    "lancet-dispatch",
+    "lancet-cep",
+    "lancet-runtime",
+];
+
+/// `lancet-audit` owns the operator audit read path (#39), so "an operator read
+/// never composes a CEP server" is a dependency-graph property: the server,
+/// transport, and registry types simply are not nameable there.
+///
+/// This gate is what makes that structural. The source-string-scan tests that
+/// used to assert it (`operator_audit_module_does_not_reference_cep_server_types`,
+/// `audit_command_source_does_not_reference_cep_server`) were deleted under
+/// RFC #41 decision 6, and the triage ledger records their replacement as
+/// "架构边界由 crate 依赖/边界检查负责" — this check is that owner.
+///
+/// Dev-dependencies count: a test-only edge still puts the types one `use` away
+/// from the production module in the same crate.
+pub fn lancet_audit_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
+    let mut parts = Vec::new();
+
+    let metadata = MetadataCommand::new()
+        .current_dir(repo_root)
+        .no_deps()
+        .exec()
+        .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))?;
+
+    let audit = metadata
+        .packages
+        .iter()
+        .find(|pkg| pkg.name == "lancet-audit")
+        .ok_or_else(|| anyhow::anyhow!("lancet-audit is missing from the workspace metadata"))?;
+
+    for dep in &audit.dependencies {
+        if AUDIT_FORBIDDEN_DEPS.contains(&dep.name.as_str()) {
+            parts.push(format!(
+                "lancet-audit -> {} ({:?}) reopens the CEP-server path",
+                dep.name, dep.kind
+            ));
+        }
+    }
+
+    let manifest = repo_root.join("crates/lancet-audit/Cargo.toml");
+    let manifest_text = std::fs::read_to_string(&manifest)?;
+    for (line_no, line) in manifest_text.lines().enumerate() {
+        if AUDIT_FORBIDDEN_DEPS
+            .iter()
+            .any(|forbidden| line.contains(forbidden))
+        {
+            parts.push(format!("{}:{}", line_no + 1, line));
+        }
+    }
+
+    Ok(parts)
+}
+
 pub fn lattice_agent_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
     let mut parts = Vec::new();
 

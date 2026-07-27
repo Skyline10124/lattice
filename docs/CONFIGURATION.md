@@ -86,10 +86,11 @@ rejected; `[tools]` only supports `enabled` (no `bundles`).
 | `[llm]` | no (defaults) | `LlmSection` | Provider stream-open retry policy (`[llm.retry]`). |
 | `[lancet]` | no (defaults) | `LancetSection` | LANCET execution policy sub-tables. |
 
-The Upper microVM `[workspace]` section was removed in #40: turns run
-Direct-Local against the canonical Local Workspace, so the schema neither
-declares nor requires `[workspace]`. Legacy profiles that still contain it
-fail to parse (the loader names `[workspace]` as a retired section).
+The Upper microVM `[workspace]` section was removed in #62 (Codeberg #40):
+turns run Direct-Local against the canonical Local Workspace, so the schema
+neither declares nor requires `[workspace]`. Legacy profiles that still
+contain it fail to parse (the loader names `[workspace]` as a retired
+section).
 
 ### `[lancet]` sub-sections
 

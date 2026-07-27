@@ -1,8 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! #5 slice D.6: end-to-end Component dispatch round-trip through the
-//! existing native CEP server lifecycle.
+//! #27 (Codeberg #5) slice D.6: end-to-end Component dispatch round-trip
+//! through the existing native CEP server lifecycle.
 //!
 //! These tests prove the D.3 dispatch split works: a no-op Component Tool
 //! (`noop.echo`) round-trips through the same `CepServer`/audit lifecycle
@@ -587,10 +587,10 @@ async fn component_call_emits_events_with_consistent_call_id() {
     );
 }
 
-/// #48: a cancelled Component call converges on `CallCancelled` end to end:
-/// the client receives the server-mapped structured error, the audit
-/// finalizer records `AuditOutcome::Cancelled`, and the server survives to
-/// serve the next call. Cancellation state (never a guest error string) is
+/// #70 (Codeberg #48): a cancelled Component call converges on `CallCancelled`
+/// end to end: the client receives the server-mapped structured error, the
+/// audit finalizer records `AuditOutcome::Cancelled`, and the server survives
+/// to serve the next call. Cancellation state (never a guest error string) is
 /// the classification authority at every observation point.
 #[tokio::test]
 async fn cancelled_component_call_returns_call_cancelled_and_audits_cancelled() {
@@ -675,8 +675,8 @@ async fn cancelled_component_call_keeps_its_admission_evidence() {
     );
 }
 
-/// #48: dropping the call future mid-flight funnels through the same
-/// server-side cancellation mapping (CancelGuard semantics unchanged): the
+/// #70 (Codeberg #48): dropping the call future mid-flight funnels through the
+/// same server-side cancellation mapping (CancelGuard semantics unchanged): the
 /// audit row records `cancelled` and the server survives.
 #[tokio::test]
 async fn dropped_component_call_audits_cancelled_and_server_survives() {

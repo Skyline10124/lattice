@@ -180,7 +180,8 @@ pub fn assert_with_failure_artifacts(
             &artifacts.command_summary,
             secrets,
         )?;
-        // RFC #19 decision eight: redact before writing (done above), then
+        // RFC #41 (Codeberg #19) decision eight: redact before writing (done
+        // above), then
         // scan after writing as defense-in-depth. Any leaked file is
         // best-effort redacted in place by `scan_artifacts_for_secrets` and
         // recorded in `sentinel_scan.txt` so the operator can see the

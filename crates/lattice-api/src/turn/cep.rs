@@ -870,7 +870,7 @@ mod turn_wiring {
 
     #[tokio::test]
     async fn external_audit_preserves_lower() {
-        let _xdg = crate::ScopedXdgStateHome::new();
+        let _xdg = lancet_audit::ScopedXdgStateHome::new();
         let project = TempDir::new().unwrap();
         init_git_repo(project.path());
         let legacy_dir = project.path().join(".lattice");

@@ -1,13 +1,13 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! #37 acceptance tests: production Turn operates directly on the Local
-//! Workspace through the closed five-method catalog.
+//! #59 (Codeberg #37) acceptance tests: production Turn operates directly
+//! on the Local Workspace through the closed five-method catalog.
 //!
 //! These tests exercise the real production runtime
 //! (`lancet_api::LancetRuntime::build` with a temp Local root, no Upper, no
 //! workspace override, no KVM/MSB) and assert each acceptance criterion from
-//! the #37 ticket against the canonical project root on disk:
+//! the #59 ticket against the canonical project root on disk:
 //!
 //! - observe reads current Local state and sees external modifications made
 //!   between Tool calls.
@@ -406,7 +406,7 @@ async fn successful_mutation_survives_later_failure() {
 /// Audit records method-local evidence (guarded path + Local Revision) and
 /// carries no routing identity: no `execution_backend`, no
 /// `upper_workspace_id`, no adapter-preflight or generic routing invocation
-/// flags (#38).
+/// flags (#60 (Codeberg #38)).
 #[tokio::test]
 async fn audit_records_method_local_evidence_without_routing_metadata() {
     let dir = TempDir::new().unwrap();

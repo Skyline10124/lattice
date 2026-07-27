@@ -5,7 +5,8 @@
 //!
 //! Closed core: `CtxOp` × `ExtImpact` over tool-declared scopes with
 //! fail-closed trust. This vocabulary is additive; the legacy
-//! `ImpactKind` machinery in `effect_types.rs` is retired by #6/#12.
+//! `ImpactKind` machinery in `effect_types.rs` is retired by #28/#34
+//! (Codeberg #6/#12).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ use std::collections::BTreeSet;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CtxOp {
-    /// Result enters context (charged against the context budget by #6).
+    /// Result enters context (charged against the context budget by #28).
     Alloc,
     /// Context release. Vocabulary only this cycle (PRD R10): no ToolHost seam.
     Free,
@@ -144,7 +145,7 @@ pub struct ArtifactIdentity {
     pub toolchain: String,
 }
 
-/// A tool call's reported output cell + value (budget seam lands in #6).
+/// A tool call's reported output cell + value (budget seam lands in #28).
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolOutput {
@@ -544,7 +545,8 @@ mod tests {
         // the operation `(Mutate, None, session/in)` (mutates existing todo
         // state, not charged) plus the return-value `(Alloc, None, session/in)`
         // (the TodoWriteResult enters context, charged against the budget
-        // by #6). The vocabulary must represent both in one `Vec<Cell>`.
+        // by #28, Codeberg #6). The vocabulary must represent both in one
+        // `Vec<Cell>`.
         let cells: Vec<Cell> = vec![
             Cell {
                 ctx_op: CtxOp::Mutate,

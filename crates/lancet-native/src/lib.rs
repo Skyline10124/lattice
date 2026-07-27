@@ -7,7 +7,15 @@
 //! native catalog handlers. `lattice-agent` cannot reach them at compile time.
 
 pub mod audit {
-    pub use lancet_audit::*;
+    //! Audit *persistence* surface only.
+    //!
+    //! Deliberately re-exports `lancet_audit::audit`, not the `lancet_audit`
+    //! crate root: since GitHub #39 the root also carries the operator read
+    //! path (`query_audit` / `tail_audit` / `replay_audit` and their DTOs) and
+    //! the project-keyed store-path helpers. Those are operator-only and have
+    //! no business widening this crate's public API — a glob over the root
+    //! would republish them here as `lancet_native::audit::query_audit`.
+    pub use lancet_audit::audit::*;
 }
 pub(crate) mod edit;
 pub mod enforcement;

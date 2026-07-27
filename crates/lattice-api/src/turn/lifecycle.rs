@@ -4,13 +4,13 @@
 //! Turn lifecycle terminal classification and crash-safe disposition
 //! finalization.
 //!
-//! #37 removed the Upper-bound half of this module (workspace-dirty hook,
-//! terminal verification, promotion outcomes, promoted-commit retry). What
-//! remains is the terminal-classification vocabulary used by the live turn
-//! path (`super::live`) to derive an explicit `(status, disposition,
-//! resource_action)` triple for every committed turn, plus the
-//! journal/retain/release/commit orchestrator used by non-promotion
-//! finalization paths.
+//! #59 (Codeberg #37) removed the Upper-bound half of this module
+//! (workspace-dirty hook, terminal verification, promotion outcomes,
+//! promoted-commit retry). What remains is the terminal-classification
+//! vocabulary used by the live turn path (`super::live`) to derive an
+//! explicit `(status, disposition, resource_action)` triple for every
+//! committed turn, plus the journal/retain/release/commit orchestrator used
+//! by non-promotion finalization paths.
 //!
 //! Every terminal condition maps to an explicit `(TurnCommitStatus,
 //! WorkspaceDisposition, ResourceAction)` triple — no error-string inference.
@@ -185,10 +185,11 @@ pub fn outcome_workspace_less() -> TurnLifecycleOutcome {
 /// Commit a terminal turn outcome through the caller-supplied commit
 /// function.
 ///
-/// #37 removed the Upper snapshot journal and retain/release paths; only the
+/// #59 removed the Upper snapshot journal and retain/release paths; only the
 /// Direct-Local Destroy path remains in production, so this is a thin delegate
-/// over `commit_fn`. #40 removed the unused legacy `session_id` /
-/// `prepared_commit_id` parameters. Never rewrites a committed lifecycle row.
+/// over `commit_fn`. #62 (Codeberg #40) removed the unused legacy
+/// `session_id` / `prepared_commit_id` parameters. Never rewrites a committed
+/// lifecycle row.
 pub fn finalize_turn<F>(
     outcome: &TurnLifecycleOutcome,
     snapshot_name: &str,

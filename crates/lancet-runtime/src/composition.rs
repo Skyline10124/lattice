@@ -416,9 +416,10 @@ fn component_footprint(bytes: &[u8]) -> ResourceFootprint {
 
 /// Derive the domain channel set supplied by the actual imports. Only known
 /// ToolHost domain WIT imports grant a channel; `host-control` grants none.
-/// #6 will add handle-per-capability domain imports.
+/// #28 (Codeberg #6) will add handle-per-capability domain imports.
 fn channels_for_domain_imports(_imports: &BTreeSet<String>) -> BTreeSet<ChannelKind> {
-    // #5: no domain imports exist yet. host-control is control-only.
+    // #27 (Codeberg #5): no domain imports exist yet. host-control is
+    // control-only.
     BTreeSet::new()
 }
 

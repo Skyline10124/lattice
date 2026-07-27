@@ -76,7 +76,8 @@ fn allows_mutation_not_in_deny_list() {
 
 #[test]
 fn denies_retired_command_run_as_unknown_method() {
-    // Regression for issue #4: exec.command_run is retired from the catalog,
+    // Regression for issue #26 (Codeberg #4): exec.command_run is retired from
+    // the catalog,
     // so the resolver rejects it as NonDeterminable before any policy check.
     let hook = DefaultPolicyHook::new(project_config());
     let input = policy_input(

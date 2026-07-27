@@ -23,9 +23,10 @@ The production execution path is **Direct-Local** (ADR 0003): structured
 LANCET Tools observe and mutate the canonical Local Workspace directly behind
 host-enforced policy, Guard L1 path checks, effect checks, and audit. There is
 no sandbox VM, workspace projection, or per-turn provisioning — the
-MSB/Upper path and the `lattice-workspace` crate were removed in #40. The
-session graph store is git-backed (`GitSessionGraphStore` over the project's
-`git2` object database); the previous SQLite graph store has been removed.
+MSB/Upper path and the `lattice-workspace` crate were removed in
+#62 (Codeberg #40). The session graph store is git-backed
+(`GitSessionGraphStore` over the project's `git2` object database); the
+previous SQLite graph store has been removed.
 ## 2. Component diagram
 
 The workspace has 19 crates grouped into layers. Arrows point from a higher
@@ -168,7 +169,7 @@ A single turn, from user keystroke to committed session graph:
      calls into typed CEP method invocations.
    - The runtime is rooted at the canonical Local Workspace (the project
      root). No sandbox VM, lease, or per-turn workspace provisioning exists;
-     the #40 cleanup removed the Upper lifecycle (`prepare_upper`,
+     the #62 cleanup removed the Upper lifecycle (`prepare_upper`,
      `UpperLease`, `UpperHandle`) with the `lattice-workspace` crate.
 4. **`AgentLoop` assembles messages from session state.**
    - `AgentLoop` (`crates/lattice-agent/src/agent_loop/mod.rs`) reads the
@@ -249,6 +250,20 @@ project-keyed CEP audit SQLite store through `lancet-api::{query_audit,
 tail_audit, replay_audit}` (`lattice audit` CLI). Agents cannot invoke audit
 reads as CEP tools.
 
+Since GitHub #39 those three `lancet-api` entry points are one-line delegations: the
+DTOs, pagination loop, filter construction, wire projection, attestation
+comparison, and contract tests live in `lancet-audit`
+(`src/operator.rs`, `src/operator_tests.rs`), and the external project-keyed
+path helpers in `lancet-audit/src/store_path.rs` (re-exported by
+`lancet-api::config`). The public `lancet_api::*` paths are unchanged. Because
+`lancet-audit` sits at layer 2 and depends on none of `lancet-native`,
+`lancet-dispatch`, `lancet-cep`, or `lancet-runtime`, "an operator audit read
+never composes a CEP server" is a **structural crate-dependency guarantee** —
+server, transport, and registry types are not nameable from the read path — not
+a source-string-scan assertion. The operator DTOs that previously lived in
+`lancet-catalog/src/methods/audit.rs` were deleted with that module; none became
+a Tool descriptor, generated catalog entry, or Component.
+
 There is **no** `session.envelope` method. It was removed from the catalog;
 `crates/lattice-api/src/turn/cep.rs:1315-1323` contains a test
 (`catalog_exposure_omits_unknown_envelope_method`) asserting that enabling
@@ -267,7 +282,7 @@ asserting a raw CEP call to `exec.command_run` returns JSON-RPC `-32601`.
 - **MSB/Upper sandbox workspace** (`lattice-workspace`, `Workspace` trait,
   `UpperHandle`, `UpperSpec`, `UpperLease`, `prepare_upper`, warm templates,
   guest-Git baseline/candidate flow, credential injection, `[workspace]`
-  profile section with egress/image/lifecycle fields) was removed in #40.
+  profile section with egress/image/lifecycle fields) was removed in #62.
   Turns run Direct-Local against the canonical project root; profiles with a
   legacy `[workspace]` section now fail strict parsing.
 - **Landlock / netns command isolation** was removed (commit `a29072e2`,
@@ -304,14 +319,18 @@ One sentence per crate:
   rebinding-domain checks.
 - **`lancet-catalog`** — Typed CEP method contracts, params/results,
   descriptors, and the static production `CATALOG` (5 agent-visible methods);
-  `methods/audit.rs` holds operator query/replay DTOs only; depends only
-  on protocol.
+  it holds no operator-only contracts (`methods/audit.rs` was deleted in GitHub #39);
+  depends only on protocol.
 - **`lancet-dispatch`** — Generic method registry, typed CEP dispatch,
   in-process transport (`CepClient`/`CepTransport`), cancellation, and event
   sinks.
 - **`lancet-audit`** — CEP audit persistence, query filters, stage/impact
-  labels, provenance projection, and attestation persistence (CEP audit
-  SQLite lives here).
+  labels, provenance projection, attestation persistence (CEP audit SQLite
+  lives here), and — since GitHub #39 — the whole operator read path: `query_audit` /
+  `tail_audit` / `replay_audit` with their DTOs, project-keyed store-path
+  resolution, and the workspace-wide `ScopedXdgStateHome` test helper behind
+  the `test-support` feature. It must never depend on `lancet-native`,
+  `lancet-dispatch`, `lancet-cep`, or `lancet-runtime`.
 - **`lancet-authority`** — Policy semantics, capability matching, Guard L1
   path/scope checks, effect ledger, and effect-region checks.
 - **`lancet-cep`** — Public CEP facade over protocol/catalog/dispatch, plus
@@ -325,7 +344,9 @@ One sentence per crate:
 - **`lancet-api`** — Unified LANCET public API: composes `LancetRuntime` /
   `LancetServer` (server lifecycle, `CepClient`, audit, tool definitions)
   from the native crates, taking LANCET-native policy types; independent of
-  LATTICE session/agent/profile layers.
+  LATTICE session/agent/profile layers. Its `audit` module is a thin
+  delegating facade over `lancet-audit`'s operator read path, not an owner of
+  it.
 - **`lattice-llm`** — Provider adapters, SSE streaming, model routing,
   tool-call vocabulary, and logging. URL/DNS safety primitives live in the
   shared `net-guard` leaf and are composed here.

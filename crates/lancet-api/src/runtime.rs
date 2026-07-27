@@ -178,7 +178,8 @@ impl LancetRuntime {
         } = config;
 
         // D.2: compose the Component runtime once. Production builds compose
-        // from embedded inventory (empty until #7–#10); the same instance
+        // from embedded inventory (empty until #29–#32, Codeberg #7–#10); the
+        // same instance
         // serves dispatch (D.3) and LLM projection (D.4).
         let components = Arc::new(
             ComponentRuntime::from_embedded()
@@ -305,8 +306,8 @@ fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
 ///
 /// The name/description/params schema come only from the generated descriptor
 /// JSON — the adapter does not hand-write method/schema matches. Production
-/// builds have zero Component Tools until #7–#10; tests inject a no-op
-/// fixture whose descriptor projects a `noop.echo` definition.
+/// builds have zero Component Tools until #29–#32 (Codeberg #7–#10); tests
+/// inject a no-op fixture whose descriptor projects a `noop.echo` definition.
 fn project_component_definitions(components: &ComponentRuntime) -> Vec<ToolDefinition> {
     components
         .descriptors()
@@ -402,7 +403,8 @@ mod tests {
         runtime.shutdown().await;
     }
 
-    // Issue #4 behavior acceptance: a raw CEP call to the permanently retired
+    // Issue #26 (Codeberg #4) behavior acceptance: a raw CEP call to the
+    // permanently retired
     // `exec.command_run` method must reach the production dispatch layer (not be
     // rejected by a pre-dispatch policy/tool-exposure filter) and return a stable
     // JSON-RPC `Method not found` (-32601) error — never a policy-denied, verify
@@ -461,7 +463,8 @@ mod tests {
         runtime.shutdown().await;
     }
 
-    // Issue #15 behavior acceptance: a raw CEP call to the permanently retired
+    // Issue #37 (Codeberg #15) behavior acceptance: a raw CEP call to the
+    // permanently retired
     // `mutate.batch` method must return JSON-RPC `Method not found` (-32601).
     #[tokio::test]
     async fn production_runtime_rejects_retired_mutate_batch_as_method_not_found() {

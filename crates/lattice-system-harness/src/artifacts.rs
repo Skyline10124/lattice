@@ -268,10 +268,10 @@ fn verify_persisted_bundle(dir: &Path, secrets: &[&str]) -> Result<(), EvidenceE
 
 /// Persist the fake LLM's captured request log into a failure bundle.
 ///
-/// RFC #19 decision eight + PRD user story 21 require that a failure artifact
-/// bundle include the requests the fake LLM received, so the post-mortem can
-/// see what the product actually sent. Each capture is written as one
-/// pretty-printed JSON object on a separated block; secrets listed in
+/// RFC #41 (Codeberg #19) decision eight + PRD user story 21 require that a
+/// failure artifact bundle include the requests the fake LLM received, so the
+/// post-mortem can see what the product actually sent. Each capture is written
+/// as one pretty-printed JSON object on a separated block; secrets listed in
 /// `secrets` are substring-redacted from the rendered bodies (the fake LLM
 /// typically receives only the `Bearer <FAKE_API_KEY>` header, which never
 /// reaches the body, but the redaction defense is applied regardless).
@@ -305,7 +305,7 @@ pub fn write_fake_llm_log(
 }
 
 /// A captured workspace listing: `(relative_path, size_bytes)` entries,
-/// sorted by path. Used to compute a before/after diff on failure (RFC #19
+/// sorted by path. Used to compute a before/after diff on failure (RFC #41
 /// decision eight, PRD user story 21: "工作区差异").
 #[derive(Debug, Clone)]
 pub struct WorkspaceSnapshot {
@@ -352,7 +352,7 @@ pub fn write_workspace_listing(
     Ok(())
 }
 
-/// Write the before/after workspace diff (RFC #19 decision eight, PRD user
+/// Write the before/after workspace diff (RFC #41 decision eight, PRD user
 /// story 21: "工作区差异"). Writes `workspace_before.txt`,
 /// `workspace_after.txt`, and `workspace_diff.txt` (a unified diff of the
 /// two listings) into `failure_dir`, all redacted against `secrets`.

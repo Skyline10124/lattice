@@ -4,7 +4,8 @@
 //! Generated host composition modules.
 //!
 //! - `host_composition`: the production `EXPECTED_COMPONENTS` list. Empty
-//!   until a production Tool migrates to a Component (#7–#10).
+//!   until a production Tool migrates to a Component
+//!   (#29–#32 (Codeberg #7–#10)).
 //! - `noop_fixture`: a fixed no-op fixture for cross-crate integration tests
 //!   (`test-utils` feature). No caller-controlled registrations, paths,
 //!   bytes, handlers, or approval set.

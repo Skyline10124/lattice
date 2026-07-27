@@ -120,11 +120,9 @@ async fn dogfood_impact_matrix_five_production_classes() {
     // Content hash used by mutate.edit; line anchors are computed by LANCET.
     let file_hash = format!("blake3:{}", blake3::hash(seed_content.as_bytes()).to_hex());
 
-    let state = TempDir::new().expect("xdg state");
-    // SAFETY: test-only env for external audit path resolution.
-    unsafe {
-        std::env::set_var("XDG_STATE_HOME", state.path());
-    }
+    // Holds the shared env lock and redirects `XDG_STATE_HOME` for the rest of
+    // this test, restoring the previous value on drop.
+    let _state = lancet_audit::ScopedXdgStateHome::new();
     let audit_path = audit_db_path_for_project(&canonical).expect("audit path");
     std::fs::create_dir_all(audit_path.parent().unwrap()).expect("audit parent");
     let audit = Arc::new(CepAuditStore::open(&audit_path).expect("audit store"));

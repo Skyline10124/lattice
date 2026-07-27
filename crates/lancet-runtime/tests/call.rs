@@ -1,7 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Call execution tests (#5 slice C.6/C.7, #28 B3/B5/B7).
+//! Call execution tests (#27 (Codeberg #5) slice C.6/C.7, #28 (Codeberg #6)
+//! B3/B5/B7).
 //!
 //! These tests exercise the `ComponentRuntime::call` path end-to-end:
 //! params validation, Component instantiation, per-operation Cell
@@ -289,7 +290,8 @@ fn disabled_tool_is_not_admitted() {
 }
 
 /// Cancellation: if the cancellation signal is set before the call, the
-/// host short-circuits with `CallCancelled` before entering Wasmtime (#48).
+/// host short-circuits with `CallCancelled` before entering Wasmtime
+/// (#70, Codeberg #48).
 #[tokio::test]
 async fn precancelled_call_returns_call_cancelled() {
     let rt = ComponentRuntime::noop_fixture().expect("fixture composes");

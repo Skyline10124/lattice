@@ -199,8 +199,9 @@ system = "You are a helpful coding agent."
 
 `[tools]`, `[llm]`, and `[lancet]` are optional and default to empty/defaults.
 Turns run Direct-Local against the canonical project workspace — no VM image,
-credential injection, or `[workspace]` section exists (removed in #40);
-legacy profiles that still declare `[workspace]` fail to parse.
+credential injection, or `[workspace]` section exists (removed in
+#62 (Codeberg #40)); legacy profiles that still declare `[workspace]` fail
+to parse.
 ### (c) Diagnostics with LATTICE_LOG
 
 If a turn fails or behaves unexpectedly, raise the tracing level for more

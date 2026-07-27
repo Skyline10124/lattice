@@ -1,8 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fast binary black-box: audit command error surface (issue #18 "fast
-//! binary black-box" matrix; triage replacement target `planned_audit_cli`).
+//! Fast binary black-box: audit command error surface (issue #40 "fast binary
+//! black-box" matrix, Codeberg #18; triage replacement target
+//! `planned_audit_cli`).
 //!
 //! Drives the built `lattice` binary for the no-turn audit surface. With no
 //! agent turn having run in the project, the audit store does not exist, so
@@ -14,7 +15,8 @@
 //!
 //! The turn-bearing audit states (seeded store, replay of a real turn,
 //! non-empty query results) are seeded via a committed Direct-Local turn
-//! (see `tests/direct_local_turn.rs`); no KVM/MSB lane exists anymore (#40).
+//! (see `tests/direct_local_turn.rs`); no KVM/MSB lane exists anymore
+//! (#62, Codeberg #40).
 //! See `docs/TEST-TRIAGE.md` and `FINDINGS.md`.
 //!
 //! These scenarios supersede the crate-internal

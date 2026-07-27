@@ -82,7 +82,7 @@ The `direct_*` scenario matrix plus `direct_local_turn` and `pty_tui_smoke` in
 (`lattice_api::stream_turn`) against the canonical Local Workspace — the
 project root — with no hypervisor, daemon, or container image required.
 
-The Direct-Local matrix (landed in #24, slices 0–8):
+The Direct-Local matrix (landed in #46 (Codeberg #24), slices 0–8):
 
 - `direct_turn_contract.rs` — turn lifecycle + session reopen.
 - `direct_observation.rs` — workspace visibility and bounds.
@@ -198,7 +198,7 @@ isolation contract (`crates/lattice-system-harness/AGENTS.md`):
 - **Fake LLM via formal config** — the fake provider
   (`src/fake_llm.rs`) connects through the real `OPENAI_COMPATIBLE_*`
   configuration; there is no test-only provider, hidden flag, or product-side
-  change (RFC #19 decision four).
+  change (RFC #41 (Codeberg #19) decision four).
 - **Process-group children** — every child is its own process-group leader on
   Unix; timeout and controlled interrupt retain drained stdout/stderr and clean
   the whole group.

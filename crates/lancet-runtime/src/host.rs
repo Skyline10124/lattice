@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Minimal ToolHost — control-only, with per-operation Cell authorization
-//! (#28 B3/D2).
+//! (#28 (Codeberg #6) B3/D2).
 //!
 //! The no-op Tool imports only `host-control` (cancellation probe +
 //! structured events). It imports **no** workspace/network/session domain
-//! operation; #6 adds handle-per-capability domain imports, and each will
-//! bind its own cell through the same [`authorize_operation`] seam.
+//! operation; the domain slices add handle-per-capability domain imports, and
+//! each will bind its own cell through the same [`authorize_operation`] seam.
 //!
 //! Host-side binding (D2): `emit-event ⇒ Cell{Mutate, None, <the tool's
 //! session-channel scope>}` with concrete target `Session{turn_id}`. Guests

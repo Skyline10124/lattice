@@ -29,16 +29,17 @@ LANCET profile sections, and pure lowering data consumed by API/authority.
 
 ## Recent Issues
 
-- ADDED #28: `[lancet.capabilities]` (`deny`, `max_boundary`, default `in`) is a
-  typed sub-table, so a Component Tool admission policy can never fall into
-  `extensions`. `AgentProfile::capability_admission_policy` lowers it plus
-  `[tools].enabled` into `CapabilityAdmissionPolicy`; unknown `deny` names fail
-  at server construction, not here. `[lancet.effects]` stays native-path only.
-- FIXED #40: the Upper microVM `[workspace]` section (`WorkspaceSection`,
-  `EgressPolicyConfig`, `CredentialRef`, lifecycle-limit constants) was
-  removed. Legacy profiles declaring `[workspace]` now fail strict parsing;
-  the loader names it via the `FORBIDDEN_SECTIONS` pre-scan. Generated
-  templates emit only the `[lancet.workspace]` policy section.
+- ADDED #28 (Codeberg #6): `[lancet.capabilities]` (`deny`, `max_boundary`,
+  default `in`) is a typed sub-table, so a Component Tool admission policy can
+  never fall into `extensions`. `AgentProfile::capability_admission_policy`
+  lowers it plus `[tools].enabled` into `CapabilityAdmissionPolicy`; unknown
+  `deny` names fail at server construction, not here. `[lancet.effects]` stays
+  native-path only.
+- FIXED #62 (Codeberg #40): the Upper microVM `[workspace]` section
+  (`WorkspaceSection`, `EgressPolicyConfig`, `CredentialRef`, lifecycle-limit
+  constants) was removed. Legacy profiles declaring `[workspace]` now fail
+  strict parsing; the loader names it via the `FORBIDDEN_SECTIONS` pre-scan.
+  Generated templates emit only the `[lancet.workspace]` policy section.
 - FIXED P19-CR-05: `[lancet]` flatten extension now rejects scalar typos instead
   of silently accepting them.
 - FIXED M-13: profile canonicalization failures now return
@@ -46,8 +47,8 @@ LANCET profile sections, and pure lowering data consumed by API/authority.
 - FIXED M-24-04: profile `tools.enabled` is the method exposure list. Base
   authority requirements come from catalog descriptors for those methods, not
   profile-specific branch logic in `lattice-api`.
-- FIXED #24: optional `[llm].timeout_secs` is validated as `1..=3600`; zero and
-  upper-bound failures retain field-specific diagnostics.
+- FIXED #46 (Codeberg #24): optional `[llm].timeout_secs` is validated as
+  `1..=3600`; zero and upper-bound failures retain field-specific diagnostics.
 - WATCH: external policy file schema (`[lancet.policy].path`) is consumed by
   per-turn LANCET composition. Command isolation was retired; do not
   reintroduce `[lancet.isolation]`/`[lancet.command]` typed sections.

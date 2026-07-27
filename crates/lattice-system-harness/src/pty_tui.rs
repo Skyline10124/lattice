@@ -3,16 +3,16 @@
 
 //! `PtyTuiDriver`: drive the prototype TUI through a PTY for smoke scenarios.
 //!
-//! RFC #19 decision three: PTY is only for one or two smoke scenarios that
-//! prove the TUI entrypoint still wires into the same `stream_turn` chain.
-//! It does **not** assert on colors, prompt shape, or layout — those are
-//! prototype presentation details that must not become long-term contract.
-//! Prompt recognition and ANSI cleanup live **inside this driver** only;
-//! scenario-level assertions never touch display details.
+//! RFC #41 (Codeberg #19) decision three: PTY is only for one or two smoke
+//! scenarios that prove the TUI entrypoint still wires into the same
+//! `stream_turn` chain. It does **not** assert on colors, prompt shape, or
+//! layout — those are prototype presentation details that must not become
+//! long-term contract. Prompt recognition and ANSI cleanup live **inside this
+//! driver** only; scenario-level assertions never touch display details.
 //!
-//! Unix-only: the repo does not commit to Windows (see #26 Out-of-Scope).
-//! The driver is built on `portable-pty`, a general test library that
-//! satisfies the harness boundary (no product crate deps).
+//! Unix-only: the repo does not commit to Windows (see #48 (Codeberg #26)
+//! Out-of-Scope). The driver is built on `portable-pty`, a general test
+//! library that satisfies the harness boundary (no product crate deps).
 
 #![cfg(unix)]
 
@@ -146,7 +146,7 @@ impl PtyTuiDriver {
     /// The predicate matches against ANSI-stripped text so a smoke scenario
     /// can wait for a semantic marker (e.g. a token, a status word) without
     /// depending on colors or cursor moves — keeping presentation details
-    /// out of the long-term contract (RFC #19 decision five).
+    /// out of the long-term contract (RFC #41 decision five).
     pub fn wait_for(
         &mut self,
         timeout: Duration,
@@ -185,7 +185,7 @@ impl PtyTuiDriver {
 
     /// Wait for the TUI prompt to appear. This is the **prompt-recognition
     /// seam**: the prompt shape (`>`) lives inside the driver, never in a
-    /// scenario (RFC #19 decision three — "prompt recognition and ANSI
+    /// scenario (RFC #41 decision three — "prompt recognition and ANSI
     /// cleanup only exist inside the driver; scenarios assert no display
     /// details"). A scenario that needs to know the TUI is ready for input
     /// calls this, not `wait_for(..., |s| s.contains('>'))`.

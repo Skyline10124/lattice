@@ -17,9 +17,9 @@ pub struct LoadedAgentProfile {
 
 /// Forbidden top-level sections that must be rejected before deserialization.
 ///
-/// `workspace` is the retired Upper microVM section (#40): legacy profiles
-/// that still declare it fail here with a named, actionable error rather
-/// than a bare `deny_unknown_fields` rejection.
+/// `workspace` is the retired Upper microVM section (#62, Codeberg #40):
+/// legacy profiles that still declare it fail here with a named, actionable
+/// error rather than a bare `deny_unknown_fields` rejection.
 const FORBIDDEN_SECTIONS: &[&str] = &[
     "capabilities",
     "handoff",

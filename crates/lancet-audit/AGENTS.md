@@ -6,12 +6,30 @@ Crate-local guidance for `lancet-audit`.
 
 This crate owns CEP audit persistence and provenance projection: call audit
 rows, query filters, stage labels, impact/capability labels, canonicalization,
-in-toto attestation construction, and attestation persistence.
+in-toto attestation construction, and attestation persistence. Since GitHub #39 it also
+owns the operator audit read path end to end — DTOs, pagination, filter
+construction, wire projection, attestation comparison, and the project-keyed
+store-path resolution behind it.
 
 ## Sub-Architecture
 
 - `src/audit.rs` owns `CepAuditStore`, query filters, row model, semantic stage
   labels, impact labels, and call metadata.
+- `src/operator.rs` owns the operator read API: `AuditRequest`,
+  `AuditQueryOutput`, `AuditTailOutput`, `AuditReplayRequest`,
+  `AuditReplayResult`, `AUDIT_TAIL_MAX_ROWS` / `AUDIT_TAIL_MAX_BATCHES`,
+  `OperatorAuditError`, and async `query_audit` / `tail_audit` / `replay_audit`.
+  Its module doc carries the pagination, cancellation (L-11-01), replay-output,
+  and concurrency (L-11-02) contracts.
+- `src/operator_tests.rs` holds the operator contract tests (pagination, replay,
+  attestation match, unfinalized-row exclusion, concurrent writer, legacy
+  schema).
+- `src/store_path.rs` owns `ExternalAuditPathError`, `audit_state_root`,
+  `project_storage_key`, `audit_db_path_for_project`, and
+  `audit_db_path_for_project_in`.
+- `src/test_support.rs` (feature `test-support`) owns the single workspace-wide
+  `ScopedXdgStateHome`; `lattice-api` and `lattice-cli` consume it as a
+  dev-dependency instead of keeping crate-local copies.
 - `src/provenance/projector.rs` projects audit records into PROV fragments.
 - `src/provenance/attestation.rs` builds and stores turn attestation records.
 - `src/provenance/canonicalize.rs` owns deterministic JSON canonicalization.
@@ -25,10 +43,18 @@ in-toto attestation construction, and attestation persistence.
 - Do not make live authority, policy, or effect decisions in this crate.
 - Do not perform native execution or inspect workspace contents directly.
 - Keep canonicalization deterministic; attestation hashes depend on it.
+- Never add a `lancet-native`, `lancet-dispatch`, `lancet-cep`, or
+  `lancet-runtime` dependency. That absence is what makes "operator audit read
+  never composes a CEP server" a structural crate-dependency guarantee instead
+  of a source-string scan: server, transport, and registry types are simply not
+  nameable here. Adding one silently reopens the door.
+- Operator read DTOs are operator-facing, not Tool schema types. They must never
+  gain catalog/schema derives, become Source Tools or generated catalog
+  entries, or reappear as Agent catalog methods.
 
 ## Recent Issues
 
-- ADDED #28: `PRAGMA user_version` carries `AUDIT_SCHEMA_VERSION`; a newer or
+- ADDED #28 (Codeberg #6): `PRAGMA user_version` carries `AUDIT_SCHEMA_VERSION`; a newer or
   old-shape database fails open with `AuditError::IncompatibleSchema` and is left
   untouched (read-only legacy import stays the migration path). Shape detection
   covers both written tables by column name (`cep_audit_entries` and
@@ -52,27 +78,51 @@ in-toto attestation construction, and attestation persistence.
   call. A Cell-governed row has no legacy `ImpactKind`, so the projector marks
   its `ProvActivity::impact_kind` `impact_kind_attributed: false` instead of
   coercing the `unknown` column into a concrete kind.
-- FIXED #38: `RejectionStage` de-Uppered (`PathGuard`/`LocalIo`, no
-  `VerificationFailure`); routing metadata and `backend_invoked` are gone from
-  durable rows; mutation preflight evidence renamed `expected_hash_status` →
-  `local_revision`. Pre-#38 rows keep the old labels (alpha-stage no-compat),
-  so `rejection_stage` filters match new writes only.
-- FIXED issue #11: agent catalog audit CEP methods removed; operator reads live in
-  `lancet-api::audit` and `lattice audit` (direct store, no CEP server).
-- OPEN #17: operator read DTOs, pagination/filter behavior, and contract tests
-  move into this crate while `lancet-api` remains a thin facade. They must not
-  become Source Tools or generated catalog entries.
+- FIXED GitHub #39 (= Codeberg #17): operator read DTOs, pagination/filter construction,
+  wire projection, attestation comparison, contract tests, and the store-path
+  helpers landed here as `src/operator.rs` / `src/operator_tests.rs` /
+  `src/store_path.rs`; `lancet-api::audit` is now a thin delegating facade with
+  byte-identical error messages, and `lancet-catalog/src/methods/audit.rs` with
+  its six DTOs was deleted outright. These types are operator-only: never Source
+  Tools, generated catalog entries, or Agent catalog methods. The same issue
+  moved `ScopedXdgStateHome` here behind `test-support`, deleting the
+  `lattice-api` / `lattice-cli` copies. New deps: `dirs`, `sha2`, optional
+  `tempfile`. Residuals L-11-01 (tail cancellation) and L-11-02
+  (synthetic-writer concurrency) are now crate-local — contracts in
+  `src/operator.rs`, escalation conditions in root `FINDINGS.md`.
+- ADDED #27 (Codeberg #5) slice D: `merge_finalize_metadata` gained a
+  `component_cells: &[String]` parameter. Component Tool calls record
+  4-segment Cell audit keys (`ctx:ext:scope:trust`) as a `component_cells`
+  JSON array; native handler calls pass an empty slice (no behavior change).
+  Audit records cells, not capability names (spec §6.3).
+- FIXED #60 (Codeberg #38): `RejectionStage` vocabulary de-Uppered —
+  `AdapterPreflight` → `PathGuard`, `BackendExecution` → `LocalIo`,
+  `VerificationFailure` removed; `CallAuditMetadata.backend_invoked` and all
+  routing metadata (`execution_backend`, `upper_workspace_id`,
+  `adapter_preflight_invoked`, `backend_invoked`) are gone from durable audit
+  rows. Mutation preflight evidence renamed `expected_hash_status` →
+  `local_revision` (carries the observed Local Revision on stale-hash
+  replans). Historical rows written before #60 keep the old labels;
+  alpha-stage no-compat means no label migration — `rejection_stage` query
+  filters match new writes only.
+- FIXED M-24-05: attestation persistence wiring moved into `lancet-api`;
+  `lattice-api` consumes it through the public LANCET runtime surface.
+- FIXED issue #33 (Codeberg #11): agent catalog audit CEP methods removed;
+  operator reads are reached through `lancet-api::audit` and `lattice audit`
+  (direct store, no CEP server) and, since #39, implemented here in
+  `src/operator.rs`.
 - WATCH: provenance isomorphism tests in `lancet-native` and audit turn tests in
   `lattice-api` are the practical consumers of this crate's contract.
 - WATCH: call stage and impact labels are shared language between native
   lifecycle, audit queries, CLI rendering, and provenance.
-- No open crate-local audit storage finding is currently listed in
-  `FINDINGS.md`.
+- No open crate-local audit *storage* finding is listed in `FINDINGS.md`.
 
 ## Next Actions
 
-- Keep audit storage, provenance projection, and attestation serialization here;
-  runtime orchestration belongs in `lancet-api`.
+- Keep audit storage, provenance projection, attestation serialization, and the
+  operator read path here; runtime orchestration belongs in `lancet-api`. Do not
+  push pagination, filter parsing, wire projection, or attestation comparison
+  back up into the facade.
 - Add migration or compatibility tests before changing audit row shape or
   attestation serialization.
 - Keep provenance projection and canonicalization changes paired with
@@ -93,7 +143,8 @@ in-toto attestation construction, and attestation persistence.
 
 ## Verification
 
-- Local: `cargo test -p lancet-audit`.
+- Local: `cargo test -p lancet-audit` (add `--features test-support` when the
+  change touches `src/test_support.rs` or its downstream consumers).
 - Provenance/attestation changes: also run the active runtime provenance tests
   (`lancet-native` during migration, then `lancet-runtime`) and `lattice-api`
   audit turn provenance tests.

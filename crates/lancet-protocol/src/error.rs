@@ -55,7 +55,7 @@ pub enum CepErrorCode {
     ExecutionFailed,
     CommandTimeout,
     ChildKillFailed,
-    // Component Tool execution failures (#5 slice C).
+    // Component Tool execution failures (#27, Codeberg #5, slice C).
     ToolTrap,
     ToolTimeout,
     ToolResourceExhausted,
@@ -182,7 +182,8 @@ pub struct ExecutionErrorData {
     pub stderr: Option<String>,
 }
 
-/// Structured error data for Component Tool execution failures (#5 slice C).
+/// Structured error data for Component Tool execution failures
+/// (#27 (Codeberg #5) slice C).
 ///
 /// Carries the tool `method`, a coarse `category` (`"trap"`, `"timeout"`,
 /// `"resource_exhausted"`, `"cancelled"`), and an optional `resource` name
@@ -283,7 +284,7 @@ impl CepError {
         invalid_params(message)
     }
 
-    /// Build a Component Tool execution error (#5 slice C). `method` is the
+    /// Build a Component Tool execution error (#27 slice C). `method` is the
     /// tool name, `category` is the coarse failure class (`"trap"`, `"timeout"`,
     /// `"resource_exhausted"`, `"cancelled"`), and `resource` names the
     /// exhausted resource for resource-exhaustion cases.
@@ -690,7 +691,7 @@ mod tests {
 
     #[test]
     fn tool_execution_codes_are_in_execution_family_range() {
-        // #5 slice C: new Execution-family codes for Component tool failures.
+        // #27 slice C: new Execution-family codes for Component tool failures.
         // Each must sit in -32020..-32029, map to the Execution family, and
         // round-trip through as_i32/from_i32.
         let new_codes = [

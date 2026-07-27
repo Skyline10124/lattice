@@ -18,6 +18,10 @@ pub fn run() -> anyhow::Result<()> {
                 check::lattice_agent_forbidden_dependency_graph(&root)?,
             ),
             (
+                "lancet-audit forbidden dependency graph (operator read stays CEP-server-free)",
+                check::lancet_audit_forbidden_dependency_graph(&root)?,
+            ),
+            (
                 "DefaultToolExecutor outside allowlisted internals",
                 check::scan_with_allowlist(
                     &root,

@@ -210,8 +210,8 @@ pub enum RejectionStage {
     SchemaValidation,
     PolicyGate,
     /// Guard L1 path validation or the concrete Local Workspace's secure
-    /// path resolution rejected the call (post-#38 vocabulary; replaces the
-    /// Upper-era `adapter_preflight`).
+    /// path resolution rejected the call (post-#60 (Codeberg #38) vocabulary;
+    /// replaces the Upper-era `adapter_preflight`).
     PathGuard,
     /// The concrete Local Workspace's I/O failed after policy and guard
     /// checks passed (replaces the Upper-era `backend_execution`).

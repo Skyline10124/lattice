@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Fast binary black-box: model resolution, config discovery, and secret
-//! redaction (issue #18 "fast binary black-box" matrix; triage replacement
-//! target `planned_config_cli`).
+//! redaction (issue #40, Codeberg #18, "fast binary black-box" matrix; triage
+//! replacement target `planned_config_cli`).
 //!
 //! These scenarios drive the built `lattice` binary for the no-turn config
 //! surface (`models`, `resolve`, `doctor`). They assert public stdout/JSON
