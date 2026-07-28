@@ -1,0 +1,58 @@
+{
+  "function": {
+    "description": "Record the current task plan as a concise todo list for multi-step work.",
+    "name": "session.todo_write",
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "todos": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "content",
+              "status"
+            ],
+            "type": "object"
+          },
+          "maxItems": 100,
+          "not": {
+            "contains": {
+              "properties": {
+                "status": {
+                  "const": "in_progress"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            "minContains": 2,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "todos"
+      ],
+      "type": "object"
+    }
+  },
+  "type": "function"
+}

@@ -191,8 +191,8 @@ mod external_audit_tests {
     fn external_audit_imports_legacy_read_only_once() {
         use crate::audit::{AuditOutcome, CallAuditMetadata, CepAuditContext, CepAuditStore};
         use lancet_catalog::CepMethod;
-        use lancet_catalog::methods::session::TodoWrite;
         use lancet_catalog::methods::workspace::ObserveWorkspace;
+        use lancet_catalog::test_method::TestEcho;
 
         let state = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();
@@ -211,7 +211,7 @@ mod external_audit_tests {
             .start_call(
                 &ctx,
                 1,
-                TodoWrite::NAME,
+                TestEcho::NAME,
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
@@ -237,7 +237,7 @@ mod external_audit_tests {
             .query_rows(&crate::audit::AuditQueryFilters::default())
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].method, TodoWrite::NAME);
+        assert_eq!(rows[0].method, TestEcho::NAME);
 
         let ctx2 = CepAuditContext {
             turn_id: "direct-turn".into(),

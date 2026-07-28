@@ -1,0 +1,11 @@
+{
+  "abi-version": 1,
+  "artifact-sha256": "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4",
+  "descriptor-sha256": "4cf978f0f2b8380bc2cdd468c71c5cb7632d3bc68e05d96bb53707553824196c",
+  "expected-imports": [
+    "host-control"
+  ],
+  "name": "session.todo_write",
+  "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0",
+  "version": "0.1.0"
+}

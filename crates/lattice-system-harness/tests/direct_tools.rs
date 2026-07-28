@@ -355,7 +355,14 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
 }
 
 /// `session.todo_write` success echoes canonical todo JSON into the next model
-/// request.
+/// request — executed by the **default binary** through its embedded WASM
+/// Component (#29 criterion 9).
+///
+/// The Component/native distinction is observable from outside the binary: a
+/// Cell-governed call reports `semantic_stage = "cell_component"` and
+/// `guard_stage = "cell_admission"`, which no native handler ever emits. A build
+/// that fell back to a native handler, or whose composition failed to embed the
+/// Component, fails here rather than passing silently.
 #[test]
 fn direct_tools_todo_write_success() {
     let driver = driver();
@@ -438,13 +445,22 @@ fn direct_tools_todo_write_success() {
         });
         require(
             cep_started_raw.is_some_and(|raw| {
-                raw.get("semantic_stage").and_then(Value::as_str) == Some("cep_native")
-                    && raw.get("guard_stage").and_then(Value::as_str)
-                        == Some("cep_policy_lifecycle")
-                    && raw.get("impact_kind").and_then(Value::as_str)
-                        == Some("session_state_mutation")
+                raw.get("semantic_stage").and_then(Value::as_str) == Some("cell_component")
+                    && raw.get("guard_stage").and_then(Value::as_str) == Some("cell_admission")
             }),
-            format!("todo cep_call_started metadata mismatch: {cep_started_raw:?}"),
+            format!(
+                "todo_write must be dispatched to the embedded Component \
+                 (cell_component/cell_admission), got: {cep_started_raw:?}"
+            ),
+        )?;
+        // A Cell-governed row carries no legacy impact kind: its authorization
+        // vocabulary is the Cell. `unknown` here is the *positive* signal that
+        // the native method-impact path did not run.
+        require(
+            cep_started_raw.is_some_and(|raw| {
+                raw.get("impact_kind").and_then(Value::as_str) != Some("session_state_mutation")
+            }),
+            format!("a Component row must not claim a native impact kind: {cep_started_raw:?}"),
         )?;
         require(captures.len() >= 2, "need tool result in next request")?;
         let todos = tool_result_value(&captures[1]).expect("todo result JSON");
@@ -561,6 +577,84 @@ fn direct_tools_todo_write_validation_rejection() {
     finish_scenario(
         scenario_evidence,
         &[("todo validation reject", &outcome.command)],
+        captures,
+        result,
+    );
+}
+
+/// #29 criterion 8: the Component Tool's result survives into the next turn's
+/// transcript after the session is reopened.
+///
+/// A Component result reaches the model through the persisted tool-role message,
+/// the same durable path a native handler's result took. Reopening the session
+/// and driving a second turn proves the migration did not move the result into
+/// some in-process-only channel — and, since this Tool has no store, that the
+/// transcript is the only place the plan is remembered.
+#[test]
+fn direct_tools_todo_write_result_survives_session_reopen() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-tools-todo-reopen",
+        "dl-todoreopen",
+        "[\"session.todo_write\"]",
+        "",
+    );
+    let server = wire_fake_llm(
+        &world,
+        "dl-todoreopen",
+        sequence(vec![
+            tool_call(
+                "t1",
+                "session.todo_write",
+                r#"{"todos":[{"content":"remember me","status":"in_progress"}]}"#,
+            ),
+            SseScript::plain("plan recorded"),
+            SseScript::plain("second turn reply"),
+        ]),
+    );
+    let scenario_evidence = evidence(&world, &spec);
+    let send =
+        SessionSendDriver::new(&driver, &world, &spec, "dl-todoreopen", "main").expect("session");
+
+    let first = send.send("write the plan").expect("first turn");
+    let second = send.send("what was the plan").expect("second turn");
+    let captures = server.captured_requests();
+
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&first)?;
+        assert_clean_send(&second)?;
+        require(
+            tool_ok(&first.parsed, "session.todo_write"),
+            "the Component call must succeed on the first turn",
+        )?;
+        require(
+            first.has_committed_completed() && second.has_committed_completed(),
+            "both turns must commit",
+        )?;
+        // Request 1: the tool call. Request 2: the tool result. Request 3: the
+        // reopened turn, which must still carry the tool-role message.
+        require(
+            captures.len() >= 3,
+            format!("expected three provider requests, got {}", captures.len()),
+        )?;
+        let reopened = captures[2].raw.to_string();
+        require(
+            reopened.contains("remember me"),
+            format!("the reopened turn lost the Component result: {reopened}"),
+        )?;
+        require(
+            reopened.contains("in_progress"),
+            format!("the reopened transcript lost the todo status: {reopened}"),
+        )?;
+        Ok(())
+    })();
+
+    finish_scenario(
+        scenario_evidence,
+        &[
+            ("todo first turn", &first.command),
+            ("todo reopened turn", &second.command),
+        ],
         captures,
         result,
     );

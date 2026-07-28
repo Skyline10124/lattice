@@ -7,8 +7,8 @@ use crate::server::call_durable_metadata::CallDurableMetadata;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use crate::workspace::LocalWorkspace;
 use lancet_audit::{
-    AuditOutcome, AuditStart, CallAuditMetadata, CepAuditContext, CepAuditStore,
-    ComponentCallEvidence, SEMANTIC_STAGE_COMPONENT, SEMANTIC_STAGE_SCAFFOLD,
+    AuditOutcome, AuditStart, CallAuditMetadata, CallEvidence, CepAuditContext, CepAuditStore,
+    ComponentCallEvidence, EvidenceOutcome, SEMANTIC_STAGE_COMPONENT, SEMANTIC_STAGE_SCAFFOLD,
     SEMANTIC_STAGE_UNROUTED, SEMANTIC_STATUS_COMPONENT, SEMANTIC_STATUS_COMPONENT_DENIED,
     impact_kind_for_method, impact_kind_label, merge_finalize_metadata,
 };
@@ -351,6 +351,42 @@ async fn handle_request(
     // decides whether this row carries a Cell evidence record at all: a native
     // handler row keeps its legacy metadata shape.
     let (admission, cell_effects, denied_operations) = component_evidence.snapshot();
+
+    // #112: the evidence table is the durable home of the three records, and it
+    // is written *before* the audit row finalizes so there is no interval in
+    // which a Component call has an audit row but no evidence (ADR 0005's
+    // sequencing constraint). Every outcome is recorded, not just successes:
+    // an admission denial carries its `AdmissionEvidence`, a trap keeps the
+    // operation effects it already produced.
+    let evidence_id = admission.as_ref().and_then(|admission| {
+        let outcome = evidence_outcome_for(&final_result);
+        let record = CallEvidence {
+            turn_id: &ctx_snapshot.turn_id,
+            session_id: &ctx_snapshot.session_id,
+            call_id: id,
+            tool: &method,
+            outcome,
+            admission,
+            effects: Some(&cell_effects),
+            denied: Some(&denied_operations),
+        };
+        match audit.record_call_evidence(&record) {
+            Ok(evidence_id) => Some(evidence_id),
+            Err(error) => {
+                // A durable-evidence failure must be visible: the audit row
+                // still finalizes (losing the row too would lose the call
+                // entirely), but it carries no `evidence_id`, so the gap is
+                // detectable rather than silent.
+                tracing::error!(
+                    method = %method,
+                    %error,
+                    "failed to persist Cell evidence for a Component call"
+                );
+                None
+            }
+        }
+    });
+
     let merged_metadata = merge_finalize_metadata(
         durable_metadata_json.as_deref(),
         &method,
@@ -359,6 +395,7 @@ async fn handle_request(
             admission: admission.as_ref(),
             effects: admission.is_some().then_some(&cell_effects),
             denied: admission.is_some().then_some(&denied_operations),
+            evidence_id,
         },
     );
 
@@ -387,6 +424,25 @@ async fn handle_request(
     .await;
 
     call.respond(final_result);
+}
+
+/// Classify a dispatched Component call for the evidence record (#112
+/// criterion 5). A denial and a failure are both recorded; only their outcome
+/// label differs, so the population a permission system is designed from
+/// includes every refusal.
+fn evidence_outcome_for(result: &Result<Value, CepError>) -> EvidenceOutcome {
+    match result {
+        Ok(_) => EvidenceOutcome::Completed,
+        Err(err) if err.code == CepErrorCode::CallCancelled => EvidenceOutcome::Cancelled,
+        // Admission refuses before the runtime is entered and reuses
+        // `CapabilityNotGranted` (#28 D10), which is also the code a
+        // per-operation refusal never produces (it denies the operation, not
+        // the call). So this code identifies the admission-denied population.
+        Err(err) if err.code == CepErrorCode::CapabilityNotGranted => {
+            EvidenceOutcome::AdmissionDenied
+        }
+        Err(_) => EvidenceOutcome::Failed,
+    }
 }
 
 /// Whether `method` resolves to a Component Tool in the closed catalog.

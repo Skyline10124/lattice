@@ -236,14 +236,18 @@ mod tests {
 
     #[test]
     fn catalog_exposure_collects_base_authority_from_descriptors() {
+        // `session.todo_write` was the `session_state` leg here. It is a
+        // Component Tool since #29, so no native catalog descriptor declares
+        // `session_state` any more — the union over the remaining four is
+        // `fetch_hosts` only.
         let exposure = ToolExposure::from_catalog_enabled(&[
             "fetch.web".to_string(),
-            "session.todo_write".to_string(),
+            "observe.workspace".to_string(),
         ])
         .expect("known tools resolve");
         let authority = exposure.base_authority();
         assert!(authority.fetch_hosts);
-        assert!(authority.session_state);
+        assert!(!authority.session_state);
         assert!(!authority.read_audit);
     }
 

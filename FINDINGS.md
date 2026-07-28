@@ -42,6 +42,12 @@
 > operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
 > `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
 
+### L-GH29-01: `max_todo_ops` 的跨调用累计预算随 Component 迁移失效 — `behavior-change` / `lancet-authority` / `lancet-runtime` / GitHub #29
+- **位置**: `tools/todo-write/manifest.toml`（`maxItems`）；`crates/lancet-authority/src/policy/budget.rs`（`try_charge_todo_ops`、`max_todo_ops`，现无调用点）；`crates/lattice-profile/src/schema.rs`（`[lancet.observation] max_todo_ops` 仍被解析与文档承诺）。
+- **问题**: 迁移前 native handler 调 `budget.try_charge_todo_ops(len)` 按 turn 累计扣减 `max_todo_ops`（默认 100，profile 可配），超限报 `BudgetExhausted`。Component 侧没有等价扣费点：按 #27/#28 的设计，runtime 对成功返回值只做 `context_measure` 度量，charge/credit seam 明确推迟，`session.todo_write` 也不再是 native catalog 方法，所以 `DefaultPolicyHook` 的 todo budget 分支已随本票删除（此前它是死代码）。
+- **当前状态**: PARTIAL —— 单次调用上限保留且更强（descriptor 的 `maxItems: 100` 是构建期常量，Tool 作者改不动、profile 也改不动），跨调用累计上限消失。`[lancet.observation] max_todo_ops` 仍被 schema 接受但对该 Tool 无执行点，属 #121（"被校验、被文档承诺，但执行侧无读取点"）同类问题。`try_charge_todo_ops` / `todo_ops` / `ObservationBudgetSnapshot.todo_ops_used` 保留未删，等 charge seam 落地后复用。
+- **计划**: 由 context budget 的 charge/credit seam 统一处理（ADR 0005 决策 7 的 value 上限与 #28 的 `context_measure` 是其输入）。届时按 `CtxOp::Alloc` 对返回值统一扣费，替代按方法名的 per-op 计数；同时决定 `max_todo_ops` 是改指新 seam 还是随旧词表退役。在那之前不要为单个 Tool 重新引入按方法名的特例扣费点。
+
 ### L-64-01: two accepted Rewind residuals — unrecorded mutations and cross-session range — `robustness` / `lancet-runtime` / `lattice-api` / #64
 - **Location**: `crates/lancet-runtime/src/history.rs` (`plan_rewind`); `crates/lancet-native/src/handlers/mutation.rs:584-620` (`record_mutation_history`); `crates/lancet-api/src/config.rs` (`workspace_history_backing`, per-project key); `crates/lattice-api/src/rewind.rs`.
 - **问题**: (a) 安装成功但 history 记录失败的 mutation(#63 设计上只留 `workspace_history.recorded=false` 审计证据 + `tracing::error!`)对 Rewind 的回溯遍历不可见,因此不会被反转;(b) private history 按 project 而非 session 分片,Rewind 会反转目标 Turn 之后的**全部** in-range mutation,包括另一个 session 安装的。

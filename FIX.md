@@ -2,6 +2,48 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #112 + #29：versioned Cell evidence 表落地，`session.todo_write` 迁为首个内嵌 Component Tool — 2026-07-29
+
+Severity: N/A（feature：ADR 0004 决策 1/2/3/7 + ADR 0005 决策 2/3 的实现切片）。
+
+**Problem:**
+
+两票串行阻塞。#112：Cell evidence（`AdmissionEvidence` / `ObservedEffectsRecord` / `DeniedOperationsRecord`，#28 交付）只存在于 `cep_audit_entries.metadata_json` 这个不透明 blob 里，而该 store 会被 ADR 0004 决策 8 删除；evidence 既不可按 turn/call 检索，也没有 ADR 0005 决策 6 所需的稳定标识。#29：`session.todo_write` 仍是 native handler，`EXPECTED_COMPONENTS` 为空，`from_embedded()` 组合出空目录 —— 生产二进制里一个 Component Tool 都没有，且 `tools/noop/generated/registration.rs` **从未被编译进任何 crate**（noop 只经手写的 `noop_fixture.rs` 进入测试），所以此前不存在"把 Tool 链接进宿主"的机制。
+
+**Fix:**
+
+*#112（`lancet-audit`）*：新增 `src/evidence.rs` —— 三张 versioned 表 `evidence_calls` / `evidence_effects` / `evidence_denials`，`PRAGMA user_version` 从 1 升到 2（v1 库加性升级并保留历史；已声明 v2 但表形状不符的库报可操作错误且不改动）。`evidence_id`（store 生成的自增整数）是稳定标识，**刻意不是 `audit_id`** —— 后者随 CEP store 一并消失。Cell 按列拆存（`ctx_op`/`ext_impact`/`cell_scope`/`scope`/`scope_trust`/`scope_channel`/`target_kind`/`target_value`）而非 JSON blob，evidence 面才真正可查；`cell_scope` 与 `scope` 分列，因为 `Cell::scope` 与 `ObservedScope::scope` 是两个协议字段。读取时校验每条记录的 `version`，不支持的版本报 `UnsupportedRecordVersion` 而非按本二进制形状误解析；损坏的枚举标签报 `UnreadableField` 而非静默回落默认值。拒绝与失败同样落表（`EvidenceOutcome::{Completed,AdmissionDenied,Failed,Cancelled}`）：admission 失败携带其 `AdmissionEvidence`，per-operation 拒绝落 `DeniedOperation`，result-cell 违规保留其之前已记录的 operation effects。`metadata_json` 不再承载结构化 evidence，只留 `evidence_id` 指针与派生的 `component_cells` 查询键；PROV 投影与 attestation 构建改经 `EvidenceLookup` 从表中解析（`project_rows_with_evidence` / `build_in_toto_statement_with_evidence` / `rebuild_in_toto_statement_with_evidence`），operator replay 与 attestation 写入路径接同一个 store。
+
+*#29（Component 迁移）*：`tools/todo-write/` 新增 source manifest 独占 method/result contract、Cell/capability/scope、description、version。**全部校验下沉到 manifest 的 params schema**：`pattern: "\\S"` 覆盖空白 content，`not/contains/minContains: 2` 覆盖"至多一个 in_progress"，`maxItems: 100` 是编译期上限 —— host 的 `params_validator` 在进入 Component **之前**以单一结构化 `SchemaMismatch` 拒绝，guest 里不留第二份命令式规则副本。descriptor 只声明 `session.result = alloc:none:session` 这一条真实发生的 effect（返回值进 context，host 度量），**不声明任何 `mutate` capability** —— 该 method 从来没有 session store，本票也没有新增。
+
+manifest 新增必填 `[tool] distribution = "builtin" | "fixture"` 字段（无默认值：Tool 不得因遗漏而进入封闭目录），`cargo xtask tool-codegen` 据此**生成** `crates/lancet-runtime/src/generated/host_composition.rs`：built-in Tool 的 `inventory` 注册（`include_bytes!` committed descriptor + Component）与 host 侧 pin 的 `EXPECTED_COMPONENTS` 身份表。这既是把 Tool 链接进宿主的机制，也顺手消掉 #103 记录的"`generated/` 实为手写、digest 无同步校验"缺口。`parse_hex_digest` 改为 `const fn` 并脱离 `test-utils` gate，pin 的 digest 成为构建期常量。
+
+native handler 与注册删除（`handlers/session_state.rs`、`register_native_session_state`）；`lancet-catalog` 的 `TodoWrite` 类型及 `methods/session.rs` 整体删除，`CATALOG` 从 5 降到 4（shipped catalog 仍是五个 Tool：四个 native + 一个 Component）。约 20 个此前把 `TodoWrite` 当通用 typed-method fixture 的测试改用新增的 `lancet_catalog::test_method::TestEcho`（`test-method` feature，dev-only，刻意不在 `catalog()` 中）；真正走生产路径的测试改用真实 shipped Tool。authority 层随之删除不可达的 `session.todo_write` 分支、`SessionStateOperation`、`ResolvedSessionState` 与 todo budget 检查。
+
+**Behavior change (honest):** profile 可配的 per-turn `[lancet.observation] max_todo_ops` 预算**不再生效**。原先由 native handler 调 `budget.try_charge_todo_ops` 扣减，而 Component 的 result accounting 按 #27/#28 设计只度量不扣费（charge/credit seam 明确推迟）。单次调用的上限保留为 descriptor 的 `maxItems: 100`（等于原 `max_todo_ops` 默认值），跨调用累计上限消失。残留记录在 `FINDINGS.md` L-GH29-01。
+
+**Verification:**
+
+```
+cargo test -p lancet-audit           # 84 passed（含 evidence_tests 12 项新契约测试）
+cargo test -p lancet-runtime         # 67 + 10 + 15 + 11 + 8 passed（tests/embedded.rs 为新增）
+cargo test -p lancet-native          # 144 + 17 + 1 + 5 + 4 passed
+cargo test -p lancet-catalog         # 27 passed
+cargo test -p lancet-dispatch        # 10 passed
+cargo test -p lancet-authority       # 125 + 6 + 2 + 10 passed
+cargo test -p lancet-api             # 9 passed
+cargo test -p lattice-api            # 93 + 各集成套件 passed
+cargo test -p lattice-profile        # 96 passed
+cargo test -p xtask                  # 55 passed
+cargo xtask tool-codegen --check     # 无漂移（幂等）
+cargo xtask tool-build --verify      # session-todo_write Component 逐字节复现 committed digest
+LATTICE_BIN=... cargo test -p lattice-system-harness   # 19 套件全绿
+```
+
+产品级证据（criterion 9）：`direct_tools_todo_write_success` 断言默认二进制发出的 `cep_call_started` 携带 `semantic_stage = "cell_component"` / `guard_stage = "cell_admission"` —— native handler 永不发出这组标签；并断言该行**不**claim native 的 `session_state_mutation` impact kind。新增 `direct_tools_todo_write_result_survives_session_reopen` 证明 Component 结果经持久 tool-role 消息进入重开后的 transcript。`migrated_todo_write_has_no_native_fallback` 证明未内嵌 Component 的运行时把该 method 报为 unrouted 而非静默由 native 服务。
+
+**Changed files:** `crates/lancet-audit/src/{evidence.rs,evidence_tests.rs,audit.rs,audit_tests.rs,lib.rs,operator.rs,store_path.rs,provenance/{projector.rs,attestation.rs,mod.rs}}`、`crates/lancet-audit/Cargo.toml`、`crates/lancet-runtime/src/{composition.rs,generated/host_composition.rs}`、`crates/lancet-runtime/tests/embedded.rs`、`crates/lancet-native/src/{lib.rs,server/{transport.rs,native_registry.rs},handlers/mod.rs,effect_contract_tests/**}`（删 `handlers/session_state.rs`、`effect_contract_tests/runtime_fixtures/session.rs`）、`crates/lancet-native/tests/{cep_component_round_trip.rs,cep_warn_harness.rs,prov_isomorphism.rs}`、`crates/lancet-catalog/src/{catalog.rs,lib.rs,test_method.rs,methods/mod.rs}`（删 `methods/session.rs`）、`crates/lancet-catalog/Cargo.toml`、`crates/lancet-dispatch/src/{registry.rs,transport.rs}`、`crates/lancet-dispatch/Cargo.toml`、`crates/lancet-cep/src/tool.rs`、`crates/lancet-authority/src/policy/{capability.rs,default.rs,resolved.rs}`、`crates/lancet-authority/tests/{guard_decide_fuzz.rs,policy_coverage.rs,policy_tests.rs}`、`crates/lancet-api/src/attestation.rs`、`crates/lattice-api/src/turn/{cep.rs,cep_tests.rs}`、`crates/lattice-api/tests/{audit_turn_provenance.rs,cep_mode_integration.rs,cep_round_trip.rs,direct_local_acceptance.rs,dogfood_impact_matrix.rs}`、`crates/lattice-api/Cargo.toml`、`crates/lattice-profile/src/defaults.rs`、`crates/lattice-system-harness/tests/direct_tools.rs`、`tools/todo-write/**`、`tools/noop/manifest.toml`、`xtask/src/tool_codegen.rs`、`Cargo.toml`。
+
 ## GitHub #124：rollout 发布门禁的输出捕获用两个独立 fd 写同一文件，互相覆盖 — 2026-07-27
 
 Severity: MEDIUM（发布门禁判定不可复现 + 证据文件被破坏）。

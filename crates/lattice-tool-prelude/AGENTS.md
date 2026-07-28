@@ -24,6 +24,15 @@ no workspace/network/session operation.
 - Never add a `lancet-*` dependency here; that would leak host internals into
   the guest trust boundary.
 
+## Source Tools
+
+- `tools/noop` (`distribution = "fixture"`) is the tracer, composed only by the
+  `test-utils` fixture. `tools/todo-write` (`distribution = "builtin"`) is the
+  first production Tool (#29): its manifest owns the whole contract, and all of
+  its validation lives in the params schema so the host refuses a bad call before
+  the Component is entered. A guest must not carry a second, imperative copy of
+  the descriptor's rules.
+
 ## Verification
 
 - Local: `cargo test -p lattice-tool-prelude`.

@@ -4,8 +4,8 @@
 //! Turn attestation persistence built from recorded audit rows.
 
 use lancet_native::{
-    AttestationRecord, AuditQueryFilters, CepAuditContext, CepAuditStore, build_in_toto_statement,
-    source_audit_range_hash, statement_bytes,
+    AttestationRecord, AuditQueryFilters, CepAuditContext, CepAuditStore, EvidenceLookup,
+    build_in_toto_statement_with_evidence, source_audit_range_hash, statement_bytes,
 };
 
 use crate::error::LancetError;
@@ -51,7 +51,16 @@ pub fn store_turn_attestation(
     // The builder picks the predicate version per turn (#28 D8); the byte
     // writer canonicalizes v2 only, so a re-projected statement compares byte
     // for byte while stored v1 bytes keep their serde order.
-    let statement = build_in_toto_statement(turn_id, &rows, runtime_version);
+    // #112: the Cell evidence records live in the evidence table, so the
+    // builder resolves each Component row's `evidence_id` through the same
+    // store the rows came from.
+    let resolve = |id: lancet_native::EvidenceId| audit.call_evidence(id).ok().flatten();
+    let statement = build_in_toto_statement_with_evidence(
+        turn_id,
+        &rows,
+        runtime_version,
+        &EvidenceLookup::new(&resolve),
+    );
     let statement_json = statement_bytes(&statement)
         .map_err(|err| LancetError::Internal(format!("attestation statement serialize: {err}")))?;
     let range_hash = source_audit_range_hash(&rows);
@@ -86,7 +95,8 @@ mod tests {
     use std::sync::Arc;
 
     use lancet_native::{
-        AuditQueryFilters, ServerRunConfig, rebuild_in_toto_statement, statement_bytes,
+        AuditQueryFilters, ServerRunConfig, rebuild_in_toto_statement_with_evidence,
+        statement_bytes,
     };
     use lancet_protocol::provenance::CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2;
     use lancet_protocol::{CapabilityAdmissionPolicy, Trust};
@@ -143,11 +153,15 @@ mod tests {
                 ..Default::default()
             })
             .expect("query rows");
-        let replayed = rebuild_in_toto_statement(
+        // #112: the replay resolves Cell evidence through the same store, the
+        // way `replay_audit` does in production.
+        let resolve = |id: lancet_native::EvidenceId| audit.call_evidence(id).ok().flatten();
+        let replayed = rebuild_in_toto_statement_with_evidence(
             &ctx.turn_id,
             &rows,
             &ctx.runtime_version,
             Some(stored.predicate_type.as_str()),
+            &lancet_native::EvidenceLookup::new(&resolve),
         );
         assert_eq!(
             statement_bytes(&replayed).expect("replay bytes"),

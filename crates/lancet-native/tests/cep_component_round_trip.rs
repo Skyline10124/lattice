@@ -22,10 +22,13 @@ use std::sync::Arc;
 
 use lancet_authority::CepTurnContext;
 use lancet_native::{
-    AuditQueryFilters, CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry,
-    ServerRunConfig, register_production_method_registry,
+    AuditQueryFilters, CepAuditStore, CepServerNativeExt, CepTransport, EvidenceId, EvidenceLookup,
+    EvidenceOutcome, MethodRegistry, ServerRunConfig, StoredCallEvidence,
+    register_production_method_registry,
 };
+use lancet_protocol::cell::CtxOp;
 use lancet_protocol::effect_types::ImpactKind;
+use lancet_protocol::evidence::{EffectSource, ObservedTarget};
 use lancet_protocol::{CapabilityAdmissionPolicy, CepErrorCode, Trust};
 use lancet_runtime::ComponentRuntime;
 
@@ -59,7 +62,7 @@ async fn spawn_native_with_admission(
     Arc<CepAuditStore>,
     tokio::task::JoinHandle<()>,
 ) {
-    spawn_native_with_policies(policy, BTreeSet::new()).await
+    spawn_native_with_policies(policy, BTreeSet::new(), None).await
 }
 
 /// One server run carrying **both** vocabularies' policies: the Cell
@@ -67,6 +70,7 @@ async fn spawn_native_with_admission(
 async fn spawn_native_with_policies(
     policy: CapabilityAdmissionPolicy,
     denied_effect_kinds: BTreeSet<ImpactKind>,
+    project_root: Option<&std::path::Path>,
 ) -> (
     lancet_native::CepClient,
     Arc<CepAuditStore>,
@@ -75,7 +79,15 @@ async fn spawn_native_with_policies(
     let components =
         Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
     let mut config = ServerRunConfig::in_memory_for_tests().with_capability_admission(policy);
-    let mut turn_policy = config.cep_context.policy.clone();
+    // Rebuilding the turn policy for a real project root must not drop the Cell
+    // admission policy `with_capability_admission` just installed — that field
+    // lives on the same struct.
+    let admission = config.cep_context.policy.capability_admission.clone();
+    let mut turn_policy = match project_root {
+        Some(root) => lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root),
+        None => config.cep_context.policy.clone(),
+    };
+    turn_policy.capability_admission = admission;
     turn_policy.denied_effect_kinds = denied_effect_kinds;
     config.cep_context = Arc::new(CepTurnContext::from_policy(turn_policy));
     config.components = Some(components);
@@ -115,6 +127,22 @@ async fn noop_metadata(audit: &CepAuditStore) -> serde_json::Value {
     serde_json::from_str(metadata).expect("metadata is JSON")
 }
 
+/// The `noop.echo` call's Cell evidence, read from the versioned evidence table
+/// through the `evidence_id` its audit row points at (#112).
+///
+/// Going through the pointer is the point: it proves the row resolves to real
+/// evidence rather than that the store happens to hold a matching record.
+async fn noop_evidence(audit: &CepAuditStore) -> StoredCallEvidence {
+    let metadata = noop_metadata(audit).await;
+    let evidence_id = metadata["evidence_id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("a Component row must point at its evidence: {metadata}"));
+    audit
+        .call_evidence(EvidenceId(evidence_id))
+        .expect("evidence read")
+        .expect("the pointer must resolve to a persisted evidence row")
+}
+
 /// D.6 tracer + #28 B11 allow path: `noop.echo` round-trips through CEP +
 /// audit with both capabilities admitted, so one call produces two effects
 /// (the gated `emit-event` operation and the result) and the audit row keeps
@@ -147,34 +175,65 @@ async fn embedded_noop_round_trips_through_cep_and_audit() {
     let metadata: serde_json::Value =
         serde_json::from_str(row.metadata_json.as_deref().expect("evidence metadata"))
             .expect("metadata is JSON");
-    // C8: a multi-effect call keeps every cell, in seq order.
+    // C8: a multi-effect call keeps every cell, in seq order. This stays a
+    // query key on the row (#112).
     assert_eq!(
         metadata["component_cells"],
         serde_json::json!(["mutate:none:session:in", "alloc:none:session:in"])
     );
+    // #112 criterion 3: the records are no longer in the blob.
+    for key in [
+        "admission_evidence",
+        "observed_effects",
+        "denied_operations",
+    ] {
+        assert!(
+            metadata.get(key).is_none(),
+            "{key} belongs to the evidence table, not the audit row: {metadata}"
+        );
+    }
+
+    let evidence = noop_evidence(&audit).await;
+    assert_eq!(evidence.tool, "noop.echo");
+    assert_eq!(evidence.turn_id, "test-turn");
+    assert_eq!(evidence.outcome, EvidenceOutcome::Completed);
     // B5/A2: approved capability names are admission evidence only.
     assert_eq!(
-        metadata["admission_evidence"]["approved_capabilities"],
-        serde_json::json!(["session.events", "session.result"])
+        evidence.admission.approved_capabilities,
+        vec!["session.events".to_string(), "session.result".to_string()]
     );
-    assert_eq!(metadata["admission_evidence"]["max_boundary"], "in");
-    let effects = metadata["observed_effects"]["effects"]
-        .as_array()
-        .expect("observed effects array");
+    assert_eq!(evidence.admission.max_boundary, Trust::In);
+    let effects = &evidence.effects.effects;
     assert_eq!(effects.len(), 2, "emit-event operation + result");
-    assert_eq!(effects[0]["source"], "operation");
-    assert_eq!(effects[0]["target"]["turn_id"], "test-turn");
-    assert_eq!(effects[0]["context_measure"], serde_json::Value::Null);
-    assert_eq!(effects[1]["source"], "result");
+    assert_eq!(effects[0].source, EffectSource::Operation);
+    assert_eq!(
+        effects[0].target,
+        ObservedTarget::Session {
+            turn_id: "test-turn".into()
+        }
+    );
+    assert_eq!(effects[0].context_measure, None);
+    assert_eq!(effects[1].source, EffectSource::Result);
     // D12: the host measures the canonical result bytes itself.
     assert_eq!(
-        effects[1]["context_measure"],
-        serde_json::json!(r#"{"echoed":"ping"}"#.len())
+        effects[1].context_measure,
+        Some(r#"{"echoed":"ping"}"#.len() as u64)
     );
     assert!(
-        metadata.get("denied_operations").is_none(),
-        "nothing was refused on the allow path: {metadata}"
+        evidence.denied.denied.is_empty(),
+        "nothing was refused on the allow path: {:?}",
+        evidence.denied
     );
+
+    // #112 criterion 1: the same evidence is reachable by turn and by call.
+    let by_turn = audit.call_evidence_for_turn("test-turn").expect("by turn");
+    assert_eq!(by_turn.len(), 1);
+    assert_eq!(by_turn[0].evidence_id, evidence.evidence_id);
+    let by_call = audit
+        .call_evidence_for_call(&row.session_id, "test-turn", row.call_id)
+        .expect("by call");
+    assert_eq!(by_call.len(), 1);
+    assert_eq!(by_call[0].evidence_id, evidence.evidence_id);
 }
 
 /// B11 partial deny: subtracting `session.events` leaves the tool callable,
@@ -203,33 +262,31 @@ async fn partial_admission_denies_only_the_uncovered_operation() {
 
     let metadata = noop_metadata(&audit).await;
     assert_eq!(
-        metadata["admission_evidence"]["approved_capabilities"],
-        serde_json::json!(["session.result"])
-    );
-    assert_eq!(
-        metadata["admission_evidence"]["denied_capabilities"],
-        serde_json::json!(["session.events"])
-    );
-    assert_eq!(
         metadata["component_cells"],
         serde_json::json!(["alloc:none:session:in"])
     );
+
+    let evidence = noop_evidence(&audit).await;
     assert_eq!(
-        metadata["denied_operations"]["version"],
-        serde_json::json!(1)
+        evidence.admission.approved_capabilities,
+        vec!["session.result".to_string()]
     );
-    let denied = metadata["denied_operations"]["denied"]
-        .as_array()
-        .expect("denied operations array");
+    assert_eq!(
+        evidence.admission.denied_capabilities,
+        vec!["session.events".to_string()]
+    );
+    // The call succeeded even though one operation was refused.
+    assert_eq!(evidence.outcome, EvidenceOutcome::Completed);
+    assert_eq!(evidence.denied.version, 1);
+    let denied = &evidence.denied.denied;
     assert_eq!(denied.len(), 1);
-    assert_eq!(denied[0]["cell"]["ctx_op"], "mutate");
+    assert_eq!(denied[0].cell.ctx_op, CtxOp::Mutate);
     assert!(
-        denied[0]["reason"]
-            .as_str()
-            .expect("reason")
+        denied[0]
+            .reason
             .contains("not covered by an admitted capability"),
         "denial reason must name the uncovered cell: {}",
-        denied[0]["reason"]
+        denied[0].reason
     );
 }
 
@@ -266,15 +323,17 @@ async fn unenabled_tool_is_denied_before_the_runtime_is_entered() {
     drop(guard);
 
     let metadata = noop_metadata(&audit).await;
-    assert_eq!(metadata["admission_evidence"]["tool"], "noop.echo");
-    assert_eq!(
-        metadata["admission_evidence"]["approved_capabilities"],
-        serde_json::json!([])
-    );
     assert!(
         metadata.get("component_cells").is_none(),
         "a call that never ran produced no effect: {metadata}"
     );
+
+    // #112 criterion 5: the refusal is evidence, with its own outcome label.
+    let evidence = noop_evidence(&audit).await;
+    assert_eq!(evidence.tool, "noop.echo");
+    assert_eq!(evidence.outcome, EvidenceOutcome::AdmissionDenied);
+    assert!(evidence.admission.approved_capabilities.is_empty());
+    assert!(evidence.effects.effects.is_empty());
 }
 
 /// B11 full deny, effect ceiling: with `session.result` subtracted the tool is
@@ -293,19 +352,21 @@ async fn denied_result_capability_fails_the_call_and_keeps_operation_evidence() 
 
     let metadata = noop_metadata(&audit).await;
     assert_eq!(
-        metadata["admission_evidence"]["approved_capabilities"],
-        serde_json::json!(["session.events"])
-    );
-    assert_eq!(
         metadata["component_cells"],
         serde_json::json!(["mutate:none:session:in"]),
         "the emit-event effect survives the result-cell violation"
     );
-    let effects = metadata["observed_effects"]["effects"]
-        .as_array()
-        .expect("observed effects array");
-    assert_eq!(effects.len(), 1);
-    assert_eq!(effects[0]["source"], "operation");
+
+    // #112 criterion 5: a failed call retains the operation effects it already
+    // recorded, and is labeled as a failure.
+    let evidence = noop_evidence(&audit).await;
+    assert_eq!(
+        evidence.admission.approved_capabilities,
+        vec!["session.events".to_string()]
+    );
+    assert_eq!(evidence.outcome, EvidenceOutcome::Failed);
+    assert_eq!(evidence.effects.effects.len(), 1);
+    assert_eq!(evidence.effects.effects[0].source, EffectSource::Operation);
 }
 
 /// #28 b8: a Component row is labeled by the vocabulary that actually governed
@@ -359,8 +420,8 @@ async fn component_rows_are_labeled_cell_governed_not_unrouted() {
 /// hand-built audit row anywhere in this path.
 #[tokio::test]
 async fn real_denial_reaches_prov_attributes_and_the_v2_predicate() {
-    use lancet_native::build_in_toto_statement;
-    use lancet_native::provenance::project_rows;
+    use lancet_native::build_in_toto_statement_with_evidence;
+    use lancet_native::provenance::project_rows_with_evidence;
     use lancet_protocol::provenance::CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2;
 
     let (client, audit, _task) = spawn_native_with_admission(admission(&["session.events"])).await;
@@ -377,7 +438,10 @@ async fn real_denial_reaches_prov_attributes_and_the_v2_predicate() {
         })
         .expect("audit query");
 
-    let attributes = &project_rows(&rows).activities[0].attributes;
+    // #112: the projection resolves the row's `evidence_id` through the store.
+    let resolve = |id: EvidenceId| audit.call_evidence(id).ok().flatten();
+    let lookup = EvidenceLookup::new(&resolve);
+    let attributes = &project_rows_with_evidence(&rows, &lookup).activities[0].attributes;
     let denied = attributes["denied_operations"]["denied"]
         .as_array()
         .expect("the denial reaches the PROV activity attributes");
@@ -390,7 +454,8 @@ async fn real_denial_reaches_prov_attributes_and_the_v2_predicate() {
         "the projected reason must be the one the host recorded: {reason}"
     );
 
-    let statement = build_in_toto_statement("test-turn", &rows, "lattice-test/1");
+    let statement =
+        build_in_toto_statement_with_evidence("test-turn", &rows, "lattice-test/1", &lookup);
     assert_eq!(
         statement.predicate_type,
         CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2
@@ -426,31 +491,72 @@ async fn unknown_deny_name_fails_server_construction() {
     );
 }
 
-/// D.6: a native method (session.todo_write) still works alongside the
-/// Component path — the dispatch split doesn't break the 5 production
-/// handlers.
+/// D.6: a native method (`observe.workspace`) still works alongside the
+/// Component path — the dispatch split doesn't break the remaining handlers.
 #[tokio::test]
 async fn native_method_still_works_alongside_component() {
-    use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWriteParams};
+    use lancet_catalog::methods::workspace::{ObserveWorkspaceParams, ReadFileParams};
 
-    let (client, _audit, _task) = spawn_native_with_noop().await;
+    let dir = tempfile::TempDir::new().expect("temp project");
+    std::fs::write(dir.path().join("probe.txt"), "coexist\n").expect("seed file");
+    let (client, _audit, _task) = spawn_native_with_project_root(dir.path()).await;
 
-    let result = client
-        .call_named::<TodoWriteParams, serde_json::Value>(
-            "session.todo_write",
-            TodoWriteParams {
-                todos: vec![TodoItem {
-                    content: "coexist".into(),
-                    status: TodoStatus::Pending,
-                }],
-            },
+    let result: serde_json::Value = client
+        .call_named(
+            "observe.workspace",
+            ObserveWorkspaceParams::ReadFile(ReadFileParams {
+                path: "probe.txt".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            }),
         )
         .await
         .expect("native method still works");
 
     assert!(
-        result.get("todos").is_some(),
-        "todo_write result must have todos field"
+        result.to_string().contains("coexist"),
+        "the native read must return the file content: {result}"
+    );
+}
+
+/// #29.6: there is no native `session.todo_write` handler and no fallback.
+///
+/// This server run has the production native registry but a Component catalog
+/// that holds only the no-op fixture, so the migrated method resolves nowhere.
+/// It must fail as an unrouted method — not quietly succeed through a native
+/// handler that survived the migration.
+#[tokio::test]
+async fn migrated_todo_write_has_no_native_fallback() {
+    let (client, audit, _task) = spawn_native_with_noop().await;
+
+    let err = client
+        .call_raw("session.todo_write", todo_params())
+        .await
+        .expect_err("no native handler may serve the migrated method");
+    // `method_not_found` is carried on the wire as JSON-RPC -32601; the
+    // structured code it maps to is `SchemaMismatch`.
+    assert_eq!(
+        lancet_protocol::error::to_jsonrpc_error(&err).0,
+        -32601,
+        "a migrated method with no embedded Component must be unrouted, not served: {err:?}"
+    );
+
+    audit.await_pending().await;
+    let rows = audit
+        .query_rows(&AuditQueryFilters {
+            method: Some("session.todo_write".to_string()),
+            ..Default::default()
+        })
+        .expect("audit query");
+    assert_eq!(rows.len(), 1, "the refusal is still audited");
+    assert_eq!(
+        rows[0].semantic_stage, "unrouted",
+        "no native handler and no Component: the row must say unrouted"
+    );
+    assert!(
+        !rows[0].policy_enforced,
+        "an unrouted call must never claim policy enforcement"
     );
 }
 
@@ -470,6 +576,41 @@ fn all_impact_kinds() -> BTreeSet<ImpactKind> {
 
 fn todo_params() -> serde_json::Value {
     serde_json::json!({"todos": [{"content": "isolation", "status": "pending"}]})
+}
+
+/// Params for a legal `observe.workspace` read of the seeded `probe.txt`. The
+/// vocabulary-isolation tests need a *native* method, and this is the cheapest
+/// one that reaches its handler.
+fn read_probe_params() -> serde_json::Value {
+    serde_json::json!({"mode": "read_file", "path": "probe.txt"})
+}
+
+/// As [`spawn_native_with_noop`], with the Local Workspace rooted at
+/// `project_root` so a native observation has a real file to read.
+async fn spawn_native_with_project_root(
+    project_root: &std::path::Path,
+) -> (
+    lancet_native::CepClient,
+    Arc<CepAuditStore>,
+    tokio::task::JoinHandle<()>,
+) {
+    let components =
+        Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
+    let mut config =
+        ServerRunConfig::in_memory_for_tests().with_capability_admission(admission(&[]));
+    config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(project_root));
+    config.components = Some(components);
+
+    let mut registry = MethodRegistry::new();
+    register_production_method_registry(&mut registry).unwrap();
+
+    let (client, server) = CepTransport::pair(64);
+    let audit = Arc::clone(&config.audit);
+    let task = tokio::spawn(async move {
+        let _ = server.run_native(registry, config).await;
+    });
+    tokio::task::yield_now().await;
+    (client, audit, task)
 }
 
 /// B8/B9/A4: the two authorization vocabularies never cross-authorize.
@@ -493,10 +634,16 @@ async fn legacy_effect_deny_refuses_native_methods_and_never_component_calls() {
         "the fixture must deny every kind the native catalog declares"
     );
 
-    let (client, audit, _task) = spawn_native_with_policies(admission(&[]), denied).await;
+    let dir = tempfile::TempDir::new().expect("temp project");
+    std::fs::write(dir.path().join("probe.txt"), "x\n").expect("seed file");
+    let (client, audit, _task) =
+        spawn_native_with_policies(admission(&[]), denied, Some(dir.path())).await;
 
+    // The native leg is `observe.workspace`: `session.todo_write` is a Component
+    // Tool since #29, so using it here would test the Component path twice and
+    // prove nothing about the legacy vocabulary's reach.
     let err = client
-        .call_raw("session.todo_write", todo_params())
+        .call_raw("observe.workspace", read_probe_params())
         .await
         .expect_err("every declared impact kind is denied");
     assert_eq!(err.code, CepErrorCode::EffectViolation);
@@ -507,12 +654,12 @@ async fn legacy_effect_deny_refuses_native_methods_and_never_component_calls() {
         .expect("the legacy deny list has no authority over a Cell-admitted Tool");
     assert_eq!(value, serde_json::json!({"echoed": "isolated"}));
 
-    // The Component row still carries its own evidence: the call went through
-    // Cell admission, not through a legacy allowance.
-    let metadata = noop_metadata(&audit).await;
+    // The Component call still has its own evidence: it went through Cell
+    // admission, not through a legacy allowance.
+    let evidence = noop_evidence(&audit).await;
     assert_eq!(
-        metadata["admission_evidence"]["approved_capabilities"],
-        serde_json::json!(["session.events", "session.result"])
+        evidence.admission.approved_capabilities,
+        vec!["session.events".to_string(), "session.result".to_string()]
     );
     audit.await_pending().await;
 }
@@ -522,8 +669,14 @@ async fn legacy_effect_deny_refuses_native_methods_and_never_component_calls() {
 /// .capabilities]` is not a second authority over the legacy path either.
 #[tokio::test]
 async fn cell_admission_denial_never_refuses_a_native_method() {
-    let (client, _audit, _task) =
-        spawn_native_with_policies(CapabilityAdmissionPolicy::default(), BTreeSet::new()).await;
+    let dir = tempfile::TempDir::new().expect("temp project");
+    std::fs::write(dir.path().join("probe.txt"), "x\n").expect("seed file");
+    let (client, _audit, _task) = spawn_native_with_policies(
+        CapabilityAdmissionPolicy::default(),
+        BTreeSet::new(),
+        Some(dir.path()),
+    )
+    .await;
 
     let err = client
         .call_raw("noop.echo", serde_json::json!({"message": "refused"}))
@@ -532,10 +685,13 @@ async fn cell_admission_denial_never_refuses_a_native_method() {
     assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
 
     let result = client
-        .call_raw("session.todo_write", todo_params())
+        .call_raw("observe.workspace", read_probe_params())
         .await
         .expect("Cell admission has no authority over a native method");
-    assert!(result.get("todos").is_some());
+    assert!(
+        result.to_string().contains('x'),
+        "the native read must return content: {result}"
+    );
 }
 
 /// D.6: the Component call emits events through the CEP event stream.
@@ -656,23 +812,17 @@ async fn cancelled_component_call_keeps_its_admission_evidence() {
 
     let row = noop_row(&audit).await;
     assert_eq!(row.result_or_error.as_deref(), Some("cancelled"));
-    let metadata: serde_json::Value = serde_json::from_str(
-        row.metadata_json
-            .as_deref()
-            .expect("a cancelled Component call still finalizes with its evidence"),
-    )
-    .expect("metadata is JSON");
-    assert_eq!(metadata["admission_evidence"]["tool"], "noop.echo");
+
+    let evidence = noop_evidence(&audit).await;
+    assert_eq!(evidence.admission.tool, "noop.echo");
     assert_eq!(
-        metadata["admission_evidence"]["approved_capabilities"],
-        serde_json::json!(["session.events", "session.result"])
+        evidence.admission.approved_capabilities,
+        vec!["session.events".to_string(), "session.result".to_string()]
     );
+    assert_eq!(evidence.outcome, EvidenceOutcome::Cancelled);
     // Pre-cancelled: Wasmtime is never entered, so the ledger is empty — but
     // the record itself is present and would carry any effect that had been.
-    assert_eq!(
-        metadata["observed_effects"]["effects"],
-        serde_json::json!([])
-    );
+    assert!(evidence.effects.effects.is_empty());
 }
 
 /// #70 (Codeberg #48): dropping the call future mid-flight funnels through the

@@ -72,8 +72,16 @@ the D.4 LLM projection, and the per-call admission step.
   `CallCancelled`) and owns the shared `cancelled_error` used by every
   cancellation observation point (#70). No guest backtrace/host path/secret
   is exposed.
-- `src/generated/` owns the production `EXPECTED_COMPONENTS` list (empty
-  until #29–#32 (Codeberg #7–#10)) and the `test-utils` no-op fixture.
+- `src/generated/host_composition.rs` is **generated** by `cargo xtask
+  tool-codegen` from the Tool manifests that declare `distribution = "builtin"`
+  (#29). It carries their `inventory` registrations (`include_bytes!` of the
+  committed descriptor + Component) and the host-pinned `EXPECTED_COMPONENTS`
+  identity list. This is the only mechanism that links a Tool into a built
+  runtime: a Tool crate's own `generated/registration.rs` is not compiled
+  anywhere. Since #29 it embeds `session.todo_write`, so `from_embedded()`
+  composes a non-empty catalog in production; #30–#32 add the other four.
+  `src/generated/noop_fixture.rs` remains the hand-maintained `test-utils`
+  fixture.
 - `src/test_helpers.rs` (`test-utils` feature) provides synthetic
   registration/identity construction for gate negative-case tests.
 

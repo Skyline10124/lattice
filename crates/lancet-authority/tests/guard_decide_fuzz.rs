@@ -73,7 +73,7 @@ fn audit_ctx(call_id: u64, budget: PolicyBudgetSnapshot) -> PolicyAuditContext {
 // Exercises the positive policy branches:
 // - WorkspaceObservation (read_file)
 // - WorkspaceObservation via grep mode
-// - SessionStateMutation (todo_write)
+// - WorkspaceMutation (mutate.create)
 // - ExternalObservation (fetch.web with default allowed hosts)
 // - CommandExecution (diagnostic echo)
 
@@ -91,9 +91,13 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(2, default_budget()),
         },
+        // `session.todo_write` used to be this leg. It is a Component Tool since
+        // #29, so the native policy hook no longer knows it — Cell admission is
+        // its authority. `mutate.create` keeps a mutation method on the positive
+        // path.
         PolicyInput {
-            method: "session.todo_write".into(),
-            params: json!({ "todos": [{ "content": "fuzz task", "status": "pending" }] }),
+            method: "mutate.create".into(),
+            params: json!({ "path": "notes/fuzz.txt", "content": "guard-fuzz" }),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(3, default_budget()),
         },

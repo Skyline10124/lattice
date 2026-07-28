@@ -55,7 +55,8 @@ use crate::audit::{
     impact_kind_label,
 };
 use crate::provenance::{
-    project_rows, project_turn_trace, rebuild_in_toto_statement, source_audit_range_hash,
+    EvidenceLookup, project_rows_with_evidence, project_turn_trace_with_evidence,
+    rebuild_in_toto_statement_with_evidence, source_audit_range_hash,
 };
 use crate::store_path::audit_db_path_for_project;
 
@@ -191,7 +192,9 @@ pub async fn query_audit(request: AuditRequest) -> OperatorAuditResult<AuditQuer
         .query_rows(&filters)
         .map_err(|err| OperatorAuditError::Internal(format!("audit query: {err}")))?;
     let row_count = rows.len();
-    let fragment = project_rows(&rows);
+    // #112: resolve each Component row's Cell evidence through the same store.
+    let resolve = |id: crate::evidence::EvidenceId| store.call_evidence(id).ok().flatten();
+    let fragment = project_rows_with_evidence(&rows, &EvidenceLookup::new(&resolve));
     Ok(AuditQueryOutput {
         session_id,
         row_count,
@@ -331,16 +334,24 @@ pub async fn replay_audit(request: AuditReplayRequest) -> OperatorAuditResult<Au
         .unwrap_or("lattice")
         .to_string();
 
-    let trace = project_turn_trace(&request.turn_id, &rows);
+    // #112: Cell evidence lives in the evidence table, so the replay resolves
+    // each Component row's `evidence_id` through the same store it read the
+    // rows from. A row that resolves to nothing projects without evidence
+    // rather than with a fabricated record.
+    let resolve = |id: crate::evidence::EvidenceId| store.call_evidence(id).ok().flatten();
+    let lookup = EvidenceLookup::new(&resolve);
+
+    let trace = project_turn_trace_with_evidence(&request.turn_id, &rows, &lookup);
     // #28 D8: the stored `predicate_type` is the authority on replay, so a
     // turn attested as v1 re-projects as v1 even on a binary that would emit
     // v2 for the same rows. An unattested turn falls back to row evidence.
     let stored = store.attestation_for_turn(&request.turn_id).ok().flatten();
-    let statement = Some(rebuild_in_toto_statement(
+    let statement = Some(rebuild_in_toto_statement_with_evidence(
         &request.turn_id,
         &rows,
         &runtime,
         stored.as_ref().map(|record| record.predicate_type.as_str()),
+        &lookup,
     ));
     let stored_statement_match = stored.as_ref().and_then(|record| {
         stored_statement_matches_derived(&record.statement_json, statement.as_ref())

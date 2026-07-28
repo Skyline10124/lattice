@@ -130,20 +130,6 @@ fn denies_observation_budget_exhausted() {
 }
 
 #[test]
-fn denies_todo_budget_exhausted() {
-    let hook = DefaultPolicyHook::new(project_config());
-    let mut input = policy_input("session.todo_write", json!({"todos": []}));
-    input.audit_context.budget_snapshot.todo_ops_used = 10;
-    assert!(matches!(
-        hook.decide(&input),
-        PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::BudgetExceeded,
-            ..
-        }
-    ));
-}
-
-#[test]
 fn decision_is_deterministic() {
     let hook = DefaultPolicyHook::new(project_config());
     let input = policy_input("mutate.edit", json!({"path": "src/lib.rs", "edits": []}));

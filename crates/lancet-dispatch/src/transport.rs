@@ -459,9 +459,8 @@ mod tests {
     use super::*;
     use crate::registry::MethodRegistry;
     use lancet_catalog::CepMethod;
-    use lancet_catalog::methods::TodoWrite;
-    use lancet_catalog::methods::session::{
-        TodoItem, TodoStatus, TodoWriteParams, TodoWriteResult,
+    use lancet_catalog::test_method::{
+        TestEcho, TestEchoItem, TestEchoParams, TestEchoResult, TestEchoStatus,
     };
     use lancet_protocol::error::jsonrpc;
 
@@ -470,9 +469,9 @@ mod tests {
         let (client, server) = CepTransport::pair(8);
         let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
         registry
-            .register_method::<TodoWrite, _, _>(|params, _ctx| async move {
-                Ok(TodoWriteResult {
-                    todos: params.todos,
+            .register_method::<TestEcho, _, _>(|params, _ctx| async move {
+                Ok(TestEchoResult {
+                    items: params.items,
                 })
             })
             .unwrap();
@@ -494,16 +493,16 @@ mod tests {
         });
 
         let result = client
-            .call::<TodoWrite>(TodoWriteParams {
-                todos: vec![TodoItem {
+            .call::<TestEcho>(TestEchoParams {
+                items: vec![TestEchoItem {
                     content: "ship".into(),
-                    status: TodoStatus::InProgress,
+                    status: TestEchoStatus::InProgress,
                 }],
             })
             .await
             .unwrap();
 
-        assert_eq!(result.todos[0].content, "ship");
+        assert_eq!(result.items[0].content, "ship");
         drop(client);
         server_task.abort();
     }
@@ -516,9 +515,9 @@ mod tests {
     fn echo_registry() -> MethodRegistry<(EventSink, Cancellation)> {
         let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
         registry
-            .register_method::<TodoWrite, _, _>(|params, _ctx| async move {
-                Ok(TodoWriteResult {
-                    todos: params.todos,
+            .register_method::<TestEcho, _, _>(|params, _ctx| async move {
+                Ok(TestEchoResult {
+                    items: params.items,
                 })
             })
             .unwrap();
@@ -550,20 +549,20 @@ mod tests {
     async fn call_named_round_trips_typed_result() {
         let (client, task) = spawn_echo_server(echo_registry());
 
-        let result: TodoWriteResult = client
+        let result: TestEchoResult = client
             .call_named(
-                TodoWrite::NAME,
-                TodoWriteParams {
-                    todos: vec![TodoItem {
+                TestEcho::NAME,
+                TestEchoParams {
+                    items: vec![TestEchoItem {
                         content: "named".into(),
-                        status: TodoStatus::Pending,
+                        status: TestEchoStatus::Pending,
                     }],
                 },
             )
             .await
             .expect("call_named succeeds");
 
-        assert_eq!(result.todos[0].content, "named");
+        assert_eq!(result.items[0].content, "named");
         drop(client);
         task.abort();
     }
@@ -584,7 +583,7 @@ mod tests {
         }
 
         let err = client
-            .call_named::<Unserializable, TodoWriteResult>(TodoWrite::NAME, Unserializable)
+            .call_named::<Unserializable, TestEchoResult>(TestEcho::NAME, Unserializable)
             .await
             .expect_err("serialize failure must error");
         assert_eq!(
@@ -597,16 +596,13 @@ mod tests {
 
     #[tokio::test]
     async fn call_named_returns_internal_error_when_result_fails_to_deserialize() {
-        // The server returns a valid TodoWriteResult, but we ask for a
+        // The server returns a valid TestEchoResult, but we ask for a
         // different type — the deserialize step must fail with an
         // ExecutionFailed (internal_error) CepError.
         let (client, task) = spawn_echo_server(echo_registry());
 
         let err = client
-            .call_named::<TodoWriteParams, String>(
-                TodoWrite::NAME,
-                TodoWriteParams { todos: vec![] },
-            )
+            .call_named::<TestEchoParams, String>(TestEcho::NAME, TestEchoParams { items: vec![] })
             .await
             .expect_err("deserialize failure must error");
         assert_eq!(err.code, lancet_protocol::CepErrorCode::ExecutionFailed);
@@ -623,7 +619,7 @@ mod tests {
     async fn cancel_resolves_with_server_structured_error() {
         let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
         registry
-            .register_method::<TodoWrite, _, _>(|_params, mut ctx| async move {
+            .register_method::<TestEcho, _, _>(|_params, mut ctx| async move {
                 // Simulate the Component path: wait until cancellation is
                 // observed, then return the host-mapped `CallCancelled`.
                 ctx.1.cancelled().await;
@@ -638,10 +634,10 @@ mod tests {
             .unwrap();
         let (client, task) = spawn_echo_server(registry);
 
-        let (call, control) = client.start_call::<TodoWrite>(TodoWriteParams {
-            todos: vec![TodoItem {
+        let (call, control) = client.start_call::<TestEcho>(TestEchoParams {
+            items: vec![TestEchoItem {
                 content: "cancel-me".into(),
-                status: TodoStatus::Pending,
+                status: TestEchoStatus::Pending,
             }],
         });
         control.cancel();
@@ -665,25 +661,25 @@ mod tests {
         let (observed_tx, mut observed_rx) = tokio::sync::mpsc::channel::<bool>(1);
         let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
         registry
-            .register_method::<TodoWrite, _, _>(move |params, mut ctx| {
+            .register_method::<TestEcho, _, _>(move |params, mut ctx| {
                 let started_tx = started_tx.clone();
                 let observed_tx = observed_tx.clone();
                 async move {
                     let _ = started_tx.send(()).await;
                     ctx.1.cancelled().await;
                     let _ = observed_tx.send(true).await;
-                    Ok(TodoWriteResult {
-                        todos: params.todos,
+                    Ok(TestEchoResult {
+                        items: params.items,
                     })
                 }
             })
             .unwrap();
         let (client, task) = spawn_echo_server(registry);
 
-        let (mut call, control) = client.start_call::<TodoWrite>(TodoWriteParams {
-            todos: vec![TodoItem {
+        let (mut call, control) = client.start_call::<TestEcho>(TestEchoParams {
+            items: vec![TestEchoItem {
                 content: "drop-me".into(),
-                status: TodoStatus::Pending,
+                status: TestEchoStatus::Pending,
             }],
         });
         // Poll the call until the request reaches the server handler.

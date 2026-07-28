@@ -1,0 +1,110 @@
+# Sole Tool Descriptor authority (ADR 0004 §2). Everything else is generated:
+# WIT world, host descriptor, LLM projection, inventory registration, and the
+# expected-identity candidate all come from this file via
+# `cargo xtask tool-codegen`.
+[tool]
+name = "session.todo_write"
+version = "0.1.0"
+description = "Record the current task plan as a concise todo list for multi-step work."
+abi-version = 1
+# `builtin` puts this Tool in the default distribution: the generated host
+# composition embeds its registration and pins its identity, so a built runtime
+# carries it in its closed catalog (ADR 0004 decisions 1/7). The field is
+# required and has no default — a Tool cannot end up in the default bundle by
+# omission.
+distribution = "builtin"
+
+[params]
+# The structured input contract, and the whole of this Tool's validation. Every
+# rule the native handler enforced imperatively is expressed here so the host
+# refuses a bad call *before* the Component is entered, with one structured
+# error, instead of the guest returning an opaque string:
+#
+# - `pattern: "\\S"` rejects blank and whitespace-only content (the native
+#   handler's `content.trim().is_empty()` check).
+# - the `not/contains/minContains: 2` clause rejects two or more `in_progress`
+#   todos (the native handler's "at most one in_progress" rule).
+# - `maxItems` is the compiled ceiling on one call's todo count. See the note in
+#   the crate docs: the profile-configurable per-turn `max_todo_ops` budget does
+#   not survive this migration, because charging is a runtime seam #27/#28
+#   deliberately deferred.
+schema = '''
+{
+  "type": "object",
+  "properties": {
+    "todos": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+        },
+        "required": ["content", "status"],
+        "additionalProperties": false
+      },
+      "not": {
+        "type": "array",
+        "contains": {
+          "type": "object",
+          "properties": { "status": { "const": "in_progress" } },
+          "required": ["status"]
+        },
+        "minContains": 2
+      }
+    }
+  },
+  "required": ["todos"],
+  "additionalProperties": false
+}
+'''
+
+[result]
+# The result contract mirrors the input: this Tool validates and echoes the
+# normalized plan. It has never had a store, and this migration adds none.
+schema = '''
+{
+  "type": "object",
+  "properties": {
+    "todos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+        },
+        "required": ["content", "status"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["todos"],
+  "additionalProperties": false
+}
+'''
+
+[[scopes]]
+name = "session"
+trust = "in"
+channel = "session"
+
+# The only effect this Tool actually has: its validated result enters the agent
+# context, which the host measures (`CtxOp::Alloc`). It performs NO host session
+# mutation — there is no session store behind it — so no `mutate:*` capability is
+# declared. Declaring one would be the "fictional host session mutation" issue
+# #29's fourth criterion forbids, and it would also let the guest relabel its
+# result cell to an unmeasured one.
+[[capabilities]]
+name = "session.result"
+cell = "alloc:none:session"
+
+[artifact]
+# Written by `cargo xtask tool-build`; verified by the composition gate.
+sha256 = "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4"
+# The encoder belongs in this fingerprint: `wasm-tools component new` determines
+# the resulting Component bytes, so the sha256 above is only interpretable
+# alongside it (#80). `cargo xtask ci` asserts the installed encoder matches
+# `EXPECTED_WASM_TOOLS`.
+toolchain = "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"

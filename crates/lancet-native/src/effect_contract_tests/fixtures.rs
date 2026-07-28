@@ -1,7 +1,6 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -51,21 +50,6 @@ pub(super) fn mutation_region(_root: &str) -> AuthorizedEffectRegion {
         denied_write_path_prefixes: Vec::new(),
         hosts: Vec::new(),
         session_state_allowed: false,
-        command_allowed: false,
-    }
-}
-
-pub(super) fn session_region() -> AuthorizedEffectRegion {
-    let mut kinds = BTreeSet::new();
-    kinds.insert(ImpactKind::SessionStateMutation);
-    AuthorizedEffectRegion {
-        kinds,
-        read_paths: Vec::new(),
-        observation_roots: Vec::new(),
-        denied_write_paths: Vec::new(),
-        denied_write_path_prefixes: Vec::new(),
-        hosts: Vec::new(),
-        session_state_allowed: true,
         command_allowed: false,
     }
 }

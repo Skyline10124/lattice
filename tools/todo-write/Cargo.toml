@@ -1,0 +1,26 @@
+[package]
+# `cargo xtask tool-build` derives the package name from the manifest's tool
+# name by replacing dots with dashes (`session.todo_write` ->
+# `session-todo_write`), and the cdylib artifact name from that. The name is
+# therefore not free-form.
+name = "session-todo_write"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+description = "session.todo_write Source Tool: validates and echoes a structured todo plan."
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+
+[dependencies]
+lattice-tool-prelude = { workspace = true }
+# wit-bindgen is also a direct dep: its `generate!` macro emits code that
+# references `wit_bindgen::rt::...` by bare crate path, so the crate must be
+# linked. The version comes from the exact `=` pin in
+# `[workspace.dependencies]`, shared with the prelude's re-export.
+wit-bindgen = { workspace = true }
