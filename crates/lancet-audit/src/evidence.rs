@@ -46,7 +46,7 @@ pub const EVIDENCE_SCHEMA_VERSION: i64 = 2;
 /// Columns an already-versioned `evidence_calls` table must carry. A file whose
 /// `user_version` claims evidence support but whose table shape disagrees is
 /// reported, never altered.
-pub(crate) const REQUIRED_EVIDENCE_CALL_COLUMNS: [&str; 9] = [
+pub(crate) const REQUIRED_EVIDENCE_CALL_COLUMNS: [&str; 11] = [
     "evidence_id",
     "turn_id",
     "session_id",
@@ -56,6 +56,13 @@ pub(crate) const REQUIRED_EVIDENCE_CALL_COLUMNS: [&str; 9] = [
     "recorded_at",
     "admission_version",
     "admission_json",
+    // The two nullable version columns belong here too. They are absent from no
+    // shape this store ever wrote, so a file claiming the evidence schema without
+    // them is a foreign shape — and omitting them from the guard let such a file
+    // OPEN and then fail every single write at runtime, which is history being
+    // dropped with no error at the seam that exists to prevent exactly that.
+    "effects_version",
+    "denials_version",
 ];
 
 /// Columns an already-versioned `evidence_effects` table must carry.

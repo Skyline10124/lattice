@@ -1213,6 +1213,29 @@ impl CepAuditStore {
     }
 }
 
+/// Drop an imported row's `evidence_id`, which does not resolve in this store.
+///
+/// The import copies audit rows only — the evidence tables are not carried, and
+/// `evidence_id` is a per-store AUTOINCREMENT rowid that restarts at 1. Keeping
+/// the pointer would let a historical row resolve to an unrelated *later* call's
+/// evidence: silently, with no version mismatch and no error. A row with no
+/// pointer is correctly read as "this call has no evidence in this store", which
+/// is the truth.
+fn strip_evidence_pointer(metadata_json: Option<&str>) -> Option<String> {
+    let raw = metadata_json?;
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        // Not JSON: nothing to strip, and rewriting it would lose data.
+        return Some(raw.to_string());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Some(raw.to_string());
+    };
+    if object.remove("evidence_id").is_none() {
+        return Some(raw.to_string());
+    }
+    serde_json::to_string(&value).ok()
+}
+
 fn import_legacy_tables(
     source: &Connection,
     dest: &Connection,
@@ -1261,7 +1284,7 @@ fn import_legacy_tables(
                 row.semantic_status,
                 row.guard_stage,
                 if row.policy_enforced { 1 } else { 0 },
-                row.metadata_json,
+                strip_evidence_pointer(row.metadata_json.as_deref()),
                 row.model_id,
                 row.runtime_version,
             ],

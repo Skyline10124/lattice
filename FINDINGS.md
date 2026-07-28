@@ -42,14 +42,13 @@
 > operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
 > `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
 
-### L-GH112-01: evidence 表的三处读取健壮性残留 — `robustness` / `lancet-audit` / GitHub #112
-- **位置**: `crates/lancet-audit/src/audit.rs`（`init_schema` 的 v2 形状检查按列名判定）；`crates/lancet-native/src/server/transport.rs`（evidence 写入失败只 `tracing::error!`）；`crates/lancet-audit/src/audit.rs::import_legacy_read_only_if_empty`。
-- **问题**: 三条独立的残留，均由对抗性验收查出：
-  (a) **形状检查按列名，不按列类型**（与既有 `cep_audit_entries` 检查同一口径）。一个列名齐全但类型/约束不符的 `evidence_calls` 能通过 open，之后**每次** evidence 写入在运行时失败（`table evidence_calls has no column named ...` 一类）。
-  (b) **写入失败只记日志**。`transport.rs` 在 `record_call_evidence` 失败时保留 audit 行、不带 `evidence_id`（缺口可检测），但没有计数器/指标/健康信号，所以 (a) 那种库能长期运行、持续产出无 evidence 的 audit 行。
-  (c) **legacy read-only import 不搬 evidence 表**。被导入的历史 audit 行其 `metadata_json` 仍带旧库的 `evidence_id`，而新库的自增 id 从 1 重新开始 —— 历史行可解析到一条**无关的**新 evidence 行，无错误、无版本不符。
-- **当前状态**: PARTIAL。已修的相邻问题：每条记录（含 `evidence_effects` / `evidence_denials` 的 per-entry `record_version`）的版本在读取时校验，NULL 版本报 `MissingRecordVersion` 而非静默按当前版本解析；生产读取路径不再 `.ok().flatten()` 吞掉 `EvidenceError`，而是记录后降级。(a)(b)(c) 未修。
-- **计划**: (c) 优先——最简修法是 import 时清除被导入行 `metadata_json` 里的 `evidence_id`（该指针在新库中无意义），而不是尝试搬迁自增 id；应与 ADR 0005 决策 4 的 operator 读取面改指一并处理。(b) 随 #34 的 runtime 收口加健康信号。(a) 与既有 audit 表检查同源，若要收紧应一并改，不要只给 evidence 表加一套更严的口径。
+### L-GH112-01: evidence 写入失败只记日志，且形状检查按列名不按列类型 — `robustness` / `lancet-audit` / GitHub #112
+- **位置**: `crates/lancet-native/src/server/transport.rs`（`record_call_evidence` 失败处理）；`crates/lancet-audit/src/audit.rs`（`missing_evidence_columns` 按列名判定）。
+- **问题**: 两条残留，均由对抗性验收查出：
+  (a) **写入失败只记日志**。失败时保留 audit 行、不带 `evidence_id`（缺口因此可检测），但没有计数器/指标/健康信号，所以一个 evidence 表不可写的库能长期运行、持续产出无 evidence 的 audit 行。
+  (b) **形状检查按列名，不按列类型**（与既有 `cep_audit_entries` 检查同一口径）。列名齐全但类型/约束不符的 `evidence_calls` 能通过 open，之后每次写入在运行时失败。
+- **当前状态**: PARTIAL。同批查出并**已修**的四项：`evidence_effects` / `evidence_denials` 的 per-entry `record_version` 此前只写不读，现逐条校验并与记录头比对；`effects_version` / `denials_version` 为 NULL 时此前被静默当作当前版本，现报 `MissingRecordVersion`（带 operator action）；生产读取路径不再 `.ok().flatten()` 吞掉 `EvidenceError`；`REQUIRED_EVIDENCE_CALL_COLUMNS` 补上遗漏的两个 version 列（此前 9/11，正是 (b) 中"能 open 但每次写入失败"的成因之一）；legacy import 现清除被导入行的 `evidence_id` 指针（此前历史行可解析到一条无关的新 evidence 行）。
+- **计划**: (a) 随 #34 的 runtime 收口加健康信号 —— 单个 Tool 的特例计数器不值得。(b) 与既有 audit 表检查同源（`REQUIRED_AUDIT_COLUMNS` 也是按列名），若要收紧应一并改，不要只给 evidence 表加一套更严的口径。
 
 ### L-GH29-01: `max_todo_ops` 的跨调用累计预算随 Component 迁移失效 — `behavior-change` / `lancet-authority` / `lancet-runtime` / GitHub #29
 - **位置**: `tools/todo-write/manifest.toml`（`maxItems`）；`crates/lancet-authority/src/policy/budget.rs`（`try_charge_todo_ops`、`max_todo_ops`，现无调用点）；`crates/lattice-profile/src/schema.rs`（`[lancet.observation] max_todo_ops` 仍被解析与文档承诺）。

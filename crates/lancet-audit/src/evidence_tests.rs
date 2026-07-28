@@ -935,6 +935,88 @@ fn all_issue28_evidence_scenarios_round_trip() {
     assert_eq!(turn.len(), scenarios.len());
 }
 
+/// A legacy import must not carry an `evidence_id` into the new store. The id is
+/// a per-store AUTOINCREMENT rowid restarting at 1, so a kept pointer would let a
+/// historical row resolve to an unrelated later call's evidence.
+#[test]
+fn legacy_import_drops_the_stale_evidence_pointer() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let legacy_path = dir.path().join("legacy.db");
+    let fresh_path = dir.path().join("fresh.db");
+
+    // A legacy store with one Component row pointing at its own evidence id 1.
+    {
+        let legacy = CepAuditStore::open(&legacy_path).expect("legacy store");
+        let ctx = crate::audit::CepAuditContext {
+            turn_id: "old-turn".into(),
+            session_id: "old-sess".into(),
+            ..Default::default()
+        };
+        let start = legacy
+            .start_call(
+                &ctx,
+                1,
+                "noop.echo",
+                &crate::audit::CallAuditMetadata::for_component_dispatch(),
+            )
+            .expect("start");
+        legacy
+            .finalize_call(
+                start,
+                crate::audit::AuditOutcome::Success {
+                    summary: "ok".into(),
+                },
+                None,
+                Some(r#"{"evidence_id":1,"component_cells":["alloc:none:session:in"]}"#),
+            )
+            .expect("finalize");
+    }
+
+    // A fresh store imports it, then records evidence of its own — which takes
+    // id 1, the very id the imported row used to point at.
+    let fresh = CepAuditStore::open(&fresh_path).expect("fresh store");
+    fresh
+        .import_legacy_read_only_if_empty(&legacy_path)
+        .expect("import");
+
+    let admission = admission(&["session.result"]);
+    let effects = effects_record();
+    let denied = empty_denials();
+    let new_id = fresh
+        .record_call_evidence(&CallEvidence {
+            turn_id: "new-turn",
+            session_id: "new-sess",
+            call_id: 9,
+            tool: "BRAND-NEW-TOOL",
+            outcome: EvidenceOutcome::Completed,
+            admission: &admission,
+            effects: Some(&effects),
+            denied: Some(&denied),
+        })
+        .expect("record");
+    assert_eq!(new_id, EvidenceId(1), "the fixture depends on id reuse");
+
+    let rows = fresh
+        .query_rows(&crate::audit::AuditQueryFilters::default())
+        .expect("query");
+    let imported = rows
+        .iter()
+        .find(|row| row.turn_id == "old-turn")
+        .expect("the imported row survived");
+    let metadata: serde_json::Value =
+        serde_json::from_str(imported.metadata_json.as_deref().expect("metadata"))
+            .expect("metadata is JSON");
+    assert!(
+        metadata.get("evidence_id").is_none(),
+        "an imported row must not point at this store's evidence: {metadata}"
+    );
+    // The rest of the metadata is preserved.
+    assert_eq!(
+        metadata["component_cells"],
+        serde_json::json!(["alloc:none:session:in"])
+    );
+}
+
 /// Reading an identity that was never written is `None`, not an error.
 #[test]
 fn unknown_evidence_id_reads_as_none() {
