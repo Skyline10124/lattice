@@ -2,6 +2,61 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #124：rollout 发布门禁的输出捕获用两个独立 fd 写同一文件，互相覆盖 — 2026-07-27
+
+Severity: MEDIUM（发布门禁判定不可复现 + 证据文件被破坏）。
+
+**Problem:**
+
+`xtask/src/rollout.rs` 的 `run_timed` 是 alpha 发布门禁全部步骤（`Action::Cmd` / `CargoTest` / `Doctor`）的执行入口，由 `.github/workflows/full-gate.yml` 的 `cargo xtask rollout --channel alpha` 每晚实跑。它创建**一个** `NamedTempFile`，然后**两次 `reopen()`** 分别接 stdout 与 stderr：
+
+```rust
+cmd.stdout(Stdio::from(file.reopen()?))
+   .stderr(Stdio::from(file.reopen()?))
+```
+
+tempfile 3.27.0 的 `reopen()`（`src/file/imp/unix.rs:81`）是 `OpenOptions::new().read(true).write(true).open(path)`，**不带 `O_APPEND`**，因此两个 fd 各持从 0 开始的**独立写偏移**。子进程交错写 stdout/stderr 时，两条流在同一文件里互相覆盖而非拼接。实测复现：
+
+```
+stderr: "   Compiling lancet-protocol v0.1.0\n   Compiling lattice-api v0.1.0\n    Finished test profile\n"
+stdout: "running 12 tests\ntest result: ok. 12 passed; 0 failed\n"
+stderr: "     Running tests/direct_local_turn.rs\n"
+→ 文件实际内容:
+b'running 12 tests\ntest result: ok. 12 passed; 0 failed\nce-api v0.1.0\n    Finished test profile\n     Running tests/direct_local_turn.rs\n'
+```
+
+这不是美观问题，被破坏的文本是三处 gating 逻辑的唯一输入：
+1. `cargo_test_passed`（`:710`）用 `passed_test_count`（`:720`）从中正则提取通过数，为 0 即判门失败（anti-vacuous 守卫）；
+2. `status_check`（`:696`）用 `tail()` 生成写入 record 的失败详情（`:244`）；
+3. `Action::Doctor`（`:327-329`）把同一份输出**直接 `fs::write` 成 `target/rollout/evidence/doctor.json`** —— 而 doctor 的 JSON 走 stdout（`lattice-cli/src/commands/lancet.rs:131-135`）、错误走 stderr（`main.rs:94`），两者交错覆盖后，`docs/TESTING.md:423` 声称的发布证据可为**非法 JSON**。
+
+第二个缺陷放大了第一个：`:773` 原为 `fs::read_to_string(..).unwrap_or_default()`。交错覆盖可切断 UTF-8 多字节序列产生非法 UTF-8（实测 `b'xxx\x9c\x93yy\n'` 解码失败），而 `unwrap_or_default()` 把解码失败**静默吞成空串**；此时 `success` 仍为 true，`passed_test_count` 返回 0，`cargo_test_passed` 精确报出 "exited 0 but ran 0 tests" —— 测试全绿的合格制品被 5 个 `CargoTest` 步骤中任一拒绝，且 `detail` 毫无诊断价值。含非 ASCII 的输出在本仓库属常态（`crates/lattice-api/tests/dogfood_impact_matrix.rs` 等测试源码含中文，rustc 诊断亦用 Unicode）。因写序取决于子进程调度，**同一 commit 反复跑结果可不一致**。
+
+第三个独立缺陷（同一失败路径）：`tail()`（`:731`）用**字节索引**切 `&str`（`&trimmed[trimmed.len() - 800..]`），截断处落在多字节码点内部时 panic。已实测：`start byte index 66 is not a char boundary; it is inside '中'`。后果比普通失败更糟——panic 沿 `main` 冒泡为 exit 101，该步 `status` 停留在 seed 的 `Blocked`、`detail` 为 `None`、`failure_artifacts` 不写入 JSON，即恰好丢失该函数存在的意义。
+
+对照：`xtask/src/ci.rs:327` 用 `Stdio::inherit()`，无此缺陷；三条都是 rollout 独有。
+
+**Fix:**
+
+1. 改为 `file.reopen()` 一次拿 stdout fd，再 `try_clone()` 出 stderr fd —— `try_clone` 复制描述符并**共享文件偏移**，两条流按序落盘。
+2. `:773` 改为 `String::from_utf8_lossy(&fs::read(..).unwrap_or_default())`，保留到达的字节而不是整份丢弃。
+3. `tail()` 改为从 `len-800` 向前走到下一个 char boundary 再切，永不 panic 且不超过上限。
+
+三处均加注释写明为什么不能回退成原写法。
+
+**Verification:**
+- `cargo test -p xtask` — 51 passed / 0 failed（新增 3 条）。
+- 新增 `run_timed_interleaves_stdout_and_stderr_without_overwriting`：spawn `sh -c 'echo compiling >&2; echo "test result: ok. 7 passed..."; echo running >&2'`，断言 stderr 两行与 stdout 行同时存活、且 `passed_test_count` 正确得 7。
+- 新增 `tail_does_not_panic_when_the_cut_lands_mid_codepoint`（fixture 先断言 `!is_char_boundary(len-800)` 以确保真的踩在码点内部）与 `tail_returns_short_output_verbatim_and_trimmed`。
+- **反向验证（两条各一次）**：
+  - 还原双 `reopen()` → 新测试 FAILED，实测输出被咬成 `"test resulrunning\n passed; 0 failed\n"`（比预估更糟：`test result:` 行被切断，`passed_test_count` 确实会误读）。
+  - 还原字节索引 `tail()` → FAILED 并报 `start byte index 66 is not a char boundary; it is inside '中'`。
+  - 两次还原后均确认 `git diff` 干净、重跑为绿。
+- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings` — passed。
+
+**Changed files:**
+`xtask/src/rollout.rs`; `FIX.md`.
+
 ## GitHub #111 部分收口：给两条断言强度不足的测试补上实质断言 — 2026-07-27
 
 Severity: LOW（**经对抗性复核下调，原评 HIGH 有误——见下方「严重度更正」**）。
