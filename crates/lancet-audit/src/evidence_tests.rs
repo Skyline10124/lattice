@@ -465,6 +465,103 @@ fn unsupported_record_version_is_refused_on_read() {
     }
 }
 
+/// The per-entry `record_version` columns gate too. They are written on every
+/// insert, so a column that is never read back would leave a future v2 effect
+/// shape interpretable as v1 — the exact mis-parse the version field prevents.
+#[test]
+fn unsupported_entry_version_is_refused_on_read() {
+    for (table, record) in [
+        ("evidence_effects", "observed_effect"),
+        ("evidence_denials", "denied_operation"),
+    ] {
+        let store = CepAuditStore::in_memory().expect("store");
+        let admission = admission(&["session.result"]);
+        let effects = effects_record();
+        let denied = denials();
+        let id = store
+            .record_call_evidence(&CallEvidence {
+                turn_id: "turn-1",
+                session_id: "sess-1",
+                call_id: 1,
+                tool: "noop.echo",
+                outcome: EvidenceOutcome::Completed,
+                admission: &admission,
+                effects: Some(&effects),
+                denied: Some(&denied),
+            })
+            .expect("record");
+
+        store
+            .with_connection_for_tests(|conn| {
+                conn.execute(
+                    &format!("UPDATE {table} SET record_version = 99 WHERE evidence_id = ?1"),
+                    params![id.0],
+                )
+                .map(|_| ())
+            })
+            .expect("bump entry version");
+
+        match store.call_evidence(id).expect_err("must be refused") {
+            EvidenceError::UnsupportedRecordVersion {
+                record: got,
+                found,
+                supported,
+                ..
+            } => {
+                assert_eq!(got, record);
+                assert_eq!(found, 99);
+                assert_eq!(supported, 1);
+            }
+            other => panic!("expected UnsupportedRecordVersion for {table}, got {other}"),
+        }
+    }
+}
+
+/// A NULL version column is not "the current version" — it is a row whose
+/// version is unknown, which is what the check exists to refuse. The producer
+/// always writes both columns, so NULL means a foreign writer or corruption.
+#[test]
+fn missing_record_version_is_refused_on_read() {
+    for column in ["effects_version", "denials_version"] {
+        let store = CepAuditStore::in_memory().expect("store");
+        let admission = admission(&["session.result"]);
+        let effects = effects_record();
+        let denied = denials();
+        let id = store
+            .record_call_evidence(&CallEvidence {
+                turn_id: "turn-1",
+                session_id: "sess-1",
+                call_id: 1,
+                tool: "noop.echo",
+                outcome: EvidenceOutcome::Completed,
+                admission: &admission,
+                effects: Some(&effects),
+                denied: Some(&denied),
+            })
+            .expect("record");
+
+        store
+            .with_connection_for_tests(|conn| {
+                conn.execute(
+                    &format!("UPDATE evidence_calls SET {column} = NULL WHERE evidence_id = ?1"),
+                    params![id.0],
+                )
+                .map(|_| ())
+            })
+            .expect("null the version");
+
+        let err = store.call_evidence(id).expect_err("must be refused");
+        assert!(
+            matches!(err, EvidenceError::MissingRecordVersion { .. }),
+            "a NULL {column} must be refused, got {err}"
+        );
+        assert!(
+            err.to_string().contains("move the database aside"),
+            "the error must carry an operator action: {err}"
+        );
+    }
+}
+
 /// A corrupt enum label is reported as an unreadable field, naming the column,
 /// rather than silently coerced to a default.
 #[test]
@@ -630,8 +727,12 @@ fn pre_evidence_database_gains_the_tables_and_keeps_history() {
                      'cep_policy_lifecycle', 1);",
         )
         .expect("v1 shape");
-        conn.pragma_update(None, "user_version", 1i64)
-            .expect("stamp v1");
+        conn.pragma_update(
+            None,
+            "user_version",
+            crate::audit::AUDIT_SCHEMA_VERSION_PRE_EVIDENCE,
+        )
+        .expect("stamp the pre-evidence version");
     }
 
     let store = CepAuditStore::open(&path).expect("a v1 database is adopted");

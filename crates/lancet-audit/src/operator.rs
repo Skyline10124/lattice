@@ -193,7 +193,7 @@ pub async fn query_audit(request: AuditRequest) -> OperatorAuditResult<AuditQuer
         .map_err(|err| OperatorAuditError::Internal(format!("audit query: {err}")))?;
     let row_count = rows.len();
     // #112: resolve each Component row's Cell evidence through the same store.
-    let resolve = |id: crate::evidence::EvidenceId| store.call_evidence(id).ok().flatten();
+    let resolve = |id: crate::evidence::EvidenceId| resolve_evidence_for_projection(&store, id);
     let fragment = project_rows_with_evidence(&rows, &EvidenceLookup::new(&resolve));
     Ok(AuditQueryOutput {
         session_id,
@@ -338,7 +338,7 @@ pub async fn replay_audit(request: AuditReplayRequest) -> OperatorAuditResult<Au
     // each Component row's `evidence_id` through the same store it read the
     // rows from. A row that resolves to nothing projects without evidence
     // rather than with a fabricated record.
-    let resolve = |id: crate::evidence::EvidenceId| store.call_evidence(id).ok().flatten();
+    let resolve = |id: crate::evidence::EvidenceId| resolve_evidence_for_projection(&store, id);
     let lookup = EvidenceLookup::new(&resolve);
 
     let trace = project_turn_trace_with_evidence(&request.turn_id, &rows, &lookup);
@@ -407,3 +407,30 @@ fn parse_impact_kind(label: Option<&str>) -> OperatorAuditResult<Option<ImpactKi
 #[cfg(test)]
 #[path = "operator_tests.rs"]
 mod tests;
+
+/// Resolve a call's evidence for a projection, surfacing a read failure instead
+/// of degrading silently.
+///
+/// `EvidenceLookup` returns `Option`, so a refused read (an unsupported record
+/// version, a corrupt column) and a call that genuinely produced no evidence are
+/// the same value to the projection. That matters: `version_from_rows` picks the
+/// attestation predicate version by whether the lookup resolves, so a swallowed
+/// error would make the attestation *shape* a function of store health rather
+/// than of what the turn did. The projection still degrades — it has no error
+/// channel — but the failure is no longer invisible.
+fn resolve_evidence_for_projection(
+    store: &CepAuditStore,
+    id: crate::evidence::EvidenceId,
+) -> Option<crate::evidence::StoredCallEvidence> {
+    match store.call_evidence(id) {
+        Ok(found) => found,
+        Err(error) => {
+            tracing::error!(
+                evidence_id = id.0,
+                %error,
+                "failed to read Cell evidence for a projection; the projection omits it"
+            );
+            None
+        }
+    }
+}

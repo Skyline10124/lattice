@@ -42,10 +42,20 @@
 > operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
 > `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
 
+### L-GH112-01: evidence 表的三处读取健壮性残留 — `robustness` / `lancet-audit` / GitHub #112
+- **位置**: `crates/lancet-audit/src/audit.rs`（`init_schema` 的 v2 形状检查按列名判定）；`crates/lancet-native/src/server/transport.rs`（evidence 写入失败只 `tracing::error!`）；`crates/lancet-audit/src/audit.rs::import_legacy_read_only_if_empty`。
+- **问题**: 三条独立的残留，均由对抗性验收查出：
+  (a) **形状检查按列名，不按列类型**（与既有 `cep_audit_entries` 检查同一口径）。一个列名齐全但类型/约束不符的 `evidence_calls` 能通过 open，之后**每次** evidence 写入在运行时失败（`table evidence_calls has no column named ...` 一类）。
+  (b) **写入失败只记日志**。`transport.rs` 在 `record_call_evidence` 失败时保留 audit 行、不带 `evidence_id`（缺口可检测），但没有计数器/指标/健康信号，所以 (a) 那种库能长期运行、持续产出无 evidence 的 audit 行。
+  (c) **legacy read-only import 不搬 evidence 表**。被导入的历史 audit 行其 `metadata_json` 仍带旧库的 `evidence_id`，而新库的自增 id 从 1 重新开始 —— 历史行可解析到一条**无关的**新 evidence 行，无错误、无版本不符。
+- **当前状态**: PARTIAL。已修的相邻问题：每条记录（含 `evidence_effects` / `evidence_denials` 的 per-entry `record_version`）的版本在读取时校验，NULL 版本报 `MissingRecordVersion` 而非静默按当前版本解析；生产读取路径不再 `.ok().flatten()` 吞掉 `EvidenceError`，而是记录后降级。(a)(b)(c) 未修。
+- **计划**: (c) 优先——最简修法是 import 时清除被导入行 `metadata_json` 里的 `evidence_id`（该指针在新库中无意义），而不是尝试搬迁自增 id；应与 ADR 0005 决策 4 的 operator 读取面改指一并处理。(b) 随 #34 的 runtime 收口加健康信号。(a) 与既有 audit 表检查同源，若要收紧应一并改，不要只给 evidence 表加一套更严的口径。
+
 ### L-GH29-01: `max_todo_ops` 的跨调用累计预算随 Component 迁移失效 — `behavior-change` / `lancet-authority` / `lancet-runtime` / GitHub #29
 - **位置**: `tools/todo-write/manifest.toml`（`maxItems`）；`crates/lancet-authority/src/policy/budget.rs`（`try_charge_todo_ops`、`max_todo_ops`，现无调用点）；`crates/lattice-profile/src/schema.rs`（`[lancet.observation] max_todo_ops` 仍被解析与文档承诺）。
 - **问题**: 迁移前 native handler 调 `budget.try_charge_todo_ops(len)` 按 turn 累计扣减 `max_todo_ops`（默认 100，profile 可配），超限报 `BudgetExhausted`。Component 侧没有等价扣费点：按 #27/#28 的设计，runtime 对成功返回值只做 `context_measure` 度量，charge/credit seam 明确推迟，`session.todo_write` 也不再是 native catalog 方法，所以 `DefaultPolicyHook` 的 todo budget 分支已随本票删除（此前它是死代码）。
-- **当前状态**: PARTIAL —— 单次调用上限保留且更强（descriptor 的 `maxItems: 100` 是构建期常量，Tool 作者改不动、profile 也改不动），跨调用累计上限消失。`[lancet.observation] max_todo_ops` 仍被 schema 接受但对该 Tool 无执行点，属 #121（"被校验、被文档承诺，但执行侧无读取点"）同类问题。`try_charge_todo_ops` / `todo_ops` / `ObservationBudgetSnapshot.todo_ops_used` 保留未删，等 charge seam 落地后复用。
+- **当前状态**: PARTIAL —— 单次调用上限保留且更强（descriptor 的 `maxItems: 100` 是构建期常量，Tool 作者改不动、profile 也改不动），跨调用累计上限消失（实测：200 次 × 100 条 = 20000 ops 全部成功）。`try_charge_todo_ops` / `todo_ops` / `ObservationBudgetSnapshot.todo_ops_used` 与 `MethodPolicy.max_todo_ops` / `ExternalMethodPolicy.max_todo_ops` 均保留但已无读取点，等 charge seam 落地后复用。
+- **同因失效的另两个 profile 面（对抗性验收查出）**: `[lancet.effects] deny` 与 `[lancet.policy] methods."session.todo_write".enabled` 都按 `ImpactKind` / native 方法身份判定，对 Component Tool 一律不生效 —— 操作者按文档设 `deny = ["session_state_mutation"]` 期望关掉该 Tool，调用仍会成功。正确的开关是 `[tools].enabled`（stage-1 capability grant）与 `[lancet.capabilities]`。`docs/CONFIGURATION.md` 已就三处加注说明；这属 #121（"被校验、被文档承诺，但执行侧无读取点"）同类问题，随 #34 的词表退役一并收口。
 - **计划**: 由 context budget 的 charge/credit seam 统一处理（ADR 0005 决策 7 的 value 上限与 #28 的 `context_measure` 是其输入）。届时按 `CtxOp::Alloc` 对返回值统一扣费，替代按方法名的 per-op 计数；同时决定 `max_todo_ops` 是改指新 seam 还是随旧词表退役。在那之前不要为单个 Tool 重新引入按方法名的特例扣费点。
 
 ### L-64-01: two accepted Rewind residuals — unrecorded mutations and cross-session range — `robustness` / `lancet-runtime` / `lattice-api` / #64

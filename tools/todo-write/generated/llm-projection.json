@@ -11,7 +11,7 @@
             "properties": {
               "content": {
                 "minLength": 1,
-                "pattern": "\\S",
+                "pattern": "[^\\p{White_Space}]",
                 "type": "string"
               },
               "status": {

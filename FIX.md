@@ -14,20 +14,29 @@ Severity: N/A（feature：ADR 0004 决策 1/2/3/7 + ADR 0005 决策 2/3 的实�
 
 *#112（`lancet-audit`）*：新增 `src/evidence.rs` —— 三张 versioned 表 `evidence_calls` / `evidence_effects` / `evidence_denials`，`PRAGMA user_version` 从 1 升到 2（v1 库加性升级并保留历史；已声明 v2 但表形状不符的库报可操作错误且不改动）。`evidence_id`（store 生成的自增整数）是稳定标识，**刻意不是 `audit_id`** —— 后者随 CEP store 一并消失。Cell 按列拆存（`ctx_op`/`ext_impact`/`cell_scope`/`scope`/`scope_trust`/`scope_channel`/`target_kind`/`target_value`）而非 JSON blob，evidence 面才真正可查；`cell_scope` 与 `scope` 分列，因为 `Cell::scope` 与 `ObservedScope::scope` 是两个协议字段。读取时校验每条记录的 `version`，不支持的版本报 `UnsupportedRecordVersion` 而非按本二进制形状误解析；损坏的枚举标签报 `UnreadableField` 而非静默回落默认值。拒绝与失败同样落表（`EvidenceOutcome::{Completed,AdmissionDenied,Failed,Cancelled}`）：admission 失败携带其 `AdmissionEvidence`，per-operation 拒绝落 `DeniedOperation`，result-cell 违规保留其之前已记录的 operation effects。`metadata_json` 不再承载结构化 evidence，只留 `evidence_id` 指针与派生的 `component_cells` 查询键；PROV 投影与 attestation 构建改经 `EvidenceLookup` 从表中解析（`project_rows_with_evidence` / `build_in_toto_statement_with_evidence` / `rebuild_in_toto_statement_with_evidence`），operator replay 与 attestation 写入路径接同一个 store。
 
-*#29（Component 迁移）*：`tools/todo-write/` 新增 source manifest 独占 method/result contract、Cell/capability/scope、description、version。**全部校验下沉到 manifest 的 params schema**：`pattern: "\\S"` 覆盖空白 content，`not/contains/minContains: 2` 覆盖"至多一个 in_progress"，`maxItems: 100` 是编译期上限 —— host 的 `params_validator` 在进入 Component **之前**以单一结构化 `SchemaMismatch` 拒绝，guest 里不留第二份命令式规则副本。descriptor 只声明 `session.result = alloc:none:session` 这一条真实发生的 effect（返回值进 context，host 度量），**不声明任何 `mutate` capability** —— 该 method 从来没有 session store，本票也没有新增。
+*#29（Component 迁移）*：`tools/todo-write/` 新增 source manifest 独占 method/result contract、Cell/capability/scope、description、version。**全部校验下沉到 manifest 的 params schema**：`pattern: "[^\\p{White_Space}]"` 覆盖空白 content，`not/contains/minContains: 2` 覆盖"至多一个 in_progress"，`maxItems: 100` 是编译期上限 —— host 的 `params_validator` 在进入 Component **之前**以单一结构化 `SchemaMismatch` 拒绝，guest 里不留第二份命令式规则副本。descriptor 只声明 `session.result = alloc:none:session` 这一条真实发生的 effect（返回值进 context，host 度量），**不声明任何 `mutate` capability** —— 该 method 从来没有 session store，本票也没有新增。
 
 manifest 新增必填 `[tool] distribution = "builtin" | "fixture"` 字段（无默认值：Tool 不得因遗漏而进入封闭目录），`cargo xtask tool-codegen` 据此**生成** `crates/lancet-runtime/src/generated/host_composition.rs`：built-in Tool 的 `inventory` 注册（`include_bytes!` committed descriptor + Component）与 host 侧 pin 的 `EXPECTED_COMPONENTS` 身份表。这既是把 Tool 链接进宿主的机制，也顺手消掉 #103 记录的"`generated/` 实为手写、digest 无同步校验"缺口。`parse_hex_digest` 改为 `const fn` 并脱离 `test-utils` gate，pin 的 digest 成为构建期常量。
 
 native handler 与注册删除（`handlers/session_state.rs`、`register_native_session_state`）；`lancet-catalog` 的 `TodoWrite` 类型及 `methods/session.rs` 整体删除，`CATALOG` 从 5 降到 4（shipped catalog 仍是五个 Tool：四个 native + 一个 Component）。约 20 个此前把 `TodoWrite` 当通用 typed-method fixture 的测试改用新增的 `lancet_catalog::test_method::TestEcho`（`test-method` feature，dev-only，刻意不在 `catalog()` 中）；真正走生产路径的测试改用真实 shipped Tool。authority 层随之删除不可达的 `session.todo_write` 分支、`SessionStateOperation`、`ResolvedSessionState` 与 todo budget 检查。
 
-**Behavior change (honest):** profile 可配的 per-turn `[lancet.observation] max_todo_ops` 预算**不再生效**。原先由 native handler 调 `budget.try_charge_todo_ops` 扣减，而 Component 的 result accounting 按 #27/#28 设计只度量不扣费（charge/credit seam 明确推迟）。单次调用的上限保留为 descriptor 的 `maxItems: 100`（等于原 `max_todo_ops` 默认值），跨调用累计上限消失。残留记录在 `FINDINGS.md` L-GH29-01。
+**Behavior change (honest):** profile 可配的 per-turn `[lancet.observation] max_todo_ops` 预算**不再生效**。原先由 native handler 调 `budget.try_charge_todo_ops` 扣减，而 Component 的 result accounting 按 #27/#28 设计只度量不扣费（charge/credit seam 明确推迟）。单次调用的上限保留为 descriptor 的 `maxItems: 100`（等于原 `max_todo_ops` 默认值），跨调用累计上限消失。残留记录在 `FINDINGS.md` L-GH29-01；evidence 表的三处读取健壮性残留记录在 L-GH112-01。
+
+**对抗性验收查出并修掉的（同一票内）：**
+
+1. **`\S` 与 `trim()` 不等价** —— 真实的行为收紧丢失。Rust 的 `char::is_whitespace`（`trim` 的依据）走 Unicode `White_Space` 属性，正则 `\s` 类更窄。逐字符枚举全部 `is_whitespace()` 码点对照编译后的 schema：`\S` **接受 16 个 native handler 会拒绝的纯空白 content**（U+0085、U+1680、U+2000..U+200A、U+2028、U+202F、U+205F、U+3000）。改为 `[^\p{White_Space}]`（分歧为 0），并加 `blank_content_rejection_matches_trim_over_all_unicode_whitespace` 逐字符钉住。
+2. **result schema 比 params schema 宽松**。host 用 result schema 校验 guest **返回值**，因此只出现在 `[params]` 的 `maxItems` / `pattern` / `minContains` 是行为不端的 guest 在返回路径上可违反的规则。两份文档改为完全一致，加 `result_schema_is_identical_to_params_schema` 钉住。
+3. **#28 设计 §11 的 name-collision hazard 此前无执行点**。该 hazard 在 `EXPECTED_COMPONENTS` 为空时不可达，本票让它可达却没加检查。实测构造：一个名为 `observe.workspace` 的 builtin Tool 能通过 composition，其调用被 legacy pre-dispatch effect-kind deny 以 `EffectViolation`（`declared_effect: [WorkspaceObservation]`，native descriptor 的，不是 Component 的）拒绝 —— 两套授权词表同时武装。新增 `ServerRunConfig::validate_no_component_native_collision`，在两套词表唯一共存的 seam（`run_native` 与 `LancetServer::spawn_composed`）fail closed；谓词拆为纯函数 `component_native_collisions` 并加三项测试，因为真实冲突无法经任何公开 API 构造。
+4. **evidence 版本校验有三处漏口**：`evidence_effects` / `evidence_denials` 的 per-entry `record_version` 列每次写入却从不读回（未来的 v2 effect 形状会被按 v1 解析）；`evidence_calls` 的 `effects_version` / `denials_version` 为 NULL 时被静默当作当前版本。前者改为逐条校验并与记录头比对，后者报新增的 `MissingRecordVersion`（带 operator action）。各加一项测试。
+5. **生产读取路径吞掉 `EvidenceError`**。`operator.rs` 与 `attestation.rs` 用 `.ok().flatten()`，使「读取被拒」与「该调用没有 evidence」不可区分 —— 而 `version_from_rows` 正是按 lookup 是否解析来选 attestation 版本，于是 attestation 形状变成 store 健康度的函数。改为记录后降级（投影层无错误通道，但失败不再隐形）。
+6. **死代码与过时注释**：删掉 `compact_success_metadata` 里已不可达的 `session.todo_write` 分支（Component 调用总带 durable evidence metadata，该 fallback 永不触发），并说明 `compact_success_summary` 的同名分支**是**活的；修正 `transport.rs` / `lancet-api/src/runtime.rs` / `lancet-runtime/src/generated/mod.rs` / `lancet-api/AGENTS.md` 四处仍写「production 目录为空，直到 #29–#32」的注释 —— #29 就是本票。
 
 **Verification:**
 
 ```
-cargo test -p lancet-audit           # 84 passed（含 evidence_tests 12 项新契约测试）
-cargo test -p lancet-runtime         # 67 + 10 + 15 + 11 + 8 passed（tests/embedded.rs 为新增）
-cargo test -p lancet-native          # 144 + 17 + 1 + 5 + 4 passed
+cargo test -p lancet-audit           # 86 passed（含 evidence_tests 14 项新契约测试）
+cargo test -p lancet-runtime         # 67 + 10 + 15 + 11 + 11 passed（tests/embedded.rs 为新增）
+cargo test -p lancet-native          # 147 + 17 + 1 + 4 + 4 passed
 cargo test -p lancet-catalog         # 27 passed
 cargo test -p lancet-dispatch        # 10 passed
 cargo test -p lancet-authority       # 125 + 6 + 2 + 10 passed

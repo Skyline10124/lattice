@@ -11,7 +11,7 @@
           "properties": {
             "content": {
               "minLength": 1,
-              "pattern": "\\S",
+              "pattern": "[^\\p{White_Space}]",
               "type": "string"
             },
             "status": {
@@ -62,6 +62,7 @@
           "properties": {
             "content": {
               "minLength": 1,
+              "pattern": "[^\\p{White_Space}]",
               "type": "string"
             },
             "status": {
@@ -78,6 +79,22 @@
             "status"
           ],
           "type": "object"
+        },
+        "maxItems": 100,
+        "not": {
+          "contains": {
+            "properties": {
+              "status": {
+                "const": "in_progress"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          "minContains": 2,
+          "type": "array"
         },
         "type": "array"
       }

@@ -54,7 +54,21 @@ pub fn store_turn_attestation(
     // #112: the Cell evidence records live in the evidence table, so the
     // builder resolves each Component row's `evidence_id` through the same
     // store the rows came from.
-    let resolve = |id: lancet_native::EvidenceId| audit.call_evidence(id).ok().flatten();
+    let resolve = |id: lancet_native::EvidenceId| match audit.call_evidence(id) {
+        Ok(found) => found,
+        Err(error) => {
+            // A refused read and "this call produced no evidence" are the same
+            // value to the lookup, and `version_from_rows` picks the predicate
+            // version from whether it resolves — so a silent failure would make
+            // the attestation shape depend on store health. Log it.
+            tracing::error!(
+                evidence_id = id.0,
+                %error,
+                "failed to read Cell evidence while building a turn attestation"
+            );
+            None
+        }
+    };
     let statement = build_in_toto_statement_with_evidence(
         turn_id,
         &rows,
@@ -155,7 +169,21 @@ mod tests {
             .expect("query rows");
         // #112: the replay resolves Cell evidence through the same store, the
         // way `replay_audit` does in production.
-        let resolve = |id: lancet_native::EvidenceId| audit.call_evidence(id).ok().flatten();
+        let resolve = |id: lancet_native::EvidenceId| match audit.call_evidence(id) {
+            Ok(found) => found,
+            Err(error) => {
+                // A refused read and "this call produced no evidence" are the same
+                // value to the lookup, and `version_from_rows` picks the predicate
+                // version from whether it resolves — so a silent failure would make
+                // the attestation shape depend on store health. Log it.
+                tracing::error!(
+                    evidence_id = id.0,
+                    %error,
+                    "failed to read Cell evidence while building a turn attestation"
+                );
+                None
+            }
+        };
         let replayed = rebuild_in_toto_statement_with_evidence(
             &ctx.turn_id,
             &rows,

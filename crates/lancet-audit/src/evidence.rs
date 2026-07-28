@@ -248,6 +248,14 @@ pub enum EvidenceError {
         found: i64,
         supported: u32,
     },
+    #[error(
+        "evidence record {record} for evidence_id {evidence_id} has no version; the row was \
+         not written by this store — move the database aside so a new one is created"
+    )]
+    MissingRecordVersion {
+        record: &'static str,
+        evidence_id: i64,
+    },
     #[error("evidence row {evidence_id} has an unreadable {field}: {value}")]
     UnreadableField {
         evidence_id: i64,
@@ -469,22 +477,21 @@ fn hydrate(conn: &Connection, call: RawCall) -> Result<StoredCallEvidence, Evide
             }
         })?;
 
-    let effects_version = call
-        .effects_version
-        .unwrap_or(i64::from(OBSERVED_EFFECTS_RECORD_VERSION));
-    check_version(
+    // A NULL version column is not "the current version": it is a row whose
+    // version is unknown, which is exactly what the check exists to refuse. Only
+    // a row that recorded no such record at all may be absent, and the producer
+    // always writes both columns (`insert_call_evidence`), so NULL means either a
+    // foreign writer or a corrupted row.
+    let effects_version = version_of(
         "observed_effects",
         call.evidence_id,
-        effects_version,
+        call.effects_version,
         OBSERVED_EFFECTS_RECORD_VERSION,
     )?;
-    let denials_version = call
-        .denials_version
-        .unwrap_or(i64::from(DENIED_OPERATIONS_RECORD_VERSION));
-    check_version(
+    let denials_version = version_of(
         "denied_operations",
         call.evidence_id,
-        denials_version,
+        call.denials_version,
         DENIED_OPERATIONS_RECORD_VERSION,
     )?;
 
@@ -512,6 +519,21 @@ fn hydrate(conn: &Connection, call: RawCall) -> Result<StoredCallEvidence, Evide
     })
 }
 
+/// Resolve and validate a nullable version column.
+fn version_of(
+    record: &'static str,
+    evidence_id: i64,
+    found: Option<i64>,
+    supported: u32,
+) -> Result<i64, EvidenceError> {
+    let found = found.ok_or(EvidenceError::MissingRecordVersion {
+        record,
+        evidence_id,
+    })?;
+    check_version(record, evidence_id, found, supported)?;
+    Ok(found)
+}
+
 fn check_version(
     record: &'static str,
     evidence_id: i64,
@@ -536,30 +558,36 @@ fn read_effects(
     version: u32,
 ) -> Result<ObservedEffectsRecord, EvidenceError> {
     let mut stmt = conn.prepare(
-        "SELECT seq, ctx_op, ext_impact, cell_scope, scope, scope_trust, scope_channel,
-                target_kind, target_value, source, context_measure
+        "SELECT seq, record_version, ctx_op, ext_impact, cell_scope, scope, scope_trust,
+                scope_channel, target_kind, target_value, source, context_measure
          FROM evidence_effects WHERE evidence_id = ?1 ORDER BY seq",
     )?;
     let rows: Vec<RawEffect> = stmt
         .query_map(params![evidence_id], |row| {
             Ok(RawEffect {
                 seq: row.get(0)?,
-                ctx_op: row.get(1)?,
-                ext_impact: row.get(2)?,
-                cell_scope: row.get(3)?,
-                scope: row.get(4)?,
-                scope_trust: row.get(5)?,
-                scope_channel: row.get(6)?,
-                target_kind: row.get(7)?,
-                target_value: row.get(8)?,
-                source: row.get(9)?,
-                context_measure: row.get(10)?,
+                record_version: row.get(1)?,
+                ctx_op: row.get(2)?,
+                ext_impact: row.get(3)?,
+                cell_scope: row.get(4)?,
+                scope: row.get(5)?,
+                scope_trust: row.get(6)?,
+                scope_channel: row.get(7)?,
+                target_kind: row.get(8)?,
+                target_value: row.get(9)?,
+                source: row.get(10)?,
+                context_measure: row.get(11)?,
             })
         })?
         .collect::<Result<_, _>>()?;
 
     let mut effects = Vec::with_capacity(rows.len());
     for raw in rows {
+        // Each entry carries its own version, and it must agree with the record
+        // header. Writing this column and never reading it would leave a future
+        // v2 effect shape interpretable as v1 — the exact mis-parse the version
+        // field exists to prevent.
+        check_version("observed_effect", evidence_id, raw.record_version, version)?;
         effects.push(ObservedEffect {
             seq: raw.seq,
             cell: Cell {
@@ -582,6 +610,7 @@ fn read_effects(
 
 struct RawEffect {
     seq: u32,
+    record_version: i64,
     ctx_op: String,
     ext_impact: String,
     cell_scope: String,
@@ -596,6 +625,7 @@ struct RawEffect {
 
 struct RawDenial {
     seq: u32,
+    record_version: i64,
     ctx_op: String,
     ext_impact: String,
     cell_scope: String,
@@ -613,29 +643,31 @@ fn read_denials(
     version: u32,
 ) -> Result<DeniedOperationsRecord, EvidenceError> {
     let mut stmt = conn.prepare(
-        "SELECT seq, ctx_op, ext_impact, cell_scope, scope, scope_trust, scope_channel,
-                target_kind, target_value, reason
+        "SELECT seq, record_version, ctx_op, ext_impact, cell_scope, scope, scope_trust,
+                scope_channel, target_kind, target_value, reason
          FROM evidence_denials WHERE evidence_id = ?1 ORDER BY seq",
     )?;
     let rows: Vec<RawDenial> = stmt
         .query_map(params![evidence_id], |row| {
             Ok(RawDenial {
                 seq: row.get(0)?,
-                ctx_op: row.get(1)?,
-                ext_impact: row.get(2)?,
-                cell_scope: row.get(3)?,
-                scope: row.get(4)?,
-                scope_trust: row.get(5)?,
-                scope_channel: row.get(6)?,
-                target_kind: row.get(7)?,
-                target_value: row.get(8)?,
-                reason: row.get(9)?,
+                record_version: row.get(1)?,
+                ctx_op: row.get(2)?,
+                ext_impact: row.get(3)?,
+                cell_scope: row.get(4)?,
+                scope: row.get(5)?,
+                scope_trust: row.get(6)?,
+                scope_channel: row.get(7)?,
+                target_kind: row.get(8)?,
+                target_value: row.get(9)?,
+                reason: row.get(10)?,
             })
         })?
         .collect::<Result<_, _>>()?;
 
     let mut denied = Vec::with_capacity(rows.len());
     for raw in rows {
+        check_version("denied_operation", evidence_id, raw.record_version, version)?;
         denied.push(DeniedOperation {
             seq: raw.seq,
             cell: Cell {

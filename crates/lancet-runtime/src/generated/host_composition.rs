@@ -30,7 +30,7 @@ inventory::submit!(&SESSION_TODO_WRITE);
 pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[ExpectedToolIdentity {
     name: "session.todo_write",
     descriptor_sha256: parse_hex_digest(
-        "4cf978f0f2b8380bc2cdd468c71c5cb7632d3bc68e05d96bb53707553824196c",
+        "e4216ac3faada82645a0190398eb0fa7a5e3664adc613017978a00861495620c",
     ),
     artifact_sha256: parse_hex_digest(
         "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4",

@@ -532,7 +532,11 @@ fn direct_tools_todo_write_validation_rejection() {
         "direct-tools-todo-bad",
         "dl-todobad",
         "[\"session.todo_write\"]",
-        "\n[lancet.observation]\nmax_todo_ops = 2\n",
+        // No `max_todo_ops` here: that knob has no enforcement point for a
+        // Component Tool (FINDINGS.md L-GH29-01), so setting it would read as
+        // live budget coverage this scenario does not provide. The refusal below
+        // is the descriptor's one-in_progress rule.
+        "",
     );
     let server = wire_fake_llm(
         &world,

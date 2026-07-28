@@ -60,6 +60,10 @@ pub const AUDIT_SCHEMA_VERSION: i64 = crate::evidence::EVIDENCE_SCHEMA_VERSION;
 
 /// The schema version before the #112 evidence tables existed. A file stamped
 /// with this version predates them and is upgraded additively on open.
+///
+/// Referenced by the compatibility test that pins that upgrade
+/// (`evidence_tests::pre_evidence_database_gains_the_tables_and_keeps_history`)
+/// so the boundary is named rather than a bare `1` in a test.
 pub const AUDIT_SCHEMA_VERSION_PRE_EVIDENCE: i64 = 1;
 
 /// `cep_audit_entries` columns an unversioned database must already have to be

@@ -16,7 +16,9 @@ use lancet_dispatch::{Cancellation, EventSink};
 use lancet_protocol::CepErrorCode;
 use lancet_protocol::cell::{CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{CapabilityAdmissionPolicy, EffectSource};
-use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool};
+use lancet_runtime::{
+    CellEvidenceLedger, ComponentCallContext, ComponentRuntime, ExecutionLimits, admit_tool,
+};
 use tokio::sync::{mpsc, watch};
 
 /// The default distribution's built-in Tools, as this slice leaves them. #30–#32
@@ -212,6 +214,143 @@ async fn invalid_input_is_refused_before_the_component_runs() {
     }
 }
 
+/// The blank-content rule must be *exactly* the deleted native handler's
+/// `content.trim().is_empty()`, over the whole Unicode whitespace set.
+///
+/// This is a real regression, not a hypothetical: the first version of the
+/// manifest used `pattern: "\\S"`, and the regex `\s` class is narrower than
+/// Rust's `char::is_whitespace` (the `White_Space` property `trim` follows). That
+/// pattern accepted 16 whitespace-only strings the native handler rejected —
+/// U+0085, U+1680, U+2000..U+200A, U+2028, U+202F, U+205F, U+3000. Enumerating
+/// the set here is what keeps the two definitions from drifting apart again.
+#[tokio::test]
+async fn blank_content_rejection_matches_trim_over_all_unicode_whitespace() {
+    let rt = ComponentRuntime::from_embedded().expect("composition");
+
+    let whitespace: Vec<char> = (0u32..0x11000)
+        .filter_map(char::from_u32)
+        .filter(|c| c.is_whitespace())
+        .collect();
+    assert!(
+        whitespace.len() > 20,
+        "sanity: the Unicode whitespace set is not this small"
+    );
+
+    for c in whitespace {
+        let content = c.to_string();
+        assert!(
+            content.trim().is_empty(),
+            "fixture invariant: U+{:04X} must be trim-blank",
+            c as u32
+        );
+        let (ctx, _evidence, _cancel) = call_ctx(&rt);
+        let params = serde_json::json!({"todos": [{"content": content, "status": "pending"}]});
+        let err = match rt.call("session.todo_write", params, ctx).await {
+            Ok(value) => panic!(
+                "whitespace-only content U+{:04X} was accepted, but the native handler \
+                 rejected it: {value}",
+                c as u32
+            ),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.code,
+            CepErrorCode::SchemaMismatch,
+            "U+{:04X} must be a schema refusal",
+            c as u32
+        );
+    }
+
+    // The converse: content that survives `trim` is accepted, including strings
+    // that merely *contain* whitespace, and non-Latin scripts.
+    for content in [
+        "hello",
+        "  padded  ",
+        "a b",
+        "\u{4f60}\u{597d}",
+        "\u{200b}zero-width",
+    ] {
+        assert!(!content.trim().is_empty(), "fixture invariant");
+        let (ctx, _evidence, _cancel) = call_ctx(&rt);
+        rt.call(
+            "session.todo_write",
+            serde_json::json!({"todos": [{"content": content, "status": "pending"}]}),
+            ctx,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("non-blank content {content:?} must be accepted: {e:?}"));
+    }
+}
+
+/// A schema refusal must not echo the caller's data.
+///
+/// The error message reaches `cep_audit_entries.result_or_error` through
+/// `compact_error_summary`, and audit records paths, hashes and object ids — never
+/// content (root `AGENTS.md`). `jsonschema`'s `Display` embeds the offending
+/// instance, which for this Tool is the user's whole todo list.
+#[tokio::test]
+async fn a_schema_refusal_does_not_leak_todo_content() {
+    let rt = ComponentRuntime::from_embedded().expect("composition");
+    const SECRET: &str = "SECRET-refactor-the-auth-bypass";
+
+    // Two refusal shapes: over the ceiling (fails on the array) and a blank entry
+    // (fails inside an item), so both a container-level and an item-level
+    // violation are covered.
+    let over_ceiling: Vec<serde_json::Value> = (0..101)
+        .map(|i| serde_json::json!({"content": format!("{SECRET}-{i}"), "status": "pending"}))
+        .collect();
+    let blank_entry = vec![
+        serde_json::json!({"content": SECRET, "status": "pending"}),
+        serde_json::json!({"content": "   ", "status": "pending"}),
+    ];
+
+    for (name, todos) in [("over ceiling", over_ceiling), ("blank entry", blank_entry)] {
+        let (ctx, _evidence, _cancel) = call_ctx(&rt);
+        let err = match rt
+            .call(
+                "session.todo_write",
+                serde_json::json!({"todos": todos}),
+                ctx,
+            )
+            .await
+        {
+            Ok(value) => panic!("{name} must be refused, got {value}"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, CepErrorCode::SchemaMismatch, "{name}");
+        assert!(
+            !err.message.contains(SECRET),
+            "{name}: the refusal leaked todo content into the error message, which is \
+             persisted as the audit row's result_or_error: {}",
+            err.message
+        );
+        let rendered = serde_json::to_string(&err).expect("error serializes");
+        assert!(
+            !rendered.contains(SECRET),
+            "{name}: the refusal leaked todo content into the structured payload: {rendered}"
+        );
+        // It must still say enough to act on: the method and where it failed.
+        assert!(
+            err.message.contains("session.todo_write") && err.message.contains("schema"),
+            "{name}: the refusal must still name the method and the violation: {}",
+            err.message
+        );
+    }
+}
+
+/// The result schema must be identical to the params schema. The host validates
+/// the guest's returned value against it, so a rule present only in `[params]`
+/// is one a misbehaving guest could violate on the way out.
+#[test]
+fn result_schema_is_identical_to_params_schema() {
+    let rt = ComponentRuntime::from_embedded().expect("composition");
+    let descriptor = rt.descriptor("session.todo_write").expect("descriptor");
+    assert_eq!(
+        descriptor.params_schema, descriptor.result_schema,
+        "params and result contracts must not drift apart"
+    );
+}
+
 /// The refusals above, checked for their error class and for producing no
 /// effect: a rejected call must not record one.
 #[tokio::test]
@@ -302,6 +441,45 @@ async fn precancelled_call_reports_cancelled_and_keeps_admission_evidence() {
         "cancellation ends the call, it does not unmake its admission evidence"
     );
     assert!(effects.effects.is_empty());
+}
+
+/// Abort-class coverage against the real embedded Component: a call that runs out
+/// of fuel is reported as `ToolResourceExhausted`, not as a success or an opaque
+/// trap, and it records no effect.
+///
+/// This guest cannot trap on its own — it has no panic path and no unreachable —
+/// so the resource-limit route is the reachable abort for it. The mapping itself
+/// is shared with every Tool (`error_map.rs`), but asserting it here proves the
+/// production Component goes through it rather than around it.
+#[tokio::test]
+async fn resource_exhaustion_is_reported_and_records_no_effect() {
+    let mut rt = ComponentRuntime::from_embedded().expect("composition");
+    rt.set_limits(ExecutionLimits {
+        fuel: 0,
+        ..ExecutionLimits::default()
+    });
+    let (ctx, evidence, _cancel) = call_ctx(&rt);
+
+    let err = rt
+        .call(
+            "session.todo_write",
+            serde_json::json!({"todos": [{"content": "starved", "status": "pending"}]}),
+            ctx,
+        )
+        .await
+        .expect_err("a call with no fuel cannot complete");
+    assert_eq!(err.code, CepErrorCode::ToolResourceExhausted);
+
+    let (admission, effects, denied) = evidence.snapshot();
+    assert!(
+        admission.is_some(),
+        "the abort does not unmake the admission evidence"
+    );
+    assert!(
+        effects.effects.is_empty(),
+        "an aborted call must not record a result effect: {effects:?}"
+    );
+    assert!(denied.denied.is_empty());
 }
 
 /// A Tool outside the turn's enabled set is refused by admission, before the
