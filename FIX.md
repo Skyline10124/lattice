@@ -2,6 +2,45 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #71：effect-kind deny 的 prevent 语义补齐验收覆盖与文档 — 2026-07-28
+
+Severity: HIGH（安全语义，issue 原始描述）→ 实际为 MEDIUM（写前闸门已存在，缺的是覆盖与文档）。
+
+**Problem:**
+
+Issue #71（迁移自 Codeberg #49）报告 `[lancet.effects] deny` 只是 post-hoc 检查：mutation 先落盘，transport 事后才比对 observed effects 并返回 `EffectViolation`，字节不回滚。
+
+复核后：写前闸门已由 Codeberg #24 slice 3（commit 35b4b70d）落地——`check_declared_effect_kinds_denied` 在 `registry.dispatch` 之前比对 method 静态 `EffectDecl.kinds` 与 `denied_effect_kinds`，命中即拒绝，handler 不执行。issue 描述的核心缺陷已不成立。剩余的真实缺口是：
+
+1. `mutate.edit`、`observe.workspace` 的写前拒绝没有测试（只覆盖了 `mutate.create`）；无反向对照测试，"文件不存在" 断言可能静默变空。
+2. 写前拒绝不经任何 handler，因此没有任何代码为该行写 rejection evidence——`AuditQueryFilters::rejection_stage` 与 `lattice audit --capability` 都看不到"写被阻止"的证据行。
+3. `effect_deny_rejects_in_warn_mode` / `effect_deny_rejects_in_off_mode` 对 post-hoc 层的覆盖是**偶然**的：`session.todo_write` 声明 `SessionStateMutation` 而测试 deny 的是 `WorkspaceMutation`，写前闸门因此不触发。两个测试断言的是两层共有的子串 `denied by effect-kind policy`，无法区分层级；若有人把 deny 改成 `SessionStateMutation`（该 method 实际声明的 kind），写前闸门开始拦截、测试照样通过，post-hoc 层将静默失去全部覆盖。
+4. 文档仍描述旧模型：`docs/LANCET.md` 写 "enforced at checker time, after runtime effects are observed"、"keyed on observed impact kind"；`CONFIGURATION.md` 与 `schema.rs` 只写 "Runtime effect kinds to deny"，读者无法推断 deny 是否阻止写入、post-hoc 命中是否回滚。
+
+**Fix:**
+
+- 写前拒绝补 rejection evidence：`transport.rs` 在拒绝分支写入 `rejection_stage=policy_gate`、`denial_source=effect_kind_deny`、`required_capability`（`required_capability_label`，与 `lattice audit --capability` 同词汇）、`policy_enforced=true`，并把 `durable_metadata.take_json()` 传给 `finalize_audit_for_dispatch`。
+- `lancet-native` 新增三个 transport-seam 测试：`denied_effect_kind_blocks_mutate_edit_before_backend`（用**正确**的 `content_hash` 作 `expected_hash`——bogus hash 会让 handler 在 Mutation Precondition 处先失败，从而让"字节不变"断言变空；已实测：移除写前闸门后该文件被改写为 `rewritten content\n`，测试失败）、`denied_effect_kind_blocks_observe_workspace_before_backend`（断言 audit metadata 含 rejection evidence，且**不含** handler 的观测证据键 `observation_source`/`bytes_read`/`content_hash`/`visibility_evidence`——断言错误文本不含文件内容是恒真的，`CepError` 消息是固定模板）、`unrelated_denied_effect_kind_does_not_block_mutate_create`（反向对照，证明同一 wiring 下写入本会成功）。deny 服务器构造抽为 `config_with_denied_effect_kind`，断言抽为 `assert_pre_dispatch_denial`（钉住 `declared effect denied`，不再接受两层共有子串）。
+- 新增 `cep_native_registry_registers_nothing_outside_the_catalog`：两层 effect-kind 检查都以 `lancet_catalog::catalog()` 为键，catalog 之外的 native 方法会同时豁免两层，故生产 registry 不得注册这类方法。为让这条成为**真**子集检查（而非硬编码坏名单），`lancet-dispatch` 的 `MethodRegistry` 新增 `registered_methods()` 枚举器。
+- `cep_mode_integration.rs` 的 warn/off 两个测试改用 `assert_post_dispatch_denial`（钉住 `observed effect denied`），并在注释中写明 decl/deny 错配是这层覆盖的承重条件、不要"整理"成 `SessionStateMutation`。
+- `lattice-api` 补配置路径覆盖 `turn::cep_tests::effects_deny_profile_path`（3 例）：TOML 里的 snake_case 名字（`workspace_mutation` / `workspace_observation`）经 `load_policy_config` 落到 `denied_effect_kinds`；无 `[lancet.effects]` 时不 deny 任何 kind；拼错的 kind 名（`workspace_mutuation`）解析失败而非静默变成空 deny 集。此前配置链只有 `mutate.create` 经 `LATTICE_BIN` harness 覆盖。
+- `lancet-authority` 补两个 checker 单元测试：`declared_observation_kind_denied_before_any_observation`（验收标准 2 的单元级正向用例 + 空 deny 集不生效）、`observed_effect_denial_is_distinguishable_from_declared_denial`（直接调用 `check_denied_effect_kinds`，并断言两层消息互不包含）。
+- 文档改写：`docs/LANCET.md` Mode semantics、`docs/CONFIGURATION.md` `[lancet.effects]`（含 §"Denial semantics: prevent first, then detect"）、`crates/lattice-profile/src/schema.rs` `LancetEffectsSection` doc comment、`crates/lancet-authority/src/effect/mod.rs` 的 Enforcement Model 列表，统一说明两层语义——写前按声明 kind 阻止（无文件变更）、写后按 observed effects 检测且按 ADR 0003 decision 8 不回滚；两层都不受 `mode` 调节；两层都以 native catalog 为键，Component Tool 由 `[lancet.capabilities]` admission 管辖；deny 是按 kind 而非按 path，路径级写禁用 `[lancet.workspace] denied_write_patterns`。
+
+方案 B（补偿回滚）未采纳：与 ADR 0003 decision 8 冲突，需要 ADR 修订。
+
+**Verification:**
+
+- `cargo test -p lancet-native` — 154 passed, 0 failed（含 4 个 deny 测试与 registry 不变量）。
+- `cargo test -p lancet-authority` — 128 + 6 + 2 + 11 passed, 0 failed。
+- `cargo test -p lattice-api` — 全 target passed, 0 failed（`cep_mode_integration` 8 passed，`workspace_history_acceptance` 13 passed）。
+- `cargo test -p lattice-profile` — 96 passed, 0 failed。
+- `cargo clippy -p lancet-native -p lancet-authority -p lattice-api -p lattice-profile --all-targets -- -D warnings` — 无告警。
+- `cargo fmt --all` — 已应用。
+
+**Changed files:**
+`crates/lancet-native/src/server/transport.rs`, `crates/lancet-native/src/server/native_registry.rs`, `crates/lancet-dispatch/src/registry.rs`, `crates/lancet-authority/src/effect/checker.rs`, `crates/lancet-authority/src/effect/mod.rs`, `crates/lattice-api/src/turn/cep_tests.rs`, `crates/lattice-api/tests/cep_mode_integration.rs`, `crates/lattice-api/tests/workspace_history_acceptance.rs`, `crates/lattice-profile/src/schema.rs`, `docs/CONFIGURATION.md`, `docs/LANCET.md`, `FIX.md`.
+
 ## GitHub #124：rollout 发布门禁的输出捕获用两个独立 fd 写同一文件，互相覆盖 — 2026-07-27
 
 Severity: MEDIUM（发布门禁判定不可复现 + 证据文件被破坏）。

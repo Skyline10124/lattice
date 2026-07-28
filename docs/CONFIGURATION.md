@@ -105,7 +105,7 @@ an `extensions` map. The real sub-sections are:
 | `[lancet.observation]` | `LancetObservationSection` | Path allow-roots and observation/todo budget limits. |
 | `[lancet.network]` | `LancetNetworkSection` | `fetch.web` host policy and response size cap. |
 | `[lancet.policy]` | `LancetPolicySection` | Pointer to an external structured TOML policy file. |
-| `[lancet.effects]` | `LancetEffectsSection` | Runtime effect-kind deny switch (native path only). |
+| `[lancet.effects]` | `LancetEffectsSection` | Effect-kind deny switch: rejects a native method before dispatch when its declared kind is denied (native path only). |
 | `[lancet.capabilities]` | `LancetCapabilitiesSection` | Component Tool capability admission policy. |
 | `[lancet.workspace]` | `LancetWorkspacePolicySection` | Local Workspace write-deny and read-visibility policy (blacklist). |
 
@@ -224,11 +224,38 @@ profile inline `[lancet.*]` < external policy file < test/runtime override**.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `deny` | `Vec<ImpactKind>` | `[]` | Runtime effect kinds to deny. |
+| `deny` | `Vec<ImpactKind>` | `[]` | Effect kinds to deny. A native method whose *declared* kind is denied is rejected before dispatch; the same set is re-checked against *observed* effects after dispatch. |
 
 `ImpactKind` (snake_case): `workspace_observation`, `workspace_mutation`,
 `command_execution`, `external_observation`, `session_state_mutation`,
 `audit_observation`.
+
+#### Denial semantics: prevent first, then detect
+
+`deny` is enforced twice, and the two layers have different guarantees.
+
+1. **Pre-dispatch, on declared kinds — prevents.** Before any handler runs, the
+   method's static `EffectDecl.kinds` (from the fixed native catalog) is
+   compared with `deny`. A hit returns `EffectViolation` without entering the
+   backend. `deny = ["workspace_mutation"]` therefore makes `mutate.create` and
+   `mutate.edit` fail with **no filesystem change**;
+   `deny = ["workspace_observation"]` makes `observe.workspace` fail without
+   reading the workspace.
+2. **Post-dispatch, on observed effects — detects, does not undo.** After a
+   successful dispatch the effect ledger is checked against the same set, which
+   catches a handler whose runtime effects diverge from its declaration. A
+   violation found here describes something that **already happened**: per ADR
+   0003 decision 8 a successfully installed Atomic Local Mutation is atomic and
+   immediate and is never rolled back, so the caller gets `EffectViolation`
+   while the bytes stay on disk. Treat this layer as defense in depth and an
+   audit signal, not as a write barrier.
+
+Neither layer is affected by `mode`; `warn` and `off` gate effect-*region*
+checks only. Both layers key on the native catalog, so a method outside it is
+not effect-kind denied at all.
+
+`deny` is per effect kind, not per path. To keep specific paths unwritable
+while leaving mutation enabled, use `[lancet.workspace] denied_write_patterns`.
 
 This section is the **native** authorization path only; Component Tool policy
 lives in `[lancet.capabilities]` and never names method impact identity. It is

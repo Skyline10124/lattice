@@ -347,9 +347,14 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         "a policy denial records nothing"
     );
 
-    // 4. Effect-kind denial. `[lancet.effects] deny` is checked against the
-    //    method's declared effect kinds before dispatch, so the handler never
-    //    runs, nothing is installed, and nothing is recorded.
+    // 4. Effect-kind denial. This test builds a `PolicyConfig`, so the denial
+    //    it observes is the `DefaultPolicyHook` impact-kind gate, which also
+    //    runs before the handler. The transport's declared-effect-kind gate
+    //    (#71) is the other pre-dispatch layer; which of the two fires first is
+    //    not this test's subject — it only asserts that a denied mutation
+    //    installs nothing and records nothing. Layer attribution is covered by
+    //    `lancet_native`'s `denied_effect_kind_blocks_*` tests, which assert
+    //    the `declared effect denied` message.
     let effect_root = TempDir::new().unwrap();
     let effect_state = TempDir::new().unwrap();
     let mut policy = PolicyConfig::defaults_for_project_root(effect_root.path().to_path_buf());

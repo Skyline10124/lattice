@@ -8,9 +8,9 @@ use crate::server::registry::{HandlerContext, MethodRegistry};
 use crate::workspace::LocalWorkspace;
 use lancet_audit::{
     AuditOutcome, AuditStart, CallAuditMetadata, CepAuditContext, CepAuditStore,
-    ComponentCallEvidence, SEMANTIC_STAGE_COMPONENT, SEMANTIC_STAGE_SCAFFOLD,
+    ComponentCallEvidence, RejectionStage, SEMANTIC_STAGE_COMPONENT, SEMANTIC_STAGE_SCAFFOLD,
     SEMANTIC_STAGE_UNROUTED, SEMANTIC_STATUS_COMPONENT, SEMANTIC_STATUS_COMPONENT_DENIED,
-    impact_kind_for_method, impact_kind_label, merge_finalize_metadata,
+    impact_kind_for_method, impact_kind_label, merge_finalize_metadata, required_capability_label,
 };
 use lancet_authority::policy::CepTurnContext;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
@@ -254,6 +254,17 @@ async fn handle_request(
             &cep_context.policy.denied_effect_kinds,
         )
     {
+        // #71: the denial never reaches a handler, so nothing else records
+        // rejection evidence for it. Stamp it here or the rows that prove a
+        // write was prevented carry no rejection stage or capability:
+        // `AuditQueryFilters::rejection_stage` and `lattice audit
+        // --capability` would both miss them.
+        durable_metadata.record(json!({
+            "rejection_stage": RejectionStage::PolicyGate.as_str(),
+            "denial_source": "effect_kind_deny",
+            "required_capability": required_capability_label(descriptor.capability),
+            "policy_enforced": true,
+        }));
         let final_result: Result<Value, CepError> = Err(denial);
         finalize_audit_for_dispatch(
             &audit,
@@ -261,7 +272,7 @@ async fn handle_request(
             &method,
             &final_result,
             &call_audit_metadata,
-            None,
+            durable_metadata.take_json().as_deref(),
         );
         let error_code = final_result
             .as_ref()

@@ -178,6 +178,19 @@ where
     pub fn contains(&self, method: &str) -> bool {
         self.handlers.contains_key(method)
     }
+
+    /// Every registered method name, sorted.
+    ///
+    /// Effect-kind denial (both the pre-dispatch declared check and the
+    /// post-dispatch observed check) keys on `lancet_catalog::catalog()`, so a
+    /// method registered without a catalog descriptor is exempt from
+    /// `[lancet.effects] deny` (GitHub #71). Callers use this to assert
+    /// registry ⊆ catalog instead of maintaining a hand-written name list.
+    pub fn registered_methods(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.handlers.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 fn incomplete_effect_contract(method: &str, reason: String) -> CepError {

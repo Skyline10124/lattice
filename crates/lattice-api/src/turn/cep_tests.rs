@@ -674,3 +674,107 @@ mod component_adapter {
         assert_cep_payload(&err, jsonrpc::METHOD_NOT_FOUND);
     }
 }
+
+/// #71: the `[lancet.effects] deny` configuration path, from TOML to the
+/// `denied_effect_kinds` set both pre-dispatch layers read.
+///
+/// The `lancet-native` transport-seam tests build the deny set in Rust, so
+/// without this the snake_case wire names and the profile → policy translation
+/// are only covered for `mutate.create` (through the LATTICE_BIN harness).
+mod effects_deny_profile_path {
+    use lancet_protocol::effect_types::ImpactKind;
+    use lattice_profile::AgentProfile;
+    use tempfile::TempDir;
+
+    use crate::turn::cep::load_policy_config;
+
+    fn lancet_section_from_toml(effects: &str) -> lattice_profile::LancetSection {
+        let toml = format!(
+            r#"
+schema_version = 1
+
+[agent]
+name = "deny-path"
+model = "sonnet"
+
+[prompt]
+system = "test"
+
+[lancet.effects]
+deny = [{effects}]
+"#
+        );
+        toml::from_str::<AgentProfile>(&toml)
+            .expect("profile parses")
+            .lancet
+    }
+
+    #[test]
+    fn profile_deny_names_reach_the_policy_denied_effect_kinds() {
+        let root = TempDir::new().unwrap();
+
+        // Both kinds the issue's acceptance criteria name, spelled the way an
+        // operator writes them in `agent.toml`.
+        let lancet = lancet_section_from_toml(r#""workspace_mutation", "workspace_observation""#);
+        let policy = load_policy_config(&lancet, root.path()).expect("policy config");
+
+        assert!(
+            policy
+                .denied_effect_kinds
+                .contains(&ImpactKind::WorkspaceMutation),
+            "workspace_mutation must reach the deny set: {:?}",
+            policy.denied_effect_kinds
+        );
+        assert!(
+            policy
+                .denied_effect_kinds
+                .contains(&ImpactKind::WorkspaceObservation),
+            "workspace_observation must reach the deny set: {:?}",
+            policy.denied_effect_kinds
+        );
+        assert_eq!(policy.denied_effect_kinds.len(), 2);
+    }
+
+    #[test]
+    fn absent_effects_section_denies_nothing() {
+        let root = TempDir::new().unwrap();
+        let toml = r#"
+schema_version = 1
+
+[agent]
+name = "no-deny"
+model = "sonnet"
+
+[prompt]
+system = "test"
+"#;
+        let lancet = toml::from_str::<AgentProfile>(toml)
+            .expect("profile parses")
+            .lancet;
+        let policy = load_policy_config(&lancet, root.path()).expect("policy config");
+        assert!(
+            policy.denied_effect_kinds.is_empty(),
+            "no [lancet.effects] must deny nothing, got {:?}",
+            policy.denied_effect_kinds
+        );
+    }
+
+    #[test]
+    fn an_unknown_effect_kind_name_fails_the_profile_closed() {
+        let toml = r#"
+schema_version = 1
+
+[agent]
+name = "typo"
+model = "sonnet"
+
+[prompt]
+system = "test"
+
+[lancet.effects]
+deny = ["workspace_mutuation"]
+"#;
+        toml::from_str::<AgentProfile>(toml)
+            .expect_err("a misspelled effect kind must not parse as an empty deny set");
+    }
+}

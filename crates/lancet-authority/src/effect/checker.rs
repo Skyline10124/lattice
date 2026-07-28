@@ -344,6 +344,83 @@ mod tests {
         );
     }
 
+    /// #71 acceptance: a denied `workspace_observation` must reject
+    /// `observe.workspace` from its declaration alone, before any effect is
+    /// observed. The error data names the declared kind, and an empty deny set
+    /// is still a no-op for the same declaration.
+    #[test]
+    fn declared_observation_kind_denied_before_any_observation() {
+        let mut denied = empty_denied();
+        denied.insert(ImpactKind::WorkspaceObservation);
+
+        let err =
+            check_declared_effect_kinds_denied("observe.workspace", &observation_decl(), &denied)
+                .expect_err("declared WorkspaceObservation must be denied");
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert!(
+            err.message.contains("declared effect denied"),
+            "message must identify pre-dispatch denial: {}",
+            err.message
+        );
+        if let CepErrorData::Effect(data) = &err.data {
+            assert_eq!(
+                data.observed_effects,
+                vec![ImpactKind::WorkspaceObservation],
+                "denial must report the declared kind that matched"
+            );
+        } else {
+            panic!("expected Effect error data");
+        }
+
+        assert!(
+            check_declared_effect_kinds_denied(
+                "observe.workspace",
+                &observation_decl(),
+                &empty_denied(),
+            )
+            .is_ok(),
+            "an empty deny set must never pre-empt a call"
+        );
+    }
+
+    /// #71: the post-dispatch layer is called directly here so it keeps its own
+    /// cover independent of the `..._with_denies` wrapper, and so the two
+    /// layers' distinct messages stay pinned.
+    #[test]
+    fn observed_effect_denial_is_distinguishable_from_declared_denial() {
+        let mut denied = empty_denied();
+        denied.insert(ImpactKind::WorkspaceMutation);
+        let observed = vec![ObservedEffect {
+            kind: ImpactKind::WorkspaceMutation,
+            scope: ObservedScope::Path(std::path::PathBuf::from("/project/landed.txt")),
+            required_capability: RequiredCapability::WritePath,
+            source: EffectSource::HandlerBackend,
+        }];
+
+        // The declaration says observation, so only the observed-effect layer
+        // can catch this divergence — exactly the defense-in-depth case.
+        assert!(
+            check_declared_effect_kinds_denied("observe.workspace", &observation_decl(), &denied)
+                .is_ok(),
+            "declared-kind layer must not fire on a kind the method does not declare"
+        );
+
+        let err =
+            check_denied_effect_kinds("observe.workspace", &observed, &observation_decl(), &denied)
+                .expect_err("observed WorkspaceMutation must be denied");
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert!(
+            err.message.contains("observed effect denied"),
+            "post-dispatch message must identify the observed layer: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("declared effect denied"),
+            "the two layers must not share a message: {}",
+            err.message
+        );
+    }
+
     #[test]
     fn mutation_in_observation_method_returns_effect_violation() {
         let observed = vec![ObservedEffect {

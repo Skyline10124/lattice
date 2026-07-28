@@ -168,6 +168,33 @@ async fn cep_mode_warn_effect_overreach_ok_with_audit_warning() {
     );
 }
 
+/// #71: these two tests are the regression cover for the **post-dispatch**
+/// observed-effect deny layer, not the pre-dispatch declared-kind gate. That
+/// separation is load-bearing and depends on a deliberate mismatch:
+/// `session.todo_write` *declares* `SessionStateMutation`, the policy denies
+/// `WorkspaceMutation`, and the synthetic handler *records* `WorkspaceMutation`
+/// at runtime. So the declared-kind gate cannot fire and only the effect
+/// ledger can catch this call.
+///
+/// Do not "tidy" these tests to deny `SessionStateMutation`: the pre-dispatch
+/// gate would then intercept, and the post-hoc layer would lose all cover
+/// while the tests kept passing. The assertion below pins the layer by its
+/// distinct message (`observed effect denied` vs `declared effect denied`);
+/// the shared `denied by effect-kind policy` substring cannot tell them apart.
+fn assert_post_dispatch_denial(err: &lancet_protocol::CepError) {
+    assert_eq!(err.code, CepErrorCode::EffectViolation);
+    assert!(
+        err.message.contains("observed effect denied"),
+        "must be the post-dispatch observed-effect layer, got: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("denied by effect-kind policy"),
+        "deny error must identify effect-kind policy: {}",
+        err.message
+    );
+}
+
 #[tokio::test]
 async fn effect_deny_rejects_in_warn_mode() {
     let (config, _audit) =
@@ -182,12 +209,7 @@ async fn effect_deny_rejects_in_warn_mode() {
         .await
         .expect_err("effect-kind deny must hard reject even in Warn mode");
 
-    assert_eq!(err.code, CepErrorCode::EffectViolation);
-    assert!(
-        err.message.contains("denied by effect-kind policy"),
-        "deny error must identify effect-kind policy: {}",
-        err.message
-    );
+    assert_post_dispatch_denial(&err);
 
     drop(client);
     server_task.abort();
@@ -229,12 +251,7 @@ async fn effect_deny_rejects_in_off_mode() {
         .await
         .expect_err("effect-kind deny must hard reject even in Off mode");
 
-    assert_eq!(err.code, CepErrorCode::EffectViolation);
-    assert!(
-        err.message.contains("denied by effect-kind policy"),
-        "deny error must identify effect-kind policy: {}",
-        err.message
-    );
+    assert_post_dispatch_denial(&err);
 
     drop(client);
     server_task.abort();
