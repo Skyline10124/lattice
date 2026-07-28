@@ -1,6 +1,6 @@
 {
   "name": "session.todo_write",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Record the current task plan as a concise todo list for multi-step work.",
   "params_schema": {
     "additionalProperties": false,
