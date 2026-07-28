@@ -49,9 +49,13 @@ were retired; the git-backed store is the only production path (gix).
 
 ## Recent Issues
 
-- CLOSED L-20: `SqliteSessionGraphStore`'s single shared `Connection` concern is
-  moot — the SQLite session store was retired in favor of the git-backed
-  `GitSessionGraphStore`.
+- ADDED #63: `TurnCommitInput`/`TurnCommit` carry `workspace_history_oid` and
+  the git manifest persists it (`skip_serializing_if`, so history-less turns
+  stay byte-identical to pre-#63 manifests). It is manifest-only — no
+  canonical seed or turn-id derivation changed — and `get_turn_commit`
+  re-reads it from the commit tree, so it survives session reopen, branch
+  movement, and process restart. The private history itself lives in
+  `lancet-runtime`, never in this store and never in the project `.git`.
 - FIXED M-11: `head_transcript_impl` now traverses reachable commits
   topologically so merge-side messages are not dropped.
 - FIXED M-12: graph JSON hashing now canonicalizes object keys.
@@ -67,6 +71,9 @@ were retired; the git-backed store is the only production path (gix).
 - Keep sidecar I/O atomic (temp + rename) and test crash-recovery paths.
 - Do not reintroduce SQLite session storage or a git2 dependency; keep the
   store on gix.
+- Keep `workspace_history_oid` manifest-only and optional; adding it to the
+  canonical seed would move every turn id. Note `deny_unknown_fields`: an
+  older binary cannot read a manifest that carries the field.
 
 ## Record Maintenance
 

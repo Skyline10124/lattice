@@ -62,6 +62,25 @@ but delegates concrete composition to `lancet-runtime`.
   serde order for v1) and `replay_audit` — now delegating into
   `lancet_audit::operator` — rebuilds under the stored `predicate_type`, so a
   turn attested as v1 never re-projects as v2.
+- ADDED #64: `rewind_workspace` composes the private history's plan/ref
+  movement with the `lancet-native` restore executor under one recording
+  lock, and `record_rewind_audit` / `rewind_audit_records` persist the
+  durable Rewind record into the project's `cep_audit.db`. Both follow the
+  `query_audit` operator shape — direct store access, never an Agent Tool.
+  The Session History half stays above this crate: lancet-api must not see
+  `lattice-session`.
+- ADDED #63: `LancetRuntimeConfig.workspace_history` selects the private
+  mutation-history backing. `LancetRuntime::build` opens it before the server
+  starts, threads it through `ServerRunConfig`, and exposes it via
+  `workspace_history()` / `LancetRuntimeParts` so a host can read the object
+  id a Turn arrived at. `project_state_dir{,_in}` is the shared per-project
+  private state directory; `workspace_history_backing{,_in}` resolves
+  `<state>/lattice/projects/<key>/workspace-history.git` next to the audit
+  database. `WorkspaceHistoryBacking::Disabled` is the default so an embedder
+  never gets durable history by accident. The per-project private state
+  directory now lives in `lancet_audit::store_path` (moved there by #39) and is
+  re-exported here, so the audit DB and the history repository resolve from one
+  definition rather than two.
 - FIXED GitHub #39 (= Codeberg #17): operator audit read sank into `lancet-audit`.
   `src/audit.rs` is now a re-export + three one-line delegations; the
   pagination loop, filter construction, wire projection, attestation
@@ -121,6 +140,8 @@ but delegates concrete composition to `lancet-runtime`.
   from `lib.rs`; do not add pass-through functions for lower-crate APIs.
 - Keep the public facade stable while #34 replaces hand-wired native/CEP/dispatch
   composition with `lancet-runtime`; do not preserve both paths afterward.
+- Keep durable per-project state under `project_state_dir`; a new store goes
+  beside the audit DB and the workspace history, never in the project root.
 
 ## Record Maintenance
 

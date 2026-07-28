@@ -8,14 +8,38 @@ use std::path::{Path, PathBuf};
 use lancet_authority::policy::default::PolicyConfig;
 use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use lancet_protocol::policy::CepMode;
+use lancet_runtime::WorkspaceHistoryBacking;
 
 // External project-keyed audit store path resolution moved to
 // `lancet_audit::store_path` (issue #39); re-exported here so both the public
 // `lancet_api::*` paths and internal `crate::config::*` users stay unchanged.
+// `project_state_dir*` is the shared per-project private state root that both
+// the audit DB and the private workspace history (#63) hang off.
 pub use lancet_audit::{
     ExternalAuditPathError, audit_db_path_for_project, audit_db_path_for_project_in,
-    audit_state_root, project_storage_key,
+    audit_state_root, project_state_dir, project_state_dir_in, project_storage_key,
 };
+
+/// Private workspace-history repository backing under a caller-supplied state
+/// root (tests/embedders).
+pub fn workspace_history_backing_in(
+    external_state_root: &Path,
+    project_root: &Path,
+) -> Result<WorkspaceHistoryBacking, ExternalAuditPathError> {
+    Ok(WorkspaceHistoryBacking::under_project_state_dir(
+        project_state_dir_in(external_state_root, project_root)?,
+    ))
+}
+
+/// Private workspace-history repository backing under the platform state
+/// directory.
+pub fn workspace_history_backing(
+    project_root: &Path,
+) -> Result<WorkspaceHistoryBacking, ExternalAuditPathError> {
+    Ok(WorkspaceHistoryBacking::under_project_state_dir(
+        project_state_dir(project_root)?,
+    ))
+}
 
 /// Where CEP audit records are persisted for the runtime.
 #[derive(Debug, Clone)]
@@ -81,6 +105,12 @@ pub struct LancetRuntimeConfig {
     pub cep_mode: CepMode,
     /// Audit store backing.
     pub audit: AuditBacking,
+    /// Private workspace mutation history backing (#63).
+    ///
+    /// Defaults to [`WorkspaceHistoryBacking::Disabled`]; production turn
+    /// runtimes set the per-project private bare repository so every
+    /// successfully installed Atomic Local Mutation is recorded.
+    pub workspace_history: WorkspaceHistoryBacking,
     /// Model identifier recorded in the audit context.
     pub model_id: String,
     /// Runtime version string recorded in the audit context and attestations.
@@ -102,6 +132,7 @@ impl LancetRuntimeConfig {
             capability_admission: CapabilityAdmissionPolicy::default(),
             cep_mode: CepMode::Enforce,
             audit: AuditBacking::InMemory,
+            workspace_history: WorkspaceHistoryBacking::Disabled,
             model_id: String::new(),
             runtime_version: String::new(),
         }

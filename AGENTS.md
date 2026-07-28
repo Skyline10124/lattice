@@ -183,6 +183,19 @@ accumulating.
   user's project `.git`; restore Git tree state and move workspace/session refs.
   Keep prior object IDs reachable through internal refs without compensation
   commits or additional user-facing command surface.
+- That history landed in GitHub #63: `lancet_runtime::WorkspaceHistory` records
+  every successfully installed Atomic Local Mutation, and a completed
+  `TurnCommit` carries the `workspace_history_oid` the Turn arrived at. Do not
+  add a second mutation-history store.
+- Rewind itself landed in GitHub #64: `lattice_api::rewind_to_turn` resolves the
+  target Turn in the current session, `lancet_api::rewind_workspace` plans the
+  reversal and verifies every affected path's recorded post-state before any
+  write, `lancet_native::rewind` restores parent-tree content through the same
+  System Path Exclusion / safe resolution / atomic installation the mutation
+  path uses, and only then do the private workspace-history ref and the Session
+  History ref move. A same-path divergence is a structured conflict with nothing
+  moved; a ref durability failure is never reported as success. The user-facing
+  surface is exactly one command, `lattice session rewind`.
 
 ## Turn Execution
 
@@ -201,8 +214,10 @@ accumulating.
    remain authoritative.
 6. Turn outcomes are persisted as commits in the session graph.
 
-Session commits never imply a Local Workspace snapshot; only the explicit
-gix-backed `/rewind` path (GitHub #63/#64) restores recorded LATTICE mutations.
+Session commits never imply a Local Workspace snapshot. GitHub #63 records each
+successfully installed Atomic Local Mutation in the private gix history and
+stamps the resulting object id on the Turn commit; only the explicit `/rewind`
+path (GitHub #64) restores from it.
 
 ## Review Records
 

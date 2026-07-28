@@ -67,6 +67,14 @@ pub(crate) struct GitSessionManifest {
     pub usage: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
+    /// Workspace-history object id this Turn ended at (GitHub #63).
+    ///
+    /// Durable in the commit tree, so the Turn's LATTICE mutations stay
+    /// resolvable after session reopen, branch movement, and process restart.
+    /// Omitted when absent, keeping manifests for history-less turns
+    /// byte-identical to pre-#63 ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_history_oid: Option<String>,
     // Legacy-ID traceability fields retained for forward-compatible reads of
     // historically migrated manifests. Native commits leave these as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

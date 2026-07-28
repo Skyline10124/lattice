@@ -62,6 +62,7 @@ pub(crate) fn commit_input(
     status: TurnCommitStatus,
 ) -> TurnCommitInput {
     TurnCommitInput {
+        workspace_history_oid: None,
         session_id: session_id.to_string(),
         parent_ids,
         messages: messages.clone(),

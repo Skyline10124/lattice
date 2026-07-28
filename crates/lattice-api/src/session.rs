@@ -200,6 +200,18 @@ impl SessionApi {
         input.session_id = resolved;
         self.store.commit_turn(input).map_err(map_session_error)
     }
+
+    /// Look up one immutable turn commit by session and commit id.
+    ///
+    /// Resolution is by object id, so it is unaffected by branch movement,
+    /// session reopen, or process restart. This is how a caller recovers the
+    /// `workspace_history_oid` a Turn arrived at (#63).
+    pub fn get_turn_commit(&self, session_id: &str, commit_id: &str) -> Result<Option<TurnCommit>> {
+        let resolved = self.resolve_id(session_id)?;
+        self.store
+            .get_turn_commit(&resolved, commit_id)
+            .map_err(map_session_error)
+    }
 }
 
 fn map_session_error(e: lattice_session::SessionError) -> ApiError {
@@ -274,6 +286,7 @@ mod session_graph {
                 assistant_msg(&format!("{session_id} response {i}")),
             ];
             let input = TurnCommitInput {
+                workspace_history_oid: None,
                 session_id: session_id.to_string(),
                 parent_ids,
                 messages: messages.clone(),
@@ -491,6 +504,7 @@ mod session_graph {
 
         let feature_messages = vec![user_msg("Feature work"), assistant_msg("Done")];
         let feature_input = TurnCommitInput {
+            workspace_history_oid: None,
             session_id: "sess-diff".to_string(),
             parent_ids: vec![base_id.clone()],
             messages: feature_messages,

@@ -71,8 +71,12 @@ pub fn project_storage_key(project_root: &Path) -> Result<String, ExternalAuditP
         .collect())
 }
 
-/// External audit DB path under a caller-supplied state root (tests/embedders).
-pub fn audit_db_path_for_project_in(
+/// Per-project private state directory under a caller-supplied state root.
+///
+/// Every piece of durable LATTICE state that must live outside both the Local
+/// Workspace and the user's project `.git` — the CEP audit database and the
+/// private workspace mutation history (#63) — hangs off this one directory.
+pub fn project_state_dir_in(
     external_state_root: &Path,
     project_root: &Path,
 ) -> Result<PathBuf, ExternalAuditPathError> {
@@ -80,8 +84,21 @@ pub fn audit_db_path_for_project_in(
     Ok(external_state_root
         .join("lattice")
         .join("projects")
-        .join(key)
-        .join("cep_audit.db"))
+        .join(key))
+}
+
+/// Per-project private state directory using the platform state directory.
+pub fn project_state_dir(project_root: &Path) -> Result<PathBuf, ExternalAuditPathError> {
+    let state_root = audit_state_root().ok_or(ExternalAuditPathError::MissingStateDir)?;
+    project_state_dir_in(&state_root, project_root)
+}
+
+/// External audit DB path under a caller-supplied state root (tests/embedders).
+pub fn audit_db_path_for_project_in(
+    external_state_root: &Path,
+    project_root: &Path,
+) -> Result<PathBuf, ExternalAuditPathError> {
+    Ok(project_state_dir_in(external_state_root, project_root)?.join("cep_audit.db"))
 }
 
 /// External audit DB path using the platform state directory.

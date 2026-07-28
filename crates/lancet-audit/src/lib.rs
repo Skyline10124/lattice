@@ -19,7 +19,7 @@ pub use operator::{
 pub use provenance::*;
 pub use store_path::{
     ExternalAuditPathError, audit_db_path_for_project, audit_db_path_for_project_in,
-    audit_state_root, project_storage_key,
+    audit_state_root, project_state_dir, project_state_dir_in, project_storage_key,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::ScopedXdgStateHome;

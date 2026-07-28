@@ -39,6 +39,9 @@ use crate::repo_root;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Max bytes of a failed step's captured output retained in the record.
+const TAIL_MAX_BYTES: usize = 800;
+
 /// Boundary checks only scan/metadata the workspace; keep them bounded.
 const CMD_TIMEOUT: Duration = Duration::from_secs(600);
 /// A cold locked release build is the long pole of the gate.
@@ -740,14 +743,13 @@ fn hex(bytes: &[u8]) -> String {
 /// and the process would exit 101 instead of 1 — losing exactly the diagnostic
 /// this function exists to produce.
 fn tail(output: &str) -> String {
-    const MAX: usize = 800;
     let trimmed = output.trim();
-    if trimmed.len() <= MAX {
+    if trimmed.len() <= TAIL_MAX_BYTES {
         return trimmed.to_owned();
     }
     // Walk forward to the next char boundary at or after the cut point, so the
-    // slice is always valid and never longer than MAX.
-    let mut cut = trimmed.len() - MAX;
+    // slice is always valid and never longer than TAIL_MAX_BYTES.
+    let mut cut = trimmed.len() - TAIL_MAX_BYTES;
     while cut < trimmed.len() && !trimmed.is_char_boundary(cut) {
         cut += 1;
     }
@@ -884,6 +886,25 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tail` byte-sliced the captured output, which panics when the cutoff
+    /// lands inside a multibyte character. Cargo diagnostics routinely carry
+    /// non-ASCII paths and test messages, so this aborted the rollout while it
+    /// was reporting a step failure, masking the original error.
+    #[test]
+    fn tail_truncates_on_a_char_boundary() {
+        // 3 bytes per char, so the naive `len() - 800` cutoff lands mid-char.
+        let multibyte = "错误".repeat(500);
+        assert!(multibyte.len() > TAIL_MAX_BYTES);
+        let out = tail(&multibyte);
+        assert!(out.starts_with('\u{2026}'), "expected the ellipsis marker");
+        // Still bounded, and valid UTF-8 by construction (it is a String).
+        assert!(out.len() <= TAIL_MAX_BYTES + '\u{2026}'.len_utf8() + 3);
+        assert!(multibyte.ends_with(out.trim_start_matches('\u{2026}')));
+
+        // ASCII shorter than the cap is returned untouched.
+        assert_eq!(tail("  short  "), "short");
+    }
 
     fn step(id: &str, status: StepStatus) -> StepRecord {
         StepRecord {

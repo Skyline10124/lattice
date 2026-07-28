@@ -56,7 +56,18 @@ integration-test target of any product crate.
   (fetch/todo/catalog/retired methods), `direct_failures` (provider
   failures/SIGINT/deadline/no-rollback), `direct_operator` (audit/session/
   lancet cross-validation), `direct_secrets` (sentinel scanning),
-  `direct_session_isolation` (two-session graph isolation).
+  `direct_session_isolation` (two-session graph isolation),
+  `direct_workspace_history` (#63: a real turn's installed mutation is
+  recorded in the private bare history under the scenario's isolated HOME,
+  read back with plain `gix`; a pre-install failure records nothing),
+  `direct_rewind` (#64: `session rewind` reverses only the later LATTICE
+  mutations while unrelated external creates/edits/deletes and ignored
+  content survive, the session log lands on the target Turn, the project
+  `.git` is untouched, pins survive a prune; a diverged LATTICE path exits 1
+  with a structured conflict and nothing moves). The
+  `TurnCommit.workspace_history_oid` binding is not observable through the
+  CLI by design (#63 adds no user command), so it stays a library-layer
+  assertion.
 - **PTY smoke** (`tests/pty_tui_smoke.rs`): proves the TUI entrypoint wires
   into the same Direct-Local `stream_turn` chain. Also ordinary-lane since
   #62; the retired KVM-lane opt-in gate and its `layer_guard` module are

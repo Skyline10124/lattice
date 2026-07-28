@@ -19,12 +19,13 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   patch write limits.
 - `src/workspace/` owns the one concrete `LocalWorkspace` (#59/#60/#61,
-  Codeberg #37/#38/#39): secure per-segment path resolution, Policy-Visible
-  Workspace filtering (gix Git facts + authority read policy), bounded
-  read/list/grep/find, content hashing (Local Revision), no-replace create,
-  atomic edit install, filesystem error normalization, and the Local operation
-  vocabulary (`WorkspacePath`, `PathFacts`, `PathIntent`, requests). ADR 0004
-  moves this into `lancet-runtime`.
+  Codeberg #37/#38/#39; plus #63): secure per-segment path resolution,
+  Policy-Visible Workspace filtering (gix Git facts + authority read policy),
+  bounded read/list/grep/find, content hashing (Local Revision), no-replace
+  create, atomic edit install, private mutation-history recording
+  (`with_history` / `record_mutation`), filesystem error normalization, and the
+  Local operation vocabulary (`WorkspacePath`, `PathFacts`, `PathIntent`,
+  requests). ADR 0004 moves this into `lancet-runtime`.
 - `src/executor/` owns crate-private web/render helpers and output limits.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 
@@ -68,6 +69,26 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   collision would arm both vocabularies in one call. Unreachable while the
   Component catalog is empty — read #28 design §11 before migrating a native
   method.
+- ADDED #64: `workspace::rewind::preflight_and_restore` (re-exported as
+  `lancet_native::rewind`) applies an explicit Rewind's per-path restores.
+  It is a host-side operator surface, not a CEP method — the catalog gains
+  no `workspace.rewind`. Phase 1 verifies every affected path against its
+  recorded post-state through `WorkspacePath::parse`, System Path Exclusion,
+  and the same symlink-rejecting secure walk mutations use, reporting a
+  structured conflict for any divergence and writing nothing. Phase 2 runs
+  only after every path verified, reusing `install_atomic_sync` /
+  `remove_file_sync` (the shared synchronous cores of the async mutation
+  primitives). The executor never records history: reversing a mutation must
+  not append compensation commits.
+- ADDED #63: every successfully installed Atomic Local Mutation is appended to
+  the run's private `lancet_runtime::WorkspaceHistory`. `ServerRunConfig`
+  carries the history, `run_native` attaches it to the one `LocalWorkspace`,
+  and `mutate.create`/`mutate.edit` call `record_mutation` only *after* the
+  install returned success — so precondition, replan, guard, and policy
+  failures record nothing and never move the current history ref. The
+  recorded commit ids land in durable audit metadata under
+  `workspace_history`. A history failure after a successful install is
+  recorded as evidence and never triggers a compensating write.
 - FIXED GitHub #39 (= Codeberg #17; PR #74 review defects) — four
   `src/workspace/local.rs` fixes. NOTE: #39 here is the operator audit sink
   ticket, not the Direct-Local workspace tickets #59/#60/#61 cited above and
@@ -130,8 +151,6 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - WATCH: current schemas must continue to come from `lancet-cep` projection until
   generated descriptors replace it; never hand-write a native or Component
   compatibility schema.
-- CLOSED 31-CR-01/WR-02: artifact commit delete paths reject symlink parents,
-  and commit-baseline anchor files are read from the captured lower baseline.
 
 ## Next Actions
 
@@ -141,6 +160,9 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   CEP mutation policy rather than reviving generic native tool limits.
 - Keep web fetch security centered on request-time DNS pinning; treat denylist
   additions as defense in depth.
+- Keep mutation-history recording at the handler level, after a successful
+  install: a rollback inside the patch engine must never produce a history
+  commit. #64 consumes this history; do not add a second recording site.
 
 ## Record Maintenance
 

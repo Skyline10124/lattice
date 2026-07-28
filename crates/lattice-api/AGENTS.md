@@ -48,6 +48,24 @@ agent loop over `lancet-api`'s CEP runtime.
   `LancetRuntimeConfig`. Without a loaded profile nothing is admitted.
   `cep_policy_from_profile` only carries executor policy, so it leaves the
   admission field at its fail-closed default.
+- ADDED #64: `rewind_to_turn` is the product-level explicit Rewind. It
+  resolves the target Turn in the current session (nonexistent, foreign, and
+  unreachable targets are refused before anything is read), refuses a Turn
+  whose workspace-history identity is unavailable rather than guessing,
+  delegates the workspace half to `lancet_api::rewind_workspace`, and only
+  then moves the Session History ref — pinning the abandoned head first. A
+  same-path conflict returns structured data with nothing moved; a ref
+  durability failure is an error carrying the partial state, never a
+  success. It is a free function, not a `SessionApi` method: the session
+  facade stays pointer-movement only.
+- ADDED #63: `build_production_turn_deps` resolves the private workspace
+  history alongside the external audit store — an ephemeral (in-memory audit)
+  run records no durable history, so it never touches the user's state
+  directory. The live turn path reads `WorkspaceHistory::current` after the
+  server has drained and passes it to `build_commit_input`, which now requires
+  `workspace_history_oid` explicitly. `SessionApi::get_turn_commit` resolves a
+  Turn's history object id by commit id, so it is unaffected by branch
+  movement or reopen.
 - FIXED #39: the crate-local `src/test_env.rs` XDG helper was deleted; this
   crate now consumes the single workspace-wide `lancet_audit::ScopedXdgStateHome`
   through the `test-support` dev-dependency feature. Do not reintroduce a local
@@ -61,10 +79,6 @@ agent loop over `lancet-api`'s CEP runtime.
   `CepClient::call_raw`, so Component Tools are no longer blocked by central
   catalog membership. Params/result validation is done server-side (native
   typed registry or generated descriptor validators).
-- FIXED M-24-04: `lancet-cep` now separates `ToolExposure` from
-  `BaseAuthorityPlan`, and catalog descriptors declare method-local base
-  authority requirements. This crate converts CEP tool definitions to provider
-  tool definitions only at the LATTICE↔LANCET seam.
 - FIXED M-24-05: turn/LANCET runtime composition extracted into the new
   `lancet-api` crate. `cep.rs` is now only the LATTICE↔LANCET seam (profile→policy
   translation, `CepExecutorAdapter`, event mapping); `enabled_tools.rs` moved to
@@ -93,6 +107,9 @@ agent loop over `lancet-api`'s CEP runtime.
 - Keep `run_turn` implemented through `stream_turn` and `RunTurnCollector`.
 - Add focused tests whenever public `TurnEvent` mapping or commit semantics
   change.
+- Read the workspace-history identity after the LANCET server has drained,
+  and keep `build_commit_input`'s parameters explicit so a new call site
+  cannot silently commit a Turn with no history identity.
 
 ## Record Maintenance
 

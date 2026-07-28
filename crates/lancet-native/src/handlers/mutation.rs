@@ -83,6 +83,21 @@ async fn handle_create_as(
 
     let created = write_create(&auth, &create).await?;
 
+    // #63: the mutation is installed. Everything from here on is evidence —
+    // a later failure never un-installs it and never fakes a rollback.
+    let history = record_mutation_history(
+        &ctx,
+        &auth,
+        MutationHistoryInput {
+            method,
+            path: created.path.as_str(),
+            before: None,
+            after: create.content.as_bytes(),
+            content_hash: &created.content_hash,
+        },
+    )
+    .await;
+
     record_created_dir_effects(&ctx, &create);
     ctx.record_effect(mutation_path_effect(&create.path));
 
@@ -93,6 +108,7 @@ async fn handle_create_as(
         "created_dirs": create.created_dirs.clone(),
         "guarded_path": created.path.as_str(),
         "policy_enforced": true,
+        "workspace_history": history,
     }));
 
     Ok(CreateResult {
@@ -133,6 +149,22 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
     let ws_path = WorkspacePath::parse(&params.path)
         .map_err(|err| validation_error("path", err.to_string()))?;
 
+    // #63: the compiled `before`/`after` content is exactly what the apply
+    // installed, so the history records the real before/after state without
+    // re-reading the Local Workspace.
+    let history = record_mutation_history(
+        &ctx,
+        &auth,
+        MutationHistoryInput {
+            method: Edit::NAME,
+            path: ws_path.as_str(),
+            before: Some(patch.before.as_bytes()),
+            after: patch.after.as_bytes(),
+            content_hash: &patch.post_install_revision,
+        },
+    )
+    .await;
+
     ctx.record_durable_metadata(json!({
         "method": Edit::NAME,
         "compiled_patch_format": "hashline_patch",
@@ -140,6 +172,7 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
         "guarded_path": ws_path.as_str(),
         "content_hash": patch.post_install_revision,
         "policy_enforced": true,
+        "workspace_history": history,
     }));
 
     Ok(EditResult {
@@ -517,9 +550,79 @@ fn record_created_dir_effects(ctx: &HandlerContext, create: &PreflightCreate) {
 /// content hash of the compiled `after` content — the Local Revision a
 /// successful apply installs (the hashline apply re-verifies the old hash
 /// before writing, so a success means exactly this content was installed).
+///
+/// `before`/`after` are the exact pre- and post-install content, carried so
+/// the private mutation history (#63) records the real before/after state
+/// without re-reading the Local Workspace.
 struct CompiledEditPatch {
     patch: String,
     post_install_revision: String,
+    before: String,
+    after: String,
+}
+
+/// One successfully installed mutation, ready to append to the private
+/// history.
+struct MutationHistoryInput<'a> {
+    method: &'a str,
+    path: &'a str,
+    /// Pre-mutation bytes; `None` when the mutation created the file.
+    before: Option<&'a [u8]>,
+    after: &'a [u8],
+    content_hash: &'a str,
+}
+
+/// Append an installed mutation to the private workspace history and return
+/// the audit evidence for it.
+///
+/// The install already succeeded, so a history failure must never be reported
+/// as a failed mutation and must never trigger a compensating write: it is
+/// recorded as evidence and the call still succeeds. A failure is also logged,
+/// because an operator who never queries the audit database would otherwise
+/// have no signal that a mutation is missing from the history a Rewind
+/// depends on.
+async fn record_mutation_history(
+    ctx: &HandlerContext,
+    auth: &MutationAuth,
+    input: MutationHistoryInput<'_>,
+) -> serde_json::Value {
+    let record = lancet_runtime::MutationRecord {
+        method: input.method.to_string(),
+        turn_id: ctx.turn_id.clone(),
+        call_id: ctx.call_id,
+        path: input.path.to_string(),
+        before: input.before.map(<[u8]>::to_vec),
+        after: input.after.to_vec(),
+        content_hash: input.content_hash.to_string(),
+        recorded_at: unix_seconds_now(),
+    };
+    match auth.workspace.record_mutation(record).await {
+        Ok(Some(recorded)) => json!({
+            "recorded": true,
+            "commit_id": recorded.commit_id,
+            "parent_commit_id": recorded.parent_commit_id,
+            "baseline_commit_id": recorded.baseline_commit_id,
+        }),
+        Ok(None) => json!({ "recorded": false, "reason": "history_disabled" }),
+        Err(err) => {
+            tracing::error!(
+                method = input.method,
+                path = input.path,
+                turn_id = %ctx.turn_id,
+                call_id = ctx.call_id,
+                error = %err,
+                "installed mutation was not recorded in the private workspace history"
+            );
+            json!({ "recorded": false, "reason": "history_error", "error": err.to_string() })
+        }
+    }
+}
+
+fn unix_seconds_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 async fn compile_edit_patch(
@@ -561,7 +664,7 @@ async fn compile_edit_patch(
         });
     }
 
-    let (fragment, post_install_revision) = compile_edit_operation_fragment(params, &before)
+    let (fragment, post_install_revision, after) = compile_edit_operation_fragment(params, &before)
         .map_err(|error| EditCompileFailure {
             error,
             local_revision: None,
@@ -569,6 +672,8 @@ async fn compile_edit_patch(
     Ok(CompiledEditPatch {
         patch: format!("*** Begin Patch\n{fragment}*** End Patch\n"),
         post_install_revision,
+        before,
+        after,
     })
 }
 
@@ -615,11 +720,11 @@ async fn read_edit_target_for_compile(
 fn compile_edit_operation_fragment(
     params: &EditParams,
     before: &str,
-) -> Result<(String, String), CepError> {
+) -> Result<(String, String, String), CepError> {
     let after = apply_semantic_edit_operations(before, &params.edits)?;
     let post_install_revision = content_hash(after.as_bytes());
     let fragment = compile_update_fragment(&params.path, &params.expected_hash, before, &after)?;
-    Ok((fragment, post_install_revision))
+    Ok((fragment, post_install_revision, after))
 }
 
 fn apply_semantic_edit_operations(

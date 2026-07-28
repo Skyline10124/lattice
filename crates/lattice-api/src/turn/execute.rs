@@ -34,16 +34,18 @@ pub(super) struct TurnCommitContext {
 /// result. Shared by the live turn path to ensure commit construction stays
 /// consistent.
 ///
-/// `disposition` and `lifecycle` are required parameters (not hardcoded
-/// defaults) so a new call site cannot silently produce a commit with
-/// `NotApplicable` / no lifecycle evidence. The caller owns the lifecycle
-/// classification and must pass both explicitly.
+/// `disposition`, `lifecycle`, and `workspace_history_oid` are required
+/// parameters (not hardcoded defaults) so a new call site cannot silently
+/// produce a commit with `NotApplicable` / no lifecycle evidence / no
+/// workspace-history identity. The caller owns the lifecycle classification
+/// and the history read, and must pass all three explicitly.
 pub(super) fn build_commit_input(
     user_input: &str,
     ctx: &TurnCommitContext,
     agent_result: &AgentTurnResult,
     disposition: WorkspaceDisposition,
     lifecycle: Option<TurnLifecycleEvidence>,
+    workspace_history_oid: Option<String>,
 ) -> TurnCommitInput {
     let commit_status = map_status(&agent_result.status).to_commit_status();
 
@@ -61,6 +63,7 @@ pub(super) fn build_commit_input(
     let commit_message = derive_commit_message(&commit_messages);
 
     TurnCommitInput {
+        workspace_history_oid,
         session_id: ctx.session_id.clone(),
         parent_ids: ctx.parent_ids.clone(),
         messages: commit_messages,

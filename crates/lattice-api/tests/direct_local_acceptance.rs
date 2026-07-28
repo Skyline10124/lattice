@@ -38,6 +38,7 @@ fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
     };
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     LancetRuntime::build(LancetRuntimeConfig {
+        workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         project_root: root.to_path_buf(),
         enabled_tools: enabled,
         policy,
@@ -180,6 +181,7 @@ async fn policy_deny_blocks_create_on_direct_local() {
     };
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
+        workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         project_root: dir.path().to_path_buf(),
         enabled_tools: enabled,
         policy,

@@ -14,12 +14,12 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
-#[cfg(any(test, feature = "test-fault-injection"))]
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-fault-injection"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use lancet_runtime::{MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryError};
 use regex::Regex;
 use rustix::fs::{AtFlags, Mode, OFlags};
 use rustix::io::Errno;
@@ -35,12 +35,17 @@ use super::visibility::{VisibilityEngine, VisibilityEvidence};
 /// The single concrete Local Workspace (ADR 0003 decision 3).
 ///
 /// Internal deep module: secure path resolution, bounded read, atomic
-/// installation, and error normalization all live behind this type. It is
-/// `pub(crate)` because native handlers and the edit engine are the only
-/// allowed callers; there is no workspace-backend seam.
+/// installation, mutation history, and error normalization all live behind
+/// this type. It is `pub(crate)` because native handlers and the edit engine
+/// are the only allowed callers; there is no workspace-backend seam.
 pub(crate) struct LocalWorkspace {
     /// Canonical project root. Captured at construction time; never mutates.
     root: PathBuf,
+    /// Private durable history of successfully installed Atomic Local
+    /// Mutations (GitHub #63). Lives in its own bare `gix` repository outside
+    /// this workspace and outside the project `.git`; recording never touches
+    /// workspace content.
+    history: Arc<WorkspaceHistory>,
     /// One-shot install-failure flag for the narrow fault-injection seam
     /// (`fail_next_install`). Not present in production builds.
     #[cfg(any(test, feature = "test-fault-injection"))]
@@ -48,14 +53,26 @@ pub(crate) struct LocalWorkspace {
 }
 
 impl LocalWorkspace {
-    /// Construct from a project root, canonicalizing it once.
+    /// Construct from a project root with mutation history recording off.
+    ///
+    /// Test-only: the production server always attaches the run's private
+    /// history through [`LocalWorkspace::with_history`], so an installation
+    /// path that records nothing cannot exist in a real turn.
+    #[cfg(test)]
+    pub(crate) fn new(root: &Path) -> Self {
+        Self::with_history(root, Arc::new(WorkspaceHistory::disabled()))
+    }
+
+    /// Construct from a project root, canonicalizing it once, with a private
+    /// mutation history attached.
     ///
     /// Falls back to the raw path if canonicalize fails (mirrors
     /// `CepPolicyConfig::defaults_for_project_root` tolerance).
-    pub(crate) fn new(root: &Path) -> Self {
+    pub(crate) fn with_history(root: &Path, history: Arc<WorkspaceHistory>) -> Self {
         let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         Self {
             root: canonical,
+            history,
             #[cfg(any(test, feature = "test-fault-injection"))]
             fail_install: Arc::new(AtomicBool::new(false)),
         }
@@ -66,10 +83,33 @@ impl LocalWorkspace {
         &self.root
     }
 
+    /// Append one successfully installed Atomic Local Mutation to the private
+    /// history.
+    ///
+    /// Callers must only reach this after the atomic install returned success:
+    /// a recorded commit asserts the mutation is on disk. Returns `Ok(None)`
+    /// when history recording is disabled. Recording writes only into the
+    /// private history repository — never the Local Workspace and never the
+    /// project `.git`.
+    pub(crate) async fn record_mutation(
+        &self,
+        record: MutationRecord,
+    ) -> Result<Option<RecordedMutation>, WorkspaceHistoryError> {
+        let history = Arc::clone(&self.history);
+        tokio::task::spawn_blocking(move || history.record(&record))
+            .await
+            .unwrap_or_else(|err| {
+                Err(WorkspaceHistoryError::Repo(format!(
+                    "history recording task failed: {err}"
+                )))
+            })
+    }
+
     /// Clone the shareable state for a `spawn_blocking` closure.
     fn blocking_clone(&self) -> Self {
         Self {
             root: self.root.clone(),
+            history: Arc::clone(&self.history),
             #[cfg(any(test, feature = "test-fault-injection"))]
             fail_install: Arc::clone(&self.fail_install),
         }
@@ -85,7 +125,7 @@ impl LocalWorkspace {
     /// Resolution is intent-independent: the same secure walk backs read,
     /// create, overwrite, delete, and list flows. The intent is carried as
     /// operation vocabulary for the guard/precondition layer.
-    fn resolve_secure(
+    pub(crate) fn resolve_secure(
         &self,
         path: &WorkspacePath,
         _intent: PathIntent,
@@ -551,94 +591,107 @@ impl LocalWorkspace {
         let ws = self.blocking_clone();
         let path = path.clone();
         let content = content.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let (full, _facts) = ws.resolve_secure(&path, PathIntent::Overwrite)?;
-            #[cfg(any(test, feature = "test-fault-injection"))]
-            if ws.fail_install.swap(false, Ordering::SeqCst) {
-                return Err(LocalWorkspaceError::Io(std::io::Error::other(
-                    "injected install failure",
-                )));
-            }
-            let (parent_rel, leaf) = split_parent_leaf(&ws.root, &full)?;
-            // create_missing=true preserves the historical create_dir_all
-            // behavior of the install path, now through the pinned walk.
-            let parent_fd = ws.open_parent_dir_secure(&parent_rel, true)?;
-            // Unique single-component temp name: pid disambiguates across
-            // processes sharing a workspace, the sequence number across
-            // concurrent installs into the same directory in this process.
-            //
-            // Neither is collision-proof on its own — a crashed process can
-            // leave `.lattice-tmp-<pid>-<seq>` residue that a later process
-            // recycling that pid walks into, and two PID namespaces over one
-            // bind-mounted workspace can both start at the same pid. `O_EXCL`
-            // detects that; retrying with a fresh sequence number resolves it
-            // rather than surfacing a bare `EEXIST`.
-            let tmp_flags =
-                OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-            let (tmp_name, tmp_fd) = {
-                let mut last = None;
-                let mut acquired = None;
-                for _ in 0..INSTALL_TMP_NAME_ATTEMPTS {
-                    let candidate = format!(
-                        ".lattice-tmp-{}-{}",
-                        std::process::id(),
-                        INSTALL_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
-                    );
-                    match rustix::fs::openat(
-                        &parent_fd,
-                        candidate.as_str(),
-                        tmp_flags,
-                        CREATE_FILE_MODE,
-                    ) {
-                        Ok(fd) => {
-                            acquired = Some((candidate, fd));
-                            break;
-                        }
-                        Err(e) if e == Errno::EXIST => last = Some(e),
-                        Err(e) => return Err(LocalWorkspaceError::Io(e.into())),
+        tokio::task::spawn_blocking(move || ws.install_atomic_sync(&path, &content))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+    }
+
+    /// Synchronous core of [`LocalWorkspace::install_atomic`].
+    ///
+    /// Shared by the async mutation path and the explicit Rewind restore
+    /// (#64), which runs on a blocking thread of its own. The pinned-dirfd
+    /// walk (#39) lives here, so both callers get it.
+    pub(crate) fn install_atomic_sync(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Result<InstalledFile, LocalWorkspaceError> {
+        path.require_file_path()?;
+        let ws = self;
+        let (full, _facts) = ws.resolve_secure(path, PathIntent::Overwrite)?;
+        #[cfg(any(test, feature = "test-fault-injection"))]
+        if ws.fail_install.swap(false, Ordering::SeqCst) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::other(
+                "injected install failure",
+            )));
+        }
+        let (parent_rel, leaf) = split_parent_leaf(&ws.root, &full)?;
+        // create_missing=true preserves the historical create_dir_all
+        // behavior of the install path, now through the pinned walk.
+        let parent_fd = ws.open_parent_dir_secure(&parent_rel, true)?;
+        // Unique single-component temp name: pid disambiguates across
+        // processes sharing a workspace, the sequence number across
+        // concurrent installs into the same directory in this process.
+        //
+        // Neither is collision-proof on its own — a crashed process can
+        // leave `.lattice-tmp-<pid>-<seq>` residue that a later process
+        // recycling that pid walks into, and two PID namespaces over one
+        // bind-mounted workspace can both start at the same pid. `O_EXCL`
+        // detects that; retrying with a fresh sequence number resolves it
+        // rather than surfacing a bare `EEXIST`.
+        let tmp_flags =
+            OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let (tmp_name, tmp_fd) = {
+            let mut last = None;
+            let mut acquired = None;
+            for _ in 0..INSTALL_TMP_NAME_ATTEMPTS {
+                let candidate = format!(
+                    ".lattice-tmp-{}-{}",
+                    std::process::id(),
+                    INSTALL_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+                );
+                match rustix::fs::openat(
+                    &parent_fd,
+                    candidate.as_str(),
+                    tmp_flags,
+                    CREATE_FILE_MODE,
+                ) {
+                    Ok(fd) => {
+                        acquired = Some((candidate, fd));
+                        break;
                     }
+                    Err(e) if e == Errno::EXIST => last = Some(e),
+                    Err(e) => return Err(LocalWorkspaceError::Io(e.into())),
                 }
-                acquired.ok_or_else(|| {
-                    LocalWorkspaceError::Io(std::io::Error::other(format!(
-                        "could not claim an install temp name after \
-                         {INSTALL_TMP_NAME_ATTEMPTS} attempts: {}",
-                        last.map(|e| e.to_string()).unwrap_or_default()
-                    )))
-                })?
-            };
-            let mut tmp_file = fs::File::from(tmp_fd);
-            let installed = (|| -> Result<(), LocalWorkspaceError> {
-                tmp_file.write_all(&content)?;
-                tmp_file.sync_all()?;
-                // Both names are single components relative to the same
-                // pinned fd, so no symlink traversal is possible on either
-                // side of the rename.
-                rustix::fs::renameat(&parent_fd, tmp_name.as_str(), &parent_fd, leaf.as_os_str())
-                    .map_err(|e| {
+            }
+            acquired.ok_or_else(|| {
+                LocalWorkspaceError::Io(std::io::Error::other(format!(
+                    "could not claim an install temp name after \
+                     {INSTALL_TMP_NAME_ATTEMPTS} attempts: {}",
+                    last.map(|e| e.to_string()).unwrap_or_default()
+                )))
+            })?
+        };
+        let mut tmp_file = fs::File::from(tmp_fd);
+        let installed = (|| -> Result<(), LocalWorkspaceError> {
+            tmp_file.write_all(content)?;
+            tmp_file.sync_all()?;
+            // Both names are single components relative to the same
+            // pinned fd, so no symlink traversal is possible on either
+            // side of the rename.
+            rustix::fs::renameat(&parent_fd, tmp_name.as_str(), &parent_fd, leaf.as_os_str())
+                .map_err(|e| {
                     LocalWorkspaceError::Io(std::io::Error::other(format!(
                         "atomic persist failed: {e}"
                     )))
                 })?;
-                Ok(())
-            })();
-            if let Err(err) = installed {
-                // Best-effort temp hygiene on any failure after creation;
-                // the rename consumed the temp name on success.
-                let _ = rustix::fs::unlinkat(&parent_fd, tmp_name.as_str(), AtFlags::empty());
-                return Err(err);
-            }
-            drop(tmp_file);
-            // Durably record the rename in the directory itself — through
-            // the pinned fd, replacing the old path-based directory reopen.
-            rustix::fs::fsync(&parent_fd).map_err(|e| LocalWorkspaceError::Io(e.into()))?;
-            Ok(InstalledFile {
-                path,
-                content_hash: content_hash(&content),
-                bytes_written: content.len() as u64,
-            })
+            Ok(())
+        })();
+        if let Err(err) = installed {
+            // Best-effort temp hygiene on any failure after creation;
+            // the rename consumed the temp name on success.
+            let _ = rustix::fs::unlinkat(&parent_fd, tmp_name.as_str(), AtFlags::empty());
+            return Err(err);
+        }
+        drop(tmp_file);
+        // Durably record the rename in the directory itself — through
+        // the pinned fd, replacing the old path-based directory reopen.
+        rustix::fs::fsync(&parent_fd).map_err(|e| LocalWorkspaceError::Io(e.into()))?;
+        Ok(InstalledFile {
+            path: path.clone(),
+            content_hash: content_hash(content),
+            bytes_written: content.len() as u64,
         })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
     /// Remove a file.
@@ -649,31 +702,37 @@ impl LocalWorkspace {
         path.require_file_path()?;
         let ws = self.blocking_clone();
         let path = path.clone();
-        tokio::task::spawn_blocking(move || {
-            let (full, facts) = ws.resolve_secure(&path, PathIntent::Delete)?;
-            if !facts.exists {
-                return Err(LocalWorkspaceError::NotFound {
-                    normalized: path.as_str().to_string(),
-                });
-            }
-            if !matches!(facts.kind, Some(PathKind::File)) {
-                return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "not a regular file",
-                )));
-            }
-            let (parent_rel, leaf) = split_parent_leaf(&ws.root, &full)?;
-            let parent_fd = ws.open_parent_dir_secure(&parent_rel, false)?;
-            // Unlink the single-component leaf through the pinned fd. A
-            // post-resolve file→dir swap fails (EISDIR/EPERM → Io); a
-            // swapped-in symlink leaf has its directory ENTRY removed —
-            // which lives inside the workspace — never its target.
-            rustix::fs::unlinkat(&parent_fd, leaf.as_os_str(), AtFlags::empty())
-                .map_err(|e| LocalWorkspaceError::Io(e.into()))?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+        tokio::task::spawn_blocking(move || ws.remove_file_sync(&path))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+    }
+
+    /// Synchronous core of [`LocalWorkspace::remove_file`], shared with the
+    /// explicit Rewind restore (#64). The pinned-dirfd unlink (#39) lives
+    /// here, so both callers get it.
+    pub(crate) fn remove_file_sync(&self, path: &WorkspacePath) -> Result<(), LocalWorkspaceError> {
+        path.require_file_path()?;
+        let (full, facts) = self.resolve_secure(path, PathIntent::Delete)?;
+        if !facts.exists {
+            return Err(LocalWorkspaceError::NotFound {
+                normalized: path.as_str().to_string(),
+            });
+        }
+        if !matches!(facts.kind, Some(PathKind::File)) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a regular file",
+            )));
+        }
+        let (parent_rel, leaf) = split_parent_leaf(&self.root, &full)?;
+        let parent_fd = self.open_parent_dir_secure(&parent_rel, false)?;
+        // Unlink the single-component leaf through the pinned fd. A
+        // post-resolve file→dir swap fails (EISDIR/EPERM → Io); a
+        // swapped-in symlink leaf has its directory ENTRY removed —
+        // which lives inside the workspace — never its target.
+        rustix::fs::unlinkat(&parent_fd, leaf.as_os_str(), AtFlags::empty())
+            .map_err(|e| LocalWorkspaceError::Io(e.into()))?;
+        Ok(())
     }
 
     /// Flip a one-shot flag so the next install (`install_atomic` or

@@ -43,6 +43,7 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
         resumes_turn_oid: None,
     };
     let input = TurnCommitInput {
+        workspace_history_oid: None,
         session_id: session_id.clone(),
         parent_ids: vec![],
         messages: vec![user_msg("candidate turn"), assistant_msg("done")],
@@ -124,6 +125,7 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
     //    candidate ref. Commit a second turn with no lifecycle and confirm
     //    the candidate ref count stays at 1.
     let plain_input = TurnCommitInput {
+        workspace_history_oid: None,
         session_id: session_id.clone(),
         parent_ids: vec![commit_oid.clone()],
         messages: vec![user_msg("plain turn"), assistant_msg("ok")],

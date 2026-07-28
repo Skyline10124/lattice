@@ -20,8 +20,8 @@ use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, policy::CepMode};
 use lancet_runtime::{
-    AdmissionDenial, CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool,
-    validate_policy_against_catalog,
+    AdmissionDenial, CellEvidenceLedger, ComponentCallContext, ComponentRuntime, WorkspaceHistory,
+    admit_tool, validate_policy_against_catalog,
 };
 use serde_json::{Value, json};
 use std::future::Future;
@@ -56,6 +56,11 @@ pub struct ServerRunConfig {
     /// legacy callers; the native server treats `None` as an empty
     /// Component catalog (all methods go to the native typed registry).
     pub components: Option<Arc<ComponentRuntime>>,
+    /// Private durable history of successfully installed Atomic Local
+    /// Mutations (GitHub #63), attached to the run's Local Workspace. Unit
+    /// servers use [`WorkspaceHistory::disabled`]; production turn runtimes
+    /// resolve a per-project private bare repository.
+    pub workspace_history: Arc<WorkspaceHistory>,
 }
 
 impl ServerRunConfig {
@@ -77,6 +82,7 @@ impl ServerRunConfig {
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
             components: None,
+            workspace_history: Arc::new(WorkspaceHistory::disabled()),
         }
     }
 
@@ -162,7 +168,13 @@ impl CepServerNativeExt for CepServer {
             // ADR 0003: the one concrete Local Workspace is constructed once
             // per server run from the resolved policy's canonical project
             // root. No caller-supplied workspace implementation is accepted.
-            let workspace = Arc::new(LocalWorkspace::new(&config.cep_context.policy.project_root));
+            // #63: the private mutation history is attached here so that
+            // installation and history recording share one host module and no
+            // Tool can install without being recorded.
+            let workspace = Arc::new(LocalWorkspace::with_history(
+                &config.cep_context.policy.project_root,
+                Arc::clone(&config.workspace_history),
+            ));
             self.run(registry, NativeServerRuntime { config, workspace })
                 .await
         })
@@ -183,6 +195,9 @@ async fn handle_request(
         default_policy_hook,
         cep_mode,
         components,
+        // Already attached to `workspace` by `run_native`; the handler path
+        // reaches the history through the Local Workspace, never directly.
+        workspace_history: _,
     } = config;
 
     let id = call.id();

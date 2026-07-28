@@ -25,6 +25,7 @@ fn turn_input(
     assistant_text: &str,
 ) -> TurnCommitInput {
     TurnCommitInput {
+        workspace_history_oid: None,
         session_id: session_id.to_string(),
         parent_ids,
         messages: vec![user_msg(user_text), assistant_msg(assistant_text)],

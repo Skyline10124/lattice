@@ -18,6 +18,8 @@ wasmtime = { workspace = true }
 inventory = { workspace = true }
 lancet-protocol = { workspace = true }
 lancet-dispatch = { workspace = true }
+gix = { workspace = true }
+libc = { workspace = true }
 jsonschema = { workspace = true }
 wasmparser = { workspace = true }
 serde = { workspace = true }
@@ -29,6 +31,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 wat = "1"
 sha2 = { workspace = true }
+tempfile = { workspace = true }
 
 # Tests use the fixed no-op fixture constructor.
 [dev-dependencies.lancet-runtime]

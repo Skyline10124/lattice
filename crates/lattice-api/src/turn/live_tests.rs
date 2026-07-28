@@ -59,6 +59,7 @@ async fn stream_turn_live_with_agent(
 ) -> crate::session::Result<TurnEventStream> {
     let (cep_client, _server) = lancet_native::CepTransport::pair(1);
     let deps = super::cep::ProductionTurnDeps {
+        workspace_history: std::sync::Arc::new(lancet_api::WorkspaceHistory::disabled()),
         agent_loop,
         tool_definitions,
         runtime: lancet_api::ServerLifecycle::noop(),

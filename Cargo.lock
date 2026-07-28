@@ -2793,14 +2793,17 @@ dependencies = [
 name = "lancet-runtime"
 version = "0.1.0"
 dependencies = [
+ "gix",
  "inventory",
  "jsonschema",
  "lancet-dispatch",
  "lancet-protocol",
  "lancet-runtime",
+ "libc",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "wasmparser 0.251.0",
@@ -2929,6 +2932,7 @@ dependencies = [
 name = "lattice-system-harness"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "gix",
  "libc",
  "portable-pty",

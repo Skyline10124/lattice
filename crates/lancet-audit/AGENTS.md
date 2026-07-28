@@ -105,6 +105,28 @@ store-path resolution behind it.
   replans). Historical rows written before #60 keep the old labels;
   alpha-stage no-compat means no label migration — `rejection_stage` query
   filters match new writes only.
+- ADDED #64: `rewind_records` table plus `RewindAuditRecord`,
+  `insert_rewind_record`, and `rewind_records_for_session`. One durable row
+  per explicit Rewind attempt — success, conflict, restore failure, or ref
+  failure — carrying the target Turn, both history identities, the reversed
+  steps, per-path preflight revisions, restored paths, and conflicts.
+  Content policy is unchanged: paths, hashes, and object ids only, never
+  file bytes. `init_schema` creates the table with `IF NOT EXISTS`, so a
+  pre-#64 database gains it on first open (covered by a compatibility test).
+- ADDED #5 slice D: `merge_finalize_metadata` gained a `component_cells: &[String]`
+  parameter. Component Tool calls record 4-segment Cell audit keys
+  (`ctx:ext:scope:trust`) as a `component_cells` JSON array; native handler
+  calls pass an empty slice (no behavior change). Audit records cells, not
+  capability names (spec §6.3).
+- FIXED #38: `RejectionStage` vocabulary de-Uppered — `AdapterPreflight` →
+  `PathGuard`, `BackendExecution` → `LocalIo`, `VerificationFailure` removed;
+  `CallAuditMetadata.backend_invoked` and all routing metadata
+  (`execution_backend`, `upper_workspace_id`, `adapter_preflight_invoked`,
+  `backend_invoked`) are gone from durable audit rows. Mutation preflight
+  evidence renamed `expected_hash_status` → `local_revision` (carries the
+  observed Local Revision on stale-hash replans). Historical rows written
+  before #38 keep the old labels; alpha-stage no-compat means no label
+  migration — `rejection_stage` query filters match new writes only.
 - FIXED M-24-05: attestation persistence wiring moved into `lancet-api`;
   `lattice-api` consumes it through the public LANCET runtime surface.
 - FIXED issue #33 (Codeberg #11): agent catalog audit CEP methods removed;

@@ -278,6 +278,15 @@ pub struct TurnCommitInput {
     pub usage: Option<TurnUsage>,
     #[serde(default)]
     pub terminal_reason: Option<String>,
+    /// Workspace-history object id this Turn ended at (GitHub #63).
+    ///
+    /// The private mutation history is a separate durable store; a completed
+    /// Turn records the object id it arrived at so the Turn's LATTICE
+    /// mutations stay resolvable after session reopen, branch movement, and
+    /// process restart. A Turn that installed no mutation records the
+    /// inherited current identity, not `None`.
+    #[serde(default)]
+    pub workspace_history_oid: Option<String>,
 }
 
 /// An immutable turn commit.
@@ -302,6 +311,12 @@ pub struct TurnCommit {
     pub usage: Option<TurnUsage>,
     #[serde(default)]
     pub terminal_reason: Option<String>,
+    /// Workspace-history object id this Turn ended at (GitHub #63).
+    ///
+    /// Persisted in the commit's manifest, so it is re-read from the Git
+    /// object on every lookup rather than held in memory.
+    #[serde(default)]
+    pub workspace_history_oid: Option<String>,
     pub created_at: String,
 }
 
@@ -581,6 +596,7 @@ pub fn prepare_turn_commit(input: &TurnCommitInput, created_at: &str) -> Prepare
         commit_message: input.commit_message.clone(),
         usage: input.usage.clone(),
         terminal_reason: input.terminal_reason.clone(),
+        workspace_history_oid: input.workspace_history_oid.clone(),
         created_at: created_at.to_string(),
     };
 
@@ -744,6 +760,7 @@ mod graph_contract {
     #[test]
     fn turn_commit_input_and_turn_commit_serialize() {
         let input = TurnCommitInput {
+            workspace_history_oid: None,
             session_id: "sess-1".to_string(),
             parent_ids: vec![],
             messages: vec![GraphMessage {
@@ -771,6 +788,7 @@ mod graph_contract {
         assert!(json.contains("profile_snapshot_hash"));
 
         let commit = TurnCommit {
+            workspace_history_oid: None,
             commit_id: "commit-abc".to_string(),
             session_id: "sess-1".to_string(),
             parent_ids: vec![],
@@ -1147,6 +1165,7 @@ mod graph_contract {
     #[test]
     fn turn_commit_input_accepts_usage_and_terminal_reason() {
         let input = TurnCommitInput {
+            workspace_history_oid: None,
             session_id: "sess-1".to_string(),
             parent_ids: vec![],
             messages: vec![user_msg("Hello")],

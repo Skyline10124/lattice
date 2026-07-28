@@ -15,6 +15,7 @@
 //! `lancet-native`; ADR 0004 moves them into `lancet-runtime`.
 
 mod local;
+pub(crate) mod rewind;
 mod types;
 mod visibility;
 

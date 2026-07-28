@@ -582,6 +582,73 @@ toolchain = "t"
     }
 
     #[test]
+    fn manifest_rejects_unknown_top_level_field() {
+        let bad = r#"
+[tool]
+name = "x"
+version = "0.1.0"
+description = "x"
+abi-version = 1
+
+[params]
+schema = '{}'
+
+[result]
+schema = '{}'
+
+[artifact]
+sha256 = "00"
+toolchain = "t"
+
+[bogus]
+anything = true
+"#;
+        assert!(
+            toml::from_str::<Manifest>(bad).is_err(),
+            "an unknown top-level table must be rejected, not silently ignored"
+        );
+    }
+
+    #[test]
+    fn misspelled_capabilities_table_is_rejected_not_silently_empty() {
+        // Fail-open regression: `capabilties` (typo) used to deserialize into a
+        // Manifest whose real `capabilities` defaulted to EMPTY, so artifacts
+        // were generated for a tool with no declared capabilities at all.
+        let typo = r#"
+[tool]
+name = "x"
+version = "0.1.0"
+description = "x"
+abi-version = 1
+
+[params]
+schema = '{}'
+
+[result]
+schema = '{}'
+
+[[scopes]]
+name = "session"
+trust = "in"
+channel = "session"
+
+[[capabilties]]
+name = "session.result"
+cell = "alloc:none:session"
+
+[artifact]
+sha256 = "00"
+toolchain = "t"
+"#;
+        let err = toml::from_str::<Manifest>(typo)
+            .expect_err("misspelled `capabilities` must fail closed");
+        assert!(
+            err.to_string().contains("capabilties"),
+            "error should name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
     fn manifest_rejects_undeclared_scope_capability() {
         // The name is grammar-conforming on purpose: `validate` checks the
         // capability-name grammar first, so a single-segment fixture would
