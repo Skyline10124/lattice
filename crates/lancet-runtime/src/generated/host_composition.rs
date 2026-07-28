@@ -15,7 +15,7 @@ use crate::composition::{
     _parse_hex_digest as parse_hex_digest, EmbeddedTool, ExpectedToolIdentity,
 };
 
-/// Embedded `session.todo_write` v0.2.0: name plus the committed descriptor and Component bytes.
+/// Embedded `session.todo_write` v0.1.0: name plus the committed descriptor and Component bytes.
 static SESSION_TODO_WRITE: EmbeddedTool = EmbeddedTool {
     name: "session.todo_write",
     descriptor_json: include_bytes!("../../../../tools/todo-write/generated/descriptor.json"),
@@ -30,11 +30,11 @@ inventory::submit!(&SESSION_TODO_WRITE);
 pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[ExpectedToolIdentity {
     name: "session.todo_write",
     descriptor_sha256: parse_hex_digest(
-        "90a29fb7fb67e94cd1a33a443cd2bb6a0a2ee6944f4317d62606aea82f2d1dfc",
+        "4cf978f0f2b8380bc2cdd468c71c5cb7632d3bc68e05d96bb53707553824196c",
     ),
     artifact_sha256: parse_hex_digest(
         "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4",
     ),
     abi_version: 1,
-    imports: &["lattice:tool-host/host-control@0.2.0"],
+    imports: &["lattice:tool-host/host-control@0.1.0"],
 }];

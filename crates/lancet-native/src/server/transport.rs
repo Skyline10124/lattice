@@ -696,9 +696,6 @@ fn compact_success_summary(method: &str, value: &Value) -> String {
 }
 
 fn compact_success_metadata(method: &str, value: &Value) -> Option<String> {
-    if matches!(method, "session.todo_write" | "fetch.web") {
-        panic!("AUDIT PROBE reached for {method}");
-    }
     match method {
         "session.todo_write" => {
             let count = value
