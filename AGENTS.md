@@ -131,6 +131,20 @@ accumulating.
   embedded Component artifacts, and `inventory` registrations from it. Missing,
   duplicate, unapproved, descriptor-drifted, or import-drifted registrations
   fail closed.
+- A manifest's optional `[render]` section declares the presentation intent of
+  its own fields, and `cargo xtask tool-codegen` projects it to
+  `generated/render.json` (GitHub #113). That file is a projection, a sibling of
+  `llm-projection.json`: it is never part of `ToolDescriptor`,
+  `descriptor.json`, `descriptor-sha256`, or `expected-identity.json`, because
+  manifest → descriptor → expected-identity → host composition is one
+  digest-pinned identity chain and presentation must not be able to invalidate
+  a Tool identity, an artifact attestation, or a composition pin. Annotations
+  bind fields only — they select fields, partition by discriminant value, and
+  declare a field's domain semantics; they never carry rows, columns,
+  positions, or nesting, because the presentation primitives belong to the
+  consumer. A Tool without `[render]` is still renderable and produces no
+  `render.json`; that absence is a legal state, and `--check` fails on a stale
+  one.
 - The default distribution contains `observe.workspace`, `mutate.create`,
   `mutate.edit`, `fetch.web`, and `session.todo_write`. Operators may install
   additional precompiled Tool Bundles and automatically rebuild a new

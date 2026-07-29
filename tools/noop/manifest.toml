@@ -25,6 +25,18 @@ schema = '''
 }
 '''
 
+# Presentation intent (#113). Annotations bind fields only: no rows, columns,
+# positions, or nesting — the presentation primitives belong to the consumer.
+# This section is the format-validation sample, so it stays inside what the
+# no-op schemas actually declare: `echoed` is the one result field, and it is
+# what summarizes the call. `render.json` is a projection artifact and is
+# deliberately outside the descriptor identity chain: adding this section leaves
+# descriptor.json, descriptor-sha256, expected-identity.json and the Component
+# bytes byte-identical.
+[[render.annotations]]
+role = "summary"
+path = "result.echoed"
+
 [[scopes]]
 name = "session"
 trust = "in"

@@ -1,0 +1,11 @@
+{
+  "annotations": [
+    {
+      "path": "result.echoed",
+      "role": "summary"
+    }
+  ],
+  "arms": [],
+  "render-schema-version": 1,
+  "tool": "noop.echo"
+}
