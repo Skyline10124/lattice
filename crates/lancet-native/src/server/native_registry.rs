@@ -54,8 +54,8 @@ mod cep_native_registry_tests {
     use lancet_catalog::CepMethod;
     use lancet_catalog::catalog;
     use lancet_catalog::methods::workspace::{
-        Create, CreateParams, FindFilesParams, ObserveWorkspace, ObserveWorkspaceParams,
-        ObserveWorkspaceResult, ReadFileParams,
+        Create, CreateParams, Edit, EditOperation, EditParams, FindFilesParams, ObserveWorkspace,
+        ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileParams,
     };
     use lancet_protocol::CepErrorCode;
     use std::sync::Arc;
@@ -78,6 +78,38 @@ mod cep_native_registry_tests {
                 descriptor.name
             );
         }
+    }
+
+    /// #71: both effect-kind layers key on `lancet_catalog::catalog()` — the
+    /// pre-dispatch declared check and the post-dispatch observed check each
+    /// fall through when the method has no descriptor. A production method
+    /// registered outside the catalog would therefore be exempt from
+    /// `[lancet.effects] deny` entirely, so the registry must not contain one.
+    ///
+    /// This is a real subset check over `registered_methods()`, not an
+    /// allowlist of known-bad names: any future registration outside the
+    /// catalog fails it. Adding a native method means adding its descriptor to
+    /// the catalog too.
+    #[test]
+    fn cep_native_registry_registers_nothing_outside_the_catalog() {
+        let registry = production_registry();
+        let catalog_names: Vec<&str> = catalog().iter().map(|d| d.name).collect();
+        let registered = registry.registered_methods();
+
+        assert!(
+            !registered.is_empty(),
+            "an empty registry would make this subset check vacuous"
+        );
+        let orphans: Vec<&str> = registered
+            .iter()
+            .copied()
+            .filter(|name| !catalog_names.contains(name))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "registered without a catalog descriptor, so exempt from both \
+             effect-kind deny layers: {orphans:?}"
+        );
     }
 
     #[test]
@@ -247,19 +279,16 @@ mod cep_native_registry_tests {
         server_task.abort();
     }
 
-    /// Issue #46 (Codeberg #24) slice 3: pre-dispatch effect-kind denial must
-    /// never call the mutation backend. A denied `mutate.create` leaves no
-    /// file and records a denied audit row.
-    #[tokio::test]
-    async fn denied_effect_kind_blocks_mutate_create_before_backend() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = production_registry();
+    /// Server config whose turn policy denies `denied` and whose project root
+    /// is `root`. Both the CEP turn context and the policy hook are rooted
+    /// there so the only reason a call can fail is the effect-kind deny.
+    fn config_with_denied_effect_kind(
+        root: &str,
+        denied: lancet_protocol::ImpactKind,
+    ) -> ServerRunConfig {
         let mut config = ServerRunConfig::in_memory_for_tests();
         let mut policy = lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root);
-        policy
-            .denied_effect_kinds
-            .insert(lancet_protocol::ImpactKind::WorkspaceMutation);
+        policy.denied_effect_kinds.insert(denied);
         config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
             lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
@@ -268,6 +297,32 @@ mod cep_native_registry_tests {
         ));
         config.policy_hook = default_hook.clone();
         config.default_policy_hook = Some(default_hook);
+        config
+    }
+
+    /// A pre-dispatch denial is distinguishable from the post-dispatch
+    /// observed-effect denial: only the declared-kind check says "declared
+    /// effect denied". Asserting the shared "denied by effect-kind policy"
+    /// substring alone cannot tell the two layers apart (#71).
+    fn assert_pre_dispatch_denial(err: &lancet_protocol::CepError) {
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        assert!(
+            err.message.contains("declared effect denied"),
+            "pre-dispatch denial must be the declared-kind layer, got: {}",
+            err.message
+        );
+    }
+
+    /// Issue #46 (Codeberg #24) slice 3: pre-dispatch effect-kind denial must
+    /// never call the mutation backend. A denied `mutate.create` leaves no
+    /// file and records a denied audit row.
+    #[tokio::test]
+    async fn denied_effect_kind_blocks_mutate_create_before_backend() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = production_registry();
+        let config =
+            config_with_denied_effect_kind(root, lancet_protocol::ImpactKind::WorkspaceMutation);
 
         let (client, server) = CepTransport::pair(8);
         let audit = Arc::clone(&config.audit);
@@ -283,13 +338,7 @@ mod cep_native_registry_tests {
             })
             .await
             .expect_err("denied WorkspaceMutation must reject mutate.create");
-        assert_eq!(err.code, CepErrorCode::EffectViolation);
-        assert!(
-            err.message.contains("declared effect denied")
-                || err.message.contains("effect-kind policy"),
-            "denial must identify effect-kind policy: {}",
-            err.message
-        );
+        assert_pre_dispatch_denial(&err);
         assert!(
             !dir.path().join("must-not-land.txt").exists(),
             "pre-dispatch denial must never create the target file"
@@ -301,6 +350,154 @@ mod cep_native_registry_tests {
         assert!(
             !result.is_empty() && !result.to_lowercase().contains("success"),
             "denied call must record a non-success audit result: {result:?}"
+        );
+
+        drop(client);
+        server_task.abort();
+    }
+
+    /// #71: `mutate.edit` declares the same `WorkspaceMutation` kind, so the
+    /// same deny must stop it before the backend. The pre-existing file keeps
+    /// its byte content — a denied edit is not a partial edit.
+    #[tokio::test]
+    async fn denied_effect_kind_blocks_mutate_edit_before_backend() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("keep-me.txt");
+        std::fs::write(&target, "original content\n").unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = production_registry();
+        let config =
+            config_with_denied_effect_kind(root, lancet_protocol::ImpactKind::WorkspaceMutation);
+
+        let (client, server) = CepTransport::pair(8);
+        let server_task = tokio::spawn(async move {
+            server.run_native(registry, config).await.unwrap();
+        });
+
+        // The `expected_hash` must be the *correct* current revision. A bogus
+        // hash would fail the Mutation Precondition inside the handler and
+        // pre-empt the very write this test rules out, making the
+        // unchanged-bytes assertion vacuous: it would hold with the
+        // pre-dispatch gate removed too.
+        let err = client
+            .call::<Edit>(EditParams {
+                path: "keep-me.txt".into(),
+                expected_hash: crate::edit::content_hash(b"original content\n"),
+                edits: vec![EditOperation::ReplaceText {
+                    old: "original".into(),
+                    new: "rewritten".into(),
+                    occurrence: None,
+                }],
+            })
+            .await
+            .expect_err("denied WorkspaceMutation must reject mutate.edit");
+        assert_pre_dispatch_denial(&err);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "original content\n",
+            "pre-dispatch denial must not modify the target file"
+        );
+
+        drop(client);
+        server_task.abort();
+    }
+
+    /// #71 acceptance: `deny = ["workspace_observation"]` rejects
+    /// `observe.workspace` before the handler, so no workspace read happens.
+    #[tokio::test]
+    async fn denied_effect_kind_blocks_observe_workspace_before_backend() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "content").unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = production_registry();
+        let config =
+            config_with_denied_effect_kind(root, lancet_protocol::ImpactKind::WorkspaceObservation);
+
+        let (client, server) = CepTransport::pair(8);
+        let audit = Arc::clone(&config.audit);
+        let server_task = tokio::spawn(async move {
+            server.run_native(registry, config).await.unwrap();
+        });
+
+        let err = client
+            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
+                path: "visible.txt".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            }))
+            .await
+            .expect_err("denied WorkspaceObservation must reject observe.workspace");
+        assert_pre_dispatch_denial(&err);
+
+        let row = audit.row_by_audit_id(1).expect("denied audit row");
+        assert_eq!(row.method, ObserveWorkspace::NAME);
+        let result = row.result_or_error.as_deref().unwrap_or("");
+        assert!(
+            !result.is_empty() && !result.to_lowercase().contains("success"),
+            "denied observation must record a non-success audit result: {result:?}"
+        );
+        // #71: the denial short-circuits before any handler, so transport is
+        // the only place that can stamp rejection evidence. Without it the row
+        // that proves the read was prevented carries no rejection stage or
+        // capability, and neither `AuditQueryFilters::rejection_stage` nor
+        // `lattice audit --capability` can find it.
+        let metadata = row.metadata_json.as_deref().unwrap_or("");
+        let metadata: serde_json::Value =
+            serde_json::from_str(metadata).expect("denied row must carry metadata json");
+        assert_eq!(metadata["rejection_stage"], "policy_gate");
+        assert_eq!(metadata["denial_source"], "effect_kind_deny");
+        assert_eq!(metadata["required_capability"], "inspect");
+        assert_eq!(metadata["policy_enforced"], true);
+        // The read never happened, so the handler's own observation evidence
+        // must be absent. Asserting the error text carries no file bytes would
+        // be vacuous — `CepError` messages are a fixed template that can never
+        // hold content — whereas these keys are exactly what a completed
+        // `read_file` records (see `handlers::observation`).
+        for key in [
+            "observation_source",
+            "bytes_read",
+            "content_hash",
+            "visibility_evidence",
+        ] {
+            assert!(
+                metadata.get(key).is_none(),
+                "denied observation must not record handler read evidence ({key}): {metadata}"
+            );
+        }
+
+        drop(client);
+        server_task.abort();
+    }
+
+    /// #71: a deny set that names a kind the method does not declare must not
+    /// pre-empt the call. This is the negative control that keeps the
+    /// pre-dispatch check from degenerating into "any deny blocks everything"
+    /// and keeps the post-dispatch layer reachable at all.
+    #[tokio::test]
+    async fn unrelated_denied_effect_kind_does_not_block_mutate_create() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = production_registry();
+        let config =
+            config_with_denied_effect_kind(root, lancet_protocol::ImpactKind::SessionStateMutation);
+
+        let (client, server) = CepTransport::pair(8);
+        let server_task = tokio::spawn(async move {
+            server.run_native(registry, config).await.unwrap();
+        });
+
+        client
+            .call::<Create>(CreateParams {
+                path: "allowed.txt".into(),
+                content: "written".into(),
+                create_parents: false,
+            })
+            .await
+            .expect("mutate.create must survive an unrelated effect-kind deny");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("allowed.txt")).unwrap(),
+            "written"
         );
 
         drop(client);

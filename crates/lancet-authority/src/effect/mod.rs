@@ -13,6 +13,13 @@
 //!
 //! - **Runtime:** [`checker::check_effects_against_region`] compares `observed ⊆ authorized`
 //!   after every dispatch; `EffectViolation` on overreach.
+//! - **Runtime, before dispatch:** effect-*kind* deny is separate from the
+//!   region contract and has two layers (GitHub #71).
+//!   [`checker::check_declared_effect_kinds_denied`] rejects a method whose
+//!   *declared* kinds are denied, so a denied mutation never reaches the
+//!   backend; the post-dispatch [`checker::check_denied_effect_kinds`] then
+//!   re-checks *observed* effects as defense in depth, and what it catches has
+//!   already happened.
 //! - **Test-time:** `lancet-native` uses these types from its effect
 //!   contract harness to fuzz all catalog methods.
 //!

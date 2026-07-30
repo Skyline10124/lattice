@@ -92,12 +92,32 @@ since GitHub #39 they no longer live in `lancet-catalog` at all.
 
 `mode = "off"` under `[lancet]` skips effect-region enforcement only. The CEP policy hook still runs; capability declarations are still required, and effect-kind denial remains a hard fail. Legacy direct tool calls are not re-enabled - there is no legacy tool executor path in the production stack.
 
-Effect-kind denial is enforced at checker time, after runtime effects are
-observed. Configure it as `deny = ["workspace_mutation"]` under
-`[lancet.effects]` or `[effects]` in an external policy file. This is stronger
-than disabling a method prefix: effect-kind denial is keyed on observed impact
-kind rather than method name, so it catches any side effect of a denied kind
-regardless of which method produced it.
+Effect-kind denial is enforced in two layers, and the first one is a genuine
+write barrier. Configure it as `deny = ["workspace_mutation"]` under
+`[lancet.effects]` or `[effects]` in an external policy file.
+
+1. **Pre-dispatch (declared kinds, prevents).** Before any handler runs, the
+   transport compares the method's static `EffectDecl.kinds` from
+   `lancet_catalog::catalog()` with the turn's denied kinds. A hit returns
+   `EffectViolation` without entering the backend, so a denied `mutate.create`
+   or `mutate.edit` never touches Local Workspace and a denied
+   `observe.workspace` never reads it.
+2. **Post-dispatch (observed kinds, defense in depth).** After a successful
+   dispatch the same deny set is checked against the effect ledger, which
+   catches a handler whose runtime effects diverge from its declaration. This
+   layer reports a side effect that has **already** happened: per ADR 0003
+   decision 8 a successfully installed Atomic Local Mutation is never rolled
+   back, so an `EffectViolation` raised here means "denied effect landed and
+   was reported", not "denied effect prevented".
+
+Neither layer is tunable by `mode`: `warn` and `off` gate effect-*region*
+checks only. Both layers key on the fixed native catalog, so they apply to
+native methods only; Component Tool policy is `[lancet.capabilities]`
+admission, which never names impact identity.
+
+Because layer 1 keys on the declared kind, one deny entry covers every native
+method declaring that kind, but it cannot express "deny only this path" — that
+is `[lancet.workspace] denied_write_patterns`.
 
 ### Command physical-boundary configuration (retired)
 
