@@ -3,9 +3,11 @@
 
 //! Generated host composition modules.
 //!
-//! - `host_composition`: the production `EXPECTED_COMPONENTS` list. Empty
-//!   until a production Tool migrates to a Component
-//!   (#29–#32 (Codeberg #7–#10)).
+//! - `host_composition`: **generated** by `cargo xtask tool-codegen` from the
+//!   Tool manifests declaring `distribution = "builtin"`. It carries their
+//!   `inventory` registrations and the host-pinned `EXPECTED_COMPONENTS`
+//!   identities, and is the only thing that links a Tool into a built runtime.
+//!   Non-empty since #29 embedded `session.todo_write`.
 //! - `noop_fixture`: a fixed no-op fixture for cross-crate integration tests
 //!   (`test-utils` feature). No caller-controlled registrations, paths,
 //!   bytes, handlers, or approval set.

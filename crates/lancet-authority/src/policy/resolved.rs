@@ -41,13 +41,6 @@ pub struct ResolvedNetwork {
     pub is_private_ip: bool,
 }
 
-/// Resolved session-state facts for `session.todo_write` / `session.envelope`.
-#[derive(Clone, Debug)]
-pub struct ResolvedSessionState {
-    pub operation: super::capability::SessionStateOperation,
-    pub todo_ops_count: usize,
-}
-
 /// Internal resolved facts table built from [`PolicyInput`].
 ///
 /// Not a public protocol type — executor-owned only.
@@ -58,7 +51,6 @@ pub struct ResolvedPolicyInput {
     pub invocation_facts: InvocationFacts,
     pub resolved_target: Option<ResolvedPath>,
     pub resolved_network: Option<ResolvedNetwork>,
-    pub resolved_session_state: Option<ResolvedSessionState>,
     pub budget_snapshot: PolicyBudgetSnapshot,
     pub audit_context: PolicyAuditContext,
 }
@@ -117,7 +109,6 @@ impl PolicyResolver {
         let mut invocation_facts = InvocationFacts::default();
         let mut resolved_target = None;
         let mut resolved_network = None;
-        let mut resolved_session_state = None;
 
         match input.method.as_str() {
             "observe.workspace" => {
@@ -162,15 +153,6 @@ impl PolicyResolver {
                     });
                 }
             }
-            "session.todo_write" => {
-                let todo_count = extract_todo_count_from_params(&input.params);
-                invocation_facts.session_state_operation =
-                    Some(super::capability::SessionStateOperation::TodoWrite);
-                resolved_session_state = Some(ResolvedSessionState {
-                    operation: super::capability::SessionStateOperation::TodoWrite,
-                    todo_ops_count: todo_count,
-                });
-            }
             _ => {}
         }
 
@@ -180,7 +162,6 @@ impl PolicyResolver {
             invocation_facts,
             resolved_target,
             resolved_network,
-            resolved_session_state,
             budget_snapshot: input.audit_context.budget_snapshot.clone(),
             audit_context: input.audit_context.clone(),
         })
@@ -209,14 +190,6 @@ fn extract_optional_path_from_params(params: &serde_json::Value) -> Option<Strin
 
 fn extract_url_from_params(params: &serde_json::Value) -> Option<String> {
     params.get("url")?.as_str().map(String::from)
-}
-
-fn extract_todo_count_from_params(params: &serde_json::Value) -> usize {
-    params
-        .get("todos")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.len())
-        .unwrap_or(0)
 }
 
 // ── Pure path normalization ─────────────────────────────────────────────
@@ -450,25 +423,6 @@ mod tests {
         assert_eq!(net.scheme, "https");
         assert_eq!(net.port, 443);
         assert!(!net.is_localhost);
-    }
-
-    #[test]
-    fn resolve_session_todo_write_identifies_operation() {
-        let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "session.todo_write".into(),
-            params: json!({"todos": [{"content": "task 1", "status": "pending"}]}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(resolved.impact_kind, ImpactKind::SessionStateMutation);
-        let ss = resolved.resolved_session_state.unwrap();
-        assert_eq!(
-            ss.operation,
-            super::super::capability::SessionStateOperation::TodoWrite
-        );
-        assert_eq!(ss.todo_ops_count, 1);
     }
 
     #[test]

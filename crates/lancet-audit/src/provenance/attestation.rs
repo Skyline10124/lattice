@@ -4,6 +4,7 @@
 //! Unsigned in-toto Statement builder from audit rows.
 
 use crate::audit::AuditRow;
+use crate::provenance::projector::EvidenceLookup;
 use lancet_protocol::canonical_json;
 use lancet_protocol::provenance::{
     CEP_TURN_ATTESTATION_PREDICATE_TYPE, CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2, InTotoStatement,
@@ -71,7 +72,20 @@ pub fn build_in_toto_statement(
     rows: &[AuditRow],
     runtime_version: &str,
 ) -> InTotoStatement {
-    build_statement(turn_id, rows, runtime_version, version_from_rows(rows))
+    build_in_toto_statement_with_evidence(turn_id, rows, runtime_version, &EvidenceLookup::none())
+}
+
+/// As [`build_in_toto_statement`], resolving each Component row's Cell evidence
+/// through `evidence` (#112: the audit row points at the evidence table instead
+/// of carrying the records).
+pub fn build_in_toto_statement_with_evidence(
+    turn_id: &str,
+    rows: &[AuditRow],
+    runtime_version: &str,
+    evidence: &EvidenceLookup<'_>,
+) -> InTotoStatement {
+    let version = version_from_rows(rows, evidence);
+    build_statement(turn_id, rows, runtime_version, version, evidence)
 }
 
 /// Rebuild the statement of an already-attested turn for replay comparison.
@@ -86,6 +100,23 @@ pub fn rebuild_in_toto_statement(
     runtime_version: &str,
     stored_predicate_type: Option<&str>,
 ) -> InTotoStatement {
+    rebuild_in_toto_statement_with_evidence(
+        turn_id,
+        rows,
+        runtime_version,
+        stored_predicate_type,
+        &EvidenceLookup::none(),
+    )
+}
+
+/// As [`rebuild_in_toto_statement`], resolving Cell evidence through `evidence`.
+pub fn rebuild_in_toto_statement_with_evidence(
+    turn_id: &str,
+    rows: &[AuditRow],
+    runtime_version: &str,
+    stored_predicate_type: Option<&str>,
+    evidence: &EvidenceLookup<'_>,
+) -> InTotoStatement {
     let version = match stored_predicate_type {
         Some(stored) => AttestationVersion::from_predicate_type(stored).unwrap_or_else(|| {
             tracing::warn!(
@@ -93,11 +124,11 @@ pub fn rebuild_in_toto_statement(
                 "unrecognized stored attestation predicate type; replay falls back to \
                  row-evidence version selection"
             );
-            version_from_rows(rows)
+            version_from_rows(rows, evidence)
         }),
-        None => version_from_rows(rows),
+        None => version_from_rows(rows, evidence),
     };
-    build_statement(turn_id, rows, runtime_version, version)
+    build_statement(turn_id, rows, runtime_version, version, evidence)
 }
 
 /// Persisted bytes for a statement.
@@ -118,6 +149,7 @@ fn build_statement(
     rows: &[AuditRow],
     runtime_version: &str,
     version: AttestationVersion,
+    evidence_lookup: &EvidenceLookup<'_>,
 ) -> InTotoStatement {
     let session_id = rows
         .first()
@@ -159,13 +191,15 @@ fn build_statement(
             if let Some(boundary) = meta.get("effective_boundary") {
                 material["effective_boundary"] = boundary.clone();
             }
-            // v1 materials stay exactly as they were; a mixed turn adds
-            // evidence entries only for the calls that produced them.
-            if version == AttestationVersion::V2
-                && let Some(entry) = evidence_entry(row.audit_id, &meta)
-            {
-                evidence.push(entry);
-            }
+        }
+        // v1 materials stay exactly as they were; a mixed turn adds evidence
+        // entries only for the calls that produced them. The records come from
+        // the evidence table (#112), so this runs whether or not the row had
+        // parseable metadata.
+        if version == AttestationVersion::V2
+            && let Some(entry) = evidence_entry(row.audit_id, &meta_value(row), evidence_lookup)
+        {
+            evidence.push(entry);
         }
         materials.push(material);
     }
@@ -208,13 +242,13 @@ fn build_statement(
     }
 }
 
-/// v2 iff some substantive row carries versioned #28 evidence metadata.
-fn version_from_rows(rows: &[AuditRow]) -> AttestationVersion {
+/// v2 iff some substantive row resolves to Cell evidence (#112: the row points
+/// at the evidence table; a row with no `evidence_id` produced none).
+fn version_from_rows(rows: &[AuditRow], evidence: &EvidenceLookup<'_>) -> AttestationVersion {
     let carries_evidence = substantive_turn_rows(rows).iter().any(|row| {
-        row.metadata_json
-            .as_ref()
-            .and_then(|s| serde_json::from_str::<Value>(s).ok())
-            .is_some_and(|meta| versioned_evidence(&meta, "admission_evidence").is_some())
+        evidence
+            .resolve_from_metadata(meta_value(row).as_ref())
+            .is_some()
     });
     if carries_evidence {
         AttestationVersion::V2
@@ -223,33 +257,48 @@ fn version_from_rows(rows: &[AuditRow]) -> AttestationVersion {
     }
 }
 
-/// One call's evidence as a v2 predicate entry: admission ("why") stays a
-/// field of its own beside the observed effects and denials ("what").
-fn evidence_entry(audit_id: i64, meta: &Value) -> Option<Value> {
-    let admission = versioned_evidence(meta, "admission_evidence")?;
-    let mut entry = serde_json::Map::new();
-    entry.insert("audit_id".into(), json!(audit_id));
-    entry.insert("admission".into(), admission.clone());
-    if let Some(effects) = versioned_evidence(meta, "observed_effects") {
-        entry.insert("observed_effects".into(), effects.clone());
-    }
-    if let Some(denied) = versioned_evidence(meta, "denied_operations") {
-        entry.insert("denied_operations".into(), denied.clone());
-    }
-    Some(Value::Object(entry))
+/// A row's parsed metadata, or `None` when it has none / is unparseable.
+fn meta_value(row: &AuditRow) -> Option<Value> {
+    row.metadata_json
+        .as_ref()
+        .and_then(|s| serde_json::from_str(s).ok())
 }
 
-/// A persisted evidence record is only interpretable once its `version` is
-/// present (protocol persisted-root convention).
-fn versioned_evidence<'a>(meta: &'a Value, key: &str) -> Option<&'a Value> {
-    meta.get(key)
-        .filter(|value| value.get("version").and_then(Value::as_u64).is_some())
+/// One call's evidence as a v2 predicate entry: admission ("why") stays a
+/// field of its own beside the observed effects and denials ("what"). The
+/// records are read from the evidence table and carry their own `version`, so
+/// the entry stays a versioned root without this builder re-checking it.
+fn evidence_entry(
+    audit_id: i64,
+    meta: &Option<Value>,
+    lookup: &EvidenceLookup<'_>,
+) -> Option<Value> {
+    let stored = lookup.resolve_from_metadata(meta.as_ref())?;
+    let mut entry = serde_json::Map::new();
+    entry.insert("audit_id".into(), json!(audit_id));
+    entry.insert("evidence_id".into(), json!(stored.evidence_id.0));
+    entry.insert(
+        "admission".into(),
+        serde_json::to_value(&stored.admission).ok()?,
+    );
+    entry.insert(
+        "observed_effects".into(),
+        serde_json::to_value(&stored.effects).ok()?,
+    );
+    if !stored.denied.denied.is_empty() {
+        entry.insert(
+            "denied_operations".into(),
+            serde_json::to_value(&stored.denied).ok()?,
+        );
+    }
+    Some(Value::Object(entry))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audit::{AuditRow, impact_kind_label};
+    use crate::evidence::{EvidenceId, EvidenceOutcome, StoredCallEvidence};
     use lancet_protocol::effect_types::ImpactKind;
 
     fn row(audit_id: i64, method: &str, meta: &str) -> AuditRow {
@@ -320,38 +369,79 @@ mod tests {
     }
 
     /// Durable metadata of one Component Tool call, as
-    /// `merge_finalize_metadata` writes it.
+    /// `merge_finalize_metadata` writes it since #112: a pointer at the
+    /// evidence row plus the derived query key, never the records themselves.
     const COMPONENT_META: &str = r#"{
-        "admission_evidence": {
-            "version": 1,
-            "tool": "noop.echo",
-            "approved_capabilities": ["session.events", "session.result"],
-            "denied_capabilities": [],
-            "boundary_excluded": [],
-            "max_boundary": "in"
-        },
-        "observed_effects": {
-            "version": 1,
-            "effects": [{
-                "seq": 0,
-                "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
-                "scope": {"scope": "session", "trust": "in", "channel": "session"},
-                "target": {"kind": "session", "turn_id": "turn-x"},
-                "source": "operation"
-            }]
-        },
-        "denied_operations": {
-            "version": 1,
-            "denied": [{
-                "seq": 1,
-                "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
-                "scope": {"scope": "session", "trust": "in", "channel": "session"},
-                "target": {"kind": "none"},
-                "reason": "uncovered operation"
-            }]
-        },
+        "evidence_id": 11,
         "component_cells": ["mutate:none:session:in"]
     }"#;
+
+    /// The evidence row `COMPONENT_META` points at, as the evidence table holds
+    /// it. Standing in for the store so these builder tests stay pure.
+    fn component_evidence() -> StoredCallEvidence {
+        use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
+        use lancet_protocol::evidence::{
+            ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION,
+            DeniedOperation, DeniedOperationsRecord, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION,
+            ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
+        };
+
+        let cell = Cell {
+            ctx_op: CtxOp::Mutate,
+            ext_impact: ExtImpact::None,
+            scope: "session".into(),
+        };
+        let scope = ObservedScope {
+            scope: "session".into(),
+            trust: Trust::In,
+            channel: ChannelKind::Session,
+        };
+        StoredCallEvidence {
+            evidence_id: EvidenceId(11),
+            turn_id: "turn-x".into(),
+            session_id: "sess".into(),
+            call_id: 2,
+            tool: "noop.echo".into(),
+            outcome: EvidenceOutcome::Completed,
+            recorded_at: "2".into(),
+            admission: AdmissionEvidence {
+                version: ADMISSION_EVIDENCE_VERSION,
+                tool: "noop.echo".into(),
+                approved_capabilities: vec!["session.events".into(), "session.result".into()],
+                denied_capabilities: Vec::new(),
+                boundary_excluded: Vec::new(),
+                max_boundary: Trust::In,
+            },
+            effects: ObservedEffectsRecord {
+                version: OBSERVED_EFFECTS_RECORD_VERSION,
+                effects: vec![ObservedEffect {
+                    seq: 0,
+                    cell: cell.clone(),
+                    scope: scope.clone(),
+                    target: ObservedTarget::Session {
+                        turn_id: "turn-x".into(),
+                    },
+                    source: EffectSource::Operation,
+                    context_measure: None,
+                }],
+            },
+            denied: DeniedOperationsRecord {
+                version: DENIED_OPERATIONS_RECORD_VERSION,
+                denied: vec![DeniedOperation {
+                    seq: 1,
+                    cell,
+                    scope,
+                    target: ObservedTarget::None,
+                    reason: "uncovered operation".into(),
+                }],
+            },
+        }
+    }
+
+    /// A lookup that resolves exactly the one evidence row above.
+    fn component_lookup() -> impl Fn(EvidenceId) -> Option<StoredCallEvidence> {
+        |id: EvidenceId| (id == EvidenceId(11)).then(component_evidence)
+    }
 
     #[test]
     fn mixed_turn_emits_v2_with_evidence_only_for_component_calls() {
@@ -363,7 +453,13 @@ mod tests {
             ),
             row(2, "noop.echo", COMPONENT_META),
         ];
-        let stmt = build_in_toto_statement("turn-x", &rows, "lattice/1");
+        let resolve = component_lookup();
+        let stmt = build_in_toto_statement_with_evidence(
+            "turn-x",
+            &rows,
+            "lattice/1",
+            &EvidenceLookup::new(&resolve),
+        );
 
         assert_eq!(stmt.predicate_type, CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2);
         assert_eq!(
@@ -398,15 +494,31 @@ mod tests {
     }
 
     #[test]
-    fn unversioned_evidence_metadata_does_not_select_v2() {
-        // `version` gates interpretation; an unversioned key is not evidence.
-        let rows = vec![row(
-            1,
-            "noop.echo",
-            r#"{"admission_evidence":{"tool":"n"}}"#,
-        )];
+    fn a_row_pointing_at_no_evidence_does_not_select_v2() {
+        // #112: the row's `evidence_id` is what makes a call evidence-bearing.
+        // A row without one — or one the store cannot resolve — is v1.
+        let unresolvable = vec![row(1, "noop.echo", r#"{"evidence_id": 999}"#)];
+        let resolve = component_lookup();
         assert_eq!(
-            build_in_toto_statement("turn-x", &rows, "lattice/1").predicate_type,
+            build_in_toto_statement_with_evidence(
+                "turn-x",
+                &unresolvable,
+                "lattice/1",
+                &EvidenceLookup::new(&resolve),
+            )
+            .predicate_type,
+            CEP_TURN_ATTESTATION_PREDICATE_TYPE
+        );
+
+        let no_pointer = vec![row(1, "noop.echo", r#"{"component_cells":[]}"#)];
+        assert_eq!(
+            build_in_toto_statement_with_evidence(
+                "turn-x",
+                &no_pointer,
+                "lattice/1",
+                &EvidenceLookup::new(&resolve),
+            )
+            .predicate_type,
             CEP_TURN_ATTESTATION_PREDICATE_TYPE
         );
     }
@@ -414,11 +526,13 @@ mod tests {
     #[test]
     fn stored_predicate_type_wins_on_replay() {
         let rows = vec![row(1, "noop.echo", COMPONENT_META)];
-        let replayed = rebuild_in_toto_statement(
+        let resolve = component_lookup();
+        let replayed = rebuild_in_toto_statement_with_evidence(
             "turn-x",
             &rows,
             "lattice/1",
             Some(CEP_TURN_ATTESTATION_PREDICATE_TYPE),
+            &EvidenceLookup::new(&resolve),
         );
         assert_eq!(replayed.predicate_type, CEP_TURN_ATTESTATION_PREDICATE_TYPE);
         assert!(
@@ -435,11 +549,13 @@ mod tests {
     #[test]
     fn unknown_stored_predicate_type_falls_back_to_row_evidence() {
         let rows = vec![row(1, "noop.echo", COMPONENT_META)];
-        let replayed = rebuild_in_toto_statement(
+        let resolve = component_lookup();
+        let replayed = rebuild_in_toto_statement_with_evidence(
             "turn-x",
             &rows,
             "lattice/1",
             Some("https://example.invalid/attestation/unknown"),
+            &EvidenceLookup::new(&resolve),
         );
         assert_eq!(
             replayed.predicate_type,
@@ -457,11 +573,18 @@ mod tests {
             ),
             row(2, "noop.echo", COMPONENT_META),
         ];
-        let stored = build_in_toto_statement("turn-x", &rows, "lattice/1");
+        let resolve = component_lookup();
+        let lookup = EvidenceLookup::new(&resolve);
+        let stored = build_in_toto_statement_with_evidence("turn-x", &rows, "lattice/1", &lookup);
         let stored_bytes = statement_bytes(&stored).unwrap();
 
-        let replayed =
-            rebuild_in_toto_statement("turn-x", &rows, "lattice/1", Some(&stored.predicate_type));
+        let replayed = rebuild_in_toto_statement_with_evidence(
+            "turn-x",
+            &rows,
+            "lattice/1",
+            Some(&stored.predicate_type),
+            &lookup,
+        );
         assert_eq!(statement_bytes(&replayed).unwrap(), stored_bytes);
         assert_eq!(
             stored_bytes,

@@ -4,17 +4,20 @@
 //! CEP/22 native catalog method registration.
 
 use crate::handlers::{
-    register_external_methods, register_mutation_methods, register_session_state_methods,
-    register_workspace_observation_methods,
+    register_external_methods, register_mutation_methods, register_workspace_observation_methods,
 };
 use crate::server::registry::MethodRegistry;
 use lancet_protocol::CepError;
 
-/// Register all six LANCET native handlers (observation, external, session-state).
+/// Register the remaining LANCET native handlers (observation, external).
+///
+/// `session.todo_write` is deliberately absent: #29 migrated it to an embedded
+/// Component Tool and deleted its native handler. There is no native fallback —
+/// a runtime whose composition does not embed the Component has no other way to
+/// serve the method, and dispatch reports `MethodNotFound`.
 pub fn register_cep_native_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_native_workspace_observation(registry)?;
     register_native_external(registry)?;
-    register_native_session_state(registry)?;
     Ok(())
 }
 
@@ -28,11 +31,6 @@ pub fn register_native_workspace_observation(
 /// Register native CEP `fetch.web` handler.
 pub fn register_native_external(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_external_methods(registry)
-}
-
-/// Register native CEP `session.todo_write` handler.
-pub fn register_native_session_state(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    register_session_state_methods(registry)
 }
 
 /// Register native CEP workspace mutation handlers.

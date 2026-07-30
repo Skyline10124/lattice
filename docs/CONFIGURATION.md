@@ -125,7 +125,15 @@ agent-visible methods:
 | `mutate.create` | `workspace_mutation` |
 | `mutate.edit` | `workspace_mutation` |
 | `fetch.web` | `external_observation` |
-| `session.todo_write` | `session_state_mutation` |
+| `session.todo_write` | *(none — Cell-governed)* |
+
+`session.todo_write` is an embedded WASM Component Tool since GitHub #29: its
+contract lives in `tools/todo-write/manifest.toml` and its authorization is Cell
+capability admission, not the legacy impact vocabulary. Consequences for the
+settings below: `[lancet.effects] deny` and `[lancet.policy] methods.*` key on
+`ImpactKind` / native method identity and therefore **do not** apply to it — use
+`[tools].enabled` (which is the stage-1 capability grant) and
+`[lancet.capabilities]` instead. The other four methods are unaffected.
 
 Audit inspection is **not** a catalog method. Use `lattice audit` (operator CLI)
 against the project-keyed audit store; do not list `observe.audit` or
@@ -199,7 +207,7 @@ All `max_*` fields are `Option`; when `None`, the authority defaults
 | `max_grep_matches` | `Option<usize>` | `1000` | Max grep matches. |
 | `max_list_entries` | `Option<usize>` | `1000` | Max list entries. |
 | `max_find_paths` | `Option<usize>` | `1000` | Max find paths. |
-| `max_todo_ops` | `Option<usize>` | `100` | Max `todo_write` operations per turn. |
+| `max_todo_ops` | `Option<usize>` | `100` | **Inert since GitHub #29** — `session.todo_write` became a Component Tool and no charge point remains on that path. The per-call ceiling is the Tool descriptor's `maxItems` (100). See `FINDINGS.md` L-GH29-01. |
 
 ### `[lancet.network]` — `LancetNetworkSection`
 

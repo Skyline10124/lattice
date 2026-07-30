@@ -11,7 +11,16 @@
 use lancet_catalog::CepMethod;
 use lancet_catalog::methods::workspace::{Create, Edit, ObserveWorkspace};
 use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
-use lancet_native::provenance::{canonicalize_prov_fragment, project_rows};
+use lancet_native::provenance::{
+    EvidenceLookup, canonicalize_prov_fragment, project_rows, project_rows_with_evidence,
+};
+use lancet_native::{CallEvidence, EvidenceId, EvidenceOutcome};
+use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
+use lancet_protocol::evidence::{
+    ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION,
+    DeniedOperation, DeniedOperationsRecord, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION,
+    ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
+};
 
 fn store_row(
     audit: &CepAuditStore,
@@ -130,39 +139,71 @@ fn component_turn_projection_separates_admission_from_effects() {
         &ctx,
         1,
         "noop.echo",
-        r#"{
-            "admission_evidence": {
-                "version": 1,
-                "tool": "noop.echo",
-                "approved_capabilities": ["session.result"],
-                "denied_capabilities": ["session.events"],
-                "boundary_excluded": [],
-                "max_boundary": "in"
-            },
-            "observed_effects": {
-                "version": 1,
-                "effects": [{
-                    "seq": 1,
-                    "cell": {"ctx_op": "alloc", "ext_impact": "none", "scope": "session"},
-                    "scope": {"scope": "session", "trust": "in", "channel": "session"},
-                    "target": {"kind": "session", "turn_id": "turn-component"},
-                    "source": "result",
-                    "context_measure": 18
-                }]
-            },
-            "denied_operations": {
-                "version": 1,
-                "denied": [{
-                    "seq": 0,
-                    "cell": {"ctx_op": "mutate", "ext_impact": "none", "scope": "session"},
-                    "scope": {"scope": "session", "trust": "in", "channel": "session"},
-                    "target": {"kind": "session", "turn_id": "turn-component"},
-                    "reason": "cell mutate:none:session is not covered by an admitted capability"
-                }]
-            },
-            "component_cells": ["alloc:none:session:in"]
-        }"#,
+        // Since #112 the audit row points at the evidence table; the records
+        // themselves are written below.
+        r#"{"evidence_id": 1, "component_cells": ["alloc:none:session:in"]}"#,
     );
+    // The evidence row the metadata points at: one refused operation and one
+    // measured result, exactly as a partial-deny Component call produces.
+    let admission = AdmissionEvidence {
+        version: ADMISSION_EVIDENCE_VERSION,
+        tool: "noop.echo".into(),
+        approved_capabilities: vec!["session.result".into()],
+        denied_capabilities: vec!["session.events".into()],
+        boundary_excluded: Vec::new(),
+        max_boundary: Trust::In,
+    };
+    let scope = ObservedScope {
+        scope: "session".into(),
+        trust: Trust::In,
+        channel: ChannelKind::Session,
+    };
+    let target = ObservedTarget::Session {
+        turn_id: ctx.turn_id.clone(),
+    };
+    let effects = ObservedEffectsRecord {
+        version: OBSERVED_EFFECTS_RECORD_VERSION,
+        effects: vec![ObservedEffect {
+            seq: 1,
+            cell: Cell {
+                ctx_op: CtxOp::Alloc,
+                ext_impact: ExtImpact::None,
+                scope: "session".into(),
+            },
+            scope: scope.clone(),
+            target: target.clone(),
+            source: EffectSource::Result,
+            context_measure: Some(18),
+        }],
+    };
+    let denied = DeniedOperationsRecord {
+        version: DENIED_OPERATIONS_RECORD_VERSION,
+        denied: vec![DeniedOperation {
+            seq: 0,
+            cell: Cell {
+                ctx_op: CtxOp::Mutate,
+                ext_impact: ExtImpact::None,
+                scope: "session".into(),
+            },
+            scope,
+            target,
+            reason: "cell mutate:none:session is not covered by an admitted capability".into(),
+        }],
+    };
+    let evidence_id = audit
+        .record_call_evidence(&CallEvidence {
+            turn_id: &ctx.turn_id,
+            session_id: &ctx.session_id,
+            call_id: 1,
+            tool: "noop.echo",
+            outcome: EvidenceOutcome::Completed,
+            admission: &admission,
+            effects: Some(&effects),
+            denied: Some(&denied),
+        })
+        .expect("record evidence");
+    assert_eq!(evidence_id, EvidenceId(1), "the row's pointer must resolve");
+
     let rows = audit
         .query_rows(&lancet_native::AuditQueryFilters {
             session_id: Some(ctx.session_id.clone()),
@@ -171,7 +212,9 @@ fn component_turn_projection_separates_admission_from_effects() {
         })
         .expect("query");
 
-    let attributes = &project_rows(&rows).activities[0].attributes;
+    let resolve = |id: EvidenceId| audit.call_evidence(id).ok().flatten();
+    let lookup = EvidenceLookup::new(&resolve);
+    let attributes = &project_rows_with_evidence(&rows, &lookup).activities[0].attributes;
     assert_eq!(
         attributes["admission_evidence"]["approved_capabilities"],
         serde_json::json!(["session.result"])

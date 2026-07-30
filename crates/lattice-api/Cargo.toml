@@ -30,6 +30,9 @@ tokio-stream = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+# `test-method` provides the synthetic `TestEcho` typed method the turn/CEP tests
+# register in place of the migrated `session.todo_write`. Dev-only.
+lancet-catalog = { workspace = true, features = ["test-method"] }
 gix = { workspace = true }
 lattice-session = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true }

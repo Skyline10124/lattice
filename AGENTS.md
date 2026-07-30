@@ -105,7 +105,7 @@ accumulating.
 | `lancet-catalog` | Legacy central Tool-contract authority scheduled for removal by ADR 0004 after source manifests and generated descriptors take over. |
 | `lancet-dispatch` | Current generic registry/transport surface scheduled for absorption into `lancet-runtime`. |
 | `lancet-cep` | Current CEP/catalog projection facade scheduled for absorption or retirement after descriptor-generated projection lands. |
-| `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, provenance projection, and attestation persistence. |
+| `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, provenance projection, attestation persistence, and (since #112) the versioned Cell evidence tables that are the durable home of `AdmissionEvidence` / `ObservedEffectsRecord` / `DeniedOperationsRecord`. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger, and effect-region checks. |
 | `lancet-native` | Current native handler/server surface. ADR 0004 moves built-ins to Components and absorbs the remaining concrete host responsibilities into `lancet-runtime`. |
 | `lancet-runtime` | ADR 0004 target: Component engine, generated descriptor inventory, dispatch/transport, Tool Host enforcement, concrete Local Workspace, native network/session channels, audit/effect integration, and private gix history. Not yet the production path. |
@@ -146,7 +146,14 @@ accumulating.
   `render.json`; that absence is a legal state, and `--check` fails on a stale
   one.
 - The default distribution contains `observe.workspace`, `mutate.create`,
-  `mutate.edit`, `fetch.web`, and `session.todo_write`. Operators may install
+  `mutate.edit`, `fetch.web`, and `session.todo_write`. Since GitHub #29 the last
+  of those is an embedded WASM Component whose sole descriptor authority is
+  `tools/todo-write/manifest.toml`; the other four are still native catalog
+  methods, so `lancet_catalog::catalog()` is four entries, not five. A Tool
+  manifest's required `[tool] distribution` field decides whether
+  `cargo xtask tool-codegen` embeds it in the generated host composition
+  (`crates/lancet-runtime/src/generated/host_composition.rs`) — that generated
+  file is the only mechanism that links a Tool into a built runtime. Operators may install
   additional precompiled Tool Bundles and automatically rebuild a new
   versioned Linux host; a running process cannot load more code or change its
   closed catalog. Audit read/replay remains operator-only.
@@ -171,6 +178,13 @@ accumulating.
   project root, observation, network, effects, workspace policy, and external
   policy file pointers. Sandbox `[workspace]`, command, isolation, and verify
   configuration are retired surface; do not reintroduce them.
+- Cell evidence is persisted in `lancet-audit`'s versioned evidence tables
+  (`evidence_calls` / `evidence_effects` / `evidence_denials`), keyed by a
+  store-generated `evidence_id` that a CEP audit row merely points at. That
+  identity is deliberately not `audit_id`: ADR 0004 decision 8 deletes the audit
+  store, and the evidence identity must outlive it. Do not put structured
+  evidence back into `metadata_json`, and do not add a second record shape
+  beside `lancet_protocol::evidence`.
 - SQLite for CEP audit records belongs in `lancet-audit`; the conversation
   graph is git-backed (git refs under `refs/lattice/sessions/<id>/**`) and
   lives in `lattice-session`. SQLite session graph storage was retired.

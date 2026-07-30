@@ -28,22 +28,33 @@ use lancet_cep::ToolExposure;
 use lancet_protocol::Retriability;
 use tempfile::TempDir;
 
-/// Build a production runtime rooted at `root` with all five catalog methods
-/// enabled and an empty write-deny list.
+/// The migrated Component Tool's method name (#29). Not a catalog constant: its
+/// descriptor authority is `tools/todo-write/manifest.toml`.
+const TODO_WRITE: &str = "session.todo_write";
+
+/// Build a production runtime rooted at `root` with all five shipped Tools
+/// enabled — the four native catalog methods plus the embedded Component — and an
+/// empty write-deny list.
 fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
     let mut policy = PolicyConfig::defaults_for_project_root(root.to_path_buf());
     policy.workspace = WorkspacePolicy {
         denied_write_patterns: Vec::new(),
         ..Default::default()
     };
-    let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    enabled.push(TODO_WRITE.to_string());
     LancetRuntime::build(LancetRuntimeConfig {
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         project_root: root.to_path_buf(),
         enabled_tools: enabled,
         policy,
-        // Native catalog methods only; no Component Tool is admitted.
-        capability_admission: Default::default(),
+        // The embedded Component Tool is admitted too: `enabled_tools` is the
+        // stage-1 capability grant, and the shipped catalog is no longer
+        // native-only (#29).
+        capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
+            enabled_tools: std::iter::once(TODO_WRITE.to_string()).collect(),
+            ..Default::default()
+        },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: lancet_api::AuditBacking::InMemory,
         model_id: "test".into(),
@@ -73,9 +84,32 @@ async fn direct_local_runtime_exposes_closed_five_method_catalog() {
     let mut got = names.clone();
     got.sort();
     assert_eq!(got, expected, "Agent-visible catalog must be exactly five");
-    // ToolExposure must also agree (rejects unknown, admits exactly the five).
-    let exposure = ToolExposure::from_catalog_enabled(&names).expect("exposure");
-    assert_eq!(exposure.definitions().len(), 5);
+
+    // Four of the five come from the native catalog; the fifth is the embedded
+    // Component, projected from its generated descriptor.
+    let native: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    let exposure = ToolExposure::from_catalog_enabled(&native).expect("exposure");
+    assert_eq!(exposure.definitions().len(), 4);
+    assert!(
+        !native.contains(&TODO_WRITE.to_string()),
+        "the migrated Tool must not be a native catalog method"
+    );
+
+    // The Component's LLM projection carries its manifest description and schema.
+    let todo = runtime
+        .tool_definitions()
+        .iter()
+        .find(|t| t.name == TODO_WRITE)
+        .expect("the embedded Component is exposed to the Agent");
+    assert!(
+        todo.description.contains("todo list"),
+        "the projection must carry the manifest description: {}",
+        todo.description
+    );
+    assert_eq!(
+        todo.parameters["properties"]["todos"]["type"],
+        serde_json::json!("array")
+    );
 }
 
 /// observe.workspace read_file sees the current Local state, including an
@@ -179,14 +213,20 @@ async fn policy_deny_blocks_create_on_direct_local() {
         denied_write_patterns: vec!["secret/**".into()],
         ..Default::default()
     };
-    let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    enabled.push(TODO_WRITE.to_string());
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         project_root: dir.path().to_path_buf(),
         enabled_tools: enabled,
         policy,
-        // Native catalog methods only; no Component Tool is admitted.
-        capability_admission: Default::default(),
+        // The embedded Component Tool is admitted too: `enabled_tools` is the
+        // stage-1 capability grant, and the shipped catalog is no longer
+        // native-only (#29).
+        capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
+            enabled_tools: std::iter::once(TODO_WRITE.to_string()).collect(),
+            ..Default::default()
+        },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: lancet_api::AuditBacking::InMemory,
         model_id: "test".into(),

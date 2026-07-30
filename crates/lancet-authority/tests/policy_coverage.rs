@@ -34,10 +34,6 @@ fn method_fixtures() -> Vec<MethodFixture> {
             method: "fetch.web",
             required_capability: RequiredCapability::FetchUrl,
         },
-        MethodFixture {
-            method: "session.todo_write",
-            required_capability: RequiredCapability::MutateSessionState,
-        },
     ]
 }
 

@@ -423,33 +423,38 @@ fn channels_for_domain_imports(_imports: &BTreeSet<String>) -> BTreeSet<ChannelK
     BTreeSet::new()
 }
 
-/// Parse a 64-char hex string into a `[u8; 32]` digest. Used by the generated
-/// fixture to construct `ExpectedToolIdentity` from the committed
-/// `expected-identity.json` candidate.
-#[cfg(any(feature = "test-utils", test))]
-pub(crate) fn parse_hex_digest(hex: &str) -> [u8; 32] {
+/// Parse a 64-char hex string into a `[u8; 32]` digest.
+///
+/// `const` because the generated host composition builds its
+/// `EXPECTED_COMPONENTS` identities in a `static`: the pinned digests are
+/// compile-time constants of the built runtime, not values assembled at startup.
+/// A malformed digest is therefore a build failure, not a runtime panic.
+pub(crate) const fn parse_hex_digest(hex: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
     let bytes = hex.as_bytes();
-    for i in 0..32 {
+    assert!(bytes.len() == 64, "digest must be 64 hex chars");
+    let mut i = 0;
+    while i < 32 {
         let hi = hex_nibble(bytes[i * 2]);
         let lo = hex_nibble(bytes[i * 2 + 1]);
         out[i] = (hi << 4) | lo;
+        i += 1;
     }
     out
 }
 
-#[cfg(any(feature = "test-utils", test))]
-fn hex_nibble(c: u8) -> u8 {
+const fn hex_nibble(c: u8) -> u8 {
     match c {
         b'0'..=b'9' => c - b'0',
         b'a'..=b'f' => c - b'a' + 10,
         b'A'..=b'F' => c - b'A' + 10,
-        _ => panic!("invalid hex digit: {c}"),
+        _ => panic!("invalid hex digit"),
     }
 }
 
-// Re-export so `generated::noop_fixture` can construct identities.
-#[cfg(feature = "test-utils")]
+// Re-exported under a `_`-prefixed alias so the generated modules
+// (`host_composition`, and `noop_fixture` under `test-utils`) can construct
+// identities without widening the crate's public surface.
 pub(crate) use parse_hex_digest as _parse_hex_digest;
 
 #[cfg(test)]

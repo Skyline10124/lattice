@@ -4,6 +4,10 @@ name = "noop.echo"
 version = "0.1.0"
 description = "Tracer no-op: emits progress/cancellation and echoes params."
 abi-version = 1
+# `fixture` keeps the tracer out of the default distribution: it is composed only
+# by the `test-utils` no-op fixture, never embedded in a built runtime's closed
+# catalog (ADR 0004 decision 1: the default distribution is five Tools).
+distribution = "fixture"
 
 [params]
 schema = '''

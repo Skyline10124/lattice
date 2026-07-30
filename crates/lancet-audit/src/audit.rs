@@ -3,11 +3,11 @@
 
 //! Flat append-only SQLite audit store for CEP execution records.
 
+use crate::evidence::{CallEvidence, EvidenceError, EvidenceId, StoredCallEvidence};
 use lancet_catalog::{RequiredCapability, catalog};
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::evidence::{
-    AdmissionEvidence, DeniedOperation, DeniedOperationsRecord, ObservedEffect,
-    ObservedEffectsRecord,
+    AdmissionEvidence, DeniedOperationsRecord, ObservedEffect, ObservedEffectsRecord,
 };
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,20 @@ pub const AUDIT_QUERY_MAX_ROWS: usize = 10_000;
 
 /// Schema version stamped in `PRAGMA user_version`. Version 0 means a database
 /// written before audit schemas were versioned at all.
-pub const AUDIT_SCHEMA_VERSION: i64 = 1;
+///
+/// Version 2 adds the #112 Cell evidence tables (`evidence_calls`,
+/// `evidence_effects`, `evidence_denials`). A version-1 file is adopted and
+/// gains them additively; a file already claiming 2 must carry their full shape
+/// or it is refused with an operator action rather than altered.
+pub const AUDIT_SCHEMA_VERSION: i64 = crate::evidence::EVIDENCE_SCHEMA_VERSION;
+
+/// The schema version before the #112 evidence tables existed. A file stamped
+/// with this version predates them and is upgraded additively on open.
+///
+/// Referenced by the compatibility test that pins that upgrade
+/// (`evidence_tests::pre_evidence_database_gains_the_tables_and_keeps_history`)
+/// so the boundary is named rather than a bare `1` in a test.
+pub const AUDIT_SCHEMA_VERSION_PRE_EVIDENCE: i64 = 1;
 
 /// `cep_audit_entries` columns an unversioned database must already have to be
 /// adopted. Only the NOT NULL columns are listed: `ended_at`,
@@ -321,30 +334,38 @@ fn required_capability_for_method(method: &str) -> Option<RequiredCapability> {
 
 /// One Component Tool call's evidence, as recorded by the runtime ledger
 /// (#28 B5/A2). *Why* the call was authorized (`admission`) and *what actually
-/// happened* (`effects`, `denied`) travel separately and are persisted under
-/// separate metadata keys; a capability alias is admission evidence only and
-/// never becomes an effect. Native handler calls pass the default (no
-/// Component evidence).
+/// happened* (`effects`, `denied`) travel separately; a capability alias is
+/// admission evidence only and never becomes an effect. Native handler calls
+/// pass the default (no Component evidence).
+///
+/// Since #112 the durable home of all three records is the versioned evidence
+/// table, and `evidence_id` is the identity that resolves them. The records are
+/// still carried here because the audit row's own summary keys
+/// (`component_cells`) are derived from them.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ComponentCallEvidence<'a> {
     pub admission: Option<&'a AdmissionEvidence>,
     pub effects: Option<&'a ObservedEffectsRecord>,
     pub denied: Option<&'a DeniedOperationsRecord>,
+    /// Identity of this call's row in the evidence table. `None` for a native
+    /// handler call, which produces no Cell evidence.
+    pub evidence_id: Option<EvidenceId>,
 }
 
 /// Merge transport and catalog summary keys into metadata JSON only.
 ///
-/// Component evidence lands under three keys — `admission_evidence`,
-/// `observed_effects`, and `denied_operations` — each a versioned object a
-/// reader gates on before interpreting. The inner arrays are written in
-/// `seq` order regardless of producer ordering, and
-/// `observed_capabilities` is ordered by label, so two runs of the same call
-/// produce identical bytes.
+/// #112 criterion 3: `metadata_json` is **no longer the authoritative carrier**
+/// of structured evidence. The `AdmissionEvidence` / `ObservedEffectsRecord` /
+/// `DeniedOperationsRecord` payloads live in the versioned evidence tables
+/// (`crate::evidence`); this row carries only `evidence_id`, the stable identity
+/// that resolves them. A reader that wants the evidence follows the id.
 ///
-/// `component_cells` keeps carrying the 4-segment Cell audit keys
-/// (`ctx:ext:scope:trust`) for query compatibility (spec §6.3: audit records
-/// cells, not capability names), now derived from the observed effects so a
-/// multi-effect call cannot disagree with its own ledger (C8).
+/// What stays here is audit-row summary, not evidence: `required_capability`,
+/// the label-ordered `observed_capabilities`, and `component_cells` — the
+/// 4-segment Cell audit keys (`ctx:ext:scope:trust`) kept as a *query key* for
+/// the operator read path (spec §6.3), derived from the observed effects so it
+/// can never disagree with the ledger (C8). Both are projections of evidence,
+/// cheap to recompute, and neither is a second record shape.
 pub fn merge_finalize_metadata(
     existing: Option<&str>,
     method: &str,
@@ -382,12 +403,20 @@ pub fn merge_finalize_metadata(
         );
     }
 
-    if let Some(admission) = component.admission
-        && let Ok(value) = serde_json::to_value(admission)
-    {
-        obj_map.insert("admission_evidence".into(), value);
+    // #112 criterion 3: the row points at the evidence, it does not carry it.
+    // `evidence_id` is written for every Component call — including a refused
+    // one, whose evidence is its `AdmissionEvidence` — so "a Component row
+    // always resolves to evidence" is checkable from the row alone.
+    if let Some(evidence_id) = component.evidence_id {
+        obj_map.insert(
+            "evidence_id".into(),
+            serde_json::Value::Number(evidence_id.0.into()),
+        );
     }
 
+    // `component_cells` stays a query key, derived from the effects (C8). It is
+    // a projection of evidence, not a second record: it carries no version, no
+    // target, no measure, and no admission basis.
     if let Some(record) = component.effects {
         let mut effects: Vec<ObservedEffect> = record.effects.clone();
         effects.sort_by_key(|effect| effect.seq);
@@ -397,23 +426,6 @@ pub fn merge_finalize_metadata(
             .collect();
         if !cells.is_empty() {
             obj_map.insert("component_cells".into(), serde_json::Value::Array(cells));
-        }
-        if let Ok(value) = serde_json::to_value(ObservedEffectsRecord {
-            version: record.version,
-            effects,
-        }) {
-            obj_map.insert("observed_effects".into(), value);
-        }
-    }
-
-    if let Some(record) = component.denied.filter(|record| !record.denied.is_empty()) {
-        let mut denied: Vec<DeniedOperation> = record.denied.clone();
-        denied.sort_by_key(|operation| operation.seq);
-        if let Ok(value) = serde_json::to_value(DeniedOperationsRecord {
-            version: record.version,
-            denied,
-        }) {
-            obj_map.insert("denied_operations".into(), value);
         }
     }
 
@@ -533,6 +545,24 @@ impl CepAuditStore {
                 ),
             });
         }
+        // #112 criterion 4: a file that already claims the evidence schema
+        // version must carry the evidence tables' full shape. A partial or
+        // renamed evidence table cannot be repaired additively (the missing
+        // column would be NOT NULL), so it is reported with an operator action
+        // rather than altered — history is never silently dropped.
+        if version == AUDIT_SCHEMA_VERSION
+            && let Some(missing) = self.missing_evidence_columns(&conn)?
+        {
+            return Err(AuditError::IncompatibleSchema {
+                path: self.path.clone(),
+                reason: format!(
+                    "database reports schema version {version} but its evidence table shape is \
+                     missing required column(s) {missing}; the database is left untouched — \
+                     move it aside so a new one is created, then bring the history over with \
+                     the read-only legacy import"
+                ),
+            });
+        }
 
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -581,6 +611,13 @@ impl CepAuditStore {
             path: self.path.clone(),
             source,
         })?;
+        // #112: the Cell evidence tables. Additive, so a version-1 file gains
+        // them on first open without touching its existing history.
+        conn.execute_batch(crate::evidence::EVIDENCE_SCHEMA_DDL)
+            .map_err(|source| AuditError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
         for ddl in [
             "ALTER TABLE cep_audit_entries ADD COLUMN model_id TEXT",
             "ALTER TABLE cep_audit_entries ADD COLUMN runtime_version TEXT",
@@ -612,6 +649,35 @@ impl CepAuditStore {
         for (table, required) in [
             ("cep_audit_entries", &REQUIRED_AUDIT_COLUMNS[..]),
             ("attestation_records", &REQUIRED_ATTESTATION_COLUMNS[..]),
+        ] {
+            missing.extend(self.missing_columns_of(conn, table, required)?);
+        }
+        if missing.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(missing.join(", ")))
+        }
+    }
+
+    /// Required evidence-table columns absent from a file that already claims
+    /// [`AUDIT_SCHEMA_VERSION`], qualified by table name. An absent evidence
+    /// table reports nothing — the additive DDL creates it, which is how a
+    /// version-1 file is upgraded.
+    fn missing_evidence_columns(&self, conn: &Connection) -> Result<Option<String>, AuditError> {
+        let mut missing = Vec::new();
+        for (table, required) in [
+            (
+                "evidence_calls",
+                &crate::evidence::REQUIRED_EVIDENCE_CALL_COLUMNS[..],
+            ),
+            (
+                "evidence_effects",
+                &crate::evidence::REQUIRED_EVIDENCE_EFFECT_COLUMNS[..],
+            ),
+            (
+                "evidence_denials",
+                &crate::evidence::REQUIRED_EVIDENCE_DENIAL_COLUMNS[..],
+            ),
         ] {
             missing.extend(self.missing_columns_of(conn, table, required)?);
         }
@@ -735,6 +801,71 @@ impl CepAuditStore {
             });
         self.pending.fetch_sub(1, Ordering::SeqCst);
         result.map(|_| ())
+    }
+
+    /// Record one Tool call's Cell evidence and return its stable identity
+    /// (#112 criteria 1/2/3/5).
+    ///
+    /// This is the authoritative write path for structured evidence. The
+    /// returned [`EvidenceId`] is what a later runtime event references; it does
+    /// not depend on `cep_audit_entries`, so it survives that store's removal.
+    ///
+    /// Every outcome is recorded, not just successes: an admission denial
+    /// carries its `AdmissionEvidence` with
+    /// [`EvidenceOutcome::AdmissionDenied`], per-operation refusals land as
+    /// `DeniedOperation`, and a failed call keeps the operation effects it had
+    /// already produced.
+    pub fn record_call_evidence(
+        &self,
+        evidence: &CallEvidence<'_>,
+    ) -> Result<EvidenceId, EvidenceError> {
+        let recorded_at = chrono_now();
+        let mut conn = self.conn.lock().expect("audit mutex poisoned");
+        crate::evidence::insert_call_evidence(&mut conn, evidence, &recorded_at)
+    }
+
+    /// Read one call's evidence by its identity.
+    pub fn call_evidence(
+        &self,
+        evidence_id: EvidenceId,
+    ) -> Result<Option<StoredCallEvidence>, EvidenceError> {
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        crate::evidence::call_evidence_by_id(&conn, evidence_id)
+    }
+
+    /// Read every Tool call's evidence for one turn, oldest first (#112
+    /// criterion 1: addressable by turn).
+    pub fn call_evidence_for_turn(
+        &self,
+        turn_id: &str,
+    ) -> Result<Vec<StoredCallEvidence>, EvidenceError> {
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        crate::evidence::call_evidence_for_turn(&conn, turn_id)
+    }
+
+    /// Read the evidence of one dispatched call (#112 criterion 1: addressable
+    /// by call), identified the way the transport identifies a call: session +
+    /// turn + per-turn `call_id`.
+    pub fn call_evidence_for_call(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        call_id: u64,
+    ) -> Result<Vec<StoredCallEvidence>, EvidenceError> {
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        crate::evidence::call_evidence_for_call(&conn, session_id, turn_id, call_id)
+    }
+
+    /// Run a statement against the store's connection. Test-only: the evidence
+    /// contract tests need to corrupt a persisted `version` or enum label to
+    /// prove the read path refuses it rather than coercing it.
+    #[cfg(test)]
+    pub(crate) fn with_connection_for_tests<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, rusqlite::Error>,
+    ) -> Result<T, rusqlite::Error> {
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        f(&conn)
     }
 
     /// Wait until all started audit rows have been finalized.
@@ -1082,6 +1213,29 @@ impl CepAuditStore {
     }
 }
 
+/// Drop an imported row's `evidence_id`, which does not resolve in this store.
+///
+/// The import copies audit rows only — the evidence tables are not carried, and
+/// `evidence_id` is a per-store AUTOINCREMENT rowid that restarts at 1. Keeping
+/// the pointer would let a historical row resolve to an unrelated *later* call's
+/// evidence: silently, with no version mismatch and no error. A row with no
+/// pointer is correctly read as "this call has no evidence in this store", which
+/// is the truth.
+fn strip_evidence_pointer(metadata_json: Option<&str>) -> Option<String> {
+    let raw = metadata_json?;
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        // Not JSON: nothing to strip, and rewriting it would lose data.
+        return Some(raw.to_string());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Some(raw.to_string());
+    };
+    if object.remove("evidence_id").is_none() {
+        return Some(raw.to_string());
+    }
+    serde_json::to_string(&value).ok()
+}
+
 fn import_legacy_tables(
     source: &Connection,
     dest: &Connection,
@@ -1130,7 +1284,7 @@ fn import_legacy_tables(
                 row.semantic_status,
                 row.guard_stage,
                 if row.policy_enforced { 1 } else { 0 },
-                row.metadata_json,
+                strip_evidence_pointer(row.metadata_json.as_deref()),
                 row.model_id,
                 row.runtime_version,
             ],
