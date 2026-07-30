@@ -31,8 +31,10 @@ use lancet_protocol::effect_types::ImpactKind;
 /// Every field here must have a live reader on the execution side (#121): a
 /// configurable key with no reader is a silently ineffective policy, which is
 /// worse than an unsupported key that errors. `enabled` is read in
-/// [`DefaultPolicyHook::decide_resolved_direct`] and `max_todo_ops` clamps the
-/// turn-scoped todo budget in [`DefaultPolicyHook::budget_denial`].
+/// [`DefaultPolicyHook::decide_resolved_direct`]. `max_todo_ops` is the one
+/// documented exception: its enforcement point left with the native
+/// `session.todo_write` handler (#29), and the plumbing is retained pending
+/// the charge/credit context-budget seam — see FINDINGS.md L-GH29-01.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct MethodPolicy {
     pub enabled: Option<bool>,
