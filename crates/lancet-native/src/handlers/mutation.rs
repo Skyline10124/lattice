@@ -8,9 +8,10 @@
 //! resolution, Mutation Preconditions (expected hash / no-replace), and
 //! atomic installation all live behind that module.
 
-use crate::edit::apply::{PatchApplyLimits, apply_parsed_patch};
+use crate::edit::apply::apply_parsed_patch;
 use crate::edit::content_hash;
 use crate::edit::hash::line_hash;
+use crate::edit::limits::WriteLimits;
 use crate::edit::parser::parse_patch_document;
 use crate::edit::storage::EditStorage;
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
@@ -319,6 +320,12 @@ async fn preflight_create(
     params: &CreateParams,
     method: &str,
 ) -> Result<PreflightCreate, CepError> {
+    // #120: the single-file write cap is checked on the request content before
+    // any filesystem write. The create install is no-replace, so an over-limit
+    // request must be refused here — never as a truncated or partially written
+    // target the Agent would then observe as installed.
+    check_create_write_size(params, method)?;
+
     let storage = auth.edit_storage();
     storage
         .preflight_create(&params.path)
@@ -354,6 +361,31 @@ async fn preflight_create(
         content: params.content.clone(),
         created_dirs,
     })
+}
+
+/// Enforce the shared single-file write byte cap for `mutate.create` (#120).
+///
+/// `mutate.edit` enforces the same [`WriteLimits`] inside the HashLine apply
+/// plan, where the over-cap diagnostic reaches the client as
+/// `ExecutionFailed` + `CepErrorData::Execution`. Create mirrors that code and
+/// data shape so one budget produces one client-visible failure vocabulary,
+/// and carries the `ToolError::SizeLimit` text (limit + actual) unchanged.
+fn check_create_write_size(params: &CreateParams, method: &str) -> Result<(), CepError> {
+    let limits = WriteLimits::default();
+    let Err(error) = limits.check_write_size(params.content.len()) else {
+        return Ok(());
+    };
+    let message = error.to_string();
+    Err(CepError::new(
+        CepErrorCode::ExecutionFailed,
+        format!("{method} rejected for '{}': {message}", params.path),
+        CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+            command: method.into(),
+            exit_code: Some(1),
+            stderr: Some(message),
+        }),
+        Retriability::Permanent,
+    ))
 }
 
 async fn parent_exists(auth: &MutationAuth, path: &str) -> Result<bool, CepError> {
@@ -932,7 +964,7 @@ async fn apply_compiled_patch(
         )
     })?;
 
-    let limits = PatchApplyLimits::default();
+    let limits = WriteLimits::default();
     let storage = auth.edit_storage();
     let result = apply_parsed_patch(&storage, &limits, document).await;
 
@@ -1218,6 +1250,213 @@ mod create_tests {
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
         let on_disk = std::fs::read(dir.path().join("exists.txt")).unwrap();
         assert_eq!(on_disk, b"first\n");
+    }
+
+    /// #120: over-limit create content is refused before any write, so the
+    /// no-replace install never leaves a partial target behind.
+    #[tokio::test]
+    async fn create_over_write_limit_fails_and_leaves_no_target() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let (ctx, _events) = test_ctx(root);
+        let limit = WriteLimits::default().max_write_size;
+
+        let params = CreateParams {
+            path: "huge.txt".into(),
+            content: "x".repeat(limit + 1),
+            create_parents: false,
+        };
+        let err = registry
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert!(
+            err.message.contains("size limit exceeded"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains(&format!("{} > {limit}", limit + 1)),
+            "the rejection must carry limit and actual: {}",
+            err.message
+        );
+        assert!(
+            !dir.path().join("huge.txt").exists(),
+            "an over-limit create must leave no partial file on disk"
+        );
+    }
+
+    /// #120 ordering: the cap runs before every filesystem side effect, so an
+    /// over-limit create with `create_parents` leaves no directories behind
+    /// either. This is the assertion that fails if the check ever moves below
+    /// the parent-directory preflight.
+    #[tokio::test]
+    async fn create_over_write_limit_creates_no_parent_directories() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let (ctx, _events) = test_ctx(root);
+        let limit = WriteLimits::default().max_write_size;
+
+        let params = CreateParams {
+            path: "a/b/huge.txt".into(),
+            content: "x".repeat(limit + 1),
+            create_parents: true,
+        };
+        let err = registry
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert!(
+            !dir.path().join("a").exists(),
+            "an over-limit create must not create parent directories"
+        );
+    }
+
+    /// #120: the cap counts UTF-8 bytes, not characters. Every other test uses
+    /// ASCII where the two coincide.
+    #[tokio::test]
+    async fn create_write_limit_counts_bytes_not_chars() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let (ctx, _events) = test_ctx(root);
+        let limit = WriteLimits::default().max_write_size;
+
+        // Two bytes per char, so char count is half the cap but byte count is
+        // over it.
+        let content = "é".repeat(limit / 2 + 1);
+        assert!(content.chars().count() < limit && content.len() > limit);
+
+        let err = registry
+            .dispatch(
+                Create::NAME,
+                serde_json::to_value(&CreateParams {
+                    path: "wide.txt".into(),
+                    content: content.clone(),
+                    create_parents: false,
+                })
+                .unwrap(),
+                ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert!(
+            err.message
+                .contains(&format!("{} > {limit}", content.len())),
+            "the rejection must report the byte count: {}",
+            err.message
+        );
+        assert!(!dir.path().join("wide.txt").exists());
+    }
+
+    /// #120 boundary: content exactly at the cap is a legal write.
+    #[tokio::test]
+    async fn create_at_write_limit_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let (ctx, _events) = test_ctx(root);
+        let limit = WriteLimits::default().max_write_size;
+
+        let params = CreateParams {
+            path: "at-limit.txt".into(),
+            content: "x".repeat(limit),
+            create_parents: false,
+        };
+        let result = registry
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: CreateResult = serde_json::from_value(result).unwrap();
+        assert_eq!(parsed.bytes_written, limit as u64);
+        assert_eq!(
+            std::fs::metadata(dir.path().join("at-limit.txt"))
+                .unwrap()
+                .len(),
+            limit as u64
+        );
+    }
+
+    /// #120: both write paths must read the one shared cap. Comparing the
+    /// limit each path reports keeps a future change to one from silently
+    /// diverging from the other.
+    #[tokio::test]
+    async fn create_and_edit_report_the_same_write_limit() {
+        let limit = WriteLimits::default().max_write_size;
+
+        let create_dir = TempDir::new().unwrap();
+        let create_root = create_dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let (create_ctx, _create_events) = test_ctx(create_root);
+        let create_err = registry
+            .dispatch(
+                Create::NAME,
+                serde_json::to_value(&CreateParams {
+                    path: "over.txt".into(),
+                    content: "x".repeat(limit + 1),
+                    create_parents: false,
+                })
+                .unwrap(),
+                create_ctx,
+            )
+            .await
+            .unwrap_err();
+
+        let edit_dir = TempDir::new().unwrap();
+        let before = "seed\n";
+        std::fs::write(edit_dir.path().join("over.txt"), before).unwrap();
+        let edit_root = edit_dir.path().to_str().unwrap();
+        let (edit_ctx, _edit_events) = test_ctx(edit_root);
+        let edit_err = registry
+            .dispatch(
+                Edit::NAME,
+                serde_json::to_value(&EditParams {
+                    path: "over.txt".into(),
+                    expected_hash: content_hash(before.as_bytes()),
+                    edits: vec![EditOperation::ReplaceText {
+                        old: "seed".into(),
+                        new: "y".repeat(limit + 1),
+                        occurrence: None,
+                    }],
+                })
+                .unwrap(),
+                edit_ctx,
+            )
+            .await
+            .unwrap_err();
+
+        let create_limit = reported_size_limit(&create_err).expect("create size-limit rejection");
+        let edit_limit = reported_size_limit(&edit_err).expect("edit size-limit rejection");
+        assert_eq!(
+            create_limit, edit_limit,
+            "mutate.create and mutate.edit must enforce one shared write cap"
+        );
+        assert_eq!(create_limit, limit);
+        assert_eq!(
+            std::fs::read_to_string(edit_dir.path().join("over.txt")).unwrap(),
+            before,
+            "an over-limit edit must not modify the target"
+        );
+    }
+
+    /// Extract the cap from a rejection carrying the `ToolError::SizeLimit`
+    /// text (`size limit exceeded: {actual} > {limit}`). Both write paths
+    /// surface it in the execution `stderr` evidence.
+    fn reported_size_limit(err: &CepError) -> Option<usize> {
+        let CepErrorData::Execution(execution) = &err.data else {
+            return None;
+        };
+        let text = execution.stderr.as_deref()?;
+        let tail = text.split("size limit exceeded:").nth(1)?;
+        tail.split('>').nth(1)?.trim().parse().ok()
     }
 
     #[tokio::test]

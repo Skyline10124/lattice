@@ -18,58 +18,24 @@ use lancet_protocol::policy::{
     PolicyActionRequired, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
 };
 
-use super::BudgetLimits;
 use super::network::NetworkPolicyConfig;
 use super::observation::ObservationPolicyConfig;
 use super::resolved::PolicyResolver;
 use lancet_protocol::effect_types::ImpactKind;
-
-// ── Config-friendly source class ───────────────────────────────────────
-
-/// Config-friendly source class for capability source policy.
-///
-/// This does not carry runtime envelope ids. A runtime capability source that
-/// satisfies both base and declared classes passes when checking source policy.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CapabilitySourceClass {
-    Base,
-    Declared,
-}
-
-// ── Capability source policy ───────────────────────────────────────────
-
-/// Which source classes are allowed for each method family.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CapabilitySourcePolicy {
-    pub observation: Vec<CapabilitySourceClass>,
-    pub mutation: Vec<CapabilitySourceClass>,
-    pub external: Vec<CapabilitySourceClass>,
-    pub session_state: Vec<CapabilitySourceClass>,
-}
-
-impl Default for CapabilitySourcePolicy {
-    fn default() -> Self {
-        use CapabilitySourceClass::*;
-        Self {
-            observation: vec![Base, Declared],
-            mutation: vec![Declared],
-            external: vec![Base, Declared],
-            session_state: vec![Base, Declared],
-        }
-    }
-}
 
 // ── Method policy overrides ────────────────────────────────────────────
 
 /// Fixed-field overrides for a single method.
 ///
 /// Only fixed fields are allowed — this must not become a second policy engine.
+/// Every field here must have a live reader on the execution side (#121): a
+/// configurable key with no reader is a silently ineffective policy, which is
+/// worse than an unsupported key that errors. `enabled` is read in
+/// [`DefaultPolicyHook::decide_resolved_direct`] and `max_todo_ops` clamps the
+/// turn-scoped todo budget in [`DefaultPolicyHook::budget_denial`].
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct MethodPolicy {
     pub enabled: Option<bool>,
-    pub allowed_sources: Option<Vec<CapabilitySourceClass>>,
-    pub required_capability: Option<lancet_catalog::method::RequiredCapability>,
-    pub max_single_read_bytes: Option<usize>,
     pub max_todo_ops: Option<usize>,
 }
 
@@ -147,7 +113,15 @@ impl WorkspacePolicy {
             }
             "fetch.web" => {
                 region.kinds.insert(ImpactKind::ExternalObservation);
-                region.hosts = policy.network.allowed_hosts.clone();
+                // Normalize at the construction site (#122) so the region carries
+                // comparison-form patterns; `contains` applies the same shared
+                // matcher the network/policy layers use.
+                region.hosts = policy
+                    .network
+                    .allowed_hosts
+                    .iter()
+                    .map(|host| super::network::normalize_host_pattern(host))
+                    .collect();
             }
             "mutate.create" | "mutate.edit" => {
                 region.kinds.insert(ImpactKind::WorkspaceMutation);
@@ -200,10 +174,10 @@ fn apply_denied_write_patterns(
 /// external policy file < test/runtime override.
 #[derive(Clone, Debug)]
 pub struct PolicyConfig {
-    pub capability_sources: CapabilitySourcePolicy,
     pub methods: BTreeMap<String, MethodPolicy>,
     pub network: NetworkPolicyConfig,
-    pub budget: BudgetLimits,
+    /// The one observation limit set (#121); the turn-scoped budget is derived
+    /// from it through [`PolicyConfig::budget`], never stored twice.
     pub observation: ObservationPolicyConfig,
     pub workspace: WorkspacePolicy,
     pub project_root: PathBuf,
@@ -213,21 +187,10 @@ pub struct PolicyConfig {
 impl PolicyConfig {
     /// Compiled defaults for the given project root.
     pub fn defaults_for_project_root(project_root: PathBuf) -> Self {
-        let observation = ObservationPolicyConfig::defaults_for_root(&project_root);
-        let budget = BudgetLimits {
-            max_single_read_bytes: observation.max_single_read_bytes,
-            max_turn_observation_bytes: observation.max_turn_observation_bytes,
-            max_grep_matches: observation.max_grep_matches,
-            max_list_entries: observation.max_list_entries,
-            max_find_paths: observation.max_find_paths,
-            max_todo_ops: observation.max_todo_ops,
-        };
         Self {
-            capability_sources: CapabilitySourcePolicy::default(),
             methods: BTreeMap::new(),
             network: NetworkPolicyConfig::safe_defaults(),
-            budget,
-            observation,
+            observation: ObservationPolicyConfig::defaults(),
             workspace: WorkspacePolicy::default(),
             project_root,
             denied_effect_kinds: BTreeSet::new(),
@@ -235,36 +198,15 @@ impl PolicyConfig {
     }
 
     /// Merge an external TOML policy file into this config.
+    ///
+    /// `[budget]` is a deprecated alias of `[observation]`: both tables write
+    /// the one limit set (#121) so no external key can land in a slot nothing
+    /// reads. `[observation]` is applied last, so it wins a conflict.
     pub fn merge_external(&mut self, external: &ExternalPolicyFile) -> Result<(), String> {
-        if let Some(cap_src) = &external.capability_sources {
-            if let Some(obs) = &cap_src.observation {
-                self.capability_sources.observation = parse_source_classes(obs)?;
-            }
-            if let Some(mut_) = &cap_src.mutation {
-                self.capability_sources.mutation = parse_source_classes(mut_)?;
-            }
-            if let Some(ext) = &cap_src.external {
-                self.capability_sources.external = parse_source_classes(ext)?;
-            }
-            if let Some(ss) = &cap_src.session_state {
-                self.capability_sources.session_state = parse_source_classes(ss)?;
-            }
-        }
         if let Some(methods) = &external.methods {
             for (name, ext_method) in methods {
                 let policy = MethodPolicy {
                     enabled: ext_method.enabled,
-                    allowed_sources: ext_method
-                        .allowed_sources
-                        .as_ref()
-                        .map(|v| parse_source_classes(v))
-                        .transpose()?,
-                    required_capability: ext_method
-                        .required_capability
-                        .as_ref()
-                        .map(|s| parse_required_capability(s))
-                        .transpose()?,
-                    max_single_read_bytes: ext_method.max_single_read_bytes,
                     max_todo_ops: ext_method.max_todo_ops,
                 };
                 self.methods.insert(name.clone(), policy);
@@ -284,25 +226,10 @@ impl PolicyConfig {
                 self.network.max_web_response_bytes = v;
             }
         }
+        // `[budget]` is the deprecated alias, applied before `[observation]` so
+        // the canonical table wins a conflict (#121).
         if let Some(budget) = &external.budget {
-            if let Some(v) = budget.max_single_read_bytes {
-                self.budget.max_single_read_bytes = v;
-            }
-            if let Some(v) = budget.max_turn_observation_bytes {
-                self.budget.max_turn_observation_bytes = v;
-            }
-            if let Some(v) = budget.max_grep_matches {
-                self.budget.max_grep_matches = v;
-            }
-            if let Some(v) = budget.max_list_entries {
-                self.budget.max_list_entries = v;
-            }
-            if let Some(v) = budget.max_find_paths {
-                self.budget.max_find_paths = v;
-            }
-            if let Some(v) = budget.max_todo_ops {
-                self.budget.max_todo_ops = v;
-            }
+            apply_external_limits(&mut self.observation, budget);
         }
         if let Some(effects) = &external.effects
             && let Some(deny) = &effects.deny
@@ -322,36 +249,18 @@ impl PolicyConfig {
             self.workspace.validate()?;
         }
         if let Some(obs) = &external.observation {
-            if let Some(v) = obs.max_single_read_bytes {
-                self.observation.max_single_read_bytes = v;
-            }
-            if let Some(v) = obs.max_turn_observation_bytes {
-                self.observation.max_turn_observation_bytes = v;
-            }
-            if let Some(v) = obs.max_grep_matches {
-                self.observation.max_grep_matches = v;
-            }
-            if let Some(v) = obs.max_list_entries {
-                self.observation.max_list_entries = v;
-            }
-            if let Some(v) = obs.max_find_paths {
-                self.observation.max_find_paths = v;
-            }
-            if let Some(v) = obs.max_todo_ops {
-                self.observation.max_todo_ops = v;
-            }
+            apply_external_limits(&mut self.observation, obs);
         }
         Ok(())
     }
 
     /// Construct a `PolicyResolver` from this config.
+    ///
+    /// Resolution is lexical, so only the project root crosses over; the limits
+    /// stay in this config, where the decision path reads them (#121).
     pub fn to_resolver(&self) -> PolicyResolver {
         PolicyResolver {
             project_root: self.project_root.clone(),
-            observation: self.observation.clone(),
-            network: self.network.clone(),
-            budget: self.budget.clone(),
-            workspace: self.workspace.clone(),
         }
     }
 
@@ -366,7 +275,6 @@ impl PolicyConfig {
             project_root: self.project_root.clone(),
             observation: self.observation.clone(),
             network: self.network.clone(),
-            budget: self.budget.clone(),
             denied_effect_kinds: self.denied_effect_kinds.clone(),
             capability_admission: Default::default(),
         }
@@ -376,10 +284,13 @@ impl PolicyConfig {
 // ── External TOML policy file DTOs ─────────────────────────────────────
 
 /// External TOML policy file structure.
+///
+/// Every key here reaches an execution-side reader (#121). `deny_unknown_fields`
+/// makes a retired key a hard parse error rather than a silently dropped
+/// setting, so operators learn that a section stopped existing.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalPolicyFile {
-    pub capability_sources: Option<ExternalCapabilitySourcePolicy>,
     pub methods: Option<BTreeMap<String, ExternalMethodPolicy>>,
     pub network: Option<ExternalNetworkPolicy>,
     pub budget: Option<ExternalBudgetPolicy>,
@@ -398,20 +309,8 @@ pub struct ExternalWorkspacePolicy {
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExternalCapabilitySourcePolicy {
-    pub observation: Option<Vec<String>>,
-    pub mutation: Option<Vec<String>>,
-    pub external: Option<Vec<String>>,
-    pub session_state: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ExternalMethodPolicy {
     pub enabled: Option<bool>,
-    pub allowed_sources: Option<Vec<String>>,
-    pub required_capability: Option<String>,
-    pub max_single_read_bytes: Option<usize>,
     pub max_todo_ops: Option<usize>,
 }
 
@@ -424,17 +323,13 @@ pub struct ExternalNetworkPolicy {
     pub max_web_response_bytes: Option<usize>,
 }
 
-#[derive(Clone, Debug, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExternalBudgetPolicy {
-    pub max_single_read_bytes: Option<usize>,
-    pub max_turn_observation_bytes: Option<usize>,
-    pub max_grep_matches: Option<usize>,
-    pub max_list_entries: Option<usize>,
-    pub max_find_paths: Option<usize>,
-    pub max_todo_ops: Option<usize>,
-}
+/// Deprecated `[budget]` alias of `[observation]`.
+///
+/// Kept as an alias so existing policy files keep loading. It is the same type,
+/// so the two tables cannot drift apart in schema either (#121).
+pub type ExternalBudgetPolicy = ExternalObservationPolicy;
 
+/// Optional overrides for the one observation limit set.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalObservationPolicy {
@@ -446,46 +341,39 @@ pub struct ExternalObservationPolicy {
     pub max_todo_ops: Option<usize>,
 }
 
+/// Apply the present keys of one external limits table onto the live config.
+///
+/// Both `[budget]` and `[observation]` route through here, so a key can never
+/// be accepted by one table and dropped by the other (#121).
+fn apply_external_limits(
+    observation: &mut ObservationPolicyConfig,
+    external: &ExternalObservationPolicy,
+) {
+    if let Some(v) = external.max_single_read_bytes {
+        observation.max_single_read_bytes = v;
+    }
+    if let Some(v) = external.max_turn_observation_bytes {
+        observation.max_turn_observation_bytes = v;
+    }
+    if let Some(v) = external.max_grep_matches {
+        observation.max_grep_matches = v;
+    }
+    if let Some(v) = external.max_list_entries {
+        observation.max_list_entries = v;
+    }
+    if let Some(v) = external.max_find_paths {
+        observation.max_find_paths = v;
+    }
+    if let Some(v) = external.max_todo_ops {
+        observation.max_todo_ops = v;
+    }
+}
+
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalEffectsPolicy {
     #[serde(default)]
     pub deny: Option<Vec<ImpactKind>>,
-}
-
-fn parse_source_classes(strings: &[String]) -> Result<Vec<CapabilitySourceClass>, String> {
-    let mut result = Vec::new();
-    for s in strings {
-        match s.as_str() {
-            "base" => result.push(CapabilitySourceClass::Base),
-            "declared" => result.push(CapabilitySourceClass::Declared),
-            other => {
-                return Err(format!(
-                    "unknown source class '{}'; expected 'base' or 'declared'",
-                    other
-                ));
-            }
-        }
-    }
-    Ok(result)
-}
-
-fn parse_required_capability(
-    s: &str,
-) -> Result<lancet_catalog::method::RequiredCapability, String> {
-    use lancet_catalog::method::RequiredCapability;
-    match s {
-        "Inspect" => Ok(RequiredCapability::Inspect),
-        "ReadPath" => Ok(RequiredCapability::ReadPath),
-        "WritePath" => Ok(RequiredCapability::WritePath),
-        "FetchUrl" => Ok(RequiredCapability::FetchUrl),
-        "MutateSessionState" => Ok(RequiredCapability::MutateSessionState),
-        "ReadAudit" => Ok(RequiredCapability::ReadAudit),
-        other => Err(format!(
-            "unknown required_capability '{}'; expected Inspect, ReadPath, WritePath, FetchUrl, MutateSessionState, or ReadAudit",
-            other
-        )),
-    }
 }
 
 // ── Rich outcome and evidence (executor-owned) ─────────────────────────
@@ -617,16 +505,10 @@ impl DefaultPolicyHook {
             && let Some(net) = &resolved.resolved_network
             && !self.config.network.allowed_hosts.is_empty()
         {
-            let host_lower = net.host.to_ascii_lowercase();
-            let allowed = self.config.network.allowed_hosts.iter().any(|h| {
-                let h = h.trim().to_ascii_lowercase();
-                if h.starts_with('.') {
-                    let suffix = h.trim_start_matches('.').to_ascii_lowercase();
-                    host_lower == suffix || host_lower.ends_with(&format!(".{suffix}"))
-                } else {
-                    host_lower == h
-                }
-            });
+            // Single shared matcher (#122): policy, network validation, and the
+            // effect region must agree on `allowed_hosts` semantics.
+            let allowed =
+                super::network::host_allowed_by_list(&net.host, &self.config.network.allowed_hosts);
             if !allowed {
                 return Some(RichPolicyOutcome {
                     decision: PolicyDecision::Denied {
@@ -719,6 +601,7 @@ impl PolicyHook for DefaultPolicyHook {
 
 #[cfg(test)]
 mod tests {
+    use super::super::BudgetLimits;
     use super::*;
     use lancet_protocol::policy::{PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot};
     use serde_json::json;
@@ -824,6 +707,65 @@ mod tests {
         ));
     }
 
+    /// #122: the hook honours the same non-canonical `allowed_hosts` forms the
+    /// matcher does, and the region it hands to the effect checker stores the
+    /// comparison form — so a leading-dot entry cannot be allowed here and then
+    /// rejected as an `EffectViolation`.
+    #[test]
+    fn default_hook_and_region_agree_on_non_canonical_allowed_hosts() {
+        for pattern in [".example.com", "Example.com", " example.com "] {
+            let mut config = test_config();
+            config.network.allowed_hosts = vec![pattern.to_string()];
+            config.network.allow_public_https = false;
+            let policy = config.to_cep_policy_config();
+            let region = config.workspace.authorized_region_for("fetch.web", &policy);
+            for host in ["example.com", "api.example.com"] {
+                let granted = super::super::network::host_allowed_by_list(
+                    host,
+                    &config.network.allowed_hosts,
+                );
+                let region_grants = region.contains(&crate::effect::ledger::ObservedEffect {
+                    kind: ImpactKind::ExternalObservation,
+                    scope: crate::effect::ledger::ObservedScope::Host(host.to_string()),
+                    required_capability: lancet_catalog::method::RequiredCapability::FetchUrl,
+                    source: crate::effect::ledger::EffectSource::HandlerBackend,
+                });
+                assert_eq!(
+                    granted, region_grants,
+                    "pattern {pattern:?} host {host}: policy={granted} region={region_grants}"
+                );
+            }
+
+            let hook = DefaultPolicyHook::new(config);
+            let outcome = hook.decide_with_evidence(&PolicyInput {
+                method: "fetch.web".into(),
+                params: json!({"url": "https://api.example.com/v1"}),
+                authority: PolicyAuthorityInput,
+                audit_context: audit_ctx(default_budget()),
+            });
+            let allowed = matches!(outcome.decision, PolicyDecision::Allowed);
+            // Only the leading-dot form covers the subdomain; the exact forms
+            // must deny it. Either way the region above agreed.
+            assert_eq!(
+                allowed,
+                pattern.trim().starts_with('.'),
+                "pattern {pattern:?} produced decision {:?}",
+                outcome.decision
+            );
+        }
+    }
+
+    /// The region carries patterns in comparison form, not the operator's
+    /// literal profile text (#122).
+    #[test]
+    fn authorized_region_stores_normalized_hosts() {
+        let mut config = test_config();
+        config.network.allowed_hosts = vec![" Example.COM ".into(), ".Example.com".into()];
+        let policy = config.to_cep_policy_config();
+        let region = config.workspace.authorized_region_for("fetch.web", &policy);
+        assert_eq!(region.hosts, vec!["example.com", ".example.com"]);
+    }
+
     // ── Test 5: observation over budget ────────────────────────────────
 
     #[test]
@@ -878,11 +820,12 @@ mod tests {
     fn policy_config_defaults_produces_valid_config() {
         let config = PolicyConfig::defaults_for_project_root(PathBuf::from("/tmp/test"));
         assert!(config.network.allow_public_https);
-        assert!(config.budget.max_single_read_bytes > 0);
         assert!(config.observation.max_single_read_bytes > 0);
+        // The budget is a derived projection, not a second config surface.
         assert_eq!(
-            config.capability_sources.observation,
-            vec![CapabilitySourceClass::Base, CapabilitySourceClass::Declared]
+            config.observation.budget_limits(),
+            BudgetLimits::defaults(),
+            "compiled defaults must agree between the limit set and its projection"
         );
     }
 
@@ -900,6 +843,97 @@ allow_public_https = false
         config.merge_external(&external).unwrap();
 
         assert!(!config.network.allow_public_https);
+    }
+
+    /// #121: an external `[budget]` per-op cap must reach the field the
+    /// handlers actually read (`observation.*`). It used to land in a second
+    /// `BudgetLimits` copy that no per-op reader consulted.
+    #[test]
+    fn external_budget_table_reaches_the_per_op_readers() {
+        let mut config = PolicyConfig::defaults_for_project_root(PathBuf::from("/tmp/test"));
+
+        let external: ExternalPolicyFile = toml::from_str(
+            r#"
+[budget]
+max_single_read_bytes = 4096
+max_grep_matches = 7
+max_list_entries = 8
+max_find_paths = 9
+"#,
+        )
+        .unwrap();
+        config.merge_external(&external).unwrap();
+
+        assert_eq!(config.observation.max_single_read_bytes, 4096);
+        assert_eq!(config.observation.max_grep_matches, 7);
+        assert_eq!(config.observation.max_list_entries, 8);
+        assert_eq!(config.observation.max_find_paths, 9);
+    }
+
+    /// #121: an external `[observation]` turn cap must reach the turn-scoped
+    /// tracker. It used to be dropped because only `[budget]` wrote
+    /// `self.budget` and nothing resynced afterwards.
+    #[test]
+    fn external_observation_turn_caps_reach_the_budget_projection() {
+        let mut config = PolicyConfig::defaults_for_project_root(PathBuf::from("/tmp/test"));
+
+        let external: ExternalPolicyFile = toml::from_str(
+            r#"
+[observation]
+max_turn_observation_bytes = 2048
+max_todo_ops = 3
+"#,
+        )
+        .unwrap();
+        config.merge_external(&external).unwrap();
+
+        let budget = config.to_cep_policy_config().budget();
+        assert_eq!(budget.max_turn_observation_bytes, 2048);
+        assert_eq!(budget.max_todo_ops, 3);
+        assert_eq!(budget, config.observation.budget_limits());
+    }
+
+    /// #121: `[budget]` is a deprecated alias applied before `[observation]`,
+    /// so `[observation]` wins a conflict and the two never diverge.
+    #[test]
+    fn external_observation_wins_over_the_budget_alias() {
+        let mut config = PolicyConfig::defaults_for_project_root(PathBuf::from("/tmp/test"));
+
+        let external: ExternalPolicyFile = toml::from_str(
+            r#"
+[budget]
+max_todo_ops = 11
+max_grep_matches = 11
+
+[observation]
+max_todo_ops = 22
+"#,
+        )
+        .unwrap();
+        config.merge_external(&external).unwrap();
+
+        assert_eq!(config.observation.max_todo_ops, 22);
+        assert_eq!(config.to_cep_policy_config().budget().max_todo_ops, 22);
+        // A key only the alias sets still applies.
+        assert_eq!(config.observation.max_grep_matches, 11);
+    }
+
+    /// #121: the retired `[capability_sources]` table and the three retired
+    /// `[methods.*]` keys are hard parse errors, not silently ignored settings.
+    #[test]
+    fn retired_external_policy_keys_fail_to_parse() {
+        for retired in [
+            "[capability_sources]\nobservation = [\"base\"]\n",
+            "[methods.\"observe.workspace\"]\nallowed_sources = [\"declared\"]\n",
+            "[methods.\"observe.workspace\"]\nrequired_capability = \"ReadPath\"\n",
+            "[methods.\"observe.workspace\"]\nmax_single_read_bytes = 1024\n",
+        ] {
+            let parsed = toml::from_str::<ExternalPolicyFile>(retired);
+            assert!(
+                parsed.is_err(),
+                "retired external policy key must be rejected: {retired}"
+            );
+        }
     }
 
     // ── Test 9: decide_resolved is pure ────────────────────────────────
@@ -961,10 +995,8 @@ allow_public_https = false
         let config = PolicyConfig::defaults_for_project_root(PathBuf::from("/tmp/test"));
         let cep_context = config.to_cep_policy_config();
         assert_eq!(cep_context.project_root, config.project_root);
-        assert_eq!(
-            cep_context.budget.max_single_read_bytes,
-            config.budget.max_single_read_bytes
-        );
+        assert_eq!(cep_context.observation, config.observation);
+        assert_eq!(cep_context.budget(), config.observation.budget_limits());
     }
 
     // ── Additional: ExternalPolicyFile deserialization ─────────────────
@@ -972,10 +1004,6 @@ allow_public_https = false
     #[test]
     fn external_policy_file_deserializes_from_toml() {
         let toml_str = r#"
-[capability_sources]
-observation = ["base", "declared"]
-mutation = ["declared"]
-
 [methods."observe.workspace"]
 enabled = true
 
@@ -990,7 +1018,6 @@ max_single_read_bytes = 4096
 max_grep_matches = 500
 "#;
         let external: ExternalPolicyFile = toml::from_str(toml_str).unwrap();
-        assert!(external.capability_sources.is_some());
         assert!(external.methods.is_some());
         assert!(external.network.is_some());
         assert!(external.budget.is_some());

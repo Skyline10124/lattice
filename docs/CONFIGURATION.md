@@ -188,12 +188,18 @@ and native routing remain active).
 
 ### `[lancet.observation]` — `LancetObservationSection`
 
-All `max_*` fields are `Option`; when `None`, the authority defaults
-(`ObservationPolicyConfig::defaults_for_root`) apply.
+Limits only. Observation **scope** is `[lancet.project_root].root` plus the
+`[lancet.workspace]` read-visibility rules; this section cannot narrow which
+paths the Agent can see. A retired `allowed_roots` key was validated but reached
+no read decision (GitHub #121), so it silently left the observation surface wider
+than it implied; a profile that still declares it now fails to load with an error
+naming the replacement.
+
+All fields are `Option`; when `None`, the authority defaults
+(`ObservationPolicyConfig::defaults`) apply.
 
 | Field | Type | Default (authority) | Description |
 | --- | --- | --- | --- |
-| `allowed_roots` | `Vec<String>` | `[project_root]` | Canonicalized path allow-roots; each must be inside the effective project root. |
 | `max_single_read_bytes` | `Option<usize>` | `10485760` (10 MiB) | Max bytes per single read. |
 | `max_turn_observation_bytes` | `Option<usize>` | `10485760` (10 MiB) | Max observation bytes per turn. |
 | `max_grep_matches` | `Option<usize>` | `1000` | Max grep matches. |
@@ -207,8 +213,28 @@ All `max_*` fields are `Option`; when `None`, the authority defaults
 | --- | --- | --- | --- |
 | `allow_public_https` | `Option<bool>` | `true` | Allow public HTTPS `fetch.web`. |
 | `allow_localhost` | `Option<bool>` | `false` | Allow localhost `fetch.web`. |
-| `allowed_hosts` | `Vec<String>` | `[]` | Explicitly allowed hosts (overrides defaults when non-empty). |
+| `allowed_hosts` | `Vec<String>` | `[]` | Explicitly allowed hosts (overrides defaults when non-empty). See the matching rules below. |
 | `max_web_response_bytes` | `Option<usize>` | `10485760` (10 MiB) | Max `fetch.web` response bytes. |
+
+`allowed_hosts` matching (one implementation, `host_allowed_by_list`, shared by
+network validation, policy decision, and the authorized effect region — GitHub
+#122):
+
+- Entries are trimmed and ASCII-lowercased, so `Example.com` and `" example.com"`
+  behave like `example.com`.
+- A **leading dot is supported** and means suffix match *including the apex
+  domain*: `.example.com` grants `example.com`, `api.example.com`, and
+  `deep.api.example.com`, but not `notexample.com`.
+- Any other entry is an exact host match.
+- Empty or dots-only entries (`""`, `"."`, `".."`) never match.
+- An **empty list is not an allowlist**: public HTTPS then falls back to
+  `allow_public_https`. Note the tiers differ deliberately here — in `enforce`
+  mode the `fetch.web` authorized effect region grants only hosts named in
+  `allowed_hosts`, so with `allow_public_https = true` and an empty
+  `allowed_hosts` a fetch is still denied before any outbound request. Name the
+  hosts you intend to allow.
+- Localhost additionally requires `allow_localhost = true` **and** a matching
+  `allowed_hosts` entry.
 
 ### `[lancet.policy]` — `LancetPolicySection`
 
@@ -219,6 +245,25 @@ All `max_*` fields are `Option`; when `None`, the authority defaults
 When present, the external file is loaded and merged via
 `PolicyConfig::merge_external`. Merge precedence: **compiled defaults <
 profile inline `[lancet.*]` < external policy file < test/runtime override**.
+
+The external file's own schema (unknown keys are a hard parse error that fails
+the turn):
+
+| Table | Keys |
+| --- | --- |
+| `[network]` | `allow_public_https`, `allow_localhost`, `allowed_hosts`, `max_web_response_bytes` |
+| `[observation]` | the six `max_*` limits of `[lancet.observation]` |
+| `[budget]` | deprecated alias of `[observation]`, same keys |
+| `[effects]` | `deny` |
+| `[workspace]` | `denied_write_patterns`, `included_ignored_read_patterns`, `denied_read_patterns` |
+| `[methods."<name>"]` | `enabled`, `max_todo_ops` |
+
+`[budget]` and `[observation]` write the same limit set; `[observation]` wins on
+conflict. They used to write two separate copies, which meant the `[budget]`
+per-operation caps and the `[observation]` turn caps were silently ignored
+(GitHub #121). The retired `[capability_sources]` table and the
+`[methods.*]` keys `allowed_sources`, `required_capability`, and
+`max_single_read_bytes` never reached any decision and are now rejected.
 
 ### `[lancet.effects]` — `LancetEffectsSection`
 
@@ -371,7 +416,6 @@ mode = "enforce"
 root = "."
 
 [lancet.observation]
-allowed_roots = ["."]
 max_single_read_bytes = 10485760
 max_turn_observation_bytes = 10485760
 max_grep_matches = 1000
@@ -382,7 +426,8 @@ max_todo_ops = 100
 [lancet.network]
 allow_public_https = true
 allow_localhost = false
-allowed_hosts = ["docs.rs", "crates.io"]
+# Exact hosts, or a leading dot for "this domain and its subdomains".
+allowed_hosts = ["docs.rs", "crates.io", ".github.io"]
 max_web_response_bytes = 10485760
 
 [lancet.policy]
@@ -437,6 +482,6 @@ sections into LANCET-native config:
 - `AgentProfile::capability_admission_policy` — lowers `[tools].enabled` plus
   `[lancet.capabilities]` into the `CapabilityAdmissionPolicy` that gates
   Component Tools. Without a profile nothing is admitted (fail closed).
-`[lancet.project_root].root` and `[lancet.observation].allowed_roots` entries
-are canonicalized and must resolve inside the runtime project root; otherwise
-the turn fails fast with a `BadRequest` error.
+`[lancet.project_root].root` is canonicalized and must resolve inside the runtime
+project root; otherwise the turn fails fast with a `BadRequest` error. It is the
+one root every read and write path resolves against.

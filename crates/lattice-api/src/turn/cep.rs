@@ -19,9 +19,7 @@ use lancet_api::{
     WorkspaceHistoryBacking, workspace_history_backing,
 };
 use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig, WorkspacePolicy};
-use lancet_authority::{
-    BudgetLimits, CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig,
-};
+use lancet_authority::{CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig};
 use lancet_native::{
     CepAuditContext, CepAuditStore, CepClient, impact_kind_for_method, impact_kind_label,
     wire_code_for_error,
@@ -185,9 +183,9 @@ pub(crate) fn cep_policy_from_profile(
         )));
     }
 
-    let mut observation = ObservationPolicyConfig::defaults_for_root(&effective_root);
+    let mut observation = ObservationPolicyConfig::defaults();
     if let Some(section) = lancet.observation.as_ref() {
-        apply_observation_profile(section, &mut observation, &effective_root)?;
+        apply_observation_profile(section, &mut observation)?;
     }
 
     let mut network = NetworkPolicyConfig::safe_defaults();
@@ -195,20 +193,12 @@ pub(crate) fn cep_policy_from_profile(
         apply_network_profile(section, &mut network);
     }
 
-    let budget = BudgetLimits {
-        max_single_read_bytes: observation.max_single_read_bytes,
-        max_turn_observation_bytes: observation.max_turn_observation_bytes,
-        max_grep_matches: observation.max_grep_matches,
-        max_list_entries: observation.max_list_entries,
-        max_find_paths: observation.max_find_paths,
-        max_todo_ops: observation.max_todo_ops,
-    };
-
+    // No turn-budget copy is assembled here: it is derived from the observation
+    // limits by `CepPolicyConfig::budget` (#121).
     Ok(CepPolicyConfig {
         project_root: effective_root,
         observation,
         network,
-        budget,
         denied_effect_kinds: lancet
             .effects
             .as_ref()
@@ -234,26 +224,15 @@ fn workspace_policy_from_profile(lancet: &LancetSection) -> Result<WorkspacePoli
     Ok(workspace)
 }
 
+/// Lower `[lancet.observation]` limits onto the authority observation policy.
+///
+/// Limits only. Observation *scope* comes from the effective project root
+/// (`[lancet.project_root].root`) and the `[lancet.workspace]` read-visibility
+/// rules; the retired `allowed_roots` key is rejected at profile load (#121).
 fn apply_observation_profile(
     section: &LancetObservationSection,
     observation: &mut ObservationPolicyConfig,
-    effective_root: &Path,
 ) -> Result<(), ApiError> {
-    if !section.allowed_roots.is_empty() {
-        let mut roots = Vec::with_capacity(section.allowed_roots.len());
-        for root in &section.allowed_roots {
-            let resolved = resolve_profile_path(effective_root, root)?;
-            let canonical = canonicalize_existing(&resolved, "lancet.observation.allowed_roots")?;
-            if !canonical.starts_with(effective_root) {
-                return Err(ApiError::BadRequest(format!(
-                    "lancet.observation.allowed_roots entry '{}' is outside effective project root",
-                    root
-                )));
-            }
-            roots.push(canonical);
-        }
-        observation.allowed_roots = roots;
-    }
     if let Some(value) = section.max_single_read_bytes {
         observation.max_single_read_bytes = value;
     }
@@ -322,10 +301,8 @@ pub(crate) fn load_policy_config(
 
     let cep_context = cep_policy_from_profile(lancet, runtime_project_root)?;
     let mut config = PolicyConfig {
-        capability_sources: Default::default(),
         methods: Default::default(),
         network: cep_context.network,
-        budget: cep_context.budget,
         observation: cep_context.observation,
         workspace: workspace_policy_from_profile(lancet)?,
         project_root: cep_context.project_root,
@@ -692,44 +669,46 @@ mod cep_context_profile_policy {
         let policy =
             cep_policy_from_profile(&LancetSection::default(), dir.path()).expect("defaults");
         assert_eq!(policy.project_root, dir.path().canonicalize().unwrap());
-        assert_eq!(
-            policy.budget.max_turn_observation_bytes,
-            policy.observation.max_turn_observation_bytes
-        );
+        assert_eq!(policy.budget(), policy.observation.budget_limits());
     }
 
+    /// #121: `[lancet.observation]` lowers limits only. Observation scope is the
+    /// effective project root, which is what secure path resolution, Guard L1,
+    /// and the `VisibilityEngine` actually enforce. The two tests this replaced
+    /// asserted that a retired `allowed_roots` key was canonicalized into a
+    /// field no read decision ever consulted.
     #[test]
-    fn cep_context_profile_policy_canonicalizes_observation_roots() {
+    fn cep_context_profile_observation_lowers_limits_only() {
         let dir = TempDir::new().unwrap();
-        let sub = dir.path().join("src");
-        std::fs::create_dir_all(&sub).unwrap();
         let cep = LancetSection {
             observation: Some(LancetObservationSection {
-                allowed_roots: vec!["src".into()],
+                max_single_read_bytes: Some(4096),
+                max_todo_ops: Some(7),
                 ..Default::default()
             }),
             ..Default::default()
         };
         let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
-        assert_eq!(
-            policy.observation.allowed_roots,
-            vec![sub.canonicalize().unwrap()]
-        );
+        assert_eq!(policy.observation.max_single_read_bytes, 4096);
+        assert_eq!(policy.budget().max_todo_ops, 7);
+        assert_eq!(policy.project_root, dir.path().canonicalize().unwrap());
     }
 
+    /// Observation scope narrowing goes through `[lancet.project_root].root`,
+    /// the one root every read path resolves against.
     #[test]
-    fn cep_context_profile_policy_rejects_roots_outside_project() {
+    fn cep_context_profile_project_root_narrows_observation_scope() {
         let dir = TempDir::new().unwrap();
-        let outside = TempDir::new().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
         let cep = LancetSection {
-            observation: Some(LancetObservationSection {
-                allowed_roots: vec![outside.path().to_string_lossy().into_owned()],
-                ..Default::default()
+            project_root: Some(lattice_profile::LancetProjectRootSection {
+                root: Some("src".into()),
             }),
             ..Default::default()
         };
-        let err = cep_policy_from_profile(&cep, dir.path()).unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(_)));
+        let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
+        assert_eq!(policy.project_root, sub.canonicalize().unwrap());
     }
 
     #[test]

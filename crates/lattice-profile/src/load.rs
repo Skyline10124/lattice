@@ -173,6 +173,48 @@ fn check_forbidden_sections(path: &Path, content: &str) -> Result<(), ProfileErr
         }
     }
 
+    check_retired_keys(path, table)?;
+
+    Ok(())
+}
+
+/// Reject retired `[lancet.*]` keys with an error that names the replacement.
+///
+/// `deny_unknown_fields` alone would reject these, but only as a bare "unknown
+/// field". These keys were once accepted and validated, so an operator's profile
+/// may still carry them; a named error is what tells them the setting never took
+/// effect and what to use instead (#121).
+fn check_retired_keys(
+    path: &Path,
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<(), ProfileError> {
+    const RETIRED_LANCET_KEYS: &[(&str, &str, &str)] = &[(
+        "observation",
+        "allowed_roots",
+        "observation scope is `[lancet.project_root].root`; \
+         read visibility is `[lancet.workspace]`",
+    )];
+
+    let Some(lancet) = table.get("lancet").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    for (section, key, replacement) in RETIRED_LANCET_KEYS {
+        let present = lancet
+            .get(*section)
+            .and_then(toml::Value::as_table)
+            .is_some_and(|sub| sub.contains_key(*key));
+        if present {
+            return Err(ProfileError::ForbiddenField {
+                path: path.to_path_buf(),
+                section: format!("lancet.{section}"),
+                field: (*key).to_string(),
+                reason: format!(
+                    "retired: it was validated but never reached any read decision, so it left \
+                     the observation surface wider than it implied. Use {replacement}"
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -592,6 +634,66 @@ x = 1
                 "expected '{section}' in error, got: {err}"
             );
         }
+    }
+
+    /// #121: a profile still carrying the retired `allowed_roots` key must fail
+    /// with an error that names the key and the supported replacement, not a
+    /// bare serde "unknown field" — and never load as if the narrowing applied.
+    #[test]
+    fn reject_retired_observation_allowed_roots_with_named_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("agent.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[lancet.observation]
+allowed_roots = ["src"]
+"#,
+        )
+        .unwrap();
+
+        let err = load_agent_profile(&toml_path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("allowed_roots"), "got: {msg}");
+        assert!(msg.contains("lancet.observation"), "got: {msg}");
+        assert!(msg.contains("project_root"), "got: {msg}");
+    }
+
+    /// The rest of `[lancet.observation]` still loads: only the scope key went.
+    #[test]
+    fn observation_limits_still_load_without_allowed_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("agent.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[lancet.observation]
+max_single_read_bytes = 4096
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_agent_profile(&toml_path).expect("profile loads");
+        let observation = loaded.profile.lancet.observation.expect("section");
+        assert_eq!(observation.max_single_read_bytes, Some(4096));
     }
 
     #[test]

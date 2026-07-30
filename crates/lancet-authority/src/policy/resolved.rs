@@ -14,11 +14,7 @@ use lancet_catalog::catalog::catalog;
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::policy::{PolicyAuditContext, PolicyBudgetSnapshot, PolicyInput};
 
-use super::BudgetLimits;
 use super::capability::InvocationFacts;
-use super::default::WorkspacePolicy;
-use super::network::NetworkPolicyConfig;
-use super::observation::ObservationPolicyConfig;
 
 // ── Resolved types (executor-owned, no Serialize/Deserialize) ───────────
 
@@ -66,25 +62,21 @@ pub struct ResolvedPolicyInput {
 /// Resolver that builds [`ResolvedPolicyInput`] from [`PolicyInput`].
 ///
 /// Pure resolution: no filesystem I/O, no time reads, no mutable state.
+///
+/// Resolution is lexical, so the project root is the only policy input it
+/// needs. It used to carry observation/network/budget/workspace copies that
+/// nothing read — a fourth phantom copy of the limits, removed with #121.
+/// Decisions over those limits belong to [`super::default::DefaultPolicyHook`],
+/// which owns the one `PolicyConfig`.
 #[derive(Clone, Debug)]
 pub struct PolicyResolver {
     pub project_root: PathBuf,
-    pub observation: ObservationPolicyConfig,
-    pub network: NetworkPolicyConfig,
-    pub budget: BudgetLimits,
-    pub workspace: WorkspacePolicy,
 }
 
 impl PolicyResolver {
     pub fn defaults_for_project_root(project_root: impl Into<PathBuf>) -> Self {
-        let project_root = project_root.into();
-        let observation = ObservationPolicyConfig::defaults_for_root(&project_root);
         Self {
-            project_root,
-            observation,
-            network: NetworkPolicyConfig::safe_defaults(),
-            budget: BudgetLimits::defaults(),
-            workspace: WorkspacePolicy::default(),
+            project_root: project_root.into(),
         }
     }
 

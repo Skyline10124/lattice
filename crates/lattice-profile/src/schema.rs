@@ -80,12 +80,17 @@ pub struct LancetProjectRootSection {
     pub root: Option<String>,
 }
 
-/// `[lancet.observation]` — path allow roots and observation/todo budget limits.
+/// `[lancet.observation]` — observation and todo budget limits.
+///
+/// Observation *scope* is not configured here: it is
+/// `[lancet.project_root].root` plus the `[lancet.workspace]` read-visibility
+/// rules. A retired `allowed_roots` key was validated but never reached any
+/// read decision, so it silently left the Agent's observation surface wider
+/// than the profile implied (#121); `load.rs` names it in its retired-key
+/// pre-scan.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LancetObservationSection {
-    #[serde(default)]
-    pub allowed_roots: Vec<String>,
     pub max_single_read_bytes: Option<usize>,
     pub max_turn_observation_bytes: Option<usize>,
     pub max_grep_matches: Option<usize>,
@@ -790,7 +795,6 @@ mode = "enforce"
 root = "."
 
 [lancet.observation]
-allowed_roots = ["."]
 max_single_read_bytes = 4096
 max_turn_observation_bytes = 8192
 max_grep_matches = 500
@@ -811,7 +815,6 @@ max_web_response_bytes = 2048
         let project_root = profile.lancet.project_root.as_ref().unwrap();
         assert_eq!(project_root.root.as_deref(), Some("."));
         let observation = profile.lancet.observation.as_ref().unwrap();
-        assert_eq!(observation.allowed_roots, vec!["."]);
         assert_eq!(observation.max_single_read_bytes, Some(4096));
         assert_eq!(observation.max_turn_observation_bytes, Some(8192));
         assert_eq!(observation.max_grep_matches, Some(500));

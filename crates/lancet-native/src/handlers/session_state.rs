@@ -216,7 +216,6 @@ mod tests {
             TempDir::new().unwrap().path(),
         );
         policy.observation.max_todo_ops = 1;
-        policy.budget.max_todo_ops = 1;
         let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let registry = test_registry();
 
@@ -257,7 +256,6 @@ mod tests {
             TempDir::new().unwrap().path(),
         );
         policy.observation.max_todo_ops = 1;
-        policy.budget.max_todo_ops = 1;
         let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let registry = test_registry();
         let (ctx, mut events) = ctx_for(cep_context);

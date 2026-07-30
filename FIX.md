@@ -2,6 +2,87 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #120 / #121 / #122：写入上限、配置项读取点、host 匹配语义三处收口 — 2026-07-30
+
+Severity: #120 MEDIUM（资源耗尽面 + 平行写路径契约分叉）、#121 MEDIUM（配置静默失效，
+其中 `allowed_roots` 是「权限比预期宽」）、#122 LOW-MEDIUM（fail-closed 的可用性 +
+一致性缺陷）。三者共同模式是同一语义存在多份实现或多个真相源。
+
+**Problem:**
+
+- **#120**：单文件写入字节上限只存在于 `mutate.edit`（`edit/apply.rs` 的
+  `PatchApplyLimits`，1 MiB）。`mutate.create` 全链（`preflight_create` →
+  `write_create` → `create_excl` → `write_all`）无任何字节数比较，而两个方法声明相同
+  capability 与 `EffectScopeKind`。Direct-Local 下写操作直落用户工作区、无快照可回滚。
+- **#121**：三组配置项被校验、被文档承诺，但执行侧无读取点。(1)
+  `[lancet.observation].allowed_roots` 唯一读取者 `resolve_observation_target` 自
+  `14ecf043` 起无调用者，真正的读范围只认 `project_root`，配置通过校验却不收窄，属静默
+  的权限放宽；(2) 六个观测上限在 `BudgetLimits` 与 `ObservationPolicyConfig` 各存一份，
+  靠三处手工复制同步，`merge_external` 分别写入两份后不再同步，导致外部策略文件的
+  `[budget]` per-op 上限与 `[observation]` turn 上限各自落进无人读取的槽位；(3)
+  `MethodPolicy` 五个字段只有 `enabled` 与 `max_todo_ops` 被消费，
+  `max_single_read_bytes` 出生即死，`allowed_sources` / `required_capability` /
+  `CapabilitySourcePolicy` 是 `ba3a8e27` 删除 envelope 授权路径后的残留，仍在校验用户输入。
+- **#122**：`allowed_hosts` 匹配有三份实现两套语义。两处策略层支持 trim + 小写 + 前导点
+  后缀匹配，授权 region 层（`effect/region.rs` 的 `contains`）只做原始字符串精确相等，
+  于是 `allowed_hosts = [".example.com"]` 被前两层放行、被 region 层以
+  `EffectViolation` 拒绝，且错误消息无法引导用户改对配置。
+
+**Fix summary:**
+
+- **#120**：上限收敛到新模块 `lancet-native/src/edit/limits.rs` 的 `WriteLimits`
+  （1 MiB 常量 + `check_write_size`），替代 `PatchApplyLimits`。`mutate.create` 在
+  `preflight_create` 的**第一条语句**校验请求内容长度，早于任何文件系统副作用（含
+  `create_parents` 建目录），两条路径统一以 `ToolError::SizeLimit` 文本经
+  `ExecutionFailed` + `CepErrorData::Execution` 返回。刻意不做成配置轴。Rewind 恢复与
+  patch 回滚两处写入显式豁免（重装工作区已持有的字节，不引入新内容），并在
+  `lancet-native/AGENTS.md` 记录豁免及理由。
+- **#121-1**：删除 `allowed_roots`（profile schema、lattice-api 翻译、
+  `ObservationPolicyConfig`、`resolve_observation_target` 及其类型/辅助函数/测试、文档）。
+  观测范围的受支持面收敛为 `[lancet.project_root].root` + `[lancet.workspace]` 可见性
+  规则。`lattice-profile/src/load.rs` 新增退役键预扫描，仍带该键的 profile 以具名错误
+  失败并指出替代项，而非 serde 的 `unknown field`，也绝不按「收窄已生效」加载。
+- **#121-2**：`ObservationPolicyConfig` 成为唯一限额真相源，`BudgetLimits` 缩到实际有
+  读取点的两个字段并改为派生投影（`budget_limits()`）。`CepPolicyConfig` 与
+  `PolicyConfig` 不再存储 `budget` 字段，改为 `budget()` 按需派生 —— 同步点从结构上消失。
+  外部策略文件的 `[budget]` 成为 `[observation]` 的 type alias（连 schema 都无法漂移），
+  两表经同一 `apply_external_limits` 写入同一限额集，`[observation]` 后应用故冲突时取胜。
+- **#121-3**：删除 `MethodPolicy::{allowed_sources, required_capability,
+  max_single_read_bytes}`、`CapabilitySourceClass`、`CapabilitySourcePolicy`、
+  `PolicyConfig::capability_sources`、`ExternalCapabilitySourcePolicy`、
+  `parse_source_classes`、`parse_required_capability` 及对应 TOML 键。`deny_unknown_fields`
+  使残留键成为硬解析错误（有意的破坏性变更：这些键从未生效，静默接受才是误导）。同类清理
+  顺带删除 `PolicyResolver` 四个无读取点字段（限额的第四份幽灵拷贝）。
+- **#122**：`policy::network::host_allowed_by_list` + `normalize_host_pattern` 成为全仓
+  唯一 host allow 匹配器，网络 URL 校验、`DefaultPolicyHook`、
+  `AuthorizedEffectRegion::contains` 三处共用；`authorized_region_for` 在构造点把
+  `region.hosts` 存为规范化形式。空 `allowed_hosts` 的分层语义**有意保留**（URL 校验回退
+  `allow_public_https`，region 不授权任何 host，故 enforce 下出站前 fail-closed），该不对称
+  由 harness 场景 `direct_tools_fetch_capability_denial_with_public_https` 锁定，并在
+  函数文档、crate `AGENTS.md`、`docs/CONFIGURATION.md` 三处写明，禁止以放宽 region 的方式
+  「收敛」。文档补齐前导点/大小写/空白语义与外部策略文件完整 schema。
+
+**Verification:**
+- `cargo fmt --all` — 已应用。
+- `cargo clippy --workspace --all-targets -- -D warnings` — 通过，无告警。
+- `cargo test --workspace` — **1488 passed / 0 failed**。
+- 新增测试：`network.rs` 6 个（规范化幂等、前导点匹配 apex+子域、非规范形式、空/纯点
+  fail-closed、与 URL 校验一致、子域放行）；`effect/region.rs` 4 个（含跨层一致性断言）；
+  `policy/default.rs` 6 个（hook 与 region 一致、region 存规范化形式、外部 `[budget]`
+  到达 per-op 读取点、外部 `[observation]` 到达 turn 投影、别名冲突优先级、退役键解析失败）；
+  `observation.rs` 2 个；`lattice-profile/load.rs` 2 个（退役键具名错误、其余限额仍可加载）；
+  `mutation.rs` 5 个（超限拒绝且无残留、边界值、跨路径上限相等、`create_parents` 不建目录、
+  按 UTF-8 字节而非字符计数）。
+- 对抗性复核（独立 subagent 读 diff）指出并已修的缺口：#122 测试完全缺失、空列表语义未
+  记录、`region.hosts` 规范化无测试锁定、#120 的 `create_parents` 顺序保证与字节计数未
+  钉住、`lancet-native/AGENTS.md` 关于 Rewind 也执行上限的断言不实。
+
+**Changed files:**
+`crates/lancet-authority/{AGENTS.md,src/effect/region.rs,src/policy/{budget,default,mod,network,observation,resolved}.rs}`,
+`crates/lancet-native/{AGENTS.md,src/edit/{limits.rs,apply.rs,mod.rs},src/handlers/{mutation,observation,external,session_state}.rs}`,
+`crates/lancet-api/src/runtime.rs`, `crates/lattice-api/src/turn/cep.rs`,
+`crates/lattice-profile/src/{load,schema}.rs`, `docs/CONFIGURATION.md`, `FIX.md`.
+
 ## GitHub #124：rollout 发布门禁的输出捕获用两个独立 fd 写同一文件，互相覆盖 — 2026-07-27
 
 Severity: MEDIUM（发布门禁判定不可复现 + 证据文件被破坏）。

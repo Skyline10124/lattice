@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
 use super::hash::{content_hash, line_hash};
+use super::limits::WriteLimits;
 #[cfg(test)]
 use super::parser::parse_patch_document;
 use super::storage::EditStorage;
@@ -17,26 +18,12 @@ use super::types::{
     LineChangeKind, PatchDiagnostic, PatchDocument, PatchErrorCode, PatchHunk, PatchHunkLine,
     PatchOperation, PatchResultEnvelope, PlannedFileChange,
 };
-use crate::executor::error::ToolError;
 use crate::workspace::WorkspacePath;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PatchApplyLimits {
-    pub(crate) max_write_size: usize,
-}
-
-impl Default for PatchApplyLimits {
-    fn default() -> Self {
-        Self {
-            max_write_size: 1024 * 1024,
-        }
-    }
-}
 
 #[cfg(test)]
 async fn apply_patch(
     project_root: &Path,
-    limits: &PatchApplyLimits,
+    limits: &WriteLimits,
     patch: &str,
 ) -> PatchResultEnvelope {
     let document = match parse_patch_document(patch) {
@@ -66,7 +53,7 @@ fn test_storage(project_root: &Path) -> EditStorage {
 
 pub(crate) async fn apply_parsed_patch(
     storage: &EditStorage,
-    limits: &PatchApplyLimits,
+    limits: &WriteLimits,
     document: PatchDocument,
 ) -> PatchResultEnvelope {
     let attempted_operations = document
@@ -112,7 +99,7 @@ pub(crate) async fn apply_parsed_patch(
 
 async fn build_apply_plan(
     storage: &EditStorage,
-    limits: &PatchApplyLimits,
+    limits: &WriteLimits,
     document: &PatchDocument,
     attempted_operations: Vec<AttemptedOperation>,
 ) -> Result<ApplyPlan, (Vec<PatchDiagnostic>, Vec<AttemptedOperation>)> {
@@ -187,7 +174,7 @@ async fn plan_update_file(
     hunks: &[PatchHunk],
     target_path: &WorkspacePath,
     operation_index: usize,
-    limits: &PatchApplyLimits,
+    limits: &WriteLimits,
 ) -> Result<PlannedFileChange, PatchDiagnostic> {
     let before = storage
         .read_edit_target(path, target_path, operation_index)
@@ -205,17 +192,12 @@ async fn plan_update_file(
     let after_text = apply_outcome.after_text;
     let after = after_text.into_bytes();
 
-    if after.len() > limits.max_write_size {
-        return Err(PatchDiagnostic::new(
-            PatchErrorCode::IoError,
-            ToolError::SizeLimit {
-                limit: limits.max_write_size,
-                actual: after.len(),
-            }
-            .to_string(),
-        )
-        .with_path(path.to_string())
-        .with_operation_index(operation_index));
+    if let Err(error) = limits.check_write_size(after.len()) {
+        return Err(
+            PatchDiagnostic::new(PatchErrorCode::IoError, error.to_string())
+                .with_path(path.to_string())
+                .with_operation_index(operation_index),
+        );
     }
 
     Ok(PlannedFileChange {
@@ -698,7 +680,7 @@ mod tests {
 +new
 *** End Patch";
 
-        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), patch).await;
+        let result = apply_patch(dir.path(), &WriteLimits::default(), patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "parse_error");
@@ -717,7 +699,7 @@ mod tests {
 *** Delete File: sample.txt
 *** End Patch";
 
-        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), patch).await;
+        let result = apply_patch(dir.path(), &WriteLimits::default(), patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "parse_error");
@@ -747,7 +729,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &WriteLimits::default(), &patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "hash_mismatch");
@@ -777,7 +759,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &WriteLimits::default(), &patch).await;
 
         assert!(result.ok);
         assert_eq!(
@@ -804,7 +786,7 @@ mod tests {
 +new value above limit
 *** End Patch"
         );
-        let limits = PatchApplyLimits { max_write_size: 4 };
+        let limits = WriteLimits { max_write_size: 4 };
 
         let result = apply_patch(dir.path(), &limits, &patch).await;
 
@@ -864,7 +846,7 @@ mod tests {
             hash(second_before)
         );
 
-        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &WriteLimits::default(), &patch).await;
 
         std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!result.ok);
@@ -904,7 +886,7 @@ mod tests {
             hash(delete_before)
         );
 
-        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &WriteLimits::default(), &patch).await;
         let value = parse_envelope(&result);
 
         assert!(result.ok);
@@ -951,7 +933,7 @@ mod tests {
 
         let plan = build_apply_plan(
             &test_storage(dir.path()),
-            &PatchApplyLimits::default(),
+            &WriteLimits::default(),
             &document,
             attempted_operations,
         )
@@ -984,7 +966,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &WriteLimits::default(), &patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "hunk_missing");
@@ -1015,7 +997,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &WriteLimits::default(), &patch).await;
 
         assert!(result.ok);
         assert_eq!(std::fs::read_to_string(file).unwrap(), "new one\nnew two\n");
