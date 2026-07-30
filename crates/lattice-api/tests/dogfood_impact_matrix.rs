@@ -22,7 +22,6 @@ use lancet_api::{AuditReplayRequest, replay_audit};
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
 use lancet_catalog::methods::external::{Fetch, FetchParams};
-use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
     Edit, EditOperation, EditParams, ObserveWorkspace, ObserveWorkspaceParams,
     ObserveWorkspaceResult, ReadFileParams,
@@ -34,6 +33,10 @@ use lancet_native::{
 use lancet_protocol::effect_types::ImpactKind;
 
 use tempfile::TempDir;
+
+/// The migrated Component Tool (#29). Not a catalog constant: its descriptor
+/// authority is `tools/todo-write/manifest.toml`.
+const TODO_WRITE: &str = "session.todo_write";
 
 const FIXED_TURN_ID: &str = "impact-matrix-turn-001";
 const FIXED_SESSION_ID: &str = "impact-matrix-session-001";
@@ -91,6 +94,15 @@ async fn build_production_config(
 
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = audit;
+    // #29: the production dispatch surface is native handlers plus the embedded
+    // Component catalog, and `enabled_tools` is the stage-1 capability grant.
+    config.components = Some(Arc::new(
+        lancet_runtime::ComponentRuntime::from_embedded().expect("embedded composition"),
+    ));
+    policy.capability_admission = lancet_protocol::evidence::CapabilityAdmissionPolicy {
+        enabled_tools: std::iter::once(TODO_WRITE.to_string()).collect(),
+        ..Default::default()
+    };
     config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
     config.policy_hook = hook.clone();
     config.default_policy_hook = Some(hook);
@@ -193,17 +205,23 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "fetch.web body must match echo server"
     );
 
-    // Row 4 — SessionStateMutation: session.todo_write
-    let todo_result = client1
-        .call::<TodoWrite>(TodoWriteParams {
-            todos: vec![TodoItem {
-                content: "dog04 impact matrix verified".into(),
-                status: TodoStatus::Completed,
-            }],
-        })
+    // Row 4 — the migrated Component Tool. Since #29 `session.todo_write` is
+    // Cell-governed rather than a legacy impact class, so this row is what proves
+    // the two vocabularies coexist in one turn.
+    let todo_result: serde_json::Value = client1
+        .call_named(
+            "session.todo_write",
+            serde_json::json!({
+                "todos": [{"content": "dog04 impact matrix verified", "status": "completed"}]
+            }),
+        )
         .await
         .expect("session.todo_write");
-    assert_eq!(todo_result.todos.len(), 1);
+    assert_eq!(
+        todo_result["todos"].as_array().map(|t| t.len()),
+        Some(1),
+        "the Component echoes the validated plan"
+    );
 
     // Shut down first server.
     drop(client1);
@@ -230,9 +248,17 @@ async fn dogfood_impact_matrix_five_production_classes() {
             row.turn_id, FIXED_TURN_ID,
             "all rows must share turn_id={FIXED_TURN_ID}"
         );
+        // Each row is labeled by the vocabulary that actually authorized it: the
+        // three native methods by the policy lifecycle, the Component by Cell
+        // admission. Both are policy-enforced.
+        let expected_stage = if row.method == TODO_WRITE {
+            "cell_component"
+        } else {
+            SEMANTIC_STAGE_NATIVE
+        };
         assert_eq!(
-            row.semantic_stage, SEMANTIC_STAGE_NATIVE,
-            "row {} ({}) must use native semantic stage",
+            row.semantic_stage, expected_stage,
+            "row {} ({}) has the wrong semantic stage",
             row.audit_id, row.method
         );
         assert!(
@@ -263,7 +289,9 @@ async fn dogfood_impact_matrix_five_production_classes() {
         ("workspace_observation", "observe.workspace"),
         ("workspace_mutation", "mutate.edit"),
         ("external_observation", "fetch.web"),
-        ("session_state_mutation", "session.todo_write"),
+        // The Component row carries no legacy impact kind — its authorization
+        // vocabulary is the Cell (#28 B6).
+        ("unknown", TODO_WRITE),
     ] {
         let method = methods_by_impact
             .get(expected_impact)
@@ -277,6 +305,26 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     // Verify metadata fields for audit rows.
     for row in impact_rows {
+        if row.method == TODO_WRITE {
+            // A Component row's metadata points at the evidence table; it has no
+            // legacy `required_capability`, and the todo text never reaches it.
+            let meta = row.metadata_json.as_deref().unwrap_or("{}");
+            assert!(
+                !meta.contains("dog04 impact matrix verified"),
+                "audit metadata must not contain raw todo content"
+            );
+            let meta_val: serde_json::Value = serde_json::from_str(meta).unwrap_or_default();
+            let evidence_id = meta_val["evidence_id"]
+                .as_i64()
+                .expect("a Component row points at its evidence");
+            let evidence = audit
+                .call_evidence(lancet_native::EvidenceId(evidence_id))
+                .expect("evidence read")
+                .expect("evidence row exists");
+            assert_eq!(evidence.tool, TODO_WRITE);
+            assert_eq!(evidence.effects.effects.len(), 1);
+            continue;
+        }
         let meta = row.metadata_json.as_deref().unwrap_or("{}");
         // Must not contain raw secret bodies (response bodies, file content).
         assert!(
@@ -332,14 +380,16 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "replay calls must be in audit_id order"
     );
 
-    // Verify impact kinds for the four production classes appear in the trace.
+    // Verify the three legacy impact classes appear in the trace. The Component
+    // row is not among them: its authorization vocabulary is the Cell, so the
+    // projection marks its `impact_kind` unattributed rather than coercing the
+    // `unknown` column into a concrete kind (#28 B6).
     let activity_impact_kinds: Vec<&ImpactKind> =
         activities.iter().map(|a| &a.impact_kind).collect();
     for expected in [
         ImpactKind::WorkspaceObservation,
         ImpactKind::WorkspaceMutation,
         ImpactKind::ExternalObservation,
-        ImpactKind::SessionStateMutation,
     ] {
         assert!(
             activity_impact_kinds.contains(&&expected),
@@ -347,6 +397,15 @@ async fn dogfood_impact_matrix_five_production_classes() {
             expected
         );
     }
+    let component_activity = activities
+        .iter()
+        .find(|a| a.method == TODO_WRITE)
+        .expect("the Component call must appear in the trace");
+    assert_eq!(
+        component_activity.attributes.get("impact_kind_attributed"),
+        Some(&serde_json::Value::Bool(false)),
+        "a Cell-governed activity must state that its impact kind is a placeholder"
+    );
 
     // Verify wasInformedBy chain: N rows → N-1 relations linking consecutive activities.
     let was_informed_by = &trace.fragment.was_informed_by;

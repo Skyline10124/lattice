@@ -4,6 +4,7 @@
 //! LANCET audit persistence, provenance projection, and operator audit reads.
 
 pub mod audit;
+pub mod evidence;
 pub mod operator;
 pub mod provenance;
 pub mod store_path;
@@ -11,6 +12,10 @@ pub mod store_path;
 pub mod test_support;
 
 pub use audit::*;
+pub use evidence::{
+    CallEvidence, EVIDENCE_SCHEMA_VERSION, EvidenceError, EvidenceId, EvidenceOutcome,
+    StoredCallEvidence,
+};
 pub use operator::{
     AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput, AuditReplayRequest,
     AuditReplayResult, AuditRequest, AuditTailOutput, OperatorAuditError, OperatorAuditResult,

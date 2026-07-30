@@ -14,7 +14,19 @@ store-path resolution behind it.
 ## Sub-Architecture
 
 - `src/audit.rs` owns `CepAuditStore`, query filters, row model, semantic stage
-  labels, impact labels, and call metadata.
+  labels, impact labels, and call metadata, plus the evidence read/write methods
+  (`record_call_evidence`, `call_evidence`, `call_evidence_for_turn`,
+  `call_evidence_for_call`).
+- `src/evidence.rs` (#112) owns the versioned Cell evidence tables —
+  `evidence_calls` / `evidence_effects` / `evidence_denials` — `EvidenceId`
+  (the stable per-call identity, **not** `audit_id`), `EvidenceOutcome`,
+  `CallEvidence` / `StoredCallEvidence`, and `EvidenceError`. Cells are stored
+  decomposed by column so the surface is queryable; `cell_scope` and `scope` are
+  separate columns because `Cell::scope` and `ObservedScope::scope` are two
+  protocol fields. Each record's `version` is validated on read
+  (`UnsupportedRecordVersion`), and a corrupt enum label is reported
+  (`UnreadableField`) rather than coerced. `src/evidence_tests.rs` holds the
+  contract tests.
 - `src/operator.rs` owns the operator read API: `AuditRequest`,
   `AuditQueryOutput`, `AuditTailOutput`, `AuditReplayRequest`,
   `AuditReplayResult`, `AUDIT_TAIL_MAX_ROWS` / `AUDIT_TAIL_MAX_BATCHES`,
@@ -35,7 +47,7 @@ store-path resolution behind it.
 - `src/provenance/canonicalize.rs` owns deterministic JSON canonicalization.
 - `src/provenance/mod.rs` exports provenance helpers used by native/API tests.
 - `src/audit_tests.rs` covers persistence and query behavior.
-- SQLite used here is only for CEP audit data.
+- SQLite used here is only for CEP audit and Cell evidence data.
 
 ## Boundaries
 
@@ -53,6 +65,20 @@ store-path resolution behind it.
   entries, or reappear as Agent catalog methods.
 
 ## Recent Issues
+
+- ADDED #112: the versioned Cell evidence tables. `AUDIT_SCHEMA_VERSION` moved
+  1 → 2 (`AUDIT_SCHEMA_VERSION_PRE_EVIDENCE` names the old value); a v1 file is
+  adopted additively, and a file already claiming v2 whose evidence table shape
+  disagrees is refused with an operator action and left untouched. Denials and
+  failures land in the table too, labeled by `EvidenceOutcome`.
+  `merge_finalize_metadata` no longer writes `admission_evidence` /
+  `observed_effects` / `denied_operations` into `metadata_json` — it writes an
+  `evidence_id` pointer plus the derived `component_cells` query key. PROV
+  projection and attestation take an `EvidenceLookup` and resolve the records
+  from the table (`project_rows_with_evidence`,
+  `build_in_toto_statement_with_evidence`,
+  `rebuild_in_toto_statement_with_evidence`); the no-lookup entry points remain
+  for native-only rows, which never had Cell evidence.
 
 - ADDED #28 (Codeberg #6): `PRAGMA user_version` carries `AUDIT_SCHEMA_VERSION`; a newer or
   old-shape database fails open with `AuditError::IncompatibleSchema` and is left

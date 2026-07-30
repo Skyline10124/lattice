@@ -9,6 +9,10 @@ description = "LANCET CEP method contracts, method params/results, descriptors, 
 [features]
 default = []
 inspect-scaffold = []
+# Exposes `test_method::TestEcho`, a synthetic typed method for downstream test
+# code that needs any `CepMethod` shape. Never enable in a production
+# `[dependencies]` entry — only in `[dev-dependencies]`.
+test-method = []
 
 [dependencies]
 lancet-protocol = { workspace = true }

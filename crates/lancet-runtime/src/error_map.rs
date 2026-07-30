@@ -114,8 +114,39 @@ fn resource_exhausted(method: &str, resource: &str) -> CepError {
 }
 
 /// Build a `SchemaMismatch` error for params/result/result-cell validation.
+///
+/// `detail` must not embed Tool data. The message reaches the durable audit row
+/// through `compact_error_summary`, and audit records paths, hashes and object
+/// ids — never content (root `AGENTS.md`). Use [`schema_violation_detail`] to
+/// turn a `jsonschema` error into a location-only description.
 pub(crate) fn schema_mismatch(method: &str, detail: impl Into<String>) -> CepError {
     lancet_protocol::error::invalid_params(format!("{method}: {}", detail.into()))
+}
+
+/// Describe a JSON Schema validation failure by *where* it failed, never by the
+/// value that failed.
+///
+/// `jsonschema`'s `Display` embeds the offending instance — for a rejected
+/// `session.todo_write` call that is the user's whole todo list, which then lands
+/// verbatim in `cep_audit_entries.result_or_error`. The instance pointer and the
+/// schema keyword are enough for a caller to fix the call and for an operator to
+/// see what was refused.
+pub(crate) fn schema_violation_detail(
+    what: &str,
+    error: &jsonschema::ValidationError<'_>,
+) -> String {
+    let location = error.instance_path().to_string();
+    let location = if location.is_empty() {
+        "(root)".to_string()
+    } else {
+        location
+    };
+    // `keyword_location` is the schema pointer, which is authored by us (the
+    // manifest), not by the caller — safe to name.
+    format!(
+        "{what} violates the declared schema at {location} (schema {})",
+        error.schema_path()
+    )
 }
 
 /// Build an `EffectViolation` error when the guest's result CellRef is not

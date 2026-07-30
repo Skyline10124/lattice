@@ -164,10 +164,6 @@ impl WorkspacePolicy {
                     &policy.project_root,
                 );
             }
-            "session.todo_write" => {
-                region.kinds.insert(ImpactKind::SessionStateMutation);
-                region.session_state_allowed = true;
-            }
             _ => {}
         }
         region
@@ -601,7 +597,7 @@ impl DefaultPolicyHook {
         // denied_write_patterns allows all workspace paths. Per-path deny
         // enforcement happens in Guard L1 / validate_path_facts.
 
-        if let Some(denied) = self.check_network_and_budget(resolved, method_policy) {
+        if let Some(denied) = self.check_network_and_budget(resolved) {
             return denied;
         }
 
@@ -611,7 +607,6 @@ impl DefaultPolicyHook {
     fn check_network_and_budget(
         &self,
         resolved: &super::resolved::ResolvedPolicyInput,
-        method_policy: Option<&MethodPolicy>,
     ) -> Option<RichPolicyOutcome> {
         if resolved.method == "fetch.web"
             && let Some(net) = &resolved.resolved_network
@@ -663,25 +658,10 @@ impl DefaultPolicyHook {
                 },
             });
         }
-        let effective_todo_limit = method_policy
-            .and_then(|mp| mp.max_todo_ops)
-            .map(|mp_limit| (mp_limit as u64).min(budget.todo_ops_limit))
-            .unwrap_or(budget.todo_ops_limit);
-        if resolved.method == "session.todo_write" && budget.todo_ops_used >= effective_todo_limit {
-            return Some(RichPolicyOutcome {
-                decision: PolicyDecision::Denied {
-                    reason_code: PolicyReasonCode::BudgetExceeded,
-                    message: "todo ops budget exhausted".into(),
-                    action_required: Some(PolicyActionRequired::ReduceReadSize),
-                },
-                evidence: PolicyEvidence {
-                    budget_remaining: Some(
-                        effective_todo_limit.saturating_sub(budget.todo_ops_used),
-                    ),
-                    ..Default::default()
-                },
-            });
-        }
+        // The per-turn todo-ops budget check lived here. `session.todo_write` is
+        // a Component Tool since #29, so no native method reaches this branch;
+        // see FINDINGS.md for the residual (Component result accounting measures
+        // but does not charge, per #27/#28).
         None
     }
 

@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
 use lancet_catalog::methods::workspace::{
     ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileResult,
 };
+use lancet_catalog::test_method::{TestEcho, TestEchoParams, TestEchoResult};
 use lancet_native::{CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::error::{
@@ -23,13 +23,11 @@ use super::cep::CepExecutorAdapter;
 
 fn todo_registry<F, Fut>(handler: F) -> MethodRegistry
 where
-    F: Fn(TodoWriteParams, lancet_native::HandlerContext) -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Result<TodoWriteResult, CepError>> + Send + 'static,
+    F: Fn(TestEchoParams, lancet_native::HandlerContext) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<TestEchoResult, CepError>> + Send + 'static,
 {
     let mut registry = MethodRegistry::new();
-    registry
-        .register_method::<TodoWrite, _, _>(handler)
-        .unwrap();
+    registry.register_method::<TestEcho, _, _>(handler).unwrap();
     registry
 }
 
@@ -40,12 +38,21 @@ async fn adapter_over_registry(registry: MethodRegistry) -> CepExecutorAdapter {
             .run_native(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
-    // D.5: the adapter's available set is driven by runtime definitions,
-    // not by hardcoded catalog membership. Project the catalog definitions
-    // and pass them — same shape as LancetRuntime::build. `lancet_cep` is
-    // a dev-dependency; `lancet_api::ToolDefinition` re-exports the same type.
-    let definitions = lancet_cep::project_tool_definitions(catalog());
-    let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    // D.5: the adapter's available set is driven by runtime definitions, not by
+    // hardcoded catalog membership. Project the catalog definitions and pass
+    // them — same shape as LancetRuntime::build, which also extends the set with
+    // the Component descriptors. `lancet_cep` is a dev-dependency;
+    // `lancet_api::ToolDefinition` re-exports the same type.
+    //
+    // `test.echo` is added explicitly: it is the registered fixture these tests
+    // dispatch to, and it is deliberately not a catalog method.
+    let mut definitions = lancet_cep::project_tool_definitions(catalog());
+    definitions.push(lancet_cep::ToolDefinition::new(
+        TestEcho::NAME,
+        TestEcho::DESCRIPTION,
+        serde_json::json!({"type": "object"}),
+    ));
+    let enabled: Vec<String> = definitions.iter().map(|d| d.name.clone()).collect();
     let adapter = CepExecutorAdapter::new(client, &definitions, enabled);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
@@ -66,8 +73,8 @@ fn assert_cep_payload(err: &ToolExecutionError, expected_code: i32) {
 #[tokio::test]
 async fn cep_executor_adapter_retired_methods_return_method_not_found() {
     let adapter = adapter_over_registry(todo_registry(|params, _ctx| async move {
-        Ok(TodoWriteResult {
-            todos: params.todos,
+        Ok(TestEchoResult {
+            items: params.items,
         })
     }))
     .await;
@@ -90,8 +97,8 @@ async fn cep_executor_adapter_retired_methods_return_method_not_found() {
 #[tokio::test]
 async fn cep_executor_adapter_parse_error_maps_to_32700() {
     let adapter = adapter_over_registry(todo_registry(|params, _ctx| async move {
-        Ok(TodoWriteResult {
-            todos: params.todos,
+        Ok(TestEchoResult {
+            items: params.items,
         })
     }))
     .await;
@@ -100,7 +107,7 @@ async fn cep_executor_adapter_parse_error_maps_to_32700() {
         .execute(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
-                name: TodoWrite::NAME.to_string(),
+                name: TestEcho::NAME.to_string(),
                 arguments: "{not-json".to_string(),
             },
         })
@@ -223,8 +230,8 @@ macro_rules! cep_family_test {
                 .execute(&ToolCall {
                     id: "call_1".to_string(),
                     function: FunctionCall {
-                        name: TodoWrite::NAME.to_string(),
-                        arguments: r#"{"todos":[]}"#.to_string(),
+                        name: TestEcho::NAME.to_string(),
+                        arguments: r#"{"items":[]}"#.to_string(),
                     },
                 })
                 .await
@@ -284,7 +291,7 @@ cep_family_test!(
     cep_executor_adapter_guard_family_preserves_payload,
     CepErrorCode::GuardDenied,
     CepErrorData::Guard(GuardErrorData {
-        method: TodoWrite::NAME.into(),
+        method: TestEcho::NAME.into(),
         reason: "denied".into(),
     }),
     Retriability::Permanent
@@ -357,7 +364,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use lancet_catalog::methods::session::TodoWrite;
+    use lancet_catalog::methods::workspace::{ObserveWorkspaceParams, ReadFileParams};
     use lancet_native::SEMANTIC_STAGE_NATIVE;
     use tempfile::TempDir;
 
@@ -380,9 +387,12 @@ mod cep_native_registry {
                 .build(),
         );
 
+        // A native method: this test asserts the *native* audit stage, so a
+        // Component Tool would be labeled `cell_component` and prove the
+        // opposite.
         let deps = build_test_production_deps(
             dir.path().to_str().unwrap(),
-            &[TodoWrite::NAME.to_string()],
+            &[ObserveWorkspace::NAME.to_string()],
             llm,
             true,
             None,
@@ -390,19 +400,19 @@ mod cep_native_registry {
         .await;
 
         deps.cep_client
-            .call::<TodoWrite>(lancet_catalog::methods::session::TodoWriteParams {
-                todos: vec![lancet_catalog::methods::session::TodoItem {
-                    content: "native audit".into(),
-                    status: lancet_catalog::methods::session::TodoStatus::Pending,
-                }],
-            })
+            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
+                path: "hello.txt".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            }))
             .await
-            .expect("native session.todo_write");
+            .expect("native observe.workspace");
 
         let row = deps.audit.row_by_audit_id(1).unwrap();
         assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
         assert!(row.policy_enforced);
-        assert_eq!(row.impact_kind, "session_state_mutation");
+        assert_eq!(row.impact_kind, "workspace_observation");
         assert_eq!(row.model_id.as_deref(), Some("test-model"));
         assert_eq!(row.runtime_version.as_deref(), Some("0.0.0-test"));
     }
@@ -414,7 +424,6 @@ mod attestation_and_dispatch {
     use crate::turn::cep::build_envelope_turn_deps_for_test;
     use lancet_api::store_turn_attestation;
     use lancet_api::{AuditReplayRequest, replay_audit};
-    use lancet_catalog::methods::session::TodoWrite;
     use lancet_native::canonicalize_in_toto_statement;
     use lattice_agent::LlmClient;
     use lattice_agent::testing::FakeStreamingLlmClient;
@@ -433,9 +442,11 @@ mod attestation_and_dispatch {
                 }])
                 .build(),
         );
+        // The embedded Component Tool, driven through the production CEP client:
+        // this is the attestation path over a real Cell-governed call.
         let deps = build_envelope_turn_deps_for_test(
             dir.path().to_str().unwrap(),
-            &[TodoWrite::NAME.to_string()],
+            &["session.todo_write".to_string()],
             llm,
             false,
             None,
@@ -455,14 +466,12 @@ mod attestation_and_dispatch {
         }
 
         deps.cep_client
-            .call::<TodoWrite>(lancet_catalog::methods::session::TodoWriteParams {
-                todos: vec![lancet_catalog::methods::session::TodoItem {
-                    content: "attest".into(),
-                    status: lancet_catalog::methods::session::TodoStatus::Pending,
-                }],
-            })
+            .call_named::<serde_json::Value, serde_json::Value>(
+                "session.todo_write",
+                serde_json::json!({"todos": [{"content": "attest", "status": "pending"}]}),
+            )
             .await
-            .expect("todo write");
+            .expect("component call");
 
         deps.audit.await_pending().await;
         let ctx = deps.audit_context.read().await;
@@ -504,9 +513,11 @@ mod attestation_and_dispatch {
                 }])
                 .build(),
         );
+        // The embedded Component Tool, driven through the production CEP client:
+        // this is the attestation path over a real Cell-governed call.
         let deps = build_envelope_turn_deps_for_test(
             dir.path().to_str().unwrap(),
-            &[TodoWrite::NAME.to_string()],
+            &["session.todo_write".to_string()],
             llm,
             false,
             None,
@@ -524,14 +535,12 @@ mod attestation_and_dispatch {
         }
 
         deps.cep_client
-            .call::<TodoWrite>(lancet_catalog::methods::session::TodoWriteParams {
-                todos: vec![lancet_catalog::methods::session::TodoItem {
-                    content: "x".into(),
-                    status: lancet_catalog::methods::session::TodoStatus::Pending,
-                }],
-            })
+            .call_named::<serde_json::Value, serde_json::Value>(
+                "session.todo_write",
+                serde_json::json!({"todos": [{"content": "x", "status": "pending"}]}),
+            )
             .await
-            .expect("todo write");
+            .expect("component call");
 
         deps.audit.await_pending().await;
         assert!(

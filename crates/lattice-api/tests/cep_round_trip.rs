@@ -9,7 +9,6 @@ use std::sync::Arc;
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
-use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace};
 use lancet_native::{
     CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE,
@@ -62,15 +61,27 @@ async fn fetch_only_adapter() -> CepExecutorAdapter {
     adapter_with_registry(registry).await
 }
 
-fn assert_catalog_method(method: &str) {
+/// A method the production runtime can actually serve: a native catalog method,
+/// or one of the embedded Component Tools (#29 — `session.todo_write` is the
+/// first, and its descriptor authority is its source manifest, not the catalog).
+fn assert_dispatchable_method(method: &str) {
+    let native = catalog().iter().any(|descriptor| descriptor.name == method);
+    let component = COMPONENT_TOOLS.contains(&method);
     assert!(
-        catalog().iter().any(|descriptor| descriptor.name == method),
-        "catalog missing method: {method}"
+        native || component,
+        "method is neither a native catalog method nor an embedded Component: {method}"
     );
 }
 
+/// The embedded Component Tools of the default distribution.
+const COMPONENT_TOOLS: [&str; 1] = [TODO_WRITE];
+
+/// The migrated Tool's method name. Not a catalog constant any more: its name
+/// lives in `tools/todo-write/manifest.toml`.
+const TODO_WRITE: &str = "session.todo_write";
+
 fn llm_tool_call(method: &str, arguments: Value) -> ToolCall {
-    assert_catalog_method(method);
+    assert_dispatchable_method(method);
     ToolCall {
         id: format!("call_{method}"),
         function: FunctionCall {
@@ -99,7 +110,7 @@ async fn cep_round_trip_impact_matrix() {
 
     let (adapter, _audit) = production_adapter(
         root.to_str().unwrap(),
-        &[ObserveWorkspace::NAME, Create::NAME, TodoWrite::NAME],
+        &[ObserveWorkspace::NAME, Create::NAME, TODO_WRITE],
         false,
     )
     .await;
@@ -134,7 +145,7 @@ async fn cep_round_trip_impact_matrix() {
         },
         ImpactRow {
             impact: ImpactKind::SessionStateMutation,
-            method: TodoWrite::NAME,
+            method: TODO_WRITE,
             arguments: serde_json::json!({
                 "todos": [{
                     "content": "verify impact matrix",
@@ -239,22 +250,25 @@ async fn cep_round_trip_cep_family_error_preserves_payload() {
     let wire_code = expected.wire_code();
     let server_err = Arc::new(expected);
 
+    // A native method with a stub handler that fails: this test is about the
+    // adapter preserving a structured `CepError` payload, so it needs a handler
+    // it can register. A Component Tool has no registrable handler seam.
     let mut registry = MethodRegistry::new();
     registry
-        .register_method::<TodoWrite, _, _>({
+        .register_method::<Fetch, _, _>({
             let server_err = Arc::clone(&server_err);
-            move |_params: TodoWriteParams, _ctx| {
+            move |_params: lancet_catalog::methods::external::FetchParams, _ctx| {
                 let err = Arc::clone(&server_err);
                 async move { Err((*err).clone()) }
             }
         })
-        .expect("todo handler");
+        .expect("fetch handler");
     let adapter = adapter_with_registry(registry).await;
 
     let err = adapter
         .execute(&llm_tool_call(
-            TodoWrite::NAME,
-            serde_json::json!({ "todos": [] }),
+            Fetch::NAME,
+            serde_json::json!({ "url": "https://example.com/" }),
         ))
         .await
         .expect_err("CEP family error must propagate");
@@ -324,6 +338,18 @@ async fn production_adapter(
     let audit = Arc::new(CepAuditStore::in_memory().expect("audit"));
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = Arc::clone(&audit);
+    // #29: the production dispatch surface is native handlers *plus* the
+    // embedded Component catalog. Composing from `from_embedded()` here is what
+    // makes `session.todo_write` reachable at all — a hand-built transport
+    // without it would report `method_not_found`, which is exactly the
+    // native-fallback absence the migration requires.
+    let components =
+        Arc::new(lancet_runtime::ComponentRuntime::from_embedded().expect("embedded composition"));
+    policy.capability_admission = lancet_protocol::evidence::CapabilityAdmissionPolicy {
+        enabled_tools: enabled.iter().map(|name| (*name).to_string()).collect(),
+        ..Default::default()
+    };
+    config.components = Some(Arc::clone(&components));
     config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
     config.policy_hook = default_hook.clone();
@@ -333,7 +359,16 @@ async fn production_adapter(
         let _ = server.run_native(registry, config).await;
     });
     let enabled_names: Vec<String> = enabled.iter().map(|s| (*s).to_string()).collect();
-    let definitions = lancet_cep::project_tool_definitions(catalog());
+    // Mirror `LancetRuntime::build`: the LLM-facing set is the native catalog
+    // projection extended with the Component descriptors.
+    let mut definitions = lancet_cep::project_tool_definitions(catalog());
+    definitions.extend(components.descriptors().map(|descriptor| {
+        lancet_cep::ToolDefinition::new(
+            descriptor.name.clone(),
+            descriptor.description.clone(),
+            descriptor.params_schema.clone(),
+        )
+    }));
     let adapter = CepExecutorAdapter::new(client, &definitions, enabled_names);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
@@ -346,12 +381,8 @@ async fn web_fetch_and_todo_write_audit_without_workspace_envelope() {
     let root = dir.path();
     let fetch_url = spawn_echo_server("200 OK", "cep-body").await;
 
-    let (adapter, audit) = production_adapter(
-        root.to_str().unwrap(),
-        &[Fetch::NAME, TodoWrite::NAME],
-        true,
-    )
-    .await;
+    let (adapter, audit) =
+        production_adapter(root.to_str().unwrap(), &[Fetch::NAME, TODO_WRITE], true).await;
 
     let fetch_call = llm_tool_call(Fetch::NAME, serde_json::json!({ "url": fetch_url }));
     let fetch_result = adapter.execute(&fetch_call).await.expect("fetch.web");
@@ -359,7 +390,7 @@ async fn web_fetch_and_todo_write_audit_without_workspace_envelope() {
     assert_eq!(fetch_parsed["body"].as_str(), Some("cep-body"));
 
     let todo_call = llm_tool_call(
-        TodoWrite::NAME,
+        TODO_WRITE,
         serde_json::json!({
             "todos": [{ "content": "secret todo text", "status": "in_progress" }]
         }),
@@ -376,11 +407,38 @@ async fn web_fetch_and_todo_write_audit_without_workspace_envelope() {
     assert!(!fetch_metadata.contains("cep-body"));
     assert!(!fetch_metadata.contains("secret todo"));
 
+    // The migrated Tool is Cell-governed: it is labeled by the vocabulary that
+    // actually authorized it, and it claims no legacy impact kind.
     let todo_row = audit.row_by_audit_id(2).expect("todo audit row");
-    assert_eq!(todo_row.method, TodoWrite::NAME);
-    assert_eq!(todo_row.impact_kind, "session_state_mutation");
-    assert_eq!(todo_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
+    assert_eq!(todo_row.method, TODO_WRITE);
+    assert_eq!(todo_row.semantic_stage, "cell_component");
+    assert_eq!(todo_row.guard_stage, "cell_admission");
+    assert!(todo_row.policy_enforced);
+    assert_eq!(
+        todo_row.impact_kind, "unknown",
+        "a Cell-governed row must not claim a legacy impact kind"
+    );
     let todo_metadata = todo_row.metadata_json.expect("todo metadata");
-    assert!(todo_metadata.contains("op_count"));
+    // The row points at its evidence and carries the derived cell key; the todo
+    // text itself never reaches audit.
+    assert!(todo_metadata.contains("evidence_id"));
+    assert!(todo_metadata.contains("alloc:none:session:in"));
     assert!(!todo_metadata.contains("secret todo"));
+
+    // And the evidence the row points at is really there, with the one effect
+    // the descriptor declares.
+    let evidence_id =
+        serde_json::from_str::<Value>(&todo_metadata).expect("metadata json")["evidence_id"]
+            .as_i64()
+            .expect("evidence pointer");
+    let evidence = audit
+        .call_evidence(lancet_native::EvidenceId(evidence_id))
+        .expect("evidence read")
+        .expect("evidence row exists");
+    assert_eq!(evidence.tool, TODO_WRITE);
+    assert_eq!(evidence.effects.effects.len(), 1);
+    assert_eq!(
+        evidence.effects.effects[0].source,
+        lancet_protocol::evidence::EffectSource::Result
+    );
 }
