@@ -108,6 +108,117 @@ Severity: #120 MEDIUM（资源耗尽面 + 平行写路径契约分叉）、#121 
 `crates/lancet-api/src/runtime.rs`, `crates/lattice-api/src/turn/cep.rs`,
 `crates/lattice-profile/src/{load,schema}.rs`, `docs/CONFIGURATION.md`, `FIX.md`.
 
+## GitHub #113：`tool-codegen` 支持 manifest `[render]` 节并生成 `render.json` 投影 — 2026-07-29
+
+Severity: ENHANCEMENT（#116 / #118 的上游格式契约；不改变任何现有运行时行为）。
+
+**Problem:**
+
+`tool-codegen` 的 `Manifest` 是 `deny_unknown_fields`，任何 `[render]` 节都会 parse
+error，因此 Tool Descriptor 的所有者无法声明自己结果的**呈现意图**。#29 是第一个
+production Source Tool manifest，若不先立这个格式，五个工具的 manifest 都要在迁移
+（并被 drift gate 冻结）之后回头补写。
+
+**Fix summary:**
+
+1. `[render]` 是 `Manifest` 上的可选节，根与每层子表都保持 `deny_unknown_fields`。
+   注解建模为 internally tagged enum（`#[serde(tag = "role", deny_unknown_fields)]`），
+   每个 variant 带自己的必填字段，所以拼错 role 是 `unknown variant`、写错role
+   的键是 `unknown field`、少写 `diff.after` 是 `missing field`。用 `role: String`
+   加一堆 `Option` 会让这三种情况全部 fail open —— 每个键都是那一个扁平 struct 的
+   已知字段，`deny_unknown_fields` 看不见（这正是本仓库 `[[capabilties]]` 回归的形状，
+   只是深一层）。空 `[render]` 与无注解的 arm 同样按 fail-closed 拒绝。
+2. 字段路径是 `FieldPath` 类型，`Deserialize` 时按语法解析
+   （`("params"|"result") ("." name ("[]")?)*`），所以畸形字符串在 parse 期就报
+   语法错误，而不是稍后表现为费解的“悬空路径”。前缀是位置性的：`paramsx.y` 被拒，
+   `params.params.x` 合法。
+3. 解析器针对 `schemars` 的**真实**输出形状写，而非理想化 fixture：`Option<primitive>`
+   是 `type: [T, "null"]`（`truncated` 这个 role 命名所指的字段本身就是它）；
+   `Option<NamedType>` 是 `anyOf: [{$ref}, {null}]`；doc comment 让 `description`
+   成为 `$ref` 的兄弟键；内部 tag 的 union 把分支载荷放在 `properties: {tag}` 的
+   **兄弟** `$ref` 上（不合并兄弟属性，`observe.workspace` 的 params 字段一个都取不到）；
+   `EditOperation` 的 union 藏在数组 `items` 里，所以 arm 支持
+   `at = "params.edits[]"`。`$ref` 只认同文档 `#/$defs/<name>`，其余（外部 ref、
+   深指针、未定义名、tuple-form `items`、无 `type` 的节点、递归 ref、`$ref` 旁的未知
+   关键字）一律 fail closed，递归有 32 层深度上限。
+4. arm 的判别属性由 schema **推导**（在每个分支都带 `const` 的那唯一一个属性），
+   而不是由作者手写 tag 路径——后者是第二个事实源，可以与真实 serde tag 悄悄不一致。
+   无判别、判别歧义、未知 case、重复 arm 均报错并列出合法 case。
+5. `render.json` 是投影产物，与 `llm-projection.json` 同级，**不进** `ToolDescriptor`、
+   `descriptor.json`、`descriptor-sha256`、`expected-identity.json`，也不进 component
+   bytes。`render` 全程不经过 `lower_manifest`，`render_outputs` 只读已构造好的
+   descriptor。
+6. `--check` 门禁把 `render.json` 建模为**条件产物**：`expected_files` 用
+   `Option<&str>`，`None` 意味着“该文件必须不存在”。原来的 check 循环只比对它期望
+   **找到**的文件，所以删掉 `[render]` 后遗留的 `render.json` 对 `tool-codegen` 和
+   `cargo xtask ci` 都是干净的，却继续把 manifest 已不再声明的注解喂给消费者。现在
+   写路径删除该孤儿文件，`--check` 在它存在时失败。
+
+**对抗性验收期间修掉的四处（findings 由独立 verifier 复跑确认）:**
+
+7. **单槽 role 按 schema 根分侧计数**（原为按 scope 计数）。#116 的错误卡只用
+   `params.*`、跳过全部 `result.*`，所以“这次调用的输入摘要”与“输出摘要”是两个槽；
+   合成一个会让扁平 schema 的工具（`fetch.web`、`mutate.create`）在“标注请求”与
+   “标注响应”之间二选一。同时补上跨 arm 的槽位竞争检查：同一 union 的两个分支互斥，
+   各自填槽合法；**不同** union 上的两个 arm 可以在一次调用里同时命中，因此竞争同一
+   个槽，报错。
+8. **`status` 不再强制封闭值集**。`status` 声明的是“这个字段是本次调用的生命周期
+   状态”，不是“这个字段是 enum”。`fetch.web` 的 HTTP 状态码是 `type: integer`，是该
+   调用最自然的状态信号，强制 `enum` 会让它完全没有拼法。封闭值集仍是常见情形（
+   `TodoStatus`、serde tag），也是消费者可穷举分派的依据；非标量仍拒绝——状态是一个
+   值，不是一个结构。不把值集复制进 `render.json`：消费者手上已有 `result_schema`，
+   复制会造出第二份可漂移的副本。
+9. **AC3 测试补上磁盘层证明**。原测试只比对内存里的 `Outputs` 字段，看不见**文件名
+   级**冲突：若 render 投影被路由到某个 identity 产物的文件名，原有断言全部依旧成立，
+   而磁盘上的 descriptor 已被覆盖。现在测试断言产物文件名两两不同，并走真实
+   `write_or_check` 在临时目录里比对加 `[render]` 前后**磁盘字节**，要求唯一新增文件
+   就是 `render.json`。该测试当即抓到 auditor 注入的同名冲突探针。
+10. `--check` 只把 ENOENT 报成“文件缺失”；权限或编码错误改为 `cannot read`，
+    否则会把作者引向重跑 codegen——那什么也改变不了。
+11. **`$ref` 解引用的兄弟键规则修正**（两条 verifier CONFIRMED 的 finding，均已实测
+    `schemars` 1.2.1 真实输出）。原规则是“`$ref` 必须是节点的唯一键”，但：
+    (a) doc comment 会让 schemars 把 `description` 作为 `$ref` 的**兄弟**发出
+    （`{"description": "...", "$ref": "#/$defs/Sha"}`），于是**每一个带文档注释的字段**
+    都会被判为悬空——`mutate.edit` 的 `expected_hash` 正是这个形状；
+    (b) `Option<NamedType>` 是 `anyOf: [{$ref: T}, {type: null}]`，与
+    `Option<primitive>` 的 `type: [T, "null"]` 不同，原代码把它当可空丢弃却不解引用。
+    现在按“兄弟键是否**约束实例**”判断：注解类关键字（`description`/`title`/`format`/
+    `default`/`examples`/…）旁的 `$ref` 照常解引用；`properties`/`type`/`required`
+    等约束类兄弟不折叠（内部 tag 分支就靠这个保持两半都可见）；**未知**关键字按约束
+    类处理，即本解析器未建模的构造 fail closed 而非被静默忽略。可空的具名类型解包到
+    目标类型；`Option<Vec<T>>` 的 `type: ["array","null"] + items` 仍可逐元素走。
+
+**#116 可用性实测**：五个 production Tool 的 `[render]` 节全部实跑通过（用
+`schemars` 的真实 schema 形状 + 真实 generator）：`observe.workspace` 四模式
+（read_file 的 `code`/`summary`、grep 的 `columns`+`truncated`、list_directory 的
+`columns`、find_files 的 `tree`）、`mutate.create`（`summary`/`code`/`created_dirs`
+作 `tree`）、`mutate.edit`（`params.edits[]` 上按 `replace_text` 分臂的 `diff`，以及
+`insert_before` 分臂的 `code`）、`fetch.web`（`status`+`summary`+`code`+`truncated`）、
+`session.todo_write`（`columns` + `$ref` enum 上的 `status`）。
+
+**Verification:**
+
+- `cargo run -p xtask -- tool-codegen` 后 `tools/noop/generated/` 六个既有产物 sha256
+  与加 `[render]` 之前逐字节相同（`diff` 空）：`descriptor.json`
+  `5d9a0967…`、`expected-identity.json` `0acbd1a4…`、`llm-projection.json`
+  `0f0f2f63…`、`registration.rs` `bf661f43…`、`tool-host.wit` `97928b29…`、
+  `noop_echo.component.wasm` `b677a9b3…`。
+- `cargo run -p xtask -- tool-build --verify` — Component 摘要仍复现
+  `b677a9b339c4703d8a02af54def031509ff17d73c66a83fc59176a528d646f08`，即 AC3 的
+  artifact 一半是实测而非论证。
+- `--check` 门禁五种情形实测：committed tree 通过；两次生成字节相同；被改写的
+  `render.json` 报 drift；缺失报 missing；删掉 `[render]` 后遗留文件报 stale，写路径
+  删除它后 `--check` 复归干净。
+- `cargo test -p xtask` — 106 passed（新增 5 个 wiring 测试 + 37 个格式测试）。
+- `cargo fmt --all --check`、`cargo clippy -p xtask --all-targets -- -D warnings` — 通过。
+- `cargo xtask ci`（含 `tool-codegen --check`）— 通过。
+- 对抗性验收：四个独立 auditor 分别攻 strictness/路径、确定性/门禁、identity chain、
+  scope 围栏与 #116 可用性，每条 finding 由独立 verifier 复跑确认或否证。
+
+**Changed files:**
+`xtask/src/tool_codegen.rs`；`xtask/src/tool_codegen/{render.rs,render_tests.rs}`（新增）；
+`tools/noop/manifest.toml`；`tools/noop/generated/render.json`（新增）；`AGENTS.md`；`FIX.md`。
+
 ## GitHub #112 + #29：versioned Cell evidence 表落地，`session.todo_write` 迁为首个内嵌 Component Tool — 2026-07-29
 
 Severity: N/A（feature：ADR 0004 决策 1/2/3/7 + ADR 0005 决策 2/3 的实现切片）。
