@@ -294,10 +294,8 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel(16);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let policy_cfg = lancet_authority::policy::default::PolicyConfig {
-            capability_sources: Default::default(),
             methods: Default::default(),
             network: cep_context.policy.network.clone(),
-            budget: cep_context.policy.budget.clone(),
             observation: cep_context.policy.observation.clone(),
             workspace: Default::default(),
             project_root: cep_context.policy.project_root.clone(),
@@ -397,7 +395,7 @@ mod tests {
         policy.network.allow_localhost = true;
         policy.network.allowed_hosts = vec!["127.0.0.1".into()];
         policy.network.max_web_response_bytes = 100;
-        policy.budget.max_turn_observation_bytes = 10_000;
+        policy.observation.max_turn_observation_bytes = 10_000;
         let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let registry = test_registry();
         let (ctx, mut events) = ctx_for(cep_context);
@@ -468,7 +466,7 @@ mod tests {
         );
         policy.network.allow_localhost = true;
         policy.network.allowed_hosts = vec!["127.0.0.1".into()];
-        policy.budget.max_turn_observation_bytes = 4;
+        policy.observation.max_turn_observation_bytes = 4;
         let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let registry = test_registry();
         let (ctx, _events) = ctx_for(cep_context);

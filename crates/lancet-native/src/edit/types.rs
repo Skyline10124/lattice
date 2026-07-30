@@ -129,6 +129,11 @@ pub enum PatchErrorCode {
     HunkMissing,
     HunkAmbiguous,
     IoError,
+    /// The write would exceed the single-file byte cap (#120). Distinct from
+    /// `IoError` so a client can tell "make the write smaller" apart from a
+    /// filesystem failure, and so the CEP mapping can reach
+    /// `ToolResourceExhausted`.
+    SizeLimit,
     RollbackFailed,
 }
 
@@ -240,6 +245,7 @@ mod tests {
             (PatchErrorCode::HunkMissing, "hunk_missing"),
             (PatchErrorCode::HunkAmbiguous, "hunk_ambiguous"),
             (PatchErrorCode::IoError, "io_error"),
+            (PatchErrorCode::SizeLimit, "size_limit"),
             (PatchErrorCode::RollbackFailed, "rollback_failed"),
         ];
 

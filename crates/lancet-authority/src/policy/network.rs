@@ -60,20 +60,59 @@ fn is_cloud_metadata_ip(ip: IpAddr) -> bool {
     )
 }
 
-fn host_allowed_by_list(host: &str, allowed_hosts: &[String]) -> bool {
-    let host_lower = host.to_ascii_lowercase();
-    allowed_hosts.iter().any(|pattern| {
-        let pattern = pattern.trim();
-        if pattern.is_empty() {
+/// Normalize one `allowed_hosts` entry (or an observed host) into its
+/// comparison form: surrounding whitespace trimmed, ASCII-lowercased.
+///
+/// Normalization is idempotent, so already-normalized patterns (for example the
+/// ones stored in `AuthorizedEffectRegion::hosts`) pass through unchanged.
+pub fn normalize_host_pattern(pattern: &str) -> String {
+    pattern.trim().to_ascii_lowercase()
+}
+
+/// Match a single normalized host against a single `allowed_hosts` pattern.
+///
+/// A leading dot means suffix match: `.example.com` matches the apex domain
+/// `example.com` and any subdomain of it. Every other pattern is an exact host
+/// match. An empty (or dots-only) pattern never matches — fail-closed.
+fn host_matches_pattern(host_lower: &str, pattern: &str) -> bool {
+    let pattern = normalize_host_pattern(pattern);
+    if pattern.is_empty() {
+        return false;
+    }
+    if pattern.starts_with('.') {
+        let suffix = pattern.trim_start_matches('.');
+        if suffix.is_empty() {
             return false;
         }
-        if pattern.starts_with('.') {
-            let suffix = pattern.trim_start_matches('.').to_ascii_lowercase();
-            host_lower == suffix || host_lower.ends_with(&format!(".{suffix}"))
-        } else {
-            host_lower == pattern.to_ascii_lowercase()
-        }
-    })
+        host_lower == suffix || host_lower.ends_with(&format!(".{suffix}"))
+    } else {
+        host_lower == pattern
+    }
+}
+
+/// The single host allow-matching implementation for the whole workspace.
+///
+/// Every layer that decides whether a host is granted by `allowed_hosts` —
+/// network policy ([`validate_fetch_url`]), the policy decision path
+/// (`DefaultPolicyHook`), and the effect region
+/// (`AuthorizedEffectRegion::contains`) — must call this function so the three
+/// layers cannot drift apart (crate `AGENTS.md` synchronization invariant).
+///
+/// This function answers exactly one question: does any configured pattern
+/// grant this host? An empty list therefore matches nothing. What an empty list
+/// *means* is deliberately a per-layer decision and is not converging here:
+/// [`validate_fetch_url`] treats an empty list as "no allowlist configured" and
+/// falls back to `allow_public_https`, while `AuthorizedEffectRegion` grants no
+/// host at all, so Enforce mode denies `fetch.web` before outbound I/O unless an
+/// operator named the host. Those tiers are intentionally asymmetric — the
+/// region is the deny-by-default tier — and the asymmetry is pinned by the
+/// harness scenario `direct_tools_fetch_capability_denial_with_public_https`.
+/// Do not "fix" it by making the region permissive on an empty list.
+pub fn host_allowed_by_list(host: &str, allowed_hosts: &[String]) -> bool {
+    let host_lower = normalize_host_pattern(host);
+    allowed_hosts
+        .iter()
+        .any(|pattern| host_matches_pattern(&host_lower, pattern))
 }
 
 fn network_denied(message: impl Into<String>) -> CepError {
@@ -294,5 +333,106 @@ mod tests {
         };
         validate_fetch_url("https://other.example/", &policy).unwrap_err();
         validate_fetch_url("https://allowed.example/", &policy).unwrap();
+    }
+
+    // ── #122: the one allow-matcher ────────────────────────────────────
+
+    #[test]
+    fn normalize_host_pattern_trims_and_lowercases_idempotently() {
+        for (raw, expected) in [
+            (" example.com ", "example.com"),
+            ("Example.COM", "example.com"),
+            ("\t.Example.com\n", ".example.com"),
+            ("example.com", "example.com"),
+        ] {
+            let once = normalize_host_pattern(raw);
+            assert_eq!(once, expected, "normalizing {raw:?}");
+            assert_eq!(
+                normalize_host_pattern(&once),
+                once,
+                "normalization must be idempotent for {raw:?}"
+            );
+        }
+    }
+
+    /// A leading dot is a suffix pattern that also matches the apex domain —
+    /// the form #122 found accepted by the policy layers and rejected by the
+    /// effect region.
+    #[test]
+    fn leading_dot_pattern_matches_apex_and_subdomains() {
+        let patterns = vec![".example.com".to_string()];
+        for host in [
+            "example.com",
+            "api.example.com",
+            "deep.api.example.com",
+            "API.Example.COM",
+        ] {
+            assert!(
+                host_allowed_by_list(host, &patterns),
+                "'.example.com' must grant {host}"
+            );
+        }
+        for host in ["notexample.com", "example.com.evil.tld", "example.org"] {
+            assert!(
+                !host_allowed_by_list(host, &patterns),
+                "'.example.com' must not grant {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_canonical_pattern_forms_all_match_the_same_host() {
+        for pattern in ["Example.com", " example.com ", "EXAMPLE.COM"] {
+            assert!(
+                host_allowed_by_list("example.com", &[pattern.to_string()]),
+                "pattern {pattern:?} must grant example.com"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_and_dots_only_patterns_match_nothing() {
+        for pattern in ["", " ", ".", "..", "\t"] {
+            assert!(
+                !host_allowed_by_list("example.com", &[pattern.to_string()]),
+                "pattern {pattern:?} must be fail-closed"
+            );
+        }
+        assert!(!host_allowed_by_list("example.com", &[]));
+    }
+
+    /// #122 acceptance: a non-canonical `allowed_hosts` entry must produce the
+    /// same verdict in URL validation as in the shared matcher. Before the fix
+    /// `.example.com` passed here and was rejected by the effect region; the
+    /// region-side half of this agreement lives in `effect::region`'s tests.
+    #[test]
+    fn validate_fetch_url_agrees_with_the_shared_matcher() {
+        for pattern in [".example.com", "Example.com", " example.com "] {
+            let policy = NetworkPolicyConfig {
+                allow_public_https: false,
+                allowed_hosts: vec![pattern.to_string()],
+                ..NetworkPolicyConfig::safe_defaults()
+            };
+            let host = "example.com";
+            let matcher_allows = host_allowed_by_list(host, &policy.allowed_hosts);
+            let url_allows = validate_fetch_url("https://example.com/", &policy).is_ok();
+            assert!(
+                matcher_allows && url_allows,
+                "pattern {pattern:?}: matcher={matcher_allows} url={url_allows}"
+            );
+        }
+    }
+
+    /// The subdomain a leading-dot pattern grants must also pass URL validation.
+    #[test]
+    fn validate_fetch_url_accepts_subdomain_of_leading_dot_pattern() {
+        let policy = NetworkPolicyConfig {
+            allow_public_https: false,
+            allowed_hosts: vec![".example.com".into()],
+            ..NetworkPolicyConfig::safe_defaults()
+        };
+        validate_fetch_url("https://api.example.com/v1", &policy).unwrap();
+        validate_fetch_url("https://example.com/", &policy).unwrap();
+        validate_fetch_url("https://example.org/", &policy).unwrap_err();
     }
 }

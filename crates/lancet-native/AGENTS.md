@@ -21,7 +21,8 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   metadata.
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
-  patch write limits.
+  `limits::WriteLimits` — the one single-file write byte cap (1 MiB) both
+  mutation write paths read.
 - `src/workspace/` owns the one concrete `LocalWorkspace` (#59/#60/#61,
   Codeberg #37/#38/#39; plus #63): secure per-segment path resolution,
   Policy-Visible Workspace filtering (gix Git facts + authority read policy),
@@ -79,7 +80,10 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   no `workspace.rewind`. Phase 1 verifies every affected path against its
   recorded post-state through `WorkspacePath::parse`, System Path Exclusion,
   and the same symlink-rejecting secure walk mutations use, reporting a
-  structured conflict for any divergence and writing nothing. Phase 2 runs
+  structured conflict for any divergence and writing nothing. Rewind is
+  deliberately exempt from the `WriteLimits` byte cap (#120): it reinstates bytes
+  the workspace already held, so capping it would make a previously legal state
+  unrestorable rather than preventing a new write. Phase 2 runs
   only after every path verified, reusing `install_atomic_sync` /
   `remove_file_sync` (the shared synchronous cores of the async mutation
   primitives). The executor never records history: reversing a mutation must
@@ -137,17 +141,26 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   audit metadata); native calls produce effect-ledger evidence as before.
   Production `from_embedded()` yields an empty Component catalog so all 5
   native methods are unchanged.
-- FIXED #60: `ExecutionBackend`/`ExecutionRouting`/`UpperContext`/
-  `RoutingInvocationState`/`NullExecutionBackend` and all spy backends
-  deleted; handlers and the edit engine call the concrete `LocalWorkspace`
-  directly; audit routing metadata replaced with method-local evidence
-  (guarded path, `local_revision`, post-install content hash,
-  `PathGuard`/`LocalIo` rejection stages); narrow one-shot
-  `fail_next_install` fault injection is the only test seam.
+- FIXED #60: routing/backend seam and all spy backends deleted; handlers and
+  the edit engine call the concrete `LocalWorkspace` directly; audit routing
+  metadata replaced with method-local evidence (guarded path, `local_revision`,
+  post-install content hash, `PathGuard`/`LocalIo` rejection stages); narrow
+  one-shot `fail_next_install` fault injection is the only test seam.
 - FIXED #61 follow-up: ignored ancestors reachable only for an exact included
   descendant are navigable but not emitted by list/find; successful
   read/list/grep/find audit metadata now records content-free visibility rule
   categories without hidden paths, content, counts, or hashes.
+- FIXED #120: the single-file write byte cap lives once, in
+  `edit::limits::WriteLimits` (1 MiB, `check_write_size`), replacing
+  `edit::apply::PatchApplyLimits`. `mutate.create` was uncapped; it now checks
+  the request content length in `preflight_create` before any filesystem write,
+  so the no-replace install never leaves a partial target. Both paths report
+  `ToolError::SizeLimit` text (limit + actual) as `ExecutionFailed` +
+  `CepErrorData::Execution`. Deliberately not a config axis. The cap applies to
+  the two Atomic Local Mutation paths. Two write sites are deliberately exempt
+  because neither introduces new content: Rewind restore
+  (`workspace::rewind`) and patch rollback (`edit::storage::rollback_edit_target`)
+  both reinstate bytes the workspace already held.
 - FIXED L-30/L-31: cleanup metadata records all cleanup failures, and positive
   commit-baseline hunk summaries are recorded when evidence exists.
 - PARTIAL M-05: web fetch rebinding defense uses request-time pinned IP plus a
@@ -160,8 +173,11 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 - If future fetch capabilities need wildcard hosts, implement semantics across
   protocol, authority, native, and tests instead of using pattern wording alone.
-- If mutation write budgets become profile-managed, lift `PatchApplyLimits` into
-  CEP mutation policy rather than reviving generic native tool limits.
+- Keep `edit::limits::WriteLimits` the only single-file write cap. A write path
+  that installs new content must call `check_write_size` before touching the
+  filesystem; do not add a second literal, a profile key, or a per-method budget.
+  Restore paths (Rewind, patch rollback) stay exempt — record any new exemption
+  and its reason next to the #120 entry above.
 - Keep web fetch security centered on request-time DNS pinning; treat denylist
   additions as defense in depth.
 - Keep mutation-history recording at the handler level, after a successful
