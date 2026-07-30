@@ -4,25 +4,29 @@
 //! Static CEP method catalog for CEP.
 
 use crate::method::MethodDescriptor;
-use crate::methods::{Create, Edit, Fetch, ObserveWorkspace, TodoWrite};
+use crate::methods::{Create, Edit, Fetch, ObserveWorkspace};
 use std::sync::LazyLock;
 
-/// Exhaustive CEP method descriptor list in stable registration order.
-pub static CATALOG: LazyLock<[MethodDescriptor; 5]> = LazyLock::new(|| {
+/// Exhaustive native CEP method descriptor list in stable registration order.
+///
+/// `session.todo_write` is not here: #29 migrated it to an embedded Component
+/// Tool whose source manifest is its sole descriptor authority. The default
+/// distribution is still five Tools — four native methods plus one Component —
+/// and #30–#32 move the rest.
+pub static CATALOG: LazyLock<[MethodDescriptor; 4]> = LazyLock::new(|| {
     [
         MethodDescriptor::for_method::<ObserveWorkspace>(),
         MethodDescriptor::for_method::<Create>(),
         MethodDescriptor::for_method::<Edit>(),
         MethodDescriptor::for_method::<Fetch>(),
-        MethodDescriptor::for_method::<TodoWrite>(),
     ]
 });
 
 /// Compile-time-known length of [`CATALOG`]. Mirrors the array bound in
-/// [`CATALOG`]'s type (`[MethodDescriptor; 5]`); keep these in sync when the
+/// [`CATALOG`]'s type (`[MethodDescriptor; 4]`); keep these in sync when the
 /// root CEP method contract changes. Callers (e.g. the LANCET doctor) read
 /// this instead of hard-coding a method count.
-pub const CATALOG_LEN: usize = 5;
+pub const CATALOG_LEN: usize = 4;
 
 /// Borrow the catalog as a slice.
 pub fn catalog() -> &'static [MethodDescriptor] {
@@ -53,15 +57,14 @@ pub fn scaffold_catalog() -> &'static [MethodDescriptor] {
 mod tests {
     use super::*;
     use crate::method::CepMethod;
-    use crate::methods::{Create, Edit, Fetch, ObserveWorkspace, TodoWrite};
+    use crate::methods::{Create, Edit, Fetch, ObserveWorkspace};
     use lancet_protocol::{ImpactKind, RequiredCapability};
 
-    const EXPECTED_ORDER: [&str; 5] = [
+    const EXPECTED_ORDER: [&str; 4] = [
         "observe.workspace",
         "mutate.create",
         "mutate.edit",
         "fetch.web",
-        "session.todo_write",
     ];
 
     #[test]
@@ -122,11 +125,6 @@ mod tests {
     fn catalog_descriptors_declare_base_authority_requirements() {
         for descriptor in catalog() {
             match descriptor.name {
-                "session.todo_write" => {
-                    assert!(descriptor.base_authority.session_state);
-                    assert!(!descriptor.base_authority.fetch_hosts);
-                    assert!(!descriptor.base_authority.read_audit);
-                }
                 "fetch.web" => {
                     assert!(!descriptor.base_authority.session_state);
                     assert!(descriptor.base_authority.fetch_hosts);
@@ -146,7 +144,7 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 5] = [
+        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 4] = [
             (
                 &catalog[0],
                 ObserveWorkspace::IMPACT,
@@ -155,7 +153,6 @@ mod tests {
             (&catalog[1], Create::IMPACT, Create::CAPABILITY),
             (&catalog[2], Edit::IMPACT, Edit::CAPABILITY),
             (&catalog[3], Fetch::IMPACT, Fetch::CAPABILITY),
-            (&catalog[4], TodoWrite::IMPACT, TodoWrite::CAPABILITY),
         ];
 
         for (descriptor, impact, capability) in checks {
@@ -172,9 +169,28 @@ mod tests {
         }
     }
 
+    /// The native catalog is four methods since #29 moved `session.todo_write`
+    /// to an embedded Component Tool. The shipped catalog is still five Tools;
+    /// this constant counts only the ones a native handler still serves.
     #[test]
-    fn catalog_len_is_5() {
-        assert_eq!(catalog().len(), 5);
+    fn catalog_len_is_4() {
+        assert_eq!(catalog().len(), 4);
+        assert_eq!(catalog().len(), CATALOG_LEN);
+    }
+
+    /// The migrated method must not reappear as a native catalog entry: a second
+    /// descriptor beside the source manifest is exactly the parallel schema
+    /// ADR 0004 forbids, and it would arm both authorization vocabularies for
+    /// one call name (#28 design §11).
+    #[test]
+    fn migrated_todo_write_is_not_a_native_catalog_method() {
+        assert!(
+            catalog()
+                .iter()
+                .all(|descriptor| descriptor.name != "session.todo_write"),
+            "session.todo_write is a Component Tool; its descriptor authority is \
+             tools/todo-write/manifest.toml"
+        );
     }
 
     #[test]
@@ -238,7 +254,7 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 5);
+        assert_eq!(catalog().len(), 4);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
@@ -247,7 +263,6 @@ mod catalog_default_snapshot {
                 "mutate.create",
                 "mutate.edit",
                 "fetch.web",
-                "session.todo_write",
             ]
         );
         for descriptor in catalog() {

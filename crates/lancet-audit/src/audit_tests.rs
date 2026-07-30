@@ -3,10 +3,11 @@
 
 use super::*;
 use lancet_catalog::CepMethod;
-use lancet_catalog::methods::{Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod};
+use lancet_catalog::methods::{Create, Fetch, ObserveWorkspace};
+use lancet_catalog::test_method::TestEcho;
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{
-    ADMISSION_EVIDENCE_VERSION, DENIED_OPERATIONS_RECORD_VERSION, EffectSource,
+    ADMISSION_EVIDENCE_VERSION, DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, EffectSource,
     OBSERVED_EFFECTS_RECORD_VERSION, ObservedScope, ObservedTarget,
 };
 use serde_json::json;
@@ -249,8 +250,10 @@ fn for_component_dispatch_labels_cell_governed_rows() {
 
 #[test]
 fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
-    // Known catalog method -> native + policy-enforced.
-    let known = CallAuditMetadata::for_production_dispatch(TodoWriteMethod::NAME);
+    // Known catalog method -> native + policy-enforced. It must be a real
+    // catalog method: the label is derived from catalog membership, so a
+    // synthetic fixture name would prove the opposite branch.
+    let known = CallAuditMetadata::for_production_dispatch(ObserveWorkspace::NAME);
     assert_eq!(known.semantic_stage, SEMANTIC_STAGE_NATIVE);
     assert!(known.policy_enforced);
 
@@ -264,11 +267,13 @@ fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
 fn cep_audit_success_appends_one_row_with_required_fields() {
     let store = CepAuditStore::in_memory().unwrap();
     let ctx = test_context();
+    // A real catalog method, so `impact_kind` is a real attribution rather than
+    // the `unknown` a non-catalog name records.
     let start = store
         .start_call(
             &ctx,
             42,
-            TodoWriteMethod::NAME,
+            Create::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -276,21 +281,21 @@ fn cep_audit_success_appends_one_row_with_required_fields() {
         .finalize_call(
             start,
             AuditOutcome::Success {
-                summary: "todo_count=1".into(),
+                summary: "created=1".into(),
             },
             Some("native_handler"),
-            Some(r#"{"outcome":"todo_write","count":1}"#),
+            Some(r#"{"outcome":"mutate_create","count":1}"#),
         )
         .unwrap();
 
     assert_eq!(store.row_count().unwrap(), 1);
     let row = store.row_by_audit_id(start.audit_id).unwrap();
     assert_eq!(row.call_id, 42);
-    assert_eq!(row.method, TodoWriteMethod::NAME);
+    assert_eq!(row.method, Create::NAME);
     assert!(!row.started_at.is_empty());
     assert!(row.ended_at.is_some());
-    assert_eq!(row.result_or_error.as_deref(), Some("success:todo_count=1"));
-    assert_eq!(row.impact_kind, "session_state_mutation");
+    assert_eq!(row.result_or_error.as_deref(), Some("success:created=1"));
+    assert_eq!(row.impact_kind, "workspace_mutation");
     assert_eq!(row.turn_id, "turn-1");
     assert_eq!(row.session_id, "session-1");
     assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
@@ -306,7 +311,7 @@ fn cep_audit_error_path_finalizes_ended_at() {
         .start_call(
             &test_context(),
             7,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -358,7 +363,7 @@ fn cep_audit_unknown_method_and_cancel_paths_finalize() {
         .start_call(
             &test_context(),
             2,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -370,7 +375,7 @@ fn cep_audit_unknown_method_and_cancel_paths_finalize() {
         .start_call(
             &test_context(),
             3,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -394,7 +399,7 @@ fn cep_audit_rows_store_summaries_not_full_payloads() {
         .start_call(
             &test_context(),
             9,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -416,7 +421,7 @@ fn cep_audit_rows_store_summaries_not_full_payloads() {
         row.result_or_error, metadata, row.method, row.impact_kind
     );
     assert!(!blob.contains("very long secret payload"));
-    assert!(!params.to_string().contains(&row.method) || row.method == TodoWriteMethod::NAME);
+    assert!(!params.to_string().contains(&row.method) || row.method == TestEcho::NAME);
     let _ = params;
 }
 
@@ -432,7 +437,7 @@ fn cep_audit_failed_insert_does_not_increment_pending() {
     let result = store.start_call(
         &test_context(),
         1,
-        TodoWriteMethod::NAME,
+        TestEcho::NAME,
         &CallAuditMetadata::native_policy_enforced(Some("started")),
     );
     assert!(result.is_err());
@@ -446,7 +451,7 @@ fn cep_audit_failed_finalize_still_decrements_pending() {
         .start_call(
             &test_context(),
             2,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -690,7 +695,7 @@ fn start_call_persists_model_and_runtime_columns() {
         .start_call(
             &ctx,
             1,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -794,7 +799,7 @@ fn query_rows_filters_by_verdict() {
         .start_call(
             &ctx,
             1,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(None),
         )
         .unwrap();
@@ -812,7 +817,7 @@ fn query_rows_filters_by_verdict() {
         .start_call(
             &ctx,
             2,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(None),
         )
         .unwrap();
@@ -1166,11 +1171,11 @@ fn denied_operations() -> DeniedOperationsRecord {
     }
 }
 
+/// #112 criterion 3: the audit row is no longer the carrier of structured
+/// evidence. It points at the evidence row and keeps only its own summary keys;
+/// the three record payloads are absent from the blob entirely.
 #[test]
-fn merge_finalize_metadata_separates_admission_effects_and_denials() {
-    // B5/A2: "why authorized" (approved capability names) must not be merged
-    // into "what happened" (real cells with host-resolved scope and target),
-    // and a refused operation is neither.
+fn merge_finalize_metadata_points_at_evidence_instead_of_carrying_it() {
     let admission = admission_evidence();
     let effects = effects_record();
     let denied = denied_operations();
@@ -1182,43 +1187,29 @@ fn merge_finalize_metadata_separates_admission_effects_and_denials() {
             admission: Some(&admission),
             effects: Some(&effects),
             denied: Some(&denied),
+            evidence_id: Some(EvidenceId(77)),
         },
     )
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
 
-    assert_eq!(parsed["admission_evidence"]["version"], json!(1));
     assert_eq!(
-        parsed["admission_evidence"]["approved_capabilities"],
-        json!(["session.events", "session.result"])
+        parsed["evidence_id"],
+        json!(77),
+        "the row must resolve to its evidence"
     );
-    assert!(
-        parsed["admission_evidence"].get("effects").is_none(),
-        "admission evidence must not carry effects"
-    );
+    for key in [
+        "admission_evidence",
+        "observed_effects",
+        "denied_operations",
+    ] {
+        assert!(
+            parsed.get(key).is_none(),
+            "{key} must live in the evidence table, not the metadata blob: {parsed}"
+        );
+    }
 
-    let observed = &parsed["observed_effects"];
-    assert_eq!(observed["version"], json!(1));
-    let effect_array = observed["effects"].as_array().unwrap();
-    assert_eq!(effect_array.len(), 2, "C8: effects stay an array");
-    assert_eq!(effect_array[0]["seq"], json!(0));
-    assert_eq!(effect_array[0]["source"], json!("operation"));
-    assert_eq!(effect_array[1]["seq"], json!(1));
-    assert_eq!(effect_array[1]["context_measure"], json!(17));
-    assert!(
-        effect_array
-            .iter()
-            .all(|effect| effect.get("approved_capabilities").is_none()),
-        "capability aliases are admission evidence only, never effects"
-    );
-
-    assert_eq!(parsed["denied_operations"]["version"], json!(1));
-    let denials = parsed["denied_operations"]["denied"].as_array().unwrap();
-    assert_eq!(denials.len(), 2);
-    assert_eq!(denials[0]["seq"], json!(2));
-    assert_eq!(denials[1]["seq"], json!(3));
-
-    // The derived query key still covers both effects, in the same order.
+    // The derived query key still covers both effects, in seq order (C8).
     assert_eq!(
         parsed["component_cells"],
         json!(["mutate:none:session:in", "alloc:none:session:in"])
@@ -1245,6 +1236,7 @@ fn merge_finalize_metadata_is_order_independent() {
             admission: Some(&admission),
             effects: Some(&effects),
             denied: Some(&denied),
+            evidence_id: Some(EvidenceId(1)),
         },
     )
     .unwrap();
@@ -1256,6 +1248,7 @@ fn merge_finalize_metadata_is_order_independent() {
             admission: Some(&admission),
             effects: Some(&reversed),
             denied: Some(&reversed_denied),
+            evidence_id: Some(EvidenceId(1)),
         },
     )
     .unwrap();
@@ -1276,7 +1269,7 @@ async fn cep_audit_await_pending_waits_for_finalization() {
         .start_call(
             &test_context(),
             1,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -1468,7 +1461,7 @@ fn import_legacy_read_only_if_empty_is_noop_when_destination_has_rows() {
         .start_call(
             &test_context(),
             1,
-            TodoWriteMethod::NAME,
+            TestEcho::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();

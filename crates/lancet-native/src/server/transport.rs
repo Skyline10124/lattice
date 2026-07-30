@@ -7,8 +7,9 @@ use crate::server::call_durable_metadata::CallDurableMetadata;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use crate::workspace::LocalWorkspace;
 use lancet_audit::{
-    AuditOutcome, AuditStart, CallAuditMetadata, CepAuditContext, CepAuditStore,
-    ComponentCallEvidence, RejectionStage, SEMANTIC_STAGE_COMPONENT, SEMANTIC_STAGE_SCAFFOLD,
+    AuditOutcome, AuditStart, CallAuditMetadata, CallEvidence, CepAuditContext, CepAuditStore,
+    ComponentCallEvidence, EvidenceOutcome, RejectionStage, SEMANTIC_STAGE_COMPONENT,
+    SEMANTIC_STAGE_SCAFFOLD,
     SEMANTIC_STAGE_UNROUTED, SEMANTIC_STATUS_COMPONENT, SEMANTIC_STATUS_COMPONENT_DENIED,
     impact_kind_for_method, impact_kind_label, merge_finalize_metadata, required_capability_label,
 };
@@ -36,11 +37,13 @@ use tokio::sync::RwLock;
 /// run starts. Callers supply only the canonical project root (via policy)
 /// and resolved policy.
 ///
-/// `components` carries the closed Component runtime (ADR 0004). When a
+/// `components` carries the closed Component runtime (ADR 0004). Since #29 a
+/// production composition is non-empty: it embeds `session.todo_write`. When a
 /// method name is in the Component catalog, `handle_request` dispatches to
 /// it instead of the native typed registry. Production builds compose
-/// `ComponentRuntime::from_embedded()` (empty until #29–#32, Codeberg
-/// #7–#10); tests may inject a no-op fixture via `with_components`.
+/// `ComponentRuntime::from_embedded()`, which since #29 embeds
+/// `session.todo_write` (#30–#32 add the remaining four); tests may inject a
+/// no-op fixture via `with_components`.
 #[derive(Clone)]
 pub struct ServerRunConfig {
     pub audit: Arc<CepAuditStore>,
@@ -114,6 +117,59 @@ impl ServerRunConfig {
         validate_policy_against_catalog(declared, &self.cep_context.policy.capability_admission)
             .map_err(|err| CepError::internal_error(err.to_string()))
     }
+
+    /// Refuse a run in which one method name resolves to both a Component Tool
+    /// and a native catalog method (the #28 design §11 name-collision hazard).
+    ///
+    /// This is the only place the two vocabularies coexist: `lancet-runtime`'s
+    /// composition gate cannot see `lancet-catalog`, and `lancet-catalog` cannot
+    /// see the composed Component set, so neither can refuse a collision alone.
+    /// A collision arms both vocabularies for one call — `handle_request`
+    /// dispatches to the Component (its descriptor lookup runs first) while the
+    /// legacy pre-dispatch effect-kind deny reads the *native* descriptor and can
+    /// refuse the call on an effect the Component never declared. Verified by
+    /// construction during review: a Tool named `observe.workspace` composed
+    /// successfully and its call was refused with
+    /// `EffectViolation: declared effect denied by effect-kind policy` carrying
+    /// `declared_effect: [WorkspaceObservation]` — the native descriptor's, not
+    /// the Component's. That is the permanent native/WASM dual dispatch ADR 0004
+    /// forbids, so the run fails closed instead of resolving silently.
+    pub fn validate_no_component_native_collision(&self) -> Result<(), CepError> {
+        let Some(components) = self.components.as_ref() else {
+            return Ok(());
+        };
+        let component_names: Vec<&str> = components
+            .descriptors()
+            .map(|descriptor| descriptor.name.as_str())
+            .collect();
+        let native_names = lancet_catalog::catalog()
+            .iter()
+            .map(|descriptor| descriptor.name);
+        component_native_collisions(native_names, &component_names)
+    }
+}
+
+/// The method names that resolve to both vocabularies.
+///
+/// Split out as a pure function because the collision is not constructible
+/// through any public API — `ComponentRuntime` has no injection seam and the
+/// shipped catalogs are disjoint — so the predicate is what tests can exercise.
+fn component_native_collisions<'a>(
+    native_names: impl IntoIterator<Item = &'a str>,
+    component_names: &[&str],
+) -> Result<(), CepError> {
+    let collisions: Vec<&str> = native_names
+        .into_iter()
+        .filter(|name| component_names.contains(name))
+        .collect();
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    Err(CepError::internal_error(format!(
+        "method name(s) {collisions:?} resolve to both a Component Tool and a native \
+         catalog method; a migrated method must be removed from the native catalog \
+         (ADR 0004: no permanent native/WASM dual dispatch)"
+    )))
 }
 
 /// Per-run native server runtime: the run configuration plus the one
@@ -163,8 +219,10 @@ impl CepServerNativeExt for CepServer {
     ) -> Pin<Box<dyn Future<Output = Result<(), CepError>> + Send>> {
         Box::pin(async move {
             // Catalog and admission policy first coexist here, so this is
-            // where an unknown deny name fails the run closed (#28 C2).
+            // where an unknown deny name fails the run closed (#28 C2) and where
+            // a Component/native name collision does too (#28 design §11).
             config.validate_capability_admission()?;
+            config.validate_no_component_native_collision()?;
             // ADR 0003: the one concrete Local Workspace is constructed once
             // per server run from the resolved policy's canonical project
             // root. No caller-supplied workspace implementation is accepted.
@@ -362,6 +420,42 @@ async fn handle_request(
     // decides whether this row carries a Cell evidence record at all: a native
     // handler row keeps its legacy metadata shape.
     let (admission, cell_effects, denied_operations) = component_evidence.snapshot();
+
+    // #112: the evidence table is the durable home of the three records, and it
+    // is written *before* the audit row finalizes so there is no interval in
+    // which a Component call has an audit row but no evidence (ADR 0005's
+    // sequencing constraint). Every outcome is recorded, not just successes:
+    // an admission denial carries its `AdmissionEvidence`, a trap keeps the
+    // operation effects it already produced.
+    let evidence_id = admission.as_ref().and_then(|admission| {
+        let outcome = evidence_outcome_for(&final_result);
+        let record = CallEvidence {
+            turn_id: &ctx_snapshot.turn_id,
+            session_id: &ctx_snapshot.session_id,
+            call_id: id,
+            tool: &method,
+            outcome,
+            admission,
+            effects: Some(&cell_effects),
+            denied: Some(&denied_operations),
+        };
+        match audit.record_call_evidence(&record) {
+            Ok(evidence_id) => Some(evidence_id),
+            Err(error) => {
+                // A durable-evidence failure must be visible: the audit row
+                // still finalizes (losing the row too would lose the call
+                // entirely), but it carries no `evidence_id`, so the gap is
+                // detectable rather than silent.
+                tracing::error!(
+                    method = %method,
+                    %error,
+                    "failed to persist Cell evidence for a Component call"
+                );
+                None
+            }
+        }
+    });
+
     let merged_metadata = merge_finalize_metadata(
         durable_metadata_json.as_deref(),
         &method,
@@ -370,6 +464,7 @@ async fn handle_request(
             admission: admission.as_ref(),
             effects: admission.is_some().then_some(&cell_effects),
             denied: admission.is_some().then_some(&denied_operations),
+            evidence_id,
         },
     );
 
@@ -398,6 +493,25 @@ async fn handle_request(
     .await;
 
     call.respond(final_result);
+}
+
+/// Classify a dispatched Component call for the evidence record (#112
+/// criterion 5). A denial and a failure are both recorded; only their outcome
+/// label differs, so the population a permission system is designed from
+/// includes every refusal.
+fn evidence_outcome_for(result: &Result<Value, CepError>) -> EvidenceOutcome {
+    match result {
+        Ok(_) => EvidenceOutcome::Completed,
+        Err(err) if err.code == CepErrorCode::CallCancelled => EvidenceOutcome::Cancelled,
+        // Admission refuses before the runtime is entered and reuses
+        // `CapabilityNotGranted` (#28 D10), which is also the code a
+        // per-operation refusal never produces (it denies the operation, not
+        // the call). So this code identifies the admission-denied population.
+        Err(err) if err.code == CepErrorCode::CapabilityNotGranted => {
+            EvidenceOutcome::AdmissionDenied
+        }
+        Err(_) => EvidenceOutcome::Failed,
+    }
 }
 
 /// Whether `method` resolves to a Component Tool in the closed catalog.
@@ -636,6 +750,15 @@ fn merge_scaffold_success_metadata(
     serde_json::to_string(&merged).ok()
 }
 
+/// One-line audit summary for a successful call.
+///
+/// Unlike [`compact_success_metadata`], this IS reached for a Component call, so
+/// the `session.todo_write` arm below is live: the row's `result_or_error` reads
+/// `success:todo_count=N`. Deriving a summary from the method name in the native
+/// transport is migration residue — #34 moves it behind the descriptor — but it
+/// is the current behavior for every method, native or Component, and dropping
+/// the arm would silently degrade the migrated Tool's audit summary to
+/// `method=session.todo_write`.
 fn compact_success_summary(method: &str, value: &Value) -> String {
     match method {
         "session.todo_write" => {
@@ -651,15 +774,11 @@ fn compact_success_summary(method: &str, value: &Value) -> String {
 }
 
 fn compact_success_metadata(method: &str, value: &Value) -> Option<String> {
+    // No `session.todo_write` arm: it is a Component Tool since #29, and a
+    // Component call always finalizes with durable evidence metadata, so the
+    // `.or_else(compact_success_metadata)` fallback that reaches this function
+    // cannot fire for it. An arm here would be dead code that reads as live.
     match method {
-        "session.todo_write" => {
-            let count = value
-                .get("todos")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            Some(format!(r#"{{"outcome":"todo_write","op_count":{count}}}"#))
-        }
         "fetch.web" => {
             let response_size = value
                 .get("body")
@@ -746,4 +865,63 @@ async fn emit_cep_call_finished(
         obj.insert("error_code".to_string(), Value::String(code.to_string()));
     }
     events.emit("cep.call_finished", payload).await;
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+
+    /// The shipped configuration is collision-free: #29 deleted the native
+    /// `session.todo_write` in the same change that embedded its Component. This
+    /// is the invariant the check defends, asserted against the real catalog.
+    #[test]
+    fn the_shipped_catalogs_are_disjoint() {
+        let native: Vec<&str> = lancet_catalog::catalog()
+            .iter()
+            .map(|descriptor| descriptor.name)
+            .collect();
+        assert!(
+            !native.contains(&"session.todo_write"),
+            "the migrated method must not be a native catalog method: {native:?}"
+        );
+        component_native_collisions(native.iter().copied(), &["session.todo_write"])
+            .expect("the shipped catalogs must not collide");
+    }
+
+    /// A collision fails closed, and the error names the offending method so an
+    /// operator can act on it.
+    #[test]
+    fn a_colliding_name_is_refused_and_named() {
+        let err = component_native_collisions(
+            ["observe.workspace", "fetch.web"],
+            &["fetch.web", "session.todo_write"],
+        )
+        .expect_err("a name in both vocabularies must fail the run closed");
+        assert!(
+            err.message.contains("fetch.web"),
+            "the error must name the colliding method: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("observe.workspace"),
+            "a non-colliding method must not be reported: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("dual dispatch"),
+            "the error must state why this is refused: {}",
+            err.message
+        );
+    }
+
+    /// An empty Component catalog collides with nothing — the pre-#29 state, and
+    /// the state of any runtime built without a Component runtime at all.
+    #[test]
+    fn an_empty_component_catalog_never_collides() {
+        let native: Vec<&str> = lancet_catalog::catalog()
+            .iter()
+            .map(|descriptor| descriptor.name)
+            .collect();
+        component_native_collisions(native, &[]).expect("empty catalog cannot collide");
+    }
 }

@@ -3,14 +3,6 @@
 
 //! Invocation facts and session-state operation types for CEP policy resolution.
 
-// ── Session state operation ─────────────────────────────────────────────
-
-/// Identifies the session-state operation being performed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SessionStateOperation {
-    TodoWrite,
-}
-
 // ── Invocation facts ────────────────────────────────────────────────────
 
 /// Concrete invocation facts for policy resolution.
@@ -33,6 +25,4 @@ pub struct InvocationFacts {
     pub env_keys: Vec<String>,
     /// URL host (for FetchUrl).
     pub host: Option<String>,
-    /// Session-state operation kind (for MutateSessionState).
-    pub session_state_operation: Option<SessionStateOperation>,
 }

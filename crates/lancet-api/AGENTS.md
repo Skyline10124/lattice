@@ -99,8 +99,10 @@ but delegates concrete composition to `lancet-runtime`.
   into the LLM tool definitions projection (D.4).
   `LancetServer::spawn` composes from embedded inventory and delegates to
   `pub(crate) spawn_composed`; there is no public path to inject Component
-  bytes, paths, or handlers. Production builds have zero Component Tools
-  until #29–#32 (Codeberg #7–#10).
+  bytes, paths, or handlers. Since #29 a production build embeds one Component
+  Tool (`session.todo_write`); #30–#32 add the remaining four. `build` also
+  refuses a run in which one method name resolves to both a Component and a
+  native catalog method (#28 design §11).
 - FIXED #60 (Codeberg #38): `ServerRunConfig.execution` and the
   `ExecutionRouting`/`UpperContext`/`NullExecutionBackend` re-exports are gone.
   The native server constructs the one concrete Local Workspace from

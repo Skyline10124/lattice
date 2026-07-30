@@ -13,7 +13,6 @@ use super::support::{
 use lancet_authority::NetworkPolicyConfig;
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::methods::external::FetchParams;
-use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
     CreateParams, EditOperation, EditParams, GrepParams, ObserveWorkspaceParams, ReadFileParams,
 };
@@ -175,28 +174,6 @@ fn fetch_effect_contract_positive() {
     });
 }
 
-proptest! {
-    #[test]
-    fn todo_write_effect_contract_positive(content in "[a-zA-Z]{1,32}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let authority = session_region();
-        let params = TodoWriteParams {
-            todos: vec![TodoItem {
-                content,
-                status: TodoStatus::Pending,
-            }],
-        };
-        let outcome = rt().block_on(effect_contract_harness::<TodoWrite>(
-            &registry, params, ctx, authority.clone(),
-        ));
-        outcome.dispatch_result.as_ref().expect("legal dispatch must succeed");
-        assert_positive(&outcome, &authority);
-    }
-}
-
 // ── Negative property tests ────────────────────────────────────────────
 
 proptest! {
@@ -323,27 +300,6 @@ proptest! {
             outcome.dispatch_result.is_err(),
             "disallowed host must be denied at preflight"
         );
-        assert_negative_no_backend_effects(&outcome);
-    }
-}
-
-proptest! {
-    #[test]
-    fn todo_write_effect_contract_negative(content in "[a-zA-Z]{1,16}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let params = TodoWriteParams {
-            todos: vec![TodoItem {
-                content,
-                status: TodoStatus::Pending,
-            }],
-        };
-        let authority = AuthorizedEffectRegion::empty();
-        let outcome = rt().block_on(effect_contract_harness::<TodoWrite>(
-            &registry, params, ctx, authority,
-        ));
         assert_negative_no_backend_effects(&outcome);
     }
 }

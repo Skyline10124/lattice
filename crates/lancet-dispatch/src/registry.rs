@@ -228,9 +228,8 @@ pub fn wire_code_for_error(err: &CepError) -> i32 {
 mod tests {
     use super::*;
     use lancet_catalog::CepMethod;
-    use lancet_catalog::methods::TodoWrite;
-    use lancet_catalog::methods::session::{
-        TodoItem, TodoStatus, TodoWriteParams, TodoWriteResult,
+    use lancet_catalog::test_method::{
+        TestEcho, TestEchoItem, TestEchoParams, TestEchoResult, TestEchoStatus,
     };
     use lancet_protocol::error::jsonrpc;
 
@@ -242,12 +241,12 @@ mod tests {
     fn sample_registry() -> MethodRegistry<TestContext> {
         let mut registry = MethodRegistry::new();
         registry
-            .register_method::<TodoWrite, _, _>(|params, ctx: TestContext| async move {
+            .register_method::<TestEcho, _, _>(|params, ctx: TestContext| async move {
                 ctx.events
                     .emit("test.todo", serde_json::json!({"seen": true}))
                     .await;
-                Ok(TodoWriteResult {
-                    todos: params.todos,
+                Ok(TestEchoResult {
+                    items: params.items,
                 })
             })
             .unwrap();
@@ -262,20 +261,20 @@ mod tests {
             events: EventSink::new(event_tx, 1),
         };
 
-        let params = serde_json::to_value(TodoWriteParams {
-            todos: vec![TodoItem {
+        let params = serde_json::to_value(TestEchoParams {
+            items: vec![TestEchoItem {
                 content: "test".into(),
-                status: TodoStatus::Pending,
+                status: TestEchoStatus::Pending,
             }],
         })
         .unwrap();
 
         let result = registry
-            .dispatch(TodoWrite::NAME, params, ctx)
+            .dispatch(TestEcho::NAME, params, ctx)
             .await
             .unwrap();
-        let parsed: TodoWriteResult = serde_json::from_value(result).unwrap();
-        assert_eq!(parsed.todos.len(), 1);
+        let parsed: TestEchoResult = serde_json::from_value(result).unwrap();
+        assert_eq!(parsed.items.len(), 1);
     }
 
     #[tokio::test]
@@ -287,7 +286,7 @@ mod tests {
         };
 
         let err = registry
-            .dispatch(TodoWrite::NAME, serde_json::json!({"bad": true}), ctx)
+            .dispatch(TestEcho::NAME, serde_json::json!({"bad": true}), ctx)
             .await
             .unwrap_err();
         assert_eq!(wire_code_for_error(&err), jsonrpc::INVALID_PARAMS);
@@ -312,16 +311,16 @@ mod tests {
     fn registry_duplicate_registration_returns_error() {
         let mut registry = MethodRegistry::<TestContext>::new();
         registry
-            .register_method::<TodoWrite, _, _>(|params, _ctx| async move {
-                Ok(TodoWriteResult {
-                    todos: params.todos,
+            .register_method::<TestEcho, _, _>(|params, _ctx| async move {
+                Ok(TestEchoResult {
+                    items: params.items,
                 })
             })
             .unwrap();
         let err = registry
-            .register_method::<TodoWrite, _, _>(|params, _ctx| async move {
-                Ok(TodoWriteResult {
-                    todos: params.todos,
+            .register_method::<TestEcho, _, _>(|params, _ctx| async move {
+                Ok(TestEchoResult {
+                    items: params.items,
                 })
             })
             .unwrap_err();

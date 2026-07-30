@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::runtime_fixtures::{
     RuntimeEffectFixture, create_runtime_effects, edit_runtime_effects, fetch_runtime_effects,
-    observe_workspace_runtime_effects, todo_write_runtime_effects,
+    observe_workspace_runtime_effects,
 };
 use lancet_authority::effect::ledger::EffectSource;
 use lancet_catalog::CepMethod;
@@ -21,10 +21,9 @@ fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
     fixtures.insert(Create::NAME, create_runtime_effects as RuntimeEffectFixture);
     fixtures.insert(Edit::NAME, edit_runtime_effects as RuntimeEffectFixture);
     fixtures.insert(Fetch::NAME, fetch_runtime_effects as RuntimeEffectFixture);
-    fixtures.insert(
-        TodoWrite::NAME,
-        todo_write_runtime_effects as RuntimeEffectFixture,
-    );
+    // `session.todo_write` has no fixture: #29 migrated it to a Component Tool,
+    // so it is no longer a native catalog method and the coverage assertion
+    // below (fixtures == catalog, exactly) is what keeps this in step.
     fixtures
 }
 

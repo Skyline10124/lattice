@@ -26,7 +26,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
+use lancet_catalog::methods::workspace::{Create, CreateParams, CreateResult};
 use lancet_native::{
     CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
@@ -40,13 +40,27 @@ use tempfile::TempDir;
 
 // ── Shared overreach handler ───────────────────────────────────────────
 //
-// A custom `session.todo_write` handler that:
+// A custom `mutate.create` handler that:
 // 1. Sets an EMPTY authorized region (scope: nothing allowed).
 // 2. Records a `WorkspaceMutation` effect at a path outside the empty region.
 // 3. Returns Ok — so the effect checker is the only thing that can catch the overreach.
 //
-// Base envelope grants `MutateSessionState` (base source is allowed for session_state),
-// so the policy check passes. The overreach is in the effect region check.
+// The handler must be a *catalog* method: the effect checker reads the method's
+// declared `EffectDecl` from `lancet_catalog::catalog()`, so a synthetic
+// non-catalog fixture would skip the check entirely and every assertion below
+// would pass vacuously. (`session.todo_write` played this role until #29 made it
+// a Component Tool.)
+
+/// Params for the overreach handler. The handler never touches the filesystem —
+/// it records a fabricated out-of-region effect and returns Ok — so the path is
+/// only a well-formed value.
+fn create_params() -> CreateParams {
+    CreateParams {
+        path: "overreach.txt".into(),
+        content: String::new(),
+        create_parents: false,
+    }
+}
 
 fn overreach_todo_handler() -> MethodRegistry {
     use lancet_authority::effect::{
@@ -57,7 +71,7 @@ fn overreach_todo_handler() -> MethodRegistry {
 
     let mut registry = MethodRegistry::new();
     registry
-        .register_method::<TodoWrite, _, _>(|params: TodoWriteParams, ctx| async move {
+        .register_method::<Create, _, _>(|_params: CreateParams, ctx| async move {
             // Intentionally set an empty authorized region (no paths allowed).
             ctx.authorized_region.set(AuthorizedEffectRegion::empty());
             // Record a WorkspaceMutation effect OUTSIDE the empty authorized region.
@@ -67,8 +81,10 @@ fn overreach_todo_handler() -> MethodRegistry {
                 required_capability: RequiredCapability::WritePath,
                 source: EffectSource::HandlerBackend,
             });
-            Ok(TodoWriteResult {
-                todos: params.todos,
+            Ok(CreateResult {
+                path: "overreach.txt".into(),
+                bytes_written: 0,
+                created_dirs: Vec::new(),
             })
         })
         .expect("overreach handler registration");
@@ -106,7 +122,7 @@ async fn cep_mode_enforce_effect_overreach_denied() {
         tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
 
     let err = client
-        .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+        .call::<Create>(create_params())
         .await
         .expect_err("enforce mode must reject overreach as EffectViolation");
 
@@ -151,10 +167,13 @@ async fn cep_mode_warn_effect_overreach_ok_with_audit_warning() {
 
     // In Warn mode, the dispatch succeeds even though the effect overreached.
     let result = client
-        .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+        .call::<Create>(create_params())
         .await
         .expect("warn mode must return Ok for overreach");
-    assert!(result.todos.is_empty(), "warn result must pass through");
+    assert_eq!(
+        result.bytes_written, 0,
+        "warn result must pass through unchanged"
+    );
 
     drop(client);
     server_task.abort();
@@ -205,7 +224,7 @@ async fn effect_deny_rejects_in_warn_mode() {
         tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
 
     let err = client
-        .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+        .call::<Create>(create_params())
         .await
         .expect_err("effect-kind deny must hard reject even in Warn mode");
 
@@ -228,10 +247,10 @@ async fn cep_mode_off_effect_overreach_passes() {
 
     // Off skips the effect-region check — overreach handler succeeds.
     let result = client
-        .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+        .call::<Create>(create_params())
         .await
         .expect("off mode must pass through overreach");
-    assert!(result.todos.is_empty());
+    assert_eq!(result.bytes_written, 0);
 
     drop(client);
     server_task.abort();
@@ -247,7 +266,7 @@ async fn effect_deny_rejects_in_off_mode() {
         tokio::spawn(async move { server.run_native(registry, config).await.unwrap() });
 
     let err = client
-        .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+        .call::<Create>(create_params())
         .await
         .expect_err("effect-kind deny must hard reject even in Off mode");
 

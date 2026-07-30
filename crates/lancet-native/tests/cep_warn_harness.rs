@@ -33,7 +33,6 @@ use lancet_authority::effect::{
 };
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
-use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
     Create, CreateParams, CreateResult, Edit, EditOperation, EditParams, EditResult,
     ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileParams,
@@ -311,9 +310,19 @@ async fn generate_warn_report() -> String {
     });
     tokio::task::yield_now().await;
 
-    // session.todo_write
+    // observe.workspace: a legal read on the canonical project root. Before #29
+    // this leg called `session.todo_write`, which no native registry serves any
+    // more — the warn-mode success leg needs a *native* method, and a Component
+    // Tool would prove nothing about the native policy lifecycle.
     let todo_ok = success_client
-        .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+        .call::<lancet_catalog::methods::workspace::ObserveWorkspace>(
+            lancet_catalog::methods::workspace::ObserveWorkspaceParams::ListDirectory(
+                lancet_catalog::methods::workspace::ListDirectoryParams {
+                    path: ".".into(),
+                    limit: None,
+                },
+            ),
+        )
         .await
         .is_ok();
 
@@ -322,7 +331,7 @@ async fn generate_warn_report() -> String {
     // Keep ws_dir alive until after server task
     drop(ws_dir);
 
-    let success_results = [("session.todo_write", todo_ok)];
+    let success_results = [("observe.workspace", todo_ok)];
 
     // ── Count leaks ──────────────────────────────────────────────────────
     let leak_count = overreach_results.iter().filter(|r| !r.leaked).count();

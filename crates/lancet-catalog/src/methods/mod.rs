@@ -6,11 +6,9 @@
 pub mod external;
 #[cfg(feature = "inspect-scaffold")]
 pub mod scaffold;
-pub mod session;
 pub mod workspace;
 
 pub use external::Fetch;
-pub use session::TodoWrite;
 pub use workspace::{
     Create, Edit, EditOperation, EditParams, EditResult, FindFilesParams, FindFilesResult,
     GrepParams, GrepResult, ListDirectoryParams, ListDirectoryResult, ObserveWorkspace,
@@ -23,7 +21,6 @@ pub use scaffold::{Inspect, Navigate, ScaffoldStubResult};
 mod sealed {
     use super::{
         external::Fetch,
-        session::TodoWrite,
         workspace::{Create, Edit, ObserveWorkspace},
     };
     use crate::method::sealed::Sealed;
@@ -32,7 +29,6 @@ mod sealed {
     impl Sealed for Create {}
     impl Sealed for Edit {}
     impl Sealed for Fetch {}
-    impl Sealed for TodoWrite {}
 }
 
 #[cfg(test)]
@@ -47,7 +43,6 @@ mod tests {
             Create::NAME,
             Edit::NAME,
             Fetch::NAME,
-            TodoWrite::NAME,
         ];
         for name in names {
             assert!(name.contains('.'), "expected dotted name: {name}");
@@ -62,7 +57,6 @@ mod tests {
             Create::NAME,
             Edit::NAME,
             Fetch::NAME,
-            TodoWrite::NAME,
         ];
         for name in names {
             assert_ne!(name, "session/create");
