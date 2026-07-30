@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::ProfileError;
-use crate::schema::AgentProfile;
+use crate::schema::{AgentProfile, TYPED_LANCET_SUB_TABLES};
 
 /// A loaded and validated agent profile with resolved system prompt.
 #[derive(Debug, Clone, PartialEq)]
@@ -178,23 +178,6 @@ fn check_forbidden_sections(path: &Path, content: &str) -> Result<(), ProfileErr
     Ok(())
 }
 
-/// The `[lancet.*]` sub-tables this schema types.
-///
-/// Anything else under `[lancet]` lands in `LancetSection::extensions` by
-/// design, so a future sub-table does not break older builds. A *case variant*
-/// of one of these names is not a future sub-table though — it is a typo that
-/// `extensions` would swallow, silently dropping settings the operator believes
-/// are in effect. `check_lancet_sub_tables` rejects those.
-const TYPED_LANCET_SUB_TABLES: &[&str] = &[
-    "project_root",
-    "observation",
-    "network",
-    "policy",
-    "effects",
-    "capabilities",
-    "workspace",
-];
-
 /// Retired `[lancet.<section>].<key>` entries: section, key, replacement text.
 const RETIRED_LANCET_KEYS: &[(&str, &str, &str)] = &[(
     "observation",
@@ -239,9 +222,12 @@ fn check_retired_keys(
 
 /// Reject a case variant of a typed `[lancet.*]` sub-table.
 ///
-/// Without this, `[lancet.Observation]` deserializes into `extensions` and every
-/// key inside it — including the retired ones this module rejects and the limits
-/// that are still live — is dropped without a word (#121).
+/// Anything genuinely unknown under `[lancet]` lands in
+/// `LancetSection::extensions` by design, so a future sub-table does not break
+/// older builds. A case variant of a typed name is not a future sub-table
+/// though: without this check `[lancet.Observation]` deserializes into
+/// `extensions` and every key inside it — including the retired ones above and
+/// the limits that are still live — is dropped without a word (#121).
 fn check_lancet_sub_table_spelling(
     path: &Path,
     lancet: &toml::map::Map<String, toml::Value>,

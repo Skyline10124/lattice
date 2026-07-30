@@ -44,11 +44,26 @@ impl AgentProfile {
     }
 }
 
+/// The `[lancet.*]` sub-tables this schema types, in declaration order.
+///
+/// Lives next to [`LancetSection`] because it must match that struct's fields:
+/// the loader uses it to reject a *case variant* of a typed name, which
+/// `extensions` would otherwise swallow along with everything inside it.
+/// `typed_lancet_sub_tables_match_the_struct_fields` fails if the two drift.
+pub const TYPED_LANCET_SUB_TABLES: &[&str] = &[
+    "project_root",
+    "observation",
+    "network",
+    "policy",
+    "effects",
+    "capabilities",
+    "workspace",
+];
+
 /// LANCET `[lancet]` profile section with typed policy sub-tables.
 ///
-/// Known sub-tables (`project_root`, `observation`, `network`, `policy`,
-/// `effects`, `capabilities`, `workspace`) deserialize into typed fields and
-/// are therefore strictly validated. Other future sub-tables remain in
+/// Sub-tables named in [`TYPED_LANCET_SUB_TABLES`] deserialize into typed fields
+/// and are therefore strictly validated. Other future sub-tables remain in
 /// `extensions`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LancetSection {
@@ -903,6 +918,47 @@ max_web_response_bytes = 1024
         assert!(serialized.contains("mode = \"warn\""), "got: {serialized}");
         assert!(serialized.contains("[future_table]"), "got: {serialized}");
         assert!(!serialized.contains("extensions"), "got: {serialized}");
+    }
+
+    /// `TYPED_LANCET_SUB_TABLES` drives the loader's case-variant rejection, so a
+    /// field added to `LancetSection` without updating it would send that
+    /// sub-table's case variants back to being silently swallowed by
+    /// `extensions` (#121). Derived from serialization rather than restated, so
+    /// the two cannot drift.
+    #[test]
+    fn typed_lancet_sub_tables_match_the_struct_fields() {
+        let section = LancetSection {
+            mode: CepMode::Warn,
+            project_root: Some(LancetProjectRootSection::default()),
+            observation: Some(LancetObservationSection::default()),
+            network: Some(LancetNetworkSection::default()),
+            policy: Some(LancetPolicySection::default()),
+            effects: Some(LancetEffectsSection::default()),
+            capabilities: Some(LancetCapabilitiesSection::default()),
+            workspace: Some(LancetWorkspacePolicySection::default()),
+            extensions: BTreeMap::new(),
+        };
+        let value = toml::Value::try_from(&section).unwrap();
+        let mut serialized_tables = value
+            .as_table()
+            .unwrap()
+            .iter()
+            .filter(|(_, value)| value.is_table())
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        serialized_tables.sort();
+
+        let mut declared = TYPED_LANCET_SUB_TABLES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        declared.sort();
+
+        assert_eq!(
+            serialized_tables, declared,
+            "TYPED_LANCET_SUB_TABLES must list exactly the typed sub-table fields \
+             of LancetSection"
+        );
     }
 
     // ── Tools section defaults ────────────────────────────────────────

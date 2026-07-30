@@ -68,7 +68,7 @@ Severity: #120 MEDIUM（资源耗尽面 + 平行写路径契约分叉）、#121 
 **Verification:**
 - `cargo fmt --all` — 已应用。
 - `cargo clippy --workspace --all-targets -- -D warnings` — 通过，无告警。
-- `cargo test --workspace` — **1494 passed / 0 failed**（exit 0）。
+- `cargo test --workspace` — **1495 passed / 0 failed**（exit 0）。
 - 新增测试：`network.rs` 6 个（规范化幂等、前导点匹配 apex+子域、非规范形式、空/纯点
   fail-closed、与 URL 校验一致、子域放行）；`effect/region.rs` 4 个（含跨层一致性断言）；
   `policy/default.rs` 6 个（hook 与 region 一致、region 存规范化形式、外部 `[budget]`
@@ -96,6 +96,11 @@ Severity: #120 MEDIUM（资源耗尽面 + 平行写路径契约分叉）、#121 
   前向兼容语义（两条测试各自锁定）；(3) `ResolvedNetwork` 的 `url`/`port`/`scheme`/
   `is_localhost`/`is_private_ip` 五个字段无任何读取点，属 #121 同类残留，已缩到唯一被读
   的 `host`，这些判定归 `validate_fetch_url` 单独拥有（它才解析 DNS）。
+- 第三轮裁决 agent 指出上一轮修正自身引入了一处同类同步点：`TYPED_LANCET_SUB_TABLES`
+  是 `LancetSection` typed 子表清单的第二份手工拷贝，删掉其中一项后测试全绿（即将来加
+  typed 子表忘记同步时，该子表的大小写变体会重新回到静默丢弃）。现把该常量移到
+  `schema.rs` 紧邻 `LancetSection`，并加 `typed_lancet_sub_tables_match_the_struct_fields`
+  从序列化结果反推清单、断言两者一致（变异验证：删一项即失败）。
 
 **Changed files:**
 `crates/lancet-authority/{AGENTS.md,src/effect/region.rs,src/policy/{budget,default,mod,network,observation,resolved}.rs}`,
