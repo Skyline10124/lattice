@@ -10,6 +10,9 @@
 //! - `generated/tool-host.wit` — the WIT world the guest Component targets.
 //! - `generated/descriptor.json` — the canonical host `ToolDescriptor`.
 //! - `generated/llm-projection.json` — the LLM-facing tool definition.
+//! - `generated/render.json` — the presentation-intent projection, emitted only
+//!   when the manifest declares a `[render]` section. It is deliberately outside
+//!   the descriptor identity chain (see [`render`]).
 //! - `generated/registration.rs` — the `inventory` registration (name +
 //!   `include_bytes!` of descriptor + component bytes; **cannot self-approve**).
 //! - `generated/expected-identity.json` — the trusted-host composition
@@ -30,6 +33,10 @@ use lancet_protocol::cell::{
 use serde::Deserialize;
 
 use crate::repo_root;
+
+pub(crate) mod render;
+
+use render::{RenderSchemas, RenderSection};
 
 #[derive(Args, Debug)]
 pub struct ToolCodegenArgs {
@@ -71,7 +78,8 @@ fn run_inner(check: bool) -> anyhow::Result<()> {
         descriptor
             .validate()
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let out = render_outputs(&descriptor);
+        let out = render_outputs(&descriptor, &m)
+            .with_context(|| format!("manifest {}", manifest_path.display()))?;
         write_or_check(&manifest_path, &out, check)?;
         if m.tool.distribution == Distribution::Builtin {
             builtins.push(BuiltinTool {
@@ -110,6 +118,11 @@ struct Manifest {
     #[serde(default)]
     capabilities: Vec<CapabilitySection>,
     artifact: ArtifactSection,
+    /// Presentation intent. Optional: a Tool without it is still renderable,
+    /// and it never reaches `lower_manifest`, so it cannot affect the
+    /// descriptor identity chain.
+    #[serde(default)]
+    render: Option<RenderSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,16 +265,39 @@ struct Outputs {
     llm_projection: String,
     registration_rs: String,
     identity_json: String,
+    /// `Some` only when the manifest declares `[render]`. `None` means the file
+    /// must **not** exist, which the write path enforces by deleting a stale one
+    /// and `--check` enforces by failing on it.
+    render_json: Option<String>,
 }
 
-fn render_outputs(descriptor: &ToolDescriptor) -> Outputs {
-    Outputs {
+/// Render every artifact. The `[render]` section is validated against the
+/// manifest's own schemas here rather than in `lower_manifest`, keeping it off
+/// the descriptor path entirely: `descriptor` is already built and is only read.
+fn render_outputs(descriptor: &ToolDescriptor, m: &Manifest) -> anyhow::Result<Outputs> {
+    let render_json = match &m.render {
+        Some(section) => {
+            let schemas = RenderSchemas {
+                params: &descriptor.params_schema,
+                result: &descriptor.result_schema,
+            };
+            render::validate_render(section, &schemas)?;
+            Some(render::render_projection(
+                &descriptor.name,
+                section,
+                &schemas,
+            )?)
+        }
+        None => None,
+    };
+    Ok(Outputs {
         wit: render_wit(descriptor),
         descriptor_json: render_canonical_descriptor_json(descriptor),
         llm_projection: render_llm_tool_definition(descriptor),
         registration_rs: render_inventory_registration(descriptor),
         identity_json: render_expected_identity(descriptor),
-    }
+        render_json,
+    })
 }
 
 /// B.2 WIT world. The no-op imports only the authority-free `host-control`
@@ -589,26 +625,55 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 // Write / check
 // ---------------------------------------------------------------------------
 
+/// Every artifact filename this generator owns, paired with the content it must
+/// have — or `None` when the artifact must not exist. A conditional artifact
+/// needs the absent case to be part of the gate: a check loop that only compares
+/// files it expects to *find* cannot see an orphan left behind when a manifest
+/// drops its `[render]` section, and that orphan would keep feeding annotations
+/// the manifest no longer declares.
+fn expected_files(out: &Outputs) -> Vec<(&'static str, Option<&str>)> {
+    vec![
+        ("tool-host.wit", Some(out.wit.as_str())),
+        ("descriptor.json", Some(out.descriptor_json.as_str())),
+        ("llm-projection.json", Some(out.llm_projection.as_str())),
+        ("registration.rs", Some(out.registration_rs.as_str())),
+        ("expected-identity.json", Some(out.identity_json.as_str())),
+        ("render.json", out.render_json.as_deref()),
+    ]
+}
+
 fn write_or_check(manifest_path: &Path, out: &Outputs, check: bool) -> anyhow::Result<()> {
     let gen_dir = generated_dir(manifest_path);
-    let files: [(&str, &str); 5] = [
-        ("tool-host.wit", &out.wit),
-        ("descriptor.json", &out.descriptor_json),
-        ("llm-projection.json", &out.llm_projection),
-        ("registration.rs", &out.registration_rs),
-        ("expected-identity.json", &out.identity_json),
-    ];
+    let files = expected_files(out);
 
     if check {
         for (name, content) in files {
             let path = gen_dir.join(name);
-            let existing = std::fs::read_to_string(&path).with_context(|| {
-                format!(
-                    "--check: {} missing; run `cargo xtask tool-codegen`",
-                    path.display()
-                )
+            let Some(content) = content else {
+                if path.exists() {
+                    bail!(
+                        "stale {}: the manifest declares no `[render]` section; run \
+                         `cargo xtask tool-codegen` and commit the deletion",
+                        path.display()
+                    );
+                }
+                continue;
+            };
+            // Only ENOENT means "not generated yet"; a permission or encoding
+            // failure would otherwise be reported as absence and send the author
+            // to re-run codegen, which changes nothing.
+            let existing = std::fs::read_to_string(&path).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    anyhow::anyhow!(
+                        "--check: {} missing; run `cargo xtask tool-codegen`",
+                        path.display()
+                    )
+                } else {
+                    anyhow::Error::new(e)
+                        .context(format!("--check: cannot read {}", path.display()))
+                }
             })?;
-            if existing != *content {
+            if existing != content {
                 bail!(
                     "codegen drift for {}: run `cargo xtask tool-codegen` and commit the result",
                     path.display()
@@ -620,7 +685,20 @@ fn write_or_check(manifest_path: &Path, out: &Outputs, check: bool) -> anyhow::R
 
     std::fs::create_dir_all(&gen_dir)?;
     for (name, content) in files {
-        std::fs::write(gen_dir.join(name), content)?;
+        let path = gen_dir.join(name);
+        match content {
+            Some(content) => std::fs::write(&path, content)?,
+            // Removing an artifact that must no longer exist is part of
+            // generating: leaving it would make the committed tree disagree with
+            // the manifest while every gate still passed.
+            None => match std::fs::remove_file(&path) {
+                Ok(()) => println!("removed stale {}", path.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| format!("failed to remove {}", path.display()));
+                }
+            },
+        }
     }
     println!("generated artifacts for {}", manifest_path.display());
     Ok(())
@@ -684,13 +762,14 @@ toolchain = "rustc-1.96.0"
         // Determinism: two renders of the same manifest produce identical bytes.
         let m = noop_manifest();
         let d = lower_manifest(&m).unwrap();
-        let a = render_outputs(&d);
-        let b = render_outputs(&d);
+        let a = render_outputs(&d, &m).unwrap();
+        let b = render_outputs(&d, &m).unwrap();
         assert_eq!(a.wit, b.wit);
         assert_eq!(a.descriptor_json, b.descriptor_json);
         assert_eq!(a.llm_projection, b.llm_projection);
         assert_eq!(a.registration_rs, b.registration_rs);
         assert_eq!(a.identity_json, b.identity_json);
+        assert_eq!(a.render_json, b.render_json);
     }
 
     #[test]
@@ -951,5 +1030,227 @@ toolchain = "t"
         assert!(id.contains("\"expected-imports\""));
         assert!(id.contains("host-control"));
         assert!(!id.contains("workspace"));
+    }
+
+    // -----------------------------------------------------------------------
+    // `[render]` wiring (#113). Format-level tests live in
+    // `tool_codegen/render_tests.rs`; these cover the generator seam.
+    // -----------------------------------------------------------------------
+
+    /// A manifest fixture whose schemas are rich enough to annotate, in two
+    /// variants that differ *only* by the presence of `[render]`.
+    fn manifest_pair() -> (Manifest, Manifest) {
+        const BASE: &str = r#"
+[tool]
+name = "noop.echo"
+version = "0.1.0"
+description = "Tracer no-op."
+abi-version = 1
+distribution = "fixture"
+
+[params]
+schema = '{"type":"object","properties":{"message":{"type":"string"}}}'
+
+[result]
+schema = '{"type":"object","properties":{"echoed":{"type":"string"}}}'
+
+[[scopes]]
+name = "session"
+trust = "in"
+channel = "session"
+
+[[capabilities]]
+name = "session.result"
+cell = "alloc:none:session"
+
+[artifact]
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+toolchain = "rustc-1.96.0"
+"#;
+        const RENDER: &str = r#"
+[[render.annotations]]
+role = "summary"
+path = "result.echoed"
+"#;
+        (
+            toml::from_str(BASE).expect("base manifest parses"),
+            toml::from_str(&format!("{BASE}{RENDER}")).expect("render manifest parses"),
+        )
+    }
+
+    /// AC 3, the load-bearing one: adding `[render]` must leave every artifact
+    /// on the identity chain byte-identical. Comparing the artifacts themselves
+    /// (not a derived claim about them) is what makes this a proof — the digest
+    /// is recomputed from `descriptor.json`, so an equal descriptor is an equal
+    /// `descriptor-sha256` by construction, and the assertion below pins that too.
+    #[test]
+    fn render_section_does_not_perturb_the_identity_chain() {
+        let (plain, with_render) = manifest_pair();
+        let a = render_outputs(&lower_manifest(&plain).unwrap(), &plain).unwrap();
+        let b = render_outputs(&lower_manifest(&with_render).unwrap(), &with_render).unwrap();
+
+        assert_eq!(
+            a.descriptor_json, b.descriptor_json,
+            "`[render]` must not change descriptor.json"
+        );
+        assert_eq!(
+            sha256_hex(a.descriptor_json.as_bytes()),
+            sha256_hex(b.descriptor_json.as_bytes()),
+            "`[render]` must not change descriptor-sha256"
+        );
+        assert_eq!(
+            a.identity_json, b.identity_json,
+            "`[render]` must not change expected-identity.json"
+        );
+        assert_eq!(a.wit, b.wit, "`[render]` must not change the WIT world");
+        assert_eq!(
+            a.registration_rs, b.registration_rs,
+            "`[render]` must not change registration.rs"
+        );
+        assert_eq!(
+            a.llm_projection, b.llm_projection,
+            "`[render]` must not change the LLM projection"
+        );
+
+        // The Component bytes are produced by `tool-build` from the guest crate
+        // and the WIT world; neither reads `[render]`. An unchanged WIT world is
+        // the whole of that dependency, and the artifact digest travels inside
+        // the descriptor, which is asserted equal above.
+        assert!(
+            !a.descriptor_json.contains("render") && !a.identity_json.contains("render"),
+            "no render vocabulary may appear on the identity chain"
+        );
+
+        // And the projection itself only exists in the second variant.
+        assert!(a.render_json.is_none());
+        assert!(b.render_json.is_some());
+
+        // Comparing in-memory `Outputs` fields alone would not see a
+        // *filename-level* collision: if the render projection were ever routed
+        // to an identity artifact's filename, every assertion above would still
+        // hold while the on-disk descriptor was overwritten. So assert the
+        // property where it actually matters — on disk, through the real write
+        // path — and pin the artifact-name partition that makes it hold.
+        let names: Vec<&str> = expected_files(&b).iter().map(|(n, _)| *n).collect();
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "each generated artifact must own a distinct filename: {names:?}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest_path = tmp.path().join("manifest.toml");
+        std::fs::write(&manifest_path, "").unwrap();
+        let gen_dir = tmp.path().join("generated");
+
+        write_or_check(&manifest_path, &a, false).expect("write without [render]");
+        let plain_bytes: Vec<(String, Vec<u8>)> = read_generated(&gen_dir);
+        write_or_check(&manifest_path, &b, false).expect("write with [render]");
+        let render_bytes: Vec<(String, Vec<u8>)> = read_generated(&gen_dir);
+
+        for (name, bytes) in &plain_bytes {
+            let after = render_bytes
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, b)| b)
+                .unwrap_or_else(|| panic!("{name} disappeared when [render] was added"));
+            assert_eq!(
+                bytes, after,
+                "adding `[render]` changed {name} on disk; every pre-existing artifact must be \
+                 byte-identical"
+            );
+        }
+        // The only on-disk difference is the new projection.
+        let added: Vec<&String> = render_bytes
+            .iter()
+            .map(|(n, _)| n)
+            .filter(|n| !plain_bytes.iter().any(|(p, _)| p == *n))
+            .collect();
+        assert_eq!(added, vec!["render.json"], "only render.json may appear");
+    }
+
+    /// Every file in a `generated/` directory, sorted, as raw bytes.
+    fn read_generated(gen_dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(gen_dir)
+            .expect("generated dir exists")
+            .filter_map(Result::ok)
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).expect("artifact readable"),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// AC 5: absence is legal, not an error, and emits no file.
+    #[test]
+    fn manifest_without_render_is_legal_and_emits_no_projection() {
+        let (plain, _) = manifest_pair();
+        let out = render_outputs(&lower_manifest(&plain).unwrap(), &plain)
+            .expect("a manifest without [render] must generate cleanly");
+        assert!(out.render_json.is_none());
+        assert!(
+            expected_files(&out)
+                .iter()
+                .any(|(name, content)| *name == "render.json" && content.is_none()),
+            "render.json must be listed as expected-absent so the gate can see an orphan"
+        );
+    }
+
+    /// AC 2/5 interaction: the gate must fail on a `render.json` the manifest no
+    /// longer declares. Without this, deleting `[render]` leaves an orphan that
+    /// both `tool-codegen` and `cargo xtask ci` report as clean.
+    #[test]
+    fn check_fails_on_a_stale_render_projection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest_path = tmp.path().join("manifest.toml");
+        std::fs::write(&manifest_path, "").unwrap();
+        let gen_dir = tmp.path().join("generated");
+        std::fs::create_dir_all(&gen_dir).unwrap();
+
+        let (plain, with_render) = manifest_pair();
+        let with = render_outputs(&lower_manifest(&with_render).unwrap(), &with_render).unwrap();
+        write_or_check(&manifest_path, &with, false).expect("write with [render]");
+        assert!(gen_dir.join("render.json").is_file());
+
+        let without = render_outputs(&lower_manifest(&plain).unwrap(), &plain).unwrap();
+        let err = write_or_check(&manifest_path, &without, true)
+            .expect_err("--check must fail while a stale render.json exists");
+        assert!(
+            err.to_string().contains("stale") && err.to_string().contains("render.json"),
+            "error must name the stale artifact, got: {err}"
+        );
+
+        // The write path removes it, and only then does --check pass.
+        write_or_check(&manifest_path, &without, false).expect("write without [render]");
+        assert!(!gen_dir.join("render.json").exists());
+        write_or_check(&manifest_path, &without, true).expect("--check clean after removal");
+    }
+
+    /// The committed `tools/noop` manifest must carry the sample section (AC 6)
+    /// and its committed projection must be exactly what codegen produces.
+    #[test]
+    fn committed_noop_manifest_carries_a_render_sample() {
+        let root = repo_root::repo_root().unwrap();
+        let manifest_path = root.join("tools/noop/manifest.toml");
+        let m = parse_manifest(&manifest_path).expect("noop manifest parses");
+        assert!(
+            m.render.is_some(),
+            "tools/noop must carry a [render] section as the format sample"
+        );
+        let out = render_outputs(&lower_manifest(&m).unwrap(), &m).expect("noop renders");
+        let committed =
+            std::fs::read_to_string(root.join("tools/noop/generated/render.json")).unwrap();
+        assert_eq!(
+            committed,
+            out.render_json.expect("noop declares [render]"),
+            "tools/noop/generated/render.json is stale; run `cargo xtask tool-codegen`"
+        );
     }
 }
