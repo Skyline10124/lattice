@@ -42,7 +42,7 @@ use tempfile::TempDir;
 //
 // A custom `mutate.create` handler that:
 // 1. Sets an EMPTY authorized region (scope: nothing allowed).
-// 2. Records a `WorkspaceMutation` effect at a path outside the empty region.
+// 2. Records a `ExternalObservation` effect at a path outside the empty region.
 // 3. Returns Ok — so the effect checker is the only thing that can catch the overreach.
 //
 // The handler must be a *catalog* method: the effect checker reads the method's
@@ -50,6 +50,12 @@ use tempfile::TempDir;
 // non-catalog fixture would skip the check entirely and every assertion below
 // would pass vacuously. (`session.todo_write` played this role until #29 made it
 // a Component Tool.)
+//
+// The recorded kind is deliberately NOT the kind `mutate.create` declares
+// (`WorkspaceMutation`): the `effect_deny_rejects_in_*_mode` tests deny the
+// observed kind, and this mismatch is what keeps the pre-dispatch
+// declared-kind gate from intercepting those calls — see
+// `assert_post_dispatch_denial`.
 
 /// Params for the overreach handler. The handler never touches the filesystem —
 /// it records a fabricated out-of-region effect and returns Ok — so the path is
@@ -74,11 +80,11 @@ fn overreach_todo_handler() -> MethodRegistry {
         .register_method::<Create, _, _>(|_params: CreateParams, ctx| async move {
             // Intentionally set an empty authorized region (no paths allowed).
             ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-            // Record a WorkspaceMutation effect OUTSIDE the empty authorized region.
+            // Record a NetworkEgress effect OUTSIDE the empty authorized region.
             ctx.record_effect(ObservedEffect {
-                kind: ImpactKind::WorkspaceMutation,
+                kind: ImpactKind::ExternalObservation,
                 scope: ObservedScope::Path(PathBuf::from("/out/of/scope/overreach")),
-                required_capability: RequiredCapability::WritePath,
+                required_capability: RequiredCapability::FetchUrl,
                 source: EffectSource::HandlerBackend,
             });
             Ok(CreateResult {
@@ -190,12 +196,14 @@ async fn cep_mode_warn_effect_overreach_ok_with_audit_warning() {
 /// #71: these two tests are the regression cover for the **post-dispatch**
 /// observed-effect deny layer, not the pre-dispatch declared-kind gate. That
 /// separation is load-bearing and depends on a deliberate mismatch:
-/// `session.todo_write` *declares* `SessionStateMutation`, the policy denies
-/// `WorkspaceMutation`, and the synthetic handler *records* `WorkspaceMutation`
+/// `mutate.create` *declares* `WorkspaceMutation`, the policy denies
+/// `ExternalObservation`, and the synthetic handler *records* `ExternalObservation`
 /// at runtime. So the declared-kind gate cannot fire and only the effect
-/// ledger can catch this call.
+/// ledger can catch this call. (`session.todo_write` provided the same
+/// mismatch — declared `SessionStateMutation` vs recorded `WorkspaceMutation`
+/// — until #29 made it a Component Tool.)
 ///
-/// Do not "tidy" these tests to deny `SessionStateMutation`: the pre-dispatch
+/// Do not "tidy" these tests to deny `WorkspaceMutation`: the pre-dispatch
 /// gate would then intercept, and the post-hoc layer would lose all cover
 /// while the tests kept passing. The assertion below pins the layer by its
 /// distinct message (`observed effect denied` vs `declared effect denied`);
@@ -217,7 +225,7 @@ fn assert_post_dispatch_denial(err: &lancet_protocol::CepError) {
 #[tokio::test]
 async fn effect_deny_rejects_in_warn_mode() {
     let (config, _audit) =
-        overreach_server_config_with_denied_effect(CepMode::Warn, ImpactKind::WorkspaceMutation);
+        overreach_server_config_with_denied_effect(CepMode::Warn, ImpactKind::ExternalObservation);
     let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
     let server_task =
@@ -259,7 +267,7 @@ async fn cep_mode_off_effect_overreach_passes() {
 #[tokio::test]
 async fn effect_deny_rejects_in_off_mode() {
     let (config, _audit) =
-        overreach_server_config_with_denied_effect(CepMode::Off, ImpactKind::WorkspaceMutation);
+        overreach_server_config_with_denied_effect(CepMode::Off, ImpactKind::ExternalObservation);
     let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
     let server_task =
