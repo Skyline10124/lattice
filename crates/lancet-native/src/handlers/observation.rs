@@ -740,10 +740,8 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let policy_cfg = lancet_authority::policy::default::PolicyConfig {
-            capability_sources: Default::default(),
             methods: Default::default(),
             network: cep_context.policy.network.clone(),
-            budget: cep_context.policy.budget.clone(),
             observation: cep_context.policy.observation.clone(),
             workspace,
             project_root: cep_context.policy.project_root.clone(),
@@ -782,8 +780,6 @@ mod tests {
         let mut policy = CepPolicyConfig::defaults_for_project_root(root);
         policy.observation.max_single_read_bytes = max_single;
         policy.observation.max_turn_observation_bytes = max_turn;
-        policy.budget.max_single_read_bytes = max_single;
-        policy.budget.max_turn_observation_bytes = max_turn;
         CepTurnContext::from_policy(policy)
     }
 
@@ -1092,7 +1088,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_observation_records_requested_root_effect_scope_under_allowed_root() {
+    async fn native_observation_records_requested_root_effect_scope() {
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("src");
         fs::create_dir(&src).unwrap();
@@ -1100,8 +1096,9 @@ mod tests {
 
         let root = dir.path().to_str().unwrap();
         let registry = native_registry();
-        let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
-        policy.observation.allowed_roots = vec![src.canonicalize().unwrap()];
+        // The requested subdirectory is the effect scope; read scope itself comes
+        // from the canonical project root, not a policy root list (#121).
+        let policy = CepPolicyConfig::defaults_for_project_root(dir.path());
         let (ctx, _events) = ctx_for_policy(policy, root);
 
         let grep_params = GrepParams {
@@ -1229,7 +1226,6 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
         policy.observation.max_grep_matches = 2;
-        policy.budget.max_grep_matches = 2;
         let ctx = HandlerContext {
             call_id: 4,
             events: EventSink::new(event_tx, 4),

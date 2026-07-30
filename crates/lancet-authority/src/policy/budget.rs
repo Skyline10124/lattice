@@ -7,26 +7,25 @@ use lancet_protocol::error::ReservedErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use std::sync::{Arc, Mutex};
 
-/// Immutable per-turn budget limits (from profile defaults or explicit values).
+/// Immutable per-turn budget limits, derived from the observation policy.
+///
+/// This is a projection, not a configuration surface: build it with
+/// [`super::ObservationPolicyConfig::budget_limits`] rather than by hand. It
+/// carries exactly the two limits the turn-scoped tracker enforces; per-op caps
+/// live only in `ObservationPolicyConfig`, where the handlers read them. Six
+/// duplicated fields kept in sync by hand were how the external-policy-file
+/// path silently dropped half a configured limit set (#121).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BudgetLimits {
-    pub max_single_read_bytes: usize,
     pub max_turn_observation_bytes: usize,
-    pub max_grep_matches: usize,
-    pub max_list_entries: usize,
-    pub max_find_paths: usize,
     pub max_todo_ops: usize,
 }
 
 impl BudgetLimits {
-    /// Defaults aligned with native single-read caps and legacy search caps.
+    /// Defaults matching [`super::ObservationPolicyConfig::defaults`].
     pub fn defaults() -> Self {
         Self {
-            max_single_read_bytes: 10 * 1024 * 1024,
             max_turn_observation_bytes: 10 * 1024 * 1024,
-            max_grep_matches: 1000,
-            max_list_entries: 1000,
-            max_find_paths: 1000,
             max_todo_ops: 100,
         }
     }

@@ -211,7 +211,6 @@ impl LancetRuntime {
             project_root: policy.project_root.clone(),
             observation: policy.observation.clone(),
             network: policy.network.clone(),
-            budget: policy.budget.clone(),
             denied_effect_kinds: policy.denied_effect_kinds.clone(),
             capability_admission,
         };
