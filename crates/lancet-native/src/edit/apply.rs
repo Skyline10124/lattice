@@ -194,7 +194,7 @@ async fn plan_update_file(
 
     if let Err(error) = limits.check_write_size(after.len()) {
         return Err(
-            PatchDiagnostic::new(PatchErrorCode::IoError, error.to_string())
+            PatchDiagnostic::new(PatchErrorCode::SizeLimit, error.to_string())
                 .with_path(path.to_string())
                 .with_operation_index(operation_index),
         );
@@ -791,7 +791,9 @@ mod tests {
         let result = apply_patch(dir.path(), &limits, &patch).await;
 
         assert!(!result.ok);
-        assert_eq!(result.errors[0].code.as_str(), "io_error");
+        // Its own code, not `io_error`: exceeding the cap is not a filesystem
+        // failure, and the handler maps it to `ToolResourceExhausted` (#120).
+        assert_eq!(result.errors[0].code.as_str(), "size_limit");
         assert!(
             result.errors[0].message.contains("size limit"),
             "got: {}",

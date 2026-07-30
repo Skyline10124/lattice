@@ -366,26 +366,42 @@ async fn preflight_create(
 /// Enforce the shared single-file write byte cap for `mutate.create` (#120).
 ///
 /// `mutate.edit` enforces the same [`WriteLimits`] inside the HashLine apply
-/// plan, where the over-cap diagnostic reaches the client as
-/// `ExecutionFailed` + `CepErrorData::Execution`. Create mirrors that code and
-/// data shape so one budget produces one client-visible failure vocabulary,
-/// and carries the `ToolError::SizeLimit` text (limit + actual) unchanged.
+/// plan and reports it through [`write_size_limit_error`] too, so one budget
+/// produces one client-visible failure vocabulary on both write paths.
 fn check_create_write_size(params: &CreateParams, method: &str) -> Result<(), CepError> {
     let limits = WriteLimits::default();
-    let Err(error) = limits.check_write_size(params.content.len()) else {
-        return Ok(());
+    match limits.check_write_size(params.content.len()) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(write_size_limit_error(
+            method,
+            Some(params.path.as_str()),
+            &error.to_string(),
+        )),
+    }
+}
+
+/// The one client-visible shape for a single-file write-cap rejection (#120).
+///
+/// `ToolResourceExhausted` rather than the generic `ExecutionFailed`: a client
+/// deciding whether to retry needs "the write is too large" to be distinguishable
+/// from a hash mismatch or an I/O failure by code alone. The limit and actual
+/// byte counts appear in both the message and the execution stderr, and
+/// `command` is the CEP method name on both paths.
+fn write_size_limit_error(method: &str, path: Option<&str>, detail: &str) -> CepError {
+    let message = match path {
+        Some(path) => format!("{method} rejected for '{path}': {detail}"),
+        None => format!("{method} rejected: {detail}"),
     };
-    let message = error.to_string();
-    Err(CepError::new(
-        CepErrorCode::ExecutionFailed,
-        format!("{method} rejected for '{}': {message}", params.path),
+    CepError::new(
+        CepErrorCode::ToolResourceExhausted,
+        message,
         CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
             command: method.into(),
             exit_code: Some(1),
-            stderr: Some(message),
+            stderr: Some(detail.to_string()),
         }),
         Retriability::Permanent,
-    ))
+    )
 }
 
 async fn parent_exists(auth: &MutationAuth, path: &str) -> Result<bool, CepError> {
@@ -969,20 +985,33 @@ async fn apply_compiled_patch(
     let result = apply_parsed_patch(&storage, &limits, document).await;
 
     if !result.ok {
+        let detail = result
+            .errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        // A write-cap rejection is reported as such rather than folded into the
+        // generic patch failure, so both write paths share one code and one
+        // message vocabulary for the same budget (#120).
+        if let Some(size_limit) = result
+            .errors
+            .iter()
+            .find(|e| e.code == crate::edit::types::PatchErrorCode::SizeLimit)
+        {
+            return Err(write_size_limit_error(
+                Edit::NAME,
+                size_limit.path.as_deref(),
+                &size_limit.message,
+            ));
+        }
         return Err(CepError::new(
             CepErrorCode::ExecutionFailed,
             format!("compiled patch application failed: {}", result.summary),
             CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
                 command: "compiled_patch".into(),
                 exit_code: Some(1),
-                stderr: Some(
-                    result
-                        .errors
-                        .iter()
-                        .map(|e| e.message.as_str())
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                ),
+                stderr: Some(detail),
             }),
             Retriability::Permanent,
         ));
@@ -1272,7 +1301,9 @@ mod create_tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        // A dedicated code, so a client can tell "too large" from any other
+        // execution failure without parsing text.
+        assert_eq!(err.code, CepErrorCode::ToolResourceExhausted);
         assert!(
             err.message.contains("size limit exceeded"),
             "got: {}",
@@ -1291,8 +1322,9 @@ mod create_tests {
 
     /// #120 ordering: the cap runs before every filesystem side effect, so an
     /// over-limit create with `create_parents` leaves no directories behind
-    /// either. This is the assertion that fails if the check ever moves below
-    /// the parent-directory preflight.
+    /// either. This fails if the check moves below the install
+    /// (`write_create`), which is where directories are actually made — the
+    /// path preflight above it only probes with `symlink_metadata`.
     #[tokio::test]
     async fn create_over_write_limit_creates_no_parent_directories() {
         let dir = TempDir::new().unwrap();
@@ -1311,7 +1343,7 @@ mod create_tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert_eq!(err.code, CepErrorCode::ToolResourceExhausted);
         assert!(
             !dir.path().join("a").exists(),
             "an over-limit create must not create parent directories"
@@ -1347,7 +1379,7 @@ mod create_tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert_eq!(err.code, CepErrorCode::ToolResourceExhausted);
         assert!(
             err.message
                 .contains(&format!("{} > {limit}", content.len())),
@@ -1440,10 +1472,96 @@ mod create_tests {
             "mutate.create and mutate.edit must enforce one shared write cap"
         );
         assert_eq!(create_limit, limit);
+
+        // One budget, one client-visible failure vocabulary: a client must be
+        // able to recognize the rejection on either path by code, and by message
+        // without parsing the execution evidence.
+        for (method, err) in [(Create::NAME, &create_err), (Edit::NAME, &edit_err)] {
+            assert_eq!(
+                err.code,
+                CepErrorCode::ToolResourceExhausted,
+                "{method} must report the write cap with a dedicated code"
+            );
+            assert!(
+                err.message.contains("size limit exceeded"),
+                "{method} top-level message must name the cap: {}",
+                err.message
+            );
+            let CepErrorData::Execution(execution) = &err.data else {
+                panic!("{method} must carry execution evidence");
+            };
+            assert_eq!(
+                execution.command, method,
+                "the evidence must name the CEP method, not an internal artifact"
+            );
+        }
+
         assert_eq!(
             std::fs::read_to_string(edit_dir.path().join("over.txt")).unwrap(),
             before,
             "an over-limit edit must not modify the target"
+        );
+    }
+
+    /// An over-cap edit must be distinguishable from the other patch failures,
+    /// which all share `ExecutionFailed` and the same generic message (#120).
+    #[tokio::test]
+    async fn edit_size_limit_is_distinguishable_from_other_patch_failures() {
+        let limit = WriteLimits::default().max_write_size;
+        let before = "seed\n";
+        let registry = mutation_registry();
+
+        let stale_dir = TempDir::new().unwrap();
+        std::fs::write(stale_dir.path().join("f.txt"), before).unwrap();
+        let (stale_ctx, _stale_events) = test_ctx(stale_dir.path().to_str().unwrap());
+        let stale_err = registry
+            .dispatch(
+                Edit::NAME,
+                serde_json::to_value(&EditParams {
+                    path: "f.txt".into(),
+                    expected_hash: content_hash(b"something else"),
+                    edits: vec![EditOperation::ReplaceText {
+                        old: "seed".into(),
+                        new: "other".into(),
+                        occurrence: None,
+                    }],
+                })
+                .unwrap(),
+                stale_ctx,
+            )
+            .await
+            .unwrap_err();
+
+        let over_dir = TempDir::new().unwrap();
+        std::fs::write(over_dir.path().join("f.txt"), before).unwrap();
+        let (over_ctx, _over_events) = test_ctx(over_dir.path().to_str().unwrap());
+        let over_err = registry
+            .dispatch(
+                Edit::NAME,
+                serde_json::to_value(&EditParams {
+                    path: "f.txt".into(),
+                    expected_hash: content_hash(before.as_bytes()),
+                    edits: vec![EditOperation::ReplaceText {
+                        old: "seed".into(),
+                        new: "y".repeat(limit + 1),
+                        occurrence: None,
+                    }],
+                })
+                .unwrap(),
+                over_ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert_ne!(
+            over_err.code, stale_err.code,
+            "a write-cap rejection must not share its code with a stale-hash rejection"
+        );
+        assert_eq!(over_err.code, CepErrorCode::ToolResourceExhausted);
+        assert!(
+            !stale_err.message.contains("size limit"),
+            "got: {}",
+            stale_err.message
         );
     }
 

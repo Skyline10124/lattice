@@ -15,6 +15,7 @@ impl PatchErrorCode {
             PatchErrorCode::HunkMissing => "hunk_missing",
             PatchErrorCode::HunkAmbiguous => "hunk_ambiguous",
             PatchErrorCode::IoError => "io_error",
+            PatchErrorCode::SizeLimit => "size_limit",
             PatchErrorCode::RollbackFailed => "rollback_failed",
         }
     }

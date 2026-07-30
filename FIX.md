@@ -33,8 +33,11 @@ Severity: #120 MEDIUM（资源耗尽面 + 平行写路径契约分叉）、#121 
 - **#120**：上限收敛到新模块 `lancet-native/src/edit/limits.rs` 的 `WriteLimits`
   （1 MiB 常量 + `check_write_size`），替代 `PatchApplyLimits`。`mutate.create` 在
   `preflight_create` 的**第一条语句**校验请求内容长度，早于任何文件系统副作用（含
-  `create_parents` 建目录），两条路径统一以 `ToolError::SizeLimit` 文本经
-  `ExecutionFailed` + `CepErrorData::Execution` 返回。刻意不做成配置轴。Rewind 恢复与
+  `create_parents` 建目录）。两条路径经同一 `write_size_limit_error` 返回专属错误码
+  `ToolResourceExhausted`（不再是通用 `ExecutionFailed`），顶层 message 与
+  `data.stderr` 都带 limit + actual，`data.command` 两侧都是 CEP 方法名 —— 客户端可仅凭
+  错误码把「写入过大」与 stale-hash / IO 失败区分开。patch 引擎侧新增
+  `PatchErrorCode::SizeLimit`，不再复用 `IoError`。刻意不做成配置轴。Rewind 恢复与
   patch 回滚两处写入显式豁免（重装工作区已持有的字节，不引入新内容），并在
   `lancet-native/AGENTS.md` 记录豁免及理由。
 - **#121-1**：删除 `allowed_roots`（profile schema、lattice-api 翻译、
@@ -65,17 +68,23 @@ Severity: #120 MEDIUM（资源耗尽面 + 平行写路径契约分叉）、#121 
 **Verification:**
 - `cargo fmt --all` — 已应用。
 - `cargo clippy --workspace --all-targets -- -D warnings` — 通过，无告警。
-- `cargo test --workspace` — **1488 passed / 0 failed**。
+- `cargo test --workspace` — **1489 passed / 0 failed**。
 - 新增测试：`network.rs` 6 个（规范化幂等、前导点匹配 apex+子域、非规范形式、空/纯点
   fail-closed、与 URL 校验一致、子域放行）；`effect/region.rs` 4 个（含跨层一致性断言）；
   `policy/default.rs` 6 个（hook 与 region 一致、region 存规范化形式、外部 `[budget]`
   到达 per-op 读取点、外部 `[observation]` 到达 turn 投影、别名冲突优先级、退役键解析失败）；
   `observation.rs` 2 个；`lattice-profile/load.rs` 2 个（退役键具名错误、其余限额仍可加载）；
-  `mutation.rs` 5 个（超限拒绝且无残留、边界值、跨路径上限相等、`create_parents` 不建目录、
-  按 UTF-8 字节而非字符计数）。
-- 对抗性复核（独立 subagent 读 diff）指出并已修的缺口：#122 测试完全缺失、空列表语义未
-  记录、`region.hosts` 规范化无测试锁定、#120 的 `create_parents` 顺序保证与字节计数未
-  钉住、`lancet-native/AGENTS.md` 关于 Rewind 也执行上限的断言不实。
+  `mutation.rs` 6 个（超限拒绝且无残留、边界值、跨路径错误码/消息/evidence 一致、
+  `create_parents` 不建目录、按 UTF-8 字节而非字符计数、edit 侧超限可与 stale-hash 区分）。
+- 变异测试（临时副本，worktree 未改）确认测试不是「回滚后仍通过」的空测试：把 region
+  的 `contains` 改回精确相等 → `region_grants_apex_and_subdomains_for_leading_dot_pattern`
+  与 `region_agrees_with_the_shared_matcher` FAILED；把 create 侧上限检查移到安装之后 →
+  两个 create 测试 FAILED。
+- 对抗性复核（独立 subagent 读 diff + 跑 cargo）指出并已修的缺口：#122 测试完全缺失、
+  空列表语义未记录、`region.hosts` 规范化无测试锁定、#120 的 `create_parents` 顺序保证与
+  字节计数未钉住、`lancet-native/AGENTS.md` 关于 Rewind 也执行上限的断言不实、以及
+  Issue 要求的「SizeLimit 或等价错误码」原本只以自由文本存在且 `mutate.edit` 顶层消息与
+  其他 patch 失败逐字相同（现以 `ToolResourceExhausted` 修正）。
 
 **Changed files:**
 `crates/lancet-authority/{AGENTS.md,src/effect/region.rs,src/policy/{budget,default,mod,network,observation,resolved}.rs}`,
