@@ -68,7 +68,7 @@ Severity: #120 MEDIUM（资源耗尽面 + 平行写路径契约分叉）、#121 
 **Verification:**
 - `cargo fmt --all` — 已应用。
 - `cargo clippy --workspace --all-targets -- -D warnings` — 通过，无告警。
-- `cargo test --workspace` — **1489 passed / 0 failed**。
+- `cargo test --workspace` — **1494 passed / 0 failed**（exit 0）。
 - 新增测试：`network.rs` 6 个（规范化幂等、前导点匹配 apex+子域、非规范形式、空/纯点
   fail-closed、与 URL 校验一致、子域放行）；`effect/region.rs` 4 个（含跨层一致性断言）；
   `policy/default.rs` 6 个（hook 与 region 一致、region 存规范化形式、外部 `[budget]`
@@ -85,6 +85,17 @@ Severity: #120 MEDIUM（资源耗尽面 + 平行写路径契约分叉）、#121 
   字节计数未钉住、`lancet-native/AGENTS.md` 关于 Rewind 也执行上限的断言不实、以及
   Issue 要求的「SizeLimit 或等价错误码」原本只以自由文本存在且 `mutate.edit` 顶层消息与
   其他 patch 失败逐字相同（现以 `ToolResourceExhausted` 修正）。
+- 第二轮独立验收（三个 agent 各自跑 cargo + 源码变异，共 15 次变异全部被测试检出，零
+  blocker）另外发现并已修的三点：(1) 删除 `allowed_roots` 测试时顺带清掉了
+  `[lancet.project_root].root` 逃逸拒绝的**唯一**自动化覆盖 —— 现补
+  `cep_context_profile_rejects_project_root_outside_runtime_root`（同时覆盖
+  `cep_policy_from_profile` 与 `load_policy_config` 两条装配路径）与
+  `..` traversal 负向测试；(2) `[lancet.Observation]` 这类大小写变体会被
+  `LancetSection::extensions` 吞掉，使退役键与同表内仍生效的限额一起静默丢失 —— 现由
+  `check_lancet_sub_table_spelling` 以具名错误拒绝，同时保留未知子表落入 `extensions` 的
+  前向兼容语义（两条测试各自锁定）；(3) `ResolvedNetwork` 的 `url`/`port`/`scheme`/
+  `is_localhost`/`is_private_ip` 五个字段无任何读取点，属 #121 同类残留，已缩到唯一被读
+  的 `host`，这些判定归 `validate_fetch_url` 单独拥有（它才解析 DNS）。
 
 **Changed files:**
 `crates/lancet-authority/{AGENTS.md,src/effect/region.rs,src/policy/{budget,default,mod,network,observation,resolved}.rs}`,

@@ -711,6 +711,53 @@ mod cep_context_profile_policy {
         assert_eq!(policy.project_root, sub.canonicalize().unwrap());
     }
 
+    /// `[lancet.project_root].root` is now the only way to narrow observation
+    /// scope, so its containment check is the one that must hold: a root
+    /// resolving outside the runtime project root fails the turn rather than
+    /// widening the Agent's surface. Both the `CepPolicyConfig` and the
+    /// `PolicyConfig` assembly paths enforce it.
+    #[test]
+    fn cep_context_profile_rejects_project_root_outside_runtime_root() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let cep = LancetSection {
+            project_root: Some(lattice_profile::LancetProjectRootSection {
+                root: Some(outside.path().to_string_lossy().into_owned()),
+            }),
+            ..Default::default()
+        };
+
+        let err = cep_policy_from_profile(&cep, dir.path()).unwrap_err();
+        assert!(
+            matches!(&err, ApiError::BadRequest(message) if message.contains("outside runtime project root")),
+            "got: {err:?}"
+        );
+
+        let err = load_policy_config(&cep, dir.path()).unwrap_err();
+        assert!(
+            matches!(&err, ApiError::BadRequest(message) if message.contains("outside runtime project root")),
+            "got: {err:?}"
+        );
+    }
+
+    /// Traversal is rejected the same way, so the containment check cannot be
+    /// walked around with `..`.
+    #[test]
+    fn cep_context_profile_rejects_project_root_traversal() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        let cep = LancetSection {
+            project_root: Some(lattice_profile::LancetProjectRootSection {
+                root: Some("../".into()),
+            }),
+            ..Default::default()
+        };
+
+        let err = cep_policy_from_profile(&cep, sub.as_path()).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)), "got: {err:?}");
+    }
+
     #[test]
     fn cep_context_profile_policy_network_max_web_response_bytes() {
         let dir = TempDir::new().unwrap();

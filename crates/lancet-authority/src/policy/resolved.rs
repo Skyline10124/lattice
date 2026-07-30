@@ -27,14 +27,16 @@ pub struct ResolvedPath {
 }
 
 /// Resolved network facts for `fetch.web`.
+///
+/// The host only. The policy decision matches it against `allowed_hosts` through
+/// the one shared matcher and records it as evidence; scheme, port, localhost,
+/// and private-IP judgements belong to `policy::network::validate_fetch_url`,
+/// which owns them and resolves DNS. Carrying unread copies here is the pattern
+/// #121 removed: a second producer of a decision input that nothing consumes
+/// invites the two to drift.
 #[derive(Clone, Debug)]
 pub struct ResolvedNetwork {
-    pub url: String,
     pub host: String,
-    pub port: u16,
-    pub scheme: String,
-    pub is_localhost: bool,
-    pub is_private_ip: bool,
 }
 
 /// Resolved session-state facts for `session.todo_write` / `session.envelope`.
@@ -142,16 +144,9 @@ impl PolicyResolver {
             }
             "fetch.web" => {
                 if let Some(url) = extract_url_from_params(&input.params) {
-                    let (host, port, scheme, is_localhost, is_private_ip) = parse_url_facts(&url);
+                    let host = parse_url_host(&url);
                     invocation_facts.host = Some(host.clone());
-                    resolved_network = Some(ResolvedNetwork {
-                        url,
-                        host,
-                        port,
-                        scheme,
-                        is_localhost,
-                        is_private_ip,
-                    });
+                    resolved_network = Some(ResolvedNetwork { host });
                 }
             }
             "session.todo_write" => {
@@ -271,28 +266,16 @@ fn normalize_lexical_pure(path: &str) -> Result<PathBuf, lancet_protocol::CepErr
 
 // ── Pure URL fact extraction ────────────────────────────────────────────
 
-fn parse_url_facts(url_str: &str) -> (String, u16, String, bool, bool) {
-    match url::Url::parse(url_str) {
-        Ok(url) => {
-            let host = url.host_str().unwrap_or("").to_string();
-            let port = url.port_or_known_default().unwrap_or(443);
-            let scheme = url.scheme().to_string();
-            let is_localhost = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
-            let is_private_ip = host
-                .parse::<std::net::IpAddr>()
-                .map(is_private_ip_addr)
-                .unwrap_or(false);
-            (host, port, scheme, is_localhost, is_private_ip)
-        }
-        Err(_) => (String::new(), 0, String::new(), false, false),
-    }
-}
-
-fn is_private_ip_addr(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
-        std::net::IpAddr::V6(v6) => v6.is_loopback(),
-    }
+/// The host of a `fetch.web` URL, empty when the URL does not parse.
+///
+/// An unparseable URL yields an empty host, which matches no `allowed_hosts`
+/// pattern — the allow decision stays fail-closed and URL shape is rejected with
+/// a precise error later, by `policy::network::validate_fetch_url`.
+fn parse_url_host(url_str: &str) -> String {
+    url::Url::parse(url_str)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -427,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_web_fetch_extracts_url_facts() {
+    fn resolve_web_fetch_extracts_the_host() {
         let resolver = test_resolver();
         let input = PolicyInput {
             method: "fetch.web".into(),
@@ -437,11 +420,28 @@ mod tests {
         };
         let resolved = resolver.resolve(&input).unwrap();
         assert_eq!(resolved.impact_kind, ImpactKind::ExternalObservation);
-        let net = resolved.resolved_network.unwrap();
-        assert_eq!(net.host, "example.com");
-        assert_eq!(net.scheme, "https");
-        assert_eq!(net.port, 443);
-        assert!(!net.is_localhost);
+        assert_eq!(resolved.resolved_network.unwrap().host, "example.com");
+        assert_eq!(resolved.invocation_facts.host.unwrap(), "example.com");
+    }
+
+    /// An unparseable URL resolves to an empty host, which no `allowed_hosts`
+    /// pattern matches — the allow decision stays fail-closed.
+    #[test]
+    fn resolve_web_fetch_unparseable_url_yields_no_grantable_host() {
+        let resolver = test_resolver();
+        let input = PolicyInput {
+            method: "fetch.web".into(),
+            params: json!({"url": "not a url"}),
+            authority: PolicyAuthorityInput,
+            audit_context: audit_ctx(),
+        };
+        let resolved = resolver.resolve(&input).unwrap();
+        let host = resolved.resolved_network.unwrap().host;
+        assert!(host.is_empty(), "got: {host}");
+        assert!(!super::super::network::host_allowed_by_list(
+            &host,
+            &["example.com".to_string()]
+        ));
     }
 
     #[test]
