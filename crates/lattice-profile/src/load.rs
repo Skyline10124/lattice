@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::ProfileError;
-use crate::schema::AgentProfile;
+use crate::schema::{AgentProfile, TYPED_LANCET_SUB_TABLES};
 
 /// A loaded and validated agent profile with resolved system prompt.
 #[derive(Debug, Clone, PartialEq)]
@@ -173,6 +173,84 @@ fn check_forbidden_sections(path: &Path, content: &str) -> Result<(), ProfileErr
         }
     }
 
+    check_retired_keys(path, table)?;
+
+    Ok(())
+}
+
+/// Retired `[lancet.<section>].<key>` entries: section, key, replacement text.
+const RETIRED_LANCET_KEYS: &[(&str, &str, &str)] = &[(
+    "observation",
+    "allowed_roots",
+    "observation scope is `[lancet.project_root].root`; \
+     read visibility is `[lancet.workspace]`",
+)];
+
+/// Reject retired `[lancet.*]` keys with an error that names the replacement.
+///
+/// `deny_unknown_fields` alone would reject these, but only as a bare "unknown
+/// field". These keys were once accepted and validated, so an operator's profile
+/// may still carry them; a named error is what tells them the setting never took
+/// effect and what to use instead (#121).
+fn check_retired_keys(
+    path: &Path,
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<(), ProfileError> {
+    let Some(lancet) = table.get("lancet").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    check_lancet_sub_table_spelling(path, lancet)?;
+    for (section, key, replacement) in RETIRED_LANCET_KEYS {
+        let present = lancet
+            .get(*section)
+            .and_then(toml::Value::as_table)
+            .is_some_and(|sub| sub.contains_key(*key));
+        if present {
+            return Err(ProfileError::ForbiddenField {
+                path: path.to_path_buf(),
+                section: format!("lancet.{section}"),
+                field: (*key).to_string(),
+                reason: format!(
+                    "retired: it was validated but never reached any read decision, so it left \
+                     the observation surface wider than it implied. Use {replacement}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Reject a case variant of a typed `[lancet.*]` sub-table.
+///
+/// Anything genuinely unknown under `[lancet]` lands in
+/// `LancetSection::extensions` by design, so a future sub-table does not break
+/// older builds. A case variant of a typed name is not a future sub-table
+/// though: without this check `[lancet.Observation]` deserializes into
+/// `extensions` and every key inside it — including the retired ones above and
+/// the limits that are still live — is dropped without a word (#121).
+fn check_lancet_sub_table_spelling(
+    path: &Path,
+    lancet: &toml::map::Map<String, toml::Value>,
+) -> Result<(), ProfileError> {
+    for key in lancet.keys() {
+        if TYPED_LANCET_SUB_TABLES.contains(&key.as_str()) {
+            continue;
+        }
+        let lower = key.to_lowercase();
+        if let Some(expected) = TYPED_LANCET_SUB_TABLES
+            .iter()
+            .find(|typed| **typed == lower.as_str())
+        {
+            return Err(ProfileError::ForbiddenSection {
+                path: path.to_path_buf(),
+                section: format!("lancet.{key}"),
+                reason: format!(
+                    "sub-table names are case-sensitive; `[lancet.{key}]` would be ignored \
+                     entirely. Write `[lancet.{expected}]`"
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -592,6 +670,143 @@ x = 1
                 "expected '{section}' in error, got: {err}"
             );
         }
+    }
+
+    /// #121: a profile still carrying the retired `allowed_roots` key must fail
+    /// with an error that names the key and the supported replacement, not a
+    /// bare serde "unknown field" — and never load as if the narrowing applied.
+    #[test]
+    fn reject_retired_observation_allowed_roots_with_named_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("agent.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[lancet.observation]
+allowed_roots = ["src"]
+"#,
+        )
+        .unwrap();
+
+        let err = load_agent_profile(&toml_path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("allowed_roots"), "got: {msg}");
+        assert!(msg.contains("lancet.observation"), "got: {msg}");
+        assert!(msg.contains("project_root"), "got: {msg}");
+    }
+
+    /// The rest of `[lancet.observation]` still loads: only the scope key went.
+    #[test]
+    fn observation_limits_still_load_without_allowed_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("agent.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[lancet.observation]
+max_single_read_bytes = 4096
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_agent_profile(&toml_path).expect("profile loads");
+        let observation = loaded.profile.lancet.observation.expect("section");
+        assert_eq!(observation.max_single_read_bytes, Some(4096));
+    }
+
+    /// #121: a case variant of a typed `[lancet.*]` sub-table must fail. It
+    /// otherwise falls into `extensions` and every key inside it is dropped in
+    /// silence — including retired keys the pre-scan is supposed to catch and
+    /// limits that are still live.
+    #[test]
+    fn reject_case_variant_of_typed_lancet_sub_table() {
+        for (spelling, expected) in [
+            ("Observation", "observation"),
+            ("NETWORK", "network"),
+            ("Project_Root", "project_root"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let toml_path = dir.path().join("agent.toml");
+            std::fs::write(
+                &toml_path,
+                format!(
+                    r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[lancet.{spelling}]
+allowed_roots = ["src"]
+"#
+                ),
+            )
+            .unwrap();
+
+            let err = load_agent_profile(&toml_path).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains(spelling), "got: {msg}");
+            assert!(
+                msg.contains(expected),
+                "the error must name the correct spelling: {msg}"
+            );
+        }
+    }
+
+    /// A genuinely unknown sub-table still lands in `extensions` — the
+    /// forward-compatibility behavior the schema intends.
+    #[test]
+    fn unknown_lancet_sub_table_still_falls_through_to_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("agent.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[lancet.future_table]
+setting = 1
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_agent_profile(&toml_path).expect("profile loads");
+        assert!(
+            loaded
+                .profile
+                .lancet
+                .extensions
+                .contains_key("future_table")
+        );
     }
 
     #[test]

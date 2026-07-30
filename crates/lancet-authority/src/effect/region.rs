@@ -42,6 +42,7 @@ pub fn normalize_write_region_path(pattern: &str, project_root: &Path) -> Option
 
 use super::ledger::{ObservedEffect, ObservedScope};
 use crate::guard::{WritePathPattern, normalize_write_path_pattern};
+use crate::policy::network::host_allowed_by_list;
 
 /// Per-invocation materialized effect — the middle layer of the effect model.
 ///
@@ -89,7 +90,11 @@ pub struct AuthorizedEffectRegion {
     /// Denied write path prefixes (from directory-glob deny patterns). A path
     /// under any of these prefixes is NOT authorized.
     pub denied_write_path_prefixes: Vec<PathBuf>,
-    /// Authorized external hosts (from FetchUrl capability pattern).
+    /// Authorized external host patterns (from FetchUrl capability pattern),
+    /// stored in normalized comparison form
+    /// ([`crate::policy::network::normalize_host_pattern`]). Matched with the
+    /// shared allow-matcher, so a leading dot is a suffix pattern that also
+    /// matches the apex domain. An empty list authorizes no host.
     pub hosts: Vec<String>,
     /// Whether session state mutation is authorized.
     pub session_state_allowed: bool,
@@ -174,8 +179,10 @@ impl AuthorizedEffectRegion {
                 self.command_allowed
             }
             (ImpactKind::ExternalObservation, ObservedScope::Host(host)) => {
-                // Check hosts (FetchUrl capability)
-                self.hosts.iter().any(|h| h == host)
+                // Check hosts (FetchUrl capability) with the single shared
+                // allow-matcher (#122), so no host the network/policy layers
+                // reject can be authorized here. An empty list matches nothing.
+                host_allowed_by_list(host, &self.hosts)
             }
             (ImpactKind::SessionStateMutation, ObservedScope::SessionState) => {
                 self.session_state_allowed
@@ -293,5 +300,85 @@ mod tests {
         assert_eq!(effect.kinds.len(), 2);
         assert!(effect.kinds.contains(&ImpactKind::CommandExecution));
         assert!(effect.kinds.contains(&ImpactKind::WorkspaceMutation));
+    }
+
+    // ── #122: host containment uses the one shared matcher ──────────────
+
+    fn host_region(patterns: &[&str]) -> AuthorizedEffectRegion {
+        let mut region = AuthorizedEffectRegion::empty();
+        region.kinds.insert(ImpactKind::ExternalObservation);
+        region.hosts = patterns
+            .iter()
+            .map(|pattern| crate::policy::network::normalize_host_pattern(pattern))
+            .collect();
+        region
+    }
+
+    fn host_effect(host: &str) -> ObservedEffect {
+        ObservedEffect {
+            kind: ImpactKind::ExternalObservation,
+            scope: ObservedScope::Host(host.to_string()),
+            required_capability: RequiredCapability::FetchUrl,
+            source: crate::effect::ledger::EffectSource::HandlerBackend,
+        }
+    }
+
+    /// The exact failure #122 reported: `.example.com` was accepted by the two
+    /// policy layers and then rejected here by raw string equality, so the apex
+    /// domain and every subdomain failed with an `EffectViolation`.
+    #[test]
+    fn region_grants_apex_and_subdomains_for_leading_dot_pattern() {
+        let region = host_region(&[".example.com"]);
+        for host in ["example.com", "api.example.com", "API.Example.COM"] {
+            assert!(
+                region.contains(&host_effect(host)),
+                "region must authorize {host}"
+            );
+        }
+        for host in ["notexample.com", "example.com.evil.tld"] {
+            assert!(
+                !region.contains(&host_effect(host)),
+                "region must not authorize {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn region_grants_non_canonical_pattern_forms() {
+        for pattern in ["Example.com", " example.com "] {
+            assert!(
+                host_region(&[pattern]).contains(&host_effect("example.com")),
+                "region must authorize example.com for pattern {pattern:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn region_with_no_hosts_authorizes_nothing() {
+        assert!(!host_region(&[]).contains(&host_effect("example.com")));
+    }
+
+    /// #122 acceptance: for a non-empty `allowed_hosts`, the region verdict must
+    /// equal the shared matcher's verdict for every pattern form. The
+    /// URL-validation half of this agreement is asserted in `policy::network`.
+    #[test]
+    fn region_agrees_with_the_shared_matcher() {
+        use crate::policy::network::host_allowed_by_list;
+        for pattern in [
+            ".example.com",
+            "Example.com",
+            " example.com ",
+            "example.com",
+        ] {
+            let patterns = vec![pattern.to_string()];
+            let region = host_region(&[pattern]);
+            for host in ["example.com", "api.example.com", "example.org"] {
+                assert_eq!(
+                    region.contains(&host_effect(host)),
+                    host_allowed_by_list(host, &patterns),
+                    "region and matcher disagree on host {host} for pattern {pattern:?}"
+                );
+            }
+        }
     }
 }

@@ -20,16 +20,19 @@ pub use budget::{
 };
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::evidence::CapabilityAdmissionPolicy;
-pub use network::NetworkPolicyConfig;
+pub use network::{NetworkPolicyConfig, host_allowed_by_list, normalize_host_pattern};
 pub use observation::ObservationPolicyConfig;
 
 /// Immutable CEP policy limits and roots assembled once per turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CepPolicyConfig {
     pub project_root: PathBuf,
+    /// The one observation limit set. Per-op caps are read from here by the
+    /// handlers; the turn-scoped budget is derived through
+    /// [`ObservationPolicyConfig::budget_limits`] (#121) rather than stored as a
+    /// second copy that has to be kept in sync.
     pub observation: ObservationPolicyConfig,
     pub network: NetworkPolicyConfig,
-    pub budget: BudgetLimits,
     pub denied_effect_kinds: BTreeSet<ImpactKind>,
     /// Component Tool admission inputs (#28). Carried here so the native
     /// transport reaches one policy per turn; the legacy `denied_effect_kinds`
@@ -41,28 +44,23 @@ impl CepPolicyConfig {
     pub fn defaults_for_project_root(project_root: impl Into<PathBuf>) -> Self {
         let project_root = project_root.into();
         let project_root = std::fs::canonicalize(&project_root).unwrap_or(project_root);
-        let observation = ObservationPolicyConfig::defaults_for_root(&project_root);
-        let budget = BudgetLimits {
-            max_single_read_bytes: observation.max_single_read_bytes,
-            max_turn_observation_bytes: observation.max_turn_observation_bytes,
-            max_grep_matches: observation.max_grep_matches,
-            max_list_entries: observation.max_list_entries,
-            max_find_paths: observation.max_find_paths,
-            max_todo_ops: observation.max_todo_ops,
-        };
         Self {
+            observation: ObservationPolicyConfig::defaults(),
             project_root,
-            observation,
             network: NetworkPolicyConfig::safe_defaults(),
-            budget,
             denied_effect_kinds: BTreeSet::new(),
             // Fail closed: no tool is enabled until an operator policy says so.
             capability_admission: CapabilityAdmissionPolicy::default(),
         }
     }
 
+    /// The turn-scoped budget derived from the observation limits (#121).
+    pub fn budget(&self) -> BudgetLimits {
+        self.observation.budget_limits()
+    }
+
     pub fn new_budget_tracker(&self) -> Arc<ObservationBudgetTracker> {
-        ObservationBudgetTracker::new(self.budget.clone())
+        ObservationBudgetTracker::new(self.budget())
     }
 }
 
