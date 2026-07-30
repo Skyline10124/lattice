@@ -367,13 +367,18 @@ selected by the profile's `agent.model` alias at turn time.
 | `OPENAI_API_KEY` | OpenAI aliases (`gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-4o-mini`) | OpenAI API key. |
 | `GEMINI_API_KEY` | `gemini` alias | Google Gemini API key. |
 | `OPENAI_COMPATIBLE_API_KEY` | `openai-compatible` / `compat:<model>` / `compatible:<model>` / `openai-compatible:<model>` | OpenAI-compatible gateway API key. |
-| `OPENAI_COMPATIBLE_BASE_URL` | OpenAI-compatible aliases | Gateway base URL. Defaults to `http://localhost:11434/v1` (Ollama). <!-- VERIFY: OpenAI-compatible default base URL is Ollama local endpoint http://localhost:11434/v1 --> |
+| `OPENAI_COMPATIBLE_BASE_URL` | OpenAI-compatible aliases | Gateway base URL. Defaults to `http://localhost:11434/v1` (Ollama). <!-- VERIFY: OpenAI-compatible default base URL is Ollama local endpoint http://localhost:11434/v1 --> **Process environment only** — refused from a workspace `.env`, see [`.env` trust boundary](#env-trust-boundary). |
 | `OPENAI_COMPATIBLE_MODEL` | bare `openai-compatible` alias | Upstream model name for the bare `openai-compatible` alias. Required unless a `compat:<model>` / `compatible:<model>` / `openai-compatible:<model>` prefix alias is used. |
 
 A credential is reported `Present` only if the env var is set and non-empty;
 otherwise `Missing`. Secrets are never stored in profiles — the profile holds
 only the model alias, and provider keys are read from the environment at
-turn time.
+turn time. `lattice doctor` also reports the **source** of each credential and
+endpoint (`process` / `dotenv` / `unset`).
+
+The API-key variables above can come from either the process environment or a
+workspace `.env`. The endpoint variable cannot: see
+[`.env` trust boundary](#env-trust-boundary).
 
 ### Provider base URLs and model aliases
 
@@ -404,10 +409,76 @@ empty; a prefix alias (`compat:<model>`) is the alternative.
 | `LATTICE_LOG` | `lattice-llm` logging (`src/logging.rs`) | `error` (or `debug` with `--verbose`) | Tracing filter. Takes priority over the `--verbose` flag. Supports `RUST_LOG`-style syntax (e.g. `trace`, `lattice_llm=debug`). |
 | `LATTICE_AGENTS_DIR` | `lattice-cli` (`commands/run.rs`) | `$HOME/.lattice/agents` | Overrides the user-global agents directory. Validated against system paths and `/tmp`. |
 
+Every `LATTICE_*` variable is **process environment only** — the whole prefix is
+refused from a workspace `.env`, see
+[`.env` trust boundary](#env-trust-boundary).
+
 > **Removed live-isolation flag:** the live Linux isolation canary lane and its
 > env flag were removed in #47; the flag has no reader anywhere in the tree
 > (not in any `crates/` runtime source). It was never a configuration variable.
 > See [docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed subsystems".
+
+### `.env` trust boundary
+
+The CLI loads a `.env` file on startup, searching the current directory and
+its ancestors (`crates/lattice-cli/src/env_boundary.rs`). That file belongs to
+whichever repository you happen to be standing in, so LATTICE treats it as
+**untrusted input**: cloning a third-party repository and running `lattice`
+inside it must not let that repository decide where LATTICE reads its policy
+from, or where it sends conversation traffic (GitHub #99).
+
+Two rules follow from that:
+
+1. **A `.env` never overrides the process environment.** A variable already
+   exported by your shell, CI job, or service manager always wins. `lattice
+   doctor` lists such keys under `Shadowed`.
+2. **Some keys are dropped from a `.env` unconditionally**, whatever their
+   value:
+
+| Refused pattern | Reason | Why |
+| --- | --- | --- |
+| `LATTICE_*` | `lattice_namespace` | These are the product's own runtime switches. `LATTICE_AGENTS_DIR` selects the agent profile directory, and with it the system prompt, the enabled tool set, and every `[lancet]` policy section (write deny list, network policy, observation bounds). |
+| `*_BASE_URL`, `*_API_BASE`, `*_API_URL`, `*_ENDPOINT` | `provider_endpoint` | A provider endpoint override reroutes every LLM call. net-guard rejects only private/reserved addresses, so a public attacker gateway would be dialled normally — with the conversation body and the API key attached. |
+| `*_PROXY` (incl. `NO_PROXY`) | `proxy` | `reqwest` honours system proxy variables by default, so these reroute provider traffic just as effectively as a base-URL override. |
+| `HOME`, `XDG_*` | `state_root` | These resolve the user-global agents directory, the session store, and the audit / private-history state root. |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | `tls_trust` | On Linux the TLS root store comes from `rustls-native-certs` via `reqwest`'s platform verifier, which **replaces** the platform store when either is set. A repository-supplied CA would silently validate any endpoint — a stronger MITM primitive than an endpoint override, not a weaker one. |
+
+Matching is case-insensitive, so `https_proxy` is refused alongside
+`HTTPS_PROXY`. The rules are patterns rather than an enumerated key list, so a
+new `LATTICE_*` or `*_BASE_URL` variable is covered the day it is added.
+
+Everything else is applied as before — in particular **provider API keys in a
+`.env` keep working**, since that is the file's legitimate use:
+
+```dotenv
+# Applied: an ordinary credential.
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_COMPATIBLE_MODEL=deepseek-chat
+
+# Dropped: runtime switch and endpoint override.
+LATTICE_AGENTS_DIR=./.tools/agents
+OPENAI_COMPATIBLE_BASE_URL=https://gateway.example/v1
+```
+
+To use a non-default endpoint or agents directory, export it in your own
+environment (`export OPENAI_COMPATIBLE_BASE_URL=...`) rather than committing it
+to a workspace `.env`. That distinction is the whole point: your shell speaks
+with your authority, a checked-out repository does not.
+
+Refusals are silent at startup — a hostile `.env` must not get to print
+anything, and a benign one must not turn every command into a warning. Run
+`lattice doctor` to see what happened: it names the `.env` path, the applied
+keys, the shadowed keys, every dropped key with its reason, and the source
+(`process` / `dotenv` / `unset`) of each credential and endpoint variable.
+`doctor` also reports a `.env` that exists but could not be parsed, under
+`Error` — `dotenvy` stops at the first malformed line, so keys after it are
+dropped.
+
+A leading UTF-8 BOM is stripped before parsing, so a `.env` written by a
+BOM-emitting editor behaves like any other.
+
+Proxy values are printed with their `user:password@` userinfo replaced by
+`***@`; credential values are never printed at all.
 
 ---
 

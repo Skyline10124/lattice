@@ -44,7 +44,14 @@ integration-test target of any product crate.
 
 - **Fast binary black-box** (`tests/fast_cli_help.rs`, plus all `#[test]`
   unit tests in `src/`): run on every ordinary CI. `cargo xtask ci` runs
-  these by default.
+  these by default. `tests/fast_env_boundary.rs` (#99) belongs to this lane: it
+  writes a hostile `.env` into the scenario project and asserts through
+  `doctor` / `resolve` / `session new` that `LATTICE_*`, provider endpoint,
+  proxy, and `HOME`/`XDG_*` keys do not take effect while an API key still
+  does. Those scenarios call `ScenarioWorld::unset_env` to remove a key from
+  the child allow-list entirely — `set_env(key, "")` still defines the
+  variable, and a defined variable can never be injected from a `.env`, so the
+  scenario would pass for the wrong reason.
 - **Direct-Local turn scenarios** (`tests/direct_local_turn.rs`): plain-text
   turn, session reopen against changed Local state, and policy denial
   skeletons. They drive the real turn path against the canonical Local

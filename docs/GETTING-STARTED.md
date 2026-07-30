@@ -19,7 +19,9 @@ that could not be confirmed from the repo are marked with
   `git2`.
 - **A provider API key** — at least one of the LLM provider credentials below
   must be set in your environment (or a `.env` file at the repo root, which the
-  CLI loads via `dotenvy` on startup):
+  CLI loads on startup; note that `OPENAI_COMPATIBLE_BASE_URL` is one of the
+  keys a workspace `.env` may **not** set — see
+  [CONFIGURATION.md § `.env` trust boundary](./CONFIGURATION.md#env-trust-boundary)):
   - `ANTHROPIC_API_KEY` (for the `opus`, `sonnet`, `haiku` aliases)
   - `OPENAI_API_KEY` (for the `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`,
     `gpt-4o-mini` aliases)
@@ -153,10 +155,18 @@ export OPENAI_COMPATIBLE_MODEL="deepseek-chat"
 ```
 
 Run `cargo run -p lattice-cli -- doctor` or `cargo run -p lattice-cli -- models --auth`
-to confirm the credential now reads as `Present`. The CLI also loads a `.env`
-file from the current directory on startup via `dotenvy` (in
-`crates/lattice-cli/src/main.rs`), so you can place exports there instead of
-your shell profile.
+to confirm the credential now reads as `Present`. `doctor` also shows where each
+credential came from (`process` / `dotenv` / `unset`).
+
+The CLI also loads a `.env` file, searching the current directory and its
+ancestors on startup (`crates/lattice-cli/src/env_boundary.rs`), so you can put
+API keys there instead of in your shell profile. A `.env` cannot set runtime
+switches, endpoints, or TLS trust anchors, though: `LATTICE_*`, `*_BASE_URL`,
+`*_PROXY`, `HOME`/`XDG_*`, and `SSL_CERT_FILE`/`SSL_CERT_DIR` keys are dropped
+from it unconditionally, because that file belongs to whichever repository you
+are standing in. Export those in your own
+environment instead. `lattice doctor` lists any key it dropped and why. Full
+rules: [CONFIGURATION.md § `.env` trust boundary](./CONFIGURATION.md#env-trust-boundary).
 
 ### (b) No default agent profile found
 
