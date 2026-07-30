@@ -109,6 +109,14 @@ impl LancetServer {
             LancetError::Internal(format!("capability admission: {}", err.message))
         })?;
 
+        // #28 design §11: one method name must not resolve to both a Component
+        // Tool and a native catalog method. Surfacing it here makes it a build
+        // error instead of a server task that dies after the client is handed
+        // out.
+        config
+            .validate_no_component_native_collision()
+            .map_err(|err| LancetError::Internal(format!("catalog collision: {}", err.message)))?;
+
         let mut registry = MethodRegistry::new();
         register_production_method_registry(&mut registry).map_err(|err| {
             LancetError::Internal(format!("production method registry registration: {err:?}"))
@@ -181,9 +189,9 @@ impl LancetRuntime {
             runtime_version,
         } = config;
 
-        // D.2: compose the Component runtime once. Production builds compose
-        // from embedded inventory (empty until #29–#32, Codeberg #7–#10); the
-        // same instance
+        // D.2: compose the Component runtime once from embedded inventory +
+        // the generated `EXPECTED_COMPONENTS`. Since #29 that is non-empty: it
+        // embeds `session.todo_write` (#30–#32 add the rest). The same instance
         // serves dispatch (D.3) and LLM projection (D.4).
         let components = Arc::new(
             ComponentRuntime::from_embedded()
@@ -328,9 +336,9 @@ fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
 /// D.4: Project Component Tool descriptors into LLM-facing tool definitions.
 ///
 /// The name/description/params schema come only from the generated descriptor
-/// JSON — the adapter does not hand-write method/schema matches. Production
-/// builds have zero Component Tools until #29–#32 (Codeberg #7–#10); tests
-/// inject a no-op fixture whose descriptor projects a `noop.echo` definition.
+/// JSON — the adapter does not hand-write method/schema matches. Since #29 a
+/// production build projects `session.todo_write` from its manifest-generated
+/// descriptor; tests may inject a no-op fixture instead.
 fn project_component_definitions(components: &ComponentRuntime) -> Vec<ToolDefinition> {
     components
         .descriptors()

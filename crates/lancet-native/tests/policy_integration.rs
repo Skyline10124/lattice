@@ -124,29 +124,3 @@ fn integration_budget_exceeded_denies_observation() {
         }
     ));
 }
-
-// ── End-to-end: todo budget exceeded denies session.todo_write ──────────
-
-#[test]
-fn integration_todo_budget_exceeded_denies_todo_write() {
-    let hook = DefaultPolicyHook::new(test_config());
-    let input = PolicyInput {
-        method: "session.todo_write".into(),
-        params: json!({"todos": [{"content": "task", "status": "pending"}]}),
-        authority: PolicyAuthorityInput,
-        audit_context: audit_ctx(PolicyBudgetSnapshot {
-            turn_observation_bytes_used: 0,
-            turn_observation_bytes_limit: 65536,
-            todo_ops_used: 10,
-            todo_ops_limit: 10,
-        }),
-    };
-    let decision = hook.decide(&input);
-    assert!(matches!(
-        decision,
-        PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::BudgetExceeded,
-            ..
-        }
-    ));
-}

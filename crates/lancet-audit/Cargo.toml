@@ -30,3 +30,6 @@ test-support = ["dep:tempfile"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `test-method` provides the synthetic `TestEcho` typed method the audit tests
+# use as a stand-in method name. Dev-only.
+lancet-catalog = { workspace = true, features = ["test-method"] }

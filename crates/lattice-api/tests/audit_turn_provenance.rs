@@ -269,7 +269,7 @@ async fn full_turn_audit_rows_and_replay_fragment() {
 /// as distinct PROV activity attributes, and the turn attests as v2.
 #[tokio::test]
 async fn component_turn_projects_admission_and_effects_and_attests_v2() {
-    use lancet_native::provenance::project_turn_trace;
+    use lancet_native::provenance::project_turn_trace_with_evidence;
     use lancet_native::{
         CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
         register_production_method_registry,
@@ -313,8 +313,15 @@ async fn component_turn_projects_admission_and_effects_and_attests_v2() {
         .expect("query rows");
     assert_eq!(rows.len(), 1, "exactly one noop.echo audit row");
 
-    // B6: the replay projection keeps the two evidence families apart.
-    let trace = project_turn_trace(&ctx.turn_id, &rows);
+    // B6: the replay projection keeps the two evidence families apart. Since
+    // #112 the records come from the evidence table, resolved through the
+    // `evidence_id` each Component row points at.
+    let resolve = |id: lancet_native::EvidenceId| audit.call_evidence(id).ok().flatten();
+    let trace = project_turn_trace_with_evidence(
+        &ctx.turn_id,
+        &rows,
+        &lancet_native::EvidenceLookup::new(&resolve),
+    );
     let attributes = &trace.fragment.activities[0].attributes;
     assert_eq!(
         attributes["admission_evidence"]["approved_capabilities"],

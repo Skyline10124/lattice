@@ -181,7 +181,11 @@ fn toml_string(value: &str) -> String {
 mod tests {
     use super::*;
 
-    fn is_catalog_method(name: &str) -> bool {
+    /// The five Tools of the default distribution (ADR 0004 decision 1). Since
+    /// #29 they are not all *native catalog* methods — `session.todo_write` is an
+    /// embedded Component Tool — so this list is deliberately the shipped-Tool
+    /// set a profile template may name, not `lancet_catalog::catalog()`.
+    fn is_default_distribution_tool(name: &str) -> bool {
         matches!(
             name,
             "observe.workspace"
@@ -342,7 +346,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name} template must parse: {e}"));
             for tool in &profile.tools.enabled {
                 assert!(
-                    is_catalog_method(tool),
+                    is_default_distribution_tool(tool),
                     "{name} tool {tool} must resolve through catalog"
                 );
             }

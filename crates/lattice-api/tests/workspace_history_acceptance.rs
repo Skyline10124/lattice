@@ -82,16 +82,21 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntim
         denied_write_patterns: Vec::new(),
         ..Default::default()
     };
-    let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    // All five shipped Tools: the four native catalog methods plus the embedded
+    // Component (#29). AC9 below asserts the private history adds nothing to that
+    // set, so the set has to be complete for the assertion to mean anything.
+    let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    enabled.push("session.todo_write".to_string());
     LancetRuntime::build(LancetRuntimeConfig {
         project_root: root.to_path_buf(),
         enabled_tools: enabled,
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: AuditBacking::InMemory,
-        // Native catalog mutations only; no Component Tool is called, so the
-        // fail-closed default admission policy is the right one here.
-        capability_admission: Default::default(),
+        capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
+            enabled_tools: std::iter::once("session.todo_write".to_string()).collect(),
+            ..Default::default()
+        },
         workspace_history: history.clone(),
         model_id: "test".into(),
         runtime_version: "test".into(),
@@ -329,9 +334,10 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: AuditBacking::InMemory,
-        // Native catalog mutations only; no Component Tool is called, so the
-        // fail-closed default admission policy is the right one here.
-        capability_admission: Default::default(),
+        capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
+            enabled_tools: std::iter::once("session.todo_write".to_string()).collect(),
+            ..Default::default()
+        },
         workspace_history: history_backing(denied_state.path()),
         model_id: "test".into(),
         runtime_version: "test".into(),
@@ -366,9 +372,10 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: AuditBacking::InMemory,
-        // Native catalog mutations only; no Component Tool is called, so the
-        // fail-closed default admission policy is the right one here.
-        capability_admission: Default::default(),
+        capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
+            enabled_tools: std::iter::once("session.todo_write".to_string()).collect(),
+            ..Default::default()
+        },
         workspace_history: history_backing(effect_state.path()),
         model_id: "test".into(),
         runtime_version: "test".into(),

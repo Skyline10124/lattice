@@ -12,7 +12,11 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Sub-Architecture
 
-- `src/handlers/` owns production CEP method handlers.
+- `src/handlers/` owns production CEP method handlers: observation, mutation, and
+  external. There is no `session_state.rs` — #29 migrated `session.todo_write`
+  to an embedded Component Tool and deleted its handler and registration. There
+  is no native fallback: a runtime whose composition does not embed the Component
+  reports the method as unrouted.
 - `src/server/` owns registry setup, transport lifecycle, and durable call
   metadata.
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.

@@ -549,8 +549,14 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         project_root: PathBuf::from(project_root),
         enabled_tools: enabled_tools.to_vec(),
         policy,
-        // Native envelope fixture: no Component Tool is exercised here.
-        capability_admission: Default::default(),
+        // Mirror the production lowering: `enabled_tools` is the stage-1
+        // capability grant. Hardcoding the fail-closed default here would leave
+        // every Component Tool unadmitted, which since #29 means the fixture
+        // could not exercise a shipped Tool at all.
+        capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
+            enabled_tools: enabled_tools.iter().cloned().collect(),
+            ..Default::default()
+        },
         cep_mode,
         audit,
         workspace_history,
@@ -868,8 +874,8 @@ mod turn_wiring {
     use super::*;
     use lancet_audit::{AuditOutcome, CallAuditMetadata};
     use lancet_catalog::CepMethod;
-    use lancet_catalog::methods::session::TodoWrite;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
+    use lancet_catalog::test_method::TestEcho;
     use lancet_cep::ToolExposure;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_profile::{
@@ -938,7 +944,7 @@ mod turn_wiring {
             .start_call(
                 &ctx,
                 1,
-                TodoWrite::NAME,
+                TestEcho::NAME,
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
@@ -956,7 +962,10 @@ mod turn_wiring {
 
         let llm: Arc<dyn lattice_agent::LlmClient> =
             Arc::new(FakeStreamingLlmClient::builder().build());
-        let profile = test_profile(vec![TodoWrite::NAME.to_string()]);
+        // A production build's available set is the four native catalog methods
+        // plus the embedded Component Tools, so an enabled name must be one of
+        // those — a synthetic fixture name would be refused as unknown.
+        let profile = test_profile(vec![ObserveWorkspace::NAME.to_string()]);
         let request = RunTurnRequest {
             input: "hi".into(),
             session_id: "s".into(),
@@ -966,7 +975,7 @@ mod turn_wiring {
             test_project_root: Some(project.path().to_string_lossy().into()),
             test_persist_audit: Some(false),
         };
-        let enabled_tools = [TodoWrite::NAME.to_string()];
+        let enabled_tools = [ObserveWorkspace::NAME.to_string()];
         let deps = build_production_turn_deps(ProductionTurnDepsInput {
             request: &request,
             project_root: project.path().to_str().unwrap(),
@@ -980,14 +989,16 @@ mod turn_wiring {
         .expect("direct deps");
 
         deps.cep_client
-            .call::<TodoWrite>(lancet_catalog::methods::session::TodoWriteParams {
-                todos: vec![lancet_catalog::methods::session::TodoItem {
-                    content: "direct".into(),
-                    status: lancet_catalog::methods::session::TodoStatus::Pending,
-                }],
-            })
+            .call::<ObserveWorkspace>(
+                lancet_catalog::methods::workspace::ObserveWorkspaceParams::ListDirectory(
+                    lancet_catalog::methods::workspace::ListDirectoryParams {
+                        path: ".".into(),
+                        limit: None,
+                    },
+                ),
+            )
             .await
-            .expect("todo write");
+            .expect("native observation");
 
         deps.audit.await_pending().await;
 
@@ -1034,9 +1045,13 @@ model = "m"
 system = "sys"
 
 [tools]
-enabled = ["{todo}"]
+enabled = ["{tool}"]
 {capabilities}"#,
-                todo = TodoWrite::NAME,
+                // The embedded Component Tool: naming it here is what proves the
+                // production available set is native catalog + Component
+                // descriptors, and that a profile can enable a Component Tool at
+                // all (#29 criterion 5).
+                tool = "session.todo_write",
             ),
         )
         .unwrap();
@@ -1058,7 +1073,7 @@ enabled = ["{todo}"]
             test_project_root: Some(project.path().to_string_lossy().into()),
             test_persist_audit: None,
         };
-        let enabled_tools = [TodoWrite::NAME.to_string()];
+        let enabled_tools = ["session.todo_write".to_string()];
         build_production_turn_deps(ProductionTurnDepsInput {
             request: &request,
             project_root: project.path().to_str().unwrap(),
@@ -1087,7 +1102,7 @@ enabled = ["{todo}"]
         );
         assert_eq!(
             profile.profile.capability_admission_policy().enabled_tools,
-            std::collections::BTreeSet::from([TodoWrite::NAME.to_string()])
+            std::collections::BTreeSet::from(["session.todo_write".to_string()])
         );
 
         let Err(err) = build_deps_for(&profile, &project).await else {

@@ -25,6 +25,7 @@ use crate::bindings;
 use crate::composition::{ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity};
 use crate::error_map::{
     cancelled_error, effect_not_admitted, effect_violation, map_component_error, schema_mismatch,
+    schema_violation_detail,
 };
 use crate::evidence::CellEvidenceLedger;
 use crate::generated;
@@ -185,9 +186,11 @@ impl ComponentRuntime {
             .ok_or_else(|| lancet_protocol::error::method_not_found(name))?;
 
         // Validate params before entering Wasmtime.
-        tool.params_validator
-            .validate(&params)
-            .map_err(|e| schema_mismatch(name, format!("params: {e}")))?;
+        tool.params_validator.validate(&params).map_err(|e| {
+            // Location only: the error message reaches the durable audit row, and
+            // `jsonschema`'s Display would put the caller's whole document there.
+            schema_mismatch(name, schema_violation_detail("params", &e))
+        })?;
 
         // Pre-cancelled call: cancellation state is the authority; never
         // enter Wasmtime (#70, Codeberg #48).
@@ -241,7 +244,7 @@ impl ComponentRuntime {
         // Validate the result value against the descriptor's JSON Schema.
         tool.result_validator
             .validate(&result_value)
-            .map_err(|e| schema_mismatch(name, format!("result: {e}")))?;
+            .map_err(|e| schema_mismatch(name, schema_violation_detail("result", &e)))?;
 
         // Host-derived scope/trust and host-computed measure: the guest has
         // no numeric channel and its scope claim is never trusted.

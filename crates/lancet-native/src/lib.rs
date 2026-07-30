@@ -43,14 +43,16 @@ pub mod rewind {
 #[cfg(feature = "inspect-scaffold")]
 pub use handlers::register_inspect_scaffold_methods;
 pub use lancet_audit::{
-    AttestationRecord, AuditQueryFilters, CallAuditMetadata, CepAuditContext, CepAuditStore,
-    RejectionRecord, RejectionStage, SEMANTIC_STAGE_NATIVE, impact_kind_for_method,
-    impact_kind_from_label, impact_kind_label,
+    AttestationRecord, AuditQueryFilters, CallAuditMetadata, CallEvidence, CepAuditContext,
+    CepAuditStore, EvidenceError, EvidenceId, EvidenceOutcome, RejectionRecord, RejectionStage,
+    SEMANTIC_STAGE_NATIVE, StoredCallEvidence, impact_kind_for_method, impact_kind_from_label,
+    impact_kind_label,
 };
 pub use lancet_dispatch::{CepClient, CepServer, CepTransport, wire_code_for_error};
 pub use provenance::{
-    build_in_toto_statement, canonicalize_in_toto_statement, rebuild_in_toto_statement,
-    source_audit_range_hash, statement_bytes,
+    EvidenceLookup, build_in_toto_statement, build_in_toto_statement_with_evidence,
+    canonicalize_in_toto_statement, rebuild_in_toto_statement,
+    rebuild_in_toto_statement_with_evidence, source_audit_range_hash, statement_bytes,
 };
 pub use server::{
     CepServerNativeExt, HandlerContext, MethodRegistry, ServerRunConfig,
