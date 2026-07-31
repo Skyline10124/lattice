@@ -2,6 +2,87 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #99：工作区 `.env` 的信任边界 — 2026-07-31
+
+Severity: HIGH（策略绕过 + 对话正文与凭据外泄，前置条件仅「在不受信任的仓库目录里跑一次
+`lattice`」）。本票只做 issue 定义的阶段 1；阶段 2（只读 `$HOME/.lattice/.env` + `--env-file`）
+仍属破坏性变更，未在此落地。
+
+**Problem:**
+
+`crates/lattice-cli/src/main.rs:79` 无条件 `dotenvy::dotenv().ok()`，把**当前工作目录**
+（及其祖先目录）的 `.env` 注入进程环境。而两个高权限开关从环境变量读取：
+`LATTICE_AGENTS_DIR`（`commands/run.rs:527`）决定 agent profile 目录，即 system prompt、
+`[tools].enabled`、以及全部 `[lancet]` 策略段（写 deny 名单、网络策略、observation 限制）；
+`OPENAI_COMPATIBLE_BASE_URL`（`lattice-llm/src/router.rs:84`）决定 LLM 端点，而 net-guard
+只拦私网/保留地址，攻击者的**公网**网关照常放行，会话正文与 API key 随请求送出。
+`validate_agents_dir` 只拒绝 `/etc /usr /var /sys /proc /dev /boot /tmp` 这类绝对路径，
+仓库内相对路径一律放行。这条路径不需要用户执行仓库里的任何代码。
+
+**Fix summary:**
+
+- 新增 `crates/lattice-cli/src/env_boundary.rs`：仍加载工作区 `.env`（把 API key 放在
+  `.env` 是它的正当用途），但按**模式**而非枚举清单无条件丢弃五类键 —— `LATTICE_*`、
+  provider endpoint（`*_BASE_URL` / `*_API_BASE` / `*_API_URL` / `*_ENDPOINT`）、`*_PROXY`、
+  `HOME`/`XDG_*`、`SSL_CERT_FILE`/`SSL_CERT_DIR`。用模式的理由是将来新增的
+  `LATTICE_*` 或 `*_BASE_URL` 变量当天即被覆盖，无需回来改边界。匹配大小写不敏感：Unix 的
+  环境变量名区分大小写，而 `https_proxy` 这类小写拼法确实会被读到，区分大小写会留下绕过口。
+- 后两类是本次自查（而非 issue 原文）新发现的同类载荷，均已独立验证依赖链：`*_PROXY` 由
+  `hyper-util-0.1.20/src/client/proxy/matcher.rs:230-233` 默认读取（`reqwest` 的
+  `auto_sys_proxy`），改流量与改 base URL 等效；`SSL_CERT_*` 在 Linux 下经
+  `reqwest[rustls]` → `rustls-platform-verifier-0.7.0/src/verification/others.rs:92` →
+  `rustls-native-certs-0.8.4`（`lib.rs:363-364`）生效，且任一变量被设置时它**替换**而非
+  追加平台信任库 —— 比端点改写更强的 MITM 原语。
+- 进程环境不受这些规则约束：在 shell / CI / systemd unit 里 export `LATTICE_AGENTS_DIR`
+  是用户自己的授权，被检出的仓库不是。`.env` 也一律不覆盖已存在的进程环境值（沿用旧
+  `dotenv()` 的 non-override 语义），落败的键记为 `shadowed`。
+- 丢弃在启动时**静默**：敌意 `.env` 不该获得打印任何东西的机会，善意 `.env`（开发者在里面
+  写了 `HTTPS_PROXY`）也不该让每条命令都变成告警。可观测性交给 `lattice doctor`：新增
+  credential/endpoint 的 `source` 列（`process` / `dotenv` / `unset`）、Endpoints 段、以及
+  Workspace `.env` 段（路径 / applied / shadowed / 每个被丢弃键及其原因 / 解析错误）。
+- `plan_dotenv` 是纯函数缝：入参是文件字节 + `already_set` 谓词，返回 report 与待安装的键值
+  对，`set_var` 循环之外不做任何决策。这样优先级、BOM、解析失败三条语义都能在不改动测试
+  进程环境的前提下单测（`set_var` 只在 tokio runtime 之前的单线程窗口调用，`main` 因此拆成
+  `main` + `#[tokio::main] async_main`）。
+- 顺带修的两处（均由对抗性验收发现）：(1) 手工迭代 `dotenvy` 绕过了它私有的 `remove_bom`，
+  带 UTF-8 BOM 的 `.env` 会在第 0 行解析失败并**静默丢弃整个文件** —— 相对旧
+  `dotenvy::dotenv()` 是回归，现显式剥离 BOM；(2) `doctor` 打印 endpoint 值（URL 本身不是
+  秘密），但代理 URL 常带 `user:password@`，现经 `redact_userinfo` 统一脱敏为 `***@`，主机
+  仍可见。另外 credential 行原先只来自「能解析的 alias」，而裸 `openai-compatible` alias 需
+  要 `OPENAI_COMPATIBLE_MODEL` 才能解析，导致只在 `.env` 里放 compat key 的用户看不到那一
+  行的来源；现四个 provider credential 无条件成行。
+
+**Verification:**
+- `cargo fmt --all --check` — 通过。
+- `cargo clippy --workspace --all-targets -- -D warnings` — 通过，无告警。
+- `LATTICE_BIN=... cargo test --workspace` — **1607 passed / 0 failed**（基线 1593）。
+- `cargo xtask harness-boundary` / `lancet-boundary` / `tool-codegen --check` — 均通过。
+- 新增测试：`env_boundary.rs` 13 个单测（五类拒绝各一、凭据仍放行、被拒键不入 apply 列表并
+  带正确 reason、shadowed 不覆盖、BOM 不丢文件、畸形行记 error 并停止解析、重复键取首次、
+  `export`/引号拼法仍被拒、`${VAR}` 替换无法把被拒值洗进允许键）；`doctor.rs` 2 个
+  （userinfo 脱敏、无 userinfo 的 URL 原样通过，含密码内含 `@` 与 authority 之后的 `@`
+  两个边界）；`tests/fast_env_boundary.rs` 11 个黑盒场景。
+- 黑盒场景以**差分**方式立论而非只看退出码：同一条 `session new` 跑两次，恶意值只在 `.env`
+  里时错误消息命名 HOME 派生目录、export 到进程环境时命名 `.tools/agents`，两个对照都断言。
+  端点同理（`.env` → 内置默认值；进程环境 → 生效）。没有对照组的话，「`LATTICE_AGENTS_DIR`
+  整体失效」也会让断言通过。
+- 变异测试（改完即恢复，工作树已核对干净）：删 BOM 剥离 → `a_utf8_bom_does_not_discard_the_file`
+  FAILED；删 `SSL_CERT_*` 规则 → 2 单测 + 2 黑盒场景 FAILED；删 non-override 守卫 →
+  `a_key_already_in_the_environment_is_shadowed_not_overridden` + 黑盒
+  `fast_dotenv_never_overrides_the_process_environment` FAILED；去掉代理脱敏 →
+  `fast_doctor_redacts_proxy_credentials` FAILED；把 `main` 换回 `dotenvy::dotenv()` →
+  多个场景 FAILED。
+- 对抗性验收（独立 subagent 跑 cargo + 源码变异 + 逐条验收标准复核）发现并已修：BOM 回归、
+  `SSL_CERT_*` 缺口、non-override 规则零覆盖、代理密码回显、compat key 无 source 行。被裁决
+  丢弃的申诉：「首个畸形行后丢弃余下键」（旧 `dotenv()` 同语义，非回归）、「大小写规则的
+  黑盒层未再覆盖一次」（三个单测已两侧覆盖）。
+- 非目标已核对未被触碰：未移除 `.env` 支持、未收紧 `validate_agents_dir` 的绝对路径规则、
+  未改 net-guard 私网判定、未引入 `--env-file` 或 `$HOME/.lattice/.env`。
+
+**Changed files:**
+`crates/lattice-cli/{AGENTS.md,src/main.rs,src/env_boundary.rs,src/commands/doctor.rs}`,
+`crates/lattice-system-harness/{AGENTS.md,src/world.rs,tests/fast_env_boundary.rs}`,
+`docs/CONFIGURATION.md`, `docs/GETTING-STARTED.md`, `FIX.md`.
 ## GitHub #30：`observe.workspace` 迁为 Policy-Visible Workspace Component Tool — 2026-07-31
 
 Severity: ENHANCEMENT（ADR 0004 五个内置 Tool 的第二个迁移切片；含三处迁移中对抗
@@ -5104,6 +5185,42 @@ harness-only driver/evidence/fake-LLM plumbing.
 `crates/lattice-system-harness/tests/direct_{failures,local_turn,mutation,observation,operator,secrets,session_isolation,tools,turn_contract}.rs`,
 `FINDINGS.md`, `FIX.md`.
 
+## GitHub #133 review blockers: close `.env` diagnostic and substitution leaks — 2026-08-01
+
+Severity: HIGH (credential/endpoint disclosure and untrusted routing input).
+
+**Problem:** The initial issue #99 trust boundary filtered rejected keys only
+after `dotenvy` had added them to substitution state, forwarded malformed-line
+parse errors verbatim, and redacted proxy userinfo only when a URL carried an
+explicit scheme. A hostile workspace could therefore launder an endpoint into
+an allowed variable or expose credentials through doctor output and persisted
+failure artifacts.
+
+**Fix summary:**
+- Raw substitution dependencies on refused `.env` keys are tracked in dotenv
+  occurrence order, with leading/inline comments and repeated assignments
+  matching dotenvy's parsing semantics; transitive and process-shadowed
+  laundering is refused without rejecting a safe first occurrence.
+- `LineParse` diagnostics now expose only a byte offset, never the source line.
+- Proxy userinfo redaction covers both schemeful and reqwest-supported
+  scheme-less forms in text and JSON output.
+- Doctor report internals retain typed `ValueSource` and `RejectReason` values;
+  strings are produced only at the rendering boundary.
+- Harness failure-artifact scans now include each scenario-specific secret.
+
+**Verification:**
+- Focused RED/GREEN unit and fast-binary tests covered substitution laundering,
+  malformed lines, and scheme-less proxy credentials.
+- `cargo test -p lattice-cli` — passed.
+- `LATTICE_BIN=target/debug/lattice cargo test -p lattice-system-harness --test fast_env_boundary`
+  — 13 passed.
+- `cargo xtask ci` in the host session — all formatting, clippy, build,
+  boundary, codegen, workspace test, harness, and artifact checks passed.
+- `git diff --check` — passed.
+
+**Changed files:** `Cargo.lock`,
+`crates/lattice-cli/{AGENTS.md,Cargo.toml,src/commands/doctor.rs,src/env_boundary.rs}`,
+`crates/lattice-system-harness/tests/fast_env_boundary.rs`, `FIX.md`.
 ## GitHub #132 review blockers: bound observation at the host trust boundary — 2026-08-01
 
 Severity: HIGH (workspace disclosure/budget accounting and durable evidence

@@ -18,7 +18,13 @@ layers.
 - `src/commands/session.rs` owns session command operations and turn send flow.
 - `src/commands/models.rs`, `resolve.rs`, and `model_render.rs` own model
   listing and resolution output.
-- `src/commands/doctor.rs` owns diagnostics.
+- `src/commands/doctor.rs` owns diagnostics, including the credential/endpoint
+  `source` column and the workspace `.env` summary.
+- `src/env_boundary.rs` owns the workspace `.env` trust boundary: it loads the
+  file, refuses the untrusted key classes, and records the provenance `doctor`
+  reports. It is the only place that mutates the process environment, and
+  `main` calls it before the tokio runtime exists because `set_var` is only
+  sound single-threaded.
 - `src/commands/audit.rs` and `lancet.rs` own audit and LANCET inspection
   surfaces.
 - CLI audit/status tests serialise `XDG_STATE_HOME` through
@@ -34,39 +40,23 @@ layers.
 - Keep JSONL output aligned with public `TurnEvent` values from `lattice-api`.
 - Command parsing belongs here; durable runtime semantics belong below the CLI.
 
-- FIXED #39: the crate-local `src/commands/test_env.rs` XDG helper was deleted;
-  CLI tests now use the single workspace-wide `lancet_audit::ScopedXdgStateHome`
-  via the `test-support` dev-dependency feature. Do not reintroduce a local
-  copy. `src/commands/audit.rs` module docs now state the CEP-server-free
-  guarantee structurally (`lancet-audit` has no native/dispatch/cep/runtime
-  dependency) instead of pointing at the retired source-scan test.
-
-- FIXED issue #33 (Codeberg #11): `lattice audit` uses
-  `lancet-api::{query_audit, tail_audit, replay_audit}` only (no CEP server
-  for audit reads); those entry points now delegate to
-  `lancet_audit::operator`. `lattice audit replay --turn <id>`
-  reconstructs turn provenance; `lattice audit` (no subcommand) and
-  `lattice audit query` do row query/tail.
-
-- ADDED #64: `lattice session rewind <session> <turn>` is the explicit Rewind
-  surface over `lattice_api::rewind_to_turn`, with `--json` emitting the
-  success or conflict report verbatim. Exit codes follow the pinned
-  contract: unresolvable/unreachable targets are input errors (2), a
-  structured same-path conflict is a runtime outcome (1). `run_with_api`
-  now returns `ExitCode` so a conflict can be reported without an error.
-- FIXED L-18-03: turn stream rendering now has a five-minute idle timeout for
-  hung providers.
-- FIXED L-18-02: `TurnEvent` JSONL serialization no longer panics through
-  `.expect()`.
-- FIXED M-18-02: dead `status_to_exit_code` logic and legacy tests were removed.
-- FIXED #45 (Codeberg #23): pre-stream input/config errors
-  (`ApiError::NotFound` and `ApiError::BadRequest`) use exit 2;
-  runtime/tool/provider/commit failures use exit 1. Fast binary tests pin
-  missing-session, profile, and credential paths.
-- WATCH H-06/M-19b: CLI turn send relies on API live streaming and backpressure
-  behavior.
-- WATCH: `session send` still needs an existing session, matching agent profile,
-  and provider credentials.
+- A workspace `.env` is untrusted input. `src/env_boundary.rs`
+  refuses `LATTICE_*`, provider endpoint keys (`*_BASE_URL`, `*_API_BASE`,
+  `*_API_URL`, `*_ENDPOINT`), `*_PROXY`, `HOME`/`XDG_*`, and
+  `SSL_CERT_FILE`/`SSL_CERT_DIR` from it (case-insensitively), while ordinary
+  credentials still apply. Do not add a second `.env` loader, do not call
+  `dotenvy::dotenv()` directly, and do not make refusals print at startup —
+  `doctor` is the observability surface. Refusals are keyed on patterns, not an
+  enumerated key list, so a new `LATTICE_*` or `*_BASE_URL` variable is covered
+  without touching the boundary. `plan_dotenv` is the pure seam: it takes the
+  file bytes plus an `already_set` predicate and returns the report and the
+  pairs to install, so precedence/BOM/parse-failure are unit-testable without
+  mutating the test process env — keep new decisions there, not in the
+  `set_var` loop. When adding an env var that a dependency reads (not just our
+  own code), check it against `classify`: `*_PROXY` is load-bearing because
+  `hyper-util` reads it, and `SSL_CERT_*` because `rustls-native-certs`
+  *replaces* the trust store when either is set. Refused values must not enter
+  dotenv substitution state, and diagnostics must never echo source lines.
 
 ## Next Actions
 

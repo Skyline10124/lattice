@@ -6,6 +6,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
 mod commands;
+mod env_boundary;
 use commands::{audit, doctor, lancet as lancet_cmd, models, resolve, session as session_cmd};
 
 #[derive(Parser)]
@@ -74,9 +75,17 @@ enum Commands {
     },
 }
 
+fn main() -> std::process::ExitCode {
+    // Load the workspace `.env` before the tokio runtime exists: this mutates
+    // the process environment, which is only sound while single-threaded. The
+    // trust boundary in `env_boundary` decides which keys a workspace file is
+    // allowed to set (see GitHub #99).
+    env_boundary::load_workspace_dotenv();
+    async_main()
+}
+
 #[tokio::main]
-async fn main() -> std::process::ExitCode {
-    dotenvy::dotenv().ok();
+async fn async_main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
     // Initialize logging.

@@ -129,6 +129,20 @@ impl ScenarioWorld {
             .insert(key.into(), value.into());
     }
 
+    /// Drop a key from the allow-list so the child process does not see it at
+    /// all — distinct from `set_env(key, "")`, which still defines the variable.
+    ///
+    /// Needed by `.env` trust-boundary scenarios: a key the parent already
+    /// defines can never be injected from a `.env` (non-override load), so
+    /// asserting that the boundary refused it requires the key to be genuinely
+    /// absent from the process environment.
+    pub fn unset_env(&self, key: &str) {
+        self.allowed_env
+            .lock()
+            .expect("allowed_env lock")
+            .remove(key);
+    }
+
     pub fn init_git_project(&self) -> Result<(), WorldError> {
         let root = &self.project;
         gix::init(root).map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
