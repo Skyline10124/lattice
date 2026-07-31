@@ -23,9 +23,10 @@
 
 use std::process::Output;
 
+use lattice_system_harness::cli::run;
 use lattice_system_harness::{
-    AssertError, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld, assert_exit_failure,
-    assert_exit_success, assert_no_secret, assert_stdout_contains,
+    AssertError, ScenarioSpec, ScenarioWorld, assert_exit_failure, assert_exit_success,
+    assert_no_secret, assert_stdout_contains,
 };
 use serde_json::Value;
 
@@ -36,23 +37,6 @@ const SECRET_SENTINEL: &str = "sk-ant-dotenv-sentinel-4b91";
 /// The endpoint a hostile `.env` tries to install. Chosen so that if it ever
 /// took effect the assertion failure names it explicitly.
 const ATTACKER_BASE_URL: &str = "http://127.0.0.1:9/v1";
-
-fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
-}
-
-fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
-    driver()
-        .run(
-            world,
-            &LatticeCommand {
-                args: args.iter().map(|s| s.to_string()).collect(),
-                timeout: Some(spec.step_timeout()),
-            },
-        )
-        .expect("drive lattice")
-        .output
-}
 
 fn parse_json(output: &Output) -> Result<Value, AssertError> {
     serde_json::from_slice(&output.stdout).map_err(|error| AssertError::StdoutMissing {
@@ -525,8 +509,18 @@ fn fast_doctor_redacts_proxy_credentials() {
         .and_then(|_| assert_stdout_contains(&out, "proxy.internal:8080"))
         .and_then(|_| assert_stdout_contains(&out, "***@"))
         .and_then(|_| assert_no_secret(&out, PROXY_PASSWORD));
-    assert_result(&world, "fast-dotenv-proxy-redaction", &out, result);
+    assert_result_with_secrets(
+        &world,
+        "fast-dotenv-proxy-redaction",
+        &out,
+        &[PROXY_PASSWORD],
+        result,
+    );
 
+    world.set_env(
+        "HTTPS_PROXY",
+        format!("puser:{PROXY_PASSWORD}@proxy.internal:8080"),
+    );
     let json_out = run(&world, &spec, &["--json", "doctor"]);
     let json_result = assert_exit_success(&json_out)
         .and_then(|_| assert_no_secret(&json_out, PROXY_PASSWORD))
@@ -538,16 +532,93 @@ fn fast_doctor_redacts_proxy_credentials() {
                 .unwrap_or_default()
                 .to_string();
             require(
-                value == "http://***@proxy.internal:8080",
+                value == "***@proxy.internal:8080",
                 format!("JSON proxy value must be redacted, got {value}"),
             )
         });
-    assert_result(
+    assert_result_with_secrets(
         &world,
         "fast-dotenv-proxy-redaction-json",
         &json_out,
+        &[PROXY_PASSWORD],
         json_result,
     );
+
+    world.set_env(
+        "HTTPS_PROXY",
+        format!("http:/puser:{PROXY_PASSWORD}@proxy.internal:8080"),
+    );
+    let normalized_out = run(&world, &spec, &["--json", "doctor"]);
+    let normalized_result = assert_exit_success(&normalized_out)
+        .and_then(|_| assert_no_secret(&normalized_out, PROXY_PASSWORD))
+        .and_then(|_| assert_stdout_contains(&normalized_out, "***@proxy.internal:8080"));
+    assert_result_with_secrets(
+        &world,
+        "fast-dotenv-proxy-redaction-normalized",
+        &normalized_out,
+        &[PROXY_PASSWORD],
+        normalized_result,
+    );
+}
+
+#[test]
+fn fast_doctor_never_echoes_a_malformed_dotenv_line() {
+    const MALFORMED_SECRET: &str = "sk-malformed-doctor-leak-70d2";
+    let spec = ScenarioSpec::fast("fast-dotenv-malformed-redaction");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
+    world
+        .write_project_file(".env", &format!("ANTHROPIC_API_KEY {MALFORMED_SECRET}\n"))
+        .expect("write malformed .env");
+    let out = run(&world, &spec, &["--json", "doctor"]);
+
+    let result = assert_exit_success(&out)
+        .and_then(|_| assert_no_secret(&out, MALFORMED_SECRET))
+        .and_then(|_| parse_json(&out))
+        .and_then(|parsed| {
+            require(
+                parsed.get("dotenv").and_then(|dotenv| dotenv.get("error")) != Some(&Value::Null),
+                "doctor must report a safe parse diagnostic",
+            )
+        });
+    assert_result_with_secrets(
+        &world,
+        "fast-dotenv-malformed-redaction",
+        &out,
+        &[MALFORMED_SECRET],
+        result,
+    );
+}
+
+#[test]
+fn fast_dotenv_substitution_cannot_launder_a_refused_endpoint() {
+    let spec = ScenarioSpec::fast("fast-dotenv-substitution-boundary");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
+    world
+        .write_project_file(
+            ".env",
+            "OPENAI_COMPATIBLE_BASE_URL=https://collector.example/v1\n\
+             OPENAI_COMPATIBLE_MODEL=${OPENAI_COMPATIBLE_BASE_URL}\n",
+        )
+        .expect("write hostile .env");
+    let out = run(&world, &spec, &["--json", "doctor"]);
+
+    let result = assert_exit_success(&out)
+        .and_then(|_| parse_json(&out))
+        .and_then(|parsed| {
+            let applied = parsed
+                .get("dotenv")
+                .and_then(|dotenv| dotenv.get("applied"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            require(
+                !applied
+                    .iter()
+                    .any(|key| key.as_str() == Some("OPENAI_COMPATIBLE_MODEL")),
+                format!("a value derived from a refused endpoint was applied: {applied:?}"),
+            )
+        });
+    assert_result(&world, "fast-dotenv-substitution-boundary", &out, result);
 }
 
 #[test]
@@ -632,13 +703,18 @@ fn assert_result(
     output: &Output,
     result: Result<(), AssertError>,
 ) {
+    assert_result_with_secrets(world, name, output, &[SECRET_SENTINEL], result);
+}
+
+fn assert_result_with_secrets(
+    world: &ScenarioWorld,
+    name: &str,
+    output: &Output,
+    secrets: &[&str],
+    result: Result<(), AssertError>,
+) {
     lattice_system_harness::assert_with_failure_artifacts(
-        world,
-        name,
-        name,
-        output,
-        &[SECRET_SENTINEL],
-        result,
+        world, name, name, output, secrets, result,
     )
     .unwrap_or_else(|e| panic!("{e}"));
 }

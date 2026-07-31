@@ -5,6 +5,8 @@ use anyhow::Result;
 use colored::Colorize;
 use std::path::PathBuf;
 
+use crate::env_boundary::{RejectReason, ValueSource};
+
 /// Report structure for doctor diagnostics.
 pub struct DoctorReport {
     pub config_loaded: bool,
@@ -21,7 +23,7 @@ pub struct DoctorReport {
 pub struct CredentialEntry {
     pub env_var: String,
     pub status: String,
-    pub source: String,
+    pub source: ValueSource,
 }
 
 /// An endpoint override entry: which env var can move a provider endpoint,
@@ -34,7 +36,7 @@ pub struct CredentialEntry {
 pub struct EndpointEntry {
     pub env_var: String,
     pub value: Option<String>,
-    pub source: String,
+    pub source: ValueSource,
 }
 
 /// What the workspace `.env` load did, projected for display.
@@ -49,8 +51,7 @@ pub struct DotenvSummary {
 /// A `.env` key the trust boundary refused, with the reason.
 pub struct IgnoredEntry {
     pub key: String,
-    pub reason: String,
-    pub detail: String,
+    pub reason: RejectReason,
 }
 
 /// Every provider credential env var the router can read
@@ -88,15 +89,45 @@ const PROXY_ENV_VARS: &[&str] = &[
 /// report rather than at each renderer. A string that is not a URL, or a URL
 /// with no userinfo, is returned unchanged.
 fn redact_userinfo(value: &str) -> String {
-    let Some((scheme, rest)) = value.split_once("://") else {
-        return value.to_string();
+    let direct = url::Url::parse(value).ok().filter(|url| {
+        matches!(
+            url.scheme(),
+            "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+        )
+    });
+    let (mut parsed, added_http) = match direct {
+        Some(url) => (url, false),
+        None => match url::Url::parse(&format!("http://{value}")) {
+            Ok(url) => (url, true),
+            Err(_) => return redact_unparsed_userinfo(value),
+        },
     };
-    // Userinfo, if present, precedes the first `@` of the authority, which ends
-    // at the first `/`, `?`, or `#`.
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(authority_end);
-    match authority.rsplit_once('@') {
-        Some((_userinfo, host)) => format!("{scheme}://***@{host}{tail}"),
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return value.to_string();
+    }
+    let _ = parsed.set_username("***");
+    let _ = parsed.set_password(None);
+    let root_only = parsed.path() == "/" && parsed.query().is_none() && parsed.fragment().is_none();
+    let mut redacted = parsed.to_string();
+    if root_only && !value.ends_with('/') {
+        redacted.pop();
+    }
+    if added_http {
+        redacted
+            .strip_prefix("http://")
+            .unwrap_or(&redacted)
+            .to_string()
+    } else {
+        redacted
+    }
+}
+
+/// Fail closed for an invalid URL-like value that still visibly carries an
+/// authority separator. Valid reqwest proxy inputs take the URL parser path;
+/// this fallback keeps malformed diagnostics from becoming a secret sink.
+fn redact_unparsed_userinfo(value: &str) -> String {
+    match value.rsplit_once('@') {
+        Some((_userinfo, host)) => format!("***@{host}"),
         None => value.to_string(),
     }
 }
@@ -123,7 +154,7 @@ pub fn build_report() -> DoctorReport {
         credential_entries.push(CredentialEntry {
             env_var: alias.api_key_env.clone(),
             status: alias.credential_status.clone(),
-            source: dotenv.source_of(&alias.api_key_env).as_str().to_string(),
+            source: dotenv.source_of(&alias.api_key_env),
         });
     }
     // Alias metadata only covers aliases that resolve, and the bare
@@ -138,7 +169,7 @@ pub fn build_report() -> DoctorReport {
                 Ok(value) if !value.is_empty() => "Present".to_string(),
                 _ => "Missing".to_string(),
             },
-            source: dotenv.source_of(env_var).as_str().to_string(),
+            source: dotenv.source_of(env_var),
         });
     }
     // Deduplicate by env var name
@@ -152,7 +183,7 @@ pub fn build_report() -> DoctorReport {
         .map(|env_var| EndpointEntry {
             env_var: (*env_var).to_string(),
             value: std::env::var(env_var).ok().map(|v| redact_userinfo(&v)),
-            source: dotenv.source_of(env_var).as_str().to_string(),
+            source: dotenv.source_of(env_var),
         })
         .collect();
     for env_var in PROXY_ENV_VARS {
@@ -160,7 +191,7 @@ pub fn build_report() -> DoctorReport {
             endpoints.push(EndpointEntry {
                 env_var: (*env_var).to_string(),
                 value: Some(redact_userinfo(&value)),
-                source: dotenv.source_of(env_var).as_str().to_string(),
+                source: dotenv.source_of(env_var),
             });
         }
     }
@@ -186,8 +217,7 @@ pub fn build_report() -> DoctorReport {
                 .iter()
                 .map(|ignored| IgnoredEntry {
                     key: ignored.key.clone(),
-                    reason: ignored.reason.as_str().to_string(),
-                    detail: ignored.reason.describe().to_string(),
+                    reason: ignored.reason,
                 })
                 .collect(),
             error: dotenv.error.clone(),
@@ -204,17 +234,21 @@ pub fn render_json(report: &DoctorReport) -> Result<String> {
         "config_loaded": report.config_loaded,
         "config_path": report.config_path,
         "credentials": report.credentials.iter().map(|c| {
-            serde_json::json!({ "env_var": c.env_var, "status": c.status, "source": c.source })
+            serde_json::json!({ "env_var": c.env_var, "status": c.status, "source": c.source.as_str() })
         }).collect::<Vec<_>>(),
         "endpoints": report.endpoints.iter().map(|e| {
-            serde_json::json!({ "env_var": e.env_var, "value": e.value, "source": e.source })
+            serde_json::json!({ "env_var": e.env_var, "value": e.value, "source": e.source.as_str() })
         }).collect::<Vec<_>>(),
         "dotenv": {
             "path": report.dotenv.path,
             "applied": report.dotenv.applied,
             "shadowed": report.dotenv.shadowed,
             "ignored": report.dotenv.ignored.iter().map(|i| {
-                serde_json::json!({ "key": i.key, "reason": i.reason, "detail": i.detail })
+                serde_json::json!({
+                    "key": i.key,
+                    "reason": i.reason.as_str(),
+                    "detail": i.reason.describe(),
+                })
             }).collect::<Vec<_>>(),
             "error": report.dotenv.error,
         },
@@ -227,11 +261,11 @@ pub fn render_json(report: &DoctorReport) -> Result<String> {
 
 /// Human label for a `ValueSource` tag, so `process` and `dotenv` read as a
 /// provenance statement rather than a bare word.
-fn source_label(source: &str) -> String {
+fn source_label(source: ValueSource) -> &'static str {
     match source {
-        "dotenv" => "workspace .env".to_string(),
-        "process" => "process env".to_string(),
-        other => other.to_string(),
+        ValueSource::Dotenv => "workspace .env",
+        ValueSource::Process => "process env",
+        ValueSource::Unset => "unset",
     }
 }
 
@@ -271,7 +305,7 @@ pub fn render_text(report: &DoctorReport) -> String {
             icon,
             cred.env_var,
             label,
-            source_label(&cred.source)
+            source_label(cred.source)
         ));
     }
 
@@ -284,14 +318,14 @@ pub fn render_text(report: &DoctorReport) -> String {
                 "\u{2713}",
                 endpoint.env_var,
                 value,
-                source_label(&endpoint.source)
+                source_label(endpoint.source)
             )),
             None => output.push_str(&format!(
                 "  {} {}: {} (source: {})\n",
                 "\u{2717}",
                 endpoint.env_var,
                 "default".dimmed(),
-                source_label(&endpoint.source)
+                source_label(endpoint.source)
             )),
         }
     }
@@ -329,7 +363,7 @@ pub fn render_text(report: &DoctorReport) -> String {
                         "    {} {}: {}\n",
                         "\u{2717}".yellow(),
                         ignored.key,
-                        ignored.detail
+                        ignored.reason.describe()
                     ));
                 }
             }
@@ -401,6 +435,20 @@ mod tests {
         assert_eq!(
             redact_userinfo("socks5://user@127.0.0.1:1080"),
             "socks5://***@127.0.0.1:1080"
+        );
+        // reqwest accepts a proxy without a scheme by prepending `http://`,
+        // so the diagnostic must treat this as an authority too.
+        assert_eq!(
+            redact_userinfo("user:s3cr3t@proxy.internal:8080"),
+            "***@proxy.internal:8080"
+        );
+        assert_eq!(
+            redact_userinfo("http:/user:s3cr3t@proxy.internal:8080"),
+            "http://***@proxy.internal:8080"
+        );
+        assert_eq!(
+            redact_userinfo("http:///user:s3cr3t@proxy.internal:8080"),
+            "http://***@proxy.internal:8080"
         );
     }
 

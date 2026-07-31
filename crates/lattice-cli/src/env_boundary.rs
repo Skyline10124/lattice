@@ -30,7 +30,7 @@
 //! Loading happens once, before the tokio runtime is built, because
 //! `std::env::set_var` is only sound while the process is single-threaded.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -204,16 +204,71 @@ fn plan_dotenv(path: &Path, bytes: &[u8], already_set: impl Fn(&str) -> bool) ->
     // on line 0 and silently drop every key in the file.
     let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
 
+    let dependency_entries = match substitution_dependencies(body) {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.error = Some(error);
+            return DotenvPlan {
+                report,
+                to_apply: Vec::new(),
+            };
+        }
+    };
+    let mut current_taint = BTreeMap::<String, bool>::new();
+    let mut occurrence_taint = dependency_entries
+        .into_iter()
+        .map(|(key, refs)| {
+            let tainted = classify(&key).is_some()
+                || refs.iter().any(|referenced| {
+                    classify(referenced).is_some()
+                        || current_taint.get(referenced).copied().unwrap_or(false)
+                });
+            // dotenvy updates substitution state for every occurrence,
+            // including duplicates that non-override loading will not apply.
+            current_taint.insert(key.clone(), tainted);
+            (key, tainted)
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
+
     // Keep the first occurrence of a repeated key, matching dotenvy's own
     // non-override `load()` semantics.
     let mut pending: BTreeMap<String, String> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     for entry in dotenvy::from_read_iter(body) {
         match entry {
             Ok((key, value)) => {
+                let Some((raw_key, tainted)) = occurrence_taint.next() else {
+                    report.error = Some("workspace .env dependency scan diverged".to_string());
+                    return DotenvPlan {
+                        report,
+                        to_apply: Vec::new(),
+                    };
+                };
+                if raw_key != key {
+                    report.error = Some("workspace .env dependency scan diverged".to_string());
+                    return DotenvPlan {
+                        report,
+                        to_apply: Vec::new(),
+                    };
+                }
+                if !seen.insert(key.clone()) {
+                    continue;
+                }
                 if let Some(reason) = classify(&key) {
                     if !report.ignored.iter().any(|ignored| ignored.key == key) {
                         report.ignored.push(IgnoredKey { key, reason });
                     }
+                    continue;
+                }
+                if tainted {
+                    // `dotenvy` expands from both earlier assignments and the
+                    // real process environment. Dependency taint is therefore
+                    // derived from the raw assignment, never guessed from the
+                    // expanded value. Never include either value in diagnostics.
+                    report.error.get_or_insert_with(|| {
+                        format!("unsafe .env substitution into {key} was refused")
+                    });
                     continue;
                 }
                 pending.entry(key).or_insert(value);
@@ -223,7 +278,7 @@ fn plan_dotenv(path: &Path, bytes: &[u8], already_set: impl Fn(&str) -> bool) ->
                 // after it are dropped. That matches the previous
                 // `dotenvy::dotenv()` behaviour; `report.error` makes it
                 // visible in `lattice doctor` instead of silent.
-                report.error = Some(error.to_string());
+                report.error = Some(safe_parse_error(&error));
                 break;
             }
         }
@@ -242,6 +297,196 @@ fn plan_dotenv(path: &Path, bytes: &[u8], already_set: impl Fn(&str) -> bool) ->
     report.ignored.sort_by(|a, b| a.key.cmp(&b.key));
     report.shadowed.sort();
     DotenvPlan { report, to_apply }
+}
+
+/// Raw substitution dependencies by assignment key.
+///
+/// `dotenvy` does not expose this provenance after expansion and consults the
+/// real process environment before its internal assignment table. We inspect
+/// only syntax here, then leave value parsing to `dotenvy`; this prevents a
+/// rejected name from laundering either its file value or a process value into
+/// an allowed assignment.
+fn substitution_dependencies(body: &[u8]) -> Result<Vec<(String, BTreeSet<String>)>, String> {
+    let text =
+        std::str::from_utf8(body).map_err(|_| "workspace .env is not valid UTF-8".to_string())?;
+    let mut dependencies = Vec::new();
+    let mut entry = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    let mut comment_eligible = true;
+
+    for ch in text.chars() {
+        if comment {
+            if ch == '\n' {
+                record_dependencies(&entry, &mut dependencies);
+                entry.clear();
+                comment = false;
+                comment_eligible = true;
+            }
+            continue;
+        }
+        let comment_start = ch == '#' && quote.is_none() && !escaped && comment_eligible;
+        if comment_start {
+            comment = true;
+            continue;
+        }
+        entry.push(ch);
+        if escaped {
+            escaped = false;
+            comment_eligible = false;
+            continue;
+        }
+        match (quote, ch) {
+            (Some(active), current) if active == current => {
+                quote = None;
+                comment_eligible = false;
+            }
+            (Some('"'), '\\') => {
+                escaped = true;
+                comment_eligible = false;
+            }
+            (None, '\\') => {
+                escaped = true;
+                comment_eligible = false;
+            }
+            (None, '\'' | '"') => {
+                quote = Some(ch);
+                comment_eligible = false;
+            }
+            (None, '\n') => {
+                record_dependencies(&entry, &mut dependencies);
+                entry.clear();
+                comment_eligible = true;
+            }
+            (None, ' ' | '\t') => comment_eligible = true,
+            _ => comment_eligible = false,
+        }
+    }
+    if !entry.is_empty() {
+        record_dependencies(&entry, &mut dependencies);
+    }
+    Ok(dependencies)
+}
+
+fn record_dependencies(entry: &str, dependencies: &mut Vec<(String, BTreeSet<String>)>) {
+    let Some((key, value)) = raw_assignment(entry) else {
+        return;
+    };
+    dependencies.push((key, substitution_refs(value)));
+}
+
+/// Split a logical dotenv assignment without interpreting its value.
+fn raw_assignment(entry: &str) -> Option<(String, &str)> {
+    let mut rest = entry.trim_start();
+    if rest.is_empty() || rest.starts_with('#') {
+        return None;
+    }
+
+    let (mut key, after_key) = raw_key(rest)?;
+    rest = after_key.trim_start();
+    if key == "export" && !rest.starts_with('=') {
+        let (exported, after_exported) = raw_key(rest)?;
+        key = exported;
+        rest = after_exported.trim_start();
+    }
+    rest.strip_prefix('=')
+        .map(|value| (key, value.trim_start()))
+}
+
+fn raw_key(input: &str) -> Option<(String, &str)> {
+    let end = input
+        .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
+        .unwrap_or(input.len());
+    let key = &input[..end];
+    if key.is_empty() || !key.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_') {
+        return None;
+    }
+    Some((key.to_string(), &input[end..]))
+}
+
+fn substitution_refs(value: &str) -> BTreeSet<String> {
+    let chars = value.char_indices().collect::<Vec<_>>();
+    let mut refs = BTreeSet::new();
+    let mut index = 0;
+    let mut strong_quote = false;
+    let mut weak_quote = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let (_, ch) = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !strong_quote {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !weak_quote {
+            strong_quote = !strong_quote;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !strong_quote {
+            weak_quote = !weak_quote;
+            index += 1;
+            continue;
+        }
+        if ch != '$' || strong_quote {
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        if index >= chars.len() {
+            break;
+        }
+        if chars[index].1 == '{' {
+            index += 1;
+            let start = index;
+            while index < chars.len() && chars[index].1 != '}' {
+                index += 1;
+            }
+            if index < chars.len() {
+                let name = chars[start..index]
+                    .iter()
+                    .map(|(_, ch)| *ch)
+                    .collect::<String>();
+                if !name.is_empty() {
+                    refs.insert(name);
+                }
+            }
+        } else {
+            let start = index;
+            while index < chars.len() && chars[index].1.is_alphanumeric() {
+                index += 1;
+            }
+            let name = chars[start..index]
+                .iter()
+                .map(|(_, ch)| *ch)
+                .collect::<String>();
+            if !name.is_empty() {
+                refs.insert(name);
+            }
+            continue;
+        }
+        index += 1;
+    }
+    refs
+}
+
+/// Render a dotenv parser failure without echoing the source line. A malformed
+/// assignment can contain a credential, and `dotenvy`'s `Display` includes the
+/// complete offending line for `LineParse`.
+fn safe_parse_error(error: &dotenvy::Error) -> String {
+    match error {
+        dotenvy::Error::LineParse(_, offset) => {
+            format!("invalid .env syntax at byte offset {offset}")
+        }
+        other => other.to_string(),
+    }
 }
 
 /// The report from the startup load. Returns an empty report if the load never
@@ -444,12 +689,18 @@ mod tests {
         // dotenvy aborts at the first bad line, so later keys are dropped —
         // same as the previous loader. The difference is that `report.error`
         // makes it visible through `lattice doctor` instead of silent.
-        let planned =
-            plan("ANTHROPIC_API_KEY=sk-first\nthis is not an assignment\nOPENAI_API_KEY=sk-late\n");
+        const SECRET: &str = "sk-malformed-must-not-leak";
+        let planned = plan(&format!(
+            "ANTHROPIC_API_KEY=sk-first\nANTHROPIC_API_KEY {SECRET}\nOPENAI_API_KEY=sk-late\n"
+        ));
         assert_eq!(planned.report.applied, vec!["ANTHROPIC_API_KEY"]);
+        let error = planned
+            .report
+            .error
+            .expect("a malformed line must be reported");
         assert!(
-            planned.report.error.is_some(),
-            "a malformed line must be reported"
+            !error.contains(SECRET),
+            "parse diagnostics must not echo the malformed line: {error}"
         );
     }
 
@@ -491,6 +742,106 @@ mod tests {
             !laundered,
             "a refused value must not reach the environment through substitution: {:?}",
             planned.to_apply
+        );
+    }
+
+    #[test]
+    fn shadowed_refused_key_still_taints_dotenv_substitution() {
+        let planned = plan_dotenv(
+            Path::new(".env"),
+            b"OPENAI_COMPATIBLE_BASE_URL=https://collector.example/v1\n\
+              OPENAI_COMPATIBLE_MODEL=${OPENAI_COMPATIBLE_BASE_URL}\n",
+            |key| key == "OPENAI_COMPATIBLE_BASE_URL",
+        );
+        assert!(
+            planned
+                .to_apply
+                .iter()
+                .all(|(key, _)| key != "OPENAI_COMPATIBLE_MODEL"),
+            "process precedence must not let refused dotenv input seed substitution"
+        );
+    }
+
+    #[test]
+    fn literal_value_collision_with_a_refused_value_remains_allowed() {
+        let planned = plan("LATTICE_LOG=a\nANTHROPIC_API_KEY=a-legitimate-key\n");
+        assert_eq!(
+            planned.to_apply,
+            vec![(
+                "ANTHROPIC_API_KEY".to_string(),
+                "a-legitimate-key".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn repeated_assignment_cannot_launder_a_refused_dependency() {
+        let planned = plan(
+            "MODEL_ALIAS=safe\n\
+             MODEL_ALIAS=${LATTICE_LOG}\n\
+             ANTHROPIC_API_KEY=${MODEL_ALIAS}\n",
+        );
+        assert!(
+            planned
+                .to_apply
+                .contains(&("MODEL_ALIAS".to_string(), "safe".to_string()))
+        );
+        assert!(
+            planned
+                .to_apply
+                .iter()
+                .all(|(key, _)| key != "ANTHROPIC_API_KEY"),
+            "every repeated assignment must contribute to dependency taint"
+        );
+    }
+
+    #[test]
+    fn comment_syntax_cannot_hide_a_refused_dependency() {
+        let planned = plan(
+            "# '\n\
+             OPENAI_COMPATIBLE_BASE_URL=https://collector.example/v1\n\
+             OPENAI_COMPATIBLE_MODEL=${OPENAI_COMPATIBLE_BASE_URL}\n",
+        );
+        assert!(
+            planned
+                .to_apply
+                .iter()
+                .all(|(key, _)| key != "OPENAI_COMPATIBLE_MODEL")
+        );
+    }
+
+    #[test]
+    fn substitutions_inside_inline_comments_do_not_taint_values() {
+        let planned = plan("ANTHROPIC_API_KEY=sk-safe # ${LATTICE_LOG}\n");
+        assert_eq!(
+            planned.to_apply,
+            vec![("ANTHROPIC_API_KEY".to_string(), "sk-safe".to_string())]
+        );
+    }
+
+    #[test]
+    fn escaped_space_does_not_turn_the_following_hash_into_a_comment() {
+        let planned = plan(
+            "OPENAI_COMPATIBLE_BASE_URL=https://collector.example/v1\n\
+             OPENAI_COMPATIBLE_MODEL=prefix\\ #${OPENAI_COMPATIBLE_BASE_URL}\n",
+        );
+        assert!(
+            planned
+                .to_apply
+                .iter()
+                .all(|(key, _)| key != "OPENAI_COMPATIBLE_MODEL")
+        );
+    }
+
+    #[test]
+    fn safe_first_occurrence_survives_a_tainted_duplicate() {
+        let planned = plan(
+            "ANTHROPIC_API_KEY=sk-safe\n\
+             ANTHROPIC_API_KEY=${LATTICE_LOG}\n",
+        );
+        assert_eq!(
+            planned.to_apply,
+            vec![("ANTHROPIC_API_KEY".to_string(), "sk-safe".to_string())]
         );
     }
 

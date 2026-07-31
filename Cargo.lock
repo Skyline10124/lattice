@@ -2883,6 +2883,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-width",
+ "url",
 ]
 
 [[package]]

@@ -5084,3 +5084,40 @@ harness-only driver/evidence/fake-LLM plumbing.
 `crates/lattice-system-harness/{AGENTS.md,tests/support/mod.rs}`,
 `crates/lattice-system-harness/tests/direct_{failures,local_turn,mutation,observation,operator,secrets,session_isolation,tools,turn_contract}.rs`,
 `FINDINGS.md`, `FIX.md`.
+
+## GitHub #133 review blockers: close `.env` diagnostic and substitution leaks — 2026-08-01
+
+Severity: HIGH (credential/endpoint disclosure and untrusted routing input).
+
+**Problem:** The initial issue #99 trust boundary filtered rejected keys only
+after `dotenvy` had added them to substitution state, forwarded malformed-line
+parse errors verbatim, and redacted proxy userinfo only when a URL carried an
+explicit scheme. A hostile workspace could therefore launder an endpoint into
+an allowed variable or expose credentials through doctor output and persisted
+failure artifacts.
+
+**Fix summary:**
+- Raw substitution dependencies on refused `.env` keys are tracked in dotenv
+  occurrence order, with leading/inline comments and repeated assignments
+  matching dotenvy's parsing semantics; transitive and process-shadowed
+  laundering is refused without rejecting a safe first occurrence.
+- `LineParse` diagnostics now expose only a byte offset, never the source line.
+- Proxy userinfo redaction covers both schemeful and reqwest-supported
+  scheme-less forms in text and JSON output.
+- Doctor report internals retain typed `ValueSource` and `RejectReason` values;
+  strings are produced only at the rendering boundary.
+- Harness failure-artifact scans now include each scenario-specific secret.
+
+**Verification:**
+- Focused RED/GREEN unit and fast-binary tests covered substitution laundering,
+  malformed lines, and scheme-less proxy credentials.
+- `cargo test -p lattice-cli` — passed.
+- `LATTICE_BIN=target/debug/lattice cargo test -p lattice-system-harness --test fast_env_boundary`
+  — 13 passed.
+- `cargo xtask ci` in the host session — all formatting, clippy, build,
+  boundary, codegen, workspace test, harness, and artifact checks passed.
+- `git diff --check` — passed.
+
+**Changed files:** `Cargo.lock`,
+`crates/lattice-cli/{AGENTS.md,Cargo.toml,src/commands/doctor.rs,src/env_boundary.rs}`,
+`crates/lattice-system-harness/tests/fast_env_boundary.rs`, `FIX.md`.
