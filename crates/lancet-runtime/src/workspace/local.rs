@@ -19,12 +19,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lancet_runtime::{MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryError};
+use crate::history::{MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryError};
 use regex::Regex;
 use rustix::fs::{AtFlags, Mode, OFlags};
 use rustix::io::Errno;
 
-use crate::edit::content_hash;
+use crate::workspace::content_hash;
 
 use super::types::{
     CreatedFile, DirectoryEntry, FindRequest, GrepMatch, GrepRequest, InstalledFile,
@@ -36,9 +36,12 @@ use super::visibility::{VisibilityEngine, VisibilityEvidence};
 ///
 /// Internal deep module: secure path resolution, bounded read, atomic
 /// installation, mutation history, and error normalization all live behind
-/// this type. It is `pub(crate)` because native handlers and the edit engine
-/// are the only allowed callers; there is no workspace-backend seam.
-pub(crate) struct LocalWorkspace {
+/// this type. It is `pub` because two host callers live in different crates
+/// since #30 — this crate's `workspace-observe` Tool Host imports, and
+/// `lancet-native`'s still-native mutation handlers — but that is reach, not a
+/// seam: the type is concrete, has no trait behind it, and cannot be swapped
+/// or injected. There is no workspace-backend seam to implement.
+pub struct LocalWorkspace {
     /// Canonical project root. Captured at construction time; never mutates.
     root: PathBuf,
     /// Private durable history of successfully installed Atomic Local
@@ -52,14 +55,24 @@ pub(crate) struct LocalWorkspace {
     fail_install: Arc<AtomicBool>,
 }
 
+/// Result of a read whose allocation is capped by the caller.
+pub enum BoundedFileRead {
+    Complete(Vec<u8>),
+    LimitExceeded { observed: usize, allowed: usize },
+}
+
 impl LocalWorkspace {
     /// Construct from a project root with mutation history recording off.
     ///
     /// Test-only: the production server always attaches the run's private
     /// history through [`LocalWorkspace::with_history`], so an installation
-    /// path that records nothing cannot exist in a real turn.
-    #[cfg(test)]
-    pub(crate) fn new(root: &Path) -> Self {
+    /// path that records nothing cannot exist in a real turn. Gated on the
+    /// `test-utils` feature rather than `#[cfg(test)]` since #30 moved the module
+    /// across a crate boundary — `lancet-native`'s tests are a different
+    /// compilation unit and `cfg(test)` does not reach them. Production binaries
+    /// do not enable the feature, so the constructor remains absent from them.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new(root: &Path) -> Self {
         Self::with_history(root, Arc::new(WorkspaceHistory::disabled()))
     }
 
@@ -68,7 +81,7 @@ impl LocalWorkspace {
     ///
     /// Falls back to the raw path if canonicalize fails (mirrors
     /// `CepPolicyConfig::defaults_for_project_root` tolerance).
-    pub(crate) fn with_history(root: &Path, history: Arc<WorkspaceHistory>) -> Self {
+    pub fn with_history(root: &Path, history: Arc<WorkspaceHistory>) -> Self {
         let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         Self {
             root: canonical,
@@ -79,7 +92,7 @@ impl LocalWorkspace {
     }
 
     /// Canonical project root this workspace operates on.
-    pub(crate) fn root(&self) -> &Path {
+    pub fn root(&self) -> &Path {
         &self.root
     }
 
@@ -91,7 +104,7 @@ impl LocalWorkspace {
     /// when history recording is disabled. Recording writes only into the
     /// private history repository — never the Local Workspace and never the
     /// project `.git`.
-    pub(crate) async fn record_mutation(
+    pub async fn record_mutation(
         &self,
         record: MutationRecord,
     ) -> Result<Option<RecordedMutation>, WorkspaceHistoryError> {
@@ -125,7 +138,7 @@ impl LocalWorkspace {
     /// Resolution is intent-independent: the same secure walk backs read,
     /// create, overwrite, delete, and list flows. The intent is carried as
     /// operation vocabulary for the guard/precondition layer.
-    pub(crate) fn resolve_secure(
+    pub fn resolve_secure(
         &self,
         path: &WorkspacePath,
         _intent: PathIntent,
@@ -323,93 +336,157 @@ impl LocalWorkspace {
         Ok(fd)
     }
 
+    /// Per-segment secure resolution returning only the observed facts.
+    ///
+    /// The synchronous form. Every observation entry point — the async wrappers
+    /// the native handlers drive and the synchronous Tool Host imports in
+    /// [`crate::host_workspace`] — funnels through this one function, so path
+    /// safety has exactly one implementation rather than one per calling
+    /// convention (#30).
+    pub fn resolve_facts_blocking(
+        &self,
+        path: &WorkspacePath,
+        intent: PathIntent,
+    ) -> Result<PathFacts, LocalWorkspaceError> {
+        self.resolve_secure(path, intent).map(|(_, facts)| facts)
+    }
+
     /// Async per-segment secure resolution returning only the observed facts.
     ///
     /// Handlers and the edit engine use this for preflight: the facts feed
     /// both their own flow (existence/kind/byte size) and Guard L1
     /// validation via [`PathFacts::to_guard`]. Resolution runs in the
     /// blocking pool.
-    pub(crate) async fn resolve_facts(
+    pub async fn resolve_facts(
         &self,
         path: &WorkspacePath,
         intent: PathIntent,
     ) -> Result<PathFacts, LocalWorkspaceError> {
         let ws = self.blocking_clone();
         let path = path.clone();
-        tokio::task::spawn_blocking(move || {
-            ws.resolve_secure(&path, intent).map(|(_, facts)| facts)
-        })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+        tokio::task::spawn_blocking(move || ws.resolve_facts_blocking(&path, intent))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+    }
+
+    /// Read a file under the workspace, returning its bytes. Synchronous form.
+    pub fn read_file_blocking(&self, path: &WorkspacePath) -> Result<Vec<u8>, LocalWorkspaceError> {
+        path.require_file_path()?;
+        let (full, facts) = self.resolve_secure(path, PathIntent::Read)?;
+        if !facts.exists {
+            return Err(LocalWorkspaceError::NotFound {
+                normalized: path.as_str().to_string(),
+            });
+        }
+        if !matches!(facts.kind, Some(PathKind::File)) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a regular file",
+            )));
+        }
+        Ok(fs::read(&full)?)
+    }
+
+    /// Read a regular file without ever allocating more than `allowed + 1`
+    /// bytes. Metadata rejects an already-oversized file before opening it;
+    /// the capped read is the post-check for a file that grows after resolution.
+    pub fn read_file_bounded_blocking(
+        &self,
+        path: &WorkspacePath,
+        allowed: usize,
+    ) -> Result<BoundedFileRead, LocalWorkspaceError> {
+        path.require_file_path()?;
+        let (full, facts) = self.resolve_secure(path, PathIntent::Read)?;
+        if !facts.exists {
+            return Err(LocalWorkspaceError::NotFound {
+                normalized: path.as_str().to_string(),
+            });
+        }
+        if !matches!(facts.kind, Some(PathKind::File)) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a regular file",
+            )));
+        }
+        if let Some(size) = facts.byte_size
+            && size as usize > allowed
+        {
+            return Ok(BoundedFileRead::LimitExceeded {
+                observed: size as usize,
+                allowed,
+            });
+        }
+
+        let file = fs::File::open(full)?;
+        let probe = allowed.saturating_add(1) as u64;
+        let mut bytes = Vec::with_capacity(allowed.min(64 * 1024));
+        file.take(probe).read_to_end(&mut bytes)?;
+        if bytes.len() > allowed {
+            Ok(BoundedFileRead::LimitExceeded {
+                observed: bytes.len(),
+                allowed,
+            })
+        } else {
+            Ok(BoundedFileRead::Complete(bytes))
+        }
     }
 
     /// Read a file under the workspace, returning its bytes.
-    pub(crate) async fn read_file(
-        &self,
-        path: &WorkspacePath,
-    ) -> Result<Vec<u8>, LocalWorkspaceError> {
+    pub async fn read_file(&self, path: &WorkspacePath) -> Result<Vec<u8>, LocalWorkspaceError> {
         path.require_file_path()?;
         let ws = self.blocking_clone();
         let path = path.clone();
-        tokio::task::spawn_blocking(move || {
-            let (full, facts) = ws.resolve_secure(&path, PathIntent::Read)?;
-            if !facts.exists {
-                return Err(LocalWorkspaceError::NotFound {
-                    normalized: path.as_str().to_string(),
-                });
-            }
-            if !matches!(facts.kind, Some(PathKind::File)) {
-                return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "not a regular file",
-                )));
-            }
-            let bytes = fs::read(&full)?;
-            Ok(bytes)
-        })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+        tokio::task::spawn_blocking(move || ws.read_file_blocking(&path))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
     /// List directory entries directly beneath `path` (non-recursive).
-    pub(crate) async fn list_dir(
+    /// Synchronous form.
+    pub fn list_dir_blocking(
+        &self,
+        path: &WorkspacePath,
+    ) -> Result<Vec<DirectoryEntry>, LocalWorkspaceError> {
+        let (full, facts) = self.resolve_secure(path, PathIntent::ListDirectory)?;
+        if !facts.exists {
+            return Err(LocalWorkspaceError::NotFound {
+                normalized: path.as_str().to_string(),
+            });
+        }
+        if !matches!(facts.kind, Some(PathKind::Directory)) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a directory",
+            )));
+        }
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&full)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // `DirEntry::file_type` does NOT follow symlinks (unlike
+            // `DirEntry::metadata`), so symlinks — including dangling
+            // ones — list as `Symlink` instead of erroring the whole
+            // listing or masquerading as their target's kind.
+            let ft = entry.file_type()?;
+            entries.push(DirectoryEntry {
+                name,
+                kind: file_type_kind(ft),
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
+    }
+
+    /// List directory entries directly beneath `path` (non-recursive).
+    pub async fn list_dir(
         &self,
         path: &WorkspacePath,
     ) -> Result<Vec<DirectoryEntry>, LocalWorkspaceError> {
         let ws = self.blocking_clone();
         let path = path.clone();
-        tokio::task::spawn_blocking(move || {
-            let (full, facts) = ws.resolve_secure(&path, PathIntent::ListDirectory)?;
-            if !facts.exists {
-                return Err(LocalWorkspaceError::NotFound {
-                    normalized: path.as_str().to_string(),
-                });
-            }
-            if !matches!(facts.kind, Some(PathKind::Directory)) {
-                return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "not a directory",
-                )));
-            }
-            let mut entries = Vec::new();
-            for entry in fs::read_dir(&full)? {
-                let entry = entry?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                // `DirEntry::file_type` does NOT follow symlinks (unlike
-                // `DirEntry::metadata`), so symlinks — including dangling
-                // ones — list as `Symlink` instead of erroring the whole
-                // listing or masquerading as their target's kind.
-                let ft = entry.file_type()?;
-                entries.push(DirectoryEntry {
-                    name,
-                    kind: file_type_kind(ft),
-                });
-            }
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            Ok(entries)
-        })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+        tokio::task::spawn_blocking(move || ws.list_dir_blocking(&path))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
     /// Grep a directory subtree, returning up to `max_results` matches.
@@ -424,85 +501,103 @@ impl LocalWorkspace {
     /// [`GREP_MAX_LINE_BYTES`] are consumed against the budget but never
     /// matched. Callers may therefore see fewer matches than exist on disk
     /// even when the result is not `max_results`-truncated.
-    pub(crate) async fn grep(
+    pub fn grep_blocking(
         &self,
         req: &GrepRequest,
         max_results: usize,
         mut visibility: VisibilityEngine,
     ) -> Result<(Vec<GrepMatch>, VisibilityEvidence), LocalWorkspaceError> {
-        let ws = self.blocking_clone();
-        let req = req.clone();
-        tokio::task::spawn_blocking(move || {
-            let (full, facts) = ws.resolve_secure(&req.path, PathIntent::ListDirectory)?;
-            if !facts.exists {
-                return Err(LocalWorkspaceError::NotFound {
-                    normalized: req.path.as_str().to_string(),
-                });
-            }
-            if !matches!(facts.kind, Some(PathKind::Directory)) {
-                return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "grep root is not a directory",
-                )));
-            }
-            let re = Regex::new(&req.pattern)
-                .map_err(std::io::Error::other)
-                .map_err(LocalWorkspaceError::Io)?;
-            let mut out: Vec<GrepMatch> = Vec::new();
-            let mut budget = GrepBudget::default();
-            grep_walk(
-                &ws.root,
-                &full,
-                &re,
-                req.glob.as_deref(),
-                max_results,
-                &mut budget,
-                &mut visibility,
-                &mut out,
-            )?;
-            Ok((out, visibility.evidence()))
-        })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+        let (full, facts) = self.resolve_secure(&req.path, PathIntent::ListDirectory)?;
+        if !facts.exists {
+            return Err(LocalWorkspaceError::NotFound {
+                normalized: req.path.as_str().to_string(),
+            });
+        }
+        if !matches!(facts.kind, Some(PathKind::Directory)) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "grep root is not a directory",
+            )));
+        }
+        let re = Regex::new(&req.pattern)
+            .map_err(std::io::Error::other)
+            .map_err(LocalWorkspaceError::Io)?;
+        let mut out: Vec<GrepMatch> = Vec::new();
+        let mut budget = GrepBudget::default();
+        grep_walk(
+            &self.root,
+            &full,
+            &re,
+            req.glob.as_deref(),
+            max_results,
+            &mut budget,
+            &mut visibility,
+            &mut out,
+        )?;
+        Ok((out, visibility.evidence()))
     }
 
-    /// Find files matching a glob beneath a directory subtree.
+    /// Grep a directory subtree, returning up to `max_results` matches.
+    pub async fn grep(
+        &self,
+        req: &GrepRequest,
+        max_results: usize,
+        visibility: VisibilityEngine,
+    ) -> Result<(Vec<GrepMatch>, VisibilityEvidence), LocalWorkspaceError> {
+        let ws = self.blocking_clone();
+        let req = req.clone();
+        tokio::task::spawn_blocking(move || ws.grep_blocking(&req, max_results, visibility))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+    }
+
+    /// Find files matching a glob beneath a directory subtree. Synchronous form.
     ///
     /// Hidden paths are omitted from results and truncation counts.
-    pub(crate) async fn find_files(
+    pub fn find_files_blocking(
         &self,
         req: &FindRequest,
         max_results: usize,
         mut visibility: VisibilityEngine,
     ) -> Result<(Vec<WorkspacePath>, VisibilityEvidence), LocalWorkspaceError> {
+        let (full, facts) = self.resolve_secure(&req.path, PathIntent::ListDirectory)?;
+        if !facts.exists {
+            return Err(LocalWorkspaceError::NotFound {
+                normalized: req.path.as_str().to_string(),
+            });
+        }
+        if !matches!(facts.kind, Some(PathKind::Directory)) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "find root is not a directory",
+            )));
+        }
+        let mut out: Vec<WorkspacePath> = Vec::new();
+        find_walk(
+            &self.root,
+            &full,
+            &req.pattern,
+            max_results,
+            &mut visibility,
+            &mut out,
+        )?;
+        Ok((out, visibility.evidence()))
+    }
+
+    /// Find files matching a glob beneath a directory subtree.
+    ///
+    /// Hidden paths are omitted from results and truncation counts.
+    pub async fn find_files(
+        &self,
+        req: &FindRequest,
+        max_results: usize,
+        visibility: VisibilityEngine,
+    ) -> Result<(Vec<WorkspacePath>, VisibilityEvidence), LocalWorkspaceError> {
         let ws = self.blocking_clone();
         let req = req.clone();
-        tokio::task::spawn_blocking(move || {
-            let (full, facts) = ws.resolve_secure(&req.path, PathIntent::ListDirectory)?;
-            if !facts.exists {
-                return Err(LocalWorkspaceError::NotFound {
-                    normalized: req.path.as_str().to_string(),
-                });
-            }
-            if !matches!(facts.kind, Some(PathKind::Directory)) {
-                return Err(LocalWorkspaceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "find root is not a directory",
-                )));
-            }
-            let mut out: Vec<WorkspacePath> = Vec::new();
-            find_walk(
-                &ws.root,
-                &full,
-                &req.pattern,
-                max_results,
-                &mut visibility,
-                &mut out,
-            )?;
-            Ok((out, visibility.evidence()))
-        })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+        tokio::task::spawn_blocking(move || ws.find_files_blocking(&req, max_results, visibility))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
     /// No-replace create (ADR 0003 decision 8).
@@ -511,7 +606,7 @@ impl LocalWorkspace {
     /// with [`LocalWorkspaceError::TargetExists`], which the caller maps to
     /// `ReplanRequired`. Missing parent directories are created when
     /// `create_parents` is true.
-    pub(crate) async fn create_excl(
+    pub async fn create_excl(
         &self,
         path: &WorkspacePath,
         content: &[u8],
@@ -582,7 +677,7 @@ impl LocalWorkspace {
     /// safe by construction. Returns the post-install content hash. The
     /// caller must have already checked the mutation precondition (expected
     /// hash or absence) against current Local state.
-    pub(crate) async fn install_atomic(
+    pub async fn install_atomic(
         &self,
         path: &WorkspacePath,
         content: &[u8],
@@ -601,7 +696,7 @@ impl LocalWorkspace {
     /// Shared by the async mutation path and the explicit Rewind restore
     /// (#64), which runs on a blocking thread of its own. The pinned-dirfd
     /// walk (#39) lives here, so both callers get it.
-    pub(crate) fn install_atomic_sync(
+    pub fn install_atomic_sync(
         &self,
         path: &WorkspacePath,
         content: &[u8],
@@ -695,10 +790,7 @@ impl LocalWorkspace {
     }
 
     /// Remove a file.
-    pub(crate) async fn remove_file(
-        &self,
-        path: &WorkspacePath,
-    ) -> Result<(), LocalWorkspaceError> {
+    pub async fn remove_file(&self, path: &WorkspacePath) -> Result<(), LocalWorkspaceError> {
         path.require_file_path()?;
         let ws = self.blocking_clone();
         let path = path.clone();
@@ -710,7 +802,7 @@ impl LocalWorkspace {
     /// Synchronous core of [`LocalWorkspace::remove_file`], shared with the
     /// explicit Rewind restore (#64). The pinned-dirfd unlink (#39) lives
     /// here, so both callers get it.
-    pub(crate) fn remove_file_sync(&self, path: &WorkspacePath) -> Result<(), LocalWorkspaceError> {
+    pub fn remove_file_sync(&self, path: &WorkspacePath) -> Result<(), LocalWorkspaceError> {
         path.require_file_path()?;
         let (full, facts) = self.resolve_secure(path, PathIntent::Delete)?;
         if !facts.exists {
@@ -740,7 +832,7 @@ impl LocalWorkspace {
     /// fault injection proving the install failure boundary leaves the
     /// target unchanged — a single boolean, not a composable plugin seam.
     #[cfg(any(test, feature = "test-fault-injection"))]
-    pub(crate) fn fail_next_install(&self) {
+    pub fn fail_next_install(&self) {
         self.fail_install.store(true, Ordering::SeqCst);
     }
 }

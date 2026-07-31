@@ -21,6 +21,7 @@ members = [
     "crates/lancet-runtime",
     "crates/lattice-system-harness",
     "tools/noop",
+    "tools/observe-workspace",
     "tools/todo-write",
     "xtask",
 ]

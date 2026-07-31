@@ -37,6 +37,12 @@ use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use tempfile::TempDir;
 
+/// The embedded Component Tools of the default distribution. Literals, not
+/// catalog constants: their descriptor authority is their source manifest
+/// (`tools/*/manifest.toml`), and #29/#30 deleted the `lancet-catalog` types
+/// that used to name them.
+const COMPONENT_TOOLS: [&str; 2] = ["observe.workspace", "session.todo_write"];
+
 // ─── Runtime-layer harness ──────────────────────────────────────────────────
 
 /// A runtime rooted at a temp Local Workspace with its private history in a
@@ -82,20 +88,27 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntim
         denied_write_patterns: Vec::new(),
         ..Default::default()
     };
-    // All five shipped Tools: the four native catalog methods plus the embedded
-    // Component (#29). AC9 below asserts the private history adds nothing to that
-    // set, so the set has to be complete for the assertion to mean anything.
+    // All five shipped Tools: the three native catalog methods plus the two
+    // embedded Components (`session.todo_write` since #29, `observe.workspace`
+    // since #30). AC9 below asserts the private history adds nothing to that
+    // set, so the set has to be complete for the assertion to mean anything —
+    // and since #30 completeness means naming a Component for the observation
+    // that used to arrive with the catalog.
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    enabled.push("session.todo_write".to_string());
+    enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
     LancetRuntime::build(LancetRuntimeConfig {
         project_root: root.to_path_buf(),
         enabled_tools: enabled,
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: AuditBacking::InMemory,
+        // `enabled_tools` is the stage-1 capability grant, and Cell admission is
+        // fail-closed: an omitted name here is a Tool the runtime exposes and
+        // then refuses.
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
-            enabled_tools: std::iter::once("session.todo_write".to_string()).collect(),
-            ..Default::default()
+            enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
+            denied_capabilities: Default::default(),
+            max_boundary: lancet_protocol::cell::Trust::In,
         },
         workspace_history: history.clone(),
         model_id: "test".into(),

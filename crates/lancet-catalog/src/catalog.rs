@@ -4,18 +4,22 @@
 //! Static CEP method catalog for CEP.
 
 use crate::method::MethodDescriptor;
-use crate::methods::{Create, Edit, Fetch, ObserveWorkspace};
+use crate::methods::{Create, Edit, Fetch};
 use std::sync::LazyLock;
 
 /// Exhaustive native CEP method descriptor list in stable registration order.
 ///
-/// `session.todo_write` is not here: #29 migrated it to an embedded Component
-/// Tool whose source manifest is its sole descriptor authority. The default
-/// distribution is still five Tools — four native methods plus one Component —
-/// and #30–#32 move the rest.
-pub static CATALOG: LazyLock<[MethodDescriptor; 4]> = LazyLock::new(|| {
+/// `session.todo_write` (#29) and `observe.workspace` (#30) are not here: both are
+/// embedded Component Tools whose source manifests are their sole descriptor
+/// authority. Removing a migrated method from this catalog is not bookkeeping —
+/// a name present in both vocabularies fails the whole server run closed
+/// (`validate_no_component_native_collision`), because a collision arms the
+/// legacy effect path against a Component's call.
+///
+/// The default distribution is still five Tools: three native methods plus two
+/// Components. #31/#32 move the rest.
+pub static CATALOG: LazyLock<[MethodDescriptor; 3]> = LazyLock::new(|| {
     [
-        MethodDescriptor::for_method::<ObserveWorkspace>(),
         MethodDescriptor::for_method::<Create>(),
         MethodDescriptor::for_method::<Edit>(),
         MethodDescriptor::for_method::<Fetch>(),
@@ -23,10 +27,10 @@ pub static CATALOG: LazyLock<[MethodDescriptor; 4]> = LazyLock::new(|| {
 });
 
 /// Compile-time-known length of [`CATALOG`]. Mirrors the array bound in
-/// [`CATALOG`]'s type (`[MethodDescriptor; 4]`); keep these in sync when the
+/// [`CATALOG`]'s type (`[MethodDescriptor; 3]`); keep these in sync when the
 /// root CEP method contract changes. Callers (e.g. the LANCET doctor) read
 /// this instead of hard-coding a method count.
-pub const CATALOG_LEN: usize = 4;
+pub const CATALOG_LEN: usize = 3;
 
 /// Borrow the catalog as a slice.
 pub fn catalog() -> &'static [MethodDescriptor] {
@@ -57,15 +61,10 @@ pub fn scaffold_catalog() -> &'static [MethodDescriptor] {
 mod tests {
     use super::*;
     use crate::method::CepMethod;
-    use crate::methods::{Create, Edit, Fetch, ObserveWorkspace};
+    use crate::methods::{Create, Edit, Fetch};
     use lancet_protocol::{ImpactKind, RequiredCapability};
 
-    const EXPECTED_ORDER: [&str; 4] = [
-        "observe.workspace",
-        "mutate.create",
-        "mutate.edit",
-        "fetch.web",
-    ];
+    const EXPECTED_ORDER: [&str; 3] = ["mutate.create", "mutate.edit", "fetch.web"];
 
     #[test]
     fn catalog_contains_expected_methods_in_stable_order() {
@@ -130,7 +129,7 @@ mod tests {
                     assert!(descriptor.base_authority.fetch_hosts);
                     assert!(!descriptor.base_authority.read_audit);
                 }
-                "observe.workspace" | "mutate.create" | "mutate.edit" => {
+                "mutate.create" | "mutate.edit" => {
                     assert_eq!(
                         descriptor.base_authority,
                         crate::method::BaseAuthorityRequirement::NONE
@@ -144,15 +143,10 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 4] = [
-            (
-                &catalog[0],
-                ObserveWorkspace::IMPACT,
-                ObserveWorkspace::CAPABILITY,
-            ),
-            (&catalog[1], Create::IMPACT, Create::CAPABILITY),
-            (&catalog[2], Edit::IMPACT, Edit::CAPABILITY),
-            (&catalog[3], Fetch::IMPACT, Fetch::CAPABILITY),
+        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 3] = [
+            (&catalog[0], Create::IMPACT, Create::CAPABILITY),
+            (&catalog[1], Edit::IMPACT, Edit::CAPABILITY),
+            (&catalog[2], Fetch::IMPACT, Fetch::CAPABILITY),
         ];
 
         for (descriptor, impact, capability) in checks {
@@ -169,28 +163,31 @@ mod tests {
         }
     }
 
-    /// The native catalog is four methods since #29 moved `session.todo_write`
-    /// to an embedded Component Tool. The shipped catalog is still five Tools;
-    /// this constant counts only the ones a native handler still serves.
+    /// The native catalog is three methods since #29 moved `session.todo_write`
+    /// and #30 moved `observe.workspace` to embedded Component Tools. The
+    /// shipped catalog is still five Tools; this constant counts only the ones a
+    /// native handler still serves.
     #[test]
-    fn catalog_len_is_4() {
-        assert_eq!(catalog().len(), 4);
+    fn catalog_len_is_3() {
+        assert_eq!(catalog().len(), 3);
         assert_eq!(catalog().len(), CATALOG_LEN);
     }
 
-    /// The migrated method must not reappear as a native catalog entry: a second
+    /// A migrated method must not reappear as a native catalog entry: a second
     /// descriptor beside the source manifest is exactly the parallel schema
     /// ADR 0004 forbids, and it would arm both authorization vocabularies for
     /// one call name (#28 design §11).
     #[test]
-    fn migrated_todo_write_is_not_a_native_catalog_method() {
-        assert!(
-            catalog()
-                .iter()
-                .all(|descriptor| descriptor.name != "session.todo_write"),
-            "session.todo_write is a Component Tool; its descriptor authority is \
-             tools/todo-write/manifest.toml"
-        );
+    fn migrated_component_tools_are_not_native_catalog_methods() {
+        for (method, manifest) in [
+            ("session.todo_write", "tools/todo-write/manifest.toml"),
+            ("observe.workspace", "tools/observe-workspace/manifest.toml"),
+        ] {
+            assert!(
+                catalog().iter().all(|descriptor| descriptor.name != method),
+                "{method} is a Component Tool; its descriptor authority is {manifest}"
+            );
+        }
     }
 
     #[test]
@@ -254,17 +251,9 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 4);
+        assert_eq!(catalog().len(), 3);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
-        assert_eq!(
-            names,
-            [
-                "observe.workspace",
-                "mutate.create",
-                "mutate.edit",
-                "fetch.web",
-            ]
-        );
+        assert_eq!(names, ["mutate.create", "mutate.edit", "fetch.web"]);
         for descriptor in catalog() {
             assert_ne!(descriptor.name, "workspace.inspect");
             assert_ne!(descriptor.name, "workspace.navigate");

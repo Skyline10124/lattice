@@ -58,7 +58,7 @@ Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
                  lancet-authority(->protocol,catalog,net-guard)
 Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
-                 lancet-runtime(->protocol,dispatch)
+                 lancet-runtime(->protocol,dispatch,authority)
 Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
                                authority,net-guard,runtime)
 Layer 3.5:       lancet-api(->protocol,catalog,dispatch,cep,audit,
@@ -77,6 +77,13 @@ workspace-internal dependencies by contract. The prelude is a guest SDK
 only reach the product through the built binary (`cargo xtask
 harness-boundary` enforces this, transitively).
 ```
+
+`lancet-runtime -> lancet-authority` arrived with #30, when the concrete Local
+Workspace moved down into `lancet-runtime`: the visibility engine's decision
+vocabulary (`ReadVisibilityPolicy` / `HiddenReason` / `ReadVisibility`) and the
+System Path Exclusion predicate are policy *semantics* and stay in
+`lancet-authority`, so the runtime consumes them rather than reimplementing them.
+The edge points down (2.5 -> 2) and closes no cycle.
 
 `net-guard` and `lattice-llm` sit at 0.5 rather than 0 because `lattice-llm`
 depends on `net-guard`. Only `net-guard` is a true leaf of that pair;
@@ -107,8 +114,8 @@ accumulating.
 | `lancet-cep` | Current CEP/catalog projection facade scheduled for absorption or retirement after descriptor-generated projection lands. |
 | `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, provenance projection, attestation persistence, and (since #112) the versioned Cell evidence tables that are the durable home of `AdmissionEvidence` / `ObservedEffectsRecord` / `DeniedOperationsRecord`. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger, and effect-region checks. |
-| `lancet-native` | Current native handler/server surface. ADR 0004 moves built-ins to Components and absorbs the remaining concrete host responsibilities into `lancet-runtime`. |
-| `lancet-runtime` | ADR 0004 target: Component engine, generated descriptor inventory, dispatch/transport, Tool Host enforcement, concrete Local Workspace, native network/session channels, audit/effect integration, and private gix history. Not yet the production path. |
+| `lancet-native` | Current native handler/server surface for the methods still native (`mutate.create`, `mutate.edit`, `fetch.web`), plus the CEP server lifecycle and the Component/native dispatch split. ADR 0004 moves the remaining built-ins to Components and absorbs the rest into `lancet-runtime`. |
+| `lancet-runtime` | Component engine, generated descriptor inventory, Tool Host enforcement, the concrete Local Workspace and its Policy-Visible visibility engine (moved down here in #30), audit/effect integration, and private gix history. The production Component path since #29; #31/#32 finish absorbing dispatch/transport. |
 | `lattice-tool-prelude` | ADR 0004 target guest SDK for source manifests, generated WIT bindings, descriptor helpers, and built-in Source Tools. |
 | `lancet-api` | Unified public API. During migration it composes native CEP pieces; the target composes `lancet-runtime` without depending on LATTICE session/agent/profile layers. |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, public-address resolution, private/reserved IP checks, and rebinding-domain checks. Depends only on `url` and `std`. |
@@ -146,10 +153,14 @@ accumulating.
   `render.json`; that absence is a legal state, and `--check` fails on a stale
   one.
 - The default distribution contains `observe.workspace`, `mutate.create`,
-  `mutate.edit`, `fetch.web`, and `session.todo_write`. Since GitHub #29 the last
-  of those is an embedded WASM Component whose sole descriptor authority is
-  `tools/todo-write/manifest.toml`; the other four are still native catalog
-  methods, so `lancet_catalog::catalog()` is four entries, not five. A Tool
+  `mutate.edit`, `fetch.web`, and `session.todo_write`. Two of those are embedded
+  WASM Components whose sole descriptor authority is their source manifest:
+  `session.todo_write` since GitHub #29 (`tools/todo-write/manifest.toml`) and
+  `observe.workspace` since GitHub #30 (`tools/observe-workspace/manifest.toml`).
+  The other three are still native catalog methods, so `lancet_catalog::catalog()`
+  is three entries, not five. Removing a migrated method from that catalog is not
+  bookkeeping: a name present in both vocabularies fails the whole server run
+  closed (`validate_no_component_native_collision`). A Tool
   manifest's required `[tool] distribution` field decides whether
   `cargo xtask tool-codegen` embeds it in the generated host composition
   (`crates/lancet-runtime/src/generated/host_composition.rs`) — that generated
@@ -173,7 +184,12 @@ accumulating.
 - Workspace observation exposes tracked and non-ignored Local files by default.
   Explicit ignored-path inclusion and read denial live in
   `[lancet.workspace]`; system exclusions take precedence over both and the
-  same visibility decision applies to read, list, grep, and find.
+  same visibility decision applies to read, list, grep, and find. Since #30 that
+  decision is made in exactly one place — `lancet_runtime::host_workspace`, behind
+  the `workspace-observe` Tool Host imports — and the `observe.workspace`
+  Component reaches the filesystem only through them. A hidden path is reported
+  as missing, with the `HiddenReason` audit label recorded as evidence and never
+  returned to the guest.
 - LANCET policy is configured through profile `[lancet]` sections: mode,
   project root, observation, network, effects, workspace policy, and external
   policy file pointers. Sandbox `[workspace]`, command, isolation, and verify
@@ -289,12 +305,16 @@ path (GitHub #64) restores from it.
   typed events and errors.
 - Keep shared URL/DNS safety primitives and neutral errors in `net-guard`;
   policy and HTTP client construction stay in their owning crates.
-- During Direct-Local migration keep concrete Local filesystem, network,
-  mutation, and transport behavior in `lancet-native`. ADR 0004 then absorbs
-  those host responsibilities into `lancet-runtime`. At every stage keep secure
-  path resolution, bounded observation, Mutation Preconditions, atomic
-  installation, and history behind one concrete host module; do not preserve a
-  pluggable execution-backend seam.
+- The concrete Local Workspace lives in `lancet-runtime` (`src/workspace/`) since
+  #30: a Tool Host import executes observation, and a host import cannot reach up
+  a layer into `lancet-native`. `lancet-native`'s still-native mutation handlers
+  and the edit engine consume the same concrete type from there — one module, not
+  a copy. Keep network and transport behavior in `lancet-native` until #31/#32
+  absorb them. At every stage keep secure path resolution, bounded observation,
+  Mutation Preconditions, atomic installation, and history behind one concrete
+  host module; do not introduce a pluggable execution-backend seam. Reaching the
+  module across a crate boundary is not such a seam — there is no trait behind it
+  and nothing to substitute.
 - Keep LANCET runtime composition and its public surface in `lancet-api`; it
   takes LANCET-native policy types and must not depend on LATTICE
   session/agent/profile crates. Anything that drives CEP (CLI, tests, embedders)

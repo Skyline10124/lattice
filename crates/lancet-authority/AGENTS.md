@@ -42,6 +42,16 @@ data, effect checking, effect ledger helpers, and boundary-credit validation.
 
 ## Recent Issues
 
+- ADDED #30: `observe.workspace` is an embedded Component Tool; this crate's
+  per-method observation resolution went with it. `policy/resolved.rs` no
+  longer extracts a per-mode observation path (`observe.workspace` resolves
+  as an unknown method, pinned by
+  `resolve_observe_workspace_errors_as_unknown_method`), and
+  `policy/default.rs` dropped its WorkspaceObservation arm. What stays is the
+  *input* side the Tool Host consumes: `[lancet.workspace]` visibility
+  (included-ignored / denied-read patterns) and the `ObservationPolicyConfig`
+  limit set, now read by `lancet-runtime`'s `workspace-observe` host imports
+  rather than by a native handler.
 - ADDED #28: `CepPolicyConfig` carries `capability_admission`
   (`CapabilityAdmissionPolicy`), the Component Tool admission inputs the native
   transport reads per call. Every constructor initializes it fail-closed. This

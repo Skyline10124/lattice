@@ -1,0 +1,12 @@
+{
+  "abi-version": 1,
+  "artifact-sha256": "14b0ea2fe0fe6d2f81827da8bec77a4270501c66ac505867f2a74026cda143ce",
+  "descriptor-sha256": "a514312e340ed12c24561f54543e213fc75b8714d84ee8360103844955404657",
+  "expected-imports": [
+    "lattice:tool-host/host-control@0.1.0",
+    "lattice:tool-host/workspace-observe@0.1.0"
+  ],
+  "name": "observe.workspace",
+  "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0",
+  "version": "0.1.0"
+}

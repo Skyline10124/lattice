@@ -12,26 +12,36 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Sub-Architecture
 
-- `src/handlers/` owns production CEP method handlers: observation, mutation, and
-  external. There is no `session_state.rs` — #29 migrated `session.todo_write`
-  to an embedded Component Tool and deleted its handler and registration. There
-  is no native fallback: a runtime whose composition does not embed the Component
-  reports the method as unrouted.
+- `src/handlers/` owns production CEP method handlers: mutation and external.
+  There is no `session_state.rs` — #29 migrated `session.todo_write` to an
+  embedded Component Tool and deleted its handler and registration — and no
+  `observation.rs`: #30 migrated `observe.workspace` to an embedded Component
+  Tool whose filesystem authority lives in `lancet-runtime`'s
+  `workspace-observe` host imports. There is no native fallback: a runtime
+  whose composition does not embed the Component reports the method as
+  unrouted.
 - `src/server/` owns registry setup, transport lifecycle, and durable call
-  metadata.
+  metadata. `transport.rs` also builds the per-call
+  `WorkspaceObservationHost` (workspace scope check, visibility policy,
+  `ObservationPolicyConfig`, shared turn budget charge) handed into
+  `ComponentCallContext`.
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   `limits::WriteLimits` — the one single-file write byte cap (1 MiB) both
   mutation write paths read.
-- `src/workspace/` owns the one concrete `LocalWorkspace` (#59/#60/#61,
-  Codeberg #37/#38/#39; plus #63): secure per-segment path resolution,
-  Policy-Visible Workspace filtering (gix Git facts + authority read policy),
-  bounded read/list/grep/find, content hashing (Local Revision), no-replace
-  create, atomic edit install, private mutation-history recording
-  (`with_history` / `record_mutation`), filesystem error normalization, and the
-  Local operation vocabulary (`WorkspacePath`, `PathFacts`, `PathIntent`,
-  requests). ADR 0004 moves this into `lancet-runtime`.
-- `src/executor/` owns crate-private web/render helpers and output limits.
+- `src/workspace/` is gone; `lib.rs` aliases the same name to
+  `lancet_runtime::workspace` (#30 moved the concrete module down a layer so
+  the Tool Host imports can reach it). The still-native mutation handlers and
+  the edit engine use the *same* concrete `LocalWorkspace` (#59/#60/#61,
+  Codeberg #37/#38/#39; plus #63) through that alias — one home for secure
+  per-segment path resolution, Policy-Visible Workspace filtering, bounded
+  read/list/grep/find, content hashing, no-replace create, atomic edit
+  install, mutation-history recording, and filesystem error normalization.
+  The alias is a path, not a seam.
+- `src/executor/` owns crate-private web helpers and output limits. The
+  observation render helpers left with #30: the host renders and charges the
+  final `read` content, while the Component wraps that result and shapes the
+  host-bounded `list` / `grep` / `find` payloads in `tools/observe-workspace`.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 
 ## Boundaries
@@ -48,11 +58,29 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - The concrete guarded Local Workspace is the single workspace path. The
   `ExecutionBackend`/routing seam was deleted in #60 — do not reintroduce a
   pluggable workspace implementation, routing enum, fallback, or parallel
-  path. #34 (Codeberg #12) moves the concrete host module into
-  `lancet-runtime` after Tool migration.
+  path. #30 moved the concrete host module into `lancet-runtime` (the Tool
+  Host imports cannot reach up a layer); the crate-local alias in `lib.rs`
+  keeps native call sites unchanged without creating a second home.
 
 ## Recent Issues
 
+- ADDED #30: `observe.workspace` migrated to the embedded
+  `tools/observe-workspace` Component Tool. The native observation handler,
+  its registration, the executor render helpers, and the authority's
+  `observe.workspace` policy arm are gone; `lancet_catalog` drops to three
+  native methods (Create/Edit/Fetch). All filesystem authority for the four
+  modes lives in `lancet-runtime::host_workspace` behind the
+  `workspace-observe` Tool Host imports — System Path Exclusion, safe
+  symlink/root containment, read denial, ignored-path inclusion, bounded
+  results, and the turn-scoped observation budget are enforced host-side,
+  and `ObservedEffect.truncated` is computed by the host, never the guest.
+  `transport.rs::workspace_observation_host` builds the per-call host from
+  the resolved visibility policy and shares the turn's budget tracker. A
+  host refusal reaches the caller as the structured `CepError` (e.g.
+  `PathContainment` for root escapes — the legacy policy hook used to
+  normalize the same denial to `GuardDenied`), not the guest's paraphrase.
+  The concrete `LocalWorkspace` moved to `lancet-runtime::workspace` with
+  it; `lib.rs` re-exports the module and `rewind` under their old names.
 - ADDED #28 (Codeberg #6): the Component branch of `transport.rs` runs `admit_tool` against
   `cep_context.policy.capability_admission` before `rt.call`. A denial answers
   `CapabilityNotGranted` and still finalizes the audit row with its

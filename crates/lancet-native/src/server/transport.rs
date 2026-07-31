@@ -21,8 +21,9 @@ use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, policy::CepMode};
 use lancet_runtime::{
-    AdmissionDenial, CellEvidenceLedger, ComponentCallContext, ComponentRuntime, WorkspaceHistory,
-    admit_tool, validate_policy_against_catalog,
+    AdmissionDenial, BudgetCharge, BudgetRefusal, CellEvidenceLedger, ComponentCallContext,
+    ComponentRuntime, WorkspaceHistory, WorkspaceObservationHost, admit_tool,
+    validate_policy_against_catalog,
 };
 use serde_json::{Value, json};
 use std::future::Future;
@@ -147,6 +148,72 @@ impl ServerRunConfig {
             .map(|descriptor| descriptor.name);
         component_native_collisions(native_names, &component_names)
     }
+}
+
+/// Assemble the call's workspace observation authority, or refuse it (#30).
+///
+/// Returns `None` — meaning every observation operation is refused — unless the
+/// Tool declares exactly one workspace-channel scope. Zero means the Tool has no
+/// business observing; several means the host cannot say which scope an operation
+/// belongs to, and it does not guess. This mirrors how `emit-event` binds its
+/// session-channel scope: a domain operation whose scope is ambiguous fails
+/// closed rather than picking one.
+///
+/// This is also the only place observation *policy* enters the Component path. The
+/// three pieces come from three owners and none of them is re-derived here:
+///
+/// - the concrete Local Workspace, constructed once per server run from the
+///   resolved project root,
+/// - the read-visibility policy, resolved from profile `[lancet.workspace]` by
+///   `lancet-authority`'s default hook,
+/// - the per-operation ceilings and the turn-scoped budget, both projected from
+///   `[lancet.observation]` on the turn context.
+///
+/// The budget is handed over as a closure over the *shared* turn tracker, not as
+/// a number: a copied counter would reset the per-turn ceiling on every call,
+/// which is the difference between a budget and a per-call limit.
+fn workspace_observation_host(
+    descriptor: &lancet_protocol::cell::ToolDescriptor,
+    workspace: &Arc<LocalWorkspace>,
+    cep_context: &Arc<CepTurnContext>,
+    default_policy_hook: Option<&DefaultPolicyHook>,
+) -> Option<Arc<WorkspaceObservationHost>> {
+    use lancet_protocol::cell::ChannelKind;
+
+    let workspace_scopes: Vec<&lancet_protocol::cell::ScopeDecl> = descriptor
+        .scopes
+        .iter()
+        .filter(|scope| scope.channel == ChannelKind::Workspace)
+        .collect();
+    let [scope] = workspace_scopes.as_slice() else {
+        return None;
+    };
+
+    // A missing or malformed visibility policy is not a reason to observe with
+    // *no* policy: the default is the restrictive one (tracked, non-ignored files
+    // only), which is what `ReadVisibilityPolicy::default` means.
+    let visibility_policy = default_policy_hook
+        .and_then(|hook| hook.config().workspace.read_visibility_policy().ok())
+        .unwrap_or_default();
+
+    let budget = Arc::clone(&cep_context.budget);
+    let charge: BudgetCharge = Arc::new(move |bytes: usize| {
+        budget
+            .try_charge_observation(bytes)
+            .map_err(|exhausted| BudgetRefusal {
+                limit: exhausted.limit,
+                requested: exhausted.requested,
+                remaining: exhausted.remaining,
+            })
+    });
+
+    Some(Arc::new(WorkspaceObservationHost::new(
+        Arc::clone(workspace),
+        visibility_policy,
+        cep_context.policy.observation.clone(),
+        charge,
+        scope.name.clone(),
+    )))
 }
 
 /// The method names that resolve to both vocabularies.
@@ -362,6 +429,17 @@ async fn handle_request(
             match admit_tool(descriptor, &cep_context.policy.capability_admission) {
                 Ok(admitted) => {
                     component_evidence.set_admission(admitted.evidence.clone());
+                    // #30: workspace observation authority, granted only to a
+                    // Tool that declares a workspace-channel scope. A Tool
+                    // without one gets `None`, and every observation operation is
+                    // then refused — the same fail-closed answer an unadmitted
+                    // cell produces, reached one step earlier.
+                    let workspace_host = workspace_observation_host(
+                        &admitted.descriptor,
+                        &workspace,
+                        &cep_context,
+                        default_policy_hook.as_deref(),
+                    );
                     let comp_ctx = ComponentCallContext {
                         call_id: id,
                         turn_id: turn_id.clone(),
@@ -369,6 +447,7 @@ async fn handle_request(
                         cancellation: cancellation.clone(),
                         evidence: component_evidence.clone(),
                         admitted: Arc::new(admitted),
+                        workspace: workspace_host,
                     };
                     rt.call(&method, params, comp_ctx).await
                 }

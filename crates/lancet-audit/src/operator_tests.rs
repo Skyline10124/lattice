@@ -11,8 +11,10 @@ use crate::audit::{AttestationRecord, AuditOutcome, CallAuditMetadata, CepAuditC
 use crate::provenance::build_in_toto_statement;
 use crate::store_path::audit_db_path_for_project_in;
 use crate::test_support::ScopedXdgStateHome;
-use lancet_catalog::CepMethod;
-use lancet_catalog::methods::workspace::ObserveWorkspace;
+/// `observe.workspace` as a plain method name (#30 made it a Component Tool, so
+/// there is no catalog type to take `NAME` from). The operator read path records
+/// and queries method names as strings; it never consults the catalog.
+const OBSERVE_WORKSPACE: &str = "observe.workspace";
 use rusqlite::Connection;
 use tempfile::TempDir;
 
@@ -57,7 +59,7 @@ fn seed_audit_db(state: &Path, project: &Path, session_id: &str, count: usize) {
             .start_call(
                 &ctx,
                 i as u64 + 1,
-                ObserveWorkspace::NAME,
+                OBSERVE_WORKSPACE,
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
@@ -232,7 +234,7 @@ async fn replay_audit_matches_stored_attestation() {
             .start_call(
                 &ctx,
                 i + 1,
-                ObserveWorkspace::NAME,
+                OBSERVE_WORKSPACE,
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
@@ -309,7 +311,7 @@ async fn query_audit_excludes_unfinalized_rows_during_active_turn() {
         .start_call(
             &ctx,
             1,
-            ObserveWorkspace::NAME,
+            OBSERVE_WORKSPACE,
             &CallAuditMetadata::native_policy_enforced(None),
         )
         .unwrap();
@@ -372,7 +374,7 @@ async fn operator_audit_reads_concurrent_with_active_writer() {
                 .start_call(
                     &ctx,
                     round + 1,
-                    ObserveWorkspace::NAME,
+                    OBSERVE_WORKSPACE,
                     &CallAuditMetadata::native_policy_enforced(Some("started")),
                 )
                 .expect("start_call");
@@ -492,7 +494,7 @@ async fn query_audit_reads_legacy_table_missing_optional_columns() {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 1_i64,
-                ObserveWorkspace::NAME,
+                OBSERVE_WORKSPACE,
                 "1",
                 "2",
                 "success:legacy",
@@ -567,7 +569,7 @@ async fn query_audit_reads_legacy_table_without_attestation_records() {
         .start_call(
             &ctx,
             1,
-            ObserveWorkspace::NAME,
+            OBSERVE_WORKSPACE,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .expect("start");

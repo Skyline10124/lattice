@@ -7,7 +7,7 @@
 //! Two proptest strategies exercised per [`ProptestConfig::with_cases(256)`]:
 //!
 //! 1. **biased_allowed** — builds `PolicyInput` that exercises positive policy
-//!    branches (observation, session state, fetch, diagnostic command).
+//!    branches (mutation, fetch) plus the retired-method denial.
 //! 2. **deny_path** — builds `PolicyInput` that exercises deny paths
 //!    (budget exhaustion, unknown method, missing write paths).
 //!
@@ -71,25 +71,23 @@ fn audit_ctx(call_id: u64, budget: PolicyBudgetSnapshot) -> PolicyAuditContext {
 // ── Biased-allowed inputs ──────────────────────────────────────────────
 //
 // Exercises the positive policy branches:
-// - WorkspaceObservation (read_file)
-// - WorkspaceObservation via grep mode
+// - WorkspaceMutation (mutate.edit, outside the deny list)
 // - WorkspaceMutation (mutate.create)
 // - ExternalObservation (fetch.web with default allowed hosts)
-// - CommandExecution (diagnostic echo)
+// - Retired method (exec.command_run → NonDeterminable)
+//
+// The two `observe.workspace` legs (read_file and grep mode) left with #30: the
+// method is an embedded Component Tool, so the native hook denies it as an unknown
+// method and it cannot sit in a positive-path set. `mutate.edit` replaces them so
+// the set still spans more than one param shape per branch.
 
 fn biased_allowed_inputs() -> Vec<PolicyInput> {
     vec![
         PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({ "mode": "read_file", "path": "src/main.rs" }),
+            method: "mutate.edit".into(),
+            params: json!({ "path": "notes/fuzz.md", "edits": [] }),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(1, default_budget()),
-        },
-        PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({ "mode": "grep", "pattern": "fn main", "path": "src" }),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(2, default_budget()),
         },
         // `session.todo_write` used to be this leg. It is a Component Tool since
         // #29, so the native policy hook no longer knows it — Cell admission is
@@ -128,19 +126,29 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
 // ── Deny-path inputs ───────────────────────────────────────────────────
 //
 // Exercises the deny branches:
-// - Mutation without configured write paths (PathOutsideScope)
-// - Read over observation budget (BudgetExceeded)
+// - Observation over the per-turn budget (BudgetExceeded)
 // - Unknown method (NonDeterminable)
 // - Retired method exec.command_run (NonDeterminable)
+// - Migrated method observe.workspace (NonDeterminable, #30)
 
 fn deny_path_inputs() -> Vec<PolicyInput> {
     vec![
-        // Observation budget exhausted → denied
+        // Observation budget exhausted → denied. Carried by `fetch.web` since #30:
+        // it is the last native method that spends the per-turn observation
+        // budget.
+        PolicyInput {
+            method: "fetch.web".into(),
+            params: json!({ "url": "https://example.com/doc" }),
+            authority: PolicyAuthorityInput,
+            audit_context: audit_ctx(11, budget_at_limit()),
+        },
+        // Migrated method: `observe.workspace` is a Component Tool since #30, so
+        // the native hook must deny it rather than fall back to a legacy policy.
         PolicyInput {
             method: "observe.workspace".into(),
             params: json!({ "mode": "read_file", "path": "src/lib.rs" }),
             authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(11, budget_at_limit()),
+            audit_context: audit_ctx(14, default_budget()),
         },
         PolicyInput {
             method: "crafted.unknown_fuzz_method".into(),
@@ -257,13 +265,15 @@ proptest! {
 
 // ── Pinned regression tests ────────────────────────────────────────────
 
-/// Regression: budget-exhausted read → BudgetExceeded denial with non-empty message.
+/// Regression: budget-exhausted observation → BudgetExceeded denial with
+/// non-empty message. On `fetch.web` since #30 moved `observe.workspace` off the
+/// native path.
 #[test]
 fn guard_decide_regression_budget_exhausted_deny_message() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = PolicyInput {
-        method: "observe.workspace".into(),
-        params: json!({ "mode": "read_file", "path": "src/lib.rs" }),
+        method: "fetch.web".into(),
+        params: json!({ "url": "https://example.com/doc" }),
         authority: PolicyAuthorityInput,
         audit_context: audit_ctx(11, budget_at_limit()),
     };

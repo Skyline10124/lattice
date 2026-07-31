@@ -2793,13 +2793,17 @@ dependencies = [
 name = "lancet-runtime"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "gix",
  "inventory",
  "jsonschema",
+ "lancet-authority",
  "lancet-dispatch",
  "lancet-protocol",
  "lancet-runtime",
  "libc",
+ "regex",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3281,6 +3285,15 @@ dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
  "memchr",
+]
+
+[[package]]
+name = "observe-workspace"
+version = "0.1.0"
+dependencies = [
+ "lattice-tool-prelude",
+ "serde_json",
+ "wit-bindgen 0.59.0",
 ]
 
 [[package]]

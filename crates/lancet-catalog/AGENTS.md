@@ -15,7 +15,9 @@ and #34 (Codeberg #12) removes the remaining central catalog surface.
   `BaseAuthorityRequirement`.
 - `src/catalog.rs` builds the production `CATALOG` and optional scaffold
   catalog behind `inspect-scaffold`.
-- `src/methods/workspace.rs` owns observe and mutate workspace contracts.
+- `src/methods/workspace.rs` owns the mutate workspace contracts.
+  `observe.workspace` left in #30 — it is an embedded Component Tool whose
+  contract authority is `tools/observe-workspace/manifest.toml`.
 - `src/methods/external.rs` owns `fetch.web` contracts.
 - `src/methods/session.rs` owns session state helper contracts.
 - `src/methods/scaffold.rs` is feature-gated inspection scaffolding only.
@@ -27,13 +29,14 @@ and #34 (Codeberg #12) removes the remaining central catalog surface.
 - Depend only on protocol plus serialization/schema support.
 - `CATALOG` remains authoritative for the current production path only. Do not
   create a third schema beside it and the ADR 0004 Source Tool manifest work.
-- `CATALOG` is the **native** method set, four entries since #29 migrated
-  `session.todo_write` to an embedded Component Tool. The shipped distribution is
-  still five Tools; the fifth's descriptor authority is
-  `tools/todo-write/manifest.toml`, and re-adding it here would be the parallel
-  schema ADR 0004 forbids (and would arm both authorization vocabularies for one
-  call name — #28 design §11). Do not treat the set as a permanent global limit;
-  closed runtime composition belongs to generated registrations in the target
+- `CATALOG` is the **native** method set, three entries since #30 migrated
+  `observe.workspace` to an embedded Component Tool (#29 did the same for
+  `session.todo_write`). The shipped distribution is still five Tools; the
+  migrated two's descriptor authority is their `tools/*/manifest.toml`, and
+  re-adding them here would be the parallel schema ADR 0004 forbids (and
+  would arm both authorization vocabularies for one call name — #28 design
+  §11). Do not treat the set as a permanent global limit; closed runtime
+  composition belongs to generated registrations in the target
   architecture.
 - `src/test_method.rs` (`test-method` feature, dev-only) holds `TestEcho`, the
   synthetic typed method downstream tests register when they need any
@@ -64,11 +67,12 @@ and #34 (Codeberg #12) removes the remaining central catalog surface.
   inputs such as allowed hosts stay outside catalog.
 - FIXED issue #33 (Codeberg #11): production `CATALOG` is 5 agent methods;
   audit reads are operator-only and were never registered in `CATALOG` (their
-  DTOs left this crate in #39).
+  DTOs left this crate in #39). (The count has since shrunk with migration:
+  4 after #29, 3 after #30 — Component Tools carry their own descriptors.)
 - WATCH: dotted method names stay canonical in CEP catalog; provider-specific
   name encoding belongs in `lattice-llm` wire adapters.
 - WATCH: optional scaffold methods must remain feature-gated and outside the
-  production 5-method agent catalog.
+  production native catalog.
 
 ## Next Actions
 

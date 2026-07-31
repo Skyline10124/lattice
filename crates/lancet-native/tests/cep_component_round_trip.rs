@@ -491,32 +491,38 @@ async fn unknown_deny_name_fails_server_construction() {
     );
 }
 
-/// D.6: a native method (`observe.workspace`) still works alongside the
-/// Component path — the dispatch split doesn't break the remaining handlers.
+/// D.6: a native method (`mutate.create`) still works alongside the Component
+/// path — the dispatch split doesn't break the remaining handlers.
+///
+/// This used to exercise `observe.workspace`, which #30 migrated to a Component
+/// Tool; a migrated method proves nothing about the *native* half of the split.
+/// `mutate.create` is a method the native registry still serves.
 #[tokio::test]
 async fn native_method_still_works_alongside_component() {
-    use lancet_catalog::methods::workspace::{ObserveWorkspaceParams, ReadFileParams};
+    use lancet_catalog::methods::workspace::CreateParams;
 
     let dir = tempfile::TempDir::new().expect("temp project");
-    std::fs::write(dir.path().join("probe.txt"), "coexist\n").expect("seed file");
     let (client, _audit, _task) = spawn_native_with_project_root(dir.path()).await;
 
     let result: serde_json::Value = client
         .call_named(
-            "observe.workspace",
-            ObserveWorkspaceParams::ReadFile(ReadFileParams {
-                path: "probe.txt".into(),
-                offset: None,
-                limit: None,
-                line_numbers: None,
-            }),
+            "mutate.create",
+            CreateParams {
+                path: "coexist.txt".into(),
+                content: "coexist\n".into(),
+                create_parents: false,
+            },
         )
         .await
         .expect("native method still works");
 
     assert!(
-        result.to_string().contains("coexist"),
-        "the native read must return the file content: {result}"
+        result.to_string().contains("coexist.txt"),
+        "the native create must report the path it wrote: {result}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("coexist.txt")).expect("written file"),
+        "coexist\n"
     );
 }
 
@@ -581,8 +587,14 @@ fn todo_params() -> serde_json::Value {
 /// Params for a legal `observe.workspace` read of the seeded `probe.txt`. The
 /// vocabulary-isolation tests need a *native* method, and this is the cheapest
 /// one that reaches its handler.
-fn read_probe_params() -> serde_json::Value {
-    serde_json::json!({"mode": "read_file", "path": "probe.txt"})
+/// Params for the native leg of the two-vocabulary tests.
+///
+/// A *native* method is required there, and `observe.workspace` stopped being one
+/// in #30. `mutate.create` is the remaining native method whose success or
+/// refusal is observable on disk, which keeps those tests' claims checkable
+/// rather than inferred from an error code alone.
+fn native_probe_params() -> serde_json::Value {
+    serde_json::json!({"path": "probe-created.txt", "content": "x\n", "create_parents": false})
 }
 
 /// As [`spawn_native_with_noop`], with the Local Workspace rooted at
@@ -639,11 +651,11 @@ async fn legacy_effect_deny_refuses_native_methods_and_never_component_calls() {
     let (client, audit, _task) =
         spawn_native_with_policies(admission(&[]), denied, Some(dir.path())).await;
 
-    // The native leg is `observe.workspace`: `session.todo_write` is a Component
-    // Tool since #29, so using it here would test the Component path twice and
-    // prove nothing about the legacy vocabulary's reach.
+    // The native leg is `mutate.create`: `session.todo_write` (#29) and
+    // `observe.workspace` (#30) are Component Tools, so either would test the
+    // Component path twice and prove nothing about the legacy vocabulary's reach.
     let err = client
-        .call_raw("observe.workspace", read_probe_params())
+        .call_raw("mutate.create", native_probe_params())
         .await
         .expect_err("every declared impact kind is denied");
     assert_eq!(err.code, CepErrorCode::EffectViolation);
@@ -685,12 +697,17 @@ async fn cell_admission_denial_never_refuses_a_native_method() {
     assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
 
     let result = client
-        .call_raw("observe.workspace", read_probe_params())
+        .call_raw("mutate.create", native_probe_params())
         .await
         .expect("Cell admission has no authority over a native method");
     assert!(
-        result.to_string().contains('x'),
-        "the native read must return content: {result}"
+        result.to_string().contains("probe-created.txt"),
+        "the native create must report the path it wrote: {result}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("probe-created.txt")).expect("written file"),
+        "x\n",
+        "the native write really happened; Cell admission did not gate it"
     );
 }
 

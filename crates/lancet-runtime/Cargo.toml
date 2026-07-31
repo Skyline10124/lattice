@@ -12,14 +12,32 @@ default = []
 # Non-default: production binaries compose from inventory + generated
 # EXPECTED_COMPONENTS, not from this helper.
 test-utils = []
+# Narrow one-shot install-failure seam for the Local Workspace, used by
+# `lancet-native`'s mutation tests across the crate boundary. Never enabled by
+# production binaries.
+test-fault-injection = []
 
 [dependencies]
 wasmtime = { workspace = true }
 inventory = { workspace = true }
 lancet-protocol = { workspace = true }
 lancet-dispatch = { workspace = true }
+# #30 moved the concrete Local Workspace down into this crate so the
+# `workspace-observe` Tool Host imports can execute observation without reaching
+# up a layer. The visibility *decision vocabulary* (`ReadVisibilityPolicy` /
+# `HiddenReason` / `ReadVisibility`) and the System Path Exclusion predicate are
+# authority semantics and stay in `lancet-authority`; this edge points down
+# (Layer 2.5 -> Layer 2) and closes no cycle. Do not reimplement policy
+# semantics here.
+lancet-authority = { workspace = true }
 gix = { workspace = true }
 libc = { workspace = true }
+# Local Workspace filesystem primitives: `rustix` for the per-segment
+# `openat`/`AT_SYMLINK_NOFOLLOW` resolution that makes root containment
+# enforceable, `regex` for grep, `blake3` for the canonical content hash.
+rustix = { workspace = true }
+regex = { workspace = true }
+blake3 = { workspace = true }
 jsonschema = { workspace = true }
 wasmparser = { workspace = true }
 serde = { workspace = true }

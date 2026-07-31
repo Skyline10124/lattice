@@ -3,7 +3,7 @@
   "artifact-sha256": "b677a9b339c4703d8a02af54def031509ff17d73c66a83fc59176a528d646f08",
   "descriptor-sha256": "5d9a09676e41362dfbc493f341b1bcc422488b621a570080cc2defc6f12d4e2d",
   "expected-imports": [
-    "host-control"
+    "lattice:tool-host/host-control@0.1.0"
   ],
   "name": "noop.echo",
   "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0",

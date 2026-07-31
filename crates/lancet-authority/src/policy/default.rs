@@ -108,11 +108,13 @@ impl WorkspacePolicy {
 
         let mut region = AuthorizedEffectRegion::empty();
         match method {
-            "observe.workspace" => {
-                region.kinds.insert(ImpactKind::WorkspaceObservation);
-                // Observation effects are project-relative; authorize the workspace root sentinel.
-                region.observation_roots = vec![PathBuf::from(".")];
-            }
+            // The `observe.workspace` arm (WorkspaceObservation plus the `.`
+            // observation-root sentinel) lived here. It is a Component Tool since
+            // #30, so no native method reaches this function with that name and
+            // Cell admission plus the Tool Host's own scope check are its
+            // authority — a legacy region for it would be a second, unreachable
+            // grant. `AuthorizedEffectRegion::observation_roots` stays: the effect
+            // checker still compares against it for regions built elsewhere.
             "fetch.web" => {
                 region.kinds.insert(ImpactKind::ExternalObservation);
                 // Normalize at the construction site (#122) so the region carries
@@ -522,7 +524,15 @@ impl DefaultPolicyHook {
         }
 
         let budget = &resolved.budget_snapshot;
-        let is_observation = matches!(resolved.method.as_str(), "observe.workspace" | "fetch.web");
+        // `fetch.web` is the last native method that spends the per-turn
+        // observation budget, so this pre-dispatch refusal narrows to it (#30
+        // moved `observe.workspace` out of the catalog). The budget itself is not
+        // residue: `ObservationBudgetTracker::try_charge_observation` is still
+        // charged by the `fetch.web` handler and, for the migrated Tool, by the
+        // closure the native transport hands
+        // `lancet_runtime::WorkspaceObservationHost` — the Component path refuses
+        // on the same shared turn tracker, one layer lower.
+        let is_observation = resolved.method == "fetch.web";
         if is_observation
             && budget.turn_observation_bytes_used >= budget.turn_observation_bytes_limit
         {
@@ -610,10 +620,15 @@ mod tests {
         }
     }
 
-    // ── Test 1: observe.workspace read_file allowed ──────
+    // ── Test 1: observe.workspace is no longer a native method ──────
 
+    /// #30: `observe.workspace` is an embedded Component Tool, so the native hook
+    /// does not know it. The allow assertion this test used to make (a default
+    /// config permits a workspace read) belongs to the Component path now: Cell
+    /// admission decides the call and `lancet_runtime::host_workspace` decides each
+    /// observation operation.
     #[test]
-    fn default_hook_allows_workspace_read_file() {
+    fn default_hook_denies_observe_workspace_as_unknown_method() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
             method: "observe.workspace".into(),
@@ -622,7 +637,13 @@ mod tests {
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
-        assert_eq!(outcome.decision, PolicyDecision::Allowed);
+        assert!(matches!(
+            outcome.decision,
+            PolicyDecision::Denied {
+                reason_code: PolicyReasonCode::NonDeterminable,
+                ..
+            }
+        ));
     }
 
     // ── Test 2: mutate.create with no denied_write_patterns (blacklist allows all) ─────────
@@ -750,12 +771,15 @@ mod tests {
 
     // ── Test 5: observation over budget ────────────────────────────────
 
+    /// The per-turn observation budget refusal is the mechanism under test, not
+    /// the method: it moved onto `fetch.web`, the last native observation method,
+    /// when #30 took `observe.workspace` out of the catalog.
     #[test]
     fn default_hook_denies_observation_over_budget() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({"mode": "read_file", "path": "src/main.rs"}),
+            method: "fetch.web".into(),
+            params: json!({"url": "https://example.com/page"}),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(PolicyBudgetSnapshot {
                 turn_observation_bytes_used: 65536,
@@ -902,13 +926,18 @@ max_todo_ops = 22
 
     /// #121: the retired `[capability_sources]` table and the three retired
     /// `[methods.*]` keys are hard parse errors, not silently ignored settings.
+    ///
+    /// The per-method table is keyed on `mutate.create`, a method that still
+    /// exists: the mechanism under test is `deny_unknown_fields` on
+    /// `ExternalMethodPolicy`, and pinning it to `observe.workspace` after #30
+    /// would keep a retired method name alive as the only fixture for a live rule.
     #[test]
     fn retired_external_policy_keys_fail_to_parse() {
         for retired in [
             "[capability_sources]\nobservation = [\"base\"]\n",
-            "[methods.\"observe.workspace\"]\nallowed_sources = [\"declared\"]\n",
-            "[methods.\"observe.workspace\"]\nrequired_capability = \"ReadPath\"\n",
-            "[methods.\"observe.workspace\"]\nmax_single_read_bytes = 1024\n",
+            "[methods.\"mutate.create\"]\nallowed_sources = [\"declared\"]\n",
+            "[methods.\"mutate.create\"]\nrequired_capability = \"ReadPath\"\n",
+            "[methods.\"mutate.create\"]\nmax_single_read_bytes = 1024\n",
         ] {
             let parsed = toml::from_str::<ExternalPolicyFile>(retired);
             assert!(
@@ -920,18 +949,26 @@ max_todo_ops = 22
 
     // ── Test 9: decide_resolved is pure ────────────────────────────────
 
+    /// Purity is asserted through a method that still resolves path facts, so
+    /// `resolved_paths` is actually populated on both runs. Asserting it through
+    /// `observe.workspace` after #30 would compare two empty vectors from a
+    /// resolver error and hold under any implementation.
     #[test]
     fn decide_resolved_is_pure_same_input_same_output() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({"mode": "read_file", "path": "src/main.rs"}),
+            method: "mutate.create".into(),
+            params: json!({"path": "src/main.rs", "content": "fn main() {}"}),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(default_budget()),
         };
         let outcome1 = hook.decide_with_evidence(&input);
         let outcome2 = hook.decide_with_evidence(&input);
         assert_eq!(outcome1.decision, outcome2.decision);
+        assert!(
+            !outcome1.evidence.resolved_paths.is_empty(),
+            "the purity comparison must have paths to compare"
+        );
         assert_eq!(
             outcome1.evidence.resolved_paths,
             outcome2.evidence.resolved_paths
@@ -940,12 +977,14 @@ max_todo_ops = 22
 
     // ── Test 10: decide_with_evidence contains rich facts ──────────────
 
+    /// Path evidence rides on a path-resolving method, so this moved to
+    /// `mutate.edit` when #30 took `observe.workspace` out of the catalog.
     #[test]
     fn decide_with_evidence_contains_rich_facts() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({"mode": "read_file", "path": "src/main.rs"}),
+            method: "mutate.edit".into(),
+            params: json!({"path": "src/main.rs", "edits": []}),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(default_budget()),
         };
@@ -959,10 +998,13 @@ max_todo_ops = 22
 
     #[test]
     fn policy_hook_decide_returns_stable_decision() {
+        // Asserted through a native method (#30 retired `observe.workspace` from
+        // the catalog): the trait impl must forward the *allow* outcome, and only
+        // a method the resolver knows can prove that.
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({"mode": "read_file", "path": "src/main.rs"}),
+            method: "mutate.create".into(),
+            params: json!({"path": "src/main.rs", "content": "fn main() {}"}),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(default_budget()),
         };
@@ -986,7 +1028,7 @@ max_todo_ops = 22
     #[test]
     fn external_policy_file_deserializes_from_toml() {
         let toml_str = r#"
-[methods."observe.workspace"]
+[methods."mutate.create"]
 enabled = true
 
 [network]

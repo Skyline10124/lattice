@@ -245,8 +245,6 @@ mod tests {
     use super::*;
     use lancet_api::audit_db_path_for_project;
     use lancet_audit::ScopedXdgStateHome;
-    use lancet_catalog::CepMethod;
-    use lancet_catalog::methods::workspace::ObserveWorkspace;
     use tempfile::TempDir;
 
     fn query_cmd(session: &str, json: bool) -> AuditCmd {
@@ -309,7 +307,14 @@ mod tests {
                     policy_enforced, metadata_json
                 ) VALUES (1, ?1, '1', '2', 'success:legacy', 'workspace_observation',
                     'turn-legacy', 'sess-legacy-cli', 'native', 'native_handler', 'native', 1, NULL)",
-                [ObserveWorkspace::NAME],
+                // A literal, not a catalog type: this fixture writes a row as an
+                // OLDER build wrote it, and #30 migrated `observe.workspace` to a
+                // Component Tool. Real audit databases still hold rows with this
+                // method name and the legacy `workspace_observation` impact, so
+                // the operator read path must keep parsing them — pinning the
+                // string to a type that no longer exists would have quietly
+                // narrowed what this test covers.
+                ["observe.workspace"],
             )
             .unwrap();
         }

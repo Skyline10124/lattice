@@ -85,6 +85,7 @@ fn run_inner(check: bool) -> anyhow::Result<()> {
             builtins.push(BuiltinTool {
                 descriptor_sha256: sha256_hex(out.descriptor_json.as_bytes()),
                 generated_dir: generated_dir(&manifest_path),
+                imports: m.imports.clone(),
                 descriptor,
             });
         }
@@ -101,6 +102,9 @@ struct BuiltinTool {
     /// against committed instead of committed against itself.
     descriptor_sha256: String,
     generated_dir: PathBuf,
+    /// The Tool's declared domain imports (#30), carried through so the pinned
+    /// `imports` list is rendered from the manifest rather than assumed.
+    imports: Vec<DomainImport>,
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +121,21 @@ struct Manifest {
     scopes: Vec<ScopeDecl>,
     #[serde(default)]
     capabilities: Vec<CapabilitySection>,
+    /// Domain Tool Host interfaces this Tool's guest calls, beyond the
+    /// always-present `host-control` (#30).
+    ///
+    /// One declaration, three consumers: the generated WIT world's `import`
+    /// lines, `expected-identity.json`'s `expected-imports`, and the host
+    /// composition's pinned `imports` list. All three are rendered from this
+    /// field rather than each keeping a copy, because the composition gate
+    /// compares the pinned list against the Component's real import section by
+    /// exact set equality — two hand-kept lists would let a Tool declare one
+    /// surface and link another.
+    ///
+    /// Empty by default: a Tool gains a domain import by naming it, never by
+    /// omission.
+    #[serde(default)]
+    imports: Vec<DomainImport>,
     artifact: ArtifactSection,
     /// Presentation intent. Optional: a Tool without it is still renderable,
     /// and it never reaches `lower_manifest`, so it cannot affect the
@@ -124,6 +143,123 @@ struct Manifest {
     #[serde(default)]
     render: Option<RenderSection>,
 }
+
+/// A domain Tool Host interface a Tool may import (#30).
+///
+/// A closed vocabulary, not a free-form string: the host has to have a linker
+/// binding and a channel mapping for an interface before a Tool can name it, so
+/// an unknown name must fail manifest parsing rather than produce a WIT world
+/// nothing implements. Each variant is also what tells the composition gate which
+/// [`lancet_protocol::cell::ChannelKind`] the import supplies.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+enum DomainImport {
+    /// Policy-Visible Workspace observation: read / list / grep / find, with all
+    /// path safety, visibility, bounds, and evidence host-side (#30).
+    WorkspaceObserve,
+}
+
+impl DomainImport {
+    /// The WIT interface name, as it appears in the generated world.
+    fn wit_interface(self) -> &'static str {
+        match self {
+            Self::WorkspaceObserve => "workspace-observe",
+        }
+    }
+
+    /// The generated WIT `interface` block for this import.
+    ///
+    /// The host's `Host` trait implementation is generated from this text by
+    /// `wasmtime::component::bindgen!`, so the signatures here and
+    /// `lancet_runtime::host_workspace` are two views of one contract.
+    fn wit_definition(self) -> &'static str {
+        match self {
+            Self::WorkspaceObserve => WORKSPACE_OBSERVE_WIT,
+        }
+    }
+}
+
+/// The `workspace-observe` interface (#30).
+///
+/// Four functions, one per observation mode, each taking the caller's *requested*
+/// project-relative path and returning host-decided facts. What the guest cannot
+/// express is the point: there is no open-directory, no descriptor, no glob
+/// escape, and no way to ask for a path outside the workspace, because a path is
+/// only ever an argument the host resolves and never a handle the guest holds.
+///
+/// Every result carries the host's `truncated` verdict. `read` returns the
+/// host-computed content hash, so the value `mutate.edit` verifies cannot
+/// originate in a guest.
+const WORKSPACE_OBSERVE_WIT: &str = "\
+interface workspace-observe {
+    /// Host-decided failure. `not-found` covers a missing, wrong-kind, or
+    /// policy-hidden path: the guest is never told which, so it cannot probe the
+    /// visibility boundary. The reason reaches the audit trail, not the guest.
+    variant observe-error {
+        not-found(string),
+        path-rejected(string),
+        limit-exceeded(string),
+        budget-exhausted(string),
+        denied(string),
+        invalid-request(string),
+        io-error(string),
+    }
+
+    /// A directory entry's kind, as observed without following symlinks.
+    enum entry-kind {
+        file,
+        directory,
+        symlink,
+        other,
+    }
+
+    record dir-entry {
+        name: string,
+        kind: entry-kind,
+    }
+
+    record match-line {
+        /// Project-relative, inside the root, and visible under policy.
+        path: string,
+        line: u64,
+        text: string,
+    }
+
+    record read-result {
+        /// Uniquely rendered LLM-visible window, charged exactly by the host.
+        content: string,
+        /// Canonical `blake3:<64 hex>`, computed by the host.
+        content-hash: string,
+    }
+
+    record list-result {
+        entries: list<dir-entry>,
+        /// Host verdict: entries were dropped to satisfy a bound.
+        truncated: bool,
+    }
+
+    record grep-result {
+        matches: list<match-line>,
+        truncated: bool,
+    }
+
+    record find-result {
+        paths: list<string>,
+        truncated: bool,
+    }
+
+    /// Read one visible file window. The host enforces the file ceiling and
+    /// charges exactly the rendered content returned by this import.
+    read-file: func(path: string, offset: option<u64>, limit: option<u64>, line-numbers: option<bool>) -> result<read-result, observe-error>;
+    /// List one directory's visible entries. Named `list-dir` because `list` is a
+    /// WIT type keyword.
+    list-dir: func(path: string, limit: option<u64>) -> result<list-result, observe-error>;
+    /// Regex-search visible files beneath a root.
+    grep: func(pattern: string, path: option<string>, max-results: option<u64>) -> result<grep-result, observe-error>;
+    /// Glob-search visible paths beneath a root.
+    find-files: func(pattern: string, path: option<string>, limit: option<u64>) -> result<find-result, observe-error>;
+}
+";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -291,11 +427,11 @@ fn render_outputs(descriptor: &ToolDescriptor, m: &Manifest) -> anyhow::Result<O
         None => None,
     };
     Ok(Outputs {
-        wit: render_wit(descriptor),
+        wit: render_wit(descriptor, &m.imports),
         descriptor_json: render_canonical_descriptor_json(descriptor),
         llm_projection: render_llm_tool_definition(descriptor),
         registration_rs: render_inventory_registration(descriptor),
-        identity_json: render_expected_identity(descriptor),
+        identity_json: render_expected_identity(descriptor, &m.imports),
         render_json,
     })
 }
@@ -305,7 +441,7 @@ fn render_outputs(descriptor: &ToolDescriptor, m: &Manifest) -> anyhow::Result<O
 /// network / session domain operation, so "declare == authorize" cannot form
 /// before #6 capability admission. The `tool-api` export's result sink is a
 /// host-owned Session adapter: it only receives/validates ToolOutput.
-fn render_wit(d: &ToolDescriptor) -> String {
+fn render_wit(d: &ToolDescriptor, imports: &[DomainImport]) -> String {
     let mut s = String::new();
     s.push_str("// @generated by `cargo xtask tool-codegen` from the Source Tool manifest.\n");
     s.push_str("// DO NOT EDIT — re-run `cargo xtask tool-codegen`.\n");
@@ -326,9 +462,25 @@ fn render_wit(d: &ToolDescriptor) -> String {
     s.push_str("    }\n");
     s.push_str("    run: func(params-json: string) -> result<tool-output, string>;\n");
     s.push_str("}\n");
+
+    // Domain interfaces, in the manifest's declared order after dedup+sort, so
+    // the generated text is a function of the declaration set alone. Codegen has
+    // to be byte-deterministic across runs (`codegen_is_byte_identical_across_runs`
+    // pins it) and the emitted file feeds a digest that pins a Tool's identity.
+    let mut declared: Vec<DomainImport> = imports.to_vec();
+    declared.sort();
+    declared.dedup();
+    for import in &declared {
+        s.push('\n');
+        s.push_str(import.wit_definition());
+    }
+
     s.push('\n');
     s.push_str("world tool {\n");
     s.push_str("    import host-control;\n");
+    for import in &declared {
+        s.push_str(&format!("    import {};\n", import.wit_interface()));
+    }
     s.push_str("    export tool-api;\n");
     s.push_str("}\n");
     s
@@ -397,7 +549,7 @@ fn render_inventory_registration(d: &ToolDescriptor) -> String {
 /// host composition step selects it and privately pins it. Records the
 /// descriptor digest, artifact digest, ABI version, and the import set the
 /// guest is expected to require (derived from the WIT world).
-fn render_expected_identity(d: &ToolDescriptor) -> String {
+fn render_expected_identity(d: &ToolDescriptor, imports: &[DomainImport]) -> String {
     let descriptor_digest = sha256_hex(render_canonical_descriptor_json(d).as_bytes());
     let identity = serde_json::json!({
         "name": d.name,
@@ -406,9 +558,13 @@ fn render_expected_identity(d: &ToolDescriptor) -> String {
         "descriptor-sha256": descriptor_digest,
         "artifact-sha256": d.artifact.sha256,
         "toolchain": d.artifact.toolchain,
-        // The no-op world imports exactly `host-control`; domain operation
-        // imports arrive with #6 capability admission.
-        "expected-imports": ["host-control"],
+        // `host-control` is always imported; domain interfaces come from the
+        // manifest's `imports` (#30). Fully qualified, matching the versioned
+        // instance-import names the composition gate pins and the Component
+        // binary actually records — a bare interface name here and a qualified
+        // one there was two spellings of one fact with nothing cross-checking
+        // them.
+        "expected-imports": expected_import_names(d, imports),
     });
     // Pure JSON — no comment header (parsed by host composition with strict
     // serde_json). The "candidate, not approved" semantics are documented here
@@ -492,18 +648,46 @@ fn render_host_composition(root: &Path, builtins: &[BuiltinTool]) -> anyhow::Res
             "        abi_version: {},\n",
             builtin.descriptor.abi_version
         ));
-        // The WIT world imports exactly `host-control`; the Component binary
-        // records it as a versioned instance import. The composition gate
-        // compares this against the real import section, so a Tool that grew an
-        // import fails startup instead of gaining authority.
-        s.push_str(&format!(
-            "        imports: &[\"lattice:tool-host/host-control@{}\"],\n",
-            builtin.descriptor.version
-        ));
+        // The Tool's declared import surface, as versioned instance-import
+        // names. The composition gate compares this against the Component's real
+        // import section by exact set equality, so a Tool that grew an import
+        // fails startup instead of gaining authority — and one that declares an
+        // import it never calls fails too, because an uncalled WIT import is
+        // absent from the encoded binary.
+        let names = expected_import_names(&builtin.descriptor, &builtin.imports)
+            .into_iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        s.push_str(&format!("        imports: &[{names}],\n"));
         s.push_str("    },\n");
     }
     s.push_str("];\n");
     Ok(s)
+}
+
+/// The versioned WIT instance-import names a Tool's Component is expected to
+/// record, in sorted order (#30).
+///
+/// This is the single source both the expected-identity candidate and the host
+/// composition's pinned `imports` list render from, so the two cannot disagree.
+/// The names are fully qualified (`lattice:tool-host/<iface>@<version>`) because
+/// that is the form `wasmparser` reads out of the Component binary, and the gate
+/// compares the pinned set against it by exact equality.
+fn expected_import_names(d: &ToolDescriptor, imports: &[DomainImport]) -> Vec<String> {
+    let mut names = vec![format!("lattice:tool-host/host-control@{}", d.version)];
+    let mut declared: Vec<DomainImport> = imports.to_vec();
+    declared.sort();
+    declared.dedup();
+    for import in declared {
+        names.push(format!(
+            "lattice:tool-host/{}@{}",
+            import.wit_interface(),
+            d.version
+        ));
+    }
+    names.sort();
+    names
 }
 
 /// The `include_bytes!` path from `crates/lancet-runtime/src/generated/` to a
@@ -773,16 +957,111 @@ toolchain = "rustc-1.96.0"
     }
 
     #[test]
-    fn wit_has_no_wasi_imports_and_only_host_control() {
+    fn wit_has_no_wasi_imports_and_no_undeclared_domain_interface() {
         let m = noop_manifest();
         let d = lower_manifest(&m).unwrap();
-        let wit = render_wit(&d);
+        let wit = render_wit(&d, &m.imports);
         assert!(!wit.contains("wasi:"), "no ambient WASI imports");
         assert!(wit.contains("import host-control;"));
         assert!(wit.contains("export tool-api;"));
-        // No domain operation import before #6 admission.
+        // A Tool that declares no domain import gets none. Ambient authority is
+        // refused by absence here, not by a later check: the world it is compiled
+        // against has no interface to call.
         assert!(!wit.contains("workspace"));
         assert!(!wit.contains("network"));
+        assert!(!wit.contains("import workspace-observe;"));
+    }
+
+    /// #30: declaring `workspace-observe` emits the interface *and* the world
+    /// import. Emitting only one of the two would produce a world a guest cannot
+    /// compile against, or an interface nothing may call.
+    #[test]
+    fn declared_workspace_import_reaches_the_world_and_the_interface() {
+        let mut m = noop_manifest();
+        m.imports = vec![DomainImport::WorkspaceObserve];
+        let d = lower_manifest(&m).unwrap();
+        let wit = render_wit(&d, &m.imports);
+        assert!(wit.contains("interface workspace-observe {"));
+        assert!(wit.contains("import workspace-observe;"));
+        assert!(wit.contains("import host-control;"));
+        assert!(
+            !wit.contains("wasi:"),
+            "a domain import is not ambient WASI"
+        );
+        // The four modes are one interface, so no mode can be linked without the
+        // others and each is a host call rather than a guest capability.
+        for func in ["read-file:", "list-dir:", "grep:", "find-files:"] {
+            assert!(wit.contains(func), "missing {func} in {wit}");
+        }
+        // A path is an argument, never a handle. WIT expresses a lasting
+        // capability as a `resource`, so the absence of one is what makes "the
+        // guest holds no file descriptor and no open directory" checkable rather
+        // than merely intended: every call re-enters the host with a string the
+        // host re-resolves.
+        let observe = wit
+            .split("interface workspace-observe {")
+            .nth(1)
+            .expect("the interface block");
+        assert!(!observe.contains("resource "), "{observe}");
+        assert!(!observe.contains("borrow<"), "{observe}");
+        assert!(!observe.contains("own<"), "{observe}");
+    }
+
+    /// The generated WIT is a digest input, so a repeated declaration must not
+    /// change a byte of it.
+    #[test]
+    fn repeated_import_declarations_do_not_perturb_the_wit() {
+        let mut once = noop_manifest();
+        once.imports = vec![DomainImport::WorkspaceObserve];
+        let mut twice = noop_manifest();
+        twice.imports = vec![
+            DomainImport::WorkspaceObserve,
+            DomainImport::WorkspaceObserve,
+        ];
+        let d = lower_manifest(&once).unwrap();
+        assert_eq!(
+            render_wit(&d, &once.imports),
+            render_wit(&d, &twice.imports)
+        );
+        assert_eq!(
+            render_wit(&d, &once.imports)
+                .matches("import workspace-observe;")
+                .count(),
+            1
+        );
+    }
+
+    /// An interface the host has no linker binding for must fail manifest
+    /// parsing. A free-form string here would generate a world nothing
+    /// implements, and the failure would surface as an opaque link error at
+    /// composition instead of a manifest error at build time.
+    #[test]
+    fn unknown_domain_import_is_rejected() {
+        let bad = r#"
+[tool]
+name = "noop.echo"
+version = "0.1.0"
+description = "d"
+abi-version = 1
+distribution = "fixture"
+imports = ["network-fetch"]
+
+[params]
+schema = '{"type":"object"}'
+
+[result]
+schema = '{"type":"object"}'
+
+[artifact]
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+toolchain = "t"
+"#;
+        let err = toml::from_str::<Manifest>(bad).expect_err("unknown import rejected");
+        assert!(
+            err.to_string().contains("network-fetch")
+                || err.to_string().contains("unknown variant"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1023,13 +1302,49 @@ toolchain = "t"
     }
 
     #[test]
-    fn expected_identity_lists_host_control_only() {
+    fn expected_identity_lists_host_control_only_without_declared_imports() {
         let m = noop_manifest();
         let d = lower_manifest(&m).unwrap();
-        let id = render_expected_identity(&d);
+        let id = render_expected_identity(&d, &m.imports);
         assert!(id.contains("\"expected-imports\""));
-        assert!(id.contains("host-control"));
+        assert!(id.contains("lattice:tool-host/host-control@0.1.0"));
         assert!(!id.contains("workspace"));
+    }
+
+    /// #30: the pinned import surface follows the manifest, and it is spelled in
+    /// the *versioned instance-import* form the Component binary records — the
+    /// form the composition gate compares against. A bare interface name here
+    /// and a qualified one in the gate were two spellings of one fact with
+    /// nothing cross-checking them.
+    #[test]
+    fn expected_identity_pins_declared_domain_imports_in_gate_form() {
+        let mut m = noop_manifest();
+        m.imports = vec![DomainImport::WorkspaceObserve];
+        let d = lower_manifest(&m).unwrap();
+        let id = render_expected_identity(&d, &m.imports);
+        assert!(id.contains("lattice:tool-host/host-control@0.1.0"));
+        assert!(id.contains("lattice:tool-host/workspace-observe@0.1.0"));
+    }
+
+    /// The identity candidate and the host composition's pinned list are two
+    /// renderings of one function, so they cannot drift apart.
+    #[test]
+    fn identity_and_composition_pin_the_same_import_set() {
+        let mut m = noop_manifest();
+        m.imports = vec![DomainImport::WorkspaceObserve];
+        let d = lower_manifest(&m).unwrap();
+        let names = expected_import_names(&d, &m.imports);
+        let id = render_expected_identity(&d, &m.imports);
+        for name in &names {
+            assert!(id.contains(name), "identity is missing {name}");
+        }
+        assert_eq!(
+            names,
+            vec![
+                "lattice:tool-host/host-control@0.1.0".to_string(),
+                "lattice:tool-host/workspace-observe@0.1.0".to_string(),
+            ]
+        );
     }
 
     // -----------------------------------------------------------------------
