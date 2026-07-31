@@ -371,30 +371,45 @@ mod tests {
         let config = LancetRuntimeConfig {
             project_root: dir.path().to_path_buf(),
             policy,
+            // Since #30 `observe.workspace` is a Component Tool, so reaching it
+            // requires Cell capability admission — which admits nothing by
+            // default. The native handler needed no such grant; this block is the
+            // migration made visible at the call site.
+            capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
+                enabled_tools: std::collections::BTreeSet::from(["observe.workspace".to_string()]),
+                denied_capabilities: std::collections::BTreeSet::new(),
+                max_boundary: lancet_protocol::cell::Trust::In,
+            },
             ..LancetRuntimeConfig::new(dir.path().to_str().expect("utf-8 root"))
         };
         let mut runtime = LancetRuntime::build(config).expect("build direct-local runtime");
 
-        use lancet_catalog::methods::workspace::{
-            ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileParams,
-        };
+        // Called untyped: the method's contract is its Source Tool manifest now,
+        // not a `lancet-catalog` Rust type, and #30 deleted the type along with
+        // the native handler.
         let client = runtime.client();
         let result = client
-            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
-                path: "probe.txt".into(),
-                offset: None,
-                limit: None,
-                line_numbers: None,
-            }))
+            .call_raw(
+                "observe.workspace",
+                serde_json::json!({ "mode": "read_file", "path": "probe.txt" }),
+            )
             .await
             .expect("read through runtime workspace");
-        let ObserveWorkspaceResult::ReadFile(read) = result else {
-            panic!("expected read_file result");
-        };
+        assert_eq!(result["mode"], "read_file");
+        let content = result["result"]["content"]
+            .as_str()
+            .expect("read_file returns content");
         assert!(
-            read.content.contains("local-evidence"),
-            "runtime must resolve observe.workspace against the policy project root: {}",
-            read.content
+            content.contains("local-evidence"),
+            "runtime must resolve observe.workspace against the policy project root: {content}"
+        );
+        // The host computed the hash; a Component cannot invent the value
+        // `mutate.edit` verifies.
+        assert!(
+            result["result"]["content_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "observation must carry the host-computed content hash: {result}"
         );
 
         // The retired exec.command_run path still returns Method not found,

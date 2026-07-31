@@ -13,54 +13,16 @@ use super::support::{
 use lancet_authority::NetworkPolicyConfig;
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::methods::external::FetchParams;
-use lancet_catalog::methods::workspace::{
-    CreateParams, EditOperation, EditParams, GrepParams, ObserveWorkspaceParams, ReadFileParams,
-};
+use lancet_catalog::methods::workspace::{CreateParams, EditOperation, EditParams};
 use lancet_catalog::methods::*;
 use lancet_protocol::effect_types::ImpactKind;
 
-proptest! {
-    #[test]
-    fn read_file_effect_contract_positive(offset in 0u64..100, limit in 1u64..50) {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let authority = observation_region(&root);
-        let params = ObserveWorkspaceParams::ReadFile(ReadFileParams {
-            path: "hello.txt".into(),
-            offset: Some(offset),
-            limit: Some(limit),
-            line_numbers: None,
-        });
-        let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
-            &registry, params, ctx, authority.clone(),
-        ));
-        outcome.dispatch_result.as_ref().expect("legal dispatch must succeed");
-        assert_positive(&outcome, &authority);
-    }
-}
-
-proptest! {
-    #[test]
-    fn grep_effect_contract_positive(pattern in "[a-z]{1,8}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let authority = observation_region(&root);
-        let params = ObserveWorkspaceParams::Grep(GrepParams {
-            pattern,
-            path: None,
-            max_results: Some(10),
-        });
-        let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
-            &registry, params, ctx, authority.clone(),
-        ));
-        outcome.dispatch_result.as_ref().expect("legal dispatch must succeed");
-        assert_positive(&outcome, &authority);
-    }
-}
+// The `read_file`/`grep` positive and negative properties are gone (#30):
+// `observe.workspace` is an embedded Component Tool with no native handler, so
+// there is nothing left for this harness to dispatch. Its effect contract is
+// enforced host-side in `lancet_runtime::host_workspace` and covered by the
+// Component's own tests, not by the native `MethodRegistry`. What survives here
+// is the contract for the three methods a native handler still serves.
 
 proptest! {
     #[test]
@@ -175,47 +137,6 @@ fn fetch_effect_contract_positive() {
 }
 
 // ── Negative property tests ────────────────────────────────────────────
-
-proptest! {
-    #[test]
-    fn read_file_effect_contract_negative(name in "[a-z]{1,16}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let params = ObserveWorkspaceParams::ReadFile(ReadFileParams {
-            path: format!("/outside-scope/{name}"),
-            offset: None,
-            limit: None,
-            line_numbers: None,
-        });
-        let authority = observation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
-            &registry, params, ctx, authority,
-        ));
-        assert_negative_no_backend_effects(&outcome);
-    }
-}
-
-proptest! {
-    #[test]
-    fn grep_effect_contract_negative(pattern in "[a-z]{1,8}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let params = ObserveWorkspaceParams::Grep(GrepParams {
-            pattern,
-            path: Some("/outside-scope".into()),
-            max_results: Some(10),
-        });
-        let authority = observation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
-            &registry, params, ctx, authority,
-        ));
-        assert_negative_no_backend_effects(&outcome);
-    }
-}
 
 proptest! {
     #[test]

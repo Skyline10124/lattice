@@ -20,10 +20,11 @@
 //! - **Cell capability admission** — the per-call admission stages (enabled
 //!   tool → profile deny → boundary predicate) and the per-operation
 //!   authorizer are the only authorization authority for Component Tools.
-//! - **Minimal ToolHost** — `host-control` only (cancellation + structured
-//!   events), with every effectful import gated by its host-bound Cell and
-//!   concrete target. No workspace/network/session domain operation before
-//!   #6.
+//! - **ToolHost** — `host-control` (cancellation + structured events) plus, since
+//!   GitHub #30, the `workspace-observe` domain interface, with every effectful
+//!   import gated by its host-bound Cell and concrete target. A Tool reaches the
+//!   filesystem only through these imports; there is no ambient authority and no
+//!   path a guest can name outside them.
 //! - **Call execution** — params validation, Component instantiation, result
 //!   CellRef validation against the descriptor ceiling and the admitted set,
 //!   result schema validation, host-computed context measure, and Cell
@@ -33,9 +34,19 @@
 //!   every successfully installed Atomic Local Mutation to a private bare
 //!   `gix` repository that lives outside the Local Workspace and the user's
 //!   project `.git` (GitHub #63).
+//! - **The concrete Local Workspace** — [`workspace::LocalWorkspace`] and the
+//!   [`workspace::VisibilityEngine`] moved down here in GitHub #30, because the
+//!   `workspace-observe` Tool Host imports execute observation and a host import
+//!   cannot reach up a layer into `lancet-native`. Secure per-segment path
+//!   resolution, System Path Exclusion, the Policy-Visible Workspace decision,
+//!   bounded reads, atomic installation, and mutation history now sit behind one
+//!   concrete host module in one crate. `lancet-native`'s still-native mutation
+//!   handlers consume it from here; they do not own a second copy, and there is
+//!   no execution-backend trait to implement.
 //!
 //! `lancet-runtime` does **not** depend on `lancet-native`, `lancet-api`, or
-//! any LATTICE session/agent/profile crate. The dependency graph has no cycle.
+//! any LATTICE session/agent/profile crate. The dependency graph has no cycle:
+//! the `lancet-authority` edge #30 added points down to Layer 2.
 
 pub mod admission;
 pub mod bindings;
@@ -45,8 +56,10 @@ pub mod evidence;
 pub mod generated;
 pub mod history;
 pub mod host;
+pub mod host_workspace;
 pub mod limits;
 pub mod runtime;
+pub mod workspace;
 
 #[cfg(feature = "test-utils")]
 pub mod test_helpers;
@@ -61,5 +74,15 @@ pub use history::{
     HistorySnapshot, MutationRecord, RecordedMutation, RewindError, RewindPathRestore, RewindPlan,
     RewindStep, WorkspaceHistory, WorkspaceHistoryBacking, WorkspaceHistoryError,
 };
+
+pub use host_workspace::{
+    BudgetCharge, BudgetRefusal, ObservationCallContext, ObservationError, ObservationLimits,
+    WorkspaceObservationHost, observation_cep_error,
+};
 pub use limits::ExecutionLimits;
 pub use runtime::{ComponentCallContext, ComponentRuntime};
+pub use workspace::{
+    CreatedFile, DirectoryEntry, FindRequest, GrepRequest, InstalledFile, LocalWorkspace,
+    LocalWorkspaceError, PathFacts, PathIntent, PathKind, VisibilityEngine, WorkspacePath,
+    content_hash,
+};

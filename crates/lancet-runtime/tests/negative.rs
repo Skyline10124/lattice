@@ -46,6 +46,9 @@ fn call_ctx(
         cancellation: Cancellation::new(cancel_rx),
         evidence: CellEvidenceLedger::new(),
         admitted: Arc::new(admitted),
+        // These fixtures exercise control-only Tools; a call with no workspace
+        // authority refuses every observation operation (#30).
+        workspace: None,
     };
     (ctx, rx, cancel_tx)
 }

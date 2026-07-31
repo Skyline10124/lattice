@@ -1,0 +1,304 @@
+# Sole Tool Descriptor authority (ADR 0004 §2) for `observe.workspace`.
+# Everything else is generated from this file by `cargo xtask tool-codegen`: the
+# WIT world, the host descriptor, the LLM projection, the inventory
+# registration, and the expected-identity candidate.
+
+# The Policy-Visible Workspace observation interface (#30). Declaring it here is
+# what puts `import workspace-observe;` in this Tool's WIT world, adds the
+# versioned instance-import name to `expected-identity.json`, and pins it in the
+# host composition's `imports` list. All three come from this one line, because
+# the composition gate compares the pinned set against the Component's real
+# import section by exact equality — a Tool cannot declare one surface and link
+# another.
+#
+# This is also the whole of this Tool's filesystem authority. The guest holds no
+# path, no preopened directory, and no descriptor; it can only call the four
+# functions this interface exposes, each of which re-enters the host with a
+# string the host re-resolves under policy.
+#
+# Top-level, above every table: TOML assigns a bare key to the section that
+# precedes it, so this line under `[tool]` would be read as `tool.imports` and
+# rejected as an unknown field.
+imports = ["workspace-observe"]
+
+[tool]
+name = "observe.workspace"
+version = "0.1.0"
+# The description the model reads. It carries the content_hash instruction
+# because that value is the only bridge between observation and `mutate.edit`:
+# the host computes it, and a model that recomputes or paraphrases it will fail
+# the edit's precondition.
+description = "Observe workspace content in one of four fixed modes: read_file for one path, grep for regex search under a root, list_directory for one directory, or find_files for glob-like path search under a root. read_file returns content_hash; copy that exact value into mutate.edit expected_hash when editing, and do not compute, transform, or narrate the hash."
+abi-version = 1
+# `builtin` puts this Tool in the default distribution: the generated host
+# composition embeds its registration and pins its identity, so a built runtime
+# carries it in its closed catalog (ADR 0004 decisions 1/7).
+distribution = "builtin"
+
+[params]
+# The union input contract, and the whole of this Tool's input validation. The
+# host's `params_validator` refuses a bad call with one structured
+# `SchemaMismatch` *before* the Component is instantiated, so the guest performs
+# no checks of its own — a second, imperative copy inside the guest could
+# disagree with the descriptor, and the guest is the side of the boundary whose
+# word the host does not take.
+#
+# `oneOf` over four closed branches, discriminated by `mode`, is what makes the
+# four observation operations one method rather than four: a call names exactly
+# one mode, and `additionalProperties: false` on every branch means a caller
+# cannot smuggle `read_file`'s fields into a `grep` call and have them reach the
+# host.
+#
+# What is deliberately NOT expressible here: an absolute path, a `..` segment, a
+# limit above policy, or any way to name a file outside the project. Those are
+# not schema concerns — the host resolves every path per segment and clamps every
+# limit — but the schema does not pretend to accept them either, so a malformed
+# request fails at the cheapest possible point.
+schema = '''
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "mode": { "const": "read_file" },
+        "path": { "type": "string", "minLength": 1 },
+        "offset": { "type": "integer", "minimum": 1 },
+        "limit": { "type": "integer", "minimum": 1 },
+        "line_numbers": { "type": "boolean" }
+      },
+      "required": ["mode", "path"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "mode": { "const": "grep" },
+        "pattern": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "max_results": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["mode", "pattern"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "mode": { "const": "list_directory" },
+        "path": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["mode", "path"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "mode": { "const": "find_files" },
+        "pattern": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["mode", "pattern"],
+      "additionalProperties": false
+    }
+  ]
+}
+'''
+
+[result]
+# The union result contract. The host validates the guest's returned value
+# against this schema on the way out, which is what bounds the shapes a
+# misbehaving guest can produce: it cannot invent a fifth mode, return a
+# `read_file` body for a `grep` call, or add a field.
+#
+# The shape matches the native handler's wire form exactly — `mode` plus a
+# `result` object — so this migration is invisible to the model and to every
+# consumer of the audit trail.
+#
+# `truncated` is the host's verdict, not the guest's opinion: the host computes
+# it from the real limit comparison and records it in the call's evidence. A
+# guest that returns `false` for a truncated result contradicts durable evidence
+# rather than concealing anything. It stays optional here because the native
+# shape omitted it when nothing was cut, and changing that would be a wire change
+# this issue does not call for.
+schema = '''
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "mode": { "const": "read_file" },
+        "result": {
+          "type": "object",
+          "properties": {
+            "content": { "type": "string" },
+            "content_hash": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$" }
+          },
+          "required": ["content"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["mode", "result"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "mode": { "const": "grep" },
+        "result": {
+          "type": "object",
+          "properties": {
+            "matches": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": { "type": "string" },
+                  "line": { "type": "integer", "minimum": 0 },
+                  "text": { "type": "string" }
+                },
+                "required": ["path", "line", "text"],
+                "additionalProperties": false
+              }
+            },
+            "truncated": { "type": "boolean" }
+          },
+          "required": ["matches"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["mode", "result"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "mode": { "const": "list_directory" },
+        "result": {
+          "type": "object",
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "kind": { "type": "string", "enum": ["file", "directory", "symlink", "other"] }
+                },
+                "required": ["name", "kind"],
+                "additionalProperties": false
+              }
+            },
+            "truncated": { "type": "boolean" }
+          },
+          "required": ["entries"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["mode", "result"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "mode": { "const": "find_files" },
+        "result": {
+          "type": "object",
+          "properties": {
+            "paths": { "type": "array", "items": { "type": "string" } },
+            "truncated": { "type": "boolean" }
+          },
+          "required": ["paths"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["mode", "result"],
+      "additionalProperties": false
+    }
+  ]
+}
+'''
+
+# Presentation intent (#113). A projection only: `render.json` is never part of
+# the descriptor identity chain, so these annotations cannot invalidate a Tool
+# identity or an artifact attestation. Annotations bind fields and declare their
+# domain semantics; they carry no rows, columns, positions, or nesting, because
+# the presentation primitives belong to the consumer.
+#
+# Each annotation is partitioned by the result union's `mode` discriminant, which
+# is how one method with four shapes annotates each shape for what it actually is:
+# `read_file`'s content is file content, `find_files`' paths form a tree, and
+# `grep`'s matches are tabular.
+[[render.arms]]
+at = "result"
+case = "read_file"
+annotations = [
+    # The file content this call returned. Marking it `code` is a claim about the
+    # field's domain, not about how to draw it.
+    { role = "code", path = "result.result.content" },
+]
+
+[[render.arms]]
+at = "result"
+case = "grep"
+annotations = [
+    # Matches are element-wise records with three stable fields, so a consumer can
+    # tabulate them without knowing this Tool.
+    { role = "columns", path = "result.result.matches[]", columns = ["path", "line", "text"] },
+    # The host's verdict that matches were cut.
+    { role = "truncated", path = "result.result.truncated" },
+]
+
+[[render.arms]]
+at = "result"
+case = "list_directory"
+annotations = [
+    { role = "columns", path = "result.result.entries[]", columns = ["name", "kind"] },
+    { role = "truncated", path = "result.result.truncated" },
+]
+
+[[render.arms]]
+at = "result"
+case = "find_files"
+annotations = [
+    # A flat list of project-relative paths is a path tree to anything that knows
+    # what a path is.
+    { role = "tree", path = "result.result.paths[]" },
+    { role = "truncated", path = "result.result.truncated" },
+]
+
+[[scopes]]
+# The workspace channel is what makes a path target authorizable at all: the
+# per-operation authorizer refuses `ObservedTarget::Path` for a cell rooted in any
+# other channel, so a session- or network-scoped grant can never turn into a file
+# read. It is also what the composition gate checks a channel adapter exists for —
+# and the adapter is supplied by the `workspace-observe` import above, not by
+# declaring this scope.
+#
+# `trust = "in"`: observation brings project content into the context, and that
+# content is inside the trust boundary. Reading it is not an external effect; the
+# `ext_impact = read` axis of the cell is what records that a file was touched.
+name = "workspace"
+trust = "in"
+channel = "workspace"
+
+[[capabilities]]
+# The one effect this Tool has: observation allocates context from a workspace
+# read. The host binds every one of the four operations to exactly this cell, and
+# a guest cannot name a cell for an operation, so this line is the complete
+# statement of what `observe.workspace` may do.
+#
+# `alloc:read:workspace` is also what the result cell must be, so a single
+# capability covers both the operations and the returned value — there is nothing
+# this Tool can do that this cell does not describe.
+name = "workspace.observation"
+cell = "alloc:read:workspace"
+
+[artifact]
+# Written by `cargo xtask tool-build`; verified by the composition gate.
+sha256 = "580c7b5520e96ac8e7900702ccf63c0ccbba996c88ff32f2ed43a351d14a4139"
+# The encoder belongs in this fingerprint: `wasm-tools component new` determines
+# the resulting Component bytes, so the sha256 above is only interpretable
+# alongside it (#80). `cargo xtask ci` asserts the installed encoder matches
+# `EXPECTED_WASM_TOOLS`.
+toolchain = "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"

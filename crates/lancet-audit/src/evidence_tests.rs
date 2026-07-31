@@ -52,6 +52,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 },
                 source: EffectSource::Operation,
                 context_measure: None,
+                truncated: None,
             },
             ObservedEffect {
                 seq: 1,
@@ -62,6 +63,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 },
                 source: EffectSource::Result,
                 context_measure: Some(17),
+                truncated: None,
             },
         ],
     }
@@ -352,6 +354,7 @@ fn failed_call_retains_the_operation_effects_it_already_recorded() {
             },
             source: EffectSource::Operation,
             context_measure: None,
+            truncated: None,
         }],
     };
     let denied = empty_denials();
@@ -801,6 +804,7 @@ fn all_issue28_evidence_scenarios_round_trip() {
             },
             source: EffectSource::Result,
             context_measure: Some(19),
+            truncated: None,
         }],
     };
     let partial_denials = DeniedOperationsRecord {

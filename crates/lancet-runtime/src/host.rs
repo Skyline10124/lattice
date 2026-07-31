@@ -188,6 +188,7 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 evidence: evidence.clone(),
                 admitted: Arc::new(admitted),
+                workspace: None,
             },
             limits: RecordingLimits::new(&ExecutionLimits::default()),
             deadline: Instant::now() + Duration::from_secs(60),

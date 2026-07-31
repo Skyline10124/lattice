@@ -43,6 +43,12 @@ types.
 
 ## Recent Issues
 
+- ADDED #30: `ObservedEffect.truncated: Option<bool>` — three-state
+  (`None` = unbounded observation, `Some(false)` = bounded but untruncated,
+  `Some(true)` = truncated), `skip_serializing_if = "Option::is_none"` so
+  pre-#30 records keep their exact serialized shape. The Tool Host computes
+  it from the bound it enforced; a guest-reported truncation flag would be
+  forgeable.
 - FIXED M-24-01: `Capability::FetchUrl` uses the explicit `host` field; do not
   reintroduce wildcard/pattern naming unless matching semantics are implemented.
 - WATCH: boundary/provenance wire additions must remain deterministic because

@@ -1,8 +1,6 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
-
 use serde::Serialize;
 use tempfile::TempDir;
 
@@ -23,20 +21,11 @@ pub(super) fn declare_active_envelope(_ctx: &crate::server::registry::HandlerCon
     // Envelope authority removed; this is now a no-op.
 }
 
-pub(super) fn observation_region(_root: &str) -> AuthorizedEffectRegion {
-    let mut kinds = std::collections::BTreeSet::new();
-    kinds.insert(ImpactKind::WorkspaceObservation);
-    AuthorizedEffectRegion {
-        kinds,
-        read_paths: vec![PathBuf::from(".")],
-        observation_roots: vec![PathBuf::from(".")],
-        denied_write_paths: Vec::new(),
-        denied_write_path_prefixes: Vec::new(),
-        hosts: Vec::new(),
-        session_state_allowed: false,
-        command_allowed: false,
-    }
-}
+// `observation_region` went with the native observation handler (#30). It built
+// the authorized region for `observe.workspace`, which is a Component Tool now:
+// its authority is Cell admission plus the Tool Host's own path checks, not a
+// legacy effect region. No native method declares `WorkspaceObservation` any
+// more, so a region for it would have no caller.
 
 pub(super) fn mutation_region(_root: &str) -> AuthorizedEffectRegion {
     let mut kinds = std::collections::BTreeSet::new();

@@ -431,21 +431,34 @@ fn direct_observation_visibility_and_bounds() {
             fs::read_to_string(&outside_file).unwrap_or_default() == OUTSIDE_CANARY,
             "outside-root file changed during observation denials",
         )?;
-        let guard_denied_finishes = outcome
+        // Every escape attempt is refused as `PathContainment`, and the event
+        // stream says so.
+        //
+        // This read `GuardDenied` until #30. The code changed with the authority,
+        // not with the outcome: the native handler ran each call through the
+        // legacy policy hook first, which normalized the path, denied it, and
+        // mapped that to `GuardDenied`. `observe.workspace` is a Component Tool
+        // now — its authorization is Cell admission plus the Tool Host's own
+        // checks, and the refusal comes from the host's path resolution, which
+        // names what actually happened. `PathContainment` is the more precise
+        // answer, and it is the same code the native workspace layer already
+        // used for a containment failure it detected itself.
+        let containment_denied_finishes = outcome
             .events
             .iter()
             .filter(|event| match event {
                 TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
                     raw.get("ok").and_then(Value::as_bool) == Some(false)
-                        && raw.get("error_code").and_then(Value::as_str) == Some("GuardDenied")
+                        && raw.get("error_code").and_then(Value::as_str) == Some("PathContainment")
                 }
                 _ => false,
             })
             .count();
         require(
-            guard_denied_finishes == 8,
+            containment_denied_finishes == 8,
             format!(
-                "expected 8 GuardDenied CEP finishes, got {guard_denied_finishes}: {:?}",
+                "expected 8 PathContainment CEP finishes, got \
+                 {containment_denied_finishes}: {:?}",
                 outcome.events
             ),
         )?;

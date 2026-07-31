@@ -41,7 +41,17 @@ use rusqlite::{Connection, params};
 /// Schema version of the evidence tables, stamped in `PRAGMA user_version`
 /// alongside the audit tables (they share one database file, so they share one
 /// version counter — see [`crate::audit::AUDIT_SCHEMA_VERSION`]).
-pub const EVIDENCE_SCHEMA_VERSION: i64 = 2;
+pub const EVIDENCE_SCHEMA_VERSION: i64 = 3;
+
+/// The evidence schema version that predates the `truncated` effect column
+/// (#30).
+///
+/// A file at this version is adopted additively rather than refused: `truncated`
+/// is nullable, so the column joins an existing table without rewriting a row,
+/// and a pre-#30 effect reads back as `truncated: None`. That is the truthful
+/// value, not a default standing in for missing data — the producer that wrote
+/// those rows evaluated no bound, so it had no flag to report.
+pub const EVIDENCE_SCHEMA_VERSION_PRE_TRUNCATION: i64 = 2;
 
 /// Columns an already-versioned `evidence_calls` table must carry. A file whose
 /// `user_version` claims evidence support but whose table shape disagrees is
@@ -87,6 +97,18 @@ pub(crate) const REQUIRED_EVIDENCE_EFFECT_COLUMNS: [&str; 13] = [
     "source",
     "context_measure",
 ];
+
+/// Evidence-effect columns that are added additively rather than required up
+/// front (#30).
+///
+/// `truncated` is deliberately NOT in [`REQUIRED_EVIDENCE_EFFECT_COLUMNS`]. That
+/// guard runs *before* the additive DDL and refuses the file when a column is
+/// missing, which is right for a `NOT NULL` column that cannot be backfilled —
+/// but `truncated` is nullable and is added by `ALTER TABLE` a few lines later.
+/// Requiring it there would turn every existing version-2 database into an
+/// "incompatible schema, move it aside" error, which is history being discarded
+/// over a column the store can simply add.
+pub(crate) const ADDITIVE_EVIDENCE_EFFECT_COLUMNS: [&str; 1] = ["truncated"];
 
 /// Columns an already-versioned `evidence_denials` table must carry.
 pub(crate) const REQUIRED_EVIDENCE_DENIAL_COLUMNS: [&str; 12] = [
@@ -138,6 +160,7 @@ CREATE TABLE IF NOT EXISTS evidence_effects (
     target_value TEXT,
     source TEXT NOT NULL,
     context_measure INTEGER,
+    truncated INTEGER,
     PRIMARY KEY (evidence_id, seq)
 );
 CREATE TABLE IF NOT EXISTS evidence_denials (
@@ -323,8 +346,8 @@ pub(crate) fn insert_call_evidence(
                 "INSERT INTO evidence_effects (
                     evidence_id, seq, record_version, ctx_op, ext_impact, cell_scope,
                     scope, scope_trust, scope_channel, target_kind, target_value, source,
-                    context_measure
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    context_measure, truncated
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     evidence_id,
                     effect.seq,
@@ -339,6 +362,11 @@ pub(crate) fn insert_call_evidence(
                     target_value,
                     source_label(effect.source),
                     effect.context_measure.map(|m| m as i64),
+                    // Three-valued on purpose: NULL means "no bound applied",
+                    // 0 means "bounded and nothing cut". Collapsing them would
+                    // make an unbounded effect indistinguishable from a
+                    // complete one (#30).
+                    effect.truncated,
                 ],
             )?;
         }
@@ -566,7 +594,7 @@ fn read_effects(
 ) -> Result<ObservedEffectsRecord, EvidenceError> {
     let mut stmt = conn.prepare(
         "SELECT seq, record_version, ctx_op, ext_impact, cell_scope, scope, scope_trust,
-                scope_channel, target_kind, target_value, source, context_measure
+                scope_channel, target_kind, target_value, source, context_measure, truncated
          FROM evidence_effects WHERE evidence_id = ?1 ORDER BY seq",
     )?;
     let rows: Vec<RawEffect> = stmt
@@ -584,6 +612,7 @@ fn read_effects(
                 target_value: row.get(9)?,
                 source: row.get(10)?,
                 context_measure: row.get(11)?,
+                truncated: row.get(12)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -610,6 +639,7 @@ fn read_effects(
             target: join_target(evidence_id, &raw.target_kind, raw.target_value)?,
             source: parse_source(evidence_id, &raw.source)?,
             context_measure: raw.context_measure.map(|m| m as u64),
+            truncated: raw.truncated,
         });
     }
     Ok(ObservedEffectsRecord { version, effects })
@@ -628,6 +658,9 @@ struct RawEffect {
     target_value: Option<String>,
     source: String,
     context_measure: Option<i64>,
+    /// `None` for a row written before #30, which is the truthful value: that
+    /// producer applied no bound and had no flag to report.
+    truncated: Option<bool>,
 }
 
 struct RawDenial {

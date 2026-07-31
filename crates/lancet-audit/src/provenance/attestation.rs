@@ -423,6 +423,7 @@ mod tests {
                     },
                     source: EffectSource::Operation,
                     context_measure: None,
+                    truncated: None,
                 }],
             },
             denied: DeniedOperationsRecord {

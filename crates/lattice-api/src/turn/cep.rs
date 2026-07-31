@@ -874,8 +874,14 @@ mod turn_wiring {
     use super::*;
     use lancet_audit::{AuditOutcome, CallAuditMetadata};
     use lancet_catalog::CepMethod;
-    use lancet_catalog::methods::workspace::ObserveWorkspace;
+    use lancet_catalog::methods::workspace::Create;
     use lancet_catalog::test_method::TestEcho;
+
+    /// `observe.workspace` as a plain method name. It is a Component Tool since
+    /// #30, so there is no catalog type — and calling it untyped is what a
+    /// production caller does too, since the contract now lives in the Tool's
+    /// source manifest rather than in a Rust type.
+    const OBSERVE_WORKSPACE: &str = "observe.workspace";
     use lancet_cep::ToolExposure;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_profile::{
@@ -962,10 +968,14 @@ mod turn_wiring {
 
         let llm: Arc<dyn lattice_agent::LlmClient> =
             Arc::new(FakeStreamingLlmClient::builder().build());
-        // A production build's available set is the four native catalog methods
+        // A production build's available set is the three native catalog methods
         // plus the embedded Component Tools, so an enabled name must be one of
         // those — a synthetic fixture name would be refused as unknown.
-        let profile = test_profile(vec![ObserveWorkspace::NAME.to_string()]);
+        //
+        // `[tools].enabled` is also the stage-1 capability grant, so naming the
+        // Component here is what admits it: since #30 `observe.workspace` is a
+        // Component Tool, and Cell admission is fail-closed.
+        let profile = test_profile(vec![OBSERVE_WORKSPACE.to_string()]);
         let request = RunTurnRequest {
             input: "hi".into(),
             session_id: "s".into(),
@@ -975,7 +985,7 @@ mod turn_wiring {
             test_project_root: Some(project.path().to_string_lossy().into()),
             test_persist_audit: Some(false),
         };
-        let enabled_tools = [ObserveWorkspace::NAME.to_string()];
+        let enabled_tools = [OBSERVE_WORKSPACE.to_string()];
         let deps = build_production_turn_deps(ProductionTurnDepsInput {
             request: &request,
             project_root: project.path().to_str().unwrap(),
@@ -989,16 +999,12 @@ mod turn_wiring {
         .expect("direct deps");
 
         deps.cep_client
-            .call::<ObserveWorkspace>(
-                lancet_catalog::methods::workspace::ObserveWorkspaceParams::ListDirectory(
-                    lancet_catalog::methods::workspace::ListDirectoryParams {
-                        path: ".".into(),
-                        limit: None,
-                    },
-                ),
+            .call_raw(
+                OBSERVE_WORKSPACE,
+                serde_json::json!({ "mode": "list_directory", "path": "." }),
             )
             .await
-            .expect("native observation");
+            .expect("component observation");
 
         deps.audit.await_pending().await;
 
@@ -1020,8 +1026,13 @@ mod turn_wiring {
     fn catalog_exposure_omits_unknown_envelope_method() {
         // session.envelope was removed from the catalog; attempting to enable
         // it now produces a ToolExposureError listing it as unknown.
+        //
+        // The companion name must be a *native catalog* method, because that is
+        // the only set `from_catalog_enabled` resolves against. It used to be
+        // `observe.workspace`; since #30 that name would land in `unknown` too
+        // and the assertion would no longer isolate `session.envelope`.
         let err = ToolExposure::from_catalog_enabled(&[
-            ObserveWorkspace::NAME.to_string(),
+            Create::NAME.to_string(),
             "session.envelope".to_string(),
         ])
         .expect_err("session.envelope is no longer a catalog method");

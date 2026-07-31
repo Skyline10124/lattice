@@ -1,7 +1,21 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Workspace observation and mutation methods.
+//! Workspace mutation methods.
+//!
+//! `observe.workspace` used to live here. #30 migrated it to an embedded
+//! Component Tool, so its method type, its four mode params/result pairs
+//! (`ReadFile*`, `Grep*`, `ListDirectory*`, `FindFiles*`) and their
+//! `CepMethod`/`CatalogMethod` impls are gone: `tools/observe-workspace/
+//! manifest.toml` is now the sole descriptor and schema authority for the
+//! method. Re-adding any of them here would be the parallel schema ADR 0004
+//! forbids, and a name in both vocabularies fails the server run closed
+//! (`validate_no_component_native_collision`).
+//!
+//! The workspace-facing Rust types the Component's *host* side needs
+//! (`DirectoryEntry`, `GrepMatch`, …) live in
+//! `lancet_runtime::workspace::types`, behind the WIT Tool Host imports —
+//! not in this crate's catalog vocabulary.
 
 use crate::method::{CatalogMethod, CepMethod};
 use lancet_protocol::RequiredCapability;
@@ -10,131 +24,6 @@ use lancet_protocol::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-/// `observe.workspace`
-pub struct ObserveWorkspace;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum ObserveWorkspaceParams {
-    ReadFile(ReadFileParams),
-    Grep(GrepParams),
-    ListDirectory(ListDirectoryParams),
-    FindFiles(FindFilesParams),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "mode", content = "result", rename_all = "snake_case")]
-pub enum ObserveWorkspaceResult {
-    ReadFile(ReadFileResult),
-    Grep(GrepResult),
-    ListDirectory(ListDirectoryResult),
-    FindFiles(FindFilesResult),
-}
-
-impl CepMethod for ObserveWorkspace {
-    const NAME: &'static str = "observe.workspace";
-    const DESCRIPTION: &'static str = "Observe workspace content in one of four fixed modes: read_file for one path, grep for regex search under a root, list_directory for one directory, or find_files for glob-like path search under a root. read_file returns content_hash; copy that exact value into mutate.edit expected_hash when editing, and do not compute, transform, or narrate the hash.";
-    type Params = ObserveWorkspaceParams;
-    type Result = ObserveWorkspaceResult;
-    const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
-    const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
-    const EFFECT: EffectDecl = EffectDecl {
-        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
-        scope: EffectScopeKind::ObservationRoot,
-        capabilities: &[RequiredCapability::ReadPath, RequiredCapability::Inspect],
-        overlay: OverlayBehavior::ReadWorkspace,
-        failure: FailureSemantics::NoBackendEffectOnFailure,
-    };
-}
-
-impl CatalogMethod for ObserveWorkspace {}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct ReadFileParams {
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offset: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line_numbers: Option<bool>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct ReadFileResult {
-    pub content: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct GrepParams {
-    pub pattern: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_results: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct GrepMatch {
-    pub path: String,
-    pub line: u64,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct GrepResult {
-    pub matches: Vec<GrepMatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncated: Option<bool>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct ListDirectoryParams {
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct DirectoryEntry {
-    pub name: String,
-    pub kind: DirectoryEntryKind,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DirectoryEntryKind {
-    File,
-    Directory,
-    Symlink,
-    Other,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct ListDirectoryResult {
-    pub entries: Vec<DirectoryEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncated: Option<bool>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct FindFilesParams {
-    pub pattern: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct FindFilesResult {
-    pub paths: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncated: Option<bool>,
-}
 
 /// `mutate.create`
 pub struct Create;
@@ -241,31 +130,24 @@ mod tests {
 
     #[test]
     fn workspace_method_names_are_full_dotted_names() {
-        for name in [ObserveWorkspace::NAME, Create::NAME, Edit::NAME] {
+        // `observe.workspace` is absent since #30: the name it would contribute
+        // here is now asserted against `tools/observe-workspace/manifest.toml`,
+        // not against a Rust `CepMethod` this crate defines.
+        for name in [Create::NAME, Edit::NAME] {
             assert!(name.contains('.'), "expected dotted name: {name}");
             assert!(!name.contains('/'), "slash names forbidden: {name}");
         }
     }
 
+    /// The hash handoff is a two-sided contract and #30 moved only one side of
+    /// it out. `observe.workspace`'s "do not compute, transform, or narrate the
+    /// hash" half now lives in the Component manifest description; the half this
+    /// crate still owns is `mutate.edit` telling the agent where the value comes
+    /// from. Without this, `expected_hash` reads as a field the agent may
+    /// compute itself, which is exactly the failure the instruction prevents.
     #[test]
-    fn read_file_params_schema_has_path_property() {
-        let schema = schemars::schema_for!(ReadFileParams);
-        let value = serde_json::to_value(schema).unwrap();
-        assert!(value["properties"]["path"].is_object());
-        assert!(ObserveWorkspace::DESCRIPTION.contains("do not compute"));
-    }
-
-    #[test]
-    fn read_file_round_trips() {
-        let params = ReadFileParams {
-            path: "src/main.rs".into(),
-            offset: Some(1),
-            limit: Some(100),
-            line_numbers: Some(true),
-        };
-        let json = serde_json::to_string(&params).unwrap();
-        let back: ReadFileParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, params);
+    fn edit_description_sources_expected_hash_from_the_observation_tool() {
+        assert!(Edit::DESCRIPTION.contains("observe.workspace content_hash as expected_hash"));
     }
 
     #[test]

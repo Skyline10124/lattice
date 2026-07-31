@@ -940,12 +940,16 @@ mod policy_tests {
 
     #[test]
     fn evaluate_with_default_hook_returns_evidence() {
+        // On a live native method (#30 retired `observe.workspace` from the
+        // catalog). `evaluate_policy` attaches evidence to denials too, so a
+        // resolver-error input would satisfy this assertion without the default
+        // hook ever producing decision facts.
         let hook = DefaultPolicyHook::new(PolicyConfig::defaults_for_project_root(
             std::path::PathBuf::from("."),
         ));
         let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: serde_json::json!({"mode": "read_file", "path": "src/lib.rs"}),
+            method: "mutate.create".into(),
+            params: serde_json::json!({"path": "src/lib.rs", "content": "fn f() {}"}),
             authority: PolicyAuthorityInput,
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),

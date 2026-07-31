@@ -15,6 +15,18 @@ use crate::composition::{
     _parse_hex_digest as parse_hex_digest, EmbeddedTool, ExpectedToolIdentity,
 };
 
+/// Embedded `observe.workspace` v0.1.0: name plus the committed descriptor and Component bytes.
+static OBSERVE_WORKSPACE: EmbeddedTool = EmbeddedTool {
+    name: "observe.workspace",
+    descriptor_json: include_bytes!(
+        "../../../../tools/observe-workspace/generated/descriptor.json"
+    ),
+    component_bytes: include_bytes!(
+        "../../../../tools/observe-workspace/generated/observe_workspace.component.wasm"
+    ),
+};
+inventory::submit!(&OBSERVE_WORKSPACE);
+
 /// Embedded `session.todo_write` v0.1.0: name plus the committed descriptor and Component bytes.
 static SESSION_TODO_WRITE: EmbeddedTool = EmbeddedTool {
     name: "session.todo_write",
@@ -27,14 +39,30 @@ inventory::submit!(&SESSION_TODO_WRITE);
 
 /// The production expected-identity set. Pinned by the trusted host
 /// composition step; a Tool crate cannot self-approve.
-pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[ExpectedToolIdentity {
-    name: "session.todo_write",
-    descriptor_sha256: parse_hex_digest(
-        "e4216ac3faada82645a0190398eb0fa7a5e3664adc613017978a00861495620c",
-    ),
-    artifact_sha256: parse_hex_digest(
-        "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4",
-    ),
-    abi_version: 1,
-    imports: &["lattice:tool-host/host-control@0.1.0"],
-}];
+pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
+    ExpectedToolIdentity {
+        name: "observe.workspace",
+        descriptor_sha256: parse_hex_digest(
+            "1caf3243b5f4fee04238b3eb8aaa5e46618b97dca2aecdfc34d7643ca0d971c7",
+        ),
+        artifact_sha256: parse_hex_digest(
+            "580c7b5520e96ac8e7900702ccf63c0ccbba996c88ff32f2ed43a351d14a4139",
+        ),
+        abi_version: 1,
+        imports: &[
+            "lattice:tool-host/host-control@0.1.0",
+            "lattice:tool-host/workspace-observe@0.1.0",
+        ],
+    },
+    ExpectedToolIdentity {
+        name: "session.todo_write",
+        descriptor_sha256: parse_hex_digest(
+            "e4216ac3faada82645a0190398eb0fa7a5e3664adc613017978a00861495620c",
+        ),
+        artifact_sha256: parse_hex_digest(
+            "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4",
+        ),
+        abi_version: 1,
+        imports: &["lattice:tool-host/host-control@0.1.0"],
+    },
+];

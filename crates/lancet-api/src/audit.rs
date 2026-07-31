@@ -70,8 +70,12 @@ mod tests {
         AuditOutcome, CallAuditMetadata, CepAuditContext, CepAuditStore, ScopedXdgStateHome,
         audit_db_path_for_project_in,
     };
-    use lancet_catalog::CepMethod;
-    use lancet_catalog::methods::workspace::ObserveWorkspace;
+
+    /// `observe.workspace` as a plain method name. It is a Component Tool since
+    /// #30, so there is no catalog type to take `NAME` from; the operator audit
+    /// read path stores and queries method names as strings and never consults
+    /// the catalog.
+    const OBSERVE_WORKSPACE: &str = "observe.workspace";
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -121,7 +125,7 @@ mod tests {
                 .start_call(
                     &ctx,
                     i as u64 + 1,
-                    ObserveWorkspace::NAME,
+                    OBSERVE_WORKSPACE,
                     &CallAuditMetadata::native_policy_enforced(Some("started")),
                 )
                 .unwrap();

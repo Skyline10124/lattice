@@ -1,0 +1,72 @@
+{
+  "annotations": [],
+  "arms": [
+    {
+      "annotations": [
+        {
+          "path": "result.result.content",
+          "role": "code"
+        }
+      ],
+      "at": "result",
+      "case": "read_file",
+      "discriminant": "mode"
+    },
+    {
+      "annotations": [
+        {
+          "columns": [
+            "path",
+            "line",
+            "text"
+          ],
+          "path": "result.result.matches[]",
+          "role": "columns"
+        },
+        {
+          "path": "result.result.truncated",
+          "role": "truncated"
+        }
+      ],
+      "at": "result",
+      "case": "grep",
+      "discriminant": "mode"
+    },
+    {
+      "annotations": [
+        {
+          "columns": [
+            "name",
+            "kind"
+          ],
+          "path": "result.result.entries[]",
+          "role": "columns"
+        },
+        {
+          "path": "result.result.truncated",
+          "role": "truncated"
+        }
+      ],
+      "at": "result",
+      "case": "list_directory",
+      "discriminant": "mode"
+    },
+    {
+      "annotations": [
+        {
+          "path": "result.result.paths[]",
+          "role": "tree"
+        },
+        {
+          "path": "result.result.truncated",
+          "role": "truncated"
+        }
+      ],
+      "at": "result",
+      "case": "find_files",
+      "discriminant": "mode"
+    }
+  ],
+  "render-schema-version": 1,
+  "tool": "observe.workspace"
+}

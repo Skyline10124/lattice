@@ -29,6 +29,7 @@ use crate::error_map::{
 };
 use crate::evidence::CellEvidenceLedger;
 use crate::generated;
+use crate::host_workspace::WorkspaceObservationHost;
 use crate::limits::{AbortReason, ExecutionLimits, RecordingLimits, ResourceFootprint};
 
 /// Call-scoped context passed to `ComponentRuntime::call`.
@@ -43,6 +44,19 @@ pub struct ComponentCallContext {
     pub cancellation: Cancellation,
     pub evidence: CellEvidenceLedger,
     pub admitted: Arc<AdmittedTool>,
+    /// Host authority for the `workspace-observe` imports (#30).
+    ///
+    /// `None` means this call has no workspace authority, and every observation
+    /// operation is refused — the fail-closed default. It is `Option` rather than
+    /// required because most Tools import nothing from the workspace channel and
+    /// the transport should not have to fabricate an authority they cannot use;
+    /// a Tool that *does* import the interface gets a real one, and one that does
+    /// not cannot reach the interface at all.
+    ///
+    /// Shared per server run (`Arc`) because the concrete Local Workspace and the
+    /// Turn's observation budget are both per-turn, not per-call: a per-call copy
+    /// of the budget would silently reset the per-turn ceiling.
+    pub workspace: Option<Arc<WorkspaceObservationHost>>,
 }
 
 /// Per-store state: the call context, resource limits, deadline, and abort
@@ -221,7 +235,14 @@ impl ComponentRuntime {
         // `CallCancelled` — cancellation state, not the guest-controlled
         // error string, is the classification authority (#70).
         let cancelled = store.data().call.cancellation.is_cancelled();
-        let raw = map_guest_logical_result(name, raw, cancelled)?;
+        let raw = match map_guest_logical_result(name, raw, cancelled) {
+            Ok(raw) => raw,
+            // The host's own refusal outranks the guest's retelling of it: a
+            // domain import that refused this call already produced a typed
+            // error with a real code, and that is what the caller and the model
+            // must see (#30).
+            Err(err) => return Err(host_refusal(&store.data().call).unwrap_or(err)),
+        };
 
         // WIT output uses a trust-free 3-segment CellRef. Guest cannot
         // claim `in` — parse_cell_ref rejects a 4th segment.
@@ -402,6 +423,25 @@ fn guest_error(method: &str, guest_err: String) -> CepError {
     err
 }
 
+/// The host's own refusal for this call, if a Tool Host import produced one.
+///
+/// A domain import that refuses an operation already decided *why*, as a typed
+/// [`CepError`] with a real error code. The guest can only hand that back as a
+/// string, and `guest_error` would then wrap it into a generic
+/// `ExecutionFailed` — turning "this path escapes the project root"
+/// (`PathContainment`) into "the tool failed", and prefixing the message with
+/// `tool <name> guest error:`. A caller reading the code could no longer tell a
+/// policy refusal from a crash, and the model would read the host's sentence
+/// through the guest's frame.
+///
+/// So the host records its refusal on the call and the runtime prefers it. The
+/// guest's string is not consulted when the host already spoke.
+fn host_refusal(ctx: &ComponentCallContext) -> Option<CepError> {
+    ctx.workspace
+        .as_ref()
+        .and_then(|workspace| workspace.take_refusal())
+}
+
 // ---------------------------------------------------------------------------
 // Engine + linker construction
 // ---------------------------------------------------------------------------
@@ -414,12 +454,28 @@ fn build_engine() -> Result<Engine, wasmtime::Error> {
     Engine::new(&c)
 }
 
+/// Link every Tool Host interface the host serves.
+///
+/// One linker for the whole runtime, so a Tool's *declared* imports — pinned by
+/// the composition gate against its Component's real import section — are what
+/// decide which of these it can reach, not which bindings happen to be linked. A
+/// Tool that never declared `workspace-observe` cannot call it: the world it was
+/// compiled against has no such interface.
+///
+/// `workspace-observe` is additionally inert without call-scoped authority: its
+/// implementation refuses every operation when `ComponentCallContext::workspace`
+/// is `None`, so a caller that links the interface but supplies no host authority
+/// fails closed rather than reaching a default.
 fn build_linker(engine: &Engine) -> Result<Linker<StoreState>, wasmtime::Error> {
     let mut linker = Linker::new(engine);
     bindings::lattice::tool_host::host_control::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
         &mut linker,
         |state| state,
     )?;
+    bindings::lattice::tool_host::workspace_observe::add_to_linker::<
+        _,
+        wasmtime::component::HasSelf<_>,
+    >(&mut linker, |state| state)?;
     Ok(linker)
 }
 

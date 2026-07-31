@@ -1,0 +1,33 @@
+[package]
+# `cargo xtask tool-build` derives the package name from the manifest's tool name
+# by replacing dots with dashes (`observe.workspace` -> `observe-workspace`), and
+# the cdylib artifact name from that. The name is therefore not free-form.
+name = "observe-workspace"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+description = "observe.workspace Source Tool: typed mode dispatch and result shaping over the Policy-Visible Workspace host imports."
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+
+[dependencies]
+lattice-tool-prelude = { workspace = true }
+# wit-bindgen is also a direct dep: its `generate!` macro emits code that
+# references `wit_bindgen::rt::...` by bare crate path, so the crate must be
+# linked. The version comes from the exact `=` pin in
+# `[workspace.dependencies]`, shared with the prelude's re-export.
+wit-bindgen = { workspace = true }
+# The guest assembles its result document as JSON, because the method's result
+# contract is a JSON Schema the host validates.
+#
+# Declared with an explicit version rather than `workspace = true`: the workspace
+# entry carries default features (which pull in `std`), and cargo refuses to let a
+# member turn a workspace dependency's defaults off. This guest is `no_std`, so it
+# needs the `alloc`-only build. The major version is pinned to the workspace's.
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

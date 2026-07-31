@@ -55,6 +55,9 @@ fn call_ctx_with(
         cancellation: Cancellation::new(cancel_rx),
         evidence: evidence.clone(),
         admitted: Arc::new(admitted),
+        // These fixtures exercise control-only Tools; a call with no workspace
+        // authority refuses every observation operation (#30).
+        workspace: None,
     };
     (ctx, evidence, rx, cancel_tx)
 }

@@ -621,8 +621,37 @@ impl CepAuditStore {
         for ddl in [
             "ALTER TABLE cep_audit_entries ADD COLUMN model_id TEXT",
             "ALTER TABLE cep_audit_entries ADD COLUMN runtime_version TEXT",
+            // #30: the observation truncation flag. Nullable, so a version-2
+            // file gains it here without rewriting a row, and its existing
+            // effects read back as `truncated: None` — the truthful value for a
+            // producer that evaluated no bound. The result is discarded because
+            // the statement fails precisely when the column already exists,
+            // which is the idempotence these three DDLs rely on.
+            "ALTER TABLE evidence_effects ADD COLUMN truncated INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
+        }
+        // The additive columns are discarded-result DDL above, so nothing has
+        // checked that they actually landed. Verify it here, before the version
+        // is stamped: a file stamped v3 whose `evidence_effects` has no
+        // `truncated` column would fail every subsequent effect write, and
+        // GitHub #112's own guard exists because that failure mode is silent.
+        let missing_additive = self.missing_columns_of(
+            &conn,
+            "evidence_effects",
+            &crate::evidence::ADDITIVE_EVIDENCE_EFFECT_COLUMNS[..],
+        )?;
+        if !missing_additive.is_empty() {
+            let missing = missing_additive.join(", ");
+            return Err(AuditError::IncompatibleSchema {
+                path: self.path.clone(),
+                reason: format!(
+                    "evidence_effects is still missing additive column(s) {missing} after the \
+                     schema upgrade; the database is left unstamped — move it aside so a new \
+                     one is created, then bring the history over with the read-only legacy \
+                     import"
+                ),
+            });
         }
         if version != AUDIT_SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", AUDIT_SCHEMA_VERSION)

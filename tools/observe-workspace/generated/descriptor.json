@@ -1,0 +1,290 @@
+{
+  "name": "observe.workspace",
+  "version": "0.1.0",
+  "description": "Observe workspace content in one of four fixed modes: read_file for one path, grep for regex search under a root, list_directory for one directory, or find_files for glob-like path search under a root. read_file returns content_hash; copy that exact value into mutate.edit expected_hash when editing, and do not compute, transform, or narrate the hash.",
+  "params_schema": {
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "line_numbers": {
+            "type": "boolean"
+          },
+          "mode": {
+            "const": "read_file"
+          },
+          "offset": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "path"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mode": {
+            "const": "grep"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pattern": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "pattern"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mode": {
+            "const": "list_directory"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "path"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mode": {
+            "const": "find_files"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pattern": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "pattern"
+        ],
+        "type": "object"
+      }
+    ]
+  },
+  "result_schema": {
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "const": "read_file"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "content_hash": {
+                "pattern": "^blake3:[0-9a-f]{64}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "content"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "mode",
+          "result"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "const": "grep"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "matches": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "line": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "text": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "line",
+                    "text"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "matches"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "mode",
+          "result"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "const": "list_directory"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "entries": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "file",
+                        "directory",
+                        "symlink",
+                        "other"
+                      ],
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "kind"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "entries"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "mode",
+          "result"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "const": "find_files"
+          },
+          "result": {
+            "additionalProperties": false,
+            "properties": {
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "paths"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "mode",
+          "result"
+        ],
+        "type": "object"
+      }
+    ]
+  },
+  "scopes": [
+    {
+      "name": "workspace",
+      "trust": "in",
+      "channel": "workspace"
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "workspace.observation",
+      "cell": {
+        "ctx_op": "alloc",
+        "ext_impact": "read",
+        "scope": "workspace"
+      }
+    }
+  ],
+  "artifact": {
+    "sha256": "580c7b5520e96ac8e7900702ccf63c0ccbba996c88ff32f2ed43a351d14a4139",
+    "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"
+  },
+  "abi_version": 1
+}

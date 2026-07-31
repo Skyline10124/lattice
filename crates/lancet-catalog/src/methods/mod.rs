@@ -9,11 +9,10 @@ pub mod scaffold;
 pub mod workspace;
 
 pub use external::Fetch;
-pub use workspace::{
-    Create, Edit, EditOperation, EditParams, EditResult, FindFilesParams, FindFilesResult,
-    GrepParams, GrepResult, ListDirectoryParams, ListDirectoryResult, ObserveWorkspace,
-    ReadFileParams, ReadFileResult,
-};
+// `ObserveWorkspace` and its four mode params/result types are gone (#30): the
+// method is an embedded Component Tool and `tools/observe-workspace/manifest.toml`
+// is its sole contract authority.
+pub use workspace::{Create, Edit, EditOperation, EditParams, EditResult};
 
 #[cfg(feature = "inspect-scaffold")]
 pub use scaffold::{Inspect, Navigate, ScaffoldStubResult};
@@ -21,11 +20,10 @@ pub use scaffold::{Inspect, Navigate, ScaffoldStubResult};
 mod sealed {
     use super::{
         external::Fetch,
-        workspace::{Create, Edit, ObserveWorkspace},
+        workspace::{Create, Edit},
     };
     use crate::method::sealed::Sealed;
 
-    impl Sealed for ObserveWorkspace {}
     impl Sealed for Create {}
     impl Sealed for Edit {}
     impl Sealed for Fetch {}
@@ -36,15 +34,14 @@ mod tests {
     use super::*;
     use crate::method::CepMethod;
 
+    /// The three native methods this crate still defines. `observe.workspace`
+    /// (#30) and `session.todo_write` (#29) are absent because they are
+    /// Component Tools with no `CepMethod` type left to name.
+    const NATIVE_METHOD_NAMES: [&str; 3] = [Create::NAME, Edit::NAME, Fetch::NAME];
+
     #[test]
     fn all_catalog_method_names_are_dotted_without_slashes() {
-        let names = [
-            ObserveWorkspace::NAME,
-            Create::NAME,
-            Edit::NAME,
-            Fetch::NAME,
-        ];
-        for name in names {
+        for name in NATIVE_METHOD_NAMES {
             assert!(name.contains('.'), "expected dotted name: {name}");
             assert!(!name.contains('/'), "slash names forbidden: {name}");
         }
@@ -52,13 +49,7 @@ mod tests {
 
     #[test]
     fn no_legacy_slash_method_names_in_protocol() {
-        let names = [
-            ObserveWorkspace::NAME,
-            Create::NAME,
-            Edit::NAME,
-            Fetch::NAME,
-        ];
-        for name in names {
+        for name in NATIVE_METHOD_NAMES {
             assert_ne!(name, "session/create");
             assert_ne!(name, "tool/call");
             assert_ne!(name, "turn/start");

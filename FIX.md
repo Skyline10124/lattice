@@ -2,6 +2,107 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #30：`observe.workspace` 迁为 Policy-Visible Workspace Component Tool — 2026-07-31
+
+Severity: ENHANCEMENT（ADR 0004 五个内置 Tool 的第二个迁移切片；含三处迁移中对抗
+验收发现并已修的真实缺陷，见下）。
+
+**Problem:**
+
+`observe.workspace` 的 read/list/grep/find 四种 mode 跑在 native handler
+（`lancet-native/src/handlers/observation.rs`）里，经 legacy policy hook 授权。ADR 0004
+要求迁成独立维护的 WASM Component Tool：Component 只做 typed mode dispatch 与 result
+shaping，全部 filesystem authority（System Path Exclusion、symlink/root containment、
+read denial、ignored-path inclusion、bounded result、observation budget、effects/audit）
+必须经 Tool Host workspace imports，且不得重新引入 ExecutionBackend/Upper/projection/
+ambient WASI/native fallback 接缝。前置：#29（todo_write 迁移）、#112（versioned
+evidence 表）、#24（PRD）均已落地。
+
+**Fix summary:**
+
+- **Local Workspace 下移一层**：`lancet-native/src/workspace/` 整体 git mv 到
+  `lancet-runtime/src/workspace/`（`pub(crate)` 放宽为 `pub`，`new` 改
+  `test-utils` feature 门控 —— pub 是 reach 不是 seam）。否决了注入式 port（违反
+  no-pluggable-backend-seam）与 observation-only 半移（分裂 one concrete host module）
+  两个方案。async 原语的闭包体抽成 `*_blocking` 同步方法，async 版委托 —— 一份实现
+  同时服务 sync host import 与 async native handler。`lancet-native` 经
+  `pub(crate) mod workspace { pub(crate) use lancet_runtime::workspace::*; }` 路径别名
+  继续用同一具体类型；`lancet_native::rewind` re-export 保持稳定。分层图新增
+  `lancet-runtime → lancet-authority` 边，无环。
+- **Tool Host workspace imports（核心权限模块）**：新
+  `lancet-runtime/src/host_workspace.rs` 的 `WorkspaceObservationHost` 实现 WIT
+  `workspace-observe` interface（read-file/list-dir/grep/find-files 四函数，一个
+  interface 保证四 mode 不可拆分链接）。每次调用：parse project-relative path → 经同一
+  `authorize_operation` seam 授权 `alloc:read:workspace`（Cell{Alloc, Read, scope}）→
+  turn-scoped budget charge → `VisibilityEngine` 可见性裁决（四 mode 共享同一 decision，
+  隐藏路径报告为 missing）→ host 侧 `ObservationLimits` 字节/行/条数截断。
+  `composition.rs` 的 `channels_for_domain_imports` 把 `workspace-observe` import 映射
+  到 Workspace channel，组合门禁 fail-closed 不变。
+- **Guest 只做 dispatch 与 shaping**：`tools/observe-workspace/`（no_std）按
+  `mode` const 判别分发四分支，结果整形（行窗口 + `[TRUNCATED]` 标记、仅在 host 判定
+  truncated 时写入标志）；`describe` 只转发 host 消息。manifest 顶层声明
+  `imports = ["workspace-observe"]`，params/result 为 oneOf 四分支 union schema。
+- **三态截断证据**：`ObservedEffect.truncated: Option<bool>`（None = 无边界 /
+  Some(false) = 有界未截 / Some(true) = 截断），host 计算、guest 不可伪造；
+  `skip_serializing_if` 保持 #30 前记录的序列化形状。audit 侧
+  `EVIDENCE_SCHEMA_VERSION` 2→3，`evidence_effects` 加 `truncated INTEGER` 可空列。
+- **错误直通与措辞契约**：host 拒绝经 `take_refusal`/`host_refusal` 以结构化
+  `CepError` 直达调用方；`PathRejection` 结构化枚举 + `classify_path_error` 从
+  `WorkspacePathError` 派生，钉住模型可见措辞（`path contains '..' traversal: 'x'` /
+  `path must be relative: 'x'`）。
+- **catalog 与 authority 同步摘除**：`lancet-catalog` 降为三个 native 方法
+  （Create/Edit/Fetch，防 #28 §11 双授权词表冲突）；authority 删 `observe.workspace`
+  policy arm 与 `extract_observe_workspace_path`（`resolved.rs` 将其钉为 unknown
+  method）；native handler/registration/executor render/effect-contract observation
+  fixtures 全部删除，覆盖去向在删除点注释说明。
+- **迁移中对抗验收发现并已修的三处真缺陷**：(1) symlink 逃逸拒绝的错误消息泄漏宿主
+  绝对路径（`/tmp/.tmpXXX/escape.txt`）—— `observation_io_error` 改为穷举匹配所有
+  `LocalWorkspaceError` 变体，`SymlinkRejected` 用固定措辞，加防泄漏断言；(2) host
+  结构化拒绝被 guest 包装成 `tool X guest error:` 前缀字符串、错误码退化为
+  `ExecutionFailed` —— 加 `take_refusal`/`host_refusal` 直通通道，map guest logical
+  result 失败时优先 host refusal；(3) v2 evidence 文件因缺 `truncated` 列被形状守卫
+  整体拒绝 —— `truncated` 移出阻断守卫，走 `ALTER TABLE` 可加性迁移 + 迁移后断言列
+  就位。
+- **语义变化已钉档**：root 逃逸的错误码从 `GuardDenied`（legacy policy hook 归一化）
+  变为 `PathContainment`（host 路径解析自报，与 native workspace 层对同类失败已用的
+  代码一致），harness 场景 `direct_observation` 断言更新并写明理由。
+
+**Verification:**
+
+- `env -u LATTICE_BIN cargo xtask ci` — **全部通过**（fmt、clippy `-D warnings`、
+  build、harness-boundary、lancet-boundary、tool-codegen `--check`、29 个 crate 测试、
+  tool-build `--verify`）。注意：本机交互 shell profile 导出
+  `LATTICE_BIN=/home/astrin/Dev/lattice/target/debug/lattice`（主仓库旧二进制），
+  会让 harness 场景测到旧分发路径（`GuardDenied`/`cep_native`）——跑 harness/CI 前
+  必须 `env -u LATTICE_BIN` 或显式指向 worktree 二进制。
+- `cargo test -p lancet-runtime` 173 项（含 `host_workspace` 16 项新测试：四 mode
+  共享可见性、ignored 默认隐藏+显式包含、denied read、symlink 逃逸+不泄漏宿主路径、
+  `..` 词法拒绝、单读超限、list 截断 host 计算+evidence、untruncated Some(false)、
+  budget 耗尽、外部 edit/create/delete 可见、content_hash、unadmitted cell、grep root
+  target、invalid regex、clamp_limit、无 mutation history）。
+- 全 workspace：lancet-catalog 26、lancet-protocol 68+、lancet-audit 88、
+  lancet-authority 138、lancet-cep 8、lancet-native 103、lancet-api 9、harness 141 项全绿。
+- No-WASI：`cargo tree -p lancet-runtime` 无 `wasmtime-wasi`/`wasi-common`；
+  guest WIT 无 `wasi:` import（tool-codegen 测试钉住）。
+
+**Changed files:**
+`AGENTS.md`, `Cargo.{toml,lock}`, `FIX.md`,
+`crates/lancet-api/src/{audit,runtime}.rs`,
+`crates/lancet-audit/{AGENTS.md,src/{audit,audit_tests,evidence,evidence_tests,operator_tests,store_path}.rs,src/provenance/{attestation,projector}.rs}`,
+`crates/lancet-authority/{AGENTS.md,src/guard.rs,src/policy/{default,resolved}.rs,tests/{guard_decide_fuzz,policy_coverage,policy_tests}.rs}`,
+`crates/lancet-catalog/{AGENTS.md,src/{catalog.rs,methods/{mod,workspace}.rs}}`,
+`crates/lancet-cep/src/tool.rs`,
+`crates/lancet-native/{AGENTS.md,Cargo.toml,src/{lib.rs,executor/mod.rs,handlers/mod.rs,server/{native_registry,transport}.rs},src/effect_contract_tests/*,tests/{cep_component_round_trip,cep_warn_harness,policy_integration,prov_isomorphism}.rs}`
+（删 `src/handlers/observation.rs`、`src/executor/render.rs`、`src/workspace/*`），
+`crates/lancet-protocol/{AGENTS.md,src/evidence.rs}`,
+`crates/lancet-runtime/{AGENTS.md,Cargo.toml,src/{admission,bindings,composition,evidence,host,host_workspace,lib,runtime}.rs,src/generated/host_composition.rs,src/workspace/*,tests/{call,embedded,negative}.rs}`,
+`crates/lattice-api/src/turn/{cep,cep_tests}.rs`,
+`crates/lattice-api/tests/{cep_round_trip,direct_local_acceptance,dogfood_impact_matrix,workspace_history_acceptance}.rs`,
+`crates/lattice-cli/src/commands/audit.rs`,
+`crates/lattice-system-harness/tests/direct_observation.rs`,
+`tools/observe-workspace/`（新增）, `tools/{noop,todo-write}/generated/expected-identity.json`,
+`xtask/src/tool_codegen.rs`.
+
 ## GitHub #120 / #121 / #122：写入上限、配置项读取点、host 匹配语义三处收口 — 2026-07-30
 
 Severity: #120 MEDIUM（资源耗尽面 + 平行写路径契约分叉）、#121 MEDIUM（配置静默失效，

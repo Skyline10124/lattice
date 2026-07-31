@@ -71,11 +71,24 @@ pub struct ObservedEffect {
     pub target: ObservedTarget,
     pub source: EffectSource,
     /// Host-computed context allocation in bytes, recorded on every result
-    /// effect whatever `ctx_op` the guest declared (D12) and absent on
-    /// operation effects, which return no value. Tool self-reported numbers
-    /// are never trusted (A3); the charge/credit seam stays in #6.
+    /// effect whatever `ctx_op` the guest declared (D12) and on every bounded
+    /// domain operation that returns data to the guest (#30: an observation
+    /// operation's returned bytes). Absent only on operations that return no
+    /// value at all. Tool self-reported numbers are never trusted (A3); the
+    /// charge/credit seam stays in #6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_measure: Option<u64>,
+    /// Whether the host dropped data from this operation's result to satisfy a
+    /// bound (#30).
+    ///
+    /// `Some(false)` is a real claim — "the host bounded this and did not have
+    /// to cut" — and is therefore distinct from `None`, which means the effect
+    /// had no bound to apply. Host-computed from the actual limit comparison: a
+    /// guest shapes its own result document, but the flag the audit trail
+    /// carries is this one, so a guest that under-reports truncation
+    /// contradicts durable evidence rather than concealing anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 /// Versioned container for a call's effects (C1/C8): one call may produce
@@ -181,6 +194,29 @@ mod tests {
                 CtxOp::Alloc => Some(42),
                 _ => None,
             },
+            truncated: None,
+        }
+    }
+
+    /// A bounded observation effect: a path target, measured bytes, and an
+    /// explicit truncation verdict (#30).
+    fn observation_effect(seq: u32, path: &str, truncated: bool) -> ObservedEffect {
+        ObservedEffect {
+            seq,
+            cell: Cell {
+                ctx_op: CtxOp::Alloc,
+                ext_impact: ExtImpact::Read,
+                scope: "workspace".into(),
+            },
+            scope: ObservedScope {
+                scope: "workspace".into(),
+                trust: Trust::In,
+                channel: ChannelKind::Workspace,
+            },
+            target: ObservedTarget::Path { path: path.into() },
+            source: EffectSource::Operation,
+            context_measure: Some(128),
+            truncated: Some(truncated),
         }
     }
 
@@ -203,6 +239,47 @@ mod tests {
         // D12: the measure rides only on the Alloc effect.
         assert_eq!(parsed.effects[0].context_measure, None);
         assert_eq!(parsed.effects[1].context_measure, Some(42));
+    }
+
+    /// #30: `truncated` is three-valued on the wire, and `Some(false)` must
+    /// survive as a claim. Collapsing it to absent would make "bounded, nothing
+    /// cut" indistinguishable from "no bound applied", which is the distinction
+    /// an operator reads the flag for.
+    #[test]
+    fn observation_truncation_flag_distinguishes_false_from_absent() {
+        let record = ObservedEffectsRecord {
+            version: OBSERVED_EFFECTS_RECORD_VERSION,
+            effects: vec![
+                observation_effect(0, "src/lib.rs", false),
+                observation_effect(1, "src/big.rs", true),
+                effect(2, CtxOp::Alloc, EffectSource::Result),
+            ],
+        };
+        let serialized = serde_json::to_string(&record).unwrap();
+        let parsed: ObservedEffectsRecord = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed, record);
+        assert_eq!(parsed.effects[0].truncated, Some(false));
+        assert_eq!(parsed.effects[1].truncated, Some(true));
+        assert_eq!(parsed.effects[2].truncated, None);
+        // An absent flag is omitted from the wire, so a pre-#30 document still
+        // parses and a bounded one is never silently read as unbounded.
+        assert!(!serialized.contains("\"truncated\":null"));
+        assert_eq!(serialized.matches("\"truncated\"").count(), 2);
+    }
+
+    /// A path target carries the concrete observed path, which is what makes an
+    /// observation effect attributable to a file rather than to the call (#30).
+    #[test]
+    fn observation_effect_carries_its_concrete_path() {
+        let effect = observation_effect(0, "src/lib.rs", false);
+        assert_eq!(
+            effect.target,
+            ObservedTarget::Path {
+                path: "src/lib.rs".into()
+            }
+        );
+        assert_eq!(effect.cell.reference(), "alloc:read:workspace");
+        assert_eq!(effect.scope.channel, ChannelKind::Workspace);
     }
 
     #[test]

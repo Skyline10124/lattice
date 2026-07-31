@@ -3,7 +3,7 @@
   "artifact-sha256": "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4",
   "descriptor-sha256": "e4216ac3faada82645a0190398eb0fa7a5e3664adc613017978a00861495620c",
   "expected-imports": [
-    "host-control"
+    "lattice:tool-host/host-control@0.1.0"
   ],
   "name": "session.todo_write",
   "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0",
