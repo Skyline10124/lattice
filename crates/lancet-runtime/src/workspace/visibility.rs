@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use lancet_authority::{GitFileStatus, HiddenReason, ReadVisibility, ReadVisibilityPolicy};
+use lancet_protocol::evidence::WorkspaceVisibilityEvidence;
 
 /// Content-free category evidence accumulated while evaluating one Tool call.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,6 +40,15 @@ impl VisibilityEvidence {
             "included_ignored": self.included_ignored,
             "filtered_by": filtered_by,
         })
+    }
+
+    pub fn into_protocol(self) -> WorkspaceVisibilityEvidence {
+        WorkspaceVisibilityEvidence {
+            included_ignored: self.included_ignored,
+            filtered_system_exclusion: self.filtered_system_exclusion,
+            filtered_read_denied: self.filtered_read_denied,
+            filtered_ignored_default: self.filtered_ignored_default,
+        }
     }
 
     fn record_hidden(&mut self, reason: HiddenReason) {

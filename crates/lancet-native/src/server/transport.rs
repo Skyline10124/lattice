@@ -22,7 +22,7 @@ use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, policy::CepMode};
 use lancet_runtime::{
     AdmissionDenial, BudgetCharge, BudgetRefusal, CellEvidenceLedger, ComponentCallContext,
-    ComponentRuntime, ObservationLimits, WorkspaceHistory, WorkspaceObservationHost, admit_tool,
+    ComponentRuntime, WorkspaceHistory, WorkspaceObservationHost, admit_tool,
     validate_policy_against_catalog,
 };
 use serde_json::{Value, json};
@@ -196,14 +196,6 @@ fn workspace_observation_host(
         .and_then(|hook| hook.config().workspace.read_visibility_policy().ok())
         .unwrap_or_default();
 
-    let observation = &cep_context.policy.observation;
-    let limits = ObservationLimits {
-        max_single_read_bytes: observation.max_single_read_bytes,
-        max_grep_matches: observation.max_grep_matches,
-        max_list_entries: observation.max_list_entries,
-        max_find_paths: observation.max_find_paths,
-    };
-
     let budget = Arc::clone(&cep_context.budget);
     let charge: BudgetCharge = Arc::new(move |bytes: usize| {
         budget
@@ -218,7 +210,7 @@ fn workspace_observation_host(
     Some(Arc::new(WorkspaceObservationHost::new(
         Arc::clone(workspace),
         visibility_policy,
-        limits,
+        cep_context.policy.observation.clone(),
         charge,
         scope.name.clone(),
     )))

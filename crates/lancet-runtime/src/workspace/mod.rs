@@ -23,7 +23,7 @@ pub mod rewind;
 mod types;
 mod visibility;
 
-pub use local::LocalWorkspace;
+pub use local::{BoundedFileRead, LocalWorkspace};
 pub use types::{
     CreatedFile, DirectoryEntry, FindRequest, GrepMatch, GrepRequest, InstalledFile,
     LocalWorkspaceError, PathFacts, PathIntent, PathKind, WorkspacePath, WorkspacePathError,

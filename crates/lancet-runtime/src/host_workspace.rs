@@ -32,7 +32,7 @@
 //!    walk produces. This is the single decision the issue's fourth criterion
 //!    asks for: the same engine instance, the same policy, and the same
 //!    [`HiddenReason`] vocabulary for all four modes.
-//! 6. **Bounds** — the per-operation ceilings in [`ObservationLimits`] clamp the
+//! 6. **Bounds** — the per-operation ceilings in [`ObservationPolicyConfig`] clamp the
 //!    caller's requested limit, and the turn-scoped observation budget is
 //!    charged with the bytes actually returned.
 //! 7. **Evidence** — the operation's Cell, the concrete resolved path, the
@@ -51,11 +51,12 @@
 //!
 //! # Truncation is host-computed
 //!
-//! Every bounded result carries a `truncated` flag this module computes from the
-//! real limit comparison and records in evidence. The guest receives the flag
-//! and echoes it, but a `false` it invents contradicts durable evidence rather
-//! than hiding anything: the recorded [`crate::evidence::CellEvidenceLedger`]
-//! entry is the audit trail's answer, not the guest's document.
+//! Every bounded result's truncation state is computed from the real limit
+//! comparison and recorded in evidence. For `read`, the host also renders and
+//! charges the final content, including any truncation marker; for `list` /
+//! `grep` / `find`, the guest receives and echoes the host-computed flag. In
+//! either case, the recorded [`crate::evidence::CellEvidenceLedger`] entry is
+//! the audit trail's answer, not the guest's document.
 //!
 //! # Synchronous by construction
 //!
@@ -70,10 +71,12 @@ use std::sync::Arc;
 
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::validate_path_facts;
-use lancet_authority::{HiddenReason, ReadVisibility, ReadVisibilityPolicy};
+use lancet_authority::{
+    HiddenReason, ObservationPolicyConfig, ReadVisibility, ReadVisibilityPolicy,
+};
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact};
 use lancet_protocol::error::ValidationErrorData;
-use lancet_protocol::evidence::{EffectSource, ObservedTarget};
+use lancet_protocol::evidence::ObservedTarget;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 
 use crate::admission::{AdmittedTool, authorize_operation, resolve_scope};
@@ -81,44 +84,10 @@ use crate::bindings;
 use crate::evidence::CellEvidenceLedger;
 use crate::runtime::StoreState;
 use crate::workspace::{
-    DirectoryEntry, FindRequest, GrepRequest, LocalWorkspace, LocalWorkspaceError, PathIntent,
-    PathKind, VisibilityEngine, WorkspacePath, content_hash, join_rel,
+    BoundedFileRead, DirectoryEntry, FindRequest, GrepRequest, LocalWorkspace, LocalWorkspaceError,
+    PathIntent, PathKind, VisibilityEngine, VisibilityEvidence, WorkspacePath, content_hash,
+    join_rel,
 };
-
-/// Per-operation observation ceilings, resolved from profile
-/// `[lancet.observation]` before the call and handed to the host as data.
-///
-/// Data, not a policy object: the host must not be able to re-derive or soften a
-/// limit, and `lancet-runtime` must not own observation policy *semantics* —
-/// those stay in `lancet-authority`, where these numbers are configured and
-/// defaulted. A caller's requested limit is always clamped into these, never the
-/// reverse.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ObservationLimits {
-    /// Ceiling on one `read` result, in bytes of file content.
-    pub max_single_read_bytes: usize,
-    /// Ceiling on `grep` matches for one operation.
-    pub max_grep_matches: usize,
-    /// Ceiling on `list` entries for one operation.
-    pub max_list_entries: usize,
-    /// Ceiling on `find` paths for one operation.
-    pub max_find_paths: usize,
-}
-
-impl ObservationLimits {
-    /// Compiled fallbacks, matching `ObservationPolicyConfig::defaults`.
-    ///
-    /// Present so a caller with no resolved profile still gets bounded
-    /// observation rather than none; production always passes resolved values.
-    pub fn defaults() -> Self {
-        Self {
-            max_single_read_bytes: 10 * 1024 * 1024,
-            max_grep_matches: 1000,
-            max_list_entries: 1000,
-            max_find_paths: 1000,
-        }
-    }
-}
 
 /// The turn-scoped observation budget, as an opaque charge sink.
 ///
@@ -266,12 +235,11 @@ pub enum PathRejection {
     GuardDenied,
 }
 
-/// One `read` result: the file's visible content plus host-computed facts.
+/// One `read` result: the uniquely rendered visible window plus its hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadOutcome {
-    /// Full UTF-8 content of the visible file. Slicing it into lines is the
-    /// guest's result shaping; the ceiling that made it readable at all is the
-    /// host's.
+    /// Final LLM-visible content. Rendering is host-owned because this exact
+    /// byte length is charged to the Turn budget and persisted in evidence.
     pub content: String,
     /// Canonical `blake3:<64 hex>` of the bytes read. Host-computed, because
     /// this is the value `mutate.edit` later verifies — a guest must not be able
@@ -323,7 +291,7 @@ pub struct FindOutcome {
 pub struct WorkspaceObservationHost {
     workspace: Arc<LocalWorkspace>,
     visibility_policy: ReadVisibilityPolicy,
-    limits: ObservationLimits,
+    observation: ObservationPolicyConfig,
     charge: BudgetCharge,
     /// The descriptor scope the observation cell roots in. Host-resolved from
     /// the admitted Tool's descriptor; a guest never names a scope.
@@ -351,14 +319,14 @@ impl WorkspaceObservationHost {
     pub fn new(
         workspace: Arc<LocalWorkspace>,
         visibility_policy: ReadVisibilityPolicy,
-        limits: ObservationLimits,
+        observation: ObservationPolicyConfig,
         charge: BudgetCharge,
         scope_name: impl Into<String>,
     ) -> Self {
         Self {
             workspace,
             visibility_policy,
-            limits,
+            observation,
             charge,
             scope_name: scope_name.into(),
             refusal: std::sync::Mutex::new(None),
@@ -430,12 +398,14 @@ impl WorkspaceObservationHost {
             path: resolved.to_string(),
         };
         if let Err(denial) = authorize_operation(ctx.admitted, &cell, &target, ctx.turn_id) {
-            ctx.evidence
-                .record_denied(cell, self.scope(ctx), target, denial.to_string());
-            return Err(ObservationError::Denied {
+            let err = ObservationError::Denied {
                 requested: requested.to_string(),
                 reason: denial.to_string(),
-            });
+            };
+            ctx.evidence
+                .record_denied(cell, self.scope(ctx), target, denial.to_string());
+            self.remember_refusal(&err);
+            return Err(err);
         }
         Ok(())
     }
@@ -469,6 +439,7 @@ impl WorkspaceObservationHost {
         resolved: &str,
         bytes_returned: usize,
         truncated: bool,
+        visibility: VisibilityEvidence,
     ) {
         ctx.evidence.record_observation_effect(
             self.cell(),
@@ -476,9 +447,9 @@ impl WorkspaceObservationHost {
             ObservedTarget::Path {
                 path: resolved.to_string(),
             },
-            EffectSource::Operation,
             bytes_returned as u64,
             truncated,
+            visibility.into_protocol(),
         );
     }
 
@@ -578,6 +549,9 @@ impl WorkspaceObservationHost {
         &self,
         ctx: &ObservationCallContext<'_>,
         requested: &str,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        line_numbers: Option<bool>,
     ) -> Result<ReadOutcome, ObservationError> {
         let ws_path = self.open(ctx, requested, PathIntent::Read, PathKind::File)?;
 
@@ -592,24 +566,28 @@ impl WorkspaceObservationHost {
             self.record_refusal(ctx, ws_path.as_str(), &e);
             return Err(e);
         }
+        let visibility_evidence = visibility.evidence();
 
-        let bytes = match self.workspace.read_file_blocking(&ws_path) {
-            Ok(bytes) => bytes,
+        let bytes = match self
+            .workspace
+            .read_file_bounded_blocking(&ws_path, self.observation.max_single_read_bytes)
+        {
+            Ok(BoundedFileRead::Complete(bytes)) => bytes,
+            Ok(BoundedFileRead::LimitExceeded { observed, allowed }) => {
+                let e = ObservationError::LimitExceeded {
+                    limit: "observation.max_single_read_bytes",
+                    requested: observed,
+                    allowed,
+                };
+                self.record_refusal(ctx, ws_path.as_str(), &e);
+                return Err(e);
+            }
             Err(err) => {
                 let e = observation_io_error(requested, err);
                 self.record_refusal(ctx, ws_path.as_str(), &e);
                 return Err(e);
             }
         };
-        if bytes.len() > self.limits.max_single_read_bytes {
-            let e = ObservationError::LimitExceeded {
-                limit: "observation.max_single_read_bytes",
-                requested: bytes.len(),
-                allowed: self.limits.max_single_read_bytes,
-            };
-            self.record_refusal(ctx, ws_path.as_str(), &e);
-            return Err(e);
-        }
         let content = match String::from_utf8(bytes) {
             Ok(content) => content,
             Err(err) => {
@@ -622,15 +600,24 @@ impl WorkspaceObservationHost {
             }
         };
 
-        self.charge(ctx, ws_path.as_str(), content.len())?;
-        // A whole-file read is not truncated by the host: line slicing is the
-        // guest's shaping, and the `[TRUNCATED: ...]` marker it may add is part
-        // of the rendered text, not a claim about what the host allowed.
-        self.record_effect(ctx, ws_path.as_str(), content.len(), false);
+        let (rendered, truncated) = render_file_slice(
+            &content,
+            offset.unwrap_or(1).max(1),
+            limit.unwrap_or(2000).max(1),
+            line_numbers.unwrap_or(true),
+        );
+        self.charge(ctx, ws_path.as_str(), rendered.len())?;
+        self.record_effect(
+            ctx,
+            ws_path.as_str(),
+            rendered.len(),
+            truncated,
+            visibility_evidence,
+        );
 
         Ok(ReadOutcome {
             content_hash: content_hash(content.as_bytes()),
-            content,
+            content: rendered,
         })
     }
 
@@ -650,7 +637,7 @@ impl WorkspaceObservationHost {
         )?;
         let mut visibility = self.enter_root(ctx, &ws_path, requested)?;
 
-        let effective = clamp_limit(limit, self.limits.max_list_entries);
+        let effective = clamp_limit(limit, self.observation.max_list_entries);
         let raw = match self.workspace.list_dir_blocking(&ws_path) {
             Ok(entries) => entries,
             Err(err) => {
@@ -675,7 +662,13 @@ impl WorkspaceObservationHost {
 
         let bytes = entries.iter().map(|e| e.name.len() + 16).sum::<usize>();
         self.charge(ctx, ws_path.as_str(), bytes)?;
-        self.record_effect(ctx, ws_path.as_str(), bytes, truncated);
+        self.record_effect(
+            ctx,
+            ws_path.as_str(),
+            bytes,
+            truncated,
+            visibility.evidence(),
+        );
 
         Ok(ListOutcome { entries, truncated })
     }
@@ -692,10 +685,12 @@ impl WorkspaceObservationHost {
         // A malformed regex is the caller's error and costs no traversal, so it
         // is refused before the path is even resolved.
         if let Err(err) = regex::Regex::new(pattern) {
-            return Err(ObservationError::InvalidRequest {
+            let err = ObservationError::InvalidRequest {
                 field: "pattern",
                 reason: err.to_string(),
-            });
+            };
+            self.record_refusal(ctx, requested, &err);
+            return Err(err);
         }
         let ws_path = self.open(
             ctx,
@@ -705,7 +700,7 @@ impl WorkspaceObservationHost {
         )?;
         let visibility = self.enter_root(ctx, &ws_path, requested)?;
 
-        let effective = clamp_limit(max_results, self.limits.max_grep_matches);
+        let effective = clamp_limit(max_results, self.observation.max_grep_matches);
         let request = GrepRequest {
             pattern: pattern.to_string(),
             path: ws_path.clone(),
@@ -713,11 +708,12 @@ impl WorkspaceObservationHost {
         };
         // The walk carries the engine, so hidden files produce no match and are
         // not counted toward truncation.
+        let probe_limit = effective.saturating_add(1);
         let raw = match self
             .workspace
-            .grep_blocking(&request, effective, visibility)
+            .grep_blocking(&request, probe_limit, visibility)
         {
-            Ok((matches, _evidence)) => matches,
+            Ok((matches, evidence)) => (matches, evidence),
             Err(err) => {
                 let e = observation_io_error(requested, err);
                 self.record_refusal(ctx, ws_path.as_str(), &e);
@@ -725,7 +721,8 @@ impl WorkspaceObservationHost {
             }
         };
 
-        let truncated = raw.len() >= effective;
+        let (raw, visibility_evidence) = raw;
+        let truncated = raw.len() > effective;
         let matches: Vec<MatchLine> = raw
             .into_iter()
             .take(effective)
@@ -741,7 +738,7 @@ impl WorkspaceObservationHost {
             .map(|m| m.path.len() + m.text.len() + 16)
             .sum::<usize>();
         self.charge(ctx, ws_path.as_str(), bytes)?;
-        self.record_effect(ctx, ws_path.as_str(), bytes, truncated);
+        self.record_effect(ctx, ws_path.as_str(), bytes, truncated, visibility_evidence);
 
         Ok(GrepOutcome { matches, truncated })
     }
@@ -763,16 +760,17 @@ impl WorkspaceObservationHost {
         )?;
         let visibility = self.enter_root(ctx, &ws_path, requested)?;
 
-        let effective = clamp_limit(limit, self.limits.max_find_paths);
+        let effective = clamp_limit(limit, self.observation.max_find_paths);
         let request = FindRequest {
             pattern: pattern.to_string(),
             path: ws_path.clone(),
         };
+        let probe_limit = effective.saturating_add(1);
         let raw = match self
             .workspace
-            .find_files_blocking(&request, effective, visibility)
+            .find_files_blocking(&request, probe_limit, visibility)
         {
-            Ok((paths, _evidence)) => paths,
+            Ok((paths, evidence)) => (paths, evidence),
             Err(err) => {
                 let e = observation_io_error(requested, err);
                 self.record_refusal(ctx, ws_path.as_str(), &e);
@@ -780,7 +778,8 @@ impl WorkspaceObservationHost {
             }
         };
 
-        let truncated = raw.len() >= effective;
+        let (raw, visibility_evidence) = raw;
+        let truncated = raw.len() > effective;
         let paths: Vec<String> = raw
             .into_iter()
             .take(effective)
@@ -789,7 +788,7 @@ impl WorkspaceObservationHost {
 
         let bytes = paths.iter().map(|p| p.len()).sum::<usize>();
         self.charge(ctx, ws_path.as_str(), bytes)?;
-        self.record_effect(ctx, ws_path.as_str(), bytes, truncated);
+        self.record_effect(ctx, ws_path.as_str(), bytes, truncated, visibility_evidence);
 
         Ok(FindOutcome { paths, truncated })
     }
@@ -838,6 +837,42 @@ fn default_root(requested: Option<&str>) -> &str {
         None | Some("") => ".",
         Some(path) => path,
     }
+}
+
+/// Render the caller's requested line window after the host has applied the
+/// full-file allocation ceiling. This is the unique renderer because its exact
+/// output is what the Turn observation budget authorizes.
+fn render_file_slice(content: &str, offset: u64, limit: u64, line_numbers: bool) -> (String, bool) {
+    let total = content.lines().count();
+    let start = usize::try_from(offset.saturating_sub(1)).unwrap_or(usize::MAX);
+    if start >= total {
+        return (
+            format!("[No content: requested offset {offset} but file has {total} lines]"),
+            false,
+        );
+    }
+
+    let take = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut rendered = Vec::new();
+    for (index, line) in content.lines().enumerate().skip(start).take(take) {
+        if line_numbers {
+            rendered.push(format!("{:>6}\t{}", index + 1, line));
+        } else {
+            rendered.push(line.to_string());
+        }
+    }
+    let returned = rendered.len();
+    let truncated = start.saturating_add(returned) < total;
+    if truncated {
+        rendered.push(format!(
+            "[TRUNCATED: showing lines {}-{} of {}; call read_file with offset {} to continue]",
+            offset,
+            start + returned,
+            total,
+            start + returned + 1
+        ));
+    }
+    (rendered.join("\n"), truncated)
 }
 
 /// Clamp a caller's requested limit into the policy ceiling.
@@ -913,9 +948,12 @@ impl bindings::lattice::tool_host::workspace_observe::Host for StoreState {
     fn read_file(
         &mut self,
         path: String,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        line_numbers: Option<bool>,
     ) -> Result<bindings::lattice::tool_host::workspace_observe::ReadResult, WitObserveError> {
         let (host, ctx) = self.observation()?;
-        host.read(&ctx, &path)
+        host.read(&ctx, &path, offset, limit, line_numbers)
             .map(
                 |outcome| bindings::lattice::tool_host::workspace_observe::ReadResult {
                     content: outcome.content,
@@ -1113,6 +1151,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use lancet_protocol::cell::{ArtifactIdentity, Capability, ScopeDecl, ToolDescriptor, Trust};
     use lancet_protocol::evidence::CapabilityAdmissionPolicy;
@@ -1167,7 +1206,7 @@ mod tests {
     fn host_over(
         root: &Path,
         policy: ReadVisibilityPolicy,
-        limits: ObservationLimits,
+        limits: ObservationPolicyConfig,
     ) -> (WorkspaceObservationHost, CellEvidenceLedger) {
         let workspace = Arc::new(LocalWorkspace::new(root));
         let charge: BudgetCharge = Arc::new(|_bytes| Ok(()));
@@ -1181,7 +1220,7 @@ mod tests {
         host_over(
             root,
             ReadVisibilityPolicy::default(),
-            ObservationLimits::defaults(),
+            ObservationPolicyConfig::defaults(),
         )
     }
 
@@ -1231,7 +1270,7 @@ mod tests {
 
         // read: refused as missing, with the policy reason in evidence only.
         let err = host
-            .read(&c, ".git/config")
+            .read(&c, ".git/config", None, None, None)
             .expect_err("system path is hidden");
         assert!(matches!(err, ObservationError::NotFound { .. }));
         assert!(
@@ -1278,6 +1317,15 @@ mod tests {
             dir.path().join(".git/config").is_file(),
             "the fixture must contain a system-excluded file"
         );
+        let (_, effects, _) = evidence.snapshot();
+        assert_eq!(effects.effects.len(), 3);
+        assert!(
+            effects
+                .effects
+                .iter()
+                .all(|effect| effect.visibility.is_some()),
+            "every successful workspace observation persists its visibility decision"
+        );
     }
 
     /// A gitignored file is hidden by default and included when policy says so —
@@ -1291,19 +1339,30 @@ mod tests {
         let (default, ev) = default_host(dir.path());
         let c = ctx(&tool, &ev);
         assert!(matches!(
-            default.read(&c, "secret.txt"),
+            default.read(&c, "secret.txt", None, None, None),
             Err(ObservationError::NotFound { .. })
         ));
 
         let including = ReadVisibilityPolicy::from_patterns(&["secret.txt".to_string()], &[])
             .expect("valid pattern");
-        let (host, ev2) = host_over(dir.path(), including, ObservationLimits::defaults());
+        let (host, ev2) = host_over(dir.path(), including, ObservationPolicyConfig::defaults());
         let c2 = ctx(&tool, &ev2);
-        let read = host.read(&c2, "secret.txt").expect("explicitly included");
+        let read = host
+            .read(&c2, "secret.txt", None, None, None)
+            .expect("explicitly included");
         assert!(read.content.contains("hidden content"));
         // And the same decision surfaces it to find, not only to read.
         let found = host.find(&c2, "secret.txt", Some("."), None).expect("find");
         assert_eq!(found.paths, vec!["secret.txt".to_string()]);
+        let (_, effects, _) = ev2.snapshot();
+        assert!(
+            effects.effects.iter().all(|effect| {
+                effect
+                    .visibility
+                    .is_some_and(|visibility| visibility.included_ignored)
+            }),
+            "explicit ignored-path inclusion is durable effect evidence"
+        );
     }
 
     /// A denied-read path is refused even when it is tracked and otherwise
@@ -1314,11 +1373,13 @@ mod tests {
         let dir = seeded_project();
         let policy = ReadVisibilityPolicy::from_patterns(&[], &["visible.rs".to_string()])
             .expect("valid pattern");
-        let (host, evidence) = host_over(dir.path(), policy, ObservationLimits::defaults());
+        let (host, evidence) = host_over(dir.path(), policy, ObservationPolicyConfig::defaults());
         let tool = admitted();
         let c = ctx(&tool, &evidence);
 
-        let err = host.read(&c, "visible.rs").expect_err("denied read");
+        let err = host
+            .read(&c, "visible.rs", None, None, None)
+            .expect_err("denied read");
         assert_eq!(err.hidden_reason(), Some(HiddenReason::ReadDenied));
         assert_eq!(err.audit_label(), "read_denied");
 
@@ -1353,7 +1414,7 @@ mod tests {
         let (host, evidence) = default_host(dir.path());
         let tool = admitted();
         let err = host
-            .read(&ctx(&tool, &evidence), "escape.txt")
+            .read(&ctx(&tool, &evidence), "escape.txt", None, None, None)
             .expect_err("a symlink out of the root is refused");
         assert!(
             matches!(err, ObservationError::PathRejected { .. }),
@@ -1385,7 +1446,7 @@ mod tests {
         let (host, evidence) = default_host(dir.path());
         let tool = admitted();
         let err = host
-            .read(&ctx(&tool, &evidence), "../outside.txt")
+            .read(&ctx(&tool, &evidence), "../outside.txt", None, None, None)
             .expect_err("traversal refused");
         assert!(
             matches!(err, ObservationError::PathRejected { .. }),
@@ -1399,14 +1460,14 @@ mod tests {
     fn a_read_over_the_single_read_ceiling_is_refused() {
         let dir = seeded_project();
         fs::write(dir.path().join("big.txt"), "x".repeat(4096)).expect("seed");
-        let limits = ObservationLimits {
+        let limits = ObservationPolicyConfig {
             max_single_read_bytes: 16,
-            ..ObservationLimits::defaults()
+            ..ObservationPolicyConfig::defaults()
         };
         let (host, evidence) = host_over(dir.path(), ReadVisibilityPolicy::default(), limits);
         let tool = admitted();
         let err = host
-            .read(&ctx(&tool, &evidence), "big.txt")
+            .read(&ctx(&tool, &evidence), "big.txt", None, None, None)
             .expect_err("over the ceiling");
         match err {
             ObservationError::LimitExceeded {
@@ -1430,9 +1491,9 @@ mod tests {
         for i in 0..5 {
             fs::write(dir.path().join(format!("f{i}.txt")), "x\n").expect("seed");
         }
-        let limits = ObservationLimits {
+        let limits = ObservationPolicyConfig {
             max_list_entries: 2,
-            ..ObservationLimits::defaults()
+            ..ObservationPolicyConfig::defaults()
         };
         let (host, evidence) = host_over(dir.path(), ReadVisibilityPolicy::default(), limits);
         let tool = admitted();
@@ -1467,6 +1528,96 @@ mod tests {
         assert_eq!(effects.effects[0].truncated, Some(false));
     }
 
+    /// Read budgeting follows the final rendered window, not the full file the
+    /// host had to inspect for its hash and single-read ceiling.
+    #[test]
+    fn read_window_is_host_bounded_charged_and_recorded() {
+        let dir = tempfile::TempDir::new().expect("temp root");
+        fs::write(dir.path().join("lines.txt"), "one\ntwo\nthree\n").expect("seed");
+        let charged = Arc::new(AtomicUsize::new(0));
+        let charged_for_call = Arc::clone(&charged);
+        let charge: BudgetCharge = Arc::new(move |bytes| {
+            charged_for_call.store(bytes, Ordering::SeqCst);
+            Ok(())
+        });
+        let host = WorkspaceObservationHost::new(
+            Arc::new(LocalWorkspace::new(dir.path())),
+            ReadVisibilityPolicy::default(),
+            ObservationPolicyConfig::defaults(),
+            charge,
+            "workspace",
+        );
+        let evidence = CellEvidenceLedger::new();
+        let tool = admitted();
+
+        let read = host
+            .read(
+                &ctx(&tool, &evidence),
+                "lines.txt",
+                Some(2),
+                Some(1),
+                Some(false),
+            )
+            .expect("window reads");
+        assert!(read.content.starts_with("two\n[TRUNCATED:"));
+        assert_eq!(charged.load(Ordering::SeqCst), read.content.len());
+        let (_, effects, _) = evidence.snapshot();
+        assert_eq!(
+            effects.effects[0].context_measure,
+            Some(read.content.len() as u64)
+        );
+        assert_eq!(effects.effects[0].truncated, Some(true));
+    }
+
+    #[test]
+    fn empty_and_numbered_read_windows_charge_exact_rendered_bytes() {
+        let dir = tempfile::TempDir::new().expect("temp root");
+        fs::write(dir.path().join("lines.txt"), "one\ntwo\n").expect("seed");
+        let charged = Arc::new(AtomicUsize::new(0));
+        let charged_for_call = Arc::clone(&charged);
+        let host = WorkspaceObservationHost::new(
+            Arc::new(LocalWorkspace::new(dir.path())),
+            ReadVisibilityPolicy::default(),
+            ObservationPolicyConfig::defaults(),
+            Arc::new(move |bytes| {
+                charged_for_call.store(bytes, Ordering::SeqCst);
+                Ok(())
+            }),
+            "workspace",
+        );
+        let evidence = CellEvidenceLedger::new();
+        let tool = admitted();
+
+        let numbered = host
+            .read(
+                &ctx(&tool, &evidence),
+                "lines.txt",
+                Some(1),
+                Some(1),
+                Some(true),
+            )
+            .expect("numbered window");
+        assert!(numbered.content.starts_with("     1\tone\n[TRUNCATED:"));
+        assert_eq!(charged.load(Ordering::SeqCst), numbered.content.len());
+
+        let empty = host
+            .read(
+                &ctx(&tool, &evidence),
+                "lines.txt",
+                Some(99),
+                Some(1),
+                Some(false),
+            )
+            .expect("empty window message");
+        assert!(empty.content.starts_with("[No content:"));
+        assert_eq!(charged.load(Ordering::SeqCst), empty.content.len());
+        let (_, effects, _) = evidence.snapshot();
+        assert_eq!(
+            effects.effects[1].context_measure,
+            Some(empty.content.len() as u64)
+        );
+    }
+
     /// The Turn budget is charged with what the operation returned, and
     /// exhaustion refuses the operation and records the refusal.
     #[test]
@@ -1483,7 +1634,7 @@ mod tests {
         let host = WorkspaceObservationHost::new(
             workspace,
             ReadVisibilityPolicy::default(),
-            ObservationLimits::defaults(),
+            ObservationPolicyConfig::defaults(),
             charge,
             "workspace",
         );
@@ -1491,7 +1642,7 @@ mod tests {
         let tool = admitted();
 
         let err = host
-            .read(&ctx(&tool, &evidence), "visible.rs")
+            .read(&ctx(&tool, &evidence), "visible.rs", None, None, None)
             .expect_err("budget exhausted");
         assert!(
             matches!(err, ObservationError::BudgetExhausted(_)),
@@ -1517,26 +1668,30 @@ mod tests {
         let c = ctx(&tool, &evidence);
 
         assert!(matches!(
-            host.read(&c, "late.txt"),
+            host.read(&c, "late.txt", None, None, None),
             Err(ObservationError::NotFound { .. })
         ));
 
         // An external writer (the user, another process) creates the file.
         fs::write(dir.path().join("late.txt"), "created mid-turn\n").expect("external create");
-        let read = host.read(&c, "late.txt").expect("now visible");
+        let read = host
+            .read(&c, "late.txt", None, None, None)
+            .expect("now visible");
         assert!(read.content.contains("created mid-turn"));
 
         // An external edit is visible too, with a hash that follows the content.
         let first_hash = read.content_hash.clone();
         fs::write(dir.path().join("late.txt"), "edited mid-turn\n").expect("external edit");
-        let again = host.read(&c, "late.txt").expect("still visible");
+        let again = host
+            .read(&c, "late.txt", None, None, None)
+            .expect("still visible");
         assert!(again.content.contains("edited mid-turn"));
         assert_ne!(again.content_hash, first_hash);
 
         // And a deletion is observed as a deletion.
         fs::remove_file(dir.path().join("late.txt")).expect("external delete");
         assert!(matches!(
-            host.read(&c, "late.txt"),
+            host.read(&c, "late.txt", None, None, None),
             Err(ObservationError::NotFound { .. })
         ));
     }
@@ -1549,11 +1704,13 @@ mod tests {
         let (host, evidence) = default_host(dir.path());
         let tool = admitted();
         let read = host
-            .read(&ctx(&tool, &evidence), "visible.rs")
+            .read(&ctx(&tool, &evidence), "visible.rs", None, None, None)
             .expect("read runs");
         assert_eq!(
             read.content_hash,
-            crate::workspace::content_hash(read.content.as_bytes())
+            crate::workspace::content_hash(
+                &fs::read(dir.path().join("visible.rs")).expect("fixture bytes")
+            )
         );
         assert!(read.content_hash.starts_with("blake3:"));
     }
@@ -1610,7 +1767,7 @@ mod tests {
 
         let (host, evidence) = default_host(dir.path());
         let err = host
-            .read(&ctx(&tool, &evidence), "visible.rs")
+            .read(&ctx(&tool, &evidence), "visible.rs", None, None, None)
             .expect_err("the observation cell is not admitted");
         assert!(matches!(err, ObservationError::Denied { .. }), "{err:?}");
         let (_, effects, denied) = evidence.snapshot();
@@ -1621,6 +1778,10 @@ mod tests {
             "{}",
             denied.denied[0].reason
         );
+        let refusal = host
+            .take_refusal()
+            .expect("an authorization denial remains a structured CEP refusal");
+        assert_eq!(refusal.code, CepErrorCode::EffectViolation);
     }
 
     /// A grep over a subtree records the root it observed, so the effect is
@@ -1656,6 +1817,39 @@ mod tests {
             ObservationError::InvalidRequest { field, .. } => assert_eq!(field, "pattern"),
             other => panic!("expected an invalid-request refusal, got {other:?}"),
         }
+        let (_, effects, denied) = evidence.snapshot();
+        assert!(effects.effects.is_empty());
+        assert_eq!(denied.denied.len(), 1);
+        assert_eq!(denied.denied[0].reason, "invalid_request");
+        assert_eq!(
+            host.take_refusal().expect("structured refusal").code,
+            CepErrorCode::TypeError
+        );
+    }
+
+    /// An exact-size result is complete. The host probes one item beyond the
+    /// effective limit, so `truncated` means data was actually dropped rather
+    /// than merely that the result filled its capacity.
+    #[test]
+    fn exact_limits_are_not_reported_as_truncated() {
+        let dir = tempfile::TempDir::new().expect("temp root");
+        fs::write(dir.path().join("only.txt"), "needle\n").expect("seed");
+        let limits = ObservationPolicyConfig {
+            max_grep_matches: 1,
+            max_find_paths: 1,
+            ..ObservationPolicyConfig::defaults()
+        };
+        let (host, evidence) = host_over(dir.path(), ReadVisibilityPolicy::default(), limits);
+        let tool = admitted();
+        let c = ctx(&tool, &evidence);
+
+        let grep = host.grep(&c, "needle", Some("."), Some(1)).expect("grep");
+        assert_eq!(grep.matches.len(), 1);
+        assert!(!grep.truncated);
+
+        let find = host.find(&c, "only.txt", Some("."), Some(1)).expect("find");
+        assert_eq!(find.paths, vec!["only.txt"]);
+        assert!(!find.truncated);
     }
 
     /// `None` means "the policy default", and a zero limit is not a way to turn
@@ -1683,12 +1877,15 @@ mod tests {
         let host = WorkspaceObservationHost::new(
             workspace,
             ReadVisibilityPolicy::default(),
-            ObservationLimits::defaults(),
+            ObservationPolicyConfig::defaults(),
             charge,
             "workspace",
         );
         let evidence = CellEvidenceLedger::new();
         let tool = admitted();
-        assert!(host.read(&ctx(&tool, &evidence), "visible.rs").is_ok());
+        assert!(
+            host.read(&ctx(&tool, &evidence), "visible.rs", None, None, None,)
+                .is_ok()
+        );
     }
 }

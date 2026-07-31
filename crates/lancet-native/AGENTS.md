@@ -23,7 +23,7 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - `src/server/` owns registry setup, transport lifecycle, and durable call
   metadata. `transport.rs` also builds the per-call
   `WorkspaceObservationHost` (workspace scope check, visibility policy,
-  `ObservationLimits`, shared turn budget charge) handed into
+  `ObservationPolicyConfig`, shared turn budget charge) handed into
   `ComponentCallContext`.
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
@@ -39,9 +39,9 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   install, mutation-history recording, and filesystem error normalization.
   The alias is a path, not a seam.
 - `src/executor/` owns crate-private web helpers and output limits. The
-  observation render helpers left with #30: result shaping for
-  `observe.workspace` is guest-side presentation in
-  `tools/observe-workspace`.
+  observation render helpers left with #30: the host renders and charges the
+  final `read` content, while the Component wraps that result and shapes the
+  host-bounded `list` / `grep` / `find` payloads in `tools/observe-workspace`.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 
 ## Boundaries

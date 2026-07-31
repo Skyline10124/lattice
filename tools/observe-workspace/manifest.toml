@@ -296,7 +296,7 @@ cell = "alloc:read:workspace"
 
 [artifact]
 # Written by `cargo xtask tool-build`; verified by the composition gate.
-sha256 = "580c7b5520e96ac8e7900702ccf63c0ccbba996c88ff32f2ed43a351d14a4139"
+sha256 = "14b0ea2fe0fe6d2f81827da8bec77a4270501c66ac505867f2a74026cda143ce"
 # The encoder belongs in this fingerprint: `wasm-tools component new` determines
 # the resulting Component bytes, so the sha256 above is only interpretable
 # alongside it (#80). `cargo xtask ci` asserts the installed encoder matches

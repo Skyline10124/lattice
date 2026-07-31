@@ -5103,3 +5103,39 @@ harness-only driver/evidence/fake-LLM plumbing.
 `crates/lattice-system-harness/{AGENTS.md,tests/support/mod.rs}`,
 `crates/lattice-system-harness/tests/direct_{failures,local_turn,mutation,observation,operator,secrets,session_isolation,tools,turn_contract}.rs`,
 `FINDINGS.md`, `FIX.md`.
+
+## GitHub #132 review blockers: bound observation at the host trust boundary — 2026-08-01
+
+Severity: HIGH (workspace disclosure/budget accounting and durable evidence
+correctness) + MEDIUM (configuration drift and structured refusal fidelity).
+
+**Problem:** The initial `observe.workspace` Component migration duplicated
+observation limits, let `read_file` allocate and expose the full file to the
+guest before slicing, inferred truncation incorrectly at exact limits, lost
+structured host refusals in some paths, and did not persist the actual
+Policy-Visible Workspace decision in queryable evidence.
+
+**Fix summary:**
+- Reused `ObservationPolicyConfig` end to end and added a bounded local-file
+  read that rejects both pre-existing and concurrent growth over the ceiling.
+- Made the host render the final read window, including line numbers and
+  truncation/no-content markers, and charge that exact exposed content; the
+  Component only wraps the host result in the outer response union. Truncation
+  is derived by probing one item beyond the limit.
+- Preserved typed authorization/input refusals and denial evidence for every
+  failed host operation.
+- Added content-free visibility facts to `ObservedEffect`, persisted them in
+  four queryable SQLite columns, and added an additive v3-to-v4 migration with
+  legacy-row preservation.
+- Regenerated WIT, descriptor identity, host composition, and the pinned
+  `observe.workspace` Component artifact.
+
+**Verification:**
+- `cargo test -p lancet-protocol -p lancet-audit -p lancet-runtime` — passed.
+- `cargo xtask tool-build` — rebuilt and pinned the Component artifact.
+- `cargo xtask ci` — all formatting, clippy, build, boundary, codegen,
+  workspace test, Direct-Local observation, and reproducibility checks passed.
+- `git diff --check` — passed.
+
+**Changed files:** `crates/lancet-{protocol,audit,runtime,native}/**`,
+`tools/observe-workspace/**`, `xtask/src/tool_codegen.rs`, `FIX.md`.

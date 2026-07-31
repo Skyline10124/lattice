@@ -49,6 +49,9 @@ types.
   pre-#30 records keep their exact serialized shape. The Tool Host computes
   it from the bound it enforced; a guest-reported truncation flag would be
   forgeable.
+- ADDED #30: `ObservedEffect.visibility: Option<WorkspaceVisibilityEvidence>`
+  persists the host's content-free Policy-Visible Workspace decisions. It is
+  absent for non-workspace effects and records written before the field existed.
 - FIXED M-24-01: `Capability::FetchUrl` uses the explicit `host` field; do not
   reintroduce wildcard/pattern naming unless matching semantics are implemented.
 - WATCH: boundary/provenance wire additions must remain deterministic because

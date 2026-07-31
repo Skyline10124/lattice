@@ -283,7 +283,7 @@
     }
   ],
   "artifact": {
-    "sha256": "580c7b5520e96ac8e7900702ccf63c0ccbba996c88ff32f2ed43a351d14a4139",
+    "sha256": "14b0ea2fe0fe6d2f81827da8bec77a4270501c66ac505867f2a74026cda143ce",
     "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"
   },
   "abi_version": 1

@@ -66,14 +66,15 @@ store-path resolution behind it.
 
 ## Recent Issues
 
-- ADDED #30: `evidence_effects` gained a `truncated INTEGER` column (nullable
+- ADDED #30: `evidence_effects` gained `truncated INTEGER` plus four nullable,
+  queryable Policy-Visible Workspace decision columns. Visibility is all-null
+  for non-workspace and pre-#30 records; a partially-null group is corrupt.
+  `truncated` remains a nullable
   three-state: absent = unbounded observation, 0 = bounded but untruncated,
   1 = truncated — the host computes it, the guest cannot forge it).
-  `EVIDENCE_SCHEMA_VERSION` moved 2 → 3
-  (`EVIDENCE_SCHEMA_VERSION_PRE_TRUNCATION` names the old value). The column
-  is **not** part of the shape guard that refuses mismatched files: a v2 file
-  is adopted additively via `ALTER TABLE evidence_effects ADD COLUMN`, with a
-  post-migration assertion that the column landed.
+  `EVIDENCE_SCHEMA_VERSION` is 4; v2 and v3 files are adopted additively via
+  `ALTER TABLE evidence_effects ADD COLUMN`, with a post-migration shape
+  assertion.
 - ADDED #112: the versioned Cell evidence tables. `AUDIT_SCHEMA_VERSION` moved
   1 → 2 (`AUDIT_SCHEMA_VERSION_PRE_EVIDENCE` names the old value); a v1 file is
   adopted additively, and a file already claiming v2 whose evidence table shape

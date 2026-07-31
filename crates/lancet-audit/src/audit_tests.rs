@@ -1171,6 +1171,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 source: EffectSource::Result,
                 context_measure: Some(17),
                 truncated: None,
+                visibility: None,
             },
             ObservedEffect {
                 seq: 0,
@@ -1182,6 +1183,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 source: EffectSource::Operation,
                 context_measure: None,
                 truncated: None,
+                visibility: None,
             },
         ],
     }

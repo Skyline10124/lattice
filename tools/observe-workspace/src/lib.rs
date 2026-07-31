@@ -4,10 +4,9 @@
 //! `observe.workspace` — Policy-Visible Workspace observation as a Component
 //! Tool (#30).
 //!
-//! This guest owns exactly two things: **typed mode dispatch** (which of the four
-//! observation modes a call names) and **result shaping** (turning the host's
-//! answer into the method's union result document). Everything else is the
-//! host's.
+//! This guest owns typed mode dispatch and the outer union result document.
+//! Security-sensitive content rendering remains host-owned so the exact bytes
+//! visible to the model are the bytes authorized by the Turn budget.
 //!
 //! # What this Tool cannot do
 //!
@@ -119,27 +118,21 @@ impl Guest for ObserveWorkspace {
 
 /// Read one file and render the requested line window.
 ///
-/// The host returns the whole visible file and its hash; the window is shaping,
-/// and the `[TRUNCATED: ...]` marker below describes *this rendering*, not what
-/// the host allowed. The two are deliberately separate: the host's own truncation
-/// verdict concerns bounds it enforced, and conflating them would let a rendering
-/// choice look like a policy decision in the audit trail.
+/// The host returns the uniquely rendered, already-budgeted content window and
+/// its hash. The guest only places those facts in the union result envelope.
 fn read_file(params: &serde_json::Value) -> Result<serde_json::Value, String> {
     let path = str_field(params, "path")?;
-    let result = observe::read_file(path).map_err(describe)?;
-
-    let offset = u64_field(params, "offset").unwrap_or(1).max(1);
-    let limit = u64_field(params, "limit").unwrap_or(2000).max(1);
-    let line_numbers = params
-        .get("line_numbers")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(true);
-
-    let rendered = render_slice(&result.content, offset, limit, line_numbers);
+    let result = observe::read_file(
+        path,
+        u64_field(params, "offset"),
+        u64_field(params, "limit"),
+        params.get("line_numbers").and_then(|value| value.as_bool()),
+    )
+    .map_err(describe)?;
     Ok(serde_json::json!({
         "mode": "read_file",
         "result": {
-            "content": rendered,
+            "content": result.content,
             // Echoed from the host. This Tool cannot compute it: the value
             // `mutate.edit` verifies must originate host-side or the precondition
             // would be checking the guest against itself.
@@ -269,43 +262,4 @@ fn str_field<'a>(params: &'a serde_json::Value, field: &str) -> Result<&'a str, 
 /// the host reads as "use the policy default" — the guest never invents a bound.
 fn u64_field(params: &serde_json::Value, field: &str) -> Option<u64> {
     params.get(field).and_then(|value| value.as_u64())
-}
-
-/// Render a line window over file content.
-///
-/// Pure shaping over a string the host already decided this call may see. The
-/// marker names the next offset so a caller can continue, which is the whole
-/// reason the window exists.
-fn render_slice(content: &str, offset: u64, limit: u64, line_numbers: bool) -> String {
-    let total = content.lines().count();
-    let start = (offset as usize).saturating_sub(1);
-    if start >= total {
-        return format!("[No content: requested offset {offset} but file has {total} lines]");
-    }
-
-    let mut rendered: Vec<String> = Vec::new();
-    let mut returned = 0usize;
-    for (index, line) in content.lines().enumerate().skip(start) {
-        if returned as u64 >= limit {
-            break;
-        }
-        if line_numbers {
-            rendered.push(format!("{:>6}\t{}", index + 1, line));
-        } else {
-            rendered.push(line.to_string());
-        }
-        returned += 1;
-    }
-
-    if start + returned < total {
-        rendered.push(format!(
-            "[TRUNCATED: showing lines {}-{} of {}; call read_file with offset {} to continue]",
-            offset,
-            start + returned,
-            total,
-            start + returned + 1
-        ));
-    }
-
-    rendered.join("\n")
 }

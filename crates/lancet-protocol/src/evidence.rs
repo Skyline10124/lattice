@@ -9,7 +9,7 @@
 //! concrete target). A capability alias is admission evidence only; it is
 //! never reported as an effect.
 //!
-//! These records are persisted inside audit `metadata_json` and attestation
+//! These records are persisted in versioned evidence tables and attestation
 //! predicates, so they follow the `provenance.rs` persisted-root convention:
 //! no `deny_unknown_fields` anywhere, and readers check `version` before
 //! interpreting the contents.
@@ -60,6 +60,17 @@ pub enum EffectSource {
     Result,
 }
 
+/// Content-free Policy-Visible Workspace facts for one successful observation.
+/// These are host decisions, not guest claims, and remain optional because
+/// non-workspace effects and records written before #30 have no such decision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceVisibilityEvidence {
+    pub included_ignored: bool,
+    pub filtered_system_exclusion: bool,
+    pub filtered_read_denied: bool,
+    pub filtered_ignored_default: bool,
+}
+
 /// One effect that actually happened (B5): the real cell, the host-resolved
 /// scope, and the concrete target — never a capability alias.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -89,6 +100,9 @@ pub struct ObservedEffect {
     /// contradicts durable evidence rather than concealing anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
+    /// Host-computed visibility decision for a workspace observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<WorkspaceVisibilityEvidence>,
 }
 
 /// Versioned container for a call's effects (C1/C8): one call may produce
@@ -195,6 +209,7 @@ mod tests {
                 _ => None,
             },
             truncated: None,
+            visibility: None,
         }
     }
 
@@ -217,6 +232,12 @@ mod tests {
             source: EffectSource::Operation,
             context_measure: Some(128),
             truncated: Some(truncated),
+            visibility: Some(WorkspaceVisibilityEvidence {
+                included_ignored: true,
+                filtered_system_exclusion: true,
+                filtered_read_denied: false,
+                filtered_ignored_default: true,
+            }),
         }
     }
 
@@ -261,10 +282,21 @@ mod tests {
         assert_eq!(parsed.effects[0].truncated, Some(false));
         assert_eq!(parsed.effects[1].truncated, Some(true));
         assert_eq!(parsed.effects[2].truncated, None);
+        assert_eq!(
+            parsed.effects[0].visibility,
+            Some(WorkspaceVisibilityEvidence {
+                included_ignored: true,
+                filtered_system_exclusion: true,
+                filtered_read_denied: false,
+                filtered_ignored_default: true,
+            })
+        );
+        assert_eq!(parsed.effects[2].visibility, None);
         // An absent flag is omitted from the wire, so a pre-#30 document still
         // parses and a bounded one is never silently read as unbounded.
         assert!(!serialized.contains("\"truncated\":null"));
         assert_eq!(serialized.matches("\"truncated\"").count(), 2);
+        assert_eq!(serialized.matches("\"visibility\"").count(), 2);
     }
 
     /// A path target carries the concrete observed path, which is what makes an

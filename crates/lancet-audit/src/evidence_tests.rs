@@ -15,11 +15,15 @@ use lancet_protocol::evidence::{
     ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION,
     DeniedOperation, DeniedOperationsRecord, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION,
     ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
+    WorkspaceVisibilityEvidence,
 };
 use rusqlite::params;
 
 use crate::audit::{AUDIT_SCHEMA_VERSION, AuditError, CepAuditStore};
-use crate::evidence::{CallEvidence, EvidenceError, EvidenceId, EvidenceOutcome};
+use crate::evidence::{
+    CallEvidence, EVIDENCE_SCHEMA_VERSION_PRE_VISIBILITY, EvidenceError, EvidenceId,
+    EvidenceOutcome,
+};
 
 fn scope() -> ObservedScope {
     ObservedScope {
@@ -53,6 +57,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 source: EffectSource::Operation,
                 context_measure: None,
                 truncated: None,
+                visibility: None,
             },
             ObservedEffect {
                 seq: 1,
@@ -64,6 +69,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 source: EffectSource::Result,
                 context_measure: Some(17),
                 truncated: None,
+                visibility: None,
             },
         ],
     }
@@ -159,6 +165,144 @@ fn completed_call_evidence_round_trips() {
     assert_eq!(stored.effects.effects[0].context_measure, None);
     assert_eq!(stored.effects.effects[1].context_measure, Some(17));
     assert_eq!(stored.denied.denied, Vec::new());
+}
+
+#[test]
+fn workspace_visibility_evidence_round_trips_in_queryable_columns() {
+    let store = CepAuditStore::in_memory().expect("store");
+    let admission = admission(&["workspace.observation"]);
+    let visibility = WorkspaceVisibilityEvidence {
+        included_ignored: true,
+        filtered_system_exclusion: true,
+        filtered_read_denied: false,
+        filtered_ignored_default: true,
+    };
+    let effects = ObservedEffectsRecord {
+        version: OBSERVED_EFFECTS_RECORD_VERSION,
+        effects: vec![ObservedEffect {
+            seq: 0,
+            cell: Cell {
+                ctx_op: CtxOp::Alloc,
+                ext_impact: ExtImpact::Read,
+                scope: "workspace".into(),
+            },
+            scope: ObservedScope {
+                scope: "workspace".into(),
+                trust: Trust::In,
+                channel: ChannelKind::Workspace,
+            },
+            target: ObservedTarget::Path { path: "src".into() },
+            source: EffectSource::Operation,
+            context_measure: Some(12),
+            truncated: Some(false),
+            visibility: Some(visibility),
+        }],
+    };
+    let denied = empty_denials();
+    let id = store
+        .record_call_evidence(&CallEvidence {
+            turn_id: "turn-visible",
+            session_id: "sess-1",
+            call_id: 8,
+            tool: "observe.workspace",
+            outcome: EvidenceOutcome::Completed,
+            admission: &admission,
+            effects: Some(&effects),
+            denied: Some(&denied),
+        })
+        .expect("record");
+
+    let stored = store
+        .call_evidence(id)
+        .expect("read")
+        .expect("evidence exists");
+    assert_eq!(stored.effects.effects[0].visibility, Some(visibility));
+    store
+        .with_connection_for_tests(|conn| {
+            conn.query_row(
+                "SELECT visibility_included_ignored,
+                        visibility_filtered_system_exclusion,
+                        visibility_filtered_read_denied,
+                        visibility_filtered_ignored_default
+                 FROM evidence_effects WHERE evidence_id = ?1",
+                params![id.0],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
+                    ))
+                },
+            )
+            .map(|stored| assert_eq!(stored, (true, true, false, true)))
+        })
+        .expect("queryable visibility columns");
+}
+
+#[test]
+fn pre_visibility_database_gains_queryable_columns_and_keeps_evidence() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("audit.db");
+    let id = {
+        let store = CepAuditStore::open(&path).expect("create current store");
+        store
+            .record_call_evidence(&CallEvidence {
+                turn_id: "turn-before-visibility",
+                session_id: "sess-1",
+                call_id: 9,
+                tool: "noop.echo",
+                outcome: EvidenceOutcome::Completed,
+                admission: &admission(&["session.result"]),
+                effects: Some(&effects_record()),
+                denied: Some(&empty_denials()),
+            })
+            .expect("record legacy evidence")
+    };
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open for downgrade fixture");
+        for column in [
+            "visibility_included_ignored",
+            "visibility_filtered_system_exclusion",
+            "visibility_filtered_read_denied",
+            "visibility_filtered_ignored_default",
+        ] {
+            conn.execute(
+                &format!("ALTER TABLE evidence_effects DROP COLUMN {column}"),
+                [],
+            )
+            .expect("remove post-v3 column");
+        }
+        conn.pragma_update(None, "user_version", EVIDENCE_SCHEMA_VERSION_PRE_VISIBILITY)
+            .expect("stamp v3 fixture");
+    }
+
+    let store = CepAuditStore::open(&path).expect("v3 store upgrades additively");
+    let stored = store
+        .call_evidence(id)
+        .expect("read legacy evidence")
+        .expect("evidence remains");
+    assert_eq!(stored.effects.effects[0].visibility, None);
+
+    store
+        .with_connection_for_tests(|conn| {
+            let mut present = BTreeSet::new();
+            conn.pragma(None, "table_info", "evidence_effects", |row| {
+                present.insert(row.get::<_, String>("name")?);
+                Ok(())
+            })?;
+            for column in [
+                "visibility_included_ignored",
+                "visibility_filtered_system_exclusion",
+                "visibility_filtered_read_denied",
+                "visibility_filtered_ignored_default",
+            ] {
+                assert!(present.contains(column), "migration must add {column}");
+            }
+            Ok(())
+        })
+        .expect("inspect upgraded shape");
 }
 
 /// Criterion 1: evidence is addressable by turn. Every call of the turn comes
@@ -355,6 +499,7 @@ fn failed_call_retains_the_operation_effects_it_already_recorded() {
             source: EffectSource::Operation,
             context_measure: None,
             truncated: None,
+            visibility: None,
         }],
     };
     let denied = empty_denials();
@@ -805,6 +950,7 @@ fn all_issue28_evidence_scenarios_round_trip() {
             source: EffectSource::Result,
             context_measure: Some(19),
             truncated: None,
+            visibility: None,
         }],
     };
     let partial_denials = DeniedOperationsRecord {

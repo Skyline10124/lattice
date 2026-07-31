@@ -185,6 +185,7 @@ fn component_turn_projection_separates_admission_from_effects() {
             // A result effect applies no bound, so it has no truncation verdict
             // to report (#30).
             truncated: None,
+            visibility: None,
         }],
     };
     let denied = DeniedOperationsRecord {

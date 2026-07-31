@@ -76,7 +76,7 @@ pub use history::{
 };
 
 pub use host_workspace::{
-    BudgetCharge, BudgetRefusal, ObservationCallContext, ObservationError, ObservationLimits,
+    BudgetCharge, BudgetRefusal, ObservationCallContext, ObservationError,
     WorkspaceObservationHost, observation_cep_error,
 };
 pub use limits::ExecutionLimits;

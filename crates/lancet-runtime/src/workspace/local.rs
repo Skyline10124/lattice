@@ -55,6 +55,12 @@ pub struct LocalWorkspace {
     fail_install: Arc<AtomicBool>,
 }
 
+/// Result of a read whose allocation is capped by the caller.
+pub enum BoundedFileRead {
+    Complete(Vec<u8>),
+    LimitExceeded { observed: usize, allowed: usize },
+}
+
 impl LocalWorkspace {
     /// Construct from a project root with mutation history recording off.
     ///
@@ -379,6 +385,50 @@ impl LocalWorkspace {
             )));
         }
         Ok(fs::read(&full)?)
+    }
+
+    /// Read a regular file without ever allocating more than `allowed + 1`
+    /// bytes. Metadata rejects an already-oversized file before opening it;
+    /// the capped read is the post-check for a file that grows after resolution.
+    pub fn read_file_bounded_blocking(
+        &self,
+        path: &WorkspacePath,
+        allowed: usize,
+    ) -> Result<BoundedFileRead, LocalWorkspaceError> {
+        path.require_file_path()?;
+        let (full, facts) = self.resolve_secure(path, PathIntent::Read)?;
+        if !facts.exists {
+            return Err(LocalWorkspaceError::NotFound {
+                normalized: path.as_str().to_string(),
+            });
+        }
+        if !matches!(facts.kind, Some(PathKind::File)) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a regular file",
+            )));
+        }
+        if let Some(size) = facts.byte_size
+            && size as usize > allowed
+        {
+            return Ok(BoundedFileRead::LimitExceeded {
+                observed: size as usize,
+                allowed,
+            });
+        }
+
+        let file = fs::File::open(full)?;
+        let probe = allowed.saturating_add(1) as u64;
+        let mut bytes = Vec::with_capacity(allowed.min(64 * 1024));
+        file.take(probe).read_to_end(&mut bytes)?;
+        if bytes.len() > allowed {
+            Ok(BoundedFileRead::LimitExceeded {
+                observed: bytes.len(),
+                allowed,
+            })
+        } else {
+            Ok(BoundedFileRead::Complete(bytes))
+        }
     }
 
     /// Read a file under the workspace, returning its bytes.

@@ -35,13 +35,17 @@ use lancet_protocol::evidence::{
     ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION,
     DeniedOperation, DeniedOperationsRecord, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION,
     ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
+    WorkspaceVisibilityEvidence,
 };
 use rusqlite::{Connection, params};
 
 /// Schema version of the evidence tables, stamped in `PRAGMA user_version`
 /// alongside the audit tables (they share one database file, so they share one
 /// version counter — see [`crate::audit::AUDIT_SCHEMA_VERSION`]).
-pub const EVIDENCE_SCHEMA_VERSION: i64 = 3;
+pub const EVIDENCE_SCHEMA_VERSION: i64 = 4;
+
+/// Evidence schema before successful workspace visibility facts were stored.
+pub const EVIDENCE_SCHEMA_VERSION_PRE_VISIBILITY: i64 = 3;
 
 /// The evidence schema version that predates the `truncated` effect column
 /// (#30).
@@ -101,14 +105,21 @@ pub(crate) const REQUIRED_EVIDENCE_EFFECT_COLUMNS: [&str; 13] = [
 /// Evidence-effect columns that are added additively rather than required up
 /// front (#30).
 ///
-/// `truncated` is deliberately NOT in [`REQUIRED_EVIDENCE_EFFECT_COLUMNS`]. That
+/// These columns are deliberately NOT in [`REQUIRED_EVIDENCE_EFFECT_COLUMNS`]. That
 /// guard runs *before* the additive DDL and refuses the file when a column is
 /// missing, which is right for a `NOT NULL` column that cannot be backfilled —
-/// but `truncated` is nullable and is added by `ALTER TABLE` a few lines later.
-/// Requiring it there would turn every existing version-2 database into an
-/// "incompatible schema, move it aside" error, which is history being discarded
-/// over a column the store can simply add.
-pub(crate) const ADDITIVE_EVIDENCE_EFFECT_COLUMNS: [&str; 1] = ["truncated"];
+/// but each is nullable and is added by `ALTER TABLE` during its versioned
+/// upgrade. Requiring them there would turn an older database into an
+/// "incompatible schema, move it aside" error over columns the store can safely
+/// add without rewriting history. A database already stamped at the current
+/// version is checked against both required and additive sets before DDL.
+pub(crate) const ADDITIVE_EVIDENCE_EFFECT_COLUMNS: [&str; 5] = [
+    "truncated",
+    "visibility_included_ignored",
+    "visibility_filtered_system_exclusion",
+    "visibility_filtered_read_denied",
+    "visibility_filtered_ignored_default",
+];
 
 /// Columns an already-versioned `evidence_denials` table must carry.
 pub(crate) const REQUIRED_EVIDENCE_DENIAL_COLUMNS: [&str; 12] = [
@@ -161,6 +172,10 @@ CREATE TABLE IF NOT EXISTS evidence_effects (
     source TEXT NOT NULL,
     context_measure INTEGER,
     truncated INTEGER,
+    visibility_included_ignored INTEGER,
+    visibility_filtered_system_exclusion INTEGER,
+    visibility_filtered_read_denied INTEGER,
+    visibility_filtered_ignored_default INTEGER,
     PRIMARY KEY (evidence_id, seq)
 );
 CREATE TABLE IF NOT EXISTS evidence_denials (
@@ -346,8 +361,10 @@ pub(crate) fn insert_call_evidence(
                 "INSERT INTO evidence_effects (
                     evidence_id, seq, record_version, ctx_op, ext_impact, cell_scope,
                     scope, scope_trust, scope_channel, target_kind, target_value, source,
-                    context_measure, truncated
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    context_measure, truncated, visibility_included_ignored,
+                    visibility_filtered_system_exclusion, visibility_filtered_read_denied,
+                    visibility_filtered_ignored_default
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     evidence_id,
                     effect.seq,
@@ -367,6 +384,10 @@ pub(crate) fn insert_call_evidence(
                     // make an unbounded effect indistinguishable from a
                     // complete one (#30).
                     effect.truncated,
+                    effect.visibility.map(|v| v.included_ignored),
+                    effect.visibility.map(|v| v.filtered_system_exclusion),
+                    effect.visibility.map(|v| v.filtered_read_denied),
+                    effect.visibility.map(|v| v.filtered_ignored_default),
                 ],
             )?;
         }
@@ -594,7 +615,9 @@ fn read_effects(
 ) -> Result<ObservedEffectsRecord, EvidenceError> {
     let mut stmt = conn.prepare(
         "SELECT seq, record_version, ctx_op, ext_impact, cell_scope, scope, scope_trust,
-                scope_channel, target_kind, target_value, source, context_measure, truncated
+                scope_channel, target_kind, target_value, source, context_measure, truncated,
+                visibility_included_ignored, visibility_filtered_system_exclusion,
+                visibility_filtered_read_denied, visibility_filtered_ignored_default
          FROM evidence_effects WHERE evidence_id = ?1 ORDER BY seq",
     )?;
     let rows: Vec<RawEffect> = stmt
@@ -613,6 +636,10 @@ fn read_effects(
                 source: row.get(10)?,
                 context_measure: row.get(11)?,
                 truncated: row.get(12)?,
+                visibility_included_ignored: row.get(13)?,
+                visibility_filtered_system_exclusion: row.get(14)?,
+                visibility_filtered_read_denied: row.get(15)?,
+                visibility_filtered_ignored_default: row.get(16)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -624,6 +651,29 @@ fn read_effects(
         // v2 effect shape interpretable as v1 — the exact mis-parse the version
         // field exists to prevent.
         check_version("observed_effect", evidence_id, raw.record_version, version)?;
+        let visibility = match (
+            raw.visibility_included_ignored,
+            raw.visibility_filtered_system_exclusion,
+            raw.visibility_filtered_read_denied,
+            raw.visibility_filtered_ignored_default,
+        ) {
+            (None, None, None, None) => None,
+            (Some(included_ignored), Some(system), Some(read_denied), Some(ignored_default)) => {
+                Some(WorkspaceVisibilityEvidence {
+                    included_ignored,
+                    filtered_system_exclusion: system,
+                    filtered_read_denied: read_denied,
+                    filtered_ignored_default: ignored_default,
+                })
+            }
+            values => {
+                return Err(EvidenceError::UnreadableField {
+                    evidence_id,
+                    field: "workspace visibility evidence",
+                    value: format!("{values:?}"),
+                });
+            }
+        };
         effects.push(ObservedEffect {
             seq: raw.seq,
             cell: Cell {
@@ -640,6 +690,7 @@ fn read_effects(
             source: parse_source(evidence_id, &raw.source)?,
             context_measure: raw.context_measure.map(|m| m as u64),
             truncated: raw.truncated,
+            visibility,
         });
     }
     Ok(ObservedEffectsRecord { version, effects })
@@ -661,6 +712,10 @@ struct RawEffect {
     /// `None` for a row written before #30, which is the truthful value: that
     /// producer applied no bound and had no flag to report.
     truncated: Option<bool>,
+    visibility_included_ignored: Option<bool>,
+    visibility_filtered_system_exclusion: Option<bool>,
+    visibility_filtered_read_denied: Option<bool>,
+    visibility_filtered_ignored_default: Option<bool>,
 }
 
 struct RawDenial {

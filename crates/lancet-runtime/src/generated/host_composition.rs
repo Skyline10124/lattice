@@ -43,10 +43,10 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
         name: "observe.workspace",
         descriptor_sha256: parse_hex_digest(
-            "1caf3243b5f4fee04238b3eb8aaa5e46618b97dca2aecdfc34d7643ca0d971c7",
+            "a514312e340ed12c24561f54543e213fc75b8714d84ee8360103844955404657",
         ),
         artifact_sha256: parse_hex_digest(
-            "580c7b5520e96ac8e7900702ccf63c0ccbba996c88ff32f2ed43a351d14a4139",
+            "14b0ea2fe0fe6d2f81827da8bec77a4270501c66ac505867f2a74026cda143ce",
         ),
         abi_version: 1,
         imports: &[

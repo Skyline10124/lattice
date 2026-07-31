@@ -28,7 +28,7 @@ use lancet_protocol::cell::Cell;
 use lancet_protocol::evidence::{
     AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, DeniedOperationsRecord,
     EffectSource, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord,
-    ObservedScope, ObservedTarget,
+    ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
 };
 
 #[derive(Debug, Default)]
@@ -80,6 +80,7 @@ impl CellEvidenceLedger {
             source,
             context_measure,
             truncated: None,
+            visibility: None,
         });
     }
 
@@ -95,9 +96,9 @@ impl CellEvidenceLedger {
         cell: Cell,
         scope: ObservedScope,
         target: ObservedTarget,
-        source: EffectSource,
         bytes_returned: u64,
         truncated: bool,
+        visibility: WorkspaceVisibilityEvidence,
     ) {
         let mut inner = self.inner.lock().unwrap();
         let seq = inner.seq;
@@ -107,9 +108,10 @@ impl CellEvidenceLedger {
             cell,
             scope,
             target,
-            source,
+            source: EffectSource::Operation,
             context_measure: Some(bytes_returned),
             truncated: Some(truncated),
+            visibility: Some(visibility),
         });
     }
 

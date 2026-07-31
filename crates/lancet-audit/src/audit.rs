@@ -52,10 +52,10 @@ pub const AUDIT_QUERY_MAX_ROWS: usize = 10_000;
 /// Schema version stamped in `PRAGMA user_version`. Version 0 means a database
 /// written before audit schemas were versioned at all.
 ///
-/// Version 2 adds the #112 Cell evidence tables (`evidence_calls`,
-/// `evidence_effects`, `evidence_denials`). A version-1 file is adopted and
-/// gains them additively; a file already claiming 2 must carry their full shape
-/// or it is refused with an operator action rather than altered.
+/// Version 2 adds the #112 Cell evidence tables, version 3 adds observation
+/// truncation, and version 4 adds queryable workspace-visibility decisions.
+/// Older files are upgraded additively; a file already claiming the current
+/// version must carry the current shape or it is refused rather than altered.
 pub const AUDIT_SCHEMA_VERSION: i64 = crate::evidence::EVIDENCE_SCHEMA_VERSION;
 
 /// The schema version before the #112 evidence tables existed. A file stamped
@@ -626,15 +626,19 @@ impl CepAuditStore {
             // effects read back as `truncated: None` — the truthful value for a
             // producer that evaluated no bound. The result is discarded because
             // the statement fails precisely when the column already exists,
-            // which is the idempotence these three DDLs rely on.
+            // which is the idempotence these additive DDLs rely on.
             "ALTER TABLE evidence_effects ADD COLUMN truncated INTEGER",
+            "ALTER TABLE evidence_effects ADD COLUMN visibility_included_ignored INTEGER",
+            "ALTER TABLE evidence_effects ADD COLUMN visibility_filtered_system_exclusion INTEGER",
+            "ALTER TABLE evidence_effects ADD COLUMN visibility_filtered_read_denied INTEGER",
+            "ALTER TABLE evidence_effects ADD COLUMN visibility_filtered_ignored_default INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
         }
         // The additive columns are discarded-result DDL above, so nothing has
         // checked that they actually landed. Verify it here, before the version
-        // is stamped: a file stamped v3 whose `evidence_effects` has no
-        // `truncated` column would fail every subsequent effect write, and
+        // is stamped: a file stamped with the current version while missing an
+        // additive effect column would fail every subsequent effect write, and
         // GitHub #112's own guard exists because that failure mode is silent.
         let missing_additive = self.missing_columns_of(
             &conn,
@@ -710,6 +714,11 @@ impl CepAuditStore {
         ] {
             missing.extend(self.missing_columns_of(conn, table, required)?);
         }
+        missing.extend(self.missing_columns_of(
+            conn,
+            "evidence_effects",
+            &crate::evidence::ADDITIVE_EVIDENCE_EFFECT_COLUMNS,
+        )?);
         if missing.is_empty() {
             Ok(None)
         } else {

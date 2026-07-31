@@ -226,6 +226,7 @@ interface workspace-observe {
     }
 
     record read-result {
+        /// Uniquely rendered LLM-visible window, charged exactly by the host.
         content: string,
         /// Canonical `blake3:<64 hex>`, computed by the host.
         content-hash: string,
@@ -247,8 +248,9 @@ interface workspace-observe {
         truncated: bool,
     }
 
-    /// Read one visible file in full. The host enforces the single-read ceiling.
-    read-file: func(path: string) -> result<read-result, observe-error>;
+    /// Read one visible file window. The host enforces the file ceiling and
+    /// charges exactly the rendered content returned by this import.
+    read-file: func(path: string, offset: option<u64>, limit: option<u64>, line-numbers: option<bool>) -> result<read-result, observe-error>;
     /// List one directory's visible entries. Named `list-dir` because `list` is a
     /// WIT type keyword.
     list-dir: func(path: string, limit: option<u64>) -> result<list-result, observe-error>;

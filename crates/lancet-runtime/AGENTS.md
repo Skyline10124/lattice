@@ -77,11 +77,13 @@ the D.4 LLM projection, and the per-call admission step.
   the project-relative path, authorizes `alloc:read:workspace` through the
   same `authorize_operation` seam, charges the turn-scoped observation
   budget, applies System Path Exclusion/read-denial/ignored-path inclusion
-  through `VisibilityEngine`, enforces `ObservationLimits` byte/line/result
-  bounds host-side (recording `truncated` in the effect evidence), and
-  reports hidden paths as missing. A host refusal is remembered so the
-  structured `CepError` reaches the caller instead of the guest's string
-  paraphrase.
+  through `VisibilityEngine`, enforces `ObservationPolicyConfig` byte/line/result
+  bounds host-side, and reports hidden paths as missing. Read imports expose
+  one host-rendered window so budget/evidence match the exact visible content;
+  the Component owns only the outer union result document.
+  Effect evidence records both host-computed truncation and content-free
+  visibility decisions. A host refusal is remembered so the structured
+  `CepError` reaches the caller instead of the guest's string paraphrase.
 - `src/limits.rs` owns `ExecutionLimits`, `RecordingLimits`, and
   `AbortReason`. Resource limits use `StoreLimits` + epoch interruption +
   fuel.
