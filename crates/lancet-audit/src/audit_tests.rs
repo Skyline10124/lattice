@@ -3,8 +3,9 @@
 
 use super::*;
 use lancet_catalog::CepMethod;
-use lancet_catalog::methods::{Create, Fetch, ObserveWorkspace};
+use lancet_catalog::methods::{Create, Fetch};
 use lancet_catalog::test_method::TestEcho;
+
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{
     ADMISSION_EVIDENCE_VERSION, DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, EffectSource,
@@ -12,6 +13,15 @@ use lancet_protocol::evidence::{
 };
 use serde_json::json;
 use std::path::PathBuf;
+
+/// `observe.workspace` as a plain method name.
+///
+/// It is a Component Tool since #30, so there is no `lancet-catalog` type to
+/// take `NAME` from. These tests use it as the *subject* of an audit row — the
+/// store records whatever method name it is given — so a literal is the honest
+/// spelling: a catalog type would imply a native-catalog membership the method
+/// no longer has.
+const OBSERVE_WORKSPACE: &str = "observe.workspace";
 
 fn test_context() -> CepAuditContext {
     CepAuditContext {
@@ -252,8 +262,9 @@ fn for_component_dispatch_labels_cell_governed_rows() {
 fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
     // Known catalog method -> native + policy-enforced. It must be a real
     // catalog method: the label is derived from catalog membership, so a
-    // synthetic fixture name would prove the opposite branch.
-    let known = CallAuditMetadata::for_production_dispatch(ObserveWorkspace::NAME);
+    // synthetic fixture name would prove the opposite branch. `mutate.create`
+    // stands in because #30 removed `observe.workspace` from the native catalog.
+    let known = CallAuditMetadata::for_production_dispatch(Create::NAME);
     assert_eq!(known.semantic_stage, SEMANTIC_STAGE_NATIVE);
     assert!(known.policy_enforced);
 
@@ -261,6 +272,18 @@ fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
     let unknown = CallAuditMetadata::for_production_dispatch("crafted.unknown");
     assert_eq!(unknown.semantic_stage, SEMANTIC_STAGE_UNROUTED);
     assert!(!unknown.policy_enforced);
+
+    // A migrated method reaches this function only when the Component dispatch
+    // branch was NOT taken, so it is not native either: labeling it `native`
+    // would claim an enforcement path that no longer exists for it (#29/#30).
+    for migrated in ["observe.workspace", "session.todo_write"] {
+        let labeled = CallAuditMetadata::for_production_dispatch(migrated);
+        assert_eq!(
+            labeled.semantic_stage, SEMANTIC_STAGE_UNROUTED,
+            "{migrated} is a Component Tool, not a native method"
+        );
+        assert!(!labeled.policy_enforced);
+    }
 }
 
 #[test]
@@ -973,7 +996,7 @@ fn query_rows_applies_database_limit_and_excluded_method_prefix() {
     let store = CepAuditStore::in_memory().unwrap();
     let ctx = test_context();
     for (idx, method) in [
-        ObserveWorkspace::NAME,
+        OBSERVE_WORKSPACE,
         "observe.audit",
         Create::NAME,
         Fetch::NAME,
@@ -1011,7 +1034,7 @@ fn query_rows_applies_database_limit_and_excluded_method_prefix() {
         .unwrap();
 
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].method, ObserveWorkspace::NAME);
+    assert_eq!(rows[0].method, OBSERVE_WORKSPACE);
     assert_eq!(rows[1].method, Create::NAME);
 }
 
@@ -1023,7 +1046,7 @@ fn query_rows_excludes_unfinalized_rows() {
         .start_call(
             &ctx,
             1,
-            ObserveWorkspace::NAME,
+            OBSERVE_WORKSPACE,
             &CallAuditMetadata::native_policy_enforced(None),
         )
         .unwrap();
@@ -1039,15 +1062,41 @@ fn query_rows_excludes_unfinalized_rows() {
 
 #[test]
 fn merge_finalize_metadata_adds_required_capability() {
+    // A native catalog method: the required capability is derived from catalog
+    // membership, so this must be a method still in the catalog.
     let merged = merge_finalize_metadata(
-        Some(r#"{"observation_source":"workspace"}"#),
-        "observe.workspace",
+        Some(r#"{"path":"src/lib.rs"}"#),
+        Create::NAME,
         &[],
         &ComponentCallEvidence::default(),
     )
     .unwrap();
     assert!(merged.contains("required_capability"));
-    assert!(merged.contains("inspect"));
+    assert!(merged.contains("write_path"));
+}
+
+/// A migrated method has no native catalog entry, so no legacy
+/// `required_capability` is attributed to it. Its authority is stated by its
+/// admitted Cell capabilities instead, which travel in the versioned evidence
+/// record — inventing a legacy label here would put two answers about one call's
+/// authority in the audit trail (#29/#30).
+#[test]
+fn merge_finalize_metadata_attributes_no_legacy_capability_to_a_component_tool() {
+    for migrated in ["observe.workspace", "session.todo_write"] {
+        let merged = merge_finalize_metadata(
+            Some(r#"{"probe":"value"}"#),
+            migrated,
+            &[],
+            &ComponentCallEvidence::default(),
+        )
+        .unwrap();
+        assert!(
+            !merged.contains("required_capability"),
+            "{migrated} is not a native catalog method: {merged}"
+        );
+        // The caller's own metadata still survives the merge.
+        assert!(merged.contains("probe"), "{merged}");
+    }
 }
 
 #[test]
@@ -1121,6 +1170,8 @@ fn effects_record() -> ObservedEffectsRecord {
                 },
                 source: EffectSource::Result,
                 context_measure: Some(17),
+                truncated: None,
+                visibility: None,
             },
             ObservedEffect {
                 seq: 0,
@@ -1131,6 +1182,8 @@ fn effects_record() -> ObservedEffectsRecord {
                 },
                 source: EffectSource::Operation,
                 context_measure: None,
+                truncated: None,
+                visibility: None,
             },
         ],
     }
@@ -1316,7 +1369,7 @@ fn rejection_stage_filters_rows_by_metadata_json() {
         .start_call(
             &ctx,
             1,
-            ObserveWorkspace::NAME,
+            OBSERVE_WORKSPACE,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -1359,7 +1412,7 @@ fn rejection_stage_filters_rows_by_metadata_json() {
         })
         .unwrap();
     assert_eq!(policy_rows.len(), 1);
-    assert_eq!(policy_rows[0].method, ObserveWorkspace::NAME);
+    assert_eq!(policy_rows[0].method, OBSERVE_WORKSPACE);
 
     let guard_rows = store
         .query_rows(&AuditQueryFilters {
@@ -1383,7 +1436,7 @@ fn write_legacy_audit_fixture(path: &std::path::Path) {
         .start_call(
             &ctx,
             42,
-            ObserveWorkspace::NAME,
+            OBSERVE_WORKSPACE,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();

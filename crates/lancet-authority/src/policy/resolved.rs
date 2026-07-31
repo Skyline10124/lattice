@@ -18,7 +18,11 @@ use super::capability::InvocationFacts;
 
 // ── Resolved types (executor-owned, no Serialize/Deserialize) ───────────
 
-/// Resolved path facts for workspace observation/mutation methods.
+/// Resolved path facts for the workspace mutation methods.
+///
+/// Observation used to produce these too; since #30 `observe.workspace` is a
+/// Component Tool and its paths are resolved host-side, so `mutate.create` and
+/// `mutate.edit` are the only producers.
 #[derive(Clone, Debug)]
 pub struct ResolvedPath {
     pub request_path: String,
@@ -104,21 +108,12 @@ impl PolicyResolver {
         let mut resolved_target = None;
         let mut resolved_network = None;
 
+        // `observe.workspace` used to resolve its per-mode path here. It is a
+        // Component Tool since #30, so the method is no longer in the catalog and
+        // the lookup above already rejected it — path facts for an observation now
+        // come from the WIT Tool Host in `lancet_runtime::host_workspace`, which
+        // resolves them against the concrete Local Workspace instead of lexically.
         match input.method.as_str() {
-            "observe.workspace" => {
-                if let Some(path) = extract_observe_workspace_path(&input.params) {
-                    let normalized = normalize_lexical_pure(&path)?;
-                    let canonical = self.project_root.join(&normalized);
-                    invocation_facts.path = Some(canonical.to_string_lossy().to_string());
-                    invocation_facts.normalized_path =
-                        Some(normalized.to_string_lossy().to_string());
-                    resolved_target = Some(ResolvedPath {
-                        request_path: path,
-                        normalized_path: normalized,
-                        project_root: self.project_root.clone(),
-                    });
-                }
-            }
             "mutate.create" | "mutate.edit" => {
                 if let Some(path) = extract_path_from_params(&input.params) {
                     let normalized = normalize_lexical_pure(&path)?;
@@ -157,21 +152,13 @@ impl PolicyResolver {
 
 // ── Pure param extraction helpers ───────────────────────────────────────
 
-fn extract_observe_workspace_path(params: &serde_json::Value) -> Option<String> {
-    match params.get("mode").and_then(|v| v.as_str()) {
-        Some("read_file") | Some("list_directory") => extract_path_from_params(params),
-        Some("grep") | Some("find_files") => {
-            extract_optional_path_from_params(params).or_else(|| Some(".".to_string()))
-        }
-        _ => None,
-    }
-}
+// `extract_observe_workspace_path` (per-mode: required `path` for read_file and
+// list_directory, optional with a `.` fallback for grep and find_files) and its
+// optional-path helper left with `observe.workspace` (#30). The mode vocabulary is
+// the Component's params schema now, so keeping a second reader of it here would
+// be a copy that can only drift from the manifest.
 
 fn extract_path_from_params(params: &serde_json::Value) -> Option<String> {
-    params.get("path")?.as_str().map(String::from)
-}
-
-fn extract_optional_path_from_params(params: &serde_json::Value) -> Option<String> {
     params.get("path")?.as_str().map(String::from)
 }
 
@@ -278,20 +265,30 @@ mod tests {
     }
 
     #[test]
-    fn resolve_workspace_read_file_extracts_path() {
+    fn resolve_observe_workspace_errors_as_unknown_method() {
+        // Regression for #30: `observe.workspace` is an embedded Component Tool,
+        // so it left the catalog and the resolver must reject it as an unknown
+        // method rather than resolve lexical path facts for it. The four per-mode
+        // extraction tests (read_file / list_directory / grep / find_files) went
+        // with the arm they covered; the mode vocabulary and its path semantics
+        // are the Tool manifest's params schema now, enforced host-side by
+        // `lancet_runtime::host_workspace`.
         let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({"mode": "read_file", "path": "src/main.rs"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(resolved.method, "observe.workspace");
-        assert_eq!(resolved.impact_kind, ImpactKind::WorkspaceObservation);
-        let target = resolved.resolved_target.unwrap();
-        assert_eq!(target.request_path, "src/main.rs");
-        assert_eq!(target.normalized_path, PathBuf::from("src/main.rs"));
+        for params in [
+            json!({"mode": "read_file", "path": "src/main.rs"}),
+            json!({"mode": "list_directory", "path": "src/"}),
+            json!({"mode": "grep", "pattern": "fn main", "path": "src/"}),
+            json!({"mode": "find_files", "pattern": "*.rs"}),
+        ] {
+            let input = PolicyInput {
+                method: "observe.workspace".into(),
+                params,
+                authority: PolicyAuthorityInput,
+                audit_context: audit_ctx(),
+            };
+            let err = resolver.resolve(&input).unwrap_err();
+            assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
+        }
     }
 
     #[test]
@@ -326,44 +323,6 @@ mod tests {
         let target = resolved.resolved_target.unwrap();
         assert_eq!(target.request_path, "src/main.rs");
         assert_eq!(target.normalized_path, PathBuf::from("src/main.rs"));
-    }
-
-    #[test]
-    fn resolve_workspace_grep_extracts_optional_path() {
-        let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({"mode": "grep", "pattern": "fn main", "path": "src/"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let resolved = resolver.resolve(&input).unwrap();
-        assert!(resolved.resolved_target.is_some());
-    }
-
-    #[test]
-    fn resolve_workspace_list_directory_extracts_path() {
-        let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({"mode": "list_directory", "path": "src/"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let resolved = resolver.resolve(&input).unwrap();
-        assert!(resolved.resolved_target.is_some());
-    }
-
-    #[test]
-    fn resolve_workspace_find_files_extracts_path() {
-        let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({"mode": "find_files", "pattern": "*.rs", "path": "src/"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let _resolved = resolver.resolve(&input).unwrap();
     }
 
     #[test]
@@ -430,17 +389,34 @@ mod tests {
         assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
     }
 
+    /// Lexical traversal rejection is a property of resolution itself, so it
+    /// stays pinned on the methods that still resolve a path. It used to be
+    /// asserted through `observe.workspace`, which left with #30; every remaining
+    /// path-resolving method is covered here so the check cannot go dead again by
+    /// losing one method.
     #[test]
     fn resolve_path_traversal_rejected() {
         let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "observe.workspace".into(),
-            params: json!({"mode": "read_file", "path": "../etc/passwd"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let err = resolver.resolve(&input).unwrap_err();
-        assert_eq!(err.code, lancet_protocol::CepErrorCode::PathContainment);
+        for (method, params) in [
+            (
+                "mutate.create",
+                json!({"path": "../etc/passwd", "content": ""}),
+            ),
+            ("mutate.edit", json!({"path": "../etc/passwd", "edits": []})),
+        ] {
+            let input = PolicyInput {
+                method: method.into(),
+                params,
+                authority: PolicyAuthorityInput,
+                audit_context: audit_ctx(),
+            };
+            let err = resolver.resolve(&input).unwrap_err();
+            assert_eq!(
+                err.code,
+                lancet_protocol::CepErrorCode::PathContainment,
+                "{method} must reject '..' traversal"
+            );
+        }
     }
 
     #[test]

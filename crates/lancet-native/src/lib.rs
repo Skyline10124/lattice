@@ -25,16 +25,29 @@ pub mod provenance {
     pub use lancet_audit::provenance::*;
 }
 mod server;
-pub(crate) mod workspace;
+
+/// The concrete Local Workspace, consumed from `lancet-runtime`.
+///
+/// GitHub #30 moved the module down a layer: the `workspace-observe` Tool Host
+/// imports run inside `lancet-runtime` and cannot reach up here. The still-native
+/// mutation handlers and the edit engine keep using the *same* concrete type
+/// through this alias, so secure path resolution has exactly one home. It is a
+/// path alias, not a seam — there is no trait behind it and nothing to
+/// substitute. #31/#32 move the remaining callers behind Component Tools.
+pub(crate) mod workspace {
+    pub(crate) use lancet_runtime::workspace::*;
+}
 
 /// Explicit Rewind restore executor (GitHub #64).
 ///
 /// Host-side operator surface: preflights every affected path against its
 /// recorded post-state and restores parent-tree content with the same safety
 /// primitives the mutation path uses. Not a CEP method — the Agent-visible
-/// catalog gains nothing here.
+/// catalog gains nothing here. The implementation moved to `lancet-runtime` with
+/// the rest of the workspace module in #30; this re-export keeps
+/// `lancet_native::rewind` the stable name `lancet-api` already resolves.
 pub mod rewind {
-    pub use crate::workspace::rewind::{
+    pub use lancet_runtime::workspace::rewind::{
         RestoredPath, RewindPathConflict, RewindPathPreflight, RewindRestoreError,
         RewindRestoreOutcome, preflight_and_restore,
     };

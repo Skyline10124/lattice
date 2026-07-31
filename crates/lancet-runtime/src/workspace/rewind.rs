@@ -38,10 +38,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::history::{RewindPathRestore, WorkspaceHistory};
 use lancet_authority::under_system_exclusion;
-use lancet_runtime::{RewindPathRestore, WorkspaceHistory};
 
-use crate::edit::content_hash;
+use crate::workspace::content_hash;
 
 use super::local::LocalWorkspace;
 use super::types::{LocalWorkspaceError, PathIntent, PathKind, WorkspacePath};

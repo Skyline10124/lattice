@@ -191,7 +191,6 @@ mod external_audit_tests {
     fn external_audit_imports_legacy_read_only_once() {
         use crate::audit::{AuditOutcome, CallAuditMetadata, CepAuditContext, CepAuditStore};
         use lancet_catalog::CepMethod;
-        use lancet_catalog::methods::workspace::ObserveWorkspace;
         use lancet_catalog::test_method::TestEcho;
 
         let state = TempDir::new().unwrap();
@@ -248,7 +247,7 @@ mod external_audit_tests {
             .start_call(
                 &ctx2,
                 2,
-                ObserveWorkspace::NAME,
+                "observe.workspace",
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();

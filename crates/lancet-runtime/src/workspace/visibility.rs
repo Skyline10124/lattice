@@ -13,10 +13,11 @@
 use std::path::Path;
 
 use lancet_authority::{GitFileStatus, HiddenReason, ReadVisibility, ReadVisibilityPolicy};
+use lancet_protocol::evidence::WorkspaceVisibilityEvidence;
 
 /// Content-free category evidence accumulated while evaluating one Tool call.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct VisibilityEvidence {
+pub struct VisibilityEvidence {
     included_ignored: bool,
     filtered_system_exclusion: bool,
     filtered_read_denied: bool,
@@ -24,7 +25,7 @@ pub(crate) struct VisibilityEvidence {
 }
 
 impl VisibilityEvidence {
-    pub(crate) fn as_json(self) -> serde_json::Value {
+    pub fn as_json(self) -> serde_json::Value {
         let mut filtered_by = Vec::new();
         if self.filtered_system_exclusion {
             filtered_by.push("system_exclusion");
@@ -41,6 +42,15 @@ impl VisibilityEvidence {
         })
     }
 
+    pub fn into_protocol(self) -> WorkspaceVisibilityEvidence {
+        WorkspaceVisibilityEvidence {
+            included_ignored: self.included_ignored,
+            filtered_system_exclusion: self.filtered_system_exclusion,
+            filtered_read_denied: self.filtered_read_denied,
+            filtered_ignored_default: self.filtered_ignored_default,
+        }
+    }
+
     fn record_hidden(&mut self, reason: HiddenReason) {
         match reason {
             HiddenReason::SystemExclusion => self.filtered_system_exclusion = true,
@@ -52,21 +62,21 @@ impl VisibilityEvidence {
 
 /// Visibility and traversal assessment for one project-relative entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct VisibilityAssessment {
+pub struct VisibilityAssessment {
     visibility: ReadVisibility,
     descend: bool,
 }
 
 impl VisibilityAssessment {
-    pub(crate) fn is_visible(self) -> bool {
+    pub fn is_visible(self) -> bool {
         matches!(self.visibility, ReadVisibility::Visible)
     }
 
-    pub(crate) fn should_descend(self) -> bool {
+    pub fn should_descend(self) -> bool {
         self.descend
     }
 
-    pub(crate) fn hidden_reason(self) -> Option<HiddenReason> {
+    pub fn hidden_reason(self) -> Option<HiddenReason> {
         match self.visibility {
             ReadVisibility::Visible => None,
             ReadVisibility::Hidden(reason) => Some(reason),
@@ -75,7 +85,7 @@ impl VisibilityAssessment {
 }
 
 /// Per Tool-call visibility engine: pure policy + current Local Git facts.
-pub(crate) struct VisibilityEngine {
+pub struct VisibilityEngine {
     policy: ReadVisibilityPolicy,
     git: Option<GitVisibility>,
     evidence: VisibilityEvidence,
@@ -90,7 +100,7 @@ struct GitVisibility {
 impl VisibilityEngine {
     /// Load policy + Git facts for `root`. Open failure (not a git repo)
     /// yields a non-git engine that reports every path as `NotIgnored`.
-    pub(crate) fn load(root: &Path, policy: ReadVisibilityPolicy) -> Self {
+    pub fn load(root: &Path, policy: ReadVisibilityPolicy) -> Self {
         Self {
             policy,
             git: GitVisibility::open(root),
@@ -98,7 +108,7 @@ impl VisibilityEngine {
         }
     }
 
-    pub(crate) fn assess(&mut self, rel: &str, is_dir: bool) -> VisibilityAssessment {
+    pub fn assess(&mut self, rel: &str, is_dir: bool) -> VisibilityAssessment {
         let git = self.git_status(rel, is_dir);
         let visibility = self.policy.decide(rel, git);
         match visibility {
@@ -119,25 +129,25 @@ impl VisibilityEngine {
         }
     }
 
-    pub(crate) fn decide(&mut self, rel: &str, is_dir: bool) -> ReadVisibility {
+    pub fn decide(&mut self, rel: &str, is_dir: bool) -> ReadVisibility {
         self.assess(rel, is_dir).visibility
     }
 
-    pub(crate) fn is_visible_entry(&mut self, rel: &str, is_dir: bool) -> bool {
+    pub fn is_visible_entry(&mut self, rel: &str, is_dir: bool) -> bool {
         self.assess(rel, is_dir).is_visible()
     }
 
-    pub(crate) fn is_visible_file(&mut self, rel: &str) -> bool {
+    pub fn is_visible_file(&mut self, rel: &str) -> bool {
         self.is_visible_entry(rel, false)
     }
 
     /// Recursive navigation may pass through an ignored directory only when
     /// an explicit include can still be reached beneath it.
-    pub(crate) fn should_descend(&mut self, dir_rel: &str) -> bool {
+    pub fn should_descend(&mut self, dir_rel: &str) -> bool {
         self.assess(dir_rel, true).should_descend()
     }
 
-    pub(crate) fn evidence(&self) -> VisibilityEvidence {
+    pub fn evidence(&self) -> VisibilityEvidence {
         self.evidence
     }
 
@@ -199,7 +209,7 @@ fn normalize_rel(rel: &str) -> &str {
 
 /// Join a parent WorkspacePath (or ".") with an entry name into a
 /// project-relative UTF-8 path string.
-pub(crate) fn join_rel(parent: &str, name: &str) -> String {
+pub fn join_rel(parent: &str, name: &str) -> String {
     let parent = normalize_rel(parent);
     if parent.is_empty() {
         name.to_string()

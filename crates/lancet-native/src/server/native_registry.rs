@@ -3,29 +3,21 @@
 
 //! CEP/22 native catalog method registration.
 
-use crate::handlers::{
-    register_external_methods, register_mutation_methods, register_workspace_observation_methods,
-};
+use crate::handlers::{register_external_methods, register_mutation_methods};
 use crate::server::registry::MethodRegistry;
 use lancet_protocol::CepError;
 
-/// Register the remaining LANCET native handlers (observation, external).
+/// Register the remaining LANCET native handlers.
 ///
-/// `session.todo_write` is deliberately absent: #29 migrated it to an embedded
-/// Component Tool and deleted its native handler. There is no native fallback —
-/// a runtime whose composition does not embed the Component has no other way to
-/// serve the method, and dispatch reports `MethodNotFound`.
+/// `session.todo_write` (#29) and `observe.workspace` (#30) are deliberately
+/// absent: both are embedded Component Tools now, and each migration deleted its
+/// native handler rather than keeping it as a fallback. The absence is the
+/// design — a runtime whose composition does not embed the Component has no other
+/// way to serve the method, and dispatch reports `MethodNotFound` instead of
+/// quietly falling back to a second implementation with different enforcement.
 pub fn register_cep_native_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    register_native_workspace_observation(registry)?;
     register_native_external(registry)?;
     Ok(())
-}
-
-/// Register native CEP workspace observation handlers.
-pub fn register_native_workspace_observation(
-    registry: &mut MethodRegistry,
-) -> Result<(), CepError> {
-    register_workspace_observation_methods(registry)
 }
 
 /// Register native CEP `fetch.web` handler.
@@ -46,21 +38,16 @@ pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Res
 #[cfg(test)]
 mod cep_native_registry_tests {
     use super::*;
-    use crate::audit::{GUARD_STAGE_NATIVE, SEMANTIC_STAGE_NATIVE};
-    use crate::server::registry::{Cancellation, EventSink, HandlerContext};
-    use crate::workspace::LocalWorkspace;
     use crate::{CepServerNativeExt, CepTransport, ServerRunConfig};
     use lancet_authority::policy::CepTurnContext;
     use lancet_catalog::CepMethod;
     use lancet_catalog::catalog;
     use lancet_catalog::methods::workspace::{
-        Create, CreateParams, Edit, EditOperation, EditParams, FindFilesParams, ObserveWorkspace,
-        ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileParams,
+        Create, CreateParams, Edit, EditOperation, EditParams,
     };
     use lancet_protocol::CepErrorCode;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::{mpsc, watch};
 
     fn production_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
@@ -121,163 +108,27 @@ mod cep_native_registry_tests {
         assert_eq!(err.code, CepErrorCode::DuplicateRegistration);
     }
 
-    #[tokio::test]
-    async fn cep_native_registry_native_error_returns_guard_denied() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("probe.txt"), "x").unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = production_registry();
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let ctx = HandlerContext {
-            call_id: 1,
-            events: EventSink::new(event_tx, 1),
-            cancellation: Cancellation::new(cancel_rx),
-            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-            turn_id: "test-turn".into(),
-            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-            authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-            policy_hook: Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
-                lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
-                    std::path::PathBuf::from(root),
-                ),
-            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
-            default_policy_hook: None,
-            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                turn_id: "test-turn".into(),
-                session_id: "test-session".into(),
-                ..Default::default()
-            })),
-            audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::policy::CepMode::Off,
-            workspace: Arc::new(LocalWorkspace::new(std::path::Path::new(root))),
-        };
-
-        let params = ReadFileParams {
-            path: "../outside".into(),
-            offset: None,
-            limit: None,
-            line_numbers: None,
-        };
-        let err = registry
-            .dispatch(
-                ObserveWorkspace::NAME,
-                serde_json::to_value(ObserveWorkspaceParams::ReadFile(params)).unwrap(),
-                ctx,
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::GuardDenied);
-    }
-
-    #[tokio::test]
-    async fn cep_native_registry_labels_native_methods() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("hello.txt"), "hi").unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = production_registry();
-        let mut config = ServerRunConfig::in_memory_for_tests();
-        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
-            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
-                std::path::PathBuf::from(root),
-            ),
-        ));
-        config.policy_hook = default_hook.clone();
-        config.default_policy_hook = Some(default_hook);
-
-        let (client, server) = CepTransport::pair(8);
-        let audit = Arc::clone(&config.audit);
-        let server_task = tokio::spawn(async move {
-            server.run_native(registry, config).await.unwrap();
-        });
-
-        client
-            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
-                path: "hello.txt".into(),
-                offset: None,
-                limit: None,
-                line_numbers: None,
-            }))
-            .await
-            .unwrap();
-
-        assert_eq!(audit.row_count().unwrap(), 1);
-        let read_row = audit.row_by_audit_id(1).unwrap();
-        assert_eq!(read_row.method, ObserveWorkspace::NAME);
-        assert_eq!(read_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
-        assert_eq!(read_row.guard_stage, GUARD_STAGE_NATIVE);
-        assert!(read_row.policy_enforced);
-        let metadata: serde_json::Value =
-            serde_json::from_str(read_row.metadata_json.as_deref().expect("metadata json"))
-                .unwrap();
-        assert_eq!(
-            metadata["visibility_evidence"],
-            serde_json::json!({"included_ignored": false, "filtered_by": []})
-        );
-
-        drop(client);
-        server_task.abort();
-    }
-
-    #[tokio::test]
-    async fn recursive_visibility_evidence_survives_transport_finalization() {
-        let dir = TempDir::new().unwrap();
-        gix::init(dir.path()).expect("gix init");
-        std::fs::write(dir.path().join(".gitignore"), "secret/\n").unwrap();
-        std::fs::create_dir(dir.path().join("secret")).unwrap();
-        std::fs::write(dir.path().join("secret/key"), "AUDIT_SENTINEL\n").unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = production_registry();
-        let mut config = ServerRunConfig::in_memory_for_tests();
-        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-        let mut policy_config =
-            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(root.into());
-        policy_config.workspace.included_ignored_read_patterns = vec!["secret/key".into()];
-        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
-            policy_config,
-        ));
-        config.policy_hook = default_hook.clone();
-        config.default_policy_hook = Some(default_hook);
-
-        let (client, server) = CepTransport::pair(8);
-        let audit = Arc::clone(&config.audit);
-        let server_task = tokio::spawn(async move {
-            server.run_native(registry, config).await.unwrap();
-        });
-
-        let result = client
-            .call::<ObserveWorkspace>(ObserveWorkspaceParams::FindFiles(FindFilesParams {
-                pattern: "*".into(),
-                path: Some(".".into()),
-                limit: Some(50),
-            }))
-            .await
-            .unwrap();
-        let ObserveWorkspaceResult::FindFiles(result) = result else {
-            panic!("expected find result");
-        };
-        assert!(result.paths.iter().any(|path| path == "secret/key"));
-        assert!(!result.paths.iter().any(|path| path == "secret"));
-
-        let row = audit.row_by_audit_id(1).unwrap();
-        let raw = row.metadata_json.as_deref().expect("metadata json");
-        let metadata: serde_json::Value = serde_json::from_str(raw).unwrap();
-        assert_eq!(
-            metadata["visibility_evidence"],
-            serde_json::json!({
-                "included_ignored": true,
-                "filtered_by": ["system_exclusion", "ignored_default"],
-            })
-        );
-        assert!(!raw.contains("secret/key"));
-        assert!(!raw.contains("AUDIT_SENTINEL"));
-        assert!(!raw.contains(root));
-
-        drop(client);
-        server_task.abort();
-    }
+    // Three `observe.workspace` transport tests lived here and went with the
+    // native handler (#30):
+    //
+    // - `cep_native_registry_native_error_returns_guard_denied` dispatched
+    //   `../outside` through the typed registry and asserted `GuardDenied`. Path
+    //   containment is host-side now and is covered where it is enforced:
+    //   `lancet_runtime::host_workspace::tests::parent_traversal_is_refused_lexically`
+    //   and `symlink_escaping_the_root_is_refused`.
+    // - `cep_native_registry_labels_native_methods` asserted the row carried
+    //   `SEMANTIC_STAGE_NATIVE`. The method is dispatched as a Component now, so
+    //   the correct label is `cell_component` — `CallAuditMetadata::for_component_dispatch`
+    //   supplies it, and `lattice-api`'s dogfood matrix pins it end to end.
+    // - `recursive_visibility_evidence_survives_transport_finalization` asserted
+    //   the handler's `visibility_evidence` metadata blob survived finalization.
+    //   That blob was the native handler's own shape; a Component call records
+    //   the same decisions as versioned Cell evidence instead
+    //   (`DeniedOperation.reason` carries the `HiddenReason` audit label), which
+    //   `host_workspace::tests::denied_reads_are_refused_and_recorded_with_their_reason`
+    //   pins. Its non-leak assertions (no `secret/key`, no sentinel, no root
+    //   path in the row) are preserved there and in
+    //   `all_four_modes_share_one_visibility_decision`.
 
     /// Server config whose turn policy denies `denied` and whose project root
     /// is `root`. Both the CEP turn context and the policy hook are rooted
@@ -351,6 +202,28 @@ mod cep_native_registry_tests {
             !result.is_empty() && !result.to_lowercase().contains("success"),
             "denied call must record a non-success audit result: {result:?}"
         );
+        // #71: the denial short-circuits before any handler, so transport is the
+        // only place that can stamp rejection evidence. Without it the row that
+        // proves the write was prevented carries no rejection stage or
+        // capability, and neither `AuditQueryFilters::rejection_stage` nor
+        // `lattice audit --capability` can find it. This assertion used to live
+        // on an `observe.workspace` twin; #30 migrated that method to a Component
+        // Tool, whose authority is its admitted Cells and which never reaches the
+        // legacy effect-kind check at all, so the mutation case carries it now.
+        let metadata = row.metadata_json.as_deref().unwrap_or("");
+        let metadata: serde_json::Value =
+            serde_json::from_str(metadata).expect("denied row must carry metadata json");
+        assert_eq!(metadata["rejection_stage"], "policy_gate");
+        assert_eq!(metadata["denial_source"], "effect_kind_deny");
+        assert_eq!(metadata["required_capability"], "write_path");
+        assert_eq!(metadata["policy_enforced"], true);
+        // The handler never ran, so its own completion evidence must be absent.
+        for key in ["bytes_written", "created_dirs", "content_hash"] {
+            assert!(
+                metadata.get(key).is_none(),
+                "a denied mutation must not record handler evidence ({key}): {metadata}"
+            );
+        }
 
         drop(client);
         server_task.abort();
@@ -397,74 +270,6 @@ mod cep_native_registry_tests {
             "original content\n",
             "pre-dispatch denial must not modify the target file"
         );
-
-        drop(client);
-        server_task.abort();
-    }
-
-    /// #71 acceptance: `deny = ["workspace_observation"]` rejects
-    /// `observe.workspace` before the handler, so no workspace read happens.
-    #[tokio::test]
-    async fn denied_effect_kind_blocks_observe_workspace_before_backend() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("visible.txt"), "content").unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = production_registry();
-        let config =
-            config_with_denied_effect_kind(root, lancet_protocol::ImpactKind::WorkspaceObservation);
-
-        let (client, server) = CepTransport::pair(8);
-        let audit = Arc::clone(&config.audit);
-        let server_task = tokio::spawn(async move {
-            server.run_native(registry, config).await.unwrap();
-        });
-
-        let err = client
-            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
-                path: "visible.txt".into(),
-                offset: None,
-                limit: None,
-                line_numbers: None,
-            }))
-            .await
-            .expect_err("denied WorkspaceObservation must reject observe.workspace");
-        assert_pre_dispatch_denial(&err);
-
-        let row = audit.row_by_audit_id(1).expect("denied audit row");
-        assert_eq!(row.method, ObserveWorkspace::NAME);
-        let result = row.result_or_error.as_deref().unwrap_or("");
-        assert!(
-            !result.is_empty() && !result.to_lowercase().contains("success"),
-            "denied observation must record a non-success audit result: {result:?}"
-        );
-        // #71: the denial short-circuits before any handler, so transport is
-        // the only place that can stamp rejection evidence. Without it the row
-        // that proves the read was prevented carries no rejection stage or
-        // capability, and neither `AuditQueryFilters::rejection_stage` nor
-        // `lattice audit --capability` can find it.
-        let metadata = row.metadata_json.as_deref().unwrap_or("");
-        let metadata: serde_json::Value =
-            serde_json::from_str(metadata).expect("denied row must carry metadata json");
-        assert_eq!(metadata["rejection_stage"], "policy_gate");
-        assert_eq!(metadata["denial_source"], "effect_kind_deny");
-        assert_eq!(metadata["required_capability"], "inspect");
-        assert_eq!(metadata["policy_enforced"], true);
-        // The read never happened, so the handler's own observation evidence
-        // must be absent. Asserting the error text carries no file bytes would
-        // be vacuous — `CepError` messages are a fixed template that can never
-        // hold content — whereas these keys are exactly what a completed
-        // `read_file` records (see `handlers::observation`).
-        for key in [
-            "observation_source",
-            "bytes_read",
-            "content_hash",
-            "visibility_evidence",
-        ] {
-            assert!(
-                metadata.get(key).is_none(),
-                "denied observation must not record handler read evidence ({key}): {metadata}"
-            );
-        }
 
         drop(client);
         server_task.abort();

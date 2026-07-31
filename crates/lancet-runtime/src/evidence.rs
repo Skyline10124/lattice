@@ -28,7 +28,7 @@ use lancet_protocol::cell::Cell;
 use lancet_protocol::evidence::{
     AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, DeniedOperationsRecord,
     EffectSource, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord,
-    ObservedScope, ObservedTarget,
+    ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
 };
 
 #[derive(Debug, Default)]
@@ -79,6 +79,39 @@ impl CellEvidenceLedger {
             target,
             source,
             context_measure,
+            truncated: None,
+            visibility: None,
+        });
+    }
+
+    /// Record a bounded domain operation's effect (#30).
+    ///
+    /// Distinct from [`Self::record_effect`] because an observation carries two
+    /// facts that operation effects generally do not: the bytes it returned to
+    /// the guest (the context allocation the criterion asks for) and whether the
+    /// host had to cut the result to stay inside a bound. Both are host-computed;
+    /// a guest cannot reach this function or the values it writes.
+    pub fn record_observation_effect(
+        &self,
+        cell: Cell,
+        scope: ObservedScope,
+        target: ObservedTarget,
+        bytes_returned: u64,
+        truncated: bool,
+        visibility: WorkspaceVisibilityEvidence,
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        let seq = inner.seq;
+        inner.seq += 1;
+        inner.effects.push(ObservedEffect {
+            seq,
+            cell,
+            scope,
+            target,
+            source: EffectSource::Operation,
+            context_measure: Some(bytes_returned),
+            truncated: Some(truncated),
+            visibility: Some(visibility),
         });
     }
 

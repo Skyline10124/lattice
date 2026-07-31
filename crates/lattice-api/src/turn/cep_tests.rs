@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::methods::workspace::{
-    ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileResult,
-};
+use lancet_catalog::methods::workspace::{Create, CreateParams, CreateResult};
 use lancet_catalog::test_method::{TestEcho, TestEchoParams, TestEchoResult};
 use lancet_native::{CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::effect_types::ImpactKind;
@@ -117,18 +115,23 @@ async fn cep_executor_adapter_parse_error_maps_to_32700() {
     assert_cep_payload(&err, jsonrpc::PARSE_ERROR);
 }
 
+/// A single-name enabled set lets that name through the adapter and the
+/// arguments reach the handler.
+///
+/// Driven through `mutate.create` since #30: this fixture needs a *registrable*
+/// handler seam, and the method that used to play the part (`observe.workspace`)
+/// is a Component Tool now, with no `register_method` seam at all. The
+/// Component equivalent is `component_adapter::cep_executor_adapter_executes_component_tool`.
 #[tokio::test]
-async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
+async fn cep_executor_adapter_allows_enabled_native_method() {
     let mut registry = MethodRegistry::new();
     registry
-        .register_method::<ObserveWorkspace, _, _>(|params, _ctx| async move {
-            let ObserveWorkspaceParams::ReadFile(params) = params else {
-                panic!("expected read_file mode");
-            };
-            Ok(ObserveWorkspaceResult::ReadFile(ReadFileResult {
-                content: params.path,
-                content_hash: None,
-            }))
+        .register_method::<Create, _, _>(|params: CreateParams, _ctx| async move {
+            Ok(CreateResult {
+                path: params.path,
+                bytes_written: params.content.len() as u64,
+                created_dirs: Vec::new(),
+            })
         })
         .unwrap();
     let (client, server) = CepTransport::pair(8);
@@ -138,8 +141,7 @@ async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
             .await;
     });
     let definitions = lancet_cep::project_tool_definitions(catalog());
-    let adapter =
-        CepExecutorAdapter::new(client, &definitions, [ObserveWorkspace::NAME.to_string()]);
+    let adapter = CepExecutorAdapter::new(client, &definitions, [Create::NAME.to_string()]);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
 
@@ -147,8 +149,9 @@ async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
         .execute(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
-                name: ObserveWorkspace::NAME.to_string(),
-                arguments: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
+                name: Create::NAME.to_string(),
+                arguments: r#"{"path":"src/lib.rs","content":"x","create_parents":false}"#
+                    .to_string(),
             },
         })
         .await
@@ -174,18 +177,23 @@ async fn cep_executor_adapter_unknown_method_maps_to_32601() {
     assert_cep_payload(&err, jsonrpc::METHOD_NOT_FOUND);
 }
 
+/// Params the handler's type cannot accept fail as invalid_params (-32602).
+///
+/// `mutate.create` since #30, for the same reason as
+/// `cep_executor_adapter_allows_enabled_native_method`: this asserts the
+/// *native registry's* server-side validation, which needs a registered
+/// handler. `content` is the omitted required field (`create_parents` has a
+/// serde default, so leaving that out would deserialize fine).
 #[tokio::test]
 async fn cep_executor_adapter_invalid_params_maps_to_32602() {
     let mut registry = MethodRegistry::new();
     registry
-        .register_method::<ObserveWorkspace, _, _>(|params, _ctx| async move {
-            let ObserveWorkspaceParams::ReadFile(params) = params else {
-                panic!("expected read_file mode");
-            };
-            Ok(ObserveWorkspaceResult::ReadFile(ReadFileResult {
-                content: params.path,
-                content_hash: None,
-            }))
+        .register_method::<Create, _, _>(|params: CreateParams, _ctx| async move {
+            Ok(CreateResult {
+                path: params.path,
+                bytes_written: params.content.len() as u64,
+                created_dirs: Vec::new(),
+            })
         })
         .unwrap();
     let adapter = adapter_over_registry(registry).await;
@@ -194,8 +202,8 @@ async fn cep_executor_adapter_invalid_params_maps_to_32602() {
         .execute(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
-                name: ObserveWorkspace::NAME.to_string(),
-                arguments: r#"{"mode":"read_file"}"#.to_string(),
+                name: Create::NAME.to_string(),
+                arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
             },
         })
         .await
@@ -297,18 +305,23 @@ cep_family_test!(
     Retriability::Permanent
 );
 
+// The effect payload names `mutate.create` and the kind that method really
+// declares. It used to name `observe.workspace`/`workspace_observation`, but
+// since #30 that method is a Component Tool governed by the Cell vocabulary and
+// declares no `ImpactKind` at all — a fixture claiming otherwise would document
+// a combination the production surface can no longer produce.
 cep_family_test!(
     cep_executor_adapter_effect_family_preserves_payload,
     CepErrorCode::EffectViolation,
     CepErrorData::Effect(Box::new(EffectErrorData {
-        method: ObserveWorkspace::NAME.into(),
-        declared_effect: vec![ImpactKind::WorkspaceObservation],
-        authorized_effect: vec![ImpactKind::WorkspaceObservation],
+        method: Create::NAME.into(),
+        declared_effect: vec![ImpactKind::WorkspaceMutation],
+        authorized_effect: vec![ImpactKind::WorkspaceMutation],
         observed_effects: vec![
-            ImpactKind::WorkspaceObservation,
             ImpactKind::WorkspaceMutation,
+            ImpactKind::ExternalObservation,
         ],
-        violations: vec!["observed workspace_mutation not in declared effect ceiling".into(),],
+        violations: vec!["observed external_observation not in declared effect ceiling".into(),],
         cell_ref: None,
         capability: None,
     })),
@@ -364,7 +377,6 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use lancet_catalog::methods::workspace::{ObserveWorkspaceParams, ReadFileParams};
     use lancet_native::SEMANTIC_STAGE_NATIVE;
     use tempfile::TempDir;
 
@@ -376,7 +388,6 @@ mod cep_native_registry {
         use crate::turn::test_support::build_test_production_deps;
 
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("hello.txt"), "native audit").unwrap();
 
         let llm: Arc<dyn LlmClient> = Arc::new(
             FakeStreamingLlmClient::builder()
@@ -389,10 +400,12 @@ mod cep_native_registry {
 
         // A native method: this test asserts the *native* audit stage, so a
         // Component Tool would be labeled `cell_component` and prove the
-        // opposite.
+        // opposite. It used to drive `observe.workspace`, which #30 migrated —
+        // driving it here would now assert the Component stage under a name that
+        // promises the native one. `mutate.create` is native and still is.
         let deps = build_test_production_deps(
             dir.path().to_str().unwrap(),
-            &[ObserveWorkspace::NAME.to_string()],
+            &[Create::NAME.to_string()],
             llm,
             true,
             None,
@@ -400,19 +413,18 @@ mod cep_native_registry {
         .await;
 
         deps.cep_client
-            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
+            .call::<Create>(CreateParams {
                 path: "hello.txt".into(),
-                offset: None,
-                limit: None,
-                line_numbers: None,
-            }))
+                content: "native audit".into(),
+                create_parents: false,
+            })
             .await
-            .expect("native observe.workspace");
+            .expect("native mutate.create");
 
         let row = deps.audit.row_by_audit_id(1).unwrap();
         assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
         assert!(row.policy_enforced);
-        assert_eq!(row.impact_kind, "workspace_observation");
+        assert_eq!(row.impact_kind, "workspace_mutation");
         assert_eq!(row.model_id.as_deref(), Some("test-model"));
         assert_eq!(row.runtime_version.as_deref(), Some("0.0.0-test"));
     }

@@ -35,8 +35,6 @@ use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::workspace::{
     Create, CreateParams, CreateResult, Edit, EditOperation, EditParams, EditResult,
-    ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileParams,
-    ReadFileResult,
 };
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
@@ -88,26 +86,13 @@ async fn has_effect_warning(audit: Arc<CepAuditStore>, row_before: i64) -> bool 
 // ── Per-method overreach handlers ────────────────────────────────────────────
 // Each registers one method with an overreach handler that triggers effect_warning.
 
-fn overreach_registry_observe_workspace() -> MethodRegistry {
-    let mut r = MethodRegistry::new();
-    r.register_method::<ObserveWorkspace, _, _>(
-        |_params: ObserveWorkspaceParams, ctx| async move {
-            ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-            ctx.record_effect(ObservedEffect {
-                kind: ImpactKind::WorkspaceObservation,
-                scope: ObservedScope::Path(PathBuf::from("/out/of/scope/observe")),
-                required_capability: RequiredCapability::ReadPath,
-                source: EffectSource::HandlerBackend,
-            });
-            Ok(ObserveWorkspaceResult::ReadFile(ReadFileResult {
-                content: "mock".into(),
-                content_hash: None,
-            }))
-        },
-    )
-    .expect("overreach ObserveWorkspace");
-    r
-}
+// `overreach_registry_observe_workspace` went with the native handler (#30).
+// A warn-mode overreach fixture registers a *native* handler that records an
+// effect outside its authorized region; `observe.workspace` is a Component Tool
+// now, and a Component's effects are recorded by the host through its Cell
+// evidence, never by a handler this harness could register. The equivalent
+// negative case for the Component path is
+// `lancet_runtime::host_workspace::tests::an_unadmitted_cell_is_refused_before_the_filesystem`.
 
 fn overreach_registry_create() -> MethodRegistry {
     let mut r = MethodRegistry::new();
@@ -234,17 +219,6 @@ async fn generate_warn_report() -> String {
     // ── Overreach-capable canonical methods ──────────────────────────────
 
     let overreach_results = vec![
-            run_overreach::<ObserveWorkspace>(
-                "observe.workspace",
-                overreach_registry_observe_workspace(),
-                ObserveWorkspaceParams::ReadFile(ReadFileParams {
-                    path: "src/lib.rs".into(),
-                    offset: None,
-                    limit: None,
-                    line_numbers: None,
-                }),
-            )
-            .await,
             run_overreach::<Create>(
                 "mutate.create",
                 overreach_registry_create(),
@@ -310,19 +284,18 @@ async fn generate_warn_report() -> String {
     });
     tokio::task::yield_now().await;
 
-    // observe.workspace: a legal read on the canonical project root. Before #29
-    // this leg called `session.todo_write`, which no native registry serves any
-    // more — the warn-mode success leg needs a *native* method, and a Component
-    // Tool would prove nothing about the native policy lifecycle.
-    let todo_ok = success_client
-        .call::<lancet_catalog::methods::workspace::ObserveWorkspace>(
-            lancet_catalog::methods::workspace::ObserveWorkspaceParams::ListDirectory(
-                lancet_catalog::methods::workspace::ListDirectoryParams {
-                    path: ".".into(),
-                    limit: None,
-                },
-            ),
-        )
+    // mutate.create: a legal write inside the canonical project root. This leg
+    // needs a *native* method, because it exercises the native policy lifecycle
+    // in warn mode; a Component Tool is governed by Cell admission instead and
+    // would prove nothing here. It has moved twice for that reason — off
+    // `session.todo_write` in #29 and off `observe.workspace` in #30, as each
+    // became a Component.
+    let native_ok = success_client
+        .call::<Create>(CreateParams {
+            path: "warn-mode-ok.txt".into(),
+            content: "written\n".into(),
+            create_parents: false,
+        })
         .await
         .is_ok();
 
@@ -331,7 +304,7 @@ async fn generate_warn_report() -> String {
     // Keep ws_dir alive until after server task
     drop(ws_dir);
 
-    let success_results = [("observe.workspace", todo_ok)];
+    let success_results = [("mutate.create", native_ok)];
 
     // ── Count leaks ──────────────────────────────────────────────────────
     let leak_count = overreach_results.iter().filter(|r| !r.leaked).count();

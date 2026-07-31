@@ -19,11 +19,9 @@
 
 use lancet_api::{LancetRuntime, LancetRuntimeConfig};
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
+use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::methods::workspace::{
-    Create, CreateParams, Edit, EditOperation, EditParams, ObserveWorkspace,
-    ObserveWorkspaceParams, ReadFileParams,
-};
+use lancet_catalog::methods::workspace::{Create, CreateParams, Edit, EditOperation, EditParams};
 use lancet_cep::ToolExposure;
 use lancet_protocol::Retriability;
 use tempfile::TempDir;
@@ -32,9 +30,18 @@ use tempfile::TempDir;
 /// descriptor authority is `tools/todo-write/manifest.toml`.
 const TODO_WRITE: &str = "session.todo_write";
 
+/// The second migrated Component Tool (#30). Same reason it is a literal: its
+/// contract lives in `tools/observe-workspace/manifest.toml`, and the
+/// `lancet-catalog` types that used to describe it are gone.
+const OBSERVE_WORKSPACE: &str = "observe.workspace";
+
+/// The two embedded Component Tools of the default distribution, in the order
+/// their source directories sort.
+const COMPONENT_TOOLS: [&str; 2] = [OBSERVE_WORKSPACE, TODO_WRITE];
+
 /// Build a production runtime rooted at `root` with all five shipped Tools
-/// enabled — the four native catalog methods plus the embedded Component — and an
-/// empty write-deny list.
+/// enabled — the three native catalog methods plus the two embedded Components —
+/// and an empty write-deny list.
 fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
     let mut policy = PolicyConfig::defaults_for_project_root(root.to_path_buf());
     policy.workspace = WorkspacePolicy {
@@ -42,18 +49,22 @@ fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
         ..Default::default()
     };
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    enabled.push(TODO_WRITE.to_string());
+    enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
     LancetRuntime::build(LancetRuntimeConfig {
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         project_root: root.to_path_buf(),
         enabled_tools: enabled,
         policy,
-        // The embedded Component Tool is admitted too: `enabled_tools` is the
+        // The embedded Component Tools are admitted too: `enabled_tools` is the
         // stage-1 capability grant, and the shipped catalog is no longer
-        // native-only (#29).
+        // native-only (#29). Since #30 that grant is what makes *observation*
+        // reachable at all — Cell admission is fail-closed and admits nothing by
+        // default, so an omitted `observe.workspace` here would fail every read
+        // in this file with `capability_not_granted` rather than a policy answer.
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
-            enabled_tools: std::iter::once(TODO_WRITE.to_string()).collect(),
-            ..Default::default()
+            enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
+            denied_capabilities: Default::default(),
+            max_boundary: lancet_protocol::cell::Trust::In,
         },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: lancet_api::AuditBacking::InMemory,
@@ -85,15 +96,19 @@ async fn direct_local_runtime_exposes_closed_five_method_catalog() {
     got.sort();
     assert_eq!(got, expected, "Agent-visible catalog must be exactly five");
 
-    // Four of the five come from the native catalog; the fifth is the embedded
-    // Component, projected from its generated descriptor.
+    // Three of the five come from the native catalog; the other two are the
+    // embedded Components, projected from their generated descriptors. The split
+    // moved with #30 — the Agent-visible five did not, which is the point: a
+    // migration is invisible from the model's side of the boundary.
     let native: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     let exposure = ToolExposure::from_catalog_enabled(&native).expect("exposure");
-    assert_eq!(exposure.definitions().len(), 4);
-    assert!(
-        !native.contains(&TODO_WRITE.to_string()),
-        "the migrated Tool must not be a native catalog method"
-    );
+    assert_eq!(exposure.definitions().len(), 3);
+    for migrated in COMPONENT_TOOLS {
+        assert!(
+            !native.contains(&migrated.to_string()),
+            "the migrated Tool must not be a native catalog method: {migrated}"
+        );
+    }
 
     // The Component's LLM projection carries its manifest description and schema.
     let todo = runtime
@@ -110,6 +125,27 @@ async fn direct_local_runtime_exposes_closed_five_method_catalog() {
         todo.parameters["properties"]["todos"]["type"],
         serde_json::json!("array")
     );
+
+    // Same for the observation Tool since #30. Its params schema is the `oneOf`
+    // over four mode branches from `tools/observe-workspace/manifest.toml` — the
+    // shape a catalog type used to carry, now proving the manifest is the sole
+    // descriptor authority.
+    let observe = runtime
+        .tool_definitions()
+        .iter()
+        .find(|t| t.name == OBSERVE_WORKSPACE)
+        .expect("the migrated observation Tool is exposed to the Agent");
+    assert!(
+        observe.description.contains("content_hash"),
+        "the projection must carry the manifest description: {}",
+        observe.description
+    );
+    assert_eq!(
+        observe.parameters["oneOf"].as_array().map(Vec::len),
+        Some(4),
+        "the four observation modes must survive projection: {}",
+        observe.parameters
+    );
 }
 
 /// observe.workspace read_file sees the current Local state, including an
@@ -121,41 +157,36 @@ async fn observe_sees_external_modification_between_tool_calls() {
     let runtime = direct_local_runtime(dir.path());
     let client = runtime.client();
 
+    // Called untyped since #30: the contract is the Source Tool manifest, not a
+    // `lancet-catalog` Rust type, so this is exactly the call a production
+    // caller makes.
+    let read_watch = serde_json::json!({ "mode": "read_file", "path": "watch.txt" });
+
     let first = client
-        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
-            path: "watch.txt".into(),
-            offset: None,
-            limit: None,
-            line_numbers: None,
-        }))
+        .call_raw(OBSERVE_WORKSPACE, read_watch.clone())
         .await
         .expect("first read");
-    let lancet_catalog::methods::workspace::ObserveWorkspaceResult::ReadFile(first) = first else {
-        panic!("read_file result");
-    };
-    assert!(first.content.contains("v1"));
+    assert_eq!(first["mode"], "read_file");
+    let first_content = first["result"]["content"]
+        .as_str()
+        .expect("read_file returns content");
+    assert!(first_content.contains("v1"));
 
     // External writer (the user's editor) changes the file on disk between
     // Tool calls. Direct-Local must observe the new state on the next read.
     std::fs::write(dir.path().join("watch.txt"), "v2-external\n").unwrap();
 
     let second = client
-        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
-            path: "watch.txt".into(),
-            offset: None,
-            limit: None,
-            line_numbers: None,
-        }))
+        .call_raw(OBSERVE_WORKSPACE, read_watch)
         .await
         .expect("second read");
-    let lancet_catalog::methods::workspace::ObserveWorkspaceResult::ReadFile(second) = second
-    else {
-        panic!("read_file result");
-    };
+    assert_eq!(second["mode"], "read_file");
+    let second_content = second["result"]["content"]
+        .as_str()
+        .expect("read_file returns content");
     assert!(
-        second.content.contains("v2-external"),
-        "second read must see the external modification: {}",
-        second.content
+        second_content.contains("v2-external"),
+        "second read must see the external modification: {second_content}"
     );
 }
 
@@ -163,42 +194,43 @@ async fn observe_sees_external_modification_between_tool_calls() {
 /// between two listings. Guards list/grep/find against stale snapshots.
 #[tokio::test]
 async fn observe_list_sees_external_addition_between_tool_calls() {
-    use lancet_catalog::methods::workspace::{ListDirectoryParams, ObserveWorkspaceResult};
+    /// Entry names of a `list_directory` result, in wire order.
+    fn entry_names(result: &serde_json::Value) -> Vec<&str> {
+        result["result"]["entries"]
+            .as_array()
+            .expect("list_directory returns entries")
+            .iter()
+            .map(|entry| entry["name"].as_str().expect("entry name is a string"))
+            .collect()
+    }
 
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("orig.txt"), "x\n").unwrap();
     let runtime = direct_local_runtime(dir.path());
     let client = runtime.client();
 
+    let list_root = serde_json::json!({ "mode": "list_directory", "path": "." });
+
     let first = client
-        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ListDirectory(ListDirectoryParams {
-            path: ".".into(),
-            limit: None,
-        }))
+        .call_raw(OBSERVE_WORKSPACE, list_root.clone())
         .await
         .expect("first list");
-    let ObserveWorkspaceResult::ListDirectory(first) = first else {
-        panic!("list_directory result");
-    };
-    assert!(first.entries.iter().any(|e| e.name == "orig.txt"));
-    assert!(!first.entries.iter().any(|e| e.name == "added.txt"));
+    assert_eq!(first["mode"], "list_directory");
+    let first_names = entry_names(&first);
+    assert!(first_names.contains(&"orig.txt"));
+    assert!(!first_names.contains(&"added.txt"));
 
     std::fs::write(dir.path().join("added.txt"), "new\n").unwrap();
 
     let second = client
-        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ListDirectory(ListDirectoryParams {
-            path: ".".into(),
-            limit: None,
-        }))
+        .call_raw(OBSERVE_WORKSPACE, list_root)
         .await
         .expect("second list");
-    let ObserveWorkspaceResult::ListDirectory(second) = second else {
-        panic!("list_directory result");
-    };
+    assert_eq!(second["mode"], "list_directory");
+    let second_names = entry_names(&second);
     assert!(
-        second.entries.iter().any(|e| e.name == "added.txt"),
-        "second list must see the externally added file: {:?}",
-        second.entries
+        second_names.contains(&"added.txt"),
+        "second list must see the externally added file: {second_names:?}"
     );
 }
 
@@ -449,6 +481,13 @@ async fn successful_mutation_survives_later_failure() {
 /// carries no routing identity: no `execution_backend`, no
 /// `upper_workspace_id`, no adapter-preflight or generic routing invocation
 /// flags (#60 (Codeberg #38)).
+///
+/// Both vocabularies get a leg, because #30 split where "method-local evidence"
+/// is written. A native mutation still records the guarded path and the Local
+/// Revision inline in `metadata_json`; a Component records its concrete path
+/// target in the evidence table and leaves a pointer in the row. The
+/// no-routing-identity assertion is the same for both — that is the #60 subject,
+/// and it must not depend on which vocabulary authorized the call.
 #[tokio::test]
 async fn audit_records_method_local_evidence_without_routing_metadata() {
     let dir = TempDir::new().unwrap();
@@ -456,48 +495,95 @@ async fn audit_records_method_local_evidence_without_routing_metadata() {
     let runtime = direct_local_runtime(dir.path());
     let client = runtime.client();
 
-    let _ = client
-        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
-            path: "a.txt".into(),
-            offset: None,
-            limit: None,
-            line_numbers: None,
-        }))
+    client
+        .call::<Create>(CreateParams {
+            path: "b.txt".into(),
+            content: "audit-body\n".into(),
+            create_parents: false,
+        })
         .await
-        .expect("read");
+        .expect("native create");
+    client
+        .call_raw(
+            OBSERVE_WORKSPACE,
+            serde_json::json!({ "mode": "read_file", "path": "a.txt" }),
+        )
+        .await
+        .expect("component read");
     runtime.audit().await_pending().await;
 
     let rows = runtime
         .audit()
         .query_rows(&lancet_native::AuditQueryFilters::default())
         .expect("rows");
-    assert!(!rows.is_empty(), "audit must record the call");
-    let meta = rows[0].metadata_json.as_deref().unwrap_or("{}");
+    assert_eq!(rows.len(), 2, "audit must record both calls: {rows:?}");
+
+    // ── The native leg: method-local evidence inline in the row ──────────
+    let create_row = rows
+        .iter()
+        .find(|row| row.method == Create::NAME)
+        .expect("the native call is audited");
+    let create_meta = create_row.metadata_json.as_deref().unwrap_or("{}");
     // Method-local evidence: the request target, the guarded normalized
-    // path, and the content hash (Local Revision) of the observed file.
+    // path, and the content hash (Local Revision) of the written file.
     assert!(
-        meta.contains("a.txt"),
-        "audit metadata must record the real Local request path: {meta}"
+        create_meta.contains("b.txt"),
+        "audit metadata must record the real Local request path: {create_meta}"
     );
     assert!(
-        meta.contains("\"guarded_path\":\"a.txt\""),
-        "audit metadata must record the guarded normalized path: {meta}"
+        create_meta.contains("\"guarded_path\":\"b.txt\""),
+        "audit metadata must record the guarded normalized path: {create_meta}"
     );
     assert!(
-        meta.contains("content_hash") && meta.contains("blake3:"),
-        "audit metadata must record the Local Revision (content_hash): {meta}"
+        create_meta.contains("content_hash") && create_meta.contains("blake3:"),
+        "audit metadata must record the Local Revision (content_hash): {create_meta}"
     );
-    // No routing identity or invocation flags survive.
-    for retired in [
-        "execution_backend",
-        "upper_workspace_id",
-        "adapter_preflight_invoked",
-        "backend_invoked",
-        "direct-local",
-    ] {
-        assert!(
-            !meta.contains(retired),
-            "audit metadata must not carry retired routing field '{retired}': {meta}"
-        );
+
+    // ── The Component leg: the same fact, one indirection away ───────────
+    let observe_row = rows
+        .iter()
+        .find(|row| row.method == OBSERVE_WORKSPACE)
+        .expect("the observation is audited");
+    assert_eq!(
+        observe_row.semantic_stage, "cell_component",
+        "since #30 the observation is labeled by the vocabulary that authorized it"
+    );
+    let observe_meta = observe_row.metadata_json.as_deref().unwrap_or("{}");
+    let evidence_id = serde_json::from_str::<serde_json::Value>(observe_meta)
+        .expect("metadata json")["evidence_id"]
+        .as_i64()
+        .expect("a Component row points at its evidence");
+    let evidence = runtime
+        .audit()
+        .call_evidence(lancet_native::EvidenceId(evidence_id))
+        .expect("evidence read")
+        .expect("evidence row exists");
+    assert_eq!(evidence.tool, OBSERVE_WORKSPACE);
+    // The concrete path the host resolved and authorized — the Component's
+    // equivalent of `guarded_path`, recorded by the host rather than reported by
+    // the guest.
+    assert!(
+        evidence.effects.effects.iter().any(|effect| matches!(
+            &effect.target,
+            lancet_protocol::evidence::ObservedTarget::Path { path } if path == "a.txt"
+        )),
+        "the observation's evidence must name the resolved Local path: {:?}",
+        evidence.effects.effects
+    );
+
+    // No routing identity or invocation flags survive, in either vocabulary.
+    for meta in [create_meta, observe_meta] {
+        for retired in [
+            "execution_backend",
+            "upper_workspace_id",
+            "adapter_preflight_invoked",
+            "backend_invoked",
+            "direct-local",
+        ] {
+            assert!(
+                !meta.contains(retired),
+                "audit metadata must not carry retired routing field '{retired}': {meta}"
+            );
+        }
     }
 }

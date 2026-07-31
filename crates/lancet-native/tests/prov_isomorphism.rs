@@ -9,7 +9,7 @@
 //! in-toto statements after a live turn.
 
 use lancet_catalog::CepMethod;
-use lancet_catalog::methods::workspace::{Create, Edit, ObserveWorkspace};
+use lancet_catalog::methods::workspace::{Create, Edit};
 use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
 use lancet_native::provenance::{
     EvidenceLookup, canonicalize_prov_fragment, project_rows, project_rows_with_evidence,
@@ -21,6 +21,14 @@ use lancet_protocol::evidence::{
     DeniedOperation, DeniedOperationsRecord, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION,
     ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
 };
+
+/// `observe.workspace` as a plain method name.
+///
+/// It is a Component Tool since #30, so there is no catalog type to take `NAME`
+/// from. These tests use it as an audit-row subject — PROV projection reads the
+/// stored method name and never consults the catalog — so a literal is the
+/// honest spelling.
+const OBSERVE_WORKSPACE: &str = "observe.workspace";
 
 fn store_row(
     audit: &CepAuditStore,
@@ -72,14 +80,14 @@ fn read_only_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         1,
-        ObserveWorkspace::NAME,
+        OBSERVE_WORKSPACE,
         r#"{"required_capability":"read_path","content_hash":"sha256:read1"}"#,
     );
     store_row(
         &audit,
         &ctx,
         2,
-        ObserveWorkspace::NAME,
+        OBSERVE_WORKSPACE,
         r#"{"required_capability":"inspect","canonical_target":"src"}"#,
     );
     let rows = audit
@@ -174,6 +182,10 @@ fn component_turn_projection_separates_admission_from_effects() {
             target: target.clone(),
             source: EffectSource::Result,
             context_measure: Some(18),
+            // A result effect applies no bound, so it has no truncation verdict
+            // to report (#30).
+            truncated: None,
+            visibility: None,
         }],
     };
     let denied = DeniedOperationsRecord {
@@ -238,7 +250,7 @@ fn mixed_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         1,
-        ObserveWorkspace::NAME,
+        OBSERVE_WORKSPACE,
         r#"{"required_capability":"read_path","content_hash":"sha256:m1"}"#,
     );
     store_row(

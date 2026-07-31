@@ -183,17 +183,48 @@ pub fn admit_tool(
 pub enum OperationDenial {
     #[error("cell {0} is not covered by an admitted capability")]
     CellNotAdmitted(String),
-    /// D13: no channel can legitimately produce a path/host target this
-    /// cycle, and `none` carries nothing to validate — all fail closed.
+    /// No channel can legitimately produce a host target yet, and `none`
+    /// carries nothing to validate — both fail closed. `path` left this set in
+    /// #30, when the workspace channel arrived to produce it.
     #[error("target kind {0} is not authorizable")]
     UnsupportedTarget(&'static str),
     #[error("session target {actual} is not the call's turn {expected}")]
     TurnMismatch { expected: String, actual: String },
+    /// A path target whose cell does not root in a workspace-channel scope.
+    #[error("path target requires a workspace-channel scope, but {0} is not one")]
+    PathOutsideWorkspaceChannel(String),
+    /// A path target that is not in the project-relative comparison form the
+    /// host produces. Structural, not a containment check: containment is
+    /// enforced by the workspace's per-segment resolution, and this refuses a
+    /// *shape* that resolution could never have emitted.
+    #[error("path target {0} is not a project-relative resolved path")]
+    PathNotProjectRelative(String),
 }
 
 /// Authorize one operation: its host-bound cell must be covered by an
 /// admitted capability, and its concrete target must pass host-owned scope
 /// validation. Guests never name either — both are host-resolved.
+///
+/// # Path targets
+///
+/// #30 opened `ObservedTarget::Path` for the workspace channel (it was refused
+/// outright while no channel could produce one). Two conditions hold, and
+/// neither is a substitute for filesystem containment:
+///
+/// 1. The cell's scope must be declared by the Tool on the **workspace**
+///    channel. A Tool cannot use a session- or network-channel grant to touch a
+///    path, so a capability audited as "session" can never turn into a file
+///    read.
+/// 2. The path must be in the project-relative comparison form the host's
+///    resolver emits: not absolute, no `..` component, no NUL. This refuses
+///    shapes the resolver could not have produced, which is what makes a
+///    fabricated target detectable here rather than deep in an IO call.
+///
+/// Containment itself — that the path is inside the root after every symlink,
+/// that System Path Exclusion applied, that policy makes it visible — is the
+/// concrete workspace's job, enforced per segment during resolution. This
+/// function authorizes the *grant*; the resolver enforces the *boundary*. Both
+/// run, in that order, for every operation.
 pub fn authorize_operation(
     admitted: &AdmittedTool,
     cell: &Cell,
@@ -209,10 +240,43 @@ pub fn authorize_operation(
             expected: turn_id.to_owned(),
             actual: actual.clone(),
         }),
-        ObservedTarget::Path { .. } => Err(OperationDenial::UnsupportedTarget("path")),
+        ObservedTarget::Path { path } => {
+            let declared = admitted
+                .descriptor
+                .scopes
+                .iter()
+                .find(|scope| scope.name == cell.scope);
+            match declared {
+                Some(scope) if scope.channel == ChannelKind::Workspace => {}
+                // An undeclared scope has no channel, so it cannot be the
+                // workspace one: fail closed rather than defaulting.
+                _ => {
+                    return Err(OperationDenial::PathOutsideWorkspaceChannel(
+                        cell.scope.clone(),
+                    ));
+                }
+            }
+            if !is_project_relative(path) {
+                return Err(OperationDenial::PathNotProjectRelative(path.clone()));
+            }
+            Ok(())
+        }
         ObservedTarget::Host { .. } => Err(OperationDenial::UnsupportedTarget("host")),
         ObservedTarget::None => Err(OperationDenial::UnsupportedTarget("none")),
     }
+}
+
+/// Whether a path target has the shape the host's resolver emits.
+///
+/// `.` is the root itself and is legal. Anything absolute, containing a `..`
+/// component, or carrying a NUL is a shape the resolver never produces.
+fn is_project_relative(path: &str) -> bool {
+    if path.is_empty() || path.contains('\0') || path.starts_with('/') {
+        return false;
+    }
+    !std::path::Path::new(path)
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
 /// Host-owned scope resolution for evidence: trust comes from the descriptor
@@ -684,19 +748,13 @@ mod tests {
         );
     }
 
-    /// D13: path/host/none targets are refused outright this cycle — no
-    /// domain channel exists that could legitimately produce one.
+    /// Host and `none` targets are still refused outright: no channel produces
+    /// them. `path` left this set in #30 with the workspace channel.
     #[test]
-    fn authorize_operation_denies_non_session_targets() {
+    fn authorize_operation_denies_host_and_none_targets() {
         let admitted = admitted_session_tool();
         let operation_cell = cell(CtxOp::Mutate, "session");
         let cases = [
-            (
-                ObservedTarget::Path {
-                    path: "src/lib.rs".into(),
-                },
-                "path",
-            ),
             (
                 ObservedTarget::Host {
                     host: "example.com".into(),
@@ -712,6 +770,161 @@ mod tests {
                 "{target:?} must fail closed"
             );
         }
+    }
+
+    /// #30: a path target is authorizable only through a workspace-channel
+    /// scope. A session-channel grant reaching a file would mean a capability
+    /// audited as "session" could read the project.
+    #[test]
+    fn path_target_requires_a_workspace_channel_scope() {
+        let admitted = admit_tool(
+            descriptor(vec![
+                capability("session.events", CtxOp::Mutate, "session"),
+                capability("workspace.observation", CtxOp::Alloc, "workspace"),
+            ]),
+            &policy(&[], Trust::In),
+        )
+        .expect("both capabilities admit");
+        let target = ObservedTarget::Path {
+            path: "src/lib.rs".into(),
+        };
+
+        // The workspace-channel cell authorizes.
+        assert_eq!(
+            authorize_operation(
+                &admitted,
+                &cell(CtxOp::Alloc, "workspace"),
+                &target,
+                "turn-1"
+            ),
+            Ok(())
+        );
+        // The session-channel cell does not, even though it is equally admitted.
+        assert_eq!(
+            authorize_operation(
+                &admitted,
+                &cell(CtxOp::Mutate, "session"),
+                &target,
+                "turn-1"
+            ),
+            Err(OperationDenial::PathOutsideWorkspaceChannel(
+                "session".into()
+            ))
+        );
+    }
+
+    /// An undeclared scope has no channel, so it cannot be the workspace one.
+    ///
+    /// Two independent refusals stand between such a cell and a path, and this
+    /// pins both. Admission removes it first — an undeclared scope resolves to
+    /// `ex` trust, which a `max_boundary = in` policy excludes — so the tool with
+    /// only that capability never admits at all. Reaching the authorizer with the
+    /// cell anyway (a laxer boundary, or a host bug) still fails: the scope is not
+    /// on the workspace channel.
+    #[test]
+    fn path_target_with_an_undeclared_scope_fails_closed() {
+        // Stage one: the boundary excludes the undeclared-scope capability, so
+        // there is nothing left to admit.
+        let denial = admit_tool(
+            descriptor(vec![capability("ghost", CtxOp::Alloc, "undeclared")]),
+            &policy(&[], Trust::In),
+        )
+        .expect_err("an undeclared scope is ex-trust and the boundary excludes it");
+        assert_eq!(denial.evidence.boundary_excluded, vec!["ghost".to_string()]);
+
+        // Stage two: with a boundary that admits it, the authorizer still refuses
+        // the path target on the channel check.
+        let admitted = admit_tool(
+            descriptor(vec![capability("ghost", CtxOp::Alloc, "undeclared")]),
+            &policy(&[], Trust::Ex),
+        )
+        .expect("an ex boundary admits the capability");
+        assert_eq!(
+            authorize_operation(
+                &admitted,
+                &cell(CtxOp::Alloc, "undeclared"),
+                &ObservedTarget::Path {
+                    path: "src/lib.rs".into()
+                },
+                "turn-1"
+            ),
+            Err(OperationDenial::PathOutsideWorkspaceChannel(
+                "undeclared".into()
+            ))
+        );
+    }
+
+    /// A path target must have the shape the host's resolver emits. This is not
+    /// containment — the workspace enforces that per segment — but a fabricated
+    /// target is detectable here rather than deep in an IO call.
+    #[test]
+    fn path_target_rejects_shapes_the_resolver_never_emits() {
+        let admitted = admit_tool(
+            descriptor(vec![capability(
+                "workspace.observation",
+                CtxOp::Alloc,
+                "workspace",
+            )]),
+            &policy(&[], Trust::In),
+        )
+        .expect("workspace capability admits");
+        let operation_cell = cell(CtxOp::Alloc, "workspace");
+
+        for bad in ["/etc/passwd", "../outside", "src/../../etc", "", "a\0b"] {
+            assert_eq!(
+                authorize_operation(
+                    &admitted,
+                    &operation_cell,
+                    &ObservedTarget::Path {
+                        path: bad.to_string()
+                    },
+                    "turn-1"
+                ),
+                Err(OperationDenial::PathNotProjectRelative(bad.to_string())),
+                "{bad:?} is not a shape the resolver emits"
+            );
+        }
+        // `.` is the root itself, and a nested relative path is the ordinary case.
+        for good in [".", "src/lib.rs", "a/b/c.txt"] {
+            assert_eq!(
+                authorize_operation(
+                    &admitted,
+                    &operation_cell,
+                    &ObservedTarget::Path {
+                        path: good.to_string()
+                    },
+                    "turn-1"
+                ),
+                Ok(()),
+                "{good:?} is a legal resolved path"
+            );
+        }
+    }
+
+    /// Cell coverage is still checked first: a workspace-channel path target
+    /// whose cell was never admitted is refused as uncovered, not as a path
+    /// problem. Order matters — reporting the path shape for an unadmitted cell
+    /// would tell a guest its target was acceptable.
+    #[test]
+    fn path_target_still_requires_an_admitted_cell() {
+        let admitted = admit_tool(
+            descriptor(vec![capability("session.events", CtxOp::Mutate, "session")]),
+            &policy(&[], Trust::In),
+        )
+        .expect("session capability admits");
+        assert_eq!(
+            authorize_operation(
+                &admitted,
+                &cell(CtxOp::Alloc, "workspace"),
+                &ObservedTarget::Path {
+                    path: "src/lib.rs".into()
+                },
+                "turn-1"
+            ),
+            Err(OperationDenial::CellNotAdmitted(
+                "alloc:none:workspace".into()
+            ))
+        );
     }
 
     #[test]

@@ -414,13 +414,39 @@ fn component_footprint(bytes: &[u8]) -> ResourceFootprint {
     footprint
 }
 
-/// Derive the domain channel set supplied by the actual imports. Only known
-/// ToolHost domain WIT imports grant a channel; `host-control` grants none.
-/// #28 (Codeberg #6) will add handle-per-capability domain imports.
-fn channels_for_domain_imports(_imports: &BTreeSet<String>) -> BTreeSet<ChannelKind> {
-    // #27 (Codeberg #5): no domain imports exist yet. host-control is
-    // control-only.
-    BTreeSet::new()
+/// Derive the domain channel set supplied by the Component's *actual* imports.
+///
+/// Only known Tool Host domain WIT interfaces grant a channel; `host-control`
+/// grants none, because it is control-only. This is the seam that makes a
+/// declared scope insufficient on its own: a Tool declaring a workspace-channel
+/// scope without importing a workspace interface has no way to reach the
+/// filesystem, so composition refuses it with `MissingChannelAdapters` rather
+/// than admitting a scope nothing can serve.
+///
+/// The imports are read out of the Component binary, not out of the manifest, so
+/// this reflects what the Tool actually linked. An unknown interface name grants
+/// nothing — which fails closed, since the required-channel check is a subset
+/// test against what is granted here.
+fn channels_for_domain_imports(imports: &BTreeSet<String>) -> BTreeSet<ChannelKind> {
+    let mut channels = BTreeSet::new();
+    for import in imports {
+        // The versioned instance-import name is `lattice:tool-host/<iface>@<ver>`.
+        // Match on the interface segment so a version bump does not silently drop
+        // a channel — which would turn a working Tool into a composition failure
+        // for a reason unrelated to its authority.
+        let interface = import
+            .rsplit_once('@')
+            .map_or(import.as_str(), |(name, _version)| name)
+            .rsplit_once('/')
+            .map_or("", |(_package, iface)| iface);
+        // #30: Policy-Visible Workspace observation. The host enforces every
+        // path decision behind it; the import is what makes the workspace
+        // channel reachable at all.
+        if interface == "workspace-observe" {
+            channels.insert(ChannelKind::Workspace);
+        }
+    }
+    channels
 }
 
 /// Parse a 64-char hex string into a `[u8; 32]` digest.

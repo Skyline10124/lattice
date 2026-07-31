@@ -16,7 +16,7 @@
 ### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — slices A–D landed; Tool migration remains — `architecture` / `lancet-runtime` / Tool migration
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; migration crates in `crates/{lancet-catalog,lancet-cep,lancet-dispatch,lancet-native}`; `crates/lancet-runtime` (slice C) + `crates/lattice-tool-prelude` (slice B) + `tools/noop` (slice B); slice D wired Component dispatch through `crates/{lancet-dispatch,lancet-audit,lancet-native,lancet-api}` and the descriptor-driven adapter in `crates/lattice-api`.
 - **Problem**: Tool contracts are currently centralized in `lancet-catalog`, projected through `lancet-cep`, dispatched through `lancet-dispatch`, and implemented as trusted native handlers. That path cannot make independently maintained Tool code structurally unable to bypass host filesystem, network, or process policy. It also duplicates the future Source Tool manifest authority and leaves the runtime split across migration crates.
-- **Current status**: PARTIAL — slices A–D landed. Slice A: Cell effect core in `lancet-protocol::cell`. Slice B: manifest + deterministic codegen + WIT + prelude + no-op guest Component. Slice C: `lancet-runtime` Component engine (wasmtime 46, no ambient WASI), closed composition gate (fail-closed: missing/duplicate/unapproved/digest/artifact/ABI/import/channel drift), minimal ToolHost (control-only), `call` execution with result CellRef + schema validation + Cell evidence, structured error mapping (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/`CallCancelled`); 26 tests; no `lancet-native`/`lancet-api`/LATTICE dependency at this slice. Slice D: closed Component dispatch through the existing CEP server/audit lifecycle (`lancet-dispatch` `call_named`, `lancet-native`/`lancet-api` `ServerRunConfig.components` dispatch split, `lancet-audit` `component_cells`), descriptor-driven LLM adapter (`lattice-api` `CepExecutorAdapter` over generated `ToolDefinition`s; hardcoded five-arm dispatch deleted), `noop.echo` CEP round-trip + Cell evidence + audit lifecycle, end-to-end tests; `lancet-native`/`lancet-api` now take a production `lancet-runtime` dep. Production `from_embedded()` yields an empty Component catalog, so all 5 native methods are unchanged. REMAINING: #28 (capability admission), #29–#32 (Tool migration), #34 (delete migration crates), #35 (Bundle install), #36 (docs).
+- **Current status**: PARTIAL — slices A–D landed. Slice A: Cell effect core in `lancet-protocol::cell`. Slice B: manifest + deterministic codegen + WIT + prelude + no-op guest Component. Slice C: `lancet-runtime` Component engine (wasmtime 46, no ambient WASI), closed composition gate (fail-closed: missing/duplicate/unapproved/digest/artifact/ABI/import/channel drift), minimal ToolHost (control-only), `call` execution with result CellRef + schema validation + Cell evidence, structured error mapping (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/`CallCancelled`); 26 tests; no `lancet-native`/`lancet-api`/LATTICE dependency at this slice. Slice D: closed Component dispatch through the existing CEP server/audit lifecycle (`lancet-dispatch` `call_named`, `lancet-native`/`lancet-api` `ServerRunConfig.components` dispatch split, `lancet-audit` `component_cells`), descriptor-driven LLM adapter (`lattice-api` `CepExecutorAdapter` over generated `ToolDefinition`s; hardcoded five-arm dispatch deleted), `noop.echo` CEP round-trip + Cell evidence + audit lifecycle, end-to-end tests; `lancet-native`/`lancet-api` now take a production `lancet-runtime` dep. Since then #28 (capability admission), #29 (`session.todo_write`) and #30 (`observe.workspace` — with the concrete Local Workspace moved into `lancet-runtime` and the first domain WIT imports, `workspace-observe`) landed: production `from_embedded()` composes two embedded Component Tools and the native catalog is three methods (Create/Edit/Fetch). REMAINING: #31–#32 (Tool migration), #34 (delete migration crates), #35 (Bundle install), #36 (docs).
 - **Plan**: Execute #28 (capability admission + domain WIT), #29–#32 (Tool migration, mutation also waiting for #64), #34 (converge + delete migration crates), #35 (Bundle), #36 (docs). Do not add a third Tool schema, native Tool ABI, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
 
 ### M-REWIND-01: `/rewind` has no gix-backed Local mutation history — RESOLVED by #63 + #64; two residuals moved to L-64-01 — `architecture` / `lancet-runtime` / `lattice-session` / `lattice-api`
@@ -75,35 +75,35 @@
 - **收口（2026-07-27）**: 两条 race 均已修复并落地 main —— (a) git-graph fixture 改用 `TempDir` 唯一路径（#106，收口 `L-47-02`）；(b) `lattice-api` fixture 的多余 `set_current_dir` 被删除，生产 `init_bare` 路径补上 CWD 恢复（#109）。本条保留为记录，不再是 OPEN。
 
 ### L-39-01: Local Workspace 读/观察路径仍是 `resolve_secure`-only,只有写路径钉住了 dirfd — `security` / `lancet-native` / GitHub #39
-- **位置**: `crates/lancet-native/src/workspace/local.rs`:`resolve_secure`(约 L88 起)与其调用方 `read_file` / `list_dir` / `grep` / `find_files`;`open_parent_dir_secure`(约 L244 起)目前只服务 `create_excl` / `install_atomic` / `remove_file`。
+- **位置**: `crates/lancet-runtime/src/workspace/local.rs`(#30 从 `lancet-native` 下移;路径别名不变语义):`resolve_secure`(约 L88 起)与其调用方 `read_file` / `list_dir` / `grep` / `find_files`;`open_parent_dir_secure`(约 L244 起)目前只服务 `create_excl` / `install_atomic` / `remove_file`。
 - **问题**: #39 只把**写**路径改成 pinned-dirfd(`openat`/`renameat`/`unlinkat`,`O_NOFOLLOW|O_DIRECTORY`)。读/观察路径仍是「逐段 `symlink_metadata` 校验 → 拿最终 `PathBuf` 去 `File::open`」的两段式模型,校验与打开之间存在 TOCTOU 窗口:本地攻击者在 resolve 之后把某个父组件换成 symlink,可以把一次 **READ** 重定向到 workspace root 之外。写路径的同类窗口已闭合,读路径没有。
 - **当前状态**: ACCEPTED RESIDUAL。威胁模型要求攻击者已对项目目录有并发写权限;此时读被重定向只泄露内容,不改写 Local bytes,而唯一能持久改变宿主状态的写路径已结构性闭合。项目根在构造时 canonicalize,逐段 `symlink_metadata` 仍然挡掉所有**静态**存在的 symlink 组件。
 - **升级条件**: 若 Local Workspace 需要在多租户 / 不可信共存目录下运行,或读取结果被当作安全决策输入(例如把读到的内容喂给 policy) → 升为 MEDIUM。
 - **计划**: 复用现成的 `open_parent_dir_secure` + `dir_open_flags()` 把叶子 fd 交给读路径,`grep_walk`/`find_walk` 改为 `openat`-relative 递归。**不要**为此引入第二套路径解析实现——单一解析权威是 ADR 0003 的前提。
 
 ### L-39-02: `grep_walk` / `find_walk` 递归无显式深度上限 — `robustness` / `lancet-native` / GitHub #39
-- **位置**: `crates/lancet-native/src/workspace/local.rs`:`grep_walk`(约 L822 起)、`find_walk`(约 L949 起)。
+- **位置**: `crates/lancet-runtime/src/workspace/local.rs`(#30 从 `lancet-native` 下移;路径别名不变语义):`grep_walk`(约 L822 起)、`find_walk`(约 L949 起)。
 - **问题**: 两者都是对 `fs::read_dir` 的直接递归,只在 `out.len() >= max_results` 与 `GrepBudget::exhausted()` 时提前返回。#39 引入的 byte budget(`GREP_MAX_FILE_BYTES` / `GREP_MAX_TOTAL_BYTES` / `GREP_MAX_LINE_BYTES`)限住了 IO 与内存,但**不限栈深度**:目录嵌套深度直接等于递归深度,`find_walk` 更是连 byte budget 都没有。
 - **当前状态**: ACCEPTED RESIDUAL。当前 walk 不进入目录 symlink(见 L-39-03),因此不存在环路;真实深度被文件系统路径长度上限约束(Linux `PATH_MAX` 4096,每层至少两字节),在默认栈上不足以溢出。
 - **升级条件**: 若 walk 改为跟随目录 symlink(环路可无限深)、或观察路径被搬到栈更小的 worker 线程 → 升为 MEDIUM。
 - **计划**: 给两个 walk 加显式 `max_depth` 常量与参数,超限按「静默截断」处理(与 over-cap 文件同口径),不要报错。
 
 ### L-39-03: grep/find walk 对目录 symlink 既不进入也不报告,与 `list_dir` 口径不一致 — `api-shape` / `lancet-native`(pre-existing)
-- **位置**: `crates/lancet-native/src/workspace/local.rs`:`grep_walk` / `find_walk` 中的 `fs::symlink_metadata` + `meta.is_dir()` / `meta.is_file()` 分支;对照 `list_dir` 的 `file_type_kind`。
+- **位置**: `crates/lancet-runtime/src/workspace/local.rs`(#30 从 `lancet-native` 下移;路径别名不变语义):`grep_walk` / `find_walk` 中的 `fs::symlink_metadata` + `meta.is_dir()` / `meta.is_file()` 分支;对照 `list_dir` 的 `file_type_kind`。
 - **问题**: symlink 条目的 `symlink_metadata` 既不是 dir 也不是 file,两个 walk 的 if/else-if 因此整条跳过。不递归是符合 root-escape 防御预期的,但**也不出现在结果里**——哪怕 `find_files` 的 pattern 精确匹配它的文件名。#39 之后 `list_dir` 会把同一条目报成 `PathKind::Symlink`,于是同一个 symlink 在 list 与 find 下有两种可见性答案。
 - **当前状态**: ACCEPTED RESIDUAL,pre-existing——该行为早于 #39,#39 只修了 `list_dir` 一侧,没有(也不打算在本票)统一 walk 一侧。
 - **升级条件**: 若用户报告 `find_files` 漏掉可见 symlink,或 Policy-Visible Workspace 要求 read/list/grep/find 四条路径给出同一可见性答案 → 升为 LOW-MEDIUM。
 - **计划**: 让两个 walk 复用 `file_type_kind` 分类:visibility 允许时把 symlink 条目**报告**出来,但仍然不递归进入。
 
 ### L-39-04: pinned-dirfd 写路径挡不住"把 pinned 目录整体 rename 出工作区" — `security` / `lancet-native` / GitHub #39
-- **位置**: `crates/lancet-native/src/workspace/local.rs`:`open_parent_dir_secure`(约 L244 起)与三个写入调用方 `create_excl` / `install_atomic` / `remove_file`。
+- **位置**: `crates/lancet-runtime/src/workspace/local.rs`(#30 从 `lancet-native` 下移;路径别名不变语义):`open_parent_dir_secure`(约 L244 起)与三个写入调用方 `create_excl` / `install_atomic` / `remove_file`。
 - **问题**: #39 的 pinned-dirfd walk 分两步——先解析父目录拿到 fd,再对叶子做 `openat`/`renameat`/`unlinkat`。`openat2(RESOLVE_BENEATH)` 是把父与叶子在一次内核调用里原子解析,本实现不是。攻击者在 pin 与叶子操作之间把**被 pin 的目录本身** rename 到工作区外,fd 跟随 inode,叶子就落在工作区外。整个过程没有任何 symlink,`O_NOFOLLOW` 不会触发,且 pin 之后没有任何 containment 复检。本分支的对抗性复核用一份 C 复刻实测确认:pin 住 `root/a/b` 后把 `root/a/b` 移出工作区,create 落到 `.../outside/stolen/victim.txt`。
 - **当前状态**: ACCEPTED RESIDUAL。**#39 报告的原缺陷已闭合**——"父目录组件在校验后被替换为 symlink"这一向量被 pin 结构性挡住。本条是复核新发现的、更窄的另一向量:要求攻击者已对项目目录持有并发写权限(与 L-39-01 同一威胁模型前提)。相关 doc comment 已就地改写,不再声称 `RESOLVE_BENEATH` 等价。
 - **升级条件**: 若 Local Workspace 要在多租户 / 不可信共存目录下运行,或写路径被用于安全敏感落盘(凭据、策略文件)→ 升为 MEDIUM。
 - **计划**: Linux 上改用 `openat2(RESOLVE_BENEATH)` 对整条路径做原子解析,本 pinned walk 降级为 macOS fallback。**不要**用"pin 后沿 `..` 走回 root 比对 dev/ino"来充数——那本身仍是 TOCTOU,只是把窗口变窄,会带来已闭合的错觉。
 
 ### L-39-05: grep 返回载荷无聚合上限,`GREP_MAX_LINE_BYTES` 只约束单行 — `robustness` / `lancet-native` / GitHub #39
-- **位置**: `crates/lancet-native/src/workspace/local.rs`:`GREP_MAX_LINE_BYTES` 及其 doc comment;`crates/lancet-native/src/handlers/observation.rs` 的 `charge_observation_bytes`;`crates/lancet-authority/src/policy/observation.rs` 的 `max_grep_matches`(默认 1000)。
+- **位置**: `crates/lancet-runtime/src/workspace/local.rs`(#30 从 `lancet-native` 下移;路径别名不变语义):`GREP_MAX_LINE_BYTES` 及其 doc comment;`crates/lancet-runtime/src/host_workspace.rs` 的 budget charge(#30 前为 `lancet-native/src/handlers/observation.rs` 的 `charge_observation_bytes`,已随迁移删除);`crates/lancet-authority/src/policy/observation.rs` 的 `max_grep_matches`(默认 1000)。
 - **问题**: #39 的 byte budget 约束的是**读入**字节数,不约束**返回**载荷。单条匹配行上限 64 KiB × 默认 1000 条上限 ≈ 64 MiB 可以在 `charge_observation_bytes` 被调用之前就堆在 `out` 里。复核实测该形状峰值 RSS 66,604 KB。`GREP_MAX_LINE_BYTES` 的 doc comment 声称"单条病态长行无法撑爆 GrepMatch 载荷"——按单行成立,按聚合不成立。
 - **当前状态**: ACCEPTED RESIDUAL。相对原缺陷(单文件 200 MB → RSS +400 MB,且与 `max_results` 无关)已是数量级改善,且现在有确定性上界(64 KiB × `max_results`),不再随文件大小无界增长。
 - **升级条件**: 若 `max_grep_matches` 默认值调高,或 grep 结果进入长驻内存 / 并发多路 → 升为 MEDIUM。
@@ -116,12 +116,12 @@
 - **升级条件**: 若在**无**并行会话、磁盘充裕时仍出现 300s 超时或配额失败 → 升为 MEDIUM 并排查是否有测试真的变慢。
 - **计划**: (a) 跑门禁前先确认没有其他会话在编译,或用 `LATTICE_TEST_TIMEOUT_SECS` 抬高超时;(b) 定期 `cargo clean` 不活跃的 worktree target(单个 34–38 GB);(c) **不要**因为这条去删别人正在用的 worktree target;(d) 若要根治并行争用,给各 worktree 配独立 `CARGO_HOME`(锁即不再全局),代价是依赖缓存不复用、磁盘占用更高——在当前 95% 占用下不划算。
 
-### ENV-WASM-01: 不过滤的 `cargo build --workspace` 在本开发机 host-link `noop-echo` cdylib 失败 — `environment` / dev-loop(pre-existing)
-- **位置**: `tools/noop`(`noop-echo`,`[lib] crate-type = ["cdylib"]`,真实目标 `wasm32-unknown-unknown`),它是根 `Cargo.toml` 的 workspace member;任何不带 `-p` / `--exclude` 的 `cargo build --workspace`。
-- **问题**: unfiltered workspace build 会拿**宿主**目标去链接这个 wasm guest cdylib 并失败。它只在 `xtask tool-build` 的 wasm 目标下才有意义。
-- **当前状态**: ACCEPTED RESIDUAL,pre-existing——在本分支的 baseline 上以完全相同方式失败,非 #39 引入。CI 与 `xtask ci` 的 fmt/clippy/test 门都不 host-link 它(`xtask ci` 的 test step 逐 crate 跑 `cargo test -p <crate>`,见 ENV-OOM-01),因此不阻塞任何门禁。
+### ENV-WASM-01: 不过滤的 `cargo build --workspace` 在本开发机 host-link wasm guest cdylib 失败 — `environment` / dev-loop(pre-existing)
+- **位置**: `tools/noop`(`noop-echo`)与 `tools/observe-workspace`(`observe-workspace`,#30 新增)——两者都是 `[lib] crate-type = ["cdylib"]`、真实目标 `wasm32-unknown-unknown`,且都是根 `Cargo.toml` 的 workspace member;任何不带 `-p` / `--exclude` 的 `cargo build --workspace`。
+- **问题**: unfiltered workspace build 会拿**宿主**目标去链接这些 wasm guest cdylib 并失败。它们只在 `xtask tool-build` 的 wasm 目标下才有意义。
+- **当前状态**: ACCEPTED RESIDUAL,pre-existing——在 baseline 上以完全相同方式失败,非 #39/#30 引入。CI 与 `xtask ci` 的 fmt/clippy/test 门都不 host-link 它们(`xtask ci` 的 test step 逐 crate 跑 `cargo test -p <crate>`,见 ENV-OOM-01),因此不阻塞任何门禁。
 - **升级条件**: 若任何门禁步骤引入 unfiltered `cargo build --workspace` → 升为 MEDIUM。
-- **计划**: 验证时一律用 `-p <crate>` 或 `--exclude noop-echo`。若要根治,给 guest crate 加目标约束(`[target.'cfg(target_arch = "wasm32")']` 形态或独立 workspace),**不要**为让宿主链接通过而改它的 `crate-type`——`.wasm` 产物的字节可复现性依赖当前配置(见 L-5-02)。
+- **计划**: 验证时一律用 `-p <crate>` 或 `--exclude noop-echo --exclude observe-workspace`。若要根治,给 guest crate 加目标约束(`[target.'cfg(target_arch = "wasm32")']` 形态或独立 workspace),**不要**为让宿主链接通过而改它们的 `crate-type`——`.wasm` 产物的字节可复现性依赖当前配置(见 L-5-02)。
 
 ### L-39-06: `lattice audit --tail` 在 turn 进行中可能漏行;多批次分页无黑盒覆盖 — `robustness` / operator-path(pre-existing)
 - **位置**: `crates/lancet-audit/src/operator.rs`:`tail_audit` 批次循环的游标(每批 `since_audit_id = since + 1`);覆盖面对照 `crates/lattice-system-harness/tests/{fast_audit_cli,direct_operator}.rs`。
@@ -282,6 +282,7 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 
 ### T-24-01: Direct-Local observation root-escape acceptance coverage — `verification` / #24
 - **Current status**: 2026-07-23 closed — `direct_observation` now drives traversal and absolute outside-root paths through read/list/grep/find (8 calls), requires public `GuardDenied` CEP finishes, exact denial text, no canary leakage, unchanged outside bytes, and a completed Turn. Focused and full harness runs passed.
+- **Update (2026-07-31, #30)**: the expected error code for the same 8 escape calls changed `GuardDenied` → `PathContainment`. The denial used to come from the legacy policy hook (which normalized containment failures to `GuardDenied`); the Component Tool's refusal now comes from the Tool Host's own path resolution, which reports `PathContainment` — the same code the native workspace layer already used for a containment failure it detected itself. The scenario's other assertions (exact denial text, no canary leakage, unchanged outside bytes, visibility/bounds matrix) are unchanged.
 
 ### T-24-02: stale mutation `ReplanRequired` identity — `verification` / #24
 - **Current status**: 2026-07-23 closed — the stale-edit scenario now pins public `cep_call_finished` identity (`method=mutate.edit`, `ok=false`, `error_code=ReplanRequired`) while retaining generic Tool failure, external-byte preservation, and same-session reopen visibility. Focused and full harness runs passed.

@@ -48,21 +48,51 @@ fn policy_input(method: &str, params: serde_json::Value) -> PolicyInput {
     }
 }
 
-// ── End-to-end: observe.workspace read_file allowed ──────────
+// ── End-to-end: a native catalog method is allowed by default policy ────
 
 #[test]
-fn integration_read_file_allowed() {
+fn integration_native_method_allowed() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = policy_input(
-        "observe.workspace",
-        json!({"mode": "read_file", "path": "src/main.rs"}),
+        "mutate.create",
+        json!({"path": "src/main.rs", "content": "fn main() {}", "create_parents": false}),
     );
     let decision = hook.decide(&input);
-    // Observation is allowed by default policy.
+    // A catalog method inside the project root is allowed by default policy.
     assert!(
         matches!(decision, PolicyDecision::Allowed),
         "expected Allowed, got {decision:?}"
     );
+}
+
+/// A migrated method is not "allowed by default" here — it is not this hook's
+/// business at all.
+///
+/// `DefaultPolicyHook` resolves against `lancet_catalog::catalog()`, and #30
+/// removed `observe.workspace` from it. The refusal is `NonDeterminable`
+/// ("unknown catalog method"), not a policy denial, which is the honest answer:
+/// a Component Tool's authorization is Cell admission plus the Tool Host's own
+/// checks, and a legacy hook that returned `Allowed` for it would be claiming an
+/// authority it does not have.
+#[test]
+fn integration_migrated_method_is_not_resolvable_by_the_legacy_hook() {
+    let hook = DefaultPolicyHook::new(test_config());
+    for migrated in ["observe.workspace", "session.todo_write"] {
+        let input = policy_input(
+            migrated,
+            json!({"mode": "read_file", "path": "src/main.rs"}),
+        );
+        assert!(
+            matches!(
+                hook.decide(&input),
+                PolicyDecision::Denied {
+                    reason_code: PolicyReasonCode::NonDeterminable,
+                    ..
+                }
+            ),
+            "{migrated} is a Component Tool and must not resolve through the legacy hook"
+        );
+    }
 }
 
 // ── End-to-end: fetch.web denied by network policy ─────────────────────
@@ -99,14 +129,26 @@ fn integration_web_fetch_allowed_for_allowed_host() {
     );
 }
 
-// ── End-to-end: budget exceeded denies observation ─────────────────────
+// ── End-to-end: budget exceeded denies an observing method ─────────────
 
+/// An exhausted turn observation budget denies a method that observes.
+///
+/// The subject is the budget gate, and it needs a method this hook can resolve.
+/// `observe.workspace` played that part until #30 made it a Component Tool; its
+/// budget is still enforced, but now at the point where the observation actually
+/// happens — `lancet_runtime::host_workspace` charges the *same shared per-turn
+/// tracker* through a closure, which
+/// `host_workspace::tests::budget_exhaustion_refuses_the_operation_and_is_recorded`
+/// pins. `fetch.web` keeps this hook-level case honest: it is the remaining
+/// catalog method whose impact is an observation.
 #[test]
 fn integration_budget_exceeded_denies_observation() {
-    let hook = DefaultPolicyHook::new(test_config());
+    let mut config = test_config();
+    config.network.allow_public_https = true;
+    let hook = DefaultPolicyHook::new(config);
     let input = PolicyInput {
-        method: "observe.workspace".into(),
-        params: json!({"mode": "read_file", "path": "src/main.rs"}),
+        method: "fetch.web".into(),
+        params: json!({"url": "https://example.com/page"}),
         authority: PolicyAuthorityInput,
         audit_context: audit_ctx(PolicyBudgetSnapshot {
             turn_observation_bytes_used: 65536,
@@ -116,11 +158,14 @@ fn integration_budget_exceeded_denies_observation() {
         }),
     };
     let decision = hook.decide(&input);
-    assert!(matches!(
-        decision,
-        PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::BudgetExceeded,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            decision,
+            PolicyDecision::Denied {
+                reason_code: PolicyReasonCode::BudgetExceeded,
+                ..
+            }
+        ),
+        "expected BudgetExceeded, got {decision:?}"
+    );
 }
