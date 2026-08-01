@@ -15,6 +15,26 @@ use crate::composition::{
     _parse_hex_digest as parse_hex_digest, EmbeddedTool, ExpectedToolIdentity,
 };
 
+/// Embedded `mutate.create` v0.1.0: name plus the committed descriptor and Component bytes.
+static MUTATE_CREATE: EmbeddedTool = EmbeddedTool {
+    name: "mutate.create",
+    descriptor_json: include_bytes!("../../../../tools/mutate-create/generated/descriptor.json"),
+    component_bytes: include_bytes!(
+        "../../../../tools/mutate-create/generated/mutate_create.component.wasm"
+    ),
+};
+inventory::submit!(&MUTATE_CREATE);
+
+/// Embedded `mutate.edit` v0.1.0: name plus the committed descriptor and Component bytes.
+static MUTATE_EDIT: EmbeddedTool = EmbeddedTool {
+    name: "mutate.edit",
+    descriptor_json: include_bytes!("../../../../tools/mutate-edit/generated/descriptor.json"),
+    component_bytes: include_bytes!(
+        "../../../../tools/mutate-edit/generated/mutate_edit.component.wasm"
+    ),
+};
+inventory::submit!(&MUTATE_EDIT);
+
 /// Embedded `observe.workspace` v0.1.0: name plus the committed descriptor and Component bytes.
 static OBSERVE_WORKSPACE: EmbeddedTool = EmbeddedTool {
     name: "observe.workspace",
@@ -40,6 +60,34 @@ inventory::submit!(&SESSION_TODO_WRITE);
 /// The production expected-identity set. Pinned by the trusted host
 /// composition step; a Tool crate cannot self-approve.
 pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
+    ExpectedToolIdentity {
+        name: "mutate.create",
+        descriptor_sha256: parse_hex_digest(
+            "5bb428720d10f4d55261e605a32818db760b03cadbb7f04e36e9469f3e7e622f",
+        ),
+        artifact_sha256: parse_hex_digest(
+            "0848e50abb6cadd7fac5108a66b84f971818253889df37c9e8371976ff275563",
+        ),
+        abi_version: 1,
+        imports: &[
+            "lattice:tool-host/host-control@0.1.0",
+            "lattice:tool-host/workspace-mutate@0.1.0",
+        ],
+    },
+    ExpectedToolIdentity {
+        name: "mutate.edit",
+        descriptor_sha256: parse_hex_digest(
+            "0e23ea8fa168312d11cad7e1850b58c6caa959ad81da0ce131f402f5594f274f",
+        ),
+        artifact_sha256: parse_hex_digest(
+            "bf47ad5bbe3cfa6ba276e7dcb8367c10a45139a48e88ffa54c70ae70854b33ae",
+        ),
+        abi_version: 1,
+        imports: &[
+            "lattice:tool-host/host-control@0.1.0",
+            "lattice:tool-host/workspace-mutate@0.1.0",
+        ],
+    },
     ExpectedToolIdentity {
         name: "observe.workspace",
         descriptor_sha256: parse_hex_digest(

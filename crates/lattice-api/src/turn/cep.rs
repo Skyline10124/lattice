@@ -661,12 +661,7 @@ fn retriability_label(value: &Retriability) -> String {
 #[cfg(test)]
 mod cep_context_profile_policy {
     use super::*;
-    use lancet_protocol::policy::{
-        PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,
-        PolicyInput,
-    };
     use lattice_profile::LancetSection;
-    use serde_json::json;
     use tempfile::TempDir;
 
     #[test]
@@ -843,29 +838,20 @@ mod cep_context_profile_policy {
             ..Default::default()
         };
         let config = load_policy_config(&cep, dir.path()).expect("policy");
-        let hook = lancet_authority::policy::default::DefaultPolicyHook::new(config);
-        let mutate = PolicyInput {
-            method: "mutate.create".into(),
-            params: json!({"path": "src/new.rs", "content": "x"}),
-            authority: PolicyAuthorityInput,
-            audit_context: PolicyAuditContext {
-                turn_id: "t".into(),
-                session_id: "s".into(),
-                call_id: Some(1),
-                budget_snapshot: PolicyBudgetSnapshot {
-                    turn_observation_bytes_used: 0,
-                    turn_observation_bytes_limit: 65536,
-                    todo_ops_used: 0,
-                    todo_ops_limit: 10,
-                },
-            },
-        };
-        assert_eq!(hook.decide(&mutate), PolicyDecision::Allowed);
-        let region = hook
-            .config()
+        // mutate.create/edit are Component Tools (#31): DefaultPolicyHook no longer
+        // resolves them. The profile write-deny list still shapes the mutate
+        // authorized region that the Tool Host enforces.
+        let region = config
             .workspace
-            .authorized_region_for("mutate.create", &hook.config().to_cep_policy_config());
-        assert!(!region.denied_write_path_prefixes.is_empty());
+            .authorized_region_for("mutate.create", &config.to_cep_policy_config());
+        assert!(
+            region
+                .denied_write_path_prefixes
+                .iter()
+                .any(|p| p.ends_with("src")),
+            "profile denied_write_patterns must reach the mutate region: {:?}",
+            region.denied_write_path_prefixes
+        );
     }
 }
 
@@ -874,8 +860,7 @@ mod turn_wiring {
     use super::*;
     use lancet_audit::{AuditOutcome, CallAuditMetadata};
     use lancet_catalog::CepMethod;
-    use lancet_catalog::methods::workspace::Create;
-    use lancet_catalog::test_method::TestEcho;
+        use lancet_catalog::test_method::TestEcho;
 
     /// `observe.workspace` as a plain method name. It is a Component Tool since
     /// #30, so there is no catalog type — and calling it untyped is what a
@@ -1032,7 +1017,7 @@ mod turn_wiring {
         // `observe.workspace`; since #30 that name would land in `unknown` too
         // and the assertion would no longer isolate `session.envelope`.
         let err = ToolExposure::from_catalog_enabled(&[
-            Create::NAME.to_string(),
+            "mutate.create".to_string(),
             "session.envelope".to_string(),
         ])
         .expect_err("session.envelope is no longer a catalog method");

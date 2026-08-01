@@ -3,9 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::runtime_fixtures::{
-    RuntimeEffectFixture, create_runtime_effects, edit_runtime_effects, fetch_runtime_effects,
-};
+use super::runtime_fixtures::{RuntimeEffectFixture, fetch_runtime_effects};
 use lancet_authority::effect::ledger::EffectSource;
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
@@ -13,15 +11,12 @@ use lancet_catalog::methods::*;
 
 fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
     let mut fixtures = BTreeMap::new();
-    fixtures.insert(Create::NAME, create_runtime_effects as RuntimeEffectFixture);
-    fixtures.insert(Edit::NAME, edit_runtime_effects as RuntimeEffectFixture);
     fixtures.insert(Fetch::NAME, fetch_runtime_effects as RuntimeEffectFixture);
-    // `session.todo_write` (#29) and `observe.workspace` (#30) have no fixture:
-    // both are Component Tools now, so neither is a native catalog method and
-    // neither has a native handler this harness could dispatch. The coverage
-    // assertion below (fixtures == catalog, exactly) is what keeps this in step —
-    // it fails if a migrated method reappears in the catalog, and it fails if a
-    // native method loses its fixture.
+    // `session.todo_write` (#29), `observe.workspace` (#30), and
+    // `mutate.create` / `mutate.edit` (#31) have no fixture: each is a Component
+    // Tool now, so none is a native catalog method and none has a native handler
+    // this harness could dispatch. The coverage assertion below (fixtures ==
+    // catalog, exactly) is what keeps this in step.
     fixtures
 }
 
@@ -86,5 +81,3 @@ fn runtime_backend_effects_are_declared_for_every_catalog_method() {
         );
     }
 }
-
-// ── Positive property tests ────────────────────────────────────────────

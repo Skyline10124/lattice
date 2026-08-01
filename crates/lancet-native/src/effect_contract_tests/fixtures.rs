@@ -100,6 +100,7 @@ where
     outcome.observed_effects
 }
 
+#[allow(dead_code)]
 pub(super) fn dispatch_success_effects<M>(
     params: M::Params,
     ctx: crate::server::registry::HandlerContext,

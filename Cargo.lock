@@ -3129,6 +3129,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "mutate-create"
+version = "0.1.0"
+dependencies = [
+ "lattice-tool-prelude",
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "mutate-edit"
+version = "0.1.0"
+dependencies = [
+ "lattice-tool-prelude",
+ "mutate-shared",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
+name = "mutate-shared"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "net-guard"
 version = "0.1.0"
 dependencies = [

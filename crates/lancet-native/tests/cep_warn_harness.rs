@@ -10,7 +10,7 @@
 //!
 //! ## Update path (`LATTICE_UPDATE_WARN_REPORT=1`)
 //!
-//! Runs each of the 5 CATALOG methods through `CepMode::Warn`, collects
+//! Runs the remaining native CATALOG method(s) through `CepMode::Warn`, collects
 //! `effect_warning` from the `CepAuditStore`, and
 //! writes a fresh `docs/lancet-warn-report.md` at the repo root.
 //!
@@ -33,9 +33,6 @@ use lancet_authority::effect::{
 };
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
-use lancet_catalog::methods::workspace::{
-    Create, CreateParams, CreateResult, Edit, EditOperation, EditParams, EditResult,
-};
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
     CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
@@ -93,44 +90,6 @@ async fn has_effect_warning(audit: Arc<CepAuditStore>, row_before: i64) -> bool 
 // evidence, never by a handler this harness could register. The equivalent
 // negative case for the Component path is
 // `lancet_runtime::host_workspace::tests::an_unadmitted_cell_is_refused_before_the_filesystem`.
-
-fn overreach_registry_create() -> MethodRegistry {
-    let mut r = MethodRegistry::new();
-    r.register_method::<Create, _, _>(|_params: CreateParams, ctx| async move {
-        ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::WorkspaceMutation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/create")),
-            required_capability: RequiredCapability::WritePath,
-            source: EffectSource::HandlerBackend,
-        });
-        Ok(CreateResult {
-            path: "mock".into(),
-            bytes_written: 0,
-            created_dirs: vec![],
-        })
-    })
-    .expect("overreach Create");
-    r
-}
-
-fn overreach_registry_edit() -> MethodRegistry {
-    let mut r = MethodRegistry::new();
-    r.register_method::<Edit, _, _>(|_params: EditParams, ctx| async move {
-        ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::WorkspaceMutation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/edit")),
-            required_capability: RequiredCapability::WritePath,
-            source: EffectSource::HandlerBackend,
-        });
-        Ok(EditResult {
-            changed_files: vec![],
-        })
-    })
-    .expect("overreach Edit");
-    r
-}
 
 fn overreach_registry_fetch() -> MethodRegistry {
     let mut r = MethodRegistry::new();
@@ -219,32 +178,6 @@ async fn generate_warn_report() -> String {
     // ── Overreach-capable canonical methods ──────────────────────────────
 
     let overreach_results = vec![
-            run_overreach::<Create>(
-                "mutate.create",
-                overreach_registry_create(),
-                CreateParams {
-                    path: "mock.txt".into(),
-                    content: "mock".into(),
-                    create_parents: false,
-                },
-            )
-            .await,
-            run_overreach::<Edit>(
-                "mutate.edit",
-                overreach_registry_edit(),
-                EditParams {
-                    path: "mock.txt".into(),
-                    expected_hash:
-                        "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                            .into(),
-                    edits: vec![EditOperation::ReplaceText {
-                        old: "old".into(),
-                        new: "new".into(),
-                        occurrence: None,
-                    }],
-                },
-            )
-            .await,
             run_overreach::<Fetch>(
                 "fetch.web",
                 overreach_registry_fetch(),
@@ -284,17 +217,17 @@ async fn generate_warn_report() -> String {
     });
     tokio::task::yield_now().await;
 
-    // mutate.create: a legal write inside the canonical project root. This leg
-    // needs a *native* method, because it exercises the native policy lifecycle
-    // in warn mode; a Component Tool is governed by Cell admission instead and
-    // would prove nothing here. It has moved twice for that reason — off
-    // `session.todo_write` in #29 and off `observe.workspace` in #30, as each
-    // became a Component.
+    // fetch.web: the remaining native method after #31. This leg needs a
+    // *native* method, because it exercises the native policy lifecycle in warn
+    // mode; a Component Tool is governed by Cell admission instead and would
+    // prove nothing here. It has moved thrice for that reason — off
+    // `session.todo_write` in #29, `observe.workspace` in #30, and
+    // `mutate.create` in #31, as each became a Component. The call may fail on
+    // network policy; we only care that it was routed as a native method.
     let native_ok = success_client
-        .call::<Create>(CreateParams {
-            path: "warn-mode-ok.txt".into(),
-            content: "written\n".into(),
-            create_parents: false,
+        .call::<Fetch>(FetchParams {
+            url: "https://example.com/".into(),
+            headers: Default::default(),
         })
         .await
         .is_ok();
@@ -304,7 +237,7 @@ async fn generate_warn_report() -> String {
     // Keep ws_dir alive until after server task
     drop(ws_dir);
 
-    let success_results = [("mutate.create", native_ok)];
+    let success_results = [("fetch.web", native_ok)];
 
     // ── Count leaks ──────────────────────────────────────────────────────
     let leak_count = overreach_results.iter().filter(|r| !r.leaked).count();
@@ -379,7 +312,7 @@ async fn generate_warn_report() -> String {
 /// **Default CI path:** reads `docs/lancet-warn-report.md` and asserts no
 /// `fix-now` entries are present.
 ///
-/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs all 5 CATALOG methods
+/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs the remaining native CATALOG method(s)
 /// in `CepMode::Warn`, checks audit metadata, and rewrites the committed report.
 #[tokio::test]
 async fn cep_warn_harness() {

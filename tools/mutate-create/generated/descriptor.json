@@ -1,0 +1,78 @@
+{
+  "name": "mutate.create",
+  "version": "0.1.0",
+  "description": "Create a new file under the workspace write scope. The target path must be permitted by policy: use a 'dir/**' pattern to cover a directory. The target file must not already exist. Set create_parents=true to create missing parent directories required for path; otherwise parent directories must already exist.",
+  "params_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "content": {
+        "type": "string"
+      },
+      "create_parents": {
+        "type": "boolean"
+      },
+      "path": {
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "content"
+    ],
+    "type": "object"
+  },
+  "result_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "bytes_written": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "created_dirs": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "bytes_written"
+    ],
+    "type": "object"
+  },
+  "scopes": [
+    {
+      "name": "workspace",
+      "trust": "in",
+      "channel": "workspace"
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "workspace.mutation",
+      "cell": {
+        "ctx_op": "mutate",
+        "ext_impact": "write",
+        "scope": "workspace"
+      }
+    },
+    {
+      "name": "workspace.mutation.result",
+      "cell": {
+        "ctx_op": "alloc",
+        "ext_impact": "write",
+        "scope": "workspace"
+      }
+    }
+  ],
+  "artifact": {
+    "sha256": "0848e50abb6cadd7fac5108a66b84f971818253889df37c9e8371976ff275563",
+    "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"
+  },
+  "abi_version": 1
+}

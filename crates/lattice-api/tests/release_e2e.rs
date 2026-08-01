@@ -325,10 +325,11 @@ async fn release_e2e_criterion_8() {
         "statement.subject must include an entry with name starting with 'turn:'; got: {subjects:?}"
     );
 
-    // predicate_type: must match CEP_TURN_ATTESTATION_PREDICATE_TYPE
+    // predicate_type: mutate.edit is a Component Tool (#31), so the turn
+    // attests as v2 (Cell evidence vocabulary), not legacy v1.
     assert_eq!(
-        attestation.predicate_type, "https://lattice.dev/attestation/cep-turn/v1",
-        "predicate_type must be CEP_TURN_ATTESTATION_PREDICATE_TYPE"
+        attestation.predicate_type, "https://lattice.dev/attestation/cep-turn/v2",
+        "predicate_type must be CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2"
     );
 
     // predicate.materials: must include mutate.edit in the sequence

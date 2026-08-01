@@ -4,33 +4,29 @@
 //! Static CEP method catalog for CEP.
 
 use crate::method::MethodDescriptor;
-use crate::methods::{Create, Edit, Fetch};
+use crate::methods::Fetch;
 use std::sync::LazyLock;
 
 /// Exhaustive native CEP method descriptor list in stable registration order.
 ///
-/// `session.todo_write` (#29) and `observe.workspace` (#30) are not here: both are
-/// embedded Component Tools whose source manifests are their sole descriptor
-/// authority. Removing a migrated method from this catalog is not bookkeeping —
-/// a name present in both vocabularies fails the whole server run closed
+/// `session.todo_write` (#29), `observe.workspace` (#30), and
+/// `mutate.create` / `mutate.edit` (#31) are not here: each is an embedded
+/// Component Tool whose source manifest is its sole descriptor authority.
+/// Removing a migrated method from this catalog is not bookkeeping — a name
+/// present in both vocabularies fails the whole server run closed
 /// (`validate_no_component_native_collision`), because a collision arms the
 /// legacy effect path against a Component's call.
 ///
-/// The default distribution is still five Tools: three native methods plus two
-/// Components. #31/#32 move the rest.
-pub static CATALOG: LazyLock<[MethodDescriptor; 3]> = LazyLock::new(|| {
-    [
-        MethodDescriptor::for_method::<Create>(),
-        MethodDescriptor::for_method::<Edit>(),
-        MethodDescriptor::for_method::<Fetch>(),
-    ]
-});
+/// The default distribution is five Tools: one native method (`fetch.web`)
+/// plus four Components. #32 moves the last native method.
+pub static CATALOG: LazyLock<[MethodDescriptor; 1]> =
+    LazyLock::new(|| [MethodDescriptor::for_method::<Fetch>()]);
 
 /// Compile-time-known length of [`CATALOG`]. Mirrors the array bound in
-/// [`CATALOG`]'s type (`[MethodDescriptor; 3]`); keep these in sync when the
+/// [`CATALOG`]'s type (`[MethodDescriptor; 1]`); keep these in sync when the
 /// root CEP method contract changes. Callers (e.g. the LANCET doctor) read
 /// this instead of hard-coding a method count.
-pub const CATALOG_LEN: usize = 3;
+pub const CATALOG_LEN: usize = 1;
 
 /// Borrow the catalog as a slice.
 pub fn catalog() -> &'static [MethodDescriptor] {
@@ -61,10 +57,10 @@ pub fn scaffold_catalog() -> &'static [MethodDescriptor] {
 mod tests {
     use super::*;
     use crate::method::CepMethod;
-    use crate::methods::{Create, Edit, Fetch};
+    use crate::methods::Fetch;
     use lancet_protocol::{ImpactKind, RequiredCapability};
 
-    const EXPECTED_ORDER: [&str; 3] = ["mutate.create", "mutate.edit", "fetch.web"];
+    const EXPECTED_ORDER: [&str; 1] = ["fetch.web"];
 
     #[test]
     fn catalog_contains_expected_methods_in_stable_order() {
@@ -129,12 +125,6 @@ mod tests {
                     assert!(descriptor.base_authority.fetch_hosts);
                     assert!(!descriptor.base_authority.read_audit);
                 }
-                "mutate.create" | "mutate.edit" => {
-                    assert_eq!(
-                        descriptor.base_authority,
-                        crate::method::BaseAuthorityRequirement::NONE
-                    )
-                }
                 other => panic!("unexpected catalog method: {other}"),
             }
         }
@@ -143,33 +133,18 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 3] = [
-            (&catalog[0], Create::IMPACT, Create::CAPABILITY),
-            (&catalog[1], Edit::IMPACT, Edit::CAPABILITY),
-            (&catalog[2], Fetch::IMPACT, Fetch::CAPABILITY),
-        ];
-
-        for (descriptor, impact, capability) in checks {
-            assert_eq!(
-                descriptor.impact, impact,
-                "impact mismatch for {}",
-                descriptor.name
-            );
-            assert_eq!(
-                descriptor.capability, capability,
-                "capability mismatch for {}",
-                descriptor.name
-            );
-        }
+        assert_eq!(catalog[0].impact, Fetch::IMPACT);
+        assert_eq!(catalog[0].capability, Fetch::CAPABILITY);
+        assert_eq!(Fetch::IMPACT, ImpactKind::ExternalObservation);
+        assert_eq!(Fetch::CAPABILITY, RequiredCapability::FetchUrl);
     }
 
-    /// The native catalog is three methods since #29 moved `session.todo_write`
-    /// and #30 moved `observe.workspace` to embedded Component Tools. The
-    /// shipped catalog is still five Tools; this constant counts only the ones a
-    /// native handler still serves.
+    /// The native catalog is one method since #29/#30/#31 moved the rest to
+    /// embedded Component Tools. The shipped catalog is still five Tools; this
+    /// constant counts only the ones a native handler still serves.
     #[test]
-    fn catalog_len_is_3() {
-        assert_eq!(catalog().len(), 3);
+    fn catalog_len_is_1() {
+        assert_eq!(catalog().len(), 1);
         assert_eq!(catalog().len(), CATALOG_LEN);
     }
 
@@ -182,6 +157,8 @@ mod tests {
         for (method, manifest) in [
             ("session.todo_write", "tools/todo-write/manifest.toml"),
             ("observe.workspace", "tools/observe-workspace/manifest.toml"),
+            ("mutate.create", "tools/mutate-create/manifest.toml"),
+            ("mutate.edit", "tools/mutate-edit/manifest.toml"),
         ] {
             assert!(
                 catalog().iter().all(|descriptor| descriptor.name != method),
@@ -221,7 +198,7 @@ mod scaffold_tests {
                 schema.get("type").and_then(|v| v.as_str()),
                 Some("object"),
                 "params schema for {} must be an object",
-                descriptor.name,
+                descriptor.name
             );
         }
     }
@@ -251,9 +228,9 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 3);
+        assert_eq!(catalog().len(), 1);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
-        assert_eq!(names, ["mutate.create", "mutate.edit", "fetch.web"]);
+        assert_eq!(names, ["fetch.web"]);
         for descriptor in catalog() {
             assert_ne!(descriptor.name, "workspace.inspect");
             assert_ne!(descriptor.name, "workspace.navigate");
@@ -275,8 +252,7 @@ mod catalog_default_snapshot {
     }
 
     /// Regression test for issue #26 (Codeberg #4): `exec.command_run` is
-    /// permanently retired from the CEP catalog. The catalog must contain
-    /// exactly 5 methods and must NOT include `exec.command_run`.
+    /// permanently retired from the CEP catalog.
     #[test]
     fn catalog_retires_exec_command_run() {
         assert_eq!(catalog().len(), CATALOG_LEN);

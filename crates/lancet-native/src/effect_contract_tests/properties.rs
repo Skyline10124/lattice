@@ -13,7 +13,6 @@ use super::support::{
 use lancet_authority::NetworkPolicyConfig;
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::methods::external::FetchParams;
-use lancet_catalog::methods::workspace::{CreateParams, EditOperation, EditParams};
 use lancet_catalog::methods::*;
 use lancet_protocol::effect_types::ImpactKind;
 
@@ -22,60 +21,7 @@ use lancet_protocol::effect_types::ImpactKind;
 // there is nothing left for this harness to dispatch. Its effect contract is
 // enforced host-side in `lancet_runtime::host_workspace` and covered by the
 // Component's own tests, not by the native `MethodRegistry`. What survives here
-// is the contract for the three methods a native handler still serves.
-
-proptest! {
-    #[test]
-    fn create_effect_contract_positive(content in "[a-zA-Z0-9 ]{1,64}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        declare_active_envelope(&ctx, &root);
-        let authority = mutation_region(&root);
-        let params = CreateParams {
-            path: "output.txt".into(),
-            content,
-            create_parents: false,
-        };
-        let outcome = rt().block_on(effect_contract_harness::<Create>(
-            &registry, params, ctx, authority.clone(),
-        ));
-        outcome.dispatch_result.as_ref().expect("legal create must dispatch");
-        assert_positive(&outcome, &authority);
-    }
-}
-
-proptest! {
-    #[test]
-    fn edit_effect_contract_positive(_n in 0u8..1) {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-
-        let content = std::fs::read(dir.path().join("hello.txt")).unwrap();
-        let hash = blake3::hash(&content);
-        let hash_hex = hash.to_hex();
-
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        declare_active_envelope(&ctx, &root);
-        let authority = mutation_region(&root);
-        let params = EditParams {
-            path: "hello.txt".into(),
-            expected_hash: format!("blake3:{hash_hex}"),
-            edits: vec![EditOperation::ReplaceText {
-                old: "world".into(),
-                new: "patched".into(),
-                occurrence: None,
-            }],
-        };
-        let outcome = rt().block_on(effect_contract_harness::<Edit>(
-            &registry, params, ctx, authority.clone(),
-        ));
-        outcome.dispatch_result.as_ref().expect("legal edit must dispatch");
-        assert_positive(&outcome, &authority);
-    }
-}
+// is the contract for the one method a native handler still serves (`fetch.web`).
 
 #[test]
 fn fetch_effect_contract_positive() {
@@ -138,49 +84,6 @@ fn fetch_effect_contract_positive() {
 
 // ── Negative property tests ────────────────────────────────────────────
 
-proptest! {
-    #[test]
-    fn create_effect_contract_negative(content in "[a-zA-Z]{1,16}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let params = CreateParams {
-            path: "/outside-scope/evil.txt".into(),
-            content,
-            create_parents: false,
-        };
-        let authority = mutation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<Create>(
-            &registry, params, ctx, authority,
-        ));
-        assert_negative_no_backend_effects(&outcome);
-    }
-}
-
-proptest! {
-    #[test]
-    fn edit_effect_contract_negative(_n in 0u8..1) {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let params = EditParams {
-            path: "../outside/evil.txt".into(),
-            expected_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            edits: vec![EditOperation::ReplaceText {
-                old: "x".into(),
-                new: "evil".into(),
-                occurrence: None,
-            }],
-        };
-        let authority = mutation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<Edit>(
-            &registry, params, ctx, authority,
-        ));
-        assert_negative_no_backend_effects(&outcome);
-    }
-}
 
 proptest! {
     #[test]

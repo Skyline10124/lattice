@@ -8,8 +8,8 @@
 //! `attestation_matches_replay_statement`, which compares stored vs replay-derived
 //! in-toto statements after a live turn.
 
-use lancet_catalog::CepMethod;
-use lancet_catalog::methods::workspace::{Create, Edit};
+const MUTATE_CREATE: &str = "mutate.create";
+const MUTATE_EDIT: &str = "mutate.edit";
 use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
 use lancet_native::provenance::{
     EvidenceLookup, canonicalize_prov_fragment, project_rows, project_rows_with_evidence,
@@ -115,14 +115,14 @@ fn mutation_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         2,
-        Create::NAME,
+        MUTATE_CREATE,
         r#"{"required_capability":"write_path","bytes_written":12}"#,
     );
     store_row(
         &audit,
         &ctx,
         3,
-        Edit::NAME,
+        MUTATE_EDIT,
         r#"{"required_capability":"write_path","changed_files":["src/a.rs"]}"#,
     );
     let rows = audit
@@ -259,7 +259,7 @@ fn mixed_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         2,
-        Edit::NAME,
+        MUTATE_EDIT,
         r#"{"required_capability":"write_path","changed_files":["b.txt"]}"#,
     );
     let rows = audit

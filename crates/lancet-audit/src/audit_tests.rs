@@ -3,7 +3,7 @@
 
 use super::*;
 use lancet_catalog::CepMethod;
-use lancet_catalog::methods::{Create, Fetch};
+use lancet_catalog::methods::Fetch;
 use lancet_catalog::test_method::TestEcho;
 
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
@@ -262,9 +262,9 @@ fn for_component_dispatch_labels_cell_governed_rows() {
 fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
     // Known catalog method -> native + policy-enforced. It must be a real
     // catalog method: the label is derived from catalog membership, so a
-    // synthetic fixture name would prove the opposite branch. `mutate.create`
-    // stands in because #30 removed `observe.workspace` from the native catalog.
-    let known = CallAuditMetadata::for_production_dispatch(Create::NAME);
+    // synthetic fixture name would prove the opposite branch. `fetch.web`
+    // stands in because #31 removed `mutate.create` from the native catalog.
+    let known = CallAuditMetadata::for_production_dispatch(Fetch::NAME);
     assert_eq!(known.semantic_stage, SEMANTIC_STAGE_NATIVE);
     assert!(known.policy_enforced);
 
@@ -276,7 +276,7 @@ fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
     // A migrated method reaches this function only when the Component dispatch
     // branch was NOT taken, so it is not native either: labeling it `native`
     // would claim an enforcement path that no longer exists for it (#29/#30).
-    for migrated in ["observe.workspace", "session.todo_write"] {
+    for migrated in ["observe.workspace", "session.todo_write", "mutate.create", "mutate.edit"] {
         let labeled = CallAuditMetadata::for_production_dispatch(migrated);
         assert_eq!(
             labeled.semantic_stage, SEMANTIC_STAGE_UNROUTED,
@@ -296,7 +296,7 @@ fn cep_audit_success_appends_one_row_with_required_fields() {
         .start_call(
             &ctx,
             42,
-            Create::NAME,
+            Fetch::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -304,21 +304,21 @@ fn cep_audit_success_appends_one_row_with_required_fields() {
         .finalize_call(
             start,
             AuditOutcome::Success {
-                summary: "created=1".into(),
+                summary: "fetched=1".into(),
             },
             Some("native_handler"),
-            Some(r#"{"outcome":"mutate_create","count":1}"#),
+            Some(r#"{"outcome":"fetch_web","count":1}"#),
         )
         .unwrap();
 
     assert_eq!(store.row_count().unwrap(), 1);
     let row = store.row_by_audit_id(start.audit_id).unwrap();
     assert_eq!(row.call_id, 42);
-    assert_eq!(row.method, Create::NAME);
+    assert_eq!(row.method, Fetch::NAME);
     assert!(!row.started_at.is_empty());
     assert!(row.ended_at.is_some());
-    assert_eq!(row.result_or_error.as_deref(), Some("success:created=1"));
-    assert_eq!(row.impact_kind, "workspace_mutation");
+    assert_eq!(row.result_or_error.as_deref(), Some("success:fetched=1"));
+    assert_eq!(row.impact_kind, "external_observation");
     assert_eq!(row.turn_id, "turn-1");
     assert_eq!(row.session_id, "session-1");
     assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
@@ -998,7 +998,7 @@ fn query_rows_applies_database_limit_and_excluded_method_prefix() {
     for (idx, method) in [
         OBSERVE_WORKSPACE,
         "observe.audit",
-        Create::NAME,
+        Fetch::NAME,
         Fetch::NAME,
     ]
     .into_iter()
@@ -1035,7 +1035,7 @@ fn query_rows_applies_database_limit_and_excluded_method_prefix() {
 
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].method, OBSERVE_WORKSPACE);
-    assert_eq!(rows[1].method, Create::NAME);
+    assert_eq!(rows[1].method, Fetch::NAME);
 }
 
 #[test]
@@ -1066,13 +1066,13 @@ fn merge_finalize_metadata_adds_required_capability() {
     // membership, so this must be a method still in the catalog.
     let merged = merge_finalize_metadata(
         Some(r#"{"path":"src/lib.rs"}"#),
-        Create::NAME,
+        Fetch::NAME,
         &[],
         &ComponentCallEvidence::default(),
     )
     .unwrap();
     assert!(merged.contains("required_capability"));
-    assert!(merged.contains("write_path"));
+    assert!(merged.contains("fetch_url"));
 }
 
 /// A migrated method has no native catalog entry, so no legacy
@@ -1082,7 +1082,7 @@ fn merge_finalize_metadata_adds_required_capability() {
 /// authority in the audit trail (#29/#30).
 #[test]
 fn merge_finalize_metadata_attributes_no_legacy_capability_to_a_component_tool() {
-    for migrated in ["observe.workspace", "session.todo_write"] {
+    for migrated in ["observe.workspace", "session.todo_write", "mutate.create", "mutate.edit"] {
         let merged = merge_finalize_metadata(
             Some(r#"{"probe":"value"}"#),
             migrated,
@@ -1393,7 +1393,7 @@ fn rejection_stage_filters_rows_by_metadata_json() {
         .start_call(
             &ctx,
             2,
-            Create::NAME,
+            Fetch::NAME,
             &CallAuditMetadata::native_policy_enforced(Some("started")),
         )
         .unwrap();
@@ -1425,7 +1425,7 @@ fn rejection_stage_filters_rows_by_metadata_json() {
         })
         .unwrap();
     assert_eq!(guard_rows.len(), 1);
-    assert_eq!(guard_rows[0].method, Create::NAME);
+    assert_eq!(guard_rows[0].method, Fetch::NAME);
 }
 
 fn write_legacy_audit_fixture(path: &std::path::Path) {

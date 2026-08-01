@@ -1,0 +1,27 @@
+{
+  "function": {
+    "description": "Create a new file under the workspace write scope. The target path must be permitted by policy: use a 'dir/**' pattern to cover a directory. The target file must not already exist. Set create_parents=true to create missing parent directories required for path; otherwise parent directories must already exist.",
+    "name": "mutate.create",
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "create_parents": {
+          "type": "boolean"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  "type": "function"
+}

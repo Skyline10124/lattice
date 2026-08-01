@@ -1,0 +1,20 @@
+[package]
+name = "mutate-shared"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+description = "Shared no_std semantic-edit logic for mutate.create / mutate.edit Component Tools (#31)."
+
+[lib]
+crate-type = ["lib"]
+
+[features]
+default = []
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+[dev-dependencies]
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

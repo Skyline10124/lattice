@@ -9,12 +9,13 @@
 //! handler or an embedded Component.
 //!
 //! Two vocabularies coexist in one turn, and the matrix names both:
-//! - Native methods carry a legacy `ImpactKind` (`workspace_mutation`,
-//!   `external_observation`) and the `cep_native` semantic stage.
+//! - Native methods carry a legacy `ImpactKind` (`external_observation` for
+//!   `fetch.web`) and the `cep_native` semantic stage.
 //! - Component Tools are authorized by Cell admission, carry no legacy impact
 //!   kind (the audit column reads `"unknown"`), and are staged `cell_component`.
-//!   Since #29 that is `session.todo_write`; since #30 `observe.workspace`
-//!   joined it, which is why no row here produces `workspace_observation`.
+//!   Since #29 that is `session.todo_write`; since #30 `observe.workspace`;
+//!   since #31 `mutate.create`/`mutate.edit`. No row here produces
+//!   `workspace_observation` or a native `workspace_mutation` impact label.
 //!
 //! For each row:
 //! 1. Execute the representative method via [`CepClient`].
@@ -30,7 +31,6 @@ use lancet_api::{AuditReplayRequest, replay_audit};
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
 use lancet_catalog::methods::external::{Fetch, FetchParams};
-use lancet_catalog::methods::workspace::{Edit, EditOperation, EditParams};
 use lancet_native::{
     CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE,
     ServerRunConfig, register_production_method_registry,
@@ -50,7 +50,9 @@ const OBSERVE_WORKSPACE: &str = "observe.workspace";
 /// The Component Tools this test drives. Membership is what decides a row's
 /// expected semantic stage and impact kind, so the two are never asserted from
 /// a hardcoded method name.
-const COMPONENT_TOOLS: [&str; 2] = [OBSERVE_WORKSPACE, TODO_WRITE];
+const MUTATE_CREATE: &str = "mutate.create";
+const MUTATE_EDIT: &str = "mutate.edit";
+const COMPONENT_TOOLS: [&str; 4] = [OBSERVE_WORKSPACE, MUTATE_CREATE, MUTATE_EDIT, TODO_WRITE];
 
 const FIXED_TURN_ID: &str = "impact-matrix-turn-001";
 const FIXED_SESSION_ID: &str = "impact-matrix-session-001";
@@ -135,9 +137,10 @@ async fn build_production_config(
 // ── The matrix test ────────────────────────────────────────────────────
 
 /// The `five_production_classes` in the name predates the Tool migrations: the
-/// matrix is four rows now — two native impact classes and two Cell-governed
-/// Components (#29, #30). The name is kept because `docs/TEST-TRIAGE.md` and
-/// `docs/test-triage-decisions.json` index this test by it.
+/// matrix is four rows now — one native impact class (`fetch.web`) and three
+/// Cell-governed Components (#29–#31). The name is kept because
+/// `docs/TEST-TRIAGE.md` and `docs/test-triage-decisions.json` index this test
+/// by it.
 #[tokio::test]
 async fn dogfood_impact_matrix_five_production_classes() {
     let dir = TempDir::new().expect("temp workspace");
@@ -195,21 +198,13 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "read_file returned unexpected content: {read_content:?}"
     );
 
-    // Row 2 — WorkspaceMutation: mutate.edit
+    // Row 2 — mutate.edit Component (#31): Cell-governed write, no legacy ImpactKind.
     let edit_result = client1
-        .call::<Edit>(EditParams {
-            path: "src/dog04.txt".into(),
-            expected_hash: file_hash,
-            edits: vec![EditOperation::ReplaceText {
-                old: "hello dog04".into(),
-                new: "hello dog04 patched".into(),
-                occurrence: None,
-            }],
-        })
+        .call_raw("mutate.edit", serde_json::json!({"path": "src/dog04.txt", "expected_hash": file_hash, "edits": [{"op": "replace_text", "old": "hello dog04", "new": "hello dog04 patched"}]}))
         .await
         .expect("mutate.edit");
     assert_eq!(
-        edit_result.changed_files.len(),
+        edit_result["changed_files"].as_array().expect("changed_files").len(),
         1,
         "edit must change 1 file"
     );
@@ -228,10 +223,9 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "fetch.web body must match echo server"
     );
 
-    // Row 4 — the other Component Tool. Since #29 `session.todo_write` is
-    // Cell-governed rather than a legacy impact class; together with row 1 and
-    // the two native rows, this is what proves the two vocabularies coexist in
-    // one turn.
+    // Row 4 — session.todo_write Component (#29). Together with observe/mutate
+    // Components and the one native fetch row, this proves the two vocabularies
+    // coexist in one turn.
     let todo_result: serde_json::Value = client1
         .call_named(
             "session.todo_write",
@@ -273,7 +267,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
             "all rows must share turn_id={FIXED_TURN_ID}"
         );
         // Each row is labeled by the vocabulary that actually authorized it: the
-        // two native methods by the policy lifecycle, the two Components by Cell
+        // remaining native method by the policy lifecycle, the Components by Cell
         // admission. Both are policy-enforced.
         let expected_stage = if COMPONENT_TOOLS.contains(&row.method.as_str()) {
             "cell_component"
@@ -312,12 +306,11 @@ async fn dogfood_impact_matrix_five_production_classes() {
         .collect();
 
     for (expected_method, expected_impact) in [
-        ("mutate.edit", "workspace_mutation"),
         ("fetch.web", "external_observation"),
         // A Component row carries no legacy impact kind — its authorization
-        // vocabulary is the Cell (#28 B6). `observe.workspace` reads "unknown"
-        // for exactly the reason `session.todo_write` does: #30 removed it from
+        // vocabulary is the Cell (#28 B6). #30/#31 removed these from
         // `lancet_catalog::catalog()`, so `impact_kind_for_method` returns None.
+        ("mutate.edit", "unknown"),
         (OBSERVE_WORKSPACE, "unknown"),
         (TODO_WRITE, "unknown"),
     ] {
@@ -336,6 +329,12 @@ async fn dogfood_impact_matrix_five_production_classes() {
             .values()
             .any(|impact| *impact == "workspace_observation"),
         "no shipped method declares workspace_observation any more: {impact_by_method:?}"
+    );
+    assert!(
+        !impact_by_method
+            .values()
+            .any(|impact| *impact == "workspace_mutation"),
+        "mutate.* are Components now — audit impact_kind must not claim native WorkspaceMutation: {impact_by_method:?}"
     );
 
     // Verify metadata fields for audit rows.
@@ -362,14 +361,10 @@ async fn dogfood_impact_matrix_five_production_classes() {
                 .expect("evidence read")
                 .expect("evidence row exists");
             assert_eq!(evidence.tool, row.method);
-            // `session.todo_write` records only its result cell;
-            // `observe.workspace` records the host-side read operation as well,
-            // so it carries one more effect than the Tool that touches nothing.
-            let expected_effects = if row.method == OBSERVE_WORKSPACE {
-                2
-            } else {
-                1
-            };
+            // `session.todo_write` records only its result cell.
+            // `observe.workspace` and `mutate.*` also record the host-side
+            // operation cell, so they carry one more effect.
+            let expected_effects = if row.method == TODO_WRITE { 1 } else { 2 };
             assert_eq!(
                 evidence.effects.effects.len(),
                 expected_effects,
@@ -434,29 +429,24 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "replay calls must be in audit_id order"
     );
 
-    // Verify the two legacy impact classes appear in the trace. Only the native
-    // rows can put one there: `WorkspaceObservation` left this list in #30 along
-    // with the native handler that declared it — the observation still happens,
-    // it just no longer speaks this vocabulary.
-    //
-    // The Component rows do carry an `impact_kind` here, but it is the PROV
-    // projection's mandatory-field placeholder, not an attribution — which is
-    // why the negative case is asserted on the audit rows above (where "unknown"
-    // is representable) and the `impact_kind_attributed` flag below, never on
-    // this list.
+    // Only native rows can attribute a legacy ImpactKind in the PROV projection.
+    // `WorkspaceObservation` left in #30; `WorkspaceMutation` left in #31 with
+    // the native mutate handlers. The Component rows still carry an
+    // `impact_kind` field, but it is a mandatory-field placeholder — asserted
+    // via `impact_kind_attributed=false` below, not via this list.
     let activity_impact_kinds: Vec<&ImpactKind> =
         activities.iter().map(|a| &a.impact_kind).collect();
-    for expected in [
-        ImpactKind::WorkspaceMutation,
-        ImpactKind::ExternalObservation,
-    ] {
-        assert!(
-            activity_impact_kinds.contains(&&expected),
-            "replay activities must include {:?}",
-            expected
-        );
-    }
-    for component in COMPONENT_TOOLS {
+    assert!(
+        activity_impact_kinds.contains(&&ImpactKind::ExternalObservation),
+        "replay activities must include ExternalObservation"
+    );
+    assert!(
+        !activity_impact_kinds.contains(&&ImpactKind::WorkspaceMutation),
+        "mutate.* Components must not attribute WorkspaceMutation in PROV: {activity_impact_kinds:?}"
+    );
+    // Only the Components this matrix actually drives (mutate.create is enabled
+    // for admission but not called here).
+    for component in [OBSERVE_WORKSPACE, MUTATE_EDIT, TODO_WRITE] {
         let component_activity = activities
             .iter()
             .find(|a| a.method == component)

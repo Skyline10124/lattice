@@ -31,7 +31,7 @@ and #34 (Codeberg #12) removes the remaining central catalog surface.
   create a third schema beside it and the ADR 0004 Source Tool manifest work.
 - `CATALOG` is the **native** method set, three entries since #30 migrated
   `observe.workspace` to an embedded Component Tool (#29 did the same for
-  `session.todo_write`). The shipped distribution is still five Tools; the
+  `session.todo_write`). After #31 the native catalog is `fetch.web` only; the shipped distribution is still five Tools; the
   migrated two's descriptor authority is their `tools/*/manifest.toml`, and
   re-adding them here would be the parallel schema ADR 0004 forbids (and
   would arm both authorization vocabularies for one call name — #28 design

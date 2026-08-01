@@ -1,0 +1,12 @@
+{
+  "abi-version": 1,
+  "artifact-sha256": "bf47ad5bbe3cfa6ba276e7dcb8367c10a45139a48e88ffa54c70ae70854b33ae",
+  "descriptor-sha256": "0e23ea8fa168312d11cad7e1850b58c6caa959ad81da0ce131f402f5594f274f",
+  "expected-imports": [
+    "lattice:tool-host/host-control@0.1.0",
+    "lattice:tool-host/workspace-mutate@0.1.0"
+  ],
+  "name": "mutate.edit",
+  "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0",
+  "version": "0.1.0"
+}

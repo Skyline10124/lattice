@@ -1,0 +1,149 @@
+{
+  "name": "mutate.edit",
+  "version": "0.1.0",
+  "description": "Edit an existing file with semantic text operations. The target path must be permitted by policy: use a 'dir/**' pattern to cover a directory (a pattern without /** matches only one exact file). Provide the path, the observe.workspace content_hash as expected_hash, and an edits array where every operation object includes op plus its required fields: replace_text uses old/new, insert_before and insert_after use anchor/content. Put multiple changes to the same file in one mutate.edit edits array. LANCET computes hashline anchors internally. This method never deletes files.",
+  "params_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "edits": {
+        "items": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "new": {
+                  "type": "string"
+                },
+                "occurrence": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "old": {
+                  "type": "string"
+                },
+                "op": {
+                  "const": "replace_text"
+                }
+              },
+              "required": [
+                "op",
+                "old",
+                "new"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "anchor": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "occurrence": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "op": {
+                  "const": "insert_before"
+                }
+              },
+              "required": [
+                "op",
+                "anchor",
+                "content"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "anchor": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "occurrence": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "op": {
+                  "const": "insert_after"
+                }
+              },
+              "required": [
+                "op",
+                "anchor",
+                "content"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "minItems": 1,
+        "type": "array"
+      },
+      "expected_hash": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "path": {
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "expected_hash",
+      "edits"
+    ],
+    "type": "object"
+  },
+  "result_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "changed_files": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "changed_files"
+    ],
+    "type": "object"
+  },
+  "scopes": [
+    {
+      "name": "workspace",
+      "trust": "in",
+      "channel": "workspace"
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "workspace.mutation",
+      "cell": {
+        "ctx_op": "mutate",
+        "ext_impact": "write",
+        "scope": "workspace"
+      }
+    },
+    {
+      "name": "workspace.mutation.result",
+      "cell": {
+        "ctx_op": "alloc",
+        "ext_impact": "write",
+        "scope": "workspace"
+      }
+    }
+  ],
+  "artifact": {
+    "sha256": "bf47ad5bbe3cfa6ba276e7dcb8367c10a45139a48e88ffa54c70ae70854b33ae",
+    "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"
+  },
+  "abi_version": 1
+}

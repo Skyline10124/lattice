@@ -8,12 +8,14 @@
 // `lancet_runtime::host_workspace`. There is no native observation handler and no
 // fallback — a runtime whose composition does not embed the Component has no
 // other way to serve the method.
+//
+// `mutation` is gone the same way for #31: `mutate.create` / `mutate.edit` are
+// Component Tools (`tools/mutate-create`, `tools/mutate-edit`) over the
+// `workspace-mutate` host imports.
 pub mod external;
-pub mod mutation;
 #[cfg(feature = "inspect-scaffold")]
 pub mod scaffold;
 
 pub use external::register_external_methods;
-pub use mutation::register_mutation_methods;
 #[cfg(feature = "inspect-scaffold")]
 pub use scaffold::register_inspect_scaffold_methods;

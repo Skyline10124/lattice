@@ -28,7 +28,6 @@ use lancet_api::{
 };
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
 use lancet_catalog::catalog;
-use lancet_catalog::methods::workspace::{Create, CreateParams, Edit, EditOperation, EditParams};
 use lancet_protocol::CepErrorCode;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
@@ -43,6 +42,10 @@ use lattice_session::{
 use tempfile::TempDir;
 
 // ─── Runtime-layer harness ──────────────────────────────────────────────────
+
+/// Component Tools this harness drives through Cell admission (#30/#31).
+const COMPONENT_TOOLS: [&str; 3] = ["mutate.create", "mutate.edit", "observe.workspace"];
+
 
 /// A runtime rooted at a temp Local Workspace whose private history lives in
 /// a separate temp state directory.
@@ -95,16 +98,21 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntim
         denied_write_patterns: Vec::new(),
         ..Default::default()
     };
-    let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    // Catalog natives plus the mutate/observe Components this harness drives.
+    let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
     LancetRuntime::build(LancetRuntimeConfig {
         project_root: root.to_path_buf(),
         enabled_tools: enabled,
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: AuditBacking::InMemory,
-        // Native catalog mutations only; no Component Tool is called, so the
-        // fail-closed default admission policy is the right one here.
-        capability_admission: Default::default(),
+        // mutate.create/edit are Components (#31): Cell admission is fail-closed.
+        capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
+            enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
+            denied_capabilities: Default::default(),
+            max_boundary: lancet_protocol::cell::Trust::In,
+        },
         workspace_history: history.clone(),
         model_id: "test".into(),
         runtime_version: "test".into(),
@@ -123,11 +131,7 @@ async fn create_file(
 ) -> Result<(), CepErrorCode> {
     runtime
         .client()
-        .call::<Create>(CreateParams {
-            path: path.into(),
-            content: content.into(),
-            create_parents: true,
-        })
+        .call_raw("mutate.create", serde_json::json!({"path": path, "content": content, "create_parents": true}))
         .await
         .map(|_| ())
         .map_err(|err| err.code)
@@ -142,15 +146,7 @@ async fn replace_text(
 ) -> Result<(), CepErrorCode> {
     runtime
         .client()
-        .call::<Edit>(EditParams {
-            path: path.into(),
-            expected_hash: expected_hash.into(),
-            edits: vec![EditOperation::ReplaceText {
-                old: old.into(),
-                new: new.into(),
-                occurrence: None,
-            }],
-        })
+        .call_raw("mutate.edit", serde_json::json!({"path": path, "expected_hash": expected_hash, "edits": [{"op": "replace_text", "old": old, "new": new}]}))
         .await
         .map(|_| ())
         .map_err(|err| err.code)
