@@ -11,27 +11,25 @@
 //!   Workspace read / list / grep / find. The host implements `Host` on
 //!   `StoreState` in [`crate::host_workspace`], where all path safety, visibility,
 //!   bounds, and evidence live.
+//! - `workspace-mutate` (imported by the guest, since #31): Structured Workspace
+//!   Mutation create / edit installs. The host implements `Host` on `StoreState`
+//!   in [`crate::host_mutate`], where precondition, atomic install, history, and
+//!   evidence live.
 //! - `tool-api` (exported by the guest): `run(params-json) ->
 //!   result<tool-output, string>`. The host calls this to execute a Tool.
 //!
 //! No `wasi:*` imports are linked — the no-ambient-WASI gate is structural.
 //!
-//! # Why this reads `observe-workspace`'s generated world
+//! # Why this reads the host-widest world
 //!
 //! Each Tool's `generated/tool-host.wit` describes *that Tool's* world: the
 //! interfaces it imports, and no others. The host has to be able to serve every
-//! interface any built-in Tool may import, so its bindings must come from the
-//! **widest** committed world — which since #30 is `observe.workspace`'s, the only
-//! one declaring a domain import. A narrower source would compile, and then fail
-//! at composition with a missing linker binding, which is a build-order accident
-//! rather than a decision.
-//!
-//! `cargo xtask tool-codegen` renders every world from one generator, so a Tool
-//! that declares a new domain interface changes this file's source of truth. When
-//! a second domain import lands (#31/#32), the widest world is whichever Tool
-//! declares the superset, and this path follows it.
+//! interface any built-in Tool may import, so its bindings come from the
+//! **widest** committed world under `crates/lancet-runtime/wit/tool-host.wit`
+//! — the union of every `DomainImport` the runtime links. A narrower source
+//! would compile, and then fail at composition with a missing linker binding.
 
 wasmtime::component::bindgen!({
-    path: "../../tools/observe-workspace/generated/tool-host.wit",
+    path: "wit/tool-host.wit",
     world: "tool",
 });

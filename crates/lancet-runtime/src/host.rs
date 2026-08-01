@@ -189,6 +189,7 @@ mod tests {
                 evidence: evidence.clone(),
                 admitted: Arc::new(admitted),
                 workspace: None,
+                mutate: None,
             },
             limits: RecordingLimits::new(&ExecutionLimits::default()),
             deadline: Instant::now() + Duration::from_secs(60),

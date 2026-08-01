@@ -448,6 +448,10 @@ async fn handle_request(
                         evidence: component_evidence.clone(),
                         admitted: Arc::new(admitted),
                         workspace: workspace_host,
+                        // Slice A wires the host type and linker; production
+                        // mutate Tools (slice C) will populate this the same
+                        // way observation does today.
+                        mutate: None,
                     };
                     rt.call(&method, params, comp_ctx).await
                 }

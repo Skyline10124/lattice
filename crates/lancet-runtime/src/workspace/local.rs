@@ -616,54 +616,67 @@ impl LocalWorkspace {
         let ws = self.blocking_clone();
         let path = path.clone();
         let content = content.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let (full, facts) = ws.resolve_secure(&path, PathIntent::Create)?;
-            #[cfg(any(test, feature = "test-fault-injection"))]
-            if ws.fail_install.swap(false, Ordering::SeqCst) {
-                return Err(LocalWorkspaceError::Io(std::io::Error::other(
-                    "injected install failure",
-                )));
-            }
-            if facts.exists {
-                return Err(LocalWorkspaceError::TargetExists {
-                    normalized: path.as_str().to_string(),
-                });
-            }
-            if !create_parents && !facts.parent_exists {
-                return Err(LocalWorkspaceError::NotFound {
-                    normalized: path.as_str().to_string(),
-                });
-            }
-            let (parent_rel, leaf) = split_parent_leaf(&ws.root, &full)?;
-            let parent_fd = ws.open_parent_dir_secure(&parent_rel, create_parents)?;
-            // O_CREAT|O_EXCL|O_NOFOLLOW on the single-component leaf,
-            // relative to the pinned parent fd: the no-replace guarantee
-            // and symlink-leaf rejection are enforced by the kernel at open
-            // time with no path re-traversal.
-            let flags =
-                OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-            let fd = rustix::fs::openat(&parent_fd, leaf.as_os_str(), flags, CREATE_FILE_MODE)
-                .map_err(|err| {
-                    if err == Errno::EXIST {
-                        LocalWorkspaceError::TargetExists {
-                            normalized: path.as_str().to_string(),
-                        }
-                    } else {
-                        LocalWorkspaceError::Io(err.into())
+        tokio::task::spawn_blocking(move || ws.create_excl_sync(&path, &content, create_parents))
+            .await
+            .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
+    }
+
+    /// Synchronous core of [`LocalWorkspace::create_excl`].
+    ///
+    /// Shared by the async native mutation path and the Tool Host
+    /// `workspace-mutate` imports (#31), which run on the wasmtime host thread
+    /// and must not nest another runtime.
+    pub fn create_excl_sync(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+        create_parents: bool,
+    ) -> Result<CreatedFile, LocalWorkspaceError> {
+        path.require_file_path()?;
+        let (full, facts) = self.resolve_secure(path, PathIntent::Create)?;
+        #[cfg(any(test, feature = "test-fault-injection"))]
+        if self.fail_install.swap(false, Ordering::SeqCst) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::other(
+                "injected install failure",
+            )));
+        }
+        if facts.exists {
+            return Err(LocalWorkspaceError::TargetExists {
+                normalized: path.as_str().to_string(),
+            });
+        }
+        if !create_parents && !facts.parent_exists {
+            return Err(LocalWorkspaceError::NotFound {
+                normalized: path.as_str().to_string(),
+            });
+        }
+        let (parent_rel, leaf) = split_parent_leaf(&self.root, &full)?;
+        let parent_fd = self.open_parent_dir_secure(&parent_rel, create_parents)?;
+        // O_CREAT|O_EXCL|O_NOFOLLOW on the single-component leaf,
+        // relative to the pinned parent fd: the no-replace guarantee
+        // and symlink-leaf rejection are enforced by the kernel at open
+        // time with no path re-traversal.
+        let flags =
+            OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let fd = rustix::fs::openat(&parent_fd, leaf.as_os_str(), flags, CREATE_FILE_MODE)
+            .map_err(|err| {
+                if err == Errno::EXIST {
+                    LocalWorkspaceError::TargetExists {
+                        normalized: path.as_str().to_string(),
                     }
-                })?;
-            let mut file = fs::File::from(fd);
-            file.write_all(&content)?;
-            file.sync_all()?;
-            drop(file);
-            Ok(CreatedFile {
-                path,
-                content_hash: content_hash(&content),
-                bytes_written: content.len() as u64,
-            })
+                } else {
+                    LocalWorkspaceError::Io(err.into())
+                }
+            })?;
+        let mut file = fs::File::from(fd);
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        Ok(CreatedFile {
+            path: path.clone(),
+            content_hash: content_hash(content),
+            bytes_written: content.len() as u64,
         })
-        .await
-        .map_err(|e| LocalWorkspaceError::Io(std::io::Error::other(e)))?
     }
 
     /// Atomic edit install (ADR 0003 decision 8).

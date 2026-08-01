@@ -56,6 +56,7 @@ pub mod evidence;
 pub mod generated;
 pub mod history;
 pub mod host;
+pub mod host_mutate;
 pub mod host_workspace;
 pub mod limits;
 pub mod runtime;
@@ -75,6 +76,10 @@ pub use history::{
     RewindStep, WorkspaceHistory, WorkspaceHistoryBacking, WorkspaceHistoryError,
 };
 
+pub use host_mutate::{
+    CreateInstalled, FileBytes, MutateError, MutationCallContext, ReplaceInstalled,
+    WorkspaceMutationHost, mutate_cep_error,
+};
 pub use host_workspace::{
     BudgetCharge, BudgetRefusal, ObservationCallContext, ObservationError,
     WorkspaceObservationHost, observation_cep_error,
