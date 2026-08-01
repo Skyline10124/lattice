@@ -1172,6 +1172,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 context_measure: Some(17),
                 truncated: None,
                 visibility: None,
+                mutation: None,
             },
             ObservedEffect {
                 seq: 0,
@@ -1184,6 +1185,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 context_measure: None,
                 truncated: None,
                 visibility: None,
+                mutation: None,
             },
         ],
     }
@@ -1210,6 +1212,7 @@ fn denied_operations() -> DeniedOperationsRecord {
                 scope: observed_scope(),
                 target: ObservedTarget::None,
                 reason: "uncovered operation".into(),
+                mutation: None,
             },
             DeniedOperation {
                 seq: 2,
@@ -1219,6 +1222,7 @@ fn denied_operations() -> DeniedOperationsRecord {
                     path: "src/lib.rs".into(),
                 },
                 reason: "path target denied this cycle".into(),
+                mutation: None,
             },
         ],
     }

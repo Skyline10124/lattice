@@ -638,6 +638,7 @@ mod tests {
                     context_measure: None,
                     truncated: None,
                     visibility: None,
+                    mutation: None,
                 }],
             },
             denied: DeniedOperationsRecord {
@@ -648,6 +649,7 @@ mod tests {
                     scope,
                     target: ObservedTarget::None,
                     reason: "uncovered operation".into(),
+                    mutation: None,
                 }],
             },
         }

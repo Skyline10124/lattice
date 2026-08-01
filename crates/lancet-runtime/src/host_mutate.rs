@@ -23,7 +23,9 @@ use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact};
 use lancet_protocol::error::{
     CepError, CepErrorCode, CepErrorData, GuardErrorData, Retriability, ValidationErrorData,
 };
-use lancet_protocol::evidence::{EffectSource, ObservedTarget};
+use lancet_protocol::evidence::{
+    MutationEvidence, MutationInstallation, MutationPrecondition, ObservedTarget,
+};
 
 use crate::admission::{AdmittedTool, authorize_operation, resolve_scope};
 use crate::evidence::CellEvidenceLedger;
@@ -287,8 +289,18 @@ impl WorkspaceMutationHost {
                 requested: requested.to_string(),
                 reason: denial.to_string(),
             };
-            ctx.evidence
-                .record_denied(cell, self.scope(ctx.admitted), target, denial.to_string());
+            ctx.evidence.record_denied_with_mutation(
+                cell,
+                self.scope(ctx.admitted),
+                target,
+                denial.to_string(),
+                Some(MutationEvidence {
+                    before_revision: None,
+                    after_revision: None,
+                    precondition: MutationPrecondition::Denied,
+                    installation: MutationInstallation::NotAttempted,
+                }),
+            );
             self.remember_refusal(ctx.method, &err);
             return Err(err);
         }
@@ -296,13 +308,14 @@ impl WorkspaceMutationHost {
     }
 
     fn record_refusal(&self, ctx: &MutationCallContext<'_>, resolved: &str, err: &MutateError) {
-        ctx.evidence.record_denied(
+        ctx.evidence.record_denied_with_mutation(
             self.operation_cell(),
             self.scope(ctx.admitted),
             ObservedTarget::Path {
                 path: resolved.to_string(),
             },
             err.audit_label(),
+            mutation_evidence_for(err),
         );
         self.remember_refusal(ctx.method, err);
     }
@@ -428,14 +441,19 @@ impl WorkspaceMutationHost {
             &created.content_hash,
         );
 
-        ctx.evidence.record_effect(
+        ctx.evidence.record_mutation_effect(
             self.operation_cell(),
             self.scope(ctx.admitted),
             ObservedTarget::Path {
                 path: resolved.clone(),
             },
-            EffectSource::Operation,
-            Some(created.bytes_written),
+            created.bytes_written,
+            MutationEvidence {
+                before_revision: None,
+                after_revision: Some(created.content_hash.clone()),
+                precondition: MutationPrecondition::Satisfied,
+                installation: MutationInstallation::Installed,
+            },
         );
 
         Ok(CreateInstalled {
@@ -504,14 +522,19 @@ impl WorkspaceMutationHost {
             &installed.content_hash,
         );
 
-        ctx.evidence.record_effect(
+        ctx.evidence.record_mutation_effect(
             self.operation_cell(),
             self.scope(ctx.admitted),
             ObservedTarget::Path {
                 path: resolved.clone(),
             },
-            EffectSource::Operation,
-            Some(installed.bytes_written),
+            installed.bytes_written,
+            MutationEvidence {
+                before_revision: Some(observed),
+                after_revision: Some(installed.content_hash.clone()),
+                precondition: MutationPrecondition::Satisfied,
+                installation: MutationInstallation::Installed,
+            },
         );
 
         Ok(ReplaceInstalled {
@@ -554,6 +577,37 @@ impl WorkspaceMutationHost {
                 None
             }
         }
+    }
+}
+
+
+fn mutation_evidence_for(err: &MutateError) -> Option<MutationEvidence> {
+    match err {
+        MutateError::StaleRevision { observed, .. } => Some(MutationEvidence {
+            before_revision: Some(observed.clone()),
+            after_revision: None,
+            precondition: MutationPrecondition::StaleRevision,
+            installation: MutationInstallation::NotAttempted,
+        }),
+        MutateError::AlreadyExists { .. } => Some(MutationEvidence {
+            before_revision: None,
+            after_revision: None,
+            precondition: MutationPrecondition::TargetExists,
+            installation: MutationInstallation::NotAttempted,
+        }),
+        MutateError::Denied { .. } => Some(MutationEvidence {
+            before_revision: None,
+            after_revision: None,
+            precondition: MutationPrecondition::Denied,
+            installation: MutationInstallation::NotAttempted,
+        }),
+        MutateError::Io { .. } => Some(MutationEvidence {
+            before_revision: None,
+            after_revision: None,
+            precondition: MutationPrecondition::Satisfied,
+            installation: MutationInstallation::Failed,
+        }),
+        _ => None,
     }
 }
 
@@ -866,6 +920,11 @@ mod tests {
         assert_eq!(effects.effects[0].cell.ctx_op, CtxOp::Mutate);
         assert_eq!(effects.effects[0].cell.ext_impact, ExtImpact::Write);
         assert_eq!(effects.effects[0].context_measure, Some(6));
+        let mutation = effects.effects[0].mutation.as_ref().expect("mutation evidence");
+        assert_eq!(mutation.before_revision, None);
+        assert_eq!(mutation.after_revision.as_deref(), Some(installed.local_revision.as_str()));
+        assert_eq!(mutation.precondition, MutationPrecondition::Satisfied);
+        assert_eq!(mutation.installation, MutationInstallation::Installed);
     }
 
     #[test]
@@ -892,6 +951,9 @@ mod tests {
         assert!(effects.effects.is_empty());
         assert_eq!(denied.denied.len(), 1);
         assert_eq!(denied.denied[0].reason, "already-exists");
+        let mutation = denied.denied[0].mutation.as_ref().expect("mutation denial");
+        assert_eq!(mutation.precondition, MutationPrecondition::TargetExists);
+        assert_eq!(mutation.installation, MutationInstallation::NotAttempted);
     }
 
     #[test]
@@ -934,6 +996,13 @@ mod tests {
         let (_, effects, denied) = evidence.snapshot();
         assert!(effects.effects.is_empty());
         assert_eq!(denied.denied[0].reason, "stale-revision");
+        let mutation = denied.denied[0].mutation.as_ref().expect("mutation denial");
+        assert_eq!(
+            mutation.before_revision.as_deref(),
+            Some(content_hash(b"v1\n").as_str())
+        );
+        assert_eq!(mutation.precondition, MutationPrecondition::StaleRevision);
+        assert_eq!(mutation.installation, MutationInstallation::NotAttempted);
     }
 
     #[test]

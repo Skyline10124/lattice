@@ -44,8 +44,9 @@ pub use error::{
 pub use evidence::{
     ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, CapabilityAdmissionPolicy,
     DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, DeniedOperationsRecord, EffectSource,
+    MutationEvidence, MutationInstallation, MutationPrecondition,
     OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord, ObservedScope,
-    ObservedTarget,
+    ObservedTarget, WorkspaceVisibilityEvidence,
 };
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};
 pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};

@@ -186,6 +186,7 @@ fn component_turn_projection_separates_admission_from_effects() {
             // to report (#30).
             truncated: None,
             visibility: None,
+            mutation: None,
         }],
     };
     let denied = DeniedOperationsRecord {
@@ -200,6 +201,7 @@ fn component_turn_projection_separates_admission_from_effects() {
             scope,
             target,
             reason: "cell mutate:none:session is not covered by an admitted capability".into(),
+            mutation: None,
         }],
     };
     let evidence_id = audit

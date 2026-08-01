@@ -33,7 +33,8 @@
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{
     ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION,
-    DeniedOperation, DeniedOperationsRecord, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION,
+    DeniedOperation, DeniedOperationsRecord, EffectSource, MutationEvidence,
+    MutationInstallation, MutationPrecondition, OBSERVED_EFFECTS_RECORD_VERSION,
     ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
     WorkspaceVisibilityEvidence,
 };
@@ -42,11 +43,13 @@ use rusqlite::{Connection, params};
 /// Schema version of the evidence tables, stamped in `PRAGMA user_version`
 /// alongside the audit tables (they share one database file, so they share one
 /// version counter — see [`crate::audit::AUDIT_SCHEMA_VERSION`]).
-pub const EVIDENCE_SCHEMA_VERSION: i64 = 4;
+pub const EVIDENCE_SCHEMA_VERSION: i64 = 5;
+
+/// Evidence schema before mutation revision columns (#31).
+pub const EVIDENCE_SCHEMA_VERSION_PRE_MUTATION: i64 = 4;
 
 /// Evidence schema before successful workspace visibility facts were stored.
 pub const EVIDENCE_SCHEMA_VERSION_PRE_VISIBILITY: i64 = 3;
-
 /// The evidence schema version that predates the `truncated` effect column
 /// (#30).
 ///
@@ -113,12 +116,27 @@ pub(crate) const REQUIRED_EVIDENCE_EFFECT_COLUMNS: [&str; 13] = [
 /// "incompatible schema, move it aside" error over columns the store can safely
 /// add without rewriting history. A database already stamped at the current
 /// version is checked against both required and additive sets before DDL.
-pub(crate) const ADDITIVE_EVIDENCE_EFFECT_COLUMNS: [&str; 5] = [
+pub(crate) const ADDITIVE_EVIDENCE_EFFECT_COLUMNS: [&str; 9] = [
     "truncated",
     "visibility_included_ignored",
     "visibility_filtered_system_exclusion",
     "visibility_filtered_read_denied",
     "visibility_filtered_ignored_default",
+    "mutation_before_revision",
+    "mutation_after_revision",
+    "mutation_precondition",
+    "mutation_installation",
+];
+
+/// Denial columns added additively for mutation evidence (#31).
+///
+/// Same rationale as [`ADDITIVE_EVIDENCE_EFFECT_COLUMNS`]: nullable, backfilled
+/// by `ALTER TABLE`, and checked after the upgrade stamps the current version.
+pub(crate) const ADDITIVE_EVIDENCE_DENIAL_COLUMNS: [&str; 4] = [
+    "mutation_before_revision",
+    "mutation_after_revision",
+    "mutation_precondition",
+    "mutation_installation",
 ];
 
 /// Columns an already-versioned `evidence_denials` table must carry.
@@ -176,6 +194,10 @@ CREATE TABLE IF NOT EXISTS evidence_effects (
     visibility_filtered_system_exclusion INTEGER,
     visibility_filtered_read_denied INTEGER,
     visibility_filtered_ignored_default INTEGER,
+    mutation_before_revision TEXT,
+    mutation_after_revision TEXT,
+    mutation_precondition TEXT,
+    mutation_installation TEXT,
     PRIMARY KEY (evidence_id, seq)
 );
 CREATE TABLE IF NOT EXISTS evidence_denials (
@@ -191,6 +213,10 @@ CREATE TABLE IF NOT EXISTS evidence_denials (
     target_kind TEXT NOT NULL,
     target_value TEXT,
     reason TEXT NOT NULL,
+    mutation_before_revision TEXT,
+    mutation_after_revision TEXT,
+    mutation_precondition TEXT,
+    mutation_installation TEXT,
     PRIMARY KEY (evidence_id, seq)
 );";
 
@@ -363,8 +389,9 @@ pub(crate) fn insert_call_evidence(
                     scope, scope_trust, scope_channel, target_kind, target_value, source,
                     context_measure, truncated, visibility_included_ignored,
                     visibility_filtered_system_exclusion, visibility_filtered_read_denied,
-                    visibility_filtered_ignored_default
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                    visibility_filtered_ignored_default, mutation_before_revision,
+                    mutation_after_revision, mutation_precondition, mutation_installation
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     evidence_id,
                     effect.seq,
@@ -388,6 +415,16 @@ pub(crate) fn insert_call_evidence(
                     effect.visibility.map(|v| v.filtered_system_exclusion),
                     effect.visibility.map(|v| v.filtered_read_denied),
                     effect.visibility.map(|v| v.filtered_ignored_default),
+                    effect.mutation.as_ref().and_then(|m| m.before_revision.clone()),
+                    effect.mutation.as_ref().and_then(|m| m.after_revision.clone()),
+                    effect
+                        .mutation
+                        .as_ref()
+                        .map(|m| mutation_precondition_label(m.precondition)),
+                    effect
+                        .mutation
+                        .as_ref()
+                        .map(|m| mutation_installation_label(m.installation)),
                 ],
             )?;
         }
@@ -401,8 +438,10 @@ pub(crate) fn insert_call_evidence(
             tx.execute(
                 "INSERT INTO evidence_denials (
                     evidence_id, seq, record_version, ctx_op, ext_impact, cell_scope,
-                    scope, scope_trust, scope_channel, target_kind, target_value, reason
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    scope, scope_trust, scope_channel, target_kind, target_value, reason,
+                    mutation_before_revision, mutation_after_revision,
+                    mutation_precondition, mutation_installation
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     evidence_id,
                     operation.seq,
@@ -416,6 +455,16 @@ pub(crate) fn insert_call_evidence(
                     target_kind,
                     target_value,
                     operation.reason,
+                    operation.mutation.as_ref().and_then(|m| m.before_revision.clone()),
+                    operation.mutation.as_ref().and_then(|m| m.after_revision.clone()),
+                    operation
+                        .mutation
+                        .as_ref()
+                        .map(|m| mutation_precondition_label(m.precondition)),
+                    operation
+                        .mutation
+                        .as_ref()
+                        .map(|m| mutation_installation_label(m.installation)),
                 ],
             )?;
         }
@@ -617,7 +666,9 @@ fn read_effects(
         "SELECT seq, record_version, ctx_op, ext_impact, cell_scope, scope, scope_trust,
                 scope_channel, target_kind, target_value, source, context_measure, truncated,
                 visibility_included_ignored, visibility_filtered_system_exclusion,
-                visibility_filtered_read_denied, visibility_filtered_ignored_default
+                visibility_filtered_read_denied, visibility_filtered_ignored_default,
+                mutation_before_revision, mutation_after_revision, mutation_precondition,
+                mutation_installation
          FROM evidence_effects WHERE evidence_id = ?1 ORDER BY seq",
     )?;
     let rows: Vec<RawEffect> = stmt
@@ -640,6 +691,10 @@ fn read_effects(
                 visibility_filtered_system_exclusion: row.get(14)?,
                 visibility_filtered_read_denied: row.get(15)?,
                 visibility_filtered_ignored_default: row.get(16)?,
+                mutation_before_revision: row.get(17)?,
+                mutation_after_revision: row.get(18)?,
+                mutation_precondition: row.get(19)?,
+                mutation_installation: row.get(20)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -674,6 +729,13 @@ fn read_effects(
                 });
             }
         };
+        let mutation = parse_mutation_evidence(
+            evidence_id,
+            raw.mutation_before_revision,
+            raw.mutation_after_revision,
+            raw.mutation_precondition.as_deref(),
+            raw.mutation_installation.as_deref(),
+        )?;
         effects.push(ObservedEffect {
             seq: raw.seq,
             cell: Cell {
@@ -691,6 +753,7 @@ fn read_effects(
             context_measure: raw.context_measure.map(|m| m as u64),
             truncated: raw.truncated,
             visibility,
+            mutation,
         });
     }
     Ok(ObservedEffectsRecord { version, effects })
@@ -716,6 +779,10 @@ struct RawEffect {
     visibility_filtered_system_exclusion: Option<bool>,
     visibility_filtered_read_denied: Option<bool>,
     visibility_filtered_ignored_default: Option<bool>,
+    mutation_before_revision: Option<String>,
+    mutation_after_revision: Option<String>,
+    mutation_precondition: Option<String>,
+    mutation_installation: Option<String>,
 }
 
 struct RawDenial {
@@ -730,6 +797,10 @@ struct RawDenial {
     target_kind: String,
     target_value: Option<String>,
     reason: String,
+    mutation_before_revision: Option<String>,
+    mutation_after_revision: Option<String>,
+    mutation_precondition: Option<String>,
+    mutation_installation: Option<String>,
 }
 
 fn read_denials(
@@ -739,7 +810,9 @@ fn read_denials(
 ) -> Result<DeniedOperationsRecord, EvidenceError> {
     let mut stmt = conn.prepare(
         "SELECT seq, record_version, ctx_op, ext_impact, cell_scope, scope, scope_trust,
-                scope_channel, target_kind, target_value, reason
+                scope_channel, target_kind, target_value, reason,
+                mutation_before_revision, mutation_after_revision, mutation_precondition,
+                mutation_installation
          FROM evidence_denials WHERE evidence_id = ?1 ORDER BY seq",
     )?;
     let rows: Vec<RawDenial> = stmt
@@ -756,6 +829,10 @@ fn read_denials(
                 target_kind: row.get(8)?,
                 target_value: row.get(9)?,
                 reason: row.get(10)?,
+                mutation_before_revision: row.get(11)?,
+                mutation_after_revision: row.get(12)?,
+                mutation_precondition: row.get(13)?,
+                mutation_installation: row.get(14)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -763,6 +840,13 @@ fn read_denials(
     let mut denied = Vec::with_capacity(rows.len());
     for raw in rows {
         check_version("denied_operation", evidence_id, raw.record_version, version)?;
+        let mutation = parse_mutation_evidence(
+            evidence_id,
+            raw.mutation_before_revision,
+            raw.mutation_after_revision,
+            raw.mutation_precondition.as_deref(),
+            raw.mutation_installation.as_deref(),
+        )?;
         denied.push(DeniedOperation {
             seq: raw.seq,
             cell: Cell {
@@ -777,6 +861,7 @@ fn read_denials(
             },
             target: join_target(evidence_id, &raw.target_kind, raw.target_value)?,
             reason: raw.reason,
+            mutation,
         });
     }
     Ok(DeniedOperationsRecord { version, denied })
@@ -787,6 +872,85 @@ fn read_denials(
 // evidence surface is queryable (criterion 1: "first-class, queryable"), which
 // a blob is not.
 // ---------------------------------------------------------------------------
+
+fn mutation_precondition_label(value: MutationPrecondition) -> &'static str {
+    match value {
+        MutationPrecondition::Satisfied => "satisfied",
+        MutationPrecondition::StaleRevision => "stale_revision",
+        MutationPrecondition::TargetExists => "target_exists",
+        MutationPrecondition::Denied => "denied",
+    }
+}
+
+fn mutation_installation_label(value: MutationInstallation) -> &'static str {
+    match value {
+        MutationInstallation::Installed => "installed",
+        MutationInstallation::NotAttempted => "not_attempted",
+        MutationInstallation::Failed => "failed",
+    }
+}
+
+fn parse_mutation_precondition(
+    evidence_id: i64,
+    raw: &str,
+) -> Result<MutationPrecondition, EvidenceError> {
+    match raw {
+        "satisfied" => Ok(MutationPrecondition::Satisfied),
+        "stale_revision" => Ok(MutationPrecondition::StaleRevision),
+        "target_exists" => Ok(MutationPrecondition::TargetExists),
+        "denied" => Ok(MutationPrecondition::Denied),
+        other => Err(EvidenceError::UnreadableField {
+            evidence_id,
+            field: "mutation_precondition",
+            value: other.to_string(),
+        }),
+    }
+}
+
+fn parse_mutation_installation(
+    evidence_id: i64,
+    raw: &str,
+) -> Result<MutationInstallation, EvidenceError> {
+    match raw {
+        "installed" => Ok(MutationInstallation::Installed),
+        "not_attempted" => Ok(MutationInstallation::NotAttempted),
+        "failed" => Ok(MutationInstallation::Failed),
+        other => Err(EvidenceError::UnreadableField {
+            evidence_id,
+            field: "mutation_installation",
+            value: other.to_string(),
+        }),
+    }
+}
+
+/// Rebuild mutation evidence from nullable columns.
+///
+/// All-null means a pre-#31 row (`None`). Any partial set is corrupt and fails
+/// closed as `UnreadableField` rather than inventing defaults.
+fn parse_mutation_evidence(
+    evidence_id: i64,
+    before_revision: Option<String>,
+    after_revision: Option<String>,
+    precondition: Option<&str>,
+    installation: Option<&str>,
+) -> Result<Option<MutationEvidence>, EvidenceError> {
+    match (before_revision, after_revision, precondition, installation) {
+        (None, None, None, None) => Ok(None),
+        (before_revision, after_revision, Some(precondition), Some(installation)) => {
+            Ok(Some(MutationEvidence {
+                before_revision,
+                after_revision,
+                precondition: parse_mutation_precondition(evidence_id, precondition)?,
+                installation: parse_mutation_installation(evidence_id, installation)?,
+            }))
+        }
+        values => Err(EvidenceError::UnreadableField {
+            evidence_id,
+            field: "mutation evidence",
+            value: format!("{values:?}"),
+        }),
+    }
+}
 
 fn ctx_op_label(op: CtxOp) -> &'static str {
     match op {

@@ -66,15 +66,22 @@ store-path resolution behind it.
 
 ## Recent Issues
 
+- ADDED #31: `evidence_effects` and `evidence_denials` gained four nullable
+  queryable MutationEvidence columns (`mutation_before_revision`,
+  `mutation_after_revision`, `mutation_precondition`, `mutation_installation`).
+  Mutation is all-null for non-mutate and pre-#31 records; a partially-null
+  group is corrupt. Enum labels are refused when unknown.
+  `EVIDENCE_SCHEMA_VERSION` is 5; v4 files are adopted additively via
+  `ALTER TABLE`, with a post-migration shape assertion.
 - ADDED #30: `evidence_effects` gained `truncated INTEGER` plus four nullable,
   queryable Policy-Visible Workspace decision columns. Visibility is all-null
   for non-workspace and pre-#30 records; a partially-null group is corrupt.
   `truncated` remains a nullable
   three-state: absent = unbounded observation, 0 = bounded but untruncated,
   1 = truncated — the host computes it, the guest cannot forge it).
-  `EVIDENCE_SCHEMA_VERSION` is 4; v2 and v3 files are adopted additively via
-  `ALTER TABLE evidence_effects ADD COLUMN`, with a post-migration shape
-  assertion.
+  Pre-#31 files were `EVIDENCE_SCHEMA_VERSION` 4; v2 and v3 files are adopted
+  additively via `ALTER TABLE evidence_effects ADD COLUMN`, with a
+  post-migration shape assertion.
 - ADDED #112: the versioned Cell evidence tables. `AUDIT_SCHEMA_VERSION` moved
   1 → 2 (`AUDIT_SCHEMA_VERSION_PRE_EVIDENCE` names the old value); a v1 file is
   adopted additively, and a file already claiming v2 whose evidence table shape
