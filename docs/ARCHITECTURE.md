@@ -193,15 +193,17 @@ A single turn, from user keystroke to committed session graph:
      in-process transport to the native CEP server.
 
 7. **Native handlers execute behind policy / Guard L1 / effect / audit.**
-   - Native handlers in `lancet-native` execute the typed CEP method
-     (`observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`,
-     `session.todo_write`) behind policy decisions (`lancet-authority`),
-     Guard L1 path/scope checks, effect-region checks, and audit recording
-     (`lancet-audit`).
+   - Native handlers in `lancet-native` execute the remaining typed CEP method
+     (`fetch.web`) behind policy decisions (`lancet-authority`), Guard L1 /
+     effect-region checks, and audit recording (`lancet-audit`). The other four
+     shipped Tools are embedded WASM Components (`observe.workspace`,
+     `mutate.create`, `mutate.edit`, `session.todo_write`) admitted by Cell
+     capability and executing over WIT Tool Host imports.
    - Filesystem observation and mutation run directly on the guarded Local
-     Workspace (the concrete host module in `lancet-native`), using typed
-     workspace-relative paths — never shell strings. Mutation preconditions,
-     atomic installation, and policy-visible reads are host-enforced.
+     Workspace through Tool Host imports (`workspace` / `workspace-mutate`),
+     using typed workspace-relative paths — never shell strings. Mutation
+     preconditions, atomic installation, MutationEvidence, and history
+     recording are host-enforced.
 8. **Turn outcome is committed to the git session graph.**
    - The turn outcome (messages, tool results, usage) is persisted as an
      immutable commit by `GitSessionGraphStore`
@@ -226,7 +228,7 @@ All file paths verified by reading the source.
 | `LancetRuntime` | struct | `crates/lancet-api/src/runtime.rs:112` | Fully-composed LANCET runtime: spawns the native CEP server and hands back a `CepClient` + audit + tool definitions. Built via `LancetRuntime::build` from `LancetRuntimeConfig`. |
 | `CepClient` | struct | `crates/lancet-dispatch/src/transport.rs:76` | Typed CEP JSON-RPC client over an in-process transport. Re-exported by `lancet-native` (`src/lib.rs`) and `lancet-api`. |
 | `CepExecutorAdapter` | struct | `crates/lattice-api/src/turn/cep.rs:75` | Maps LLM-shape `ToolCall`s into typed CEP method invocations via `CepClient`; implements `ToolCallExecutor`. Holds catalog/enabled name sets. |
-| `CATALOG` | static | `crates/lancet-catalog/src/catalog.rs:13` | `LazyLock<[MethodDescriptor; 5]>` — the authoritative production agent catalog (exactly 5 methods, see below). |
+| `CATALOG` | static | `crates/lancet-catalog/src/catalog.rs` | `LazyLock<[MethodDescriptor; 1]>` — the remaining native production method (`fetch.web`). The Agent-visible five-Tool set is closed composition of this catalog plus four embedded Components. |
 | `LocalWorkspace` | module | `crates/lancet-native/src/workspace/` | Concrete guarded Local Workspace host: secure path resolution, bounded observation, Mutation Preconditions, atomic installation. Not a pluggable seam (ADR 0003). |
 | `CepError` | struct | `crates/lancet-protocol/src/error.rs:216` | Typed CEP error with `data` + `Retriability`. Wire codes in reserved JSON-RPC range `-32000..-32099`. |
 | `CepErrorCode` | enum | `crates/lancet-protocol/src/error.rs:46` | Closed enum of CEP error codes, segmented by family (Validation/Permission/Execution/State/Guard/Effect). |
@@ -234,16 +236,18 @@ All file paths verified by reading the source.
 | `run_turn` | fn | `crates/lattice-api/src/turn/execute.rs:132` | `pub async fn run_turn(...) -> Result<RunTurnResult>` — drains `stream_turn` via `RunTurnCollector`. |
 | `RunTurnCollector` | struct | `crates/lattice-api/src/turn/collector.rs:26` | Drains the live `TurnEventStream` into a `RunTurnResult`. |
 
-### CEP catalog — exactly 5 agent-visible methods
+### Closed Tool distribution — exactly 5 agent-visible Tools
 
-The `CATALOG` static declares exactly these methods (verified at
-`crates/lancet-catalog/src/catalog.rs`):
+The Agent-visible set is still these five names. `lancet_catalog::CATALOG` now
+holds only the remaining native method (`fetch.web`); the other four are
+embedded Component Tools whose descriptor authority is `tools/*/manifest.toml`
+(#29–#31):
 
-1. `observe.workspace`
-2. `mutate.create`
-3. `mutate.edit`
-4. `fetch.web`
-5. `session.todo_write`
+1. `observe.workspace` — Component (`tools/observe-workspace`)
+2. `mutate.create` — Component (`tools/mutate-create`)
+3. `mutate.edit` — Component (`tools/mutate-edit`)
+4. `fetch.web` — native catalog
+5. `session.todo_write` — Component (`tools/todo-write`)
 
 **Operator audit (not in `CATALOG`):** query, tail, and turn replay read the
 project-keyed CEP audit SQLite store through `lancet-api::{query_audit,

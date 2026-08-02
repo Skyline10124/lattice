@@ -119,12 +119,14 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 - ADDED #63: every successfully installed Atomic Local Mutation is appended to
   the run's private `lancet_runtime::WorkspaceHistory`. `ServerRunConfig`
   carries the history, `run_native` attaches it to the one `LocalWorkspace`,
-  and `mutate.create`/`mutate.edit` call `record_mutation` only *after* the
+  and Component `mutate.create`/`mutate.edit` (via the `workspace-mutate`
+  Tool Host in `lancet-runtime`) call `record_mutation` only *after* the
   install returned success — so precondition, replan, guard, and policy
   failures record nothing and never move the current history ref. The
-  recorded commit ids land in durable audit metadata under
-  `workspace_history`. A history failure after a successful install is
-  recorded as evidence and never triggers a compensating write.
+  recorded commit ids land in durable audit / MutationEvidence. A history
+  failure after a successful install is recorded as evidence and never
+  triggers a compensating write. The native `handlers/mutation.rs` path was
+  removed in #31.
 - FIXED GitHub #39 (= Codeberg #17; PR #74 review defects) — four
   `src/workspace/local.rs` fixes. NOTE: #39 here is the operator audit sink
   ticket, not the Direct-Local workspace tickets #59/#60/#61 cited above and

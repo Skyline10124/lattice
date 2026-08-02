@@ -327,18 +327,31 @@ fn direct_mutation_stale_edit_and_external_visibility() {
             tool_failed(&stale.parsed, "mutate.edit"),
             "stale edit must fail",
         )?;
-        let replan_required = stale.parsed.events.iter().any(|event| match event {
+        // Component mutate.edit surfaces host StaleRevision through a guest
+        // `Err(String)`, which the runtime maps to ExecutionFailed. Native
+        // handlers used to emit ReplanRequired on the wire; MutationEvidence
+        // still records StaleRevision on the denied operation (#31).
+        let stale_code = stale.parsed.events.iter().find_map(|event| match event {
             TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
-                raw.get("method").and_then(Value::as_str) == Some("mutate.edit")
+                if raw.get("method").and_then(Value::as_str) == Some("mutate.edit")
                     && raw.get("ok").and_then(Value::as_bool) == Some(false)
-                    && raw.get("error_code").and_then(Value::as_str) == Some("ReplanRequired")
+                {
+                    raw.get("error_code")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                } else {
+                    None
+                }
             }
-            _ => false,
+            _ => None,
         });
         require(
-            replan_required,
+            matches!(
+                stale_code.as_deref(),
+                Some("ExecutionFailed") | Some("ReplanRequired")
+            ),
             format!(
-                "stale edit must emit ReplanRequired: {:?}",
+                "stale edit must emit ExecutionFailed or ReplanRequired, got {stale_code:?}: {:?}",
                 stale.parsed.events
             ),
         )?;
@@ -441,7 +454,7 @@ fn direct_mutation_no_rollback_after_provider_failure() {
     );
 }
 
-/// Write policy, system exclusion, and preflight effect denial produce no
+/// Write policy, system exclusion, and Cell capability denial produce no
 /// filesystem side effect.
 #[test]
 fn direct_mutation_denials_have_no_side_effect() {
@@ -492,11 +505,14 @@ fn direct_mutation_denials_have_no_side_effect() {
     let caps2 = server2.captured_requests();
     drop(server2);
 
+    // Legacy `[lancet.effects] deny = ["workspace_mutation"]` gates native
+    // catalog declared kinds. Component mutate.create is Cell-admitted (#31),
+    // so the equivalent pre-install refuse is `[lancet.capabilities] deny`.
     let (world3, spec3) = direct_world(
         "direct-mut-deny-effect",
         "dl-deff",
         "[\"mutate.create\"]",
-        "\n[lancet.effects]\ndeny = [\"workspace_mutation\"]\n",
+        "\n[lancet.capabilities]\ndeny = [\"workspace.mutation\"]\n",
     );
     let server3 = wire_fake_llm(
         &world3,
@@ -540,19 +556,20 @@ fn direct_mutation_denials_have_no_side_effect() {
         assert_clean_send(&effect_deny)?;
         require(
             tool_failed(&effect_deny.parsed, "mutate.create"),
-            "effect denial must fail tool",
+            "capability denial must fail tool",
         )?;
         require(
             !world3.project_dir().join("effect-denied.txt").exists(),
-            "preflight effect denial left a file",
+            "capability denial left a file",
         )?;
-        require(caps3.len() >= 2, "effect denial needs tool result capture")?;
+        require(caps3.len() >= 2, "capability denial needs tool result capture")?;
         let err_text = last_tool_content(&caps3[1]).unwrap_or_default();
         require(
-            err_text.to_lowercase().contains("effect")
+            err_text.to_lowercase().contains("capability")
                 || err_text.to_lowercase().contains("denied")
+                || err_text.to_lowercase().contains("not granted")
                 || err_text.to_lowercase().contains("policy"),
-            format!("effect denial tool message weak: {err_text}"),
+            format!("capability denial tool message weak: {err_text}"),
         )?;
         Ok(())
     })();
@@ -565,7 +582,7 @@ fn direct_mutation_denials_have_no_side_effect() {
     let _ = evidence2.finish(false);
     finish_scenario(
         evidence3,
-        &[("effect deny", &effect_deny.command)],
+        &[("capability deny", &effect_deny.command)],
         caps3,
         result,
     );

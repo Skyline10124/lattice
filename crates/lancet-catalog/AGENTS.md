@@ -15,9 +15,10 @@ and #34 (Codeberg #12) removes the remaining central catalog surface.
   `BaseAuthorityRequirement`.
 - `src/catalog.rs` builds the production `CATALOG` and optional scaffold
   catalog behind `inspect-scaffold`.
-- `src/methods/workspace.rs` owns the mutate workspace contracts.
-  `observe.workspace` left in #30 — it is an embedded Component Tool whose
-  contract authority is `tools/observe-workspace/manifest.toml`.
+- `src/methods/workspace.rs` is a stub documenting the retired native mutate
+  contracts. `observe.workspace` left in #30; `mutate.create` / `mutate.edit`
+  left in #31 — all three are embedded Component Tools whose contract authority
+  is `tools/*/manifest.toml`.
 - `src/methods/external.rs` owns `fetch.web` contracts.
 - `src/methods/session.rs` owns session state helper contracts.
 - `src/methods/scaffold.rs` is feature-gated inspection scaffolding only.
@@ -29,10 +30,10 @@ and #34 (Codeberg #12) removes the remaining central catalog surface.
 - Depend only on protocol plus serialization/schema support.
 - `CATALOG` remains authoritative for the current production path only. Do not
   create a third schema beside it and the ADR 0004 Source Tool manifest work.
-- `CATALOG` is the **native** method set, three entries since #30 migrated
-  `observe.workspace` to an embedded Component Tool (#29 did the same for
-  `session.todo_write`). After #31 the native catalog is `fetch.web` only; the shipped distribution is still five Tools; the
-  migrated two's descriptor authority is their `tools/*/manifest.toml`, and
+- `CATALOG` is the **native** method set: `fetch.web` only since #31 migrated
+  `mutate.create` / `mutate.edit` (#30 did `observe.workspace`; #29 did
+  `session.todo_write`). The shipped distribution is still five Tools; the
+  migrated four's descriptor authority is their `tools/*/manifest.toml`, and
   re-adding them here would be the parallel schema ADR 0004 forbids (and
   would arm both authorization vocabularies for one call name — #28 design
   §11). Do not treat the set as a permanent global limit; closed runtime

@@ -153,12 +153,13 @@ accumulating.
   `render.json`; that absence is a legal state, and `--check` fails on a stale
   one.
 - The default distribution contains `observe.workspace`, `mutate.create`,
-  `mutate.edit`, `fetch.web`, and `session.todo_write`. Two of those are embedded
+  `mutate.edit`, `fetch.web`, and `session.todo_write`. Four of those are embedded
   WASM Components whose sole descriptor authority is their source manifest:
-  `session.todo_write` since GitHub #29 (`tools/todo-write/manifest.toml`) and
-  `observe.workspace` since GitHub #30 (`tools/observe-workspace/manifest.toml`).
-  The other three are still native catalog methods, so `lancet_catalog::catalog()`
-  is three entries, not five. Removing a migrated method from that catalog is not
+  `session.todo_write` since GitHub #29 (`tools/todo-write/manifest.toml`),
+  `observe.workspace` since GitHub #30 (`tools/observe-workspace/manifest.toml`),
+  and `mutate.create` / `mutate.edit` since GitHub #31 (`tools/mutate-*/manifest.toml`).
+  The remaining native catalog method is `fetch.web`, so `lancet_catalog::catalog()`
+  is one entry, not five. Removing a migrated method from that catalog is not
   bookkeeping: a name present in both vocabularies fails the whole server run
   closed (`validate_no_component_native_collision`). A Tool
   manifest's required `[tool] distribution` field decides whether
