@@ -475,7 +475,8 @@ sanity check. Related: `lattice lancet status` shows audit-derived CEP status
 ### Ordinary lane — `.github/workflows/ci.yml`
 
 - **Triggers:** `push` to `main`, all `pull_request` events.
-- **Matrix:** `ubuntu-latest`, `macos-latest`.
+- **Host:** `ubuntu-latest`. LATTICE currently supports Linux hosts only;
+  macOS and Windows are not release or CI targets.
 - **Steps (in order):**
   1. `actions/checkout@v4` (SHA-pinned)
   2. `dtolnay/rust-toolchain` (stable) with `rustfmt, clippy` components — the

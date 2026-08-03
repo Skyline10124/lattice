@@ -5307,3 +5307,34 @@ test fixtures also diverged from their contracts.
 `crates/lattice-api/**`, `crates/lattice-system-harness/**`,
 `tools/mutate-{create,edit,shared}/**`, `xtask/src/tool_codegen.rs`,
 `docs/{LANCET.md,plans/**}`, root/scoped `AGENTS.md`, `CONTRIBUTING.md`, `FIX.md`.
+
+## PR #134 CI: make the supported host lane Linux-only — 2026-08-03
+
+Severity: MEDIUM (unsupported-platform CI failure cancelled the supported
+Linux gate).
+
+**Problem:** The ordinary CI workflow still declared an Ubuntu/macOS matrix
+even though ADR 0004 limits the built host target to Linux. On PR #134 the
+macOS job failed in `fast_dotenv_agents_dir_cannot_redirect_profile_lookup`,
+and the matrix fail-fast behavior cancelled the Ubuntu job before it could
+provide the supported-platform verdict.
+
+**Fix summary:**
+- Replaced the ordinary CI platform matrix with one `ubuntu-latest` job.
+- Removed the matrix-dependent failure-artifact name.
+- Documented Linux as the only current release and CI host target; macOS and
+  Windows are explicitly unsupported until multi-platform work is resumed.
+- Left incidental portable implementation branches intact without treating
+  them as support commitments.
+
+**Verification:**
+- Linux-only workflow assertion (`macos-latest` / `windows-latest` absent from
+  `.github/workflows`) — passed after reproducing the pre-fix failure.
+- YAML parse check for `.github/workflows/ci.yml` — passed.
+- `cargo xtask ci` — all formatting, Clippy, debug build, architecture
+  boundaries, generated-artifact checks, workspace tests, Direct-Local harness,
+  and reproducible Component digest checks passed.
+- `git diff --check` — passed.
+
+**Changed files:** `.github/workflows/ci.yml`, `CONTRIBUTING.md`,
+`docs/TESTING.md`, `FIX.md`.

@@ -9,10 +9,9 @@ permissions:
 
 jobs:
   check:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # LATTICE currently supports Linux hosts only. Do not add a platform
+    # matrix until the project explicitly resumes multi-platform support.
+    runs-on: ubuntu-latest
     # Drop debuginfo for every step in this job. Debug test binaries here are
     # ~430 MB each (wasmtime, aws-lc-sys, gix, rusqlite all link in) across ~68
     # test targets, which overruns the hosted runner's ~14 GB of free disk. lld
@@ -53,6 +52,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
-          name: harness-failures-${{ matrix.os }}
+          name: harness-failures-ubuntu-latest
           path: target/harness-failures/
           if-no-files-found: ignore

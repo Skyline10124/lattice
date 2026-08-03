@@ -235,9 +235,10 @@ step 1 or step 9; the nightly `full-gate` lane runs step 9 and installs the
 pinned `wasm-tools` for it. See [docs/TESTING.md](docs/TESTING.md) for the full
 lane-by-lane breakdown.
 
-CI (`.github/workflows/ci.yml`) runs the fmt/clippy/test gates across
-`ubuntu-latest` and `macos-latest` on pushes to `main` and on pull requests, so
-a clean local run avoids surprises.
+CI (`.github/workflows/ci.yml`) runs the fmt/clippy/test gates on
+`ubuntu-latest` for pushes to `main` and pull requests. LATTICE currently
+supports Linux hosts only; macOS and Windows are not release or CI targets.
+A clean local run avoids surprises.
 
 Open a PR against **`main`**. There is currently no `.github/PULL_REQUEST_TEMPLATE.md`,
 so in your PR description please:
