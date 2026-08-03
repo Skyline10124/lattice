@@ -26,11 +26,8 @@
 //! - After exit, the TUI's process group has no live members (no orphaned
 //!   TUI / fake-LLM children).
 
-#![cfg(unix)]
-
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
 use lattice_system_harness::processes_in_pgid;
 use lattice_system_harness::{
     LatticeDriver, PtyTuiDriver, ScenarioLayer, ScenarioSpec, ScenarioWorld, SseScript,
@@ -113,15 +110,11 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     tui.send_line("/quit").expect("send /quit");
     std::thread::sleep(Duration::from_millis(500));
 
-    #[cfg(target_os = "linux")]
     let pgid = tui.pgid();
     drop(tui);
 
     // Give the OS a moment to reap, then verify no survivors.
-    // Linux-only: on non-Linux Unix we skip the /proc scan (the Drop kill
-    // is still best-effort correct, just not machine-verified here).
     std::thread::sleep(Duration::from_millis(400));
-    #[cfg(target_os = "linux")]
     if let Some(pgid) = pgid {
         let survivors = processes_in_pgid(pgid);
         assert!(

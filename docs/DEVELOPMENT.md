@@ -18,6 +18,12 @@ Rust **1.94+** (edition 2024) and pins rustc **1.96.0** via
 commands or `cargo xtask` subcommands. The former `scripts/` shell gates were
 removed in #47 — see [docs/TESTING.md](./TESTING.md) "Retired lanes".
 
+The development, build, test, and runtime host is Linux only. Do not preserve
+generic-Unix or non-Linux compatibility branches, and do not trade away a
+stronger Linux primitive for a portable fallback. The Source Tool
+`wasm32-unknown-unknown` target is a guest artifact format, not a supported
+host.
+
 ## Local setup
 
 1. **Fork and clone** the repository, then `cd lattice` into the workspace root.

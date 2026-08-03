@@ -21,8 +21,6 @@
 //!   a failed tool event in the public stream, leaves no file on disk, and
 //!   the turn still completes on the model's recovery reply.
 
-#![cfg(unix)]
-
 mod support;
 
 use lattice_system_harness::{

@@ -15,8 +15,6 @@
 //! observable through the CLI. It is covered at the library layer in
 //! `crates/lattice-api/tests/workspace_history_acceptance.rs`.
 
-#![cfg(unix)]
-
 mod support;
 
 use std::fs;
@@ -30,7 +28,7 @@ use support::{
 
 /// Locate the private history repository under the scenario's isolated HOME.
 ///
-/// The world clears the environment and pins `HOME`, so the platform state
+/// The world clears the environment and pins `HOME`, so the Linux XDG state
 /// directory resolves beneath it. There is exactly one project key per
 /// scenario, so a glob avoids re-deriving the product's hashing scheme here.
 fn private_history_repo(world: &ScenarioWorld) -> Option<PathBuf> {

@@ -62,7 +62,7 @@ pub struct LatticeCommand {
 
 /// A spawned command whose output pipes are drained concurrently.
 ///
-/// The child is always its process-group leader on Unix. Timeout, interrupt,
+/// The child is always its process-group leader on Linux. Timeout, interrupt,
 /// and drop cleanup therefore reach descendants as well as the direct child.
 ///
 /// `pgid` is read back from the kernel with `getpgid(child_pid)` rather than
@@ -261,21 +261,16 @@ fn join_drain(
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn set_new_process_group(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
-
-#[cfg(not(unix))]
-pub(crate) fn set_new_process_group(_cmd: &mut Command) {}
 
 /// Read the child's actual process group from the kernel.
 ///
 /// `process_group(0)` makes the child its own group leader, so this normally
 /// equals the child pid. Reading it back keeps a failed or unsupported
 /// `setpgid` from silently leaving `pgid` pointing at the harness's own group.
-#[cfg(unix)]
 fn resolve_child_pgid(child: &Child) -> std::io::Result<u32> {
     let pid = child.id();
     // SAFETY: `getpgid` only reads scheduler metadata for `pid`; it has no
@@ -289,17 +284,11 @@ fn resolve_child_pgid(child: &Child) -> std::io::Result<u32> {
     Ok(pgid)
 }
 
-#[cfg(not(unix))]
-fn resolve_child_pgid(child: &Child) -> std::io::Result<u32> {
-    Ok(child.id())
-}
-
 /// Refuse to treat this process's own group as a signal target.
 ///
 /// Broadcasting into the harness's group interrupts the test binary itself:
 /// `cargo test` then dies with exit 130 while reporting zero failures (#105).
 /// Failing closed turns that silent, whole-run abort into a local error.
-#[cfg(unix)]
 fn reject_own_process_group(pgid: u32) -> std::io::Result<()> {
     // SAFETY: `getpgrp` takes no arguments, reads only the caller's own
     // process group, and cannot fail.
@@ -312,7 +301,6 @@ fn reject_own_process_group(pgid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn signal_process_group(pgid: u32, signal: libc::c_int) -> std::io::Result<()> {
     reject_own_process_group(pgid)?;
     // SAFETY: `killpg` only delivers `signal` to the process group; it has no
@@ -323,28 +311,14 @@ fn signal_process_group(pgid: u32, signal: libc::c_int) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn interrupt_process_group(pgid: u32) -> std::io::Result<()> {
     signal_process_group(pgid, libc::SIGINT)
 }
 
-#[cfg(not(unix))]
-fn interrupt_process_group(_pgid: u32) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "process-group signals require Unix",
-    ))
-}
-
-#[cfg(unix)]
 pub(crate) fn kill_process_group(pgid: u32) {
     let _ = signal_process_group(pgid, libc::SIGKILL);
 }
 
-#[cfg(not(unix))]
-pub(crate) fn kill_process_group(_pgid: u32) {}
-
-#[cfg(all(unix, target_os = "linux"))]
 pub fn processes_in_pgid(pgid: u32) -> Vec<u32> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -375,16 +349,10 @@ pub fn processes_in_pgid(pgid: u32) -> Vec<u32> {
     out
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-pub fn processes_in_pgid(_pgid: u32) -> Vec<u32> {
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn timeout_retains_partial_output_and_cleans_process_group() {
         let mut cmd = Command::new("sh");
@@ -412,7 +380,6 @@ mod tests {
 
     /// #105: a group signal aimed at the harness's own group would interrupt
     /// the test binary itself. The guard must reject it instead of firing.
-    #[cfg(unix)]
     #[test]
     fn signalling_own_process_group_is_refused() {
         // SAFETY: `getpgrp` reads only the caller's own process group.
@@ -429,7 +396,6 @@ mod tests {
 
     /// The spawned child must land in a group that is not the harness's own,
     /// so `interrupt`/`kill` can never reach back into `cargo test`.
-    #[cfg(unix)]
     #[test]
     fn spawned_child_pgid_is_read_back_and_distinct() {
         let mut cmd = Command::new("sh");
@@ -450,7 +416,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn interrupt_reaches_and_reaps_the_process_group() {
         let dir = tempfile::tempdir().expect("tempdir");

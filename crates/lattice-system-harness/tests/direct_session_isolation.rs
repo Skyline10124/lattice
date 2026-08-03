@@ -9,8 +9,6 @@
 //! addressed session only. No `sessions.git` or sidecar inspection — every
 //! assertion goes through public `--json` commands.
 
-#![cfg(unix)]
-
 mod support;
 
 use lattice_system_harness::{

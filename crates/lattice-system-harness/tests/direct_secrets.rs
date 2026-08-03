@@ -9,8 +9,6 @@
 //! query/replay, lancet status, provenance JSON) and asserts no sentinel
 //! leaks. A detected sentinel is an assertion failure.
 
-#![cfg(unix)]
-
 mod support;
 
 use std::fs;

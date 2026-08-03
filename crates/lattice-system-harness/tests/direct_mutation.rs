@@ -12,8 +12,6 @@
 //! Tool results are inspected in the next captured provider request (the
 //! product feeds the CEP result back as a `tool` role message).
 
-#![cfg(unix)]
-
 mod support;
 
 use std::fs;

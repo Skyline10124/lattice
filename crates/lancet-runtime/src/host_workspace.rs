@@ -1400,7 +1400,6 @@ mod tests {
     /// A symlink escaping the root fails as a rejected path, not as a followed
     /// link. The resolver refuses per segment, so the escape never happens.
     #[test]
-    #[cfg(unix)]
     fn symlink_escaping_the_root_is_refused() {
         let outside = tempfile::TempDir::new().expect("outside root");
         fs::write(outside.path().join("target.txt"), "outside\n").expect("seed");

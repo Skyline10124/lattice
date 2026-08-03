@@ -12,8 +12,6 @@
 //! (the product feeds the full CEP result back to the LLM as a `tool` role
 //! message); the JSONL stream only exposes result size / error summary.
 
-#![cfg(unix)]
-
 mod support;
 
 use std::fs;

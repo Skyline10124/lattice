@@ -157,7 +157,7 @@ fn collect_file_paths(root: &Path, dir: &Path, out: &mut Vec<String>) {
                 .strip_prefix(root)
                 .expect("path under root")
                 .to_string_lossy()
-                .replace('\\', "/");
+                .into_owned();
             out.push(rel);
         }
     }
@@ -188,7 +188,7 @@ mod cwd_recovery_tests {
     /// `gix::init` reads the process CWD even for an absolute target. Other
     /// crates' tests chdir into a TempDir that later gets dropped, leaving the
     /// process without a valid CWD; `init_empty_repo` must recover instead of
-    /// panicking (observed as a macos-latest CI failure).
+    /// panicking.
     ///
     /// Run serially and marked `#[ignore]`: the CWD is process-global, so
     /// invalidating it races every fixture running in parallel in this binary.

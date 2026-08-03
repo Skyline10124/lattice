@@ -200,7 +200,7 @@ Git history retains the non-claims narrative.
 ### Flat Store, Projected Graph
 
 Audit rows live in SQLite (`cep_audit_entries`). Production persistence uses the
-**external project-keyed path** under the platform state directory
+**external project-keyed path** under the Linux XDG state directory
 (`$XDG_STATE_HOME/lattice/projects/<sha256-canonical-root>/cep_audit.db` via
 `audit_db_path_for_project`, defined in `lancet_audit::store_path` and
 re-exported as `lancet_api::audit_db_path_for_project`). Each finalized CEP call is one

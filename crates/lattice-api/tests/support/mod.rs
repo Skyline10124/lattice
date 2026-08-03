@@ -40,7 +40,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
                 .strip_prefix(root)
                 .expect("under root")
                 .to_string_lossy()
-                .replace('\\', "/");
+                .into_owned();
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             out.push((rel, content));
         }

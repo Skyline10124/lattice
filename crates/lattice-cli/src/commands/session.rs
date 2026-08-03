@@ -15,7 +15,7 @@ use colored::Colorize;
 use lattice_api::{CreateSessionRequest, GraphHead, OpenSessionRequest, SessionApi};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
+/// Lattice config root (`$XDG_CONFIG_HOME` or the Linux config directory).
 pub(crate) fn lattice_config_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         let xdg = xdg.trim();

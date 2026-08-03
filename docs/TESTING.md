@@ -200,7 +200,7 @@ isolation contract (`crates/lattice-system-harness/AGENTS.md`):
   configuration; there is no test-only provider, hidden flag, or product-side
   change (RFC #41 (Codeberg #19) decision four).
 - **Process-group children** — every child is its own process-group leader on
-  Unix; timeout and controlled interrupt retain drained stdout/stderr and clean
+  Linux; timeout and controlled interrupt retain drained stdout/stderr and clean
   the whole group.
 
 ---
@@ -475,8 +475,8 @@ sanity check. Related: `lattice lancet status` shows audit-derived CEP status
 ### Ordinary lane — `.github/workflows/ci.yml`
 
 - **Triggers:** `push` to `main`, all `pull_request` events.
-- **Host:** `ubuntu-latest`. LATTICE currently supports Linux hosts only;
-  macOS and Windows are not release or CI targets.
+- **Host:** `ubuntu-latest`. Linux is the sole supported host; non-Linux CI,
+  release, compatibility, and fallback lanes are outside the project contract.
 - **Steps (in order):**
   1. `actions/checkout@v4` (SHA-pinned)
   2. `dtolnay/rust-toolchain` (stable) with `rustfmt, clippy` components — the
@@ -499,9 +499,9 @@ sanity check. Related: `lattice lancet status` shows audit-derived CEP status
 Lint and format run before tests and are `-D warnings`-strict, so a single
 clippy warning or formatting diff fails CI before tests execute. The build and
 boundary checks run before `cargo test` because the harness needs a built
-binary and a verified dependency boundary. Direct-Local scenarios run on any
-host — no hypervisor, daemon, or container image is required, so the lane is
-green on both matrix OSes.
+binary and a verified dependency boundary. Direct-Local scenarios run on the
+supported Linux host without a hypervisor, daemon, or container image; the
+ordinary lane has no host matrix.
 
 ### Full gate lane — `.github/workflows/full-gate.yml`
 

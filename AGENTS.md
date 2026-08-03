@@ -18,6 +18,22 @@ Triage uses the canonical `needs-triage`, `needs-info`, `ready-for-agent`, `read
 
 This repository uses a single-context domain documentation layout. See `docs/agents/domain.md`.
 
+## Platform Contract
+
+LATTICE supports Linux hosts only for development, build, test, deployment,
+and runtime operation. The `wasm32-unknown-unknown` Source Tool target is a
+guest artifact format, not a second supported host platform.
+
+- Do not add or retain macOS, Windows, BSD, generic-Unix, or other host
+  compatibility branches, no-op fallbacks, non-Linux host target dependency
+  sections, CI lanes, packaging, or documentation promises.
+- Do not choose a weaker portable primitive or degraded behavior to preserve
+  hypothetical future multi-platform support. Use the strongest appropriate
+  Linux facility and fail closed when its contract cannot be met.
+- Any future expansion beyond Linux requires an explicit architecture decision
+  and a complete native design; it must not arrive incrementally through
+  compatibility shims in Linux production paths.
+
 ## Architecture
 
 LATTICE is a session-centric LLM runtime. Conversation state lives in a

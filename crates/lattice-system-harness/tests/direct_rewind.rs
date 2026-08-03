@@ -13,8 +13,6 @@
 //! plain `blake3` — general libraries, not product crates — so the scenario
 //! stays inside the harness boundary.
 
-#![cfg(unix)]
-
 mod support;
 
 use std::fs;

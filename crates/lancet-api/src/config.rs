@@ -31,7 +31,7 @@ pub fn workspace_history_backing_in(
     ))
 }
 
-/// Private workspace-history repository backing under the platform state
+/// Private workspace-history repository backing under the Linux XDG state
 /// directory.
 pub fn workspace_history_backing(
     project_root: &Path,
@@ -70,7 +70,7 @@ impl AuditBacking {
         )?))
     }
 
-    /// Persistent external backing under the platform state directory.
+    /// Persistent external backing under the Linux XDG state directory.
     pub fn external_for_project(
         project_root: impl AsRef<Path>,
     ) -> Result<Self, ExternalAuditPathError> {

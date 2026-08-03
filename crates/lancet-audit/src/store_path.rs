@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 /// Failure resolving the external project-keyed CEP audit store path.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ExternalAuditPathError {
-    #[error("platform state directory unavailable")]
+    #[error("Linux XDG state directory unavailable")]
     MissingStateDir,
     #[error("project root path is not representable as UTF-8")]
     InvalidCanonicalIdentity,
@@ -22,25 +22,14 @@ pub enum ExternalAuditPathError {
     Canonicalize(String),
 }
 
-/// Platform state-directory root used for external audit storage.
+/// Linux state-directory root used for external audit storage.
 ///
 /// Resolution order:
 ///
-/// 1. `XDG_STATE_HOME`, when set to an absolute path. The XDG spec honors this
-///    override on every platform, and `dirs::state_dir()` only consults it on
-///    Linux. Reading it here keeps one operator-visible knob that behaves the
-///    same everywhere, and is what the test-isolation helpers
-///    (`ScopedXdgStateHome`, the system harness) rely on to redirect audit
-///    storage into a temp dir.
-/// 2. `dirs::state_dir()` — the XDG state directory. Linux-only; returns
-///    `None` on macOS and Windows.
-/// 3. `dirs::data_local_dir()` — the conventional home for persistent per-user
-///    state on those platforms (`~/Library/Application Support` on macOS,
-///    `%LOCALAPPDATA%` on Windows).
-///
-/// Without steps 1 and 3 every project-keyed audit path is unresolvable off
-/// Linux, which breaks production audit storage, `lancet status`, and the CLI
-/// audit commands there.
+/// 1. `XDG_STATE_HOME`, when set to an absolute path. Reading it explicitly
+///    keeps the operator-visible override used by the test-isolation helpers
+///    (`ScopedXdgStateHome`, the system harness).
+/// 2. `dirs::state_dir()` — the Linux XDG state directory.
 ///
 /// Callers that need an explicit root (tests, embedders) should prefer
 /// [`audit_db_path_for_project_in`] over relying on this resolution.
@@ -52,7 +41,7 @@ pub fn audit_state_root() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    dirs::state_dir().or_else(dirs::data_local_dir)
+    dirs::state_dir()
 }
 
 /// Deterministic SHA-256 project key from the canonical project root identity.
@@ -87,7 +76,7 @@ pub fn project_state_dir_in(
         .join(key))
 }
 
-/// Per-project private state directory using the platform state directory.
+/// Per-project private state directory using the Linux XDG state directory.
 pub fn project_state_dir(project_root: &Path) -> Result<PathBuf, ExternalAuditPathError> {
     let state_root = audit_state_root().ok_or(ExternalAuditPathError::MissingStateDir)?;
     project_state_dir_in(&state_root, project_root)
@@ -101,7 +90,7 @@ pub fn audit_db_path_for_project_in(
     Ok(project_state_dir_in(external_state_root, project_root)?.join("cep_audit.db"))
 }
 
-/// External audit DB path using the platform state directory.
+/// External audit DB path using the Linux XDG state directory.
 pub fn audit_db_path_for_project(project_root: &Path) -> Result<PathBuf, ExternalAuditPathError> {
     let state_root = audit_state_root().ok_or(ExternalAuditPathError::MissingStateDir)?;
     audit_db_path_for_project_in(&state_root, project_root)
@@ -122,11 +111,8 @@ mod external_audit_tests {
         )
     }
 
-    /// `audit_state_root` must honor an absolute `XDG_STATE_HOME` on every
-    /// platform, not just Linux. `dirs::state_dir()` only reads it on Linux, so
-    /// without the explicit lookup the test-isolation helpers silently fall
-    /// through to the real user directory on macOS/Windows and tests scribble
-    /// outside their temp dir (observed as CI failures on macos-latest).
+    /// `audit_state_root` must honor an absolute `XDG_STATE_HOME` before the
+    /// normal Linux XDG resolution so test isolation cannot escape its temp dir.
     #[test]
     fn audit_state_root_prefers_absolute_xdg_state_home() {
         // Shared env lock: this test mutates XDG_STATE_HOME manually, so it
@@ -141,10 +127,10 @@ mod external_audit_tests {
         assert_eq!(audit_state_root().as_deref(), Some(dir.path()));
 
         // A relative value is ignored per the XDG spec; resolution falls
-        // through to the platform directories, which must still yield a path.
+        // through to the normal Linux XDG state directory.
         crate::test_support::set_env_var("XDG_STATE_HOME", Some("relative/path"));
         let resolved = audit_state_root();
-        assert!(resolved.is_some(), "platform fallback must resolve");
+        assert_eq!(resolved, dirs::state_dir());
         assert_ne!(resolved.as_deref(), Some(Path::new("relative/path")));
 
         crate::test_support::set_env_var("XDG_STATE_HOME", prev.as_deref());
@@ -181,7 +167,7 @@ mod external_audit_tests {
 
     #[test]
     fn external_audit_invalid_canonical_identity_errors() {
-        // Non-UTF8 paths are environment-specific; canonicalize failure is portable.
+        // A missing path gives this test a deterministic canonicalize failure.
         let err = project_storage_key(Path::new("/this/path/should/not/exist/for/lattice"))
             .expect_err("missing path should not canonicalize");
         assert!(matches!(err, ExternalAuditPathError::Canonicalize(_)));

@@ -12,9 +12,8 @@ permissions:
 
 jobs:
   full-gate:
-    # Single OS bounds the long lane's cost; nothing here needs host
-    # virtualization — the rollout gate records host capabilities without
-    # requiring them.
+    # Linux is LATTICE's sole supported host. The rollout gate records host
+    # capabilities without requiring virtualization.
     runs-on: ubuntu-latest
     # See ci.yml: debug test binaries overrun the hosted runner's disk and lld
     # dies with SIGBUS mid-link. Job-level so every step shares one profile.

@@ -511,7 +511,6 @@ async fn cancelled_component_mutation_before_entry_writes_nothing() {
     assert!(!dir.path().join("cancelled.txt").exists());
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn component_mutation_install_failure_leaves_no_partial_target() {
     use std::os::unix::fs::PermissionsExt;

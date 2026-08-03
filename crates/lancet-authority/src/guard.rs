@@ -880,7 +880,6 @@ mod guard_l1_tests {
         assert_eq!(err.code, CepErrorCode::PathContainment);
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlink_escape_returns_guard_denied() {
         let dir = TempDir::new().unwrap();

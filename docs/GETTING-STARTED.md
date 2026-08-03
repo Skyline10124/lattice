@@ -10,8 +10,15 @@ All commands and paths below are verified against the repository source. Claims
 that could not be confirmed from the repo are marked with
 `<!-- VERIFY: ... -->`.
 
+LATTICE requires a Linux host for development, building, testing, deployment,
+and runtime operation. The `wasm32-unknown-unknown` target installed for Source
+Tool builds produces sandboxed guest artifacts for that Linux host; it does not
+make WASM, macOS, Windows, BSD, or generic Unix a supported host platform.
+
 ## 1. Prerequisites
 
+- **Linux host** — LATTICE is Linux-only. The commands in this guide are not
+  portability instructions for another operating system.
 - **Rust >= 1.88** (edition 2024). The workspace pins `rust-version = "1.88"`
   and `edition = "2024"` in the root `Cargo.toml` (`[workspace.package]`). Use
   [rustup](https://rustup.rs/) to install or update a compatible toolchain.

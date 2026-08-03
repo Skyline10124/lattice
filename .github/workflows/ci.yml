@@ -9,8 +9,8 @@ permissions:
 
 jobs:
   check:
-    # LATTICE currently supports Linux hosts only. Do not add a platform
-    # matrix until the project explicitly resumes multi-platform support.
+    # Linux is LATTICE's sole supported host. Do not add a platform matrix;
+    # expanding the host contract requires a separate architecture decision.
     runs-on: ubuntu-latest
     # Drop debuginfo for every step in this job. Debug test binaries here are
     # ~430 MB each (wasmtime, aws-lc-sys, gix, rusqlite all link in) across ~68

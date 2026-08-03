@@ -3,6 +3,18 @@
 This directory separates maintained documentation from historical design and
 release records.
 
+## Platform contract
+
+All maintained documentation assumes a Linux host. LATTICE supports Linux only
+for development, build, test, deployment, and runtime operation. The
+`wasm32-unknown-unknown` Source Tool target is a sandboxed guest-artifact
+format within that Linux host, not another supported deployment platform.
+
+Do not introduce macOS, Windows, BSD, generic-Unix, or other host compatibility
+paths, or weaken a Linux implementation with a portable, degraded, or no-op
+fallback for a possible future port. Expanding beyond Linux requires an
+explicit architecture decision and a complete native implementation.
+
 ## Start Here
 
 - [Getting Started](GETTING-STARTED.md) - install, configure, and run LATTICE.

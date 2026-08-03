@@ -62,7 +62,8 @@ starts because build scripts and procedural macros execute as host code.
    bundles, builds a versioned Linux host binary, runs descriptor/artifact and
    exact-catalog gates, then atomically changes the active version used by the
    next invocation. The current process continues with its original catalog.
-   Windows and macOS activation are out of scope.
+   Linux is the only supported host; no non-Linux activation or compatibility
+   path exists.
 
 8. **LANCET runtime responsibilities converge after Tool migration.**
    `lancet-native`, `lancet-cep`, `lancet-dispatch`, and the central

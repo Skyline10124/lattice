@@ -35,7 +35,7 @@ impl WorkspacePath {
     /// Parse and normalize a project-relative path.
     ///
     /// Rejects absolute paths, empty strings, NUL bytes, `..` traversal,
-    /// platform-specific prefixes, and the literal `/workspace` root alias.
+    /// foreign drive prefixes, and the literal `/workspace` root alias.
     pub fn parse(raw: &str) -> Result<Self, WorkspacePathError> {
         if raw.is_empty() {
             return Err(WorkspacePathError::Empty);
@@ -64,7 +64,6 @@ impl WorkspacePath {
         if trimmed.starts_with('/') || trimmed.starts_with('\\') {
             return Err(WorkspacePathError::Absolute);
         }
-        #[cfg(windows)]
         if trimmed.len() >= 2 {
             let bytes = trimmed.as_bytes();
             if bytes[1] == b':' {

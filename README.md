@@ -6,11 +6,24 @@
 
 ![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)
 ![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)
+![Platform: Linux only](https://img.shields.io/badge/platform-Linux%20only-informational.svg)
 
 A session-centric LLM runtime in Rust: every turn commits to a **git-backed
 session graph**, and all tool execution flows through **LANCET**, which uses
 CEP (Controlled Execution Protocol) — a typed JSON-RPC method protocol with
 policy gating, path guards, effect checks, and an audit trail.
+
+## Platform support
+
+LATTICE supports Linux hosts only for building, testing, deployment, and
+runtime operation. macOS, Windows, BSD, and generic Unix targets are not
+supported. The project does not preserve compatibility branches or weaker
+fallback behavior for possible future ports; a future platform expansion would
+require a separate architecture decision and a complete native implementation.
+
+Source Tools are compiled to `wasm32-unknown-unknown` as sandboxed guest
+artifacts inside the Linux host. That guest target is not another supported
+deployment platform.
 
 ## Workspace
 
@@ -86,7 +99,8 @@ command execution is not an agent-visible capability.
 
 ## Installation
 
-Requires Rust **1.88+** (edition 2024). Build the workspace with cargo:
+Requires a Linux host and Rust **1.88+** (edition 2024). Build the workspace
+with cargo:
 
 ```sh
 cargo build --release

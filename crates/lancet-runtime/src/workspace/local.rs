@@ -362,8 +362,7 @@ impl LocalWorkspace {
     /// can be swapped for a symlink, redirecting the mutation OUTSIDE the
     /// workspace and bypassing deny rules.
     ///
-    /// The walk is portable (macOS has neither `openat2` nor `O_PATH`, so it
-    /// uses plain `O_RDONLY` directory opens): the root is opened once with
+    /// The Linux walk uses `O_RDONLY` directory opens: the root is opened once with
     /// `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, and every child component is opened
     /// with `openat` relative to the already-pinned parent fd using the same
     /// flags. Once a directory fd is open it is pinned to the inode, so a later
@@ -390,11 +389,11 @@ impl LocalWorkspace {
     /// that directory now lives. Nothing in the walk is a symlink in that
     /// attack, so `O_NOFOLLOW` never fires, and there is no post-pin
     /// containment re-check. Closing it needs `openat2(RESOLVE_BENEATH)` over
-    /// the whole path on Linux (with this walk as the macOS fallback).
+    /// the whole path.
     /// The attacker must already hold concurrent write access to the project
     /// directory, which is why the residual is accepted rather than blocking.
     ///
-    /// Symlink-shaped failures (`ELOOP`/`ENOTDIR`/`EMLINK`) map to
+    /// Symlink-shaped failures (`ELOOP`/`ENOTDIR`) map to
     /// [`LocalWorkspaceError::SymlinkRejected`]; everything else maps to
     /// `Io`.
     fn open_parent_dir_secure(
@@ -1127,8 +1126,8 @@ fn claim_install_temp(parent_fd: &OwnedFd) -> Result<(String, OwnedFd), LocalWor
     ))))
 }
 
-/// Directory-open flags for every step of the pinned dirfd walk: read-only
-/// (macOS has no `O_PATH`), directories only, and no symlink following.
+/// Directory-open flags for every step of the pinned dirfd walk: read-only,
+/// directories only, and no symlink following.
 fn dir_open_flags() -> OFlags {
     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
 }
@@ -1163,11 +1162,10 @@ fn open_dir_component(
 }
 
 /// Map a dirfd-walk errno: symlink-shaped failures — `ELOOP` from
-/// `O_NOFOLLOW`, `ENOTDIR` from a non-directory swap, `EMLINK` from
-/// BSD-style `O_NOFOLLOW` rejection — become `SymlinkRejected`; the rest
-/// stay plain I/O.
+/// `O_NOFOLLOW` and `ENOTDIR` from a non-directory swap — become
+/// `SymlinkRejected`; the rest stay plain I/O.
 fn map_walk_errno(e: Errno, cur: &Path) -> LocalWorkspaceError {
-    if e == Errno::LOOP || e == Errno::NOTDIR || e == Errno::MLINK {
+    if e == Errno::LOOP || e == Errno::NOTDIR {
         LocalWorkspaceError::SymlinkRejected {
             component: cur.to_path_buf(),
         }

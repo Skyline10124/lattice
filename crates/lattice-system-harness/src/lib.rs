@@ -12,7 +12,6 @@ pub mod cli;
 pub mod driver;
 pub mod fake_llm;
 pub mod fixture_http;
-#[cfg(unix)]
 pub mod pty_tui;
 pub mod scenario;
 pub mod session_send;
@@ -26,7 +25,6 @@ pub use assert::{
     assert_stderr_contains, assert_stdout_contains, assert_stdout_contains_all,
     assert_with_failure_artifacts, failure_dir,
 };
-#[cfg(all(unix, target_os = "linux"))]
 pub use driver::processes_in_pgid;
 pub use driver::{
     CommandOutcome, DriverError, LatticeCommand, LatticeDriver, RunningCommand, Termination,
@@ -35,7 +33,6 @@ pub use fake_llm::{
     CapturedRequest, FAKE_API_KEY, FakeLlmServer, ResponseGate, ServeError, SseScript,
 };
 pub use fixture_http::{CapturedHttpRequest, FixtureHttpError, FixtureHttpServer, HttpFixture};
-#[cfg(unix)]
 pub use pty_tui::{PtyError, PtyTuiDriver};
 pub use scenario::{ScenarioBudget, ScenarioError, ScenarioLayer, ScenarioSpec};
 pub use session_send::{

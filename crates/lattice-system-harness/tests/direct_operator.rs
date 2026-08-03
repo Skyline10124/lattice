@@ -9,8 +9,6 @@
 //! order, and stored attestation match. Unknown session/turn are explicit
 //! nonzero failures.
 
-#![cfg(unix)]
-
 mod support;
 
 use std::process::Output;

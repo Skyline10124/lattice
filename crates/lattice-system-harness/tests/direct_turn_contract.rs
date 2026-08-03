@@ -28,8 +28,6 @@
 //! No full event golden: unknown additive events are allowed between the
 //! required events (RFC #41 (Codeberg #19) decision five).
 
-#![cfg(unix)]
-
 mod support;
 
 use lattice_system_harness::{

@@ -753,45 +753,31 @@ fn move_current_backwards(
 /// process death, so a crashed LATTICE cannot wedge the history behind a stale
 /// lock file the way an `O_EXCL` marker would.
 struct RecordingLock {
-    #[cfg(unix)]
     _file: std::fs::File,
 }
 
 impl RecordingLock {
     fn acquire(path: Option<&Path>) -> Result<Self, WorkspaceHistoryError> {
-        let _ = path;
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let path = path.ok_or_else(|| {
-                WorkspaceHistoryError::Repo("history lock path is unset".to_string())
+        use std::os::unix::io::AsRawFd;
+
+        let path = path
+            .ok_or_else(|| WorkspaceHistoryError::Repo("history lock path is unset".to_string()))?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| {
+                WorkspaceHistoryError::Repo(format!("open history lock {}: {e}", path.display()))
             })?;
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|e| {
-                    WorkspaceHistoryError::Repo(format!(
-                        "open history lock {}: {e}",
-                        path.display()
-                    ))
-                })?;
-            // SAFETY: `file` owns a valid open descriptor for the duration of
-            // the call, and `flock` only sets an advisory lock on it.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(WorkspaceHistoryError::Repo(format!(
-                    "lock history for recording: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            Ok(Self { _file: file })
+        // SAFETY: `file` owns a valid open descriptor for the duration of
+        // the call, and `flock` only sets an advisory lock on it.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(WorkspaceHistoryError::Repo(format!(
+                "lock history for recording: {}",
+                std::io::Error::last_os_error()
+            )));
         }
-        #[cfg(not(unix))]
-        {
-            // No advisory lock available; the compare-and-set retry below is
-            // the only serialization.
-            Ok(Self {})
-        }
+        Ok(Self { _file: file })
     }
 }
 

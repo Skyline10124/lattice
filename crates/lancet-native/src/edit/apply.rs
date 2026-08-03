@@ -802,7 +802,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(file).unwrap(), before);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn apply_patch_engine_write_stage_failure_rolls_back_already_written_files() {
         use std::os::unix::fs::PermissionsExt;

@@ -10,11 +10,8 @@
 //! long-term contract. Prompt recognition and ANSI cleanup live **inside this
 //! driver** only; scenario-level assertions never touch display details.
 //!
-//! Unix-only: the repo does not commit to Windows (see #48 (Codeberg #26)
-//! Out-of-Scope). The driver is built on `portable-pty`, a general test
-//! library that satisfies the harness boundary (no product crate deps).
-
-#![cfg(unix)]
+//! Linux-only. The driver is built on `portable-pty`, a general test library
+//! that satisfies the harness boundary (no product crate deps).
 
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -235,7 +232,7 @@ impl PtyTuiDriver {
                 }
             }
             // If still not reaped by the deadline, drop `child` —
-            // portable-pty's Child drop on Unix forgets (no kill/wait), so
+            // portable-pty's Child drop on Linux forgets (no kill/wait), so
             // the zombie may linger, but we have done our best within a
             // bounded window.
         }

@@ -501,7 +501,7 @@ pub fn report() -> &'static DotenvReport {
 /// Decide whether a `.env` key crosses the trust boundary.
 ///
 /// Matching is case-insensitive: environment variable names are
-/// case-sensitive on Unix, and some of these keys are genuinely read in
+/// case-sensitive on Linux, and some of these keys are genuinely read in
 /// lowercase form (`https_proxy`), so a case-sensitive rule would leave a
 /// bypass open.
 pub fn classify(key: &str) -> Option<RejectReason> {

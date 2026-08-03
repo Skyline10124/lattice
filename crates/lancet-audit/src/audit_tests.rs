@@ -44,7 +44,6 @@ fn unique_test_dir(name: &str) -> PathBuf {
     dir
 }
 
-#[cfg(unix)]
 #[test]
 fn open_rejects_symlinked_audit_parent() {
     let root = unique_test_dir("symlink-parent-root");
@@ -65,7 +64,6 @@ fn open_rejects_symlinked_audit_parent() {
     let _ = std::fs::remove_dir_all(&outside);
 }
 
-#[cfg(unix)]
 #[test]
 fn open_rejects_symlinked_audit_database_file() {
     let root = unique_test_dir("symlink-file-root");
@@ -1499,11 +1497,8 @@ fn import_legacy_read_only_if_empty_copies_both_tables() {
     let source_bytes_after = std::fs::read(&legacy_path).unwrap();
     assert_eq!(source_bytes_before, source_bytes_after);
     assert_eq!(source_meta_before.len(), source_meta_after.len());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        assert_eq!(source_meta_before.mtime(), source_meta_after.mtime());
-    }
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(source_meta_before.mtime(), source_meta_after.mtime());
 
     dest.import_legacy_read_only_if_empty(&legacy_path).unwrap();
     assert_eq!(dest.row_count().unwrap(), 1);

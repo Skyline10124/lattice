@@ -11,8 +11,6 @@
 //! (not the OpenAI-compatible fake LLM). Tool results are inspected in the
 //! next captured provider request.
 
-#![cfg(unix)]
-
 mod support;
 
 use std::fs;
@@ -422,8 +420,8 @@ fn direct_tools_todo_write_success() {
         // stream), so their relative interleaving is not ordered. Assert only
         // the ordering that holds within the CEP channel itself, plus the
         // presence of the tool completion. Requiring
-        // `cep_finished < ToolCallFinished` across the two channels was flaky on
-        // macOS, where the tool event frequently lands first.
+        // `cep_finished < ToolCallFinished` across the two channels would assert
+        // an ordering the implementation does not provide.
         require(
             cep_started
                 .zip(cep_finished)

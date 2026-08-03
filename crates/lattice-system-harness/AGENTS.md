@@ -27,11 +27,10 @@ integration-test target of any product crate.
   together with parsed JSONL. Unknown valid `TurnEvent` variants are kept as
   `Unknown`; malformed nonblank lines are retained separately. Exit code
   classification mirrors the product's 0/1/2 contract without importing it.
-- Subprocesses are spawned in their own process group
-  (`process_group(0)` on Unix). Timeout and controlled interrupt retain drained
-  stdout/stderr, reap the direct child, and clean the whole group. The repo does
-  not commit to Windows (see #48 (Codeberg #26) Out-of-Scope); process groups
-  are a no-op there.
+- Subprocesses are spawned in their own Linux process group
+  (`process_group(0)`). Timeout and controlled interrupt retain drained
+  stdout/stderr, reap the direct child, and clean the whole group. Do not add a
+  non-Linux no-op or degraded cleanup fallback.
 - Fake-provider races use `ResponseGate` plus bounded request waits. Failure
   evidence is redacted before writing, stale bundles are cleared, and recursive
   byte-level sentinel scans fail closed on both hits and I/O errors.

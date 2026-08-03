@@ -149,8 +149,8 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   fd (`mkdirat` + EEXIST-tolerant retry when creating), and `create_excl` /
   `install_atomic` / `remove_file` reach the filesystem only through that fd
   with single-component leaf names (`openat O_CREAT|O_EXCL`, `renameat`,
-  `unlinkat`, `fsync` on the dirfd; path-based `fsync_dir` is gone). Portable
-  (Linux + macOS; no `openat2`/`O_PATH`). It is NOT `openat2(RESOLVE_BENEATH)`:
+  `unlinkat`, `fsync` on the dirfd; path-based `fsync_dir` is gone). It is NOT
+  `openat2(RESOLVE_BENEATH)`:
   pinning defeats symlink substitution but not a rename of the pinned directory
   out of the workspace between pin and leaf op — accepted residual L-39-04.
   Adds `rustix` (features `["fs"]`) to the root workspace deps and here.

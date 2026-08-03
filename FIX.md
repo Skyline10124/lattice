@@ -5338,3 +5338,47 @@ provide the supported-platform verdict.
 
 **Changed files:** `.github/workflows/ci.yml`, `CONTRIBUTING.md`,
 `docs/TESTING.md`, `FIX.md`.
+
+## Linux-only host contract: remove non-Linux compatibility paths — 2026-08-04
+
+Severity: MEDIUM (the documented Linux host target still carried non-Linux
+fallback behavior and portability-driven implementation residue).
+
+**Problem:** The Linux-only CI declaration did not remove project-owned
+generic-Unix, Windows, macOS, and BSD compatibility paths. The system harness
+still compiled no-op non-Unix process handling and skipped Linux `/proc`
+assertions elsewhere; audit storage fell back to non-Linux state directories;
+tests normalized Windows separators; and Local Workspace errno handling kept a
+BSD-only branch. Documentation also described Linux as a current CI choice
+rather than the sole host contract, leaving room for future portability work to
+weaken Linux behavior.
+
+**Fix summary:**
+- Removed host-platform `cfg` branches and target-specific dependency sections
+  from the maintained crates. Linux process groups, signals, PTY cleanup,
+  symlink/permission tests, and `/proc` assertions now run directly.
+- Removed non-Linux audit-state fallback, BSD `EMLINK` handling, and Windows
+  separator normalization from Linux test helpers.
+- Established Linux as the only development, build, test, deployment, and
+  runtime host in root, contributor, architecture, testing, and getting-started
+  documentation. The `wasm32-unknown-unknown` Source Tool target is explicitly
+  a guest artifact format, not another host.
+- Recorded the architecture rule that hypothetical future platform support
+  cannot justify portable no-op fallbacks or weaker Linux primitives; expanding
+  the host set requires a separate architecture decision and a complete native
+  implementation.
+
+**Verification:**
+- Focused `lancet-runtime`, `lattice-session`, `lattice-system-harness`, and
+  `lattice-api` tests — passed.
+- `cargo xtask harness-boundary` — passed.
+- `cargo xtask ci` — passed on the Linux host, including formatting, Clippy,
+  debug build, architecture boundaries, all workspace tests, Direct-Local/PTY
+  harness scenarios, generated-artifact checks, and Component digest
+  reproduction.
+- `git diff --check` — passed.
+
+**Changed files:** root Cargo/workflow/platform documentation; active
+`docs/**`; `crates/lancet-{audit,authority,native,runtime}/**`;
+`crates/lattice-{api,cli,session,system-harness}/**`; root/scoped `AGENTS.md`;
+`FINDINGS.md`; `FIX.md`.

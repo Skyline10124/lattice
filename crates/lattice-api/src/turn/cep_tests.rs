@@ -345,7 +345,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
     // ScopedXdgStateHome test cannot point XDG_STATE_HOME at its tempdir and
     // drop it under our open SQLite store (FINDINGS ENV-OOM-02 "disk I/O
     // error" flake); the isolated state dir also keeps the audit DB out of
-    // the real platform state directory.
+    // the real Linux XDG state directory.
     let _xdg = lancet_audit::ScopedXdgStateHome::new();
     let dir = TempDir::new().unwrap();
 

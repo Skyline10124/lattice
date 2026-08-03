@@ -41,7 +41,6 @@ fn loaded_profile(model: &str) -> lattice_profile::LoadedAgentProfile {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn run_validate_agents_dir_resolves_symlink_prefix_before_safety_check() {
     let scratch_root = std::env::current_dir()

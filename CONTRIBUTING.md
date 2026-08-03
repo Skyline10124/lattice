@@ -34,6 +34,11 @@ license that covers the project.
 
 ## 2. Getting started
 
+LATTICE development and CI support Linux hosts only. Do not add compatibility
+branches or weaken a Linux implementation for hypothetical future macOS,
+Windows, BSD, or generic-Unix support. Any platform expansion requires a
+separate architecture decision and a complete native implementation.
+
 LATTICE requires Rust **1.94+** (edition 2024). The toolchain is pinned to
 rustc 1.96.0 via `rust-toolchain.toml` (which also installs the
 `wasm32-unknown-unknown` target for Source Tool builds). Build and test the
@@ -236,9 +241,9 @@ pinned `wasm-tools` for it. See [docs/TESTING.md](docs/TESTING.md) for the full
 lane-by-lane breakdown.
 
 CI (`.github/workflows/ci.yml`) runs the fmt/clippy/test gates on
-`ubuntu-latest` for pushes to `main` and pull requests. LATTICE currently
-supports Linux hosts only; macOS and Windows are not release or CI targets.
-A clean local run avoids surprises.
+`ubuntu-latest` for pushes to `main` and pull requests. Linux is the sole
+supported host; non-Linux release, CI, compatibility, and fallback paths are
+outside the project contract. A clean local run avoids surprises.
 
 Open a PR against **`main`**. There is currently no `.github/PULL_REQUEST_TEMPLATE.md`,
 so in your PR description please:
