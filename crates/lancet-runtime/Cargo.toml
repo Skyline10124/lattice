@@ -12,9 +12,9 @@ default = []
 # Non-default: production binaries compose from inventory + generated
 # EXPECTED_COMPONENTS, not from this helper.
 test-utils = []
-# Narrow one-shot install-failure seam for the Local Workspace, used by
-# `lancet-native`'s mutation tests across the crate boundary. Never enabled by
-# production binaries.
+# Narrow one-shot install and post-install parent-fsync failure seams for the
+# Local Workspace, used by mutation tests across the crate boundary. Never
+# enabled by production binaries.
 test-fault-injection = []
 
 [dependencies]

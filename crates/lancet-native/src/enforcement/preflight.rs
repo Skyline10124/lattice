@@ -107,43 +107,6 @@ pub(crate) fn policy_denial_preflight_metadata(
     }))
 }
 
-/// Build mutation-specific preflight metadata after scope checks.
-///
-/// Method-local evidence only: the guarded target paths, the Local Revision
-/// observed at the Mutation Precondition check (when relevant), and the
-/// replan reason. No routing invocation flags.
-pub(crate) fn mutation_preflight_metadata(input: MutationPreflight<'_>) -> Value {
-    json!({
-        "cep_preflight": {
-            "method": input.method,
-            "kind": "workspace_mutation",
-            "effective_effect": ["workspace_mutation"],
-            "changed_paths": input.changed_paths,
-            "write_patterns": input.write_patterns,
-            "out_of_scope_paths": input.out_of_scope_paths,
-            "local_revision": input.local_revision,
-            "replan_reason": input.replan_reason,
-        },
-        "changed_paths": input.changed_paths,
-        "out_of_scope_paths": input.out_of_scope_paths,
-        "local_revision": input.local_revision,
-        "replan_reason": input.replan_reason,
-        "policy_enforced": true,
-    })
-}
-
-pub(crate) struct MutationPreflight<'a> {
-    pub(crate) method: &'a str,
-    pub(crate) changed_paths: &'a [String],
-    pub(crate) write_patterns: &'a [String],
-    pub(crate) out_of_scope_paths: &'a [String],
-    /// Local Revision observed at the Mutation Precondition check (the
-    /// current content hash of the target), present when the precondition
-    /// failed on a stale expected hash.
-    pub(crate) local_revision: Option<&'a str>,
-    pub(crate) replan_reason: Option<&'a str>,
-}
-
 pub(crate) fn authorized_region_metadata(region: &AuthorizedEffectRegion) -> Value {
     json!({
         "kinds": region

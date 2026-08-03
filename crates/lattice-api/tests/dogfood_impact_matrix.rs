@@ -204,7 +204,10 @@ async fn dogfood_impact_matrix_five_production_classes() {
         .await
         .expect("mutate.edit");
     assert_eq!(
-        edit_result["changed_files"].as_array().expect("changed_files").len(),
+        edit_result["changed_files"]
+            .as_array()
+            .expect("changed_files")
+            .len(),
         1,
         "edit must change 1 file"
     );

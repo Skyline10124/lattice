@@ -69,6 +69,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+#[cfg(any(test, feature = "test-fault-injection"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gix::objs::tree::EntryKind;
 use gix::refs::transaction::PreviousValue;
@@ -200,6 +202,9 @@ pub struct WorkspaceHistory {
     path: Option<PathBuf>,
     /// Advisory lock file serializing recording across handles and processes.
     lock_path: Option<PathBuf>,
+    /// One-shot record failure for tests of the post-install durability edge.
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    fail_record: AtomicBool,
 }
 
 impl std::fmt::Debug for WorkspaceHistory {
@@ -222,6 +227,8 @@ impl WorkspaceHistory {
                     repo: Some(Mutex::new(repo)),
                     path: Some(path),
                     lock_path: Some(lock_path),
+                    #[cfg(any(test, feature = "test-fault-injection"))]
+                    fail_record: AtomicBool::new(false),
                 })
             }
         }
@@ -233,6 +240,8 @@ impl WorkspaceHistory {
             repo: None,
             path: None,
             lock_path: None,
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            fail_record: AtomicBool::new(false),
         }
     }
 
@@ -267,6 +276,12 @@ impl WorkspaceHistory {
         let Some(repo) = self.repo.as_ref() else {
             return Ok(None);
         };
+        #[cfg(any(test, feature = "test-fault-injection"))]
+        if self.fail_record.swap(false, Ordering::SeqCst) {
+            return Err(WorkspaceHistoryError::Repo(
+                "injected history record failure".into(),
+            ));
+        }
         let path = normalize_history_path(&record.path)?;
         let repo = repo.lock().unwrap_or_else(|e| e.into_inner());
         // The in-process mutex only covers this handle. A second LATTICE
@@ -276,6 +291,13 @@ impl WorkspaceHistory {
         // releases it if the holder dies.
         let _guard = RecordingLock::acquire(self.lock_path.as_deref())?;
         record_locked(&repo, &path, record).map(Some)
+    }
+
+    /// Fail the next enabled history append before any history object or ref
+    /// changes. The Local Workspace install has already happened at this seam.
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    pub fn fail_next_record(&self) {
+        self.fail_record.store(true, Ordering::SeqCst);
     }
 
     /// Read back the LATTICE-mutated file state at `oid`.

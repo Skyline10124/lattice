@@ -13,8 +13,8 @@ pub mod test_support;
 
 pub use audit::*;
 pub use evidence::{
-    CallEvidence, EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_PRE_MUTATION,
-    EvidenceError, EvidenceId, EvidenceOutcome, StoredCallEvidence,
+    CallEvidence, EVIDENCE_SCHEMA_VERSION, EVIDENCE_SCHEMA_VERSION_PRE_MUTATION, EvidenceError,
+    EvidenceId, EvidenceOutcome, StoredCallEvidence,
 };
 pub use operator::{
     AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput, AuditReplayRequest,

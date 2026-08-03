@@ -152,11 +152,11 @@ Params/result 对齐现 catalog `EditParams` / `EditResult`。description 保留
 “copy observe.workspace content_hash into expected_hash”。capabilities 与
 create 相同（mutate + alloc write cells）。
 
-## Guest 示意（Standards #2 — 禁止 stale 短路）
+## Guest 示意（Standards #2 — host 权威 precondition）
 
-Guest **不得**在比较 `local_revision != expected_hash` 后直接 `return Err`。
-那样 host 的 `replace-with-expected` 不会运行，precondition 无法强制，stale
-evidence 也无法写入。修订后的流程：
+Guest 不自行分类 stale，也不以原内容调用 replace。`read-for-edit` 接收
+`expected_hash` 并由 host 在编译前记录 stale refusal；成功编译后
+`replace-with-expected` 在安装点最终重检。修订后的流程：
 
 ```rust
 // tools/mutate-edit/src/lib.rs
@@ -164,13 +164,20 @@ fn run(params_json: String) -> Result<ToolOutput, String> {
     if host_control::cancelled() { return Err("cancelled".into()); }
     let params: EditParams = serde_json::from_str(&params_json).map_err(|e| e.to_string())?;
 
-    // Always go through host for bytes + authoritative revision.
-    let file = mutate::read_for_edit(&params.path).map_err(describe)?;
+    // Host validates the planning revision before guest compilation.
+    let file = mutate::read_for_edit(&params.path, &params.expected_hash)
+        .map_err(describe)?;
     let after = mutate_shared::apply_edits(&file.content, &params.edits)
-        .map_err(describe_diag)?;
+        .map_err(|diag| {
+            let kind = if diag.replan { EditRefusalKind::Replan }
+                else { EditRefusalKind::Validation };
+            describe(mutate::refuse_edit(
+                &params.path, kind, &diag.field, &diag.reason,
+            ))
+        })?;
 
     // Host rechecks expected_hash, records MutationEvidence / DeniedOperation,
-    // and only then installs. Guest does not short-circuit on mismatch.
+    // and only then installs.
     let installed = mutate::replace_with_expected(
         &params.path,
         &params.expected_hash,

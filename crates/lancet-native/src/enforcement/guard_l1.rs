@@ -185,9 +185,6 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                workspace: Arc::new(crate::workspace::LocalWorkspace::new(std::path::Path::new(
-                    root,
-                ))),
             },
             event_rx,
         )

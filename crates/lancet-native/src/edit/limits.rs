@@ -1,17 +1,18 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! The single-file write byte cap shared by every workspace write path.
+//! Alias of the single-file write byte cap for the residual hashline apply
+//! engine.
 //!
-//! One definition, read by both Atomic Local Mutation paths: the
-//! `mutate.create` install preflight and the HashLine apply update stage.
-//! It is deliberately not a profile/config axis — a Cell must not be able to
-//! raise its own write budget.
+//! Live `mutate.create` / `mutate.edit` installs read
+//! [`lancet_runtime::MAX_WORKSPACE_WRITE_BYTES`] through `host_mutate`. This
+//! module keeps the same constant so the unused apply-engine tests cannot
+//! drift from the production cap (#120 / #31 review).
 
 use crate::executor::error::ToolError;
 
 /// Maximum bytes a single mutation may write to one file.
-const MAX_WRITE_SIZE: usize = 1024 * 1024;
+const MAX_WRITE_SIZE: usize = lancet_runtime::MAX_WORKSPACE_WRITE_BYTES;
 
 /// Byte budget for one installed file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +50,10 @@ mod tests {
 
     #[test]
     fn write_limits_default_is_one_mib() {
-        assert_eq!(WriteLimits::default().max_write_size, 1024 * 1024);
+        assert_eq!(
+            WriteLimits::default().max_write_size,
+            lancet_runtime::MAX_WORKSPACE_WRITE_BYTES
+        );
     }
 
     #[test]

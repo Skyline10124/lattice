@@ -450,7 +450,7 @@ fn host_refusal(ctx: &ComponentCallContext) -> Option<CepError> {
         .or_else(|| {
             ctx.mutate
                 .as_ref()
-                .and_then(|mutate| mutate.take_refusal())
+                .and_then(|mutate| mutate.take_refusal(ctx.call_id))
         })
 }
 

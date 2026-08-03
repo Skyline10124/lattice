@@ -4,24 +4,27 @@
 //! Tool Host Structured Workspace Mutation operations (#31 slice A).
 //!
 //! The guest holds no filesystem path and no write handle. Its only reach is
-//! the three `workspace-mutate` imports — `read-for-edit`, `create-if-absent`,
-//! and `replace-with-expected` — each of which re-enters this host with a
+//! the four `workspace-mutate` imports — `read-for-edit`, `create-if-absent`,
+//! `replace-with-expected`, and `refuse-edit` — each of which re-enters this host with a
 //! string the host re-resolves, authorizes against `mutate:write:workspace`,
 //! and either installs atomically or refuses before any Local bytes change.
 //!
 //! Precondition enforcement and evidence recording are host-authoritative:
-//! a guest that short-circuits on a stale revision never reaches these
-//! imports, so Components MUST call them for every install attempt (see the
-//! #31 plan review fix for Standards #2).
+//! `read-for-edit` rejects a stale planning revision before guest compilation;
+//! `replace-with-expected` rechecks at the final install operation; and
+//! semantic guest diagnostics return through `refuse-edit` without installing.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::validate_path_facts;
 use lancet_authority::under_system_exclusion;
+use lancet_dispatch::Cancellation;
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact};
 use lancet_protocol::error::{
-    CepError, CepErrorCode, CepErrorData, GuardErrorData, Retriability, ValidationErrorData,
+    CepError, CepErrorCode, CepErrorData, ExecutionErrorData, GuardErrorData, Retriability,
+    ValidationErrorData,
 };
 use lancet_protocol::evidence::{
     MutationEvidence, MutationInstallation, MutationPrecondition, ObservedTarget,
@@ -31,11 +34,13 @@ use crate::admission::{AdmittedTool, authorize_operation, resolve_scope};
 use crate::evidence::CellEvidenceLedger;
 use crate::history::{MutationRecord, RecordedMutation, WorkspaceHistory};
 use crate::workspace::{
-    LocalWorkspace, LocalWorkspaceError, PathIntent, WorkspacePath, content_hash,
+    ConditionalCreateError, ConditionalReplaceError, LocalWorkspace, LocalWorkspaceError,
+    PathIntent, WorkspacePath, content_hash,
 };
 
 /// Maximum bytes a single mutation may write to one file (#120).
-const MAX_WRITE_SIZE: usize = 1024 * 1024;
+// Singularity: same byte cap as every workspace write (#120 / #31 review).
+const MAX_WRITE_SIZE: usize = crate::workspace::MAX_WORKSPACE_WRITE_BYTES;
 
 /// Call-scoped inputs for one mutate import.
 pub struct MutationCallContext<'a> {
@@ -45,6 +50,15 @@ pub struct MutationCallContext<'a> {
     pub method: &'a str,
     pub admitted: &'a AdmittedTool,
     pub evidence: &'a CellEvidenceLedger,
+    pub cancellation: Cancellation,
+}
+
+/// Guest-owned semantic edit diagnostic class, authenticated and projected by
+/// the host so it cannot collapse into an untyped guest error string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditRefusalKind {
+    Validation,
+    Replan,
 }
 
 /// Bytes + host-computed Local Revision returned by `read-for-edit`.
@@ -77,23 +91,51 @@ pub struct ReplaceInstalled {
 /// labels stay on the host side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MutateError {
-    NotFound { requested: String },
-    AlreadyExists { requested: String },
+    NotFound {
+        requested: String,
+    },
+    AlreadyExists {
+        requested: String,
+    },
     StaleRevision {
         requested: String,
         expected: String,
         observed: String,
     },
-    PathRejected { requested: String, reason: String },
-    Denied { requested: String, reason: String },
+    SemanticReplan {
+        requested: String,
+        reason: String,
+    },
+    Validation {
+        requested: String,
+        field: String,
+        reason: String,
+    },
+    PathRejected {
+        requested: String,
+        reason: String,
+    },
+    Denied {
+        requested: String,
+        reason: String,
+    },
     LimitExceeded {
         requested: String,
         limit: usize,
         actual: usize,
     },
     Cancelled,
-    InvalidRequest { reason: String },
-    Io { requested: String, detail: String },
+    InvalidRequest {
+        reason: String,
+    },
+    Io {
+        requested: String,
+        detail: String,
+    },
+    History {
+        requested: String,
+        detail: String,
+    },
 }
 
 impl MutateError {
@@ -102,12 +144,15 @@ impl MutateError {
             Self::NotFound { .. } => "not-found",
             Self::AlreadyExists { .. } => "already-exists",
             Self::StaleRevision { .. } => "stale-revision",
+            Self::SemanticReplan { .. } => "semantic-replan",
+            Self::Validation { .. } => "validation",
             Self::PathRejected { .. } => "path-rejected",
             Self::Denied { .. } => "denied",
             Self::LimitExceeded { .. } => "limit-exceeded",
             Self::Cancelled => "cancelled",
             Self::InvalidRequest { .. } => "invalid-request",
             Self::Io { .. } => "io-error",
+            Self::History { .. } => "history-error",
         }
     }
 
@@ -115,9 +160,7 @@ impl MutateError {
         match self {
             Self::NotFound { requested } => format!("path not found: {requested}"),
             Self::AlreadyExists { requested } => {
-                format!(
-                    "mutate target '{requested}' already exists; observe.workspace and replan"
-                )
+                format!("mutate target '{requested}' already exists; observe.workspace and replan")
             }
             Self::StaleRevision {
                 requested,
@@ -126,6 +169,8 @@ impl MutateError {
             } => format!(
                 "expected_hash for '{requested}' is stale: expected {expected}, current {observed}; observe.workspace read_file again"
             ),
+            Self::SemanticReplan { reason, .. } => reason.clone(),
+            Self::Validation { reason, .. } => reason.clone(),
             Self::PathRejected { requested, .. } => format!("path rejected: {requested}"),
             Self::Denied { requested, .. } => format!("write denied: {requested}"),
             Self::LimitExceeded {
@@ -136,6 +181,9 @@ impl MutateError {
             Self::Cancelled => "cancelled".into(),
             Self::InvalidRequest { reason } => reason.clone(),
             Self::Io { requested, .. } => format!("i/o error at {requested}"),
+            Self::History { requested, .. } => {
+                format!("mutation installed at {requested}, but private history recording failed")
+            }
         }
     }
 }
@@ -143,7 +191,9 @@ impl MutateError {
 /// Map a host mutate refusal to a structured CEP error.
 pub fn mutate_cep_error(method: &str, err: &MutateError) -> CepError {
     match err {
-        MutateError::AlreadyExists { .. } | MutateError::StaleRevision { .. } => CepError::new(
+        MutateError::AlreadyExists { .. }
+        | MutateError::StaleRevision { .. }
+        | MutateError::SemanticReplan { .. } => CepError::new(
             CepErrorCode::ReplanRequired,
             err.guest_message(),
             CepErrorData::Guard(GuardErrorData {
@@ -171,15 +221,25 @@ pub fn mutate_cep_error(method: &str, err: &MutateError) -> CepError {
             Retriability::Permanent,
         ),
         MutateError::LimitExceeded { limit, actual, .. } => CepError::new(
-            CepErrorCode::Reserved,
+            CepErrorCode::ToolResourceExhausted,
             err.guest_message(),
-            CepErrorData::Validation(ValidationErrorData {
-                field: "content".into(),
-                reason: format!("size limit exceeded: {actual} > {limit}"),
+            CepErrorData::Execution(ExecutionErrorData {
+                command: method.into(),
+                exit_code: Some(1),
+                stderr: Some(format!("size limit exceeded: {actual} > {limit}")),
             }),
             Retriability::Permanent,
         ),
         MutateError::Cancelled => crate::error_map::cancelled_error(method),
+        MutateError::Validation { field, reason, .. } => CepError::new(
+            CepErrorCode::SchemaMismatch,
+            reason.clone(),
+            CepErrorData::Validation(ValidationErrorData {
+                field: field.clone(),
+                reason: reason.clone(),
+            }),
+            Retriability::Permanent,
+        ),
         MutateError::NotFound { .. } | MutateError::InvalidRequest { .. } => CepError::new(
             CepErrorCode::TypeError,
             err.guest_message(),
@@ -189,7 +249,7 @@ pub fn mutate_cep_error(method: &str, err: &MutateError) -> CepError {
             }),
             Retriability::Permanent,
         ),
-        MutateError::Io { .. } => CepError::new(
+        MutateError::Io { .. } | MutateError::History { .. } => CepError::new(
             CepErrorCode::ExecutionFailed,
             err.guest_message(),
             CepErrorData::Validation(ValidationErrorData {
@@ -208,7 +268,8 @@ pub struct WorkspaceMutationHost {
     history: Option<Arc<WorkspaceHistory>>,
     scope_name: String,
     max_write_size: usize,
-    refusal: Mutex<Option<CepError>>,
+    mutation_gate: Arc<Mutex<()>>,
+    refusals: Mutex<HashMap<u64, CepError>>,
 }
 
 impl WorkspaceMutationHost {
@@ -218,13 +279,15 @@ impl WorkspaceMutationHost {
         history: Option<Arc<WorkspaceHistory>>,
         scope_name: impl Into<String>,
     ) -> Self {
+        let mutation_gate = workspace.mutation_sequence_gate();
         Self {
             workspace,
             authorized_region,
             history,
             scope_name: scope_name.into(),
             max_write_size: MAX_WRITE_SIZE,
-            refusal: Mutex::new(None),
+            mutation_gate,
+            refusals: Mutex::new(HashMap::new()),
         }
     }
 
@@ -234,15 +297,16 @@ impl WorkspaceMutationHost {
         self
     }
 
-    pub fn take_refusal(&self) -> Option<CepError> {
-        self.refusal.lock().unwrap().take()
+    pub fn take_refusal(&self, call_id: u64) -> Option<CepError> {
+        self.refusals.lock().unwrap().remove(&call_id)
     }
 
-    fn remember_refusal(&self, method: &str, err: &MutateError) {
-        let mut slot = self.refusal.lock().unwrap();
-        if slot.is_none() {
-            *slot = Some(mutate_cep_error(method, err));
-        }
+    fn remember_refusal(&self, call_id: u64, method: &str, err: &MutateError) {
+        self.refusals
+            .lock()
+            .unwrap()
+            .entry(call_id)
+            .or_insert_with(|| mutate_cep_error(method, err));
     }
 
     /// Operation cell: `mutate:write:<workspace scope>` (Spec P0).
@@ -274,6 +338,19 @@ impl WorkspaceMutationHost {
         Ok(())
     }
 
+    fn check_cancelled(
+        &self,
+        ctx: &MutationCallContext<'_>,
+        path_for_evidence: &str,
+    ) -> Result<(), MutateError> {
+        if ctx.cancellation.is_cancelled() {
+            let err = MutateError::Cancelled;
+            self.record_refusal(ctx, path_for_evidence, &err);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn authorize(
         &self,
         ctx: &MutationCallContext<'_>,
@@ -301,7 +378,7 @@ impl WorkspaceMutationHost {
                     installation: MutationInstallation::NotAttempted,
                 }),
             );
-            self.remember_refusal(ctx.method, &err);
+            self.remember_refusal(ctx.call_id, ctx.method, &err);
             return Err(err);
         }
         Ok(())
@@ -317,7 +394,20 @@ impl WorkspaceMutationHost {
             err.audit_label(),
             mutation_evidence_for(err),
         );
-        self.remember_refusal(ctx.method, err);
+        self.remember_refusal(ctx.call_id, ctx.method, err);
+    }
+
+    /// Early refusal (parse / guard / size) before install: still records
+    /// MutationEvidence denial + typed CEP so guest `Err(String)` cannot
+    /// collapse the outcome to generic `ExecutionFailed`.
+    fn refuse_early(
+        &self,
+        ctx: &MutationCallContext<'_>,
+        path_for_evidence: &str,
+        err: MutateError,
+    ) -> MutateError {
+        self.record_refusal(ctx, path_for_evidence, &err);
+        err
     }
 
     fn parse_path(&self, requested: &str) -> Result<WorkspacePath, MutateError> {
@@ -362,29 +452,94 @@ impl WorkspaceMutationHost {
         &self,
         ctx: &MutationCallContext<'_>,
         path: &str,
+        expected_revision: &str,
     ) -> Result<FileBytes, MutateError> {
-        let ws_path = self.parse_path(path)?;
-        self.guard_path(path, &ws_path, PathIntent::Read)?;
+        self.check_cancelled(ctx, path)?;
+        let ws_path = self
+            .parse_path(path)
+            .map_err(|err| self.refuse_early(ctx, path, err))?;
+        self.guard_path(path, &ws_path, PathIntent::Read)
+            .map_err(|err| self.refuse_early(ctx, ws_path.as_str(), err))?;
         let resolved = ws_path.as_str().to_string();
         self.authorize(ctx, &resolved, path)?;
 
-        let bytes = self
-            .workspace
-            .read_file_blocking(&ws_path)
-            .map_err(|err| match err {
-                LocalWorkspaceError::NotFound { .. } => MutateError::NotFound {
-                    requested: path.to_string(),
-                },
-                other => map_workspace_io(path, other),
-            })?;
-        let content = String::from_utf8(bytes).map_err(|_| MutateError::InvalidRequest {
-            reason: format!("file '{path}' is not valid UTF-8"),
-        })?;
+        let bytes = match self.workspace.read_file_blocking(&ws_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let mapped = match err {
+                    LocalWorkspaceError::NotFound { .. } => MutateError::NotFound {
+                        requested: path.to_string(),
+                    },
+                    other => map_workspace_io(path, other),
+                };
+                self.record_refusal(ctx, &resolved, &mapped);
+                return Err(mapped);
+            }
+        };
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(_) => {
+                let err = MutateError::InvalidRequest {
+                    reason: format!("file '{path}' is not valid UTF-8"),
+                };
+                self.record_refusal(ctx, &resolved, &err);
+                return Err(err);
+            }
+        };
         let local_revision = content_hash(content.as_bytes());
+        if local_revision != expected_revision {
+            let err = MutateError::StaleRevision {
+                requested: path.to_string(),
+                expected: expected_revision.to_string(),
+                observed: local_revision,
+            };
+            self.record_refusal(ctx, &resolved, &err);
+            return Err(err);
+        }
         Ok(FileBytes {
             content,
             local_revision,
         })
+    }
+
+    /// Preserve a semantic edit diagnostic as a typed host refusal without
+    /// attempting any installation. The path is re-resolved and authorized so
+    /// a guest cannot attach a diagnostic to authority it was never granted.
+    pub fn refuse_edit(
+        &self,
+        ctx: &MutationCallContext<'_>,
+        path: &str,
+        kind: EditRefusalKind,
+        field: &str,
+        reason: &str,
+    ) -> MutateError {
+        if let Err(err) = self.check_cancelled(ctx, path) {
+            return err;
+        }
+        let ws_path = match self.parse_path(path) {
+            Ok(path) => path,
+            Err(err) => return self.refuse_early(ctx, path, err),
+        };
+        if let Err(err) = self.guard_path(path, &ws_path, PathIntent::Read) {
+            return self.refuse_early(ctx, ws_path.as_str(), err);
+        }
+        let resolved = ws_path.as_str().to_string();
+        if let Err(err) = self.authorize(ctx, &resolved, path) {
+            return err;
+        }
+        let err = match kind {
+            EditRefusalKind::Validation => MutateError::Validation {
+                requested: path.to_string(),
+                field: field.to_string(),
+                reason: reason.to_string(),
+            },
+            EditRefusalKind::Replan => MutateError::SemanticReplan {
+                requested: path.to_string(),
+                reason: reason.to_string(),
+            },
+        };
+        self.record_refusal(ctx, &resolved, &err);
+        err
     }
 
     /// ADR 0003 decision 8: no-replace create.
@@ -395,38 +550,63 @@ impl WorkspaceMutationHost {
         content: &str,
         create_parents: bool,
     ) -> Result<CreateInstalled, MutateError> {
-        self.check_write_size(path, content)?;
-        let ws_path = self.parse_path(path)?;
-        ws_path
-            .require_file_path()
-            .map_err(|err| MutateError::PathRejected {
-                requested: path.to_string(),
-                reason: err.to_string(),
-            })?;
-        self.guard_path(path, &ws_path, PathIntent::Create)?;
+        self.check_write_size(path, content)
+            .map_err(|err| self.refuse_early(ctx, path, err))?;
+        let ws_path = self
+            .parse_path(path)
+            .map_err(|err| self.refuse_early(ctx, path, err))?;
+        ws_path.require_file_path().map_err(|err| {
+            self.refuse_early(
+                ctx,
+                path,
+                MutateError::PathRejected {
+                    requested: path.to_string(),
+                    reason: err.to_string(),
+                },
+            )
+        })?;
+        self.guard_path(path, &ws_path, PathIntent::Create)
+            .map_err(|err| self.refuse_early(ctx, ws_path.as_str(), err))?;
         let resolved = ws_path.as_str().to_string();
         self.authorize(ctx, &resolved, path)?;
+        let _mutation_guard = self
+            .mutation_gate
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
 
         let created_dirs = if create_parents {
-            missing_parent_dirs(self.workspace.as_ref(), &ws_path)?
+            missing_parent_dirs(self.workspace.as_ref(), &ws_path).inspect_err(|err| {
+                self.record_refusal(ctx, &resolved, err);
+            })?
         } else {
             Vec::new()
         };
 
-        let created = match self.workspace.create_excl_sync(
+        let (created, post_install_error) = match self.workspace.create_excl_sync_cancellable(
             &ws_path,
             content.as_bytes(),
             create_parents,
+            || ctx.cancellation.is_cancelled(),
         ) {
-            Ok(created) => created,
-            Err(LocalWorkspaceError::TargetExists { .. }) => {
+            Ok(created) => (created, None),
+            Err(ConditionalCreateError::InstalledButNotDurable { created, error }) => {
+                (created, Some(map_workspace_io(path, error)))
+            }
+            Err(ConditionalCreateError::Cancelled) => {
+                let err = MutateError::Cancelled;
+                self.record_refusal(ctx, &resolved, &err);
+                return Err(err);
+            }
+            Err(ConditionalCreateError::Workspace(LocalWorkspaceError::TargetExists {
+                ..
+            })) => {
                 let err = MutateError::AlreadyExists {
                     requested: path.to_string(),
                 };
                 self.record_refusal(ctx, &resolved, &err);
                 return Err(err);
             }
-            Err(other) => {
+            Err(ConditionalCreateError::Workspace(other)) => {
                 let err = map_workspace_io(path, other);
                 self.record_refusal(ctx, &resolved, &err);
                 return Err(err);
@@ -447,7 +627,6 @@ impl WorkspaceMutationHost {
             ObservedTarget::Path {
                 path: resolved.clone(),
             },
-            created.bytes_written,
             MutationEvidence {
                 before_revision: None,
                 after_revision: Some(created.content_hash.clone()),
@@ -455,6 +634,19 @@ impl WorkspaceMutationHost {
                 installation: MutationInstallation::Installed,
             },
         );
+
+        let history = match history {
+            Ok(history) => history,
+            Err(err) => {
+                self.remember_refusal(ctx.call_id, ctx.method, &err);
+                return Err(err);
+            }
+        };
+
+        if let Some(err) = post_install_error {
+            self.remember_refusal(ctx.call_id, ctx.method, &err);
+            return Err(err);
+        }
 
         Ok(CreateInstalled {
             path: path.to_string(),
@@ -473,46 +665,63 @@ impl WorkspaceMutationHost {
         expected_revision: &str,
         content: &str,
     ) -> Result<ReplaceInstalled, MutateError> {
-        self.check_write_size(path, content)?;
-        let ws_path = self.parse_path(path)?;
-        ws_path
-            .require_file_path()
-            .map_err(|err| MutateError::PathRejected {
-                requested: path.to_string(),
-                reason: err.to_string(),
-            })?;
-        self.guard_path(path, &ws_path, PathIntent::Overwrite)?;
+        self.check_write_size(path, content)
+            .map_err(|err| self.refuse_early(ctx, path, err))?;
+        let ws_path = self
+            .parse_path(path)
+            .map_err(|err| self.refuse_early(ctx, path, err))?;
+        ws_path.require_file_path().map_err(|err| {
+            self.refuse_early(
+                ctx,
+                path,
+                MutateError::PathRejected {
+                    requested: path.to_string(),
+                    reason: err.to_string(),
+                },
+            )
+        })?;
+        self.guard_path(path, &ws_path, PathIntent::Overwrite)
+            .map_err(|err| self.refuse_early(ctx, ws_path.as_str(), err))?;
         let resolved = ws_path.as_str().to_string();
         self.authorize(ctx, &resolved, path)?;
+        let _mutation_guard = self
+            .mutation_gate
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
 
-        let before = self
-            .workspace
-            .read_file_blocking(&ws_path)
-            .map_err(|err| match err {
-                LocalWorkspaceError::NotFound { .. } => MutateError::NotFound {
+        let (replacement, post_install_error) = match self.workspace.replace_if_revision_sync(
+            &ws_path,
+            expected_revision,
+            content.as_bytes(),
+            || ctx.cancellation.is_cancelled(),
+        ) {
+            Ok(replacement) => (replacement, None),
+            Err(ConditionalReplaceError::InstalledButNotDurable { replacement, error }) => {
+                (replacement, Some(map_workspace_io(path, error)))
+            }
+            Err(ConditionalReplaceError::StaleRevision { observed }) => {
+                let err = MutateError::StaleRevision {
                     requested: path.to_string(),
-                },
-                other => map_workspace_io(path, other),
-            })?;
-        let observed = content_hash(&before);
-        if observed != expected_revision {
-            let err = MutateError::StaleRevision {
-                requested: path.to_string(),
-                expected: expected_revision.to_string(),
-                observed,
-            };
-            self.record_refusal(ctx, &resolved, &err);
-            return Err(err);
-        }
-
-        let installed = self
-            .workspace
-            .install_atomic_sync(&ws_path, content.as_bytes())
-            .map_err(|err| {
+                    expected: expected_revision.to_string(),
+                    observed,
+                };
+                self.record_refusal(ctx, &resolved, &err);
+                return Err(err);
+            }
+            Err(ConditionalReplaceError::Cancelled) => {
+                let err = MutateError::Cancelled;
+                self.record_refusal(ctx, &resolved, &err);
+                return Err(err);
+            }
+            Err(ConditionalReplaceError::Workspace(err)) => {
                 let mapped = map_workspace_io(path, err);
                 self.record_refusal(ctx, &resolved, &mapped);
-                mapped
-            })?;
+                return Err(mapped);
+            }
+        };
+        let before = replacement.before;
+        let installed = replacement.installed;
+        let observed = content_hash(&before);
 
         let history = self.record_history(
             ctx,
@@ -528,7 +737,6 @@ impl WorkspaceMutationHost {
             ObservedTarget::Path {
                 path: resolved.clone(),
             },
-            installed.bytes_written,
             MutationEvidence {
                 before_revision: Some(observed),
                 after_revision: Some(installed.content_hash.clone()),
@@ -536,6 +744,19 @@ impl WorkspaceMutationHost {
                 installation: MutationInstallation::Installed,
             },
         );
+
+        let history = match history {
+            Ok(history) => history,
+            Err(err) => {
+                self.remember_refusal(ctx.call_id, ctx.method, &err);
+                return Err(err);
+            }
+        };
+
+        if let Some(err) = post_install_error {
+            self.remember_refusal(ctx.call_id, ctx.method, &err);
+            return Err(err);
+        }
 
         Ok(ReplaceInstalled {
             path: path.to_string(),
@@ -552,8 +773,10 @@ impl WorkspaceMutationHost {
         before: Option<&[u8]>,
         after: &[u8],
         content_hash: &str,
-    ) -> Option<RecordedMutation> {
-        let history = self.history.as_ref()?;
+    ) -> Result<Option<RecordedMutation>, MutateError> {
+        let Some(history) = self.history.as_ref() else {
+            return Ok(None);
+        };
         let record = MutationRecord {
             method: ctx.method.to_string(),
             turn_id: ctx.turn_id.to_string(),
@@ -564,22 +787,12 @@ impl WorkspaceMutationHost {
             content_hash: content_hash.to_string(),
             recorded_at: unix_seconds_now(),
         };
-        match history.record(&record) {
-            Ok(recorded) => recorded,
-            Err(err) => {
-                // History failure must not roll back an already-installed
-                // mutation (ADR 0003 / #63). Surface via stderr until this
-                // crate takes a tracing dependency for host-side ops.
-                eprintln!(
-                    "installed mutation was not recorded in the private workspace history: method={} path={} turn_id={} call_id={} error={}",
-                    ctx.method, path, ctx.turn_id, ctx.call_id, err
-                );
-                None
-            }
-        }
+        history.record(&record).map_err(|err| MutateError::History {
+            requested: path.to_string(),
+            detail: err.to_string(),
+        })
     }
 }
-
 
 fn mutation_evidence_for(err: &MutateError) -> Option<MutationEvidence> {
     match err {
@@ -607,6 +820,7 @@ fn mutation_evidence_for(err: &MutateError) -> Option<MutationEvidence> {
             precondition: MutationPrecondition::Satisfied,
             installation: MutationInstallation::Failed,
         }),
+        MutateError::History { .. } => None,
         _ => None,
     }
 }
@@ -686,9 +900,10 @@ impl bindings::lattice::tool_host::workspace_mutate::Host for StoreState {
     fn read_for_edit(
         &mut self,
         path: String,
+        expected_revision: String,
     ) -> Result<bindings::lattice::tool_host::workspace_mutate::FileBytes, WitMutateError> {
         let (host, ctx) = self.mutation("mutate.edit")?;
-        host.read_for_edit(&ctx, &path)
+        host.read_for_edit(&ctx, &path, &expected_revision)
             .map(
                 |outcome| bindings::lattice::tool_host::workspace_mutate::FileBytes {
                     content: outcome.content,
@@ -734,6 +949,28 @@ impl bindings::lattice::tool_host::workspace_mutate::Host for StoreState {
             )
             .map_err(wit_mutate_error)
     }
+
+    fn refuse_edit(
+        &mut self,
+        path: String,
+        kind: bindings::lattice::tool_host::workspace_mutate::EditRefusalKind,
+        field: String,
+        reason: String,
+    ) -> WitMutateError {
+        let (host, ctx) = match self.mutation("mutate.edit") {
+            Ok(authority) => authority,
+            Err(err) => return err,
+        };
+        let kind = match kind {
+            bindings::lattice::tool_host::workspace_mutate::EditRefusalKind::Validation => {
+                EditRefusalKind::Validation
+            }
+            bindings::lattice::tool_host::workspace_mutate::EditRefusalKind::Replan => {
+                EditRefusalKind::Replan
+            }
+        };
+        wit_mutate_error(host.refuse_edit(&ctx, &path, kind, &field, &reason))
+    }
 }
 
 impl StoreState {
@@ -754,6 +991,7 @@ impl StoreState {
                 method,
                 admitted: &self.call.admitted,
                 evidence: &self.call.evidence,
+                cancellation: self.call.cancellation.clone(),
             },
         ))
     }
@@ -765,12 +1003,15 @@ fn wit_mutate_error(err: MutateError) -> WitMutateError {
         MutateError::NotFound { .. } => WitMutateError::NotFound(message),
         MutateError::AlreadyExists { .. } => WitMutateError::AlreadyExists(message),
         MutateError::StaleRevision { .. } => WitMutateError::StaleRevision(message),
+        MutateError::SemanticReplan { .. } => WitMutateError::SemanticReplan(message),
+        MutateError::Validation { .. } => WitMutateError::Validation(message),
         MutateError::PathRejected { .. } => WitMutateError::PathRejected(message),
         MutateError::Denied { .. } => WitMutateError::Denied(message),
         MutateError::LimitExceeded { .. } => WitMutateError::LimitExceeded(message),
         MutateError::Cancelled => WitMutateError::Cancelled(message),
         MutateError::InvalidRequest { .. } => WitMutateError::InvalidRequest(message),
         MutateError::Io { .. } => WitMutateError::IoError(message),
+        MutateError::History { .. } => WitMutateError::IoError(message),
     }
 }
 
@@ -784,6 +1025,7 @@ mod tests {
 
     use lancet_protocol::cell::{ArtifactIdentity, Capability, ScopeDecl, ToolDescriptor, Trust};
     use lancet_protocol::evidence::CapabilityAdmissionPolicy;
+    use tokio::sync::watch;
 
     use crate::admission::admit_tool;
     use crate::history::WorkspaceHistoryBacking;
@@ -834,11 +1076,26 @@ mod tests {
         dir
     }
 
+    fn private_history() -> (tempfile::TempDir, Arc<WorkspaceHistory>) {
+        let state = tempfile::TempDir::new().expect("private state root");
+        let history = Arc::new(
+            WorkspaceHistory::open(WorkspaceHistoryBacking::Repo(
+                state.path().join("history.git"),
+            ))
+            .expect("history"),
+        );
+        (state, history)
+    }
+
     fn host_over(
         root: &Path,
         region: AuthorizedEffectRegion,
         history: Option<Arc<WorkspaceHistory>>,
-    ) -> (WorkspaceMutationHost, CellEvidenceLedger, Arc<LocalWorkspace>) {
+    ) -> (
+        WorkspaceMutationHost,
+        CellEvidenceLedger,
+        Arc<LocalWorkspace>,
+    ) {
         let workspace = Arc::new(LocalWorkspace::new(root));
         (
             WorkspaceMutationHost::new(Arc::clone(&workspace), region, history, "workspace"),
@@ -849,7 +1106,11 @@ mod tests {
 
     fn default_host(
         root: &Path,
-    ) -> (WorkspaceMutationHost, CellEvidenceLedger, Arc<LocalWorkspace>) {
+    ) -> (
+        WorkspaceMutationHost,
+        CellEvidenceLedger,
+        Arc<LocalWorkspace>,
+    ) {
         host_over(root, AuthorizedEffectRegion::empty(), None)
     }
 
@@ -858,12 +1119,30 @@ mod tests {
         evidence: &'a CellEvidenceLedger,
         method: &'a str,
     ) -> MutationCallContext<'a> {
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
         MutationCallContext {
             call_id: 7,
             turn_id: "turn-1",
             method,
             admitted: tool,
             evidence,
+            cancellation: Cancellation::new(cancel_rx),
+        }
+    }
+
+    fn cancelled_ctx<'a>(
+        tool: &'a AdmittedTool,
+        evidence: &'a CellEvidenceLedger,
+        method: &'a str,
+    ) -> MutationCallContext<'a> {
+        let (_cancel_tx, cancel_rx) = watch::channel(true);
+        MutationCallContext {
+            call_id: 7,
+            turn_id: "turn-1",
+            method,
+            admitted: tool,
+            evidence,
+            cancellation: Cancellation::new(cancel_rx),
         }
     }
 
@@ -885,7 +1164,7 @@ mod tests {
         region.denied_write_paths = patterns
             .iter()
             .filter(|p| !p.ends_with("/**"))
-            .map(|p| PathBuf::from(p))
+            .map(PathBuf::from)
             .collect();
         region.denied_write_path_prefixes = patterns
             .iter()
@@ -905,10 +1184,7 @@ mod tests {
             .create_if_absent(&call, "fresh.txt", "hello\n", false)
             .expect("create");
         assert_eq!(installed.bytes_written, 6);
-        assert_eq!(
-            installed.local_revision,
-            content_hash(b"hello\n")
-        );
+        assert_eq!(installed.local_revision, content_hash(b"hello\n"));
         assert_eq!(
             fs::read_to_string(dir.path().join("fresh.txt")).unwrap(),
             "hello\n"
@@ -919,10 +1195,16 @@ mod tests {
         assert_eq!(effects.effects.len(), 1);
         assert_eq!(effects.effects[0].cell.ctx_op, CtxOp::Mutate);
         assert_eq!(effects.effects[0].cell.ext_impact, ExtImpact::Write);
-        assert_eq!(effects.effects[0].context_measure, Some(6));
-        let mutation = effects.effects[0].mutation.as_ref().expect("mutation evidence");
+        assert_eq!(effects.effects[0].context_measure, None);
+        let mutation = effects.effects[0]
+            .mutation
+            .as_ref()
+            .expect("mutation evidence");
         assert_eq!(mutation.before_revision, None);
-        assert_eq!(mutation.after_revision.as_deref(), Some(installed.local_revision.as_str()));
+        assert_eq!(
+            mutation.after_revision.as_deref(),
+            Some(installed.local_revision.as_str())
+        );
         assert_eq!(mutation.precondition, MutationPrecondition::Satisfied);
         assert_eq!(mutation.installation, MutationInstallation::Installed);
     }
@@ -954,6 +1236,87 @@ mod tests {
         let mutation = denied.denied[0].mutation.as_ref().expect("mutation denial");
         assert_eq!(mutation.precondition, MutationPrecondition::TargetExists);
         assert_eq!(mutation.installation, MutationInstallation::NotAttempted);
+    }
+
+    #[test]
+    fn hosts_for_same_workspace_share_install_history_gate() {
+        let dir = seeded_project();
+        let workspace = Arc::new(LocalWorkspace::new(dir.path()));
+        let host_a = WorkspaceMutationHost::new(
+            Arc::clone(&workspace),
+            AuthorizedEffectRegion::empty(),
+            None,
+            "workspace",
+        );
+        let host_b = WorkspaceMutationHost::new(
+            workspace,
+            AuthorizedEffectRegion::empty(),
+            None,
+            "workspace",
+        );
+
+        let _guard = host_a.mutation_gate.lock().unwrap();
+        assert!(
+            host_b.mutation_gate.try_lock().is_err(),
+            "all hosts over one workspace must serialize install through history recording"
+        );
+    }
+
+    #[test]
+    fn concurrent_create_same_target_has_one_winner_and_one_replan() {
+        let dir = seeded_project();
+        let workspace = Arc::new(LocalWorkspace::new(dir.path()));
+        let host_a = WorkspaceMutationHost::new(
+            Arc::clone(&workspace),
+            AuthorizedEffectRegion::empty(),
+            None,
+            "workspace",
+        );
+        let host_b = WorkspaceMutationHost::new(
+            workspace,
+            AuthorizedEffectRegion::empty(),
+            None,
+            "workspace",
+        );
+        let tool = admitted();
+        let evidence_a = CellEvidenceLedger::new();
+        let evidence_b = CellEvidenceLedger::new();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let (a, b) = std::thread::scope(|scope| {
+            let barrier_a = Arc::clone(&barrier);
+            let host_a = &host_a;
+            let tool_a = &tool;
+            let evidence_a = &evidence_a;
+            let a = scope.spawn(move || {
+                let call = ctx(tool_a, evidence_a, "mutate.create");
+                barrier_a.wait();
+                host_a.create_if_absent(&call, "race.txt", "a\n", false)
+            });
+            let barrier_b = Arc::clone(&barrier);
+            let host_b = &host_b;
+            let tool_b = &tool;
+            let evidence_b = &evidence_b;
+            let b = scope.spawn(move || {
+                let call = ctx(tool_b, evidence_b, "mutate.create");
+                barrier_b.wait();
+                host_b.create_if_absent(&call, "race.txt", "b\n", false)
+            });
+            barrier.wait();
+            (a.join().unwrap(), b.join().unwrap())
+        });
+
+        let outcomes = [&a, &b];
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(MutateError::AlreadyExists { .. })))
+                .count(),
+            1
+        );
+        let bytes = fs::read(dir.path().join("race.txt")).unwrap();
+        assert!(bytes == b"a\n" || bytes == b"b\n");
     }
 
     #[test]
@@ -1006,6 +1369,27 @@ mod tests {
     }
 
     #[test]
+    fn replace_with_expected_detects_external_writer_at_final_precondition_check() {
+        let dir = seeded_project();
+        let (host, evidence, workspace) = default_host(dir.path());
+        let tool = admitted();
+        let call = ctx(&tool, &evidence, "mutate.edit");
+        workspace.replace_target_before_next_revision_check(
+            WorkspacePath::parse("notes.txt").unwrap(),
+            b"external\n".to_vec(),
+        );
+
+        let err = host
+            .replace_with_expected(&call, "notes.txt", &content_hash(b"v1\n"), "agent\n")
+            .expect_err("the final precondition must observe the external write");
+        assert!(matches!(err, MutateError::StaleRevision { .. }));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "external\n"
+        );
+    }
+
+    #[test]
     fn path_traversal_is_rejected_before_authorize() {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
@@ -1016,6 +1400,10 @@ mod tests {
             .create_if_absent(&call, "../escape.txt", "x\n", false)
             .expect_err("escape");
         assert!(matches!(err, MutateError::PathRejected { .. }));
+        assert_eq!(
+            host.take_refusal(7).expect("structured refusal").code,
+            CepErrorCode::PathContainment
+        );
     }
 
     #[test]
@@ -1031,6 +1419,10 @@ mod tests {
             .expect_err("denied");
         assert!(matches!(err, MutateError::Denied { .. }));
         assert!(!dir.path().join("locked.txt").exists());
+        assert_eq!(
+            host.take_refusal(7).expect("structured refusal").code,
+            CepErrorCode::EffectViolation
+        );
     }
 
     #[test]
@@ -1053,6 +1445,10 @@ mod tests {
             }
         ));
         assert!(!dir.path().join("big.txt").exists());
+        assert_eq!(
+            host.take_refusal(7).expect("structured refusal").code,
+            CepErrorCode::ToolResourceExhausted
+        );
     }
 
     #[test]
@@ -1077,15 +1473,53 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_create_is_refused_at_host_install_boundary() {
+        let dir = seeded_project();
+        let (host, evidence, _) = default_host(dir.path());
+        let tool = admitted();
+        let call = cancelled_ctx(&tool, &evidence, "mutate.create");
+
+        let err = host
+            .create_if_absent(&call, "cancelled.txt", "no\n", false)
+            .expect_err("cancelled create");
+        assert_eq!(err, MutateError::Cancelled);
+        assert!(!dir.path().join("cancelled.txt").exists());
+        assert_eq!(
+            host.take_refusal(7).expect("structured refusal").code,
+            CepErrorCode::CallCancelled
+        );
+    }
+
+    #[test]
+    fn cancelled_replace_is_refused_at_host_install_boundary() {
+        let dir = seeded_project();
+        let (host, evidence, _) = default_host(dir.path());
+        let tool = admitted();
+        let call = cancelled_ctx(&tool, &evidence, "mutate.edit");
+
+        let err = host
+            .replace_with_expected(&call, "notes.txt", &content_hash(b"v1\n"), "v2\n")
+            .expect_err("cancelled replace");
+        assert_eq!(err, MutateError::Cancelled);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "v1\n"
+        );
+        assert_eq!(
+            host.take_refusal(7).expect("structured refusal").code,
+            CepErrorCode::CallCancelled
+        );
+    }
+
+    #[test]
     fn successful_create_appends_private_history() {
         let dir = seeded_project();
-        let history = Arc::new(
-            WorkspaceHistory::open(WorkspaceHistoryBacking::Repo(
-                dir.path().join(".lattice-history"),
-            ))
-            .expect("history"),
+        let (_state, history) = private_history();
+        let (host, evidence, _) = host_over(
+            dir.path(),
+            AuthorizedEffectRegion::empty(),
+            Some(history.clone()),
         );
-        let (host, evidence, _) = host_over(dir.path(), AuthorizedEffectRegion::empty(), Some(history.clone()));
         let tool = admitted();
         let call = ctx(&tool, &evidence, "mutate.create");
 
@@ -1097,15 +1531,234 @@ mod tests {
     }
 
     #[test]
+    fn history_failure_after_install_is_returned_with_installed_effect() {
+        let dir = seeded_project();
+        let (_state, history) = private_history();
+        history.fail_next_record();
+        let (host, evidence, _) = host_over(
+            dir.path(),
+            AuthorizedEffectRegion::empty(),
+            Some(history.clone()),
+        );
+        let tool = admitted();
+        let call = ctx(&tool, &evidence, "mutate.create");
+
+        let err = host
+            .create_if_absent(&call, "installed.txt", "keep\n", false)
+            .expect_err("history failure must not be reported as success");
+        assert!(matches!(err, MutateError::History { .. }));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("installed.txt")).unwrap(),
+            "keep\n",
+            "post-install failure must not fake rollback"
+        );
+        assert_eq!(history.current().unwrap(), None);
+        let (_, effects, denied) = evidence.snapshot();
+        assert_eq!(
+            effects.effects.len(),
+            1,
+            "the installed write remains an effect"
+        );
+        assert_eq!(
+            effects.effects[0]
+                .mutation
+                .as_ref()
+                .expect("mutation evidence")
+                .installation,
+            MutationInstallation::Installed
+        );
+        assert!(
+            denied.denied.is_empty(),
+            "an installed write is not a denial"
+        );
+        assert_eq!(
+            host.take_refusal(7).expect("structured failure").code,
+            CepErrorCode::ExecutionFailed
+        );
+    }
+
+    #[test]
+    fn create_parent_fsync_failure_keeps_installed_history_and_effect() {
+        let dir = seeded_project();
+        let (_state, history) = private_history();
+        let (host, evidence, workspace) = host_over(
+            dir.path(),
+            AuthorizedEffectRegion::empty(),
+            Some(history.clone()),
+        );
+        let tool = admitted();
+        let call = ctx(&tool, &evidence, "mutate.create");
+        workspace.fail_next_parent_fsync();
+
+        let err = host
+            .create_if_absent(&call, "durability.txt", "installed\n", false)
+            .expect_err("parent fsync failure must remain visible to the caller");
+        assert!(matches!(err, MutateError::Io { .. }));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("durability.txt")).unwrap(),
+            "installed\n"
+        );
+        assert!(history.current().unwrap().is_some());
+        let (_, effects, denied) = evidence.snapshot();
+        assert_eq!(effects.effects.len(), 1);
+        assert_eq!(
+            effects.effects[0]
+                .mutation
+                .as_ref()
+                .expect("mutation evidence")
+                .installation,
+            MutationInstallation::Installed
+        );
+        assert!(denied.denied.is_empty());
+    }
+
+    #[test]
+    fn replace_parent_fsync_failure_keeps_installed_history_and_effect() {
+        let dir = seeded_project();
+        let (_state, history) = private_history();
+        let (host, evidence, workspace) = host_over(
+            dir.path(),
+            AuthorizedEffectRegion::empty(),
+            Some(history.clone()),
+        );
+        let tool = admitted();
+        let call = ctx(&tool, &evidence, "mutate.edit");
+        workspace.fail_next_parent_fsync();
+
+        let err = host
+            .replace_with_expected(&call, "notes.txt", &content_hash(b"v1\n"), "v2\n")
+            .expect_err("parent fsync failure must remain visible to the caller");
+        assert!(matches!(err, MutateError::Io { .. }));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "v2\n"
+        );
+        assert!(history.current().unwrap().is_some());
+        let (_, effects, denied) = evidence.snapshot();
+        assert_eq!(effects.effects.len(), 1);
+        assert_eq!(
+            effects.effects[0]
+                .mutation
+                .as_ref()
+                .expect("mutation evidence")
+                .installation,
+            MutationInstallation::Installed
+        );
+        assert!(denied.denied.is_empty());
+    }
+
+    #[test]
     fn read_for_edit_returns_host_computed_revision() {
         let dir = seeded_project();
         let (host, evidence, _) = default_host(dir.path());
         let tool = admitted();
         let call = ctx(&tool, &evidence, "mutate.edit");
 
-        let bytes = host.read_for_edit(&call, "notes.txt").expect("read");
+        let expected = content_hash(b"v1\n");
+        let bytes = host
+            .read_for_edit(&call, "notes.txt", &expected)
+            .expect("read");
         assert_eq!(bytes.content, "v1\n");
-        assert_eq!(bytes.local_revision, content_hash(b"v1\n"));
+        assert_eq!(bytes.local_revision, expected);
+    }
+
+    #[test]
+    fn read_for_edit_refuses_stale_revision_before_guest_compilation() {
+        let dir = seeded_project();
+        let (host, evidence, _) = default_host(dir.path());
+        let tool = admitted();
+        let call = ctx(&tool, &evidence, "mutate.edit");
+
+        let err = host
+            .read_for_edit(&call, "notes.txt", &content_hash(b"old\n"))
+            .expect_err("stale read");
+        assert!(matches!(err, MutateError::StaleRevision { .. }));
+        assert_eq!(
+            host.take_refusal(7).expect("structured refusal").code,
+            CepErrorCode::ReplanRequired
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "v1\n"
+        );
+    }
+
+    #[test]
+    fn semantic_edit_refusal_preserves_replan_required() {
+        let dir = seeded_project();
+        let (host, evidence, _) = default_host(dir.path());
+        let tool = admitted();
+        let call = ctx(&tool, &evidence, "mutate.edit");
+
+        let err = host.refuse_edit(
+            &call,
+            "notes.txt",
+            EditRefusalKind::Replan,
+            "old",
+            "old text matched 2 occurrences; provide occurrence",
+        );
+        assert!(matches!(err, MutateError::SemanticReplan { .. }));
+        assert_eq!(
+            host.take_refusal(7).expect("structured refusal").code,
+            CepErrorCode::ReplanRequired
+        );
+    }
+
+    #[test]
+    fn semantic_edit_validation_preserves_schema_mismatch() {
+        let dir = seeded_project();
+        let (host, evidence, _) = default_host(dir.path());
+        let tool = admitted();
+        let call = ctx(&tool, &evidence, "mutate.edit");
+
+        let err = host.refuse_edit(
+            &call,
+            "notes.txt",
+            EditRefusalKind::Validation,
+            "edits",
+            "semantic edit produced no changes",
+        );
+        assert!(matches!(err, MutateError::Validation { .. }));
+        let refusal = host.take_refusal(7).expect("structured refusal");
+        assert_eq!(refusal.code, CepErrorCode::SchemaMismatch);
+        let CepErrorData::Validation(data) = refusal.data else {
+            panic!("validation details");
+        };
+        assert_eq!(data.field, "edits");
+    }
+
+    #[test]
+    fn structured_refusals_are_isolated_by_call_id() {
+        let dir = seeded_project();
+        let (host, evidence, _) = default_host(dir.path());
+        let tool = admitted();
+        let first = ctx(&tool, &evidence, "mutate.edit");
+        let mut second = ctx(&tool, &evidence, "mutate.edit");
+        second.call_id = 8;
+
+        host.refuse_edit(
+            &first,
+            "notes.txt",
+            EditRefusalKind::Validation,
+            "edits",
+            "semantic edit produced no changes",
+        );
+        host.refuse_edit(
+            &second,
+            "notes.txt",
+            EditRefusalKind::Replan,
+            "old",
+            "old text was not found",
+        );
+
+        assert_eq!(
+            host.take_refusal(8).expect("second refusal").code,
+            CepErrorCode::ReplanRequired
+        );
+        assert_eq!(
+            host.take_refusal(7).expect("first refusal").code,
+            CepErrorCode::SchemaMismatch
+        );
     }
 
     #[test]
@@ -1118,7 +1771,10 @@ mod tests {
         let installed = host
             .create_if_absent(&call, "a/b/c.txt", "nested\n", true)
             .expect("create");
-        assert_eq!(installed.created_dirs, vec!["a".to_string(), "a/b".to_string()]);
+        assert_eq!(
+            installed.created_dirs,
+            vec!["a".to_string(), "a/b".to_string()]
+        );
         assert!(dir.path().join("a/b/c.txt").is_file());
     }
 }

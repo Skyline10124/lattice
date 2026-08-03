@@ -485,10 +485,6 @@ impl DefaultPolicyHook {
             };
         }
 
-        // No allowlist gate for mutate.* — blacklist semantics mean an empty
-        // denied_write_patterns allows all workspace paths. Per-path deny
-        // enforcement happens in Guard L1 / validate_path_facts.
-
         if let Some(denied) = self.check_network_and_budget(resolved) {
             return denied;
         }
@@ -564,10 +560,6 @@ impl DefaultPolicyHook {
         resolved: &super::resolved::ResolvedPolicyInput,
     ) -> RichPolicyOutcome {
         let budget = &resolved.budget_snapshot;
-        let mut resolved_paths = Vec::new();
-        if let Some(target) = &resolved.resolved_target {
-            resolved_paths.push(target.request_path.clone());
-        }
         RichPolicyOutcome {
             decision: PolicyDecision::Allowed,
             evidence: PolicyEvidence {
@@ -577,7 +569,7 @@ impl DefaultPolicyHook {
                         .turn_observation_bytes_limit
                         .saturating_sub(budget.turn_observation_bytes_used),
                 ),
-                resolved_paths,
+                resolved_paths: Vec::new(),
             },
         }
     }
@@ -646,19 +638,27 @@ mod tests {
         ));
     }
 
-    // ── Test 2: mutate.create with no denied_write_patterns (blacklist allows all) ─────────
+    // ── Test 2: mutation Components are no longer legacy policy methods ──
 
     #[test]
-    fn default_hook_allows_create_with_no_denied_patterns() {
+    fn default_hook_denies_mutation_components_as_unknown_methods() {
         let hook = DefaultPolicyHook::new(test_config());
-        let input = PolicyInput {
-            method: "mutate.create".into(),
-            params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(default_budget()),
-        };
-        let outcome = hook.decide_with_evidence(&input);
-        assert_eq!(outcome.decision, PolicyDecision::Allowed);
+        for method in ["mutate.create", "mutate.edit"] {
+            let input = PolicyInput {
+                method: method.into(),
+                params: json!({"path": "src/new.rs"}),
+                authority: PolicyAuthorityInput,
+                audit_context: audit_ctx(default_budget()),
+            };
+            let outcome = hook.decide_with_evidence(&input);
+            assert!(matches!(
+                outcome.decision,
+                PolicyDecision::Denied {
+                    reason_code: PolicyReasonCode::NonDeterminable,
+                    ..
+                }
+            ));
+        }
     }
 
     // ── Test 3: exec.command_run is retired and rejected as unknown method ──
@@ -927,17 +927,16 @@ max_todo_ops = 22
     /// #121: the retired `[capability_sources]` table and the three retired
     /// `[methods.*]` keys are hard parse errors, not silently ignored settings.
     ///
-    /// The per-method table is keyed on `mutate.create`, a method that still
-    /// exists: the mechanism under test is `deny_unknown_fields` on
-    /// `ExternalMethodPolicy`, and pinning it to `observe.workspace` after #30
-    /// would keep a retired method name alive as the only fixture for a live rule.
+    /// The per-method table is keyed on `fetch.web`, the sole remaining native
+    /// method: the mechanism under test is `deny_unknown_fields` on
+    /// `ExternalMethodPolicy`, not acceptance of a migrated method name.
     #[test]
     fn retired_external_policy_keys_fail_to_parse() {
         for retired in [
             "[capability_sources]\nobservation = [\"base\"]\n",
-            "[methods.\"mutate.create\"]\nallowed_sources = [\"declared\"]\n",
-            "[methods.\"mutate.create\"]\nrequired_capability = \"ReadPath\"\n",
-            "[methods.\"mutate.create\"]\nmax_single_read_bytes = 1024\n",
+            "[methods.\"fetch.web\"]\nallowed_sources = [\"declared\"]\n",
+            "[methods.\"fetch.web\"]\nrequired_capability = \"ReadPath\"\n",
+            "[methods.\"fetch.web\"]\nmax_single_read_bytes = 1024\n",
         ] {
             let parsed = toml::from_str::<ExternalPolicyFile>(retired);
             assert!(
@@ -949,16 +948,14 @@ max_todo_ops = 22
 
     // ── Test 9: decide_resolved is pure ────────────────────────────────
 
-    /// Purity is asserted through a method that still resolves path facts, so
-    /// `resolved_paths` is actually populated on both runs. Asserting it through
-    /// `observe.workspace` after #30 would compare two empty vectors from a
-    /// resolver error and hold under any implementation.
+    /// Purity is asserted through the remaining native method and includes its
+    /// resolved network fact, rather than comparing two unknown-method errors.
     #[test]
     fn decide_resolved_is_pure_same_input_same_output() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "mutate.create".into(),
-            params: json!({"path": "src/main.rs", "content": "fn main() {}"}),
+            method: "fetch.web".into(),
+            params: json!({"url": "https://example.com/page"}),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(default_budget()),
         };
@@ -966,45 +963,47 @@ max_todo_ops = 22
         let outcome2 = hook.decide_with_evidence(&input);
         assert_eq!(outcome1.decision, outcome2.decision);
         assert!(
-            !outcome1.evidence.resolved_paths.is_empty(),
-            "the purity comparison must have paths to compare"
+            outcome1.evidence.network_host.is_some(),
+            "the purity comparison must have a resolved host to compare"
         );
         assert_eq!(
-            outcome1.evidence.resolved_paths,
-            outcome2.evidence.resolved_paths
+            outcome1.evidence.network_host,
+            outcome2.evidence.network_host
         );
     }
 
     // ── Test 10: decide_with_evidence contains rich facts ──────────────
 
-    /// Path evidence rides on a path-resolving method, so this moved to
-    /// `mutate.edit` when #30 took `observe.workspace` out of the catalog.
+    /// Rich legacy evidence now comes from `fetch.web`; mutation evidence is
+    /// produced by `lancet-runtime`'s Component Tool Host path.
     #[test]
     fn decide_with_evidence_contains_rich_facts() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "mutate.edit".into(),
-            params: json!({"path": "src/main.rs", "edits": []}),
+            method: "fetch.web".into(),
+            params: json!({"url": "https://example.com/page"}),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
         assert_eq!(outcome.decision, PolicyDecision::Allowed);
         assert!(outcome.evidence.budget_remaining.is_some());
-        assert!(!outcome.evidence.resolved_paths.is_empty());
+        assert_eq!(
+            outcome.evidence.network_host.as_deref(),
+            Some("example.com")
+        );
     }
 
     // ── Additional: PolicyHook::decide returns stable PolicyDecision ───
 
     #[test]
     fn policy_hook_decide_returns_stable_decision() {
-        // Asserted through a native method (#30 retired `observe.workspace` from
-        // the catalog): the trait impl must forward the *allow* outcome, and only
-        // a method the resolver knows can prove that.
+        // The trait impl must forward the allow outcome from the one remaining
+        // native method.
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "mutate.create".into(),
-            params: json!({"path": "src/main.rs", "content": "fn main() {}"}),
+            method: "fetch.web".into(),
+            params: json!({"url": "https://example.com/page"}),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(default_budget()),
         };
@@ -1028,7 +1027,7 @@ max_todo_ops = 22
     #[test]
     fn external_policy_file_deserializes_from_toml() {
         let toml_str = r#"
-[methods."mutate.create"]
+[methods."fetch.web"]
 enabled = true
 
 [network]

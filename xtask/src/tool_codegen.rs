@@ -158,8 +158,8 @@ enum DomainImport {
     /// path safety, visibility, bounds, and evidence host-side (#30).
     WorkspaceObserve,
     /// Structured Workspace Mutation: read-for-edit / create-if-absent /
-    /// replace-with-expected, with path safety, precondition, install, and
-    /// evidence host-side (#31).
+    /// replace-with-expected / refuse-edit, with path safety, precondition,
+    /// install, structured diagnostics, and evidence host-side (#31).
     WorkspaceMutate,
 }
 
@@ -269,8 +269,7 @@ interface workspace-observe {
 ";
 
 /// The `workspace-mutate` interface (#31).
-
-/// Three Structured Workspace Operations. The guest never holds a path handle
+/// Four Structured Workspace Operations. The guest never holds a path handle
 /// or write stream: every install re-enters the host with a string path the
 /// host re-resolves, authorizes, and either installs atomically or refuses.
 const WORKSPACE_MUTATE_WIT: &str = "\
@@ -281,12 +280,19 @@ interface workspace-mutate {
         not-found(string),
         already-exists(string),
         stale-revision(string),
+        semantic-replan(string),
+        validation(string),
         path-rejected(string),
         denied(string),
         limit-exceeded(string),
         cancelled(string),
         io-error(string),
         invalid-request(string),
+    }
+
+    enum edit-refusal-kind {
+        validation,
+        replan,
     }
 
     record file-bytes {
@@ -311,8 +317,13 @@ interface workspace-mutate {
         local-revision: string,
     }
 
-    /// Read target bytes + Local Revision for edit compile.
-    read-for-edit: func(path: string) -> result<file-bytes, mutate-error>;
+    /// Read target bytes only when its current Local Revision matches the
+    /// caller's planning revision. A stale target is host-classified before
+    /// guest semantic compilation and never reaches an install operation.
+    read-for-edit: func(
+        path: string,
+        expected-revision: string,
+    ) -> result<file-bytes, mutate-error>;
 
     /// ADR 0003 decision 8: O_EXCL / no-replace. Existing or raced target →
     /// `already-exists` → host maps to Replan Required.
@@ -329,6 +340,15 @@ interface workspace-mutate {
         expected-revision: string,
         content: string,
     ) -> result<replace-result, mutate-error>;
+
+    /// Preserve guest-owned semantic edit diagnostics as host-authenticated
+    /// structured CEP refusals instead of collapsing them into a guest string.
+    refuse-edit: func(
+        path: string,
+        kind: edit-refusal-kind,
+        field: string,
+        reason: string,
+    ) -> mutate-error;
 }
 ";
 
@@ -1089,11 +1109,15 @@ toolchain = "rustc-1.96.0"
         assert!(wit.contains("interface workspace-mutate {"));
         assert!(wit.contains("import workspace-mutate;"));
         assert!(wit.contains("import host-control;"));
-        assert!(!wit.contains("wasi:"), "a domain import is not ambient WASI");
+        assert!(
+            !wit.contains("wasi:"),
+            "a domain import is not ambient WASI"
+        );
         for func in [
             "read-for-edit:",
             "create-if-absent:",
             "replace-with-expected:",
+            "refuse-edit:",
         ] {
             assert!(wit.contains(func), "missing {func} in {wit}");
         }
@@ -1105,7 +1129,6 @@ toolchain = "rustc-1.96.0"
         assert!(!mutate.contains("borrow<"), "{mutate}");
         assert!(!mutate.contains("own<"), "{mutate}");
     }
-
 
     /// The generated WIT is a digest input, so a repeated declaration must not
     /// change a byte of it.

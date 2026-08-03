@@ -14,10 +14,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 #[cfg(any(test, feature = "test-fault-injection"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::history::{MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryError};
 use regex::Regex;
@@ -31,6 +31,9 @@ use super::types::{
     LocalWorkspaceError, PathFacts, PathIntent, PathKind, WorkspacePath,
 };
 use super::visibility::{VisibilityEngine, VisibilityEvidence};
+
+#[cfg(any(test, feature = "test-fault-injection"))]
+type ReplaceBeforeCheck = Arc<Mutex<Option<(WorkspacePath, Vec<u8>)>>>;
 
 /// The single concrete Local Workspace (ADR 0003 decision 3).
 ///
@@ -49,16 +52,86 @@ pub struct LocalWorkspace {
     /// this workspace and outside the project `.git`; recording never touches
     /// workspace content.
     history: Arc<WorkspaceHistory>,
+    /// Serializes LATTICE-owned replacement checks and installs. It does not
+    /// claim to lock non-cooperating external writers (ADR 0003 decision 9),
+    /// but keeps the final revision check and rename in one host operation.
+    mutation_lock: Arc<Mutex<()>>,
+    /// Serializes one complete LATTICE mutation transaction — installation,
+    /// private-history append, and evidence publication — across every Host
+    /// instance constructed over this workspace. This is separate from
+    /// `mutation_lock` because conditional replacement acquires that narrower
+    /// lock while the outer transaction gate is already held.
+    mutation_sequence_gate: Arc<Mutex<()>>,
     /// One-shot install-failure flag for the narrow fault-injection seam
     /// (`fail_next_install`). Not present in production builds.
     #[cfg(any(test, feature = "test-fault-injection"))]
     fail_install: Arc<AtomicBool>,
+    /// One-shot post-install parent-fsync failure for tests. This fires only
+    /// after the target name has been atomically installed.
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    fail_parent_fsync: Arc<AtomicBool>,
+    /// One-shot external-writer simulation consumed immediately before a
+    /// conditional replace performs its final Local Revision check.
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    replace_before_check: ReplaceBeforeCheck,
 }
 
 /// Result of a read whose allocation is capped by the caller.
 pub enum BoundedFileRead {
     Complete(Vec<u8>),
     LimitExceeded { observed: usize, allowed: usize },
+}
+
+/// Successful conditional replacement: exact pre-install bytes plus the
+/// atomic install receipt used for history and evidence.
+#[derive(Debug)]
+pub(crate) struct RevisionMatchedInstall {
+    pub before: Vec<u8>,
+    pub installed: InstalledFile,
+}
+
+/// An atomic replacement receipt plus a possible failure to confirm the
+/// installed directory entry's durability. The target is already changed
+/// whenever `durability_error` is present.
+struct AtomicInstallReceipt {
+    installed: InstalledFile,
+    durability_error: Option<LocalWorkspaceError>,
+}
+
+/// Failure vocabulary for the host-only conditional replacement primitive.
+#[derive(Debug)]
+pub(crate) enum ConditionalReplaceError {
+    Workspace(LocalWorkspaceError),
+    StaleRevision {
+        observed: String,
+    },
+    Cancelled,
+    InstalledButNotDurable {
+        replacement: RevisionMatchedInstall,
+        error: LocalWorkspaceError,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum ConditionalCreateError {
+    Workspace(LocalWorkspaceError),
+    Cancelled,
+    InstalledButNotDurable {
+        created: CreatedFile,
+        error: LocalWorkspaceError,
+    },
+}
+
+impl From<LocalWorkspaceError> for ConditionalCreateError {
+    fn from(error: LocalWorkspaceError) -> Self {
+        Self::Workspace(error)
+    }
+}
+
+impl From<std::io::Error> for ConditionalCreateError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Workspace(LocalWorkspaceError::Io(error))
+    }
 }
 
 impl LocalWorkspace {
@@ -86,8 +159,14 @@ impl LocalWorkspace {
         Self {
             root: canonical,
             history,
+            mutation_lock: Arc::new(Mutex::new(())),
+            mutation_sequence_gate: Arc::new(Mutex::new(())),
             #[cfg(any(test, feature = "test-fault-injection"))]
             fail_install: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            fail_parent_fsync: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            replace_before_check: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -123,9 +202,20 @@ impl LocalWorkspace {
         Self {
             root: self.root.clone(),
             history: Arc::clone(&self.history),
+            mutation_lock: Arc::clone(&self.mutation_lock),
+            mutation_sequence_gate: Arc::clone(&self.mutation_sequence_gate),
             #[cfg(any(test, feature = "test-fault-injection"))]
             fail_install: Arc::clone(&self.fail_install),
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            fail_parent_fsync: Arc::clone(&self.fail_parent_fsync),
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            replace_before_check: Arc::clone(&self.replace_before_check),
         }
+    }
+
+    /// Shared gate for one full Host mutation transaction.
+    pub(crate) fn mutation_sequence_gate(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.mutation_sequence_gate)
     }
 
     /// Per-segment secure path resolution.
@@ -602,10 +692,11 @@ impl LocalWorkspace {
 
     /// No-replace create (ADR 0003 decision 8).
     ///
-    /// Uses `O_CREAT|O_EXCL`. If the target already exists the call fails
-    /// with [`LocalWorkspaceError::TargetExists`], which the caller maps to
-    /// `ReplanRequired`. Missing parent directories are created when
-    /// `create_parents` is true.
+    /// Prepares and syncs a same-directory temporary inode, then atomically
+    /// links it at the target name without replacement. If the target already
+    /// exists the call fails with [`LocalWorkspaceError::TargetExists`], which
+    /// the caller maps to `ReplanRequired`. Missing parent directories are
+    /// created when `create_parents` is true.
     pub async fn create_excl(
         &self,
         path: &WorkspacePath,
@@ -632,51 +723,104 @@ impl LocalWorkspace {
         content: &[u8],
         create_parents: bool,
     ) -> Result<CreatedFile, LocalWorkspaceError> {
-        path.require_file_path()?;
+        match self.create_excl_sync_cancellable(path, content, create_parents, || false) {
+            Ok(created) => Ok(created),
+            Err(ConditionalCreateError::Workspace(err)) => Err(err),
+            Err(ConditionalCreateError::Cancelled) => Err(LocalWorkspaceError::Io(
+                std::io::Error::other("unexpected cancellation in non-cancellable create"),
+            )),
+            Err(ConditionalCreateError::InstalledButNotDurable { error, .. }) => Err(error),
+        }
+    }
+
+    /// Atomic no-replace create with a call-scoped cancellation probe checked
+    /// before parent creation, before preparing the temporary inode, and
+    /// immediately before the no-replace link installs the final name.
+    pub(crate) fn create_excl_sync_cancellable(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+        create_parents: bool,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<CreatedFile, ConditionalCreateError> {
+        path.require_file_path()
+            .map_err(LocalWorkspaceError::from)?;
         let (full, facts) = self.resolve_secure(path, PathIntent::Create)?;
         #[cfg(any(test, feature = "test-fault-injection"))]
         if self.fail_install.swap(false, Ordering::SeqCst) {
-            return Err(LocalWorkspaceError::Io(std::io::Error::other(
-                "injected install failure",
-            )));
+            return Err(
+                LocalWorkspaceError::Io(std::io::Error::other("injected install failure")).into(),
+            );
         }
         if facts.exists {
             return Err(LocalWorkspaceError::TargetExists {
                 normalized: path.as_str().to_string(),
-            });
+            }
+            .into());
         }
         if !create_parents && !facts.parent_exists {
             return Err(LocalWorkspaceError::NotFound {
                 normalized: path.as_str().to_string(),
-            });
+            }
+            .into());
         }
         let (parent_rel, leaf) = split_parent_leaf(&self.root, &full)?;
+        if is_cancelled() {
+            return Err(ConditionalCreateError::Cancelled);
+        }
         let parent_fd = self.open_parent_dir_secure(&parent_rel, create_parents)?;
-        // O_CREAT|O_EXCL|O_NOFOLLOW on the single-component leaf,
-        // relative to the pinned parent fd: the no-replace guarantee
-        // and symlink-leaf rejection are enforced by the kernel at open
-        // time with no path re-traversal.
-        let flags =
-            OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let fd = rustix::fs::openat(&parent_fd, leaf.as_os_str(), flags, CREATE_FILE_MODE)
+        if is_cancelled() {
+            return Err(ConditionalCreateError::Cancelled);
+        }
+        let (tmp_name, tmp_fd) = claim_install_temp(&parent_fd)?;
+        let mut tmp_file = fs::File::from(tmp_fd);
+        let prepared = (|| -> Result<(), ConditionalCreateError> {
+            tmp_file.write_all(content)?;
+            tmp_file.sync_all()?;
+            if is_cancelled() {
+                return Err(ConditionalCreateError::Cancelled);
+            }
+            // POSIX linkat is an atomic no-replace name installation: a
+            // concurrent target (including a symlink) yields EEXIST, while
+            // the final name can never expose the partially written temp.
+            rustix::fs::linkat(
+                &parent_fd,
+                tmp_name.as_str(),
+                &parent_fd,
+                leaf.as_os_str(),
+                AtFlags::empty(),
+            )
             .map_err(|err| {
                 if err == Errno::EXIST {
-                    LocalWorkspaceError::TargetExists {
+                    ConditionalCreateError::Workspace(LocalWorkspaceError::TargetExists {
                         normalized: path.as_str().to_string(),
-                    }
+                    })
                 } else {
-                    LocalWorkspaceError::Io(err.into())
+                    ConditionalCreateError::Workspace(LocalWorkspaceError::Io(
+                        std::io::Error::other(format!("atomic no-replace persist failed: {err}")),
+                    ))
                 }
             })?;
-        let mut file = fs::File::from(fd);
-        file.write_all(content)?;
-        file.sync_all()?;
-        drop(file);
-        Ok(CreatedFile {
+            Ok(())
+        })();
+        if let Err(err) = prepared {
+            let _ = rustix::fs::unlinkat(&parent_fd, tmp_name.as_str(), AtFlags::empty());
+            return Err(err);
+        }
+        drop(tmp_file);
+        // The final target is already complete. Temp-name cleanup is
+        // best-effort because reporting a failure here would falsely claim
+        // that the installed mutation did not happen.
+        let _ = rustix::fs::unlinkat(&parent_fd, tmp_name.as_str(), AtFlags::empty());
+        let created = CreatedFile {
             path: path.clone(),
             content_hash: content_hash(content),
             bytes_written: content.len() as u64,
-        })
+        };
+        if let Err(error) = self.sync_parent_dir(&parent_fd) {
+            return Err(ConditionalCreateError::InstalledButNotDurable { created, error });
+        }
+        Ok(created)
     }
 
     /// Atomic edit install (ADR 0003 decision 8).
@@ -714,6 +858,66 @@ impl LocalWorkspace {
         path: &WorkspacePath,
         content: &[u8],
     ) -> Result<InstalledFile, LocalWorkspaceError> {
+        let _guard = self.mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let receipt = self.install_atomic_sync_locked(path, content)?;
+        match receipt.durability_error {
+            Some(error) => Err(error),
+            None => Ok(receipt.installed),
+        }
+    }
+
+    /// Host-only conditional replacement. The caller supplies the call-scoped
+    /// cancellation probe; the concrete workspace owns the final revision
+    /// check and atomic install under one LATTICE mutation lock.
+    pub(crate) fn replace_if_revision_sync(
+        &self,
+        path: &WorkspacePath,
+        expected_revision: &str,
+        content: &[u8],
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<RevisionMatchedInstall, ConditionalReplaceError> {
+        let _guard = self.mutation_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if is_cancelled() {
+            return Err(ConditionalReplaceError::Cancelled);
+        }
+
+        #[cfg(any(test, feature = "test-fault-injection"))]
+        if let Some((race_path, race_content)) = self.replace_before_check.lock().unwrap().take() {
+            debug_assert_eq!(&race_path, path);
+            fs::write(self.root.join(race_path.as_str()), race_content)
+                .map_err(LocalWorkspaceError::from)
+                .map_err(ConditionalReplaceError::Workspace)?;
+        }
+
+        let before = self
+            .read_file_blocking(path)
+            .map_err(ConditionalReplaceError::Workspace)?;
+        let observed = content_hash(&before);
+        if observed != expected_revision {
+            return Err(ConditionalReplaceError::StaleRevision { observed });
+        }
+        if is_cancelled() {
+            return Err(ConditionalReplaceError::Cancelled);
+        }
+        let receipt = self
+            .install_atomic_sync_locked(path, content)
+            .map_err(ConditionalReplaceError::Workspace)?;
+        let replacement = RevisionMatchedInstall {
+            before,
+            installed: receipt.installed,
+        };
+        if let Some(error) = receipt.durability_error {
+            return Err(ConditionalReplaceError::InstalledButNotDurable { replacement, error });
+        }
+        Ok(replacement)
+    }
+
+    /// Atomic install implementation. The caller holds `mutation_lock`.
+    fn install_atomic_sync_locked(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Result<AtomicInstallReceipt, LocalWorkspaceError> {
         path.require_file_path()?;
         let ws = self;
         let (full, _facts) = ws.resolve_secure(path, PathIntent::Overwrite)?;
@@ -737,39 +941,7 @@ impl LocalWorkspace {
         // bind-mounted workspace can both start at the same pid. `O_EXCL`
         // detects that; retrying with a fresh sequence number resolves it
         // rather than surfacing a bare `EEXIST`.
-        let tmp_flags =
-            OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let (tmp_name, tmp_fd) = {
-            let mut last = None;
-            let mut acquired = None;
-            for _ in 0..INSTALL_TMP_NAME_ATTEMPTS {
-                let candidate = format!(
-                    ".lattice-tmp-{}-{}",
-                    std::process::id(),
-                    INSTALL_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
-                );
-                match rustix::fs::openat(
-                    &parent_fd,
-                    candidate.as_str(),
-                    tmp_flags,
-                    CREATE_FILE_MODE,
-                ) {
-                    Ok(fd) => {
-                        acquired = Some((candidate, fd));
-                        break;
-                    }
-                    Err(e) if e == Errno::EXIST => last = Some(e),
-                    Err(e) => return Err(LocalWorkspaceError::Io(e.into())),
-                }
-            }
-            acquired.ok_or_else(|| {
-                LocalWorkspaceError::Io(std::io::Error::other(format!(
-                    "could not claim an install temp name after \
-                     {INSTALL_TMP_NAME_ATTEMPTS} attempts: {}",
-                    last.map(|e| e.to_string()).unwrap_or_default()
-                )))
-            })?
-        };
+        let (tmp_name, tmp_fd) = claim_install_temp(&parent_fd)?;
         let mut tmp_file = fs::File::from(tmp_fd);
         let installed = (|| -> Result<(), LocalWorkspaceError> {
             tmp_file.write_all(content)?;
@@ -794,11 +966,15 @@ impl LocalWorkspace {
         drop(tmp_file);
         // Durably record the rename in the directory itself — through
         // the pinned fd, replacing the old path-based directory reopen.
-        rustix::fs::fsync(&parent_fd).map_err(|e| LocalWorkspaceError::Io(e.into()))?;
-        Ok(InstalledFile {
+        let installed = InstalledFile {
             path: path.clone(),
             content_hash: content_hash(content),
             bytes_written: content.len() as u64,
+        };
+        let durability_error = self.sync_parent_dir(&parent_fd).err();
+        Ok(AtomicInstallReceipt {
+            installed,
+            durability_error,
         })
     }
 
@@ -847,6 +1023,29 @@ impl LocalWorkspace {
     #[cfg(any(test, feature = "test-fault-injection"))]
     pub fn fail_next_install(&self) {
         self.fail_install.store(true, Ordering::SeqCst);
+    }
+
+    /// Fail the next parent-directory fsync after the target was installed.
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    pub fn fail_next_parent_fsync(&self) {
+        self.fail_parent_fsync.store(true, Ordering::SeqCst);
+    }
+
+    /// Simulate a non-cooperating writer changing `path` immediately before
+    /// the next conditional replacement's final revision check.
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    pub fn replace_target_before_next_revision_check(&self, path: WorkspacePath, content: Vec<u8>) {
+        *self.replace_before_check.lock().unwrap() = Some((path, content));
+    }
+
+    fn sync_parent_dir(&self, parent_fd: &OwnedFd) -> Result<(), LocalWorkspaceError> {
+        #[cfg(any(test, feature = "test-fault-injection"))]
+        if self.fail_parent_fsync.swap(false, Ordering::SeqCst) {
+            return Err(LocalWorkspaceError::Io(std::io::Error::other(
+                "injected parent fsync failure after install",
+            )));
+        }
+        rustix::fs::fsync(parent_fd).map_err(|err| LocalWorkspaceError::Io(err.into()))
     }
 }
 
@@ -904,6 +1103,29 @@ static INSTALL_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// process that shared this pid, or a second PID namespace over the same
 /// workspace; a handful of fresh sequence numbers clears both.
 const INSTALL_TMP_NAME_ATTEMPTS: usize = 8;
+
+/// Claim a unique same-directory temporary file for atomic installation.
+fn claim_install_temp(parent_fd: &OwnedFd) -> Result<(String, OwnedFd), LocalWorkspaceError> {
+    let tmp_flags =
+        OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut last = None;
+    for _ in 0..INSTALL_TMP_NAME_ATTEMPTS {
+        let candidate = format!(
+            ".lattice-tmp-{}-{}",
+            std::process::id(),
+            INSTALL_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        match rustix::fs::openat(parent_fd, candidate.as_str(), tmp_flags, CREATE_FILE_MODE) {
+            Ok(fd) => return Ok((candidate, fd)),
+            Err(err) if err == Errno::EXIST => last = Some(err),
+            Err(err) => return Err(LocalWorkspaceError::Io(err.into())),
+        }
+    }
+    Err(LocalWorkspaceError::Io(std::io::Error::other(format!(
+        "could not claim an install temp name after {INSTALL_TMP_NAME_ATTEMPTS} attempts: {}",
+        last.map(|err| err.to_string()).unwrap_or_default()
+    ))))
+}
 
 /// Directory-open flags for every step of the pinned dirfd walk: read-only
 /// (macOS has no `O_PATH`), directories only, and no symlink following.
@@ -1478,6 +1700,52 @@ mod tests {
         ws.install_atomic(&path, b"v2").await.unwrap();
         let on_disk = std::fs::read(dir.path().join("f.txt")).unwrap();
         assert_eq!(on_disk, b"v2");
+    }
+
+    #[test]
+    fn conditional_replace_rechecks_cancellation_at_install_point() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("target.txt"), b"before\n").unwrap();
+        let ws = ws_at(&dir);
+        let path = WorkspacePath::parse("target.txt").unwrap();
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+
+        let err = ws
+            .replace_if_revision_sync(&path, &content_hash(b"before\n"), b"after\n", || {
+                probes.fetch_add(1, Ordering::SeqCst) > 0
+            })
+            .expect_err("cancellation arriving after the first probe must abort install");
+        assert!(matches!(err, ConditionalReplaceError::Cancelled));
+        assert_eq!(
+            std::fs::read(dir.path().join("target.txt")).unwrap(),
+            b"before\n"
+        );
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn no_replace_create_cancelled_after_temp_sync_leaves_no_target_or_temp() {
+        let dir = TempDir::new().unwrap();
+        let ws = ws_at(&dir);
+        let path = WorkspacePath::parse("cancelled.txt").unwrap();
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+
+        let err = ws
+            .create_excl_sync_cancellable(&path, b"content\n", false, || {
+                probes.fetch_add(1, Ordering::SeqCst) > 1
+            })
+            .expect_err("cancellation after temp sync must abort before no-replace install");
+        assert!(matches!(err, ConditionalCreateError::Cancelled));
+        assert!(!dir.path().join("cancelled.txt").exists());
+        assert_eq!(probes.load(Ordering::SeqCst), 3);
+        assert!(
+            fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".lattice-tmp-")),
+            "cancelled create must clean up its prepared temp file"
+        );
     }
 
     // ── Supporting tests for observation operations ──────────────────────

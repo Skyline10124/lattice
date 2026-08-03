@@ -88,6 +88,6 @@ pub use limits::ExecutionLimits;
 pub use runtime::{ComponentCallContext, ComponentRuntime};
 pub use workspace::{
     CreatedFile, DirectoryEntry, FindRequest, GrepRequest, InstalledFile, LocalWorkspace,
-    LocalWorkspaceError, PathFacts, PathIntent, PathKind, VisibilityEngine, WorkspacePath,
-    content_hash,
+    LocalWorkspaceError, MAX_WORKSPACE_WRITE_BYTES, PathFacts, PathIntent, PathKind,
+    VisibilityEngine, WorkspacePath, content_hash,
 };

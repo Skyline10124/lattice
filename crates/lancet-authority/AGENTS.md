@@ -42,6 +42,13 @@ data, effect checking, effect ledger helpers, and boundary-credit validation.
 
 ## Recent Issues
 
+- ADDED #31: `mutate.create` and `mutate.edit` are embedded Component Tools.
+  The legacy `PolicyResolver` rejects both as unknown catalog methods; path
+  parsing, Mutation Preconditions, Guard L1, cancellation, and installation run
+  in `lancet-runtime`'s `workspace-mutate` host. `WorkspacePolicyConfig::
+  authorized_region_for` still materializes the mutation region consumed by
+  that host — removing legacy method resolution does not remove host-side
+  blacklist and System Path Exclusion semantics.
 - ADDED #30: `observe.workspace` is an embedded Component Tool; this crate's
   per-method observation resolution went with it. `policy/resolved.rs` no
   longer extracts a per-mode observation path (`observe.workspace` resolves

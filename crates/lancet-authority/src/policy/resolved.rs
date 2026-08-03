@@ -8,7 +8,7 @@
 //! budget snapshots. The resolver is pure: no filesystem I/O, no time reads,
 //! no mutable counter access.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use lancet_catalog::catalog::catalog;
 use lancet_protocol::effect_types::ImpactKind;
@@ -17,18 +17,6 @@ use lancet_protocol::policy::{PolicyAuditContext, PolicyBudgetSnapshot, PolicyIn
 use super::capability::InvocationFacts;
 
 // ── Resolved types (executor-owned, no Serialize/Deserialize) ───────────
-
-/// Resolved path facts for the workspace mutation methods.
-///
-/// Observation used to produce these too; since #30 `observe.workspace` is a
-/// Component Tool and its paths are resolved host-side, so `mutate.create` and
-/// `mutate.edit` are the only producers.
-#[derive(Clone, Debug)]
-pub struct ResolvedPath {
-    pub request_path: String,
-    pub normalized_path: PathBuf,
-    pub project_root: PathBuf,
-}
 
 /// Resolved network facts for `fetch.web`.
 ///
@@ -51,7 +39,6 @@ pub struct ResolvedPolicyInput {
     pub method: String,
     pub impact_kind: ImpactKind,
     pub invocation_facts: InvocationFacts,
-    pub resolved_target: Option<ResolvedPath>,
     pub resolved_network: Option<ResolvedNetwork>,
     pub budget_snapshot: PolicyBudgetSnapshot,
     pub audit_context: PolicyAuditContext,
@@ -105,44 +92,24 @@ impl PolicyResolver {
         let impact_kind = descriptor.impact.clone();
 
         let mut invocation_facts = InvocationFacts::default();
-        let mut resolved_target = None;
         let mut resolved_network = None;
 
-        // `observe.workspace` used to resolve its per-mode path here. It is a
-        // Component Tool since #30, so the method is no longer in the catalog and
-        // the lookup above already rejected it — path facts for an observation now
-        // come from the WIT Tool Host in `lancet_runtime::host_workspace`, which
-        // resolves them against the concrete Local Workspace instead of lexically.
-        match input.method.as_str() {
-            "mutate.create" | "mutate.edit" => {
-                if let Some(path) = extract_path_from_params(&input.params) {
-                    let normalized = normalize_lexical_pure(&path)?;
-                    let canonical = self.project_root.join(&normalized);
-                    invocation_facts.path = Some(canonical.to_string_lossy().to_string());
-                    invocation_facts.normalized_path =
-                        Some(normalized.to_string_lossy().to_string());
-                    resolved_target = Some(ResolvedPath {
-                        request_path: path,
-                        normalized_path: normalized,
-                        project_root: self.project_root.clone(),
-                    });
-                }
-            }
-            "fetch.web" => {
-                if let Some(url) = extract_url_from_params(&input.params) {
-                    let host = parse_url_host(&url);
-                    invocation_facts.host = Some(host.clone());
-                    resolved_network = Some(ResolvedNetwork { host });
-                }
-            }
-            _ => {}
+        // Observation and mutation paths are resolved by their Component Tool
+        // Hosts. Those methods are absent from the legacy catalog, so the lookup
+        // above rejects them before this branch and there is no parallel lexical
+        // path-authority path here.
+        if input.method == "fetch.web"
+            && let Some(url) = extract_url_from_params(&input.params)
+        {
+            let host = parse_url_host(&url);
+            invocation_facts.host = Some(host.clone());
+            resolved_network = Some(ResolvedNetwork { host });
         }
 
         Ok(ResolvedPolicyInput {
             method: input.method.clone(),
             impact_kind,
             invocation_facts,
-            resolved_target,
             resolved_network,
             budget_snapshot: input.audit_context.budget_snapshot.clone(),
             audit_context: input.audit_context.clone(),
@@ -158,70 +125,8 @@ impl PolicyResolver {
 // the Component's params schema now, so keeping a second reader of it here would
 // be a copy that can only drift from the manifest.
 
-fn extract_path_from_params(params: &serde_json::Value) -> Option<String> {
-    params.get("path")?.as_str().map(String::from)
-}
-
 fn extract_url_from_params(params: &serde_json::Value) -> Option<String> {
     params.get("url")?.as_str().map(String::from)
-}
-
-// ── Pure path normalization ─────────────────────────────────────────────
-
-fn normalize_lexical_pure(path: &str) -> Result<PathBuf, lancet_protocol::CepError> {
-    use std::path::Component;
-
-    if path.contains('\0') {
-        return Err(lancet_protocol::CepError::new(
-            lancet_protocol::CepErrorCode::PathContainment,
-            "path contains NUL byte",
-            lancet_protocol::error::CepErrorData::Validation(
-                lancet_protocol::error::ValidationErrorData {
-                    field: "path".into(),
-                    reason: "contains NUL byte".into(),
-                },
-            ),
-            lancet_protocol::Retriability::Permanent,
-        ));
-    }
-
-    let mut result = PathBuf::new();
-    for component in Path::new(path).components() {
-        match component {
-            Component::Normal(part) => result.push(part),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(lancet_protocol::CepError::new(
-                    lancet_protocol::CepErrorCode::PathContainment,
-                    format!("path contains '..' traversal: '{path}'"),
-                    lancet_protocol::error::CepErrorData::Validation(
-                        lancet_protocol::error::ValidationErrorData {
-                            field: "path".into(),
-                            reason: "contains '..'".into(),
-                        },
-                    ),
-                    lancet_protocol::Retriability::Permanent,
-                ));
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(lancet_protocol::CepError::new(
-                    lancet_protocol::CepErrorCode::PathContainment,
-                    format!("path must be relative: '{path}'"),
-                    lancet_protocol::error::CepErrorData::Validation(
-                        lancet_protocol::error::ValidationErrorData {
-                            field: "path".into(),
-                            reason: "absolute path not allowed".into(),
-                        },
-                    ),
-                    lancet_protocol::Retriability::Permanent,
-                ));
-            }
-        }
-    }
-    if result.as_os_str().is_empty() {
-        result.push(".");
-    }
-    Ok(result)
 }
 
 // ── Pure URL fact extraction ────────────────────────────────────────────
@@ -292,37 +197,29 @@ mod tests {
     }
 
     #[test]
-    fn resolve_workspace_create_extracts_path() {
+    fn resolve_mutation_components_errors_as_unknown_method() {
         let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "mutate.create".into(),
-            params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(resolved.impact_kind, ImpactKind::WorkspaceMutation);
-        assert!(resolved.resolved_target.is_some());
-    }
-
-    #[test]
-    fn resolve_workspace_edit_extracts_path() {
-        let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "mutate.edit".into(),
-            params: json!({
-                "path": "src/main.rs",
-                "expected_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
-                "edits": []
-            }),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(resolved.impact_kind, ImpactKind::WorkspaceMutation);
-        let target = resolved.resolved_target.unwrap();
-        assert_eq!(target.request_path, "src/main.rs");
-        assert_eq!(target.normalized_path, PathBuf::from("src/main.rs"));
+        for (method, params) in [
+            (
+                "mutate.create",
+                json!({"path": "src/new.rs", "content": "fn main() {}"}),
+            ),
+            (
+                "mutate.edit",
+                json!({"path": "src/main.rs", "expected_hash": "blake3:00", "edits": []}),
+            ),
+        ] {
+            let input = PolicyInput {
+                method: method.into(),
+                params,
+                authority: PolicyAuthorityInput,
+                audit_context: audit_ctx(),
+            };
+            let err = resolver
+                .resolve(&input)
+                .expect_err("Component mutations must not resolve through the legacy catalog");
+            assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
+        }
     }
 
     #[test]
@@ -387,36 +284,6 @@ mod tests {
         };
         let err = resolver.resolve(&input).unwrap_err();
         assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
-    }
-
-    /// Lexical traversal rejection is a property of resolution itself, so it
-    /// stays pinned on the methods that still resolve a path. It used to be
-    /// asserted through `observe.workspace`, which left with #30; every remaining
-    /// path-resolving method is covered here so the check cannot go dead again by
-    /// losing one method.
-    #[test]
-    fn resolve_path_traversal_rejected() {
-        let resolver = test_resolver();
-        for (method, params) in [
-            (
-                "mutate.create",
-                json!({"path": "../etc/passwd", "content": ""}),
-            ),
-            ("mutate.edit", json!({"path": "../etc/passwd", "edits": []})),
-        ] {
-            let input = PolicyInput {
-                method: method.into(),
-                params,
-                authority: PolicyAuthorityInput,
-                audit_context: audit_ctx(),
-            };
-            let err = resolver.resolve(&input).unwrap_err();
-            assert_eq!(
-                err.code,
-                lancet_protocol::CepErrorCode::PathContainment,
-                "{method} must reject '..' traversal"
-            );
-        }
     }
 
     #[test]

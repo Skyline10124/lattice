@@ -41,6 +41,8 @@ mod cep_native_registry_tests {
     use lancet_protocol::CepErrorCode;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn production_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
@@ -106,15 +108,40 @@ mod cep_native_registry_tests {
         let mut config = ServerRunConfig::in_memory_for_tests();
         let mut policy = lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root);
         policy.denied_effect_kinds.insert(denied);
+        policy.network.allow_localhost = true;
+        policy.network.allowed_hosts = vec!["127.0.0.1".into()];
         config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
-        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+        let mut hook_policy =
             lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from(root),
-            ),
+            );
+        hook_policy.network.allow_localhost = true;
+        hook_policy.network.allowed_hosts = vec!["127.0.0.1".into()];
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            hook_policy,
         ));
         config.policy_hook = default_hook.clone();
         config.default_policy_hook = Some(default_hook);
         config
+    }
+
+    async fn spawn_ok_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind localhost fixture");
+        let addr = listener.local_addr().expect("fixture address");
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+            }
+        });
+        format!("http://{addr}/")
     }
 
     fn assert_pre_dispatch_denial(err: &lancet_protocol::CepError) {
@@ -135,10 +162,8 @@ mod cep_native_registry_tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = production_registry();
-        let config = config_with_denied_effect_kind(
-            root,
-            lancet_protocol::ImpactKind::ExternalObservation,
-        );
+        let config =
+            config_with_denied_effect_kind(root, lancet_protocol::ImpactKind::ExternalObservation);
 
         let (client, server) = CepTransport::pair(8);
         let audit = Arc::clone(&config.audit);
@@ -149,7 +174,7 @@ mod cep_native_registry_tests {
         let err = client
             .call_raw(
                 Fetch::NAME,
-                serde_json::json!({ "url": "https://example.com/" }),
+                serde_json::json!({ "url": "https://backend-must-not-run.invalid/" }),
             )
             .await
             .expect_err("denied ExternalObservation must reject fetch.web");
@@ -184,6 +209,7 @@ mod cep_native_registry_tests {
         // allowlist, not on this declared-kind check).
         let config =
             config_with_denied_effect_kind(root, lancet_protocol::ImpactKind::WorkspaceMutation);
+        let url = spawn_ok_server().await;
 
         let (client, server) = CepTransport::pair(8);
         let server_task = tokio::spawn(async move {
@@ -191,10 +217,7 @@ mod cep_native_registry_tests {
         });
 
         let value = client
-            .call_raw(
-                Fetch::NAME,
-                serde_json::json!({ "url": "https://example.com/" }),
-            )
+            .call_raw(Fetch::NAME, serde_json::json!({ "url": url }))
             .await
             .expect("fetch.web must survive an unrelated WorkspaceMutation effect-kind deny");
         assert_eq!(value["status"], 200);
@@ -206,8 +229,12 @@ mod cep_native_registry_tests {
     #[test]
     fn production_registry_does_not_register_migrated_mutation_methods() {
         let registry = production_registry();
-        for migrated in ["mutate.create", "mutate.edit", "observe.workspace", "session.todo_write"]
-        {
+        for migrated in [
+            "mutate.create",
+            "mutate.edit",
+            "observe.workspace",
+            "session.todo_write",
+        ] {
             assert!(
                 !registry.contains(migrated),
                 "{migrated} must not remain a native registry method"

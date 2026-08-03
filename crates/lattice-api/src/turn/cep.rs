@@ -860,7 +860,7 @@ mod turn_wiring {
     use super::*;
     use lancet_audit::{AuditOutcome, CallAuditMetadata};
     use lancet_catalog::CepMethod;
-        use lancet_catalog::test_method::TestEcho;
+    use lancet_catalog::test_method::TestEcho;
 
     /// `observe.workspace` as a plain method name. It is a Component Tool since
     /// #30, so there is no catalog type — and calling it untyped is what a

@@ -17,24 +17,12 @@ struct MethodFixture {
 
 /// Build the method fixture matrix covering all canonical catalog methods.
 fn method_fixtures() -> Vec<MethodFixture> {
-    // `observe.workspace` left this matrix with #30 (as `session.todo_write` did
-    // with #29): it is an embedded Component Tool, so its contract authority is
-    // `tools/observe-workspace/manifest.toml`, not a catalog descriptor this
-    // fixture could compare against.
-    vec![
-        MethodFixture {
-            method: "mutate.create",
-            required_capability: RequiredCapability::WritePath,
-        },
-        MethodFixture {
-            method: "mutate.edit",
-            required_capability: RequiredCapability::WritePath,
-        },
-        MethodFixture {
-            method: "fetch.web",
-            required_capability: RequiredCapability::FetchUrl,
-        },
-    ]
+    // Four built-ins are Component Tools, whose manifests own their contracts.
+    // This legacy matrix covers only the one remaining native descriptor.
+    vec![MethodFixture {
+        method: "fetch.web",
+        required_capability: RequiredCapability::FetchUrl,
+    }]
 }
 
 // ── Coverage tests ─────────────────────────────────────────────────────

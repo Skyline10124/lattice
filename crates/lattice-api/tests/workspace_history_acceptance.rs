@@ -131,7 +131,10 @@ async fn create_file(
 ) -> Result<(), CepErrorCode> {
     runtime
         .client()
-        .call_raw("mutate.create", serde_json::json!({"path": path, "content": content, "create_parents": true}))
+        .call_raw(
+            "mutate.create",
+            serde_json::json!({"path": path, "content": content, "create_parents": true}),
+        )
         .await
         .map(|_| ())
         .map_err(|err| err.code)
@@ -356,8 +359,9 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
     let denial = create_file(&denied_runtime, "README.md", "nope\n")
         .await
         .expect_err("guard must deny");
-    // Component guests surface host MutateError::Denied as a string; dispatch maps it to ExecutionFailed.
-    assert_eq!(denial, CepErrorCode::ExecutionFailed);
+    // The host refusal outranks the guest's string retelling, so the Guard
+    // denial keeps its structured Cell-era code through Component dispatch.
+    assert_eq!(denial, CepErrorCode::EffectViolation);
     assert_eq!(
         denied_runtime.workspace_history().current().unwrap(),
         None,

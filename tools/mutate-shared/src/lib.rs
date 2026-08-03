@@ -163,6 +163,8 @@ fn find_semantic_occurrence(
     occurrence: Option<u64>,
     field: &str,
 ) -> Result<(usize, usize), EditDiag> {
+    const MAX_COMPONENT_OCCURRENCE: u64 = u32::MAX as u64;
+
     if needle.is_empty() {
         return Err(EditDiag::validation(field, "match text must not be empty"));
     }
@@ -173,12 +175,17 @@ fn find_semantic_occurrence(
 
     let index = match occurrence {
         Some(0) => {
+            return Err(EditDiag::validation("occurrence", "occurrence is 1-based"));
+        }
+        Some(value) if value > MAX_COMPONENT_OCCURRENCE => {
             return Err(EditDiag::validation(
                 "occurrence",
-                "occurrence is 1-based",
+                "occurrence exceeds the supported range",
             ));
         }
-        Some(value) => value as usize - 1,
+        Some(value) => usize::try_from(value - 1).map_err(|_| {
+            EditDiag::validation("occurrence", "occurrence exceeds the supported range")
+        })?,
         None if matches.len() == 1 => 0,
         None if matches.is_empty() => {
             return Err(EditDiag::replan(
@@ -328,11 +335,19 @@ mod tests {
     }
 
     #[test]
+    fn occurrence_above_wasm32_index_range_is_rejected() {
+        let err =
+            apply_edits("a a\n", &[replace("a", "b", Some(u64::from(u32::MAX) + 2))]).unwrap_err();
+        assert_eq!(err.field, "occurrence");
+        assert_eq!(err.reason, "occurrence exceeds the supported range");
+        assert!(!err.replan);
+    }
+
+    #[test]
     fn edit_op_deserializes_tagged_wire_shape() {
-        let op: EditOp = serde_json::from_str(
-            r#"{"op":"replace_text","old":"a","new":"b","occurrence":1}"#,
-        )
-        .unwrap();
+        let op: EditOp =
+            serde_json::from_str(r#"{"op":"replace_text","old":"a","new":"b","occurrence":1}"#)
+                .unwrap();
         assert_eq!(op, replace("a", "b", Some(1)));
     }
 }

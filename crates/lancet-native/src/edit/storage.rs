@@ -14,8 +14,7 @@ use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::validate_path_facts;
 
 use crate::workspace::{
-    CreatedFile, InstalledFile, LocalWorkspace, LocalWorkspaceError, PathFacts, PathIntent,
-    WorkspacePath,
+    InstalledFile, LocalWorkspace, LocalWorkspaceError, PathFacts, PathIntent, WorkspacePath,
 };
 
 use super::types::{PatchDiagnostic, PatchErrorCode};
@@ -111,24 +110,6 @@ impl EditStorage {
             .map_err(|err| local_io_error(path, operation_index, err))
     }
 
-    /// No-replace create install (ADR 0003 decision 8).
-    ///
-    /// Distinct from [`write_edit_target`]: the install must fail if the
-    /// target exists at install time, so a concurrent writer between
-    /// `preflight_create` and the install surfaces as a create error rather
-    /// than a silent overwrite.
-    pub(crate) async fn create_edit_target(
-        &self,
-        path: &str,
-        target: &WorkspacePath,
-        content: &[u8],
-    ) -> Result<CreatedFile, PatchDiagnostic> {
-        self.workspace
-            .create_excl(target, content, true)
-            .await
-            .map_err(|err| local_io_error(path, 0, err))
-    }
-
     pub(crate) async fn remove_edit_target(
         &self,
         path: &str,
@@ -160,44 +141,6 @@ impl EditStorage {
             }
             _ => Ok(()),
         }
-    }
-
-    pub(crate) async fn preflight_create(
-        &self,
-        path: &str,
-    ) -> Result<WorkspacePath, PatchDiagnostic> {
-        let ws_path = Self::parse_relative_path(path)?;
-        let facts = self.preflight_path(&ws_path, PathIntent::Create).await?;
-        validate_facts(ws_path.as_str(), &facts, &self.authorized_region)?;
-        if facts.exists {
-            return Err(PatchDiagnostic::new(
-                PatchErrorCode::IoError,
-                format!("target file '{path}' already exists"),
-            )
-            .with_path(path.to_string()));
-        }
-        Ok(ws_path)
-    }
-
-    pub(crate) async fn read_for_compile(&self, path: &str) -> Result<String, PatchDiagnostic> {
-        let ws_path = Self::parse_relative_path(path)?;
-        ws_path.require_file_path().map_err(|err| {
-            PatchDiagnostic::new(
-                PatchErrorCode::BoundaryDenied,
-                format!("edit path '{path}' rejected: {err}"),
-            )
-            .with_path(path.to_string())
-        })?;
-        let facts = self.preflight_path(&ws_path, PathIntent::Read).await?;
-        validate_facts(path, &facts, &self.authorized_region)?;
-        let bytes = self.read_edit_target(path, &ws_path, 0).await?;
-        String::from_utf8(bytes).map_err(|error| {
-            PatchDiagnostic::new(
-                PatchErrorCode::IoError,
-                format!("edit target '{path}' is not valid UTF-8: {error}"),
-            )
-            .with_path(path.to_string())
-        })
     }
 
     async fn preflight_path(

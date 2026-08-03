@@ -31,7 +31,6 @@ use lancet_protocol::evidence::{
     ObservedEffectsRecord, ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
 };
 
-
 #[derive(Debug, Default)]
 struct EvidenceInner {
     /// Next `seq`, shared by effects and denials.
@@ -124,7 +123,6 @@ impl CellEvidenceLedger {
         cell: Cell,
         scope: ObservedScope,
         target: ObservedTarget,
-        bytes_written: u64,
         mutation: MutationEvidence,
     ) {
         let mut inner = self.inner.lock().unwrap();
@@ -136,7 +134,7 @@ impl CellEvidenceLedger {
             scope,
             target,
             source: EffectSource::Operation,
-            context_measure: Some(bytes_written),
+            context_measure: None,
             truncated: None,
             visibility: None,
             mutation: Some(mutation),

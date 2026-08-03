@@ -63,10 +63,10 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
         name: "mutate.create",
         descriptor_sha256: parse_hex_digest(
-            "5bb428720d10f4d55261e605a32818db760b03cadbb7f04e36e9469f3e7e622f",
+            "89007cefe32b17fbeb479d349c8a609b6e8f7112fc25f827e555e295be18459d",
         ),
         artifact_sha256: parse_hex_digest(
-            "0848e50abb6cadd7fac5108a66b84f971818253889df37c9e8371976ff275563",
+            "6454d321f5e6bee2f3315edf4ae1092597ae5d93e696a6c9c14b89d696b0c4a8",
         ),
         abi_version: 1,
         imports: &[
@@ -77,10 +77,10 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
         name: "mutate.edit",
         descriptor_sha256: parse_hex_digest(
-            "0e23ea8fa168312d11cad7e1850b58c6caa959ad81da0ce131f402f5594f274f",
+            "9433ba395e88c5bafc95ab2926ac355e19b3e95b4b48a9e171747c5642852aec",
         ),
         artifact_sha256: parse_hex_digest(
-            "bf47ad5bbe3cfa6ba276e7dcb8367c10a45139a48e88ffa54c70ae70854b33ae",
+            "14308ccd96a0f0f732c853ff897aa19d79b107ab8524a75c9116cc7de4340a1c",
         ),
         abi_version: 1,
         imports: &[

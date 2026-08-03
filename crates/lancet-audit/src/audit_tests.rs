@@ -276,7 +276,12 @@ fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
     // A migrated method reaches this function only when the Component dispatch
     // branch was NOT taken, so it is not native either: labeling it `native`
     // would claim an enforcement path that no longer exists for it (#29/#30).
-    for migrated in ["observe.workspace", "session.todo_write", "mutate.create", "mutate.edit"] {
+    for migrated in [
+        "observe.workspace",
+        "session.todo_write",
+        "mutate.create",
+        "mutate.edit",
+    ] {
         let labeled = CallAuditMetadata::for_production_dispatch(migrated);
         assert_eq!(
             labeled.semantic_stage, SEMANTIC_STAGE_UNROUTED,
@@ -995,14 +1000,9 @@ fn query_rows_filters_by_capability() {
 fn query_rows_applies_database_limit_and_excluded_method_prefix() {
     let store = CepAuditStore::in_memory().unwrap();
     let ctx = test_context();
-    for (idx, method) in [
-        OBSERVE_WORKSPACE,
-        "observe.audit",
-        Fetch::NAME,
-        Fetch::NAME,
-    ]
-    .into_iter()
-    .enumerate()
+    for (idx, method) in [OBSERVE_WORKSPACE, "observe.audit", Fetch::NAME, Fetch::NAME]
+        .into_iter()
+        .enumerate()
     {
         let start = store
             .start_call(
@@ -1082,7 +1082,12 @@ fn merge_finalize_metadata_adds_required_capability() {
 /// authority in the audit trail (#29/#30).
 #[test]
 fn merge_finalize_metadata_attributes_no_legacy_capability_to_a_component_tool() {
-    for migrated in ["observe.workspace", "session.todo_write", "mutate.create", "mutate.edit"] {
+    for migrated in [
+        "observe.workspace",
+        "session.todo_write",
+        "mutate.create",
+        "mutate.edit",
+    ] {
         let merged = merge_finalize_metadata(
             Some(r#"{"probe":"value"}"#),
             migrated,

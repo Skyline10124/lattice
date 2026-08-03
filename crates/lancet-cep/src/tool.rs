@@ -226,16 +226,14 @@ mod tests {
 
     #[test]
     fn enabled_filter_uses_exact_names() {
-        // A *native catalog* method: this filter resolves against
-        // `lancet_catalog::catalog()`, and #29/#30 moved `session.todo_write` and
-        // `observe.workspace` out of it into Component Tools. A prefix of a real
-        // name must still not resolve.
-        let exposure = ToolExposure::from_catalog_enabled(&["mutate.create".to_string()])
+        // This filter resolves only against `lancet_catalog::catalog()`. A
+        // prefix of its remaining native method must still not resolve.
+        let exposure = ToolExposure::from_catalog_enabled(&["fetch.web".to_string()])
             .expect("known tool resolves");
-        assert!(exposure.contains("mutate.create"));
-        assert!(!exposure.contains("mutate"));
+        assert!(exposure.contains("fetch.web"));
+        assert!(!exposure.contains("fetch"));
         assert_eq!(exposure.definitions().len(), 1);
-        assert_eq!(exposure.definitions()[0].name, "mutate.create");
+        assert_eq!(exposure.definitions()[0].name, "fetch.web");
     }
 
     /// A migrated method is not resolvable through the *catalog* exposure.
@@ -245,7 +243,12 @@ mod tests {
     /// would mean two projections of one Tool with nothing keeping them in step.
     #[test]
     fn migrated_component_tools_do_not_resolve_through_the_catalog() {
-        for migrated in ["observe.workspace", "session.todo_write"] {
+        for migrated in [
+            "observe.workspace",
+            "mutate.create",
+            "mutate.edit",
+            "session.todo_write",
+        ] {
             let err = ToolExposure::from_catalog_enabled(&[migrated.to_string()])
                 .expect_err("a Component Tool is not a catalog method");
             assert_eq!(err.unknown, vec![migrated.to_string()]);
@@ -254,15 +257,10 @@ mod tests {
 
     #[test]
     fn catalog_exposure_collects_base_authority_from_descriptors() {
-        // `session.todo_write` was the `session_state` leg here, and
-        // `observe.workspace` the second native leg. Both are Component Tools now
-        // (#29/#30), so no native catalog descriptor declares `session_state` any
-        // more and the union over the remaining three is `fetch_hosts` only.
-        let exposure = ToolExposure::from_catalog_enabled(&[
-            "fetch.web".to_string(),
-            "mutate.create".to_string(),
-        ])
-        .expect("known tools resolve");
+        // All other built-ins are Components, so the native catalog contributes
+        // only the `fetch.web` base-authority requirement.
+        let exposure = ToolExposure::from_catalog_enabled(&["fetch.web".to_string()])
+            .expect("known tool resolves");
         let authority = exposure.base_authority();
         assert!(authority.fetch_hosts);
         assert!(!authority.session_state);

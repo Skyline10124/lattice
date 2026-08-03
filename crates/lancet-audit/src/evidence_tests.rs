@@ -13,10 +13,9 @@ use std::collections::BTreeSet;
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{
     ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION,
-    DeniedOperation, DeniedOperationsRecord, EffectSource, MutationEvidence,
-    MutationInstallation, MutationPrecondition, OBSERVED_EFFECTS_RECORD_VERSION,
-    ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
-    WorkspaceVisibilityEvidence,
+    DeniedOperation, DeniedOperationsRecord, EffectSource, MutationEvidence, MutationInstallation,
+    MutationPrecondition, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord,
+    ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
 };
 use rusqlite::params;
 
@@ -246,7 +245,6 @@ fn workspace_visibility_evidence_round_trips_in_queryable_columns() {
         .expect("queryable visibility columns");
 }
 
-
 #[test]
 fn mutation_evidence_round_trips_in_queryable_columns() {
     let store = CepAuditStore::in_memory().expect("store");
@@ -326,7 +324,11 @@ fn mutation_evidence_round_trips_in_queryable_columns() {
         .expect("evidence exists");
     assert_eq!(stored.effects.effects[0].mutation, Some(mutation));
     assert_eq!(
-        stored.denied.denied[0].mutation.as_ref().unwrap().precondition,
+        stored.denied.denied[0]
+            .mutation
+            .as_ref()
+            .unwrap()
+            .precondition,
         MutationPrecondition::StaleRevision
     );
 
@@ -349,7 +351,12 @@ fn mutation_evidence_round_trips_in_queryable_columns() {
             .map(|stored| {
                 assert_eq!(
                     stored,
-                    (None, Some("blake3:after".into()), "satisfied".into(), "installed".into())
+                    (
+                        None,
+                        Some("blake3:after".into()),
+                        "satisfied".into(),
+                        "installed".into()
+                    )
                 )
             })?;
             conn.query_row(
@@ -410,11 +417,8 @@ fn pre_mutation_database_gains_queryable_columns_and_keeps_evidence() {
                 "mutation_precondition",
                 "mutation_installation",
             ] {
-                conn.execute(
-                    &format!("ALTER TABLE {table} DROP COLUMN {column}"),
-                    [],
-                )
-                .expect("remove post-v4 column");
+                conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
+                    .expect("remove post-v4 column");
             }
         }
         conn.pragma_update(None, "user_version", EVIDENCE_SCHEMA_VERSION_PRE_MUTATION)
@@ -442,7 +446,10 @@ fn pre_mutation_database_gains_queryable_columns_and_keeps_evidence() {
                     "mutation_precondition",
                     "mutation_installation",
                 ] {
-                    assert!(present.contains(column), "migration must add {table}.{column}");
+                    assert!(
+                        present.contains(column),
+                        "migration must add {table}.{column}"
+                    );
                 }
             }
             Ok(())

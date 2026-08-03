@@ -57,10 +57,7 @@ impl Guest for MutateCreate {
             mutate::create_if_absent(path, content, create_parents).map_err(describe)?;
 
         let mut result = serde_json::Map::new();
-        result.insert(
-            "path".into(),
-            serde_json::Value::String(installed.path),
-        );
+        result.insert("path".into(), serde_json::Value::String(installed.path));
         result.insert(
             "bytes_written".into(),
             serde_json::Value::from(installed.bytes_written),
@@ -90,6 +87,8 @@ fn describe(err: MutateError) -> String {
         MutateError::NotFound(message)
         | MutateError::AlreadyExists(message)
         | MutateError::StaleRevision(message)
+        | MutateError::SemanticReplan(message)
+        | MutateError::Validation(message)
         | MutateError::PathRejected(message)
         | MutateError::Denied(message)
         | MutateError::LimitExceeded(message)

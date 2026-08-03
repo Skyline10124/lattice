@@ -6,8 +6,8 @@
 //!
 //! Two proptest strategies exercised per [`ProptestConfig::with_cases(256)`]:
 //!
-//! 1. **biased_allowed** — builds `PolicyInput` that exercises positive policy
-//!    branches (mutation, fetch) plus the retired-method denial.
+//! 1. **biased_allowed** — builds `PolicyInput` that exercises the positive
+//!    native `fetch.web` policy branch.
 //! 2. **deny_path** — builds `PolicyInput` that exercises deny paths
 //!    (budget exhaustion, unknown method, missing write paths).
 //!
@@ -31,13 +31,6 @@ use serde_json::json;
 fn test_config() -> PolicyConfig {
     let mut config = PolicyConfig::defaults_for_project_root(PathBuf::from("/home/user/project"));
     config.workspace.denied_write_patterns = vec!["src/**".into()];
-    config
-}
-
-#[allow(dead_code)]
-fn test_config_no_denied_patterns() -> PolicyConfig {
-    let mut config = PolicyConfig::defaults_for_project_root(PathBuf::from("/home/user/project"));
-    config.workspace.denied_write_patterns.clear();
     config
 }
 
@@ -70,55 +63,23 @@ fn audit_ctx(call_id: u64, budget: PolicyBudgetSnapshot) -> PolicyAuditContext {
 
 // ── Biased-allowed inputs ──────────────────────────────────────────────
 //
-// Exercises the positive policy branches:
-// - WorkspaceMutation (mutate.edit, outside the deny list)
-// - WorkspaceMutation (mutate.create)
-// - ExternalObservation (fetch.web with default allowed hosts)
-// - Retired method (exec.command_run → NonDeterminable)
-//
-// The two `observe.workspace` legs (read_file and grep mode) left with #30: the
-// method is an embedded Component Tool, so the native hook denies it as an unknown
-// method and it cannot sit in a positive-path set. `mutate.edit` replaces them so
-// the set still spans more than one param shape per branch.
+// `fetch.web` is the only remaining native catalog method. Component Tool
+// authority is fuzzed in `lancet-runtime`; this legacy hook must reject migrated
+// names rather than treating them as positive paths.
 
 fn biased_allowed_inputs() -> Vec<PolicyInput> {
     vec![
         PolicyInput {
-            method: "mutate.edit".into(),
-            params: json!({ "path": "notes/fuzz.md", "edits": [] }),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(1, default_budget()),
-        },
-        // `session.todo_write` used to be this leg. It is a Component Tool since
-        // #29, so the native policy hook no longer knows it — Cell admission is
-        // its authority. `mutate.create` keeps a mutation method on the positive
-        // path.
-        PolicyInput {
-            method: "mutate.create".into(),
-            params: json!({ "path": "notes/fuzz.txt", "content": "guard-fuzz" }),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(3, default_budget()),
-        },
-        PolicyInput {
             method: "fetch.web".into(),
             params: json!({ "url": "https://example.com/doc" }),
             authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(4, default_budget()),
+            audit_context: audit_ctx(1, default_budget()),
         },
-        // Retired method: exec.command_run is no longer in the catalog,
-        // so it is rejected as NonDeterminable (a Denied variant).
         PolicyInput {
-            method: "exec.command_run".into(),
-            params: json!({ "argv": ["echo", "guard-fuzz"] }),
+            method: "fetch.web".into(),
+            params: json!({ "url": "https://docs.example.org/guide?part=1" }),
             authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(5, default_budget()),
-        },
-        // WorkspaceMutation: with configured write paths
-        PolicyInput {
-            method: "mutate.create".into(),
-            params: json!({ "path": "src/new.rs", "content": "fn f(){}" }),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(6, default_budget()),
+            audit_context: audit_ctx(2, default_budget()),
         },
     ]
 }
@@ -129,7 +90,7 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
 // - Observation over the per-turn budget (BudgetExceeded)
 // - Unknown method (NonDeterminable)
 // - Retired method exec.command_run (NonDeterminable)
-// - Migrated method observe.workspace (NonDeterminable, #30)
+// - Migrated Component methods (NonDeterminable, #29/#30/#31)
 
 fn deny_path_inputs() -> Vec<PolicyInput> {
     vec![
@@ -149,6 +110,18 @@ fn deny_path_inputs() -> Vec<PolicyInput> {
             params: json!({ "mode": "read_file", "path": "src/lib.rs" }),
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(14, default_budget()),
+        },
+        PolicyInput {
+            method: "mutate.create".into(),
+            params: json!({ "path": "src/new.rs", "content": "x" }),
+            authority: PolicyAuthorityInput,
+            audit_context: audit_ctx(15, default_budget()),
+        },
+        PolicyInput {
+            method: "mutate.edit".into(),
+            params: json!({ "path": "src/lib.rs", "edits": [] }),
+            authority: PolicyAuthorityInput,
+            audit_context: audit_ctx(16, default_budget()),
         },
         PolicyInput {
             method: "crafted.unknown_fuzz_method".into(),
@@ -233,33 +206,19 @@ proptest! {
     /// direction was not, so a policy regressing to deny-all would leave all 256
     /// cases green.
     ///
-    /// `exec.command_run` is in this set deliberately: it is a retired method, so
-    /// the positive-path set pins it as `NonDeterminable` rather than pretending
-    /// it is allowed.
     #[test]
     fn guard_decide_fuzz_biased_allowed_reaches_expected_decision(
         input in arb_biased_allowed_input()
     ) {
         let hook = DefaultPolicyHook::new(test_config());
         let decision = hook.decide(&input);
-        if input.method == "exec.command_run" {
-            prop_assert!(
-                matches!(
-                    decision,
-                    PolicyDecision::Denied { reason_code: PolicyReasonCode::NonDeterminable, .. }
-                ),
-                "retired method must be NonDeterminable, got {:?}",
-                decision
-            );
-        } else {
-            prop_assert_eq!(
-                &decision,
-                &PolicyDecision::Allowed,
-                "positive-path input {} must be Allowed, got {:?}",
-                input.method,
-                decision
-            );
-        }
+        prop_assert_eq!(
+            &decision,
+            &PolicyDecision::Allowed,
+            "positive-path input {} must be Allowed, got {:?}",
+            input.method,
+            decision
+        );
     }
 }
 

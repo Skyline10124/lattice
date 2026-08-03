@@ -113,8 +113,8 @@ Corrupt enum label → `UnreadableField`（与现有 ctx_op 等一致），不�
 
 ## 写入路径
 
-Host 是唯一写入者。Guest **不得**在调用 host import 前因 stale 短路（见总控
-修订与切片 C）——否则 host 无法记录 denial evidence。
+Host 是唯一写入者。`read-for-edit(expected-revision)` 在 guest 编译前由 host
+记录 stale denial；成功编译后 `replace-with-expected` 在安装操作内再检查一次。
 
 ```rust
 // success install — operation cell is mutate:write:workspace (slice C)
@@ -124,7 +124,7 @@ evidence.record_effect(ObservedEffect {
     scope: workspace_scope,
     target: ObservedTarget::Path { path: resolved.into() },
     source: EffectSource::Operation,
-    context_measure: Some(bytes_written),
+    context_measure: None,       // operation effect returns no value (issue #28 D12)
     truncated: None,
     visibility: None,
     mutation: Some(MutationEvidence {

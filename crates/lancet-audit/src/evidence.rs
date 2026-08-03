@@ -33,10 +33,9 @@
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{
     ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION,
-    DeniedOperation, DeniedOperationsRecord, EffectSource, MutationEvidence,
-    MutationInstallation, MutationPrecondition, OBSERVED_EFFECTS_RECORD_VERSION,
-    ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
-    WorkspaceVisibilityEvidence,
+    DeniedOperation, DeniedOperationsRecord, EffectSource, MutationEvidence, MutationInstallation,
+    MutationPrecondition, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord,
+    ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
 };
 use rusqlite::{Connection, params};
 
@@ -455,8 +454,14 @@ pub(crate) fn insert_call_evidence(
                     target_kind,
                     target_value,
                     operation.reason,
-                    operation.mutation.as_ref().and_then(|m| m.before_revision.clone()),
-                    operation.mutation.as_ref().and_then(|m| m.after_revision.clone()),
+                    operation
+                        .mutation
+                        .as_ref()
+                        .and_then(|m| m.before_revision.clone()),
+                    operation
+                        .mutation
+                        .as_ref()
+                        .and_then(|m| m.after_revision.clone()),
                     operation
                         .mutation
                         .as_ref()

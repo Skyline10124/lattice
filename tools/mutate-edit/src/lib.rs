@@ -3,11 +3,11 @@
 
 //! `mutate.edit` — semantic edit + replace-with-expected as a Component Tool (#31).
 //!
-//! The guest reads bytes through `read-for-edit`, applies pure semantic ops via
-//! `mutate-shared`, then always calls `replace-with-expected` — even when the
-//! guest can see that `expected_hash` does not match the host revision. Short-
-//! circuiting on the guest would skip host precondition enforcement and skip
-//! stale MutationEvidence (Standards #2).
+//! The guest asks `read-for-edit` to validate the planning revision before
+//! applying pure semantic ops via `mutate-shared`. Successful compilation then
+//! calls `replace-with-expected`, whose final host-side revision check remains
+//! the installation authority. Semantic failures re-enter `refuse-edit` so the
+//! host preserves their structured CEP class without installing bytes.
 
 #![no_std]
 extern crate alloc;
@@ -30,7 +30,9 @@ mod bindings {
 
 use bindings::exports::lattice::tool_host::tool_api::{Guest, ToolOutput};
 use bindings::lattice::tool_host::host_control;
-use bindings::lattice::tool_host::workspace_mutate::{self as mutate, MutateError};
+use bindings::lattice::tool_host::workspace_mutate::{
+    self as mutate, EditRefusalKind, MutateError,
+};
 
 struct MutateEdit;
 
@@ -53,14 +55,17 @@ impl Guest for MutateEdit {
             serde_json::from_str(&params_json).map_err(|err| format!("malformed params: {err}"))?;
 
         // Always ask the host for authoritative bytes + Local Revision.
-        let file = mutate::read_for_edit(&params.path).map_err(describe)?;
-        let after = apply_edits(&file.content, &params.edits).map_err(describe_diag)?;
+        let file = mutate::read_for_edit(&params.path, &params.expected_hash).map_err(describe)?;
+        let after = match apply_edits(&file.content, &params.edits) {
+            Ok(after) => after,
+            Err(diag) => return Err(describe_diag(&params.path, diag)),
+        };
 
         // Host rechecks expected_hash, records MutationEvidence / denial, and
-        // only then installs. Do not compare revisions here.
-        let _installed =
-            mutate::replace_with_expected(&params.path, &params.expected_hash, &after)
-                .map_err(describe)?;
+        // only then installs. Do not skip this import when the guest can see
+        // a revision mismatch — that is the host's job.
+        let _installed = mutate::replace_with_expected(&params.path, &params.expected_hash, &after)
+            .map_err(describe)?;
 
         let value = serde_json::json!({
             "changed_files": vec![params.path],
@@ -78,6 +83,8 @@ fn describe(err: MutateError) -> String {
         MutateError::NotFound(message)
         | MutateError::AlreadyExists(message)
         | MutateError::StaleRevision(message)
+        | MutateError::SemanticReplan(message)
+        | MutateError::Validation(message)
         | MutateError::PathRejected(message)
         | MutateError::Denied(message)
         | MutateError::LimitExceeded(message)
@@ -87,12 +94,11 @@ fn describe(err: MutateError) -> String {
     }
 }
 
-fn describe_diag(diag: EditDiag) -> String {
-    // Field-tagged validation mirrors native SchemaMismatch text; replan
-    // diagnostics mirror ReplanRequired reason strings.
-    if diag.replan {
-        diag.reason
+fn describe_diag(path: &str, diag: EditDiag) -> String {
+    let kind = if diag.replan {
+        EditRefusalKind::Replan
     } else {
-        format!("{}: {}", diag.field, diag.reason)
-    }
+        EditRefusalKind::Validation
+    };
+    describe(mutate::refuse_edit(path, kind, &diag.field, &diag.reason))
 }

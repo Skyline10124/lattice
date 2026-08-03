@@ -307,15 +307,16 @@ path (GitHub #64) restores from it.
 - Keep shared URL/DNS safety primitives and neutral errors in `net-guard`;
   policy and HTTP client construction stay in their owning crates.
 - The concrete Local Workspace lives in `lancet-runtime` (`src/workspace/`) since
-  #30: a Tool Host import executes observation, and a host import cannot reach up
-  a layer into `lancet-native`. `lancet-native`'s still-native mutation handlers
-  and the edit engine consume the same concrete type from there — one module, not
-  a copy. Keep network and transport behavior in `lancet-native` until #31/#32
-  absorb them. At every stage keep secure path resolution, bounded observation,
-  Mutation Preconditions, atomic installation, and history behind one concrete
-  host module; do not introduce a pluggable execution-backend seam. Reaching the
-  module across a crate boundary is not such a seam — there is no trait behind it
-  and nothing to substitute.
+  #30: Tool Host imports execute observation (`workspace-observe`) and mutation
+  (`workspace-mutate` since #31), and a host import cannot reach up a layer into
+  `lancet-native`. Rewind and the residual hashline apply engine still consume
+  the same concrete type from there — one module, not a copy. Keep network and
+  transport behavior in `lancet-native` until #32 absorbs them. At every stage
+  keep secure path resolution, bounded observation, Mutation Preconditions,
+  atomic installation, and history behind one concrete host module; do not
+  introduce a pluggable execution-backend seam. Reaching the module across a
+  crate boundary is not such a seam — there is no trait behind it and nothing
+  to substitute.
 - Keep LANCET runtime composition and its public surface in `lancet-api`; it
   takes LANCET-native policy types and must not depend on LATTICE
   session/agent/profile crates. Anything that drives CEP (CLI, tests, embedders)

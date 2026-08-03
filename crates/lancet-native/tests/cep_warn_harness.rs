@@ -178,16 +178,16 @@ async fn generate_warn_report() -> String {
     // ── Overreach-capable canonical methods ──────────────────────────────
 
     let overreach_results = vec![
-            run_overreach::<Fetch>(
-                "fetch.web",
-                overreach_registry_fetch(),
-                FetchParams {
-                    url: "http://localhost/mock".into(),
-                    headers: Default::default(),
-                },
-            )
-            .await,
-        ];
+        run_overreach::<Fetch>(
+            "fetch.web",
+            overreach_registry_fetch(),
+            FetchParams {
+                url: "http://localhost/mock".into(),
+                headers: Default::default(),
+            },
+        )
+        .await,
+    ];
 
     // ── Success-only methods via production registry ─────────────────────
 

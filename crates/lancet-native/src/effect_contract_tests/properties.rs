@@ -84,7 +84,6 @@ fn fetch_effect_contract_positive() {
 
 // ── Negative property tests ────────────────────────────────────────────
 
-
 proptest! {
     #[test]
     fn fetch_effect_contract_negative(_n in 0u8..1) {

@@ -15,6 +15,7 @@
                   "type": "string"
                 },
                 "occurrence": {
+                  "maximum": 4294967295,
                   "minimum": 1,
                   "type": "integer"
                 },
@@ -42,6 +43,7 @@
                   "type": "string"
                 },
                 "occurrence": {
+                  "maximum": 4294967295,
                   "minimum": 1,
                   "type": "integer"
                 },
@@ -66,6 +68,7 @@
                   "type": "string"
                 },
                 "occurrence": {
+                  "maximum": 4294967295,
                   "minimum": 1,
                   "type": "integer"
                 },
@@ -142,7 +145,7 @@
     }
   ],
   "artifact": {
-    "sha256": "bf47ad5bbe3cfa6ba276e7dcb8367c10a45139a48e88ffa54c70ae70854b33ae",
+    "sha256": "14308ccd96a0f0f732c853ff897aa19d79b107ab8524a75c9116cc7de4340a1c",
     "toolchain": "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"
   },
   "abi_version": 1

@@ -17,6 +17,10 @@ pub mod audit {
     //! would republish them here as `lancet_native::audit::query_audit`.
     pub use lancet_audit::audit::*;
 }
+// The retired native HashLine engine remains only as a regression-test asset.
+// Production mutation execution lives in the embedded Components and
+// `lancet-runtime`'s `workspace-mutate` host.
+#[cfg(test)]
 pub(crate) mod edit;
 pub mod enforcement;
 pub(crate) mod executor;
@@ -29,11 +33,10 @@ mod server;
 /// The concrete Local Workspace, consumed from `lancet-runtime`.
 ///
 /// GitHub #30 moved the module down a layer: the `workspace-observe` Tool Host
-/// imports run inside `lancet-runtime` and cannot reach up here. The still-native
-/// mutation handlers and the edit engine keep using the *same* concrete type
-/// through this alias, so secure path resolution has exactly one home. It is a
-/// path alias, not a seam — there is no trait behind it and nothing to
-/// substitute. #31/#32 move the remaining callers behind Component Tools.
+/// imports run inside `lancet-runtime` and cannot reach up here. Rewind and the
+/// retired edit engine's regression tests use the *same* concrete type through
+/// this alias, so secure path resolution has exactly one home. It is a path
+/// alias, not a seam — there is no trait behind it and nothing to substitute.
 pub(crate) mod workspace {
     pub(crate) use lancet_runtime::workspace::*;
 }

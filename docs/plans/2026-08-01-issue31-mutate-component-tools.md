@@ -12,7 +12,9 @@
 Standards/Spec 两轴审阅后已回写 plan（本文件 + 切片 B/C；A/D 轻触）：
 
 1. Evidence：**不** bump protocol record version；`EVIDENCE_SCHEMA_VERSION` 5 + additive 列；denial 也带 `MutationEvidence`
-2. Guest **禁止** stale 短路；必须调用 host `replace-with-expected`
+2. Guest 不自行分类 stale：host `read-for-edit(expected-revision)` 在编译前拒绝，
+   `replace-with-expected` 在安装操作内最终重检；semantic diagnostics 走
+   非安装的 `refuse-edit`
 3. Descriptor **禁止** legacy `FailureSemantics`；只用 Cell vocabulary
 4. Operation cell=`mutate:write:workspace`，result cell=`alloc:write:workspace`
 5. 丢弃 HashLine **传输**但保留 no-op / trailing newline / empty-insert / WriteLimits 行为
@@ -73,6 +75,8 @@ interface workspace-mutate {
         not-found(string),
         already-exists(string),
         stale-revision(string),
+        semantic-replan(string),
+        validation(string),
         path-rejected(string),
         denied(string),
         limit-exceeded(string),
@@ -80,6 +84,8 @@ interface workspace-mutate {
         io-error(string),
         invalid-request(string),
     }
+
+    enum edit-refusal-kind { validation, replan }
 
     record file-bytes {
         /// Exact Local bytes (UTF-8 text Tools only, same as today).
@@ -103,9 +109,11 @@ interface workspace-mutate {
         local-revision: string,
     }
 
-    /// Read target bytes + Local Revision for edit compile. Path safety,
-    /// write-scope admission, and evidence are host-side.
-    read-for-edit: func(path: string) -> result<file-bytes, mutate-error>;
+    /// Host validates the planning revision before guest edit compilation.
+    read-for-edit: func(
+        path: string,
+        expected-revision: string,
+    ) -> result<file-bytes, mutate-error>;
 
     /// ADR 0003 decision 8: O_EXCL / no-replace. Existing or raced target →
     /// `already-exists` → host maps to Replan Required.
@@ -123,6 +131,14 @@ interface workspace-mutate {
         expected-revision: string,
         content: string,
     ) -> result<replace-result, mutate-error>;
+
+    /// Preserve semantic validation/replan class without installing bytes.
+    refuse-edit: func(
+        path: string,
+        kind: edit-refusal-kind,
+        field: string,
+        reason: string,
+    ) -> mutate-error;
 }
 ```
 
@@ -275,22 +291,30 @@ schema = '''
 ```
 
 `mutate.edit` 同理：params 含 `path` / `expected_hash` / `edits[]`；guest
-`run` 调 `read-for-edit` → shared semantic apply → `replace-with-expected`。
+`run` 调 `read-for-edit(expected_hash)` → shared semantic apply → 成功时
+`replace-with-expected`；semantic failure 调非安装的 `refuse-edit`。
 
 ### 2.3 Guest edit 示意
 
-Guest **禁止**在调用 `replace-with-expected` 前因 revision 不匹配而短路
-（Standards #2）：否则 host 无法强制 precondition，也无法写入 stale denial
-evidence。
+Guest 不比较 revision 来分类 stale（Standards #2）：`read-for-edit` 已由 host
+验证 planning revision 并记录 stale denial；安装时 `replace-with-expected`
+再在同一 Local Workspace 操作内最终重检。
 
 ```rust
 // tools/mutate-edit/src/lib.rs（示意，贴近 observe-workspace）
 fn run(params_json: String) -> Result<ToolOutput, String> {
     if host_control::cancelled() { return Err("cancelled".into()); }
     let params: EditParams = serde_json::from_str(&params_json).map_err(|e| e.to_string())?;
-    let file = mutate::read_for_edit(&params.path).map_err(describe)?;
+    let file = mutate::read_for_edit(&params.path, &params.expected_hash)
+        .map_err(describe)?;
     let after = mutate_shared::apply_edits(&file.content, &params.edits)
-        .map_err(describe_diag)?;
+        .map_err(|diag| {
+            let kind = if diag.replan { EditRefusalKind::Replan }
+                else { EditRefusalKind::Validation };
+            describe(mutate::refuse_edit(
+                &params.path, kind, &diag.field, &diag.reason,
+            ))
+        })?;
     // Host rechecks expected_hash, records evidence, then installs.
     let _installed = mutate::replace_with_expected(
         &params.path,

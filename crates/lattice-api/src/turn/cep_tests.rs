@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
+use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::test_method::{TestEcho, TestEchoParams, TestEchoResult};
 use lancet_native::{CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::effect_types::ImpactKind;
@@ -189,7 +189,12 @@ async fn cep_executor_adapter_invalid_params_maps_to_32602() {
     let mut registry = MethodRegistry::new();
     registry
         .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
-            Ok(FetchResult { status: 200, body: "ok".into(), content_type: None, truncated: None })
+            Ok(FetchResult {
+                status: 200,
+                body: "ok".into(),
+                content_type: None,
+                truncated: None,
+            })
         })
         .unwrap();
     let adapter = adapter_over_registry(registry).await;

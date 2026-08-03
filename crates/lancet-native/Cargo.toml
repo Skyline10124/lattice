@@ -36,7 +36,8 @@ proptest = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
 # `test-fault-injection` moved down with the Local Workspace in #30: the
-# one-shot install-failure boolean now lives on `lancet_runtime::LocalWorkspace`,
+# one-shot install and post-install fsync failure flags now live on
+# `lancet_runtime::LocalWorkspace`,
 # and this crate's tests are a separate compilation unit, so the seam has to be a
 # feature rather than `cfg(test)`. `test-utils` carries the history-less
 # `LocalWorkspace::new` those same tests construct with.
@@ -45,7 +46,7 @@ lancet-runtime = { workspace = true, features = ["test-utils", "test-fault-injec
 [features]
 default = []
 inspect-scaffold = ["lancet-catalog/inspect-scaffold"]
-# Narrow LocalWorkspace install-failure injection for integration tests.
-# Enables only the one-shot `fail_next_install` boolean; not a plugin seam.
+# Narrow LocalWorkspace mutation-failure injection for integration tests.
+# Enables only one-shot install and parent-fsync flags; not a plugin seam.
 # Since #30 the flag lives in `lancet-runtime`, so this forwards there.
 test-fault-injection = ["lancet-runtime/test-fault-injection"]

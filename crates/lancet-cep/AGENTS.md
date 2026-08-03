@@ -36,6 +36,10 @@ this facade through `lancet-runtime` in #34 (Codeberg #12).
 
 ## Recent Issues
 
+- ADDED #31: `mutate.create` and `mutate.edit` left the native catalog with
+  their Component migration. Catalog-only exposure now projects `fetch.web`
+  alone; the public runtime unions generated Component descriptors elsewhere,
+  and this facade must not add compatibility projections for migrated Tools.
 - FIXED M-24-04: this crate separates `ToolExposure` from
   `BaseAuthorityPlan`; enabled method exposure now carries catalog-declared
   requirements instead of acting as the authority interface itself.

@@ -68,7 +68,7 @@ mod scaffold_tests {
     use crate::audit::{CepAuditContext, CepAuditStore, SEMANTIC_STAGE_SCAFFOLD};
     use crate::server::registry::{Cancellation, EventSink};
     use crate::wire_code_for_error;
-    use crate::{CepTransport, ServerRunConfig};
+    use crate::{CepServerNativeExt, CepTransport, ServerRunConfig};
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_catalog::methods::scaffold::InspectParams;
@@ -110,9 +110,6 @@ mod scaffold_tests {
             })),
             audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
             cep_mode: CepMode::Off,
-            workspace: Arc::new(crate::workspace::LocalWorkspace::new(std::path::Path::new(
-                root,
-            ))),
         }
     }
 
@@ -175,7 +172,7 @@ mod scaffold_tests {
         let (client, server) = CepTransport::pair(8);
         let audit = Arc::clone(&config.audit);
         let server_task = tokio::spawn(async move {
-            server.run(registry, config).await.unwrap();
+            server.run_native(registry, config).await.unwrap();
         });
 
         let result = client

@@ -46,7 +46,6 @@ use tempfile::TempDir;
 /// Component Tools this harness drives through Cell admission (#30/#31).
 const COMPONENT_TOOLS: [&str; 3] = ["mutate.create", "mutate.edit", "observe.workspace"];
 
-
 /// A runtime rooted at a temp Local Workspace whose private history lives in
 /// a separate temp state directory.
 struct RewindRuntime {
@@ -131,7 +130,10 @@ async fn create_file(
 ) -> Result<(), CepErrorCode> {
     runtime
         .client()
-        .call_raw("mutate.create", serde_json::json!({"path": path, "content": content, "create_parents": true}))
+        .call_raw(
+            "mutate.create",
+            serde_json::json!({"path": path, "content": content, "create_parents": true}),
+        )
         .await
         .map(|_| ())
         .map_err(|err| err.code)

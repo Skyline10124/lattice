@@ -145,14 +145,17 @@ produced. Git history retains the phase narrative.
 
 `mutate.edit` edits one existing file with semantic operations such as
 `replace_text`, `insert_before`, and `insert_after`. The caller supplies the
-file `expected_hash` from `observe.workspace`; LANCET verifies that hash and
-computes hashline anchors inside the native edit backend. The LLM-facing tool
-surface does not accept hashline patch documents.
+file `expected_hash` from `observe.workspace`; LANCET verifies that hash on the
+`workspace-mutate` host before guest compilation and again at the final atomic
+install operation. Semantic ops run in the guest (`tools/mutate-edit` +
+`mutate-shared`); their validation/replan diagnostics return through a
+non-installing host refusal, and the LLM-facing tool surface does not accept
+hashline patch documents.
 
-The internal hashline backend still forces edits to be based on the current file
-state before commit. Audit metadata records changed files and line-level
-add/remove effects. Agent-visible workspace mutation is limited to
-`mutate.create` and `mutate.edit` (single-file methods only).
+Edits are forced to be based on the current Local Revision before commit. Audit
+metadata records MutationEvidence (before/after revision, precondition,
+installation). Agent-visible workspace mutation is limited to `mutate.create`
+and `mutate.edit` (single-file methods only).
 
 ### Create-only writes
 

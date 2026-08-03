@@ -110,7 +110,8 @@ the dependents in order:
   definitions.
 - **Provider protocol details** stay in `lattice-llm`; higher layers consume
   typed events and errors.
-- **Native fs/shell/web/mutation/verify/transport** stays in `lancet-native`.
+- **Native web/transport/server lifecycle** stays in `lancet-native`. Workspace
+  observation and mutation Tool Host imports live in `lancet-runtime` (#30/#31).
 - **LANCET runtime composition** stays in `lancet-api`; anything that drives CEP
   (CLI, tests, embedders) spawns through `lancet_api::LancetServer`/`LancetRuntime`.
 - **Public session/turn API** stays in `lattice-api` (profile→policy translation

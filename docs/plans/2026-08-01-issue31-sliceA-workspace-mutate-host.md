@@ -8,17 +8,17 @@
 ## Goal
 
 落地闭集 domain import `workspace-mutate` 与 host 实现，使 guest（测试用
-fixture 或后续 mutate Tools）只能通过三个 Structured Workspace Operations
+fixture 或后续 mutate Tools）只能通过四个 Structured Workspace Operations
 触达 Local Workspace：`read-for-edit`、`create-if-absent`、
-`replace-with-expected`。
+`replace-with-expected`、非安装的 `refuse-edit`。
 
 
 ## Host authority (Standards #2)
 
-`replace-with-expected` / `create-if-absent` 是 precondition 与 evidence 的唯一权威。
-Guest 不得在调用这些 import 前因 stale/exists 短路；fixture 与后续 Component
-都必须走到 host，以便写入 `MutationEvidence` / `DeniedOperation.mutation`
-（切片 B）并映射 `ReplanRequired`。
+`read-for-edit(expected-revision)`、`replace-with-expected` / `create-if-absent`
+是 precondition 与 evidence 的唯一权威：前者在 guest 编译前拒绝 stale，后者
+在安装点最终重检。Guest semantic diagnostics 通过 `refuse-edit` 回到 host，
+不安装任何 bytes，并保留 `SchemaMismatch` / `ReplanRequired`。
 
 Operation 授权 Cell 在切片 C 钉为 `mutate:write:workspace`；本切片 fixture
 descriptor 须声明该 cell，否则精确授权会拒写。

@@ -523,7 +523,6 @@ async fn handle_request(
                 audit_context: Arc::clone(&audit_context),
                 audit: Arc::clone(&audit),
                 cep_mode: cep_mode.clone(),
-                workspace,
             };
             registry.dispatch(&method, params, ctx).await
         }

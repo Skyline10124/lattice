@@ -28,7 +28,6 @@ use tokio::sync::RwLock;
 use crate::audit::CepAuditContext;
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use crate::server::registry::{Cancellation, EventSink, HandlerContext, MethodRegistry};
-use crate::workspace::LocalWorkspace;
 use lancet_authority::effect::ledger::{
     AuthorizedRegionSlot, EffectLedger, EffectSource, ObservedEffect,
 };
@@ -204,8 +203,6 @@ pub fn build_test_context(
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::policy::CepMode::Off,
-
-        workspace: Arc::new(LocalWorkspace::new(root_path)),
     };
     (ctx, event_rx, canonical_root)
 }

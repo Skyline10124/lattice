@@ -6,13 +6,14 @@ Crate-local guidance for `lancet-runtime`.
 
 ADR 0004 Component engine, closed composition gate, Cell capability
 admission, and ToolHost for LATTICE Source Tools (#27 (Codeberg #5)
-slices C–D, #28 (Codeberg #6), #30). Owns the wasmtime engine, embedded inventory
-collection, the fail-closed composition gate, the admission/authorization
-authority, the ToolHost (control plus the `workspace-observe` domain imports),
-the concrete Local Workspace module, the `call` execution path with
-result/effect validation, and the `contains`/`descriptors`/`descriptor`
-surface that `lancet-native` and `lancet-api` use for the D.3 dispatch split,
-the D.4 LLM projection, and the per-call admission step.
+slices C–D, #28 (Codeberg #6), #30, #31). Owns the wasmtime engine, embedded
+inventory collection, the fail-closed composition gate, the
+admission/authorization authority, the ToolHost (control plus the
+`workspace-observe` and `workspace-mutate` domain imports), the concrete Local
+Workspace module, the `call` execution path with result/effect validation, and
+the `contains`/`descriptors`/`descriptor` surface that `lancet-native` and
+`lancet-api` use for the D.3 dispatch split, the D.4 LLM projection, and the
+per-call admission step.
 
 ## Sub-Architecture
 
@@ -84,6 +85,18 @@ the D.4 LLM projection, and the per-call admission step.
   Effect evidence records both host-computed truncation and content-free
   visibility decisions. A host refusal is remembered so the structured
   `CepError` reaches the caller instead of the guest's string paraphrase.
+- `src/host_mutate.rs` implements the `workspace-mutate` WIT imports on
+  `WorkspaceMutationHost` (#31): `read-for-edit`, `create-if-absent`,
+  `replace-with-expected`, and non-installing `refuse-edit`. Every call re-resolves the path, authorizes
+  `mutate:write:workspace`, enforces the single `MAX_WORKSPACE_WRITE_BYTES`
+  cap (#120), applies System Path Exclusion / write-deny / Mutation
+  Preconditions, installs atomically (or refuses before any Local bytes
+  change), appends private history after a successful install, and records
+  MutationEvidence. If the atomic name installation succeeds but the following
+  parent-directory fsync fails, the Host keeps the installed receipt, appends
+  history and installed evidence, then returns `ExecutionFailed`; it never
+  relabels changed bytes as an uninstalled refusal. Early refusals (parse / guard / size) call
+  `record_refusal` so the typed CEP code outranks the guest `Err(String)`.
 - `src/limits.rs` owns `ExecutionLimits`, `RecordingLimits`, and
   `AbortReason`. Resource limits use `StoreLimits` + epoch interruption +
   fuel.
@@ -105,7 +118,8 @@ the D.4 LLM projection, and the per-call admission step.
   runtime: a Tool crate's own `generated/registration.rs` is not compiled
   anywhere. Since #29 it embeds `session.todo_write`, so `from_embedded()`
   composes a non-empty catalog in production; #30 added `observe.workspace`,
-  and #31/#32 add the remaining three.
+  and #31 added `mutate.create` / `mutate.edit` (fetch.web remains native until
+  #32).
   `src/generated/noop_fixture.rs` remains the hand-maintained `test-utils`
   fixture.
 - `src/test_helpers.rs` (`test-utils` feature) provides synthetic
@@ -127,10 +141,9 @@ the D.4 LLM projection, and the per-call admission step.
   generated `EXPECTED_COMPONENTS` only.
 - `test-utils` feature exposes only the fixed no-op fixture constructor
   and synthetic test helpers. Production code never enables it.
-- The `host-control` interface is control-only (cancellation + events).
   Domain operations arrive as handle-per-capability domain imports; #30 added
-  the first one (`workspace-observe`), and each binds its own cell through
-  the same `authorize_operation` seam.
+  `workspace-observe`, #31 added `workspace-mutate`, and each binds its own cell
+  through the same `authorize_operation` seam.
 - Every effectful Tool Host import is gated by its host-bound cell and
   concrete target. A denial rejects only that operation: the host facility
   is never invoked, the call continues, and a `DeniedOperation` is recorded
@@ -152,6 +165,10 @@ the D.4 LLM projection, and the per-call admission step.
 - Observation changes: `cargo test -p lancet-runtime --lib host_workspace::`
   plus `LATTICE_BIN=$PWD/target/debug/lattice cargo test -p
   lattice-system-harness --test direct_observation`.
+- Mutation changes: `cargo test -p lancet-runtime --lib host_mutate::` plus
+  `LATTICE_BIN=$PWD/target/debug/lattice cargo test -p lattice-system-harness
+  --test direct_mutation --test direct_failures --test direct_rewind
+  --test direct_workspace_history`.
 - History changes: `cargo test -p lancet-runtime --lib history::` plus
   `cargo test -p lattice-api --test workspace_history_acceptance`.
 - Rewind changes: also `cargo test -p lattice-api --test rewind_acceptance`.
