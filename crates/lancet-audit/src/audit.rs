@@ -632,6 +632,17 @@ impl CepAuditStore {
             "ALTER TABLE evidence_effects ADD COLUMN visibility_filtered_system_exclusion INTEGER",
             "ALTER TABLE evidence_effects ADD COLUMN visibility_filtered_read_denied INTEGER",
             "ALTER TABLE evidence_effects ADD COLUMN visibility_filtered_ignored_default INTEGER",
+            // #31: mutation revision / precondition / installation. Nullable on
+            // both effects and denials so v4 files gain the columns without
+            // rewriting history; pre-#31 rows read back as `mutation: None`.
+            "ALTER TABLE evidence_effects ADD COLUMN mutation_before_revision TEXT",
+            "ALTER TABLE evidence_effects ADD COLUMN mutation_after_revision TEXT",
+            "ALTER TABLE evidence_effects ADD COLUMN mutation_precondition TEXT",
+            "ALTER TABLE evidence_effects ADD COLUMN mutation_installation TEXT",
+            "ALTER TABLE evidence_denials ADD COLUMN mutation_before_revision TEXT",
+            "ALTER TABLE evidence_denials ADD COLUMN mutation_after_revision TEXT",
+            "ALTER TABLE evidence_denials ADD COLUMN mutation_precondition TEXT",
+            "ALTER TABLE evidence_denials ADD COLUMN mutation_installation TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -651,6 +662,23 @@ impl CepAuditStore {
                 path: self.path.clone(),
                 reason: format!(
                     "evidence_effects is still missing additive column(s) {missing} after the \
+                     schema upgrade; the database is left unstamped — move it aside so a new \
+                     one is created, then bring the history over with the read-only legacy \
+                     import"
+                ),
+            });
+        }
+        let missing_denial_additive = self.missing_columns_of(
+            &conn,
+            "evidence_denials",
+            &crate::evidence::ADDITIVE_EVIDENCE_DENIAL_COLUMNS[..],
+        )?;
+        if !missing_denial_additive.is_empty() {
+            let missing = missing_denial_additive.join(", ");
+            return Err(AuditError::IncompatibleSchema {
+                path: self.path.clone(),
+                reason: format!(
+                    "evidence_denials is still missing additive column(s) {missing} after the \
                      schema upgrade; the database is left unstamped — move it aside so a new \
                      one is created, then bring the history over with the read-only legacy \
                      import"
@@ -718,6 +746,11 @@ impl CepAuditStore {
             conn,
             "evidence_effects",
             &crate::evidence::ADDITIVE_EVIDENCE_EFFECT_COLUMNS,
+        )?);
+        missing.extend(self.missing_columns_of(
+            conn,
+            "evidence_denials",
+            &crate::evidence::ADDITIVE_EVIDENCE_DENIAL_COLUMNS,
         )?);
         if missing.is_empty() {
             Ok(None)

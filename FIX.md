@@ -5256,3 +5256,85 @@ Policy-Visible Workspace decision in queryable evidence.
 
 **Changed files:** `crates/lancet-{protocol,audit,runtime,native}/**`,
 `tools/observe-workspace/**`, `xtask/src/tool_codegen.rs`, `FIX.md`.
+
+## GitHub #31 review blockers: harden Component workspace mutations — 2026-08-03
+
+Severity: HIGH (stale-write/linearization, cancellation, and durable-history
+correctness) + MEDIUM (structured error/evidence fidelity and hermetic tests).
+
+**Problem:** The initial `mutate.create` / `mutate.edit` Component migration
+left expected-revision validation separated from installation, allowed a stale
+edit probe to reinstall old bytes, collapsed semantic diagnostics into generic
+execution failures, omitted the install-boundary cancellation check, and
+reported success after private-history persistence failed. The write ceiling,
+wasm32 occurrence conversion, mutation-operation measurement, and networked
+test fixtures also diverged from their contracts.
+
+**Fix summary:**
+- Moved the final revision check, cancellation check, and atomic replacement
+  under one host-side mutation linearization point. No-replace create now
+  writes and syncs a same-directory temporary inode, rechecks cancellation,
+  atomically links the complete inode at the absent target, cleans the temp,
+  and fsyncs the parent directory.
+- Added host-owned semantic refusal operations so ambiguous/missing edits retain
+  `ReplanRequired`, validation/no-op failures retain `SchemaMismatch`, and the
+  write ceiling returns `ToolResourceExhausted` without changing the target.
+- Made post-install history persistence failure an explicit `ExecutionFailed`
+  while retaining the installed mutation effect, and moved the install →
+  history → evidence sequence behind a gate shared by every mutation Host over
+  the same `LocalWorkspace`. A parent-directory fsync failure after atomic name
+  installation now follows the same installed receipt path: history and
+  installed evidence are retained before `ExecutionFailed` reaches the caller.
+- Rejected occurrences above `u32::MAX` before wasm32 conversion, removed
+  operation-cell `context_measure`, and keyed structured host refusals by call.
+- Replaced public-network test calls with local HTTP fixtures, added direct
+  Component acceptance for semantic errors and external races, added a
+  same-target double-create harness proving one winner plus one
+  `ReplanRequired`, added product-level pre-cancel/install-fault no-write
+  coverage and mutation evidence-field assertions, and removed legacy
+  catalog/policy expectations for the migrated mutation Tools.
+
+**Verification:**
+- `cargo xtask tool-codegen --check` — passed.
+- Focused runtime host/local-workspace mutation tests, direct-local acceptance,
+  workspace-history acceptance, and native Component round trips — passed.
+- `cargo xtask ci` — all formatting, Clippy, debug build, architecture
+  boundaries, generated-artifact checks, workspace tests, Direct-Local harness,
+  and reproducible Component digest checks passed.
+- `git diff --check` — passed.
+
+**Changed files:** `crates/lancet-{protocol,audit,authority,cep,runtime,native}/**`,
+`crates/lattice-api/**`, `crates/lattice-system-harness/**`,
+`tools/mutate-{create,edit,shared}/**`, `xtask/src/tool_codegen.rs`,
+`docs/{LANCET.md,plans/**}`, root/scoped `AGENTS.md`, `CONTRIBUTING.md`, `FIX.md`.
+
+## PR #134 CI: make the supported host lane Linux-only — 2026-08-03
+
+Severity: MEDIUM (unsupported-platform CI failure cancelled the supported
+Linux gate).
+
+**Problem:** The ordinary CI workflow still declared an Ubuntu/macOS matrix
+even though ADR 0004 limits the built host target to Linux. On PR #134 the
+macOS job failed in `fast_dotenv_agents_dir_cannot_redirect_profile_lookup`,
+and the matrix fail-fast behavior cancelled the Ubuntu job before it could
+provide the supported-platform verdict.
+
+**Fix summary:**
+- Replaced the ordinary CI platform matrix with one `ubuntu-latest` job.
+- Removed the matrix-dependent failure-artifact name.
+- Documented Linux as the only current release and CI host target; macOS and
+  Windows are explicitly unsupported until multi-platform work is resumed.
+- Left incidental portable implementation branches intact without treating
+  them as support commitments.
+
+**Verification:**
+- Linux-only workflow assertion (`macos-latest` / `windows-latest` absent from
+  `.github/workflows`) — passed after reproducing the pre-fix failure.
+- YAML parse check for `.github/workflows/ci.yml` — passed.
+- `cargo xtask ci` — all formatting, Clippy, debug build, architecture
+  boundaries, generated-artifact checks, workspace tests, Direct-Local harness,
+  and reproducible Component digest checks passed.
+- `git diff --check` — passed.
+
+**Changed files:** `.github/workflows/ci.yml`, `CONTRIBUTING.md`,
+`docs/TESTING.md`, `FIX.md`.

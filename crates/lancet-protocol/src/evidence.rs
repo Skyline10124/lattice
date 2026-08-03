@@ -103,6 +103,43 @@ pub struct ObservedEffect {
     /// Host-computed visibility decision for a workspace observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<WorkspaceVisibilityEvidence>,
+    /// Host-computed Local Revision / precondition / installation facts for a
+    /// workspace mutation (#31). Absent on non-mutation effects and on rows
+    /// written before the mutation columns existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<MutationEvidence>,
+}
+
+/// Closed precondition outcome for one host mutation attempt (#31).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationPrecondition {
+    Satisfied,
+    StaleRevision,
+    TargetExists,
+    Denied,
+}
+
+/// Whether the host attempted / completed an atomic install (#31).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationInstallation {
+    Installed,
+    NotAttempted,
+    Failed,
+}
+
+/// Explicit mutation facts carried on effects and denials (#31).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MutationEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_revision: Option<String>,
+    /// Post-install revision when installed; for denials may be absent or the
+    /// observed current revision (stale case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_revision: Option<String>,
+    pub precondition: MutationPrecondition,
+    pub installation: MutationInstallation,
 }
 
 /// Versioned container for a call's effects (C1/C8): one call may produce
@@ -124,6 +161,10 @@ pub struct DeniedOperation {
     pub scope: ObservedScope,
     pub target: ObservedTarget,
     pub reason: String,
+    /// Explicit mutation outcome on refused host ops (stale / exists / denied).
+    /// Absent on non-mutation denials and on pre-#31 rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<MutationEvidence>,
 }
 
 /// Versioned container for a call's refused operations. Every persisted
@@ -210,6 +251,7 @@ mod tests {
             },
             truncated: None,
             visibility: None,
+            mutation: None,
         }
     }
 
@@ -238,6 +280,7 @@ mod tests {
                 filtered_read_denied: false,
                 filtered_ignored_default: true,
             }),
+            mutation: None,
         }
     }
 
@@ -371,6 +414,7 @@ mod tests {
                 turn_id: "turn-1".into(),
             },
             reason: "capability not admitted".into(),
+            mutation: None,
         };
         let record = DeniedOperationsRecord {
             version: DENIED_OPERATIONS_RECORD_VERSION,
@@ -435,6 +479,7 @@ mod tests {
         assert_eq!(effects.effects.len(), 1);
         // Absent optional measure reads as `None`.
         assert_eq!(effects.effects[0].context_measure, None);
+        assert_eq!(effects.effects[0].mutation, None);
 
         let admission: AdmissionEvidence = serde_json::from_value(json!({
             "version": 1,
@@ -462,6 +507,89 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(denied.denied[0].target, ObservedTarget::None);
+        assert_eq!(denied.denied[0].mutation, None);
+    }
+
+    #[test]
+    fn mutation_evidence_round_trips_and_old_rows_omit_it() {
+        let mutation = MutationEvidence {
+            before_revision: Some("blake3:aa".into()),
+            after_revision: Some("blake3:bb".into()),
+            precondition: MutationPrecondition::Satisfied,
+            installation: MutationInstallation::Installed,
+        };
+        let effect = ObservedEffect {
+            seq: 0,
+            cell: Cell {
+                ctx_op: CtxOp::Mutate,
+                ext_impact: ExtImpact::Write,
+                scope: "workspace".into(),
+            },
+            scope: ObservedScope {
+                scope: "workspace".into(),
+                trust: Trust::In,
+                channel: ChannelKind::Workspace,
+            },
+            target: ObservedTarget::Path {
+                path: "notes.txt".into(),
+            },
+            source: EffectSource::Operation,
+            context_measure: Some(6),
+            truncated: None,
+            visibility: None,
+            mutation: Some(mutation.clone()),
+        };
+        let record = ObservedEffectsRecord {
+            version: OBSERVED_EFFECTS_RECORD_VERSION,
+            effects: vec![effect],
+        };
+        let parsed: ObservedEffectsRecord =
+            serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+        assert_eq!(parsed, record);
+
+        let denial = DeniedOperation {
+            seq: 1,
+            cell: Cell {
+                ctx_op: CtxOp::Mutate,
+                ext_impact: ExtImpact::Write,
+                scope: "workspace".into(),
+            },
+            scope: ObservedScope {
+                scope: "workspace".into(),
+                trust: Trust::In,
+                channel: ChannelKind::Workspace,
+            },
+            target: ObservedTarget::Path {
+                path: "notes.txt".into(),
+            },
+            reason: "stale-revision".into(),
+            mutation: Some(MutationEvidence {
+                before_revision: Some("blake3:cur".into()),
+                after_revision: None,
+                precondition: MutationPrecondition::StaleRevision,
+                installation: MutationInstallation::NotAttempted,
+            }),
+        };
+        let denials = DeniedOperationsRecord {
+            version: DENIED_OPERATIONS_RECORD_VERSION,
+            denied: vec![denial],
+        };
+        let parsed: DeniedOperationsRecord =
+            serde_json::from_str(&serde_json::to_string(&denials).unwrap()).unwrap();
+        assert_eq!(parsed, denials);
+
+        let legacy: ObservedEffectsRecord = serde_json::from_value(json!({
+            "version": 1,
+            "effects": [{
+                "seq": 0,
+                "cell": {"ctx_op": "mutate", "ext_impact": "write", "scope": "workspace"},
+                "scope": {"scope": "workspace", "trust": "in", "channel": "workspace"},
+                "target": {"kind": "path", "path": "a.txt"},
+                "source": "operation"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(legacy.effects[0].mutation, None);
     }
 
     #[test]

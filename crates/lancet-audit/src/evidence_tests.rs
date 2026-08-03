@@ -13,16 +13,16 @@ use std::collections::BTreeSet;
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{
     ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION,
-    DeniedOperation, DeniedOperationsRecord, EffectSource, OBSERVED_EFFECTS_RECORD_VERSION,
-    ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
-    WorkspaceVisibilityEvidence,
+    DeniedOperation, DeniedOperationsRecord, EffectSource, MutationEvidence, MutationInstallation,
+    MutationPrecondition, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord,
+    ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
 };
 use rusqlite::params;
 
 use crate::audit::{AUDIT_SCHEMA_VERSION, AuditError, CepAuditStore};
 use crate::evidence::{
-    CallEvidence, EVIDENCE_SCHEMA_VERSION_PRE_VISIBILITY, EvidenceError, EvidenceId,
-    EvidenceOutcome,
+    CallEvidence, EVIDENCE_SCHEMA_VERSION_PRE_MUTATION, EVIDENCE_SCHEMA_VERSION_PRE_VISIBILITY,
+    EvidenceError, EvidenceId, EvidenceOutcome,
 };
 
 fn scope() -> ObservedScope {
@@ -58,6 +58,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 context_measure: None,
                 truncated: None,
                 visibility: None,
+                mutation: None,
             },
             ObservedEffect {
                 seq: 1,
@@ -70,6 +71,7 @@ fn effects_record() -> ObservedEffectsRecord {
                 context_measure: Some(17),
                 truncated: None,
                 visibility: None,
+                mutation: None,
             },
         ],
     }
@@ -96,6 +98,7 @@ fn denials() -> DeniedOperationsRecord {
                 scope: scope(),
                 target: ObservedTarget::None,
                 reason: "uncovered operation".into(),
+                mutation: None,
             },
             DeniedOperation {
                 seq: 2,
@@ -105,6 +108,7 @@ fn denials() -> DeniedOperationsRecord {
                     path: "src/lib.rs".into(),
                 },
                 reason: "path target denied this cycle".into(),
+                mutation: None,
             },
         ],
     }
@@ -196,6 +200,7 @@ fn workspace_visibility_evidence_round_trips_in_queryable_columns() {
             context_measure: Some(12),
             truncated: Some(false),
             visibility: Some(visibility),
+            mutation: None,
         }],
     };
     let denied = empty_denials();
@@ -238,6 +243,287 @@ fn workspace_visibility_evidence_round_trips_in_queryable_columns() {
             .map(|stored| assert_eq!(stored, (true, true, false, true)))
         })
         .expect("queryable visibility columns");
+}
+
+#[test]
+fn mutation_evidence_round_trips_in_queryable_columns() {
+    let store = CepAuditStore::in_memory().expect("store");
+    let admission = admission(&["workspace.mutation"]);
+    let mutation = MutationEvidence {
+        before_revision: None,
+        after_revision: Some("blake3:after".into()),
+        precondition: MutationPrecondition::Satisfied,
+        installation: MutationInstallation::Installed,
+    };
+    let effects = ObservedEffectsRecord {
+        version: OBSERVED_EFFECTS_RECORD_VERSION,
+        effects: vec![ObservedEffect {
+            seq: 0,
+            cell: Cell {
+                ctx_op: CtxOp::Mutate,
+                ext_impact: ExtImpact::Write,
+                scope: "workspace".into(),
+            },
+            scope: ObservedScope {
+                scope: "workspace".into(),
+                trust: Trust::In,
+                channel: ChannelKind::Workspace,
+            },
+            target: ObservedTarget::Path {
+                path: "fresh.txt".into(),
+            },
+            source: EffectSource::Operation,
+            context_measure: Some(6),
+            truncated: None,
+            visibility: None,
+            mutation: Some(mutation.clone()),
+        }],
+    };
+    let denied = DeniedOperationsRecord {
+        version: DENIED_OPERATIONS_RECORD_VERSION,
+        denied: vec![DeniedOperation {
+            seq: 1,
+            cell: Cell {
+                ctx_op: CtxOp::Mutate,
+                ext_impact: ExtImpact::Write,
+                scope: "workspace".into(),
+            },
+            scope: ObservedScope {
+                scope: "workspace".into(),
+                trust: Trust::In,
+                channel: ChannelKind::Workspace,
+            },
+            target: ObservedTarget::Path {
+                path: "notes.txt".into(),
+            },
+            reason: "stale-revision".into(),
+            mutation: Some(MutationEvidence {
+                before_revision: Some("blake3:current".into()),
+                after_revision: None,
+                precondition: MutationPrecondition::StaleRevision,
+                installation: MutationInstallation::NotAttempted,
+            }),
+        }],
+    };
+    let id = store
+        .record_call_evidence(&CallEvidence {
+            turn_id: "turn-mutate",
+            session_id: "sess-1",
+            call_id: 11,
+            tool: "mutate.edit",
+            outcome: EvidenceOutcome::Completed,
+            admission: &admission,
+            effects: Some(&effects),
+            denied: Some(&denied),
+        })
+        .expect("record");
+
+    let stored = store
+        .call_evidence(id)
+        .expect("read")
+        .expect("evidence exists");
+    assert_eq!(stored.effects.effects[0].mutation, Some(mutation));
+    assert_eq!(
+        stored.denied.denied[0]
+            .mutation
+            .as_ref()
+            .unwrap()
+            .precondition,
+        MutationPrecondition::StaleRevision
+    );
+
+    store
+        .with_connection_for_tests(|conn| {
+            conn.query_row(
+                "SELECT mutation_before_revision, mutation_after_revision,
+                        mutation_precondition, mutation_installation
+                 FROM evidence_effects WHERE evidence_id = ?1",
+                params![id.0],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map(|stored| {
+                assert_eq!(
+                    stored,
+                    (
+                        None,
+                        Some("blake3:after".into()),
+                        "satisfied".into(),
+                        "installed".into()
+                    )
+                )
+            })?;
+            conn.query_row(
+                "SELECT mutation_before_revision, mutation_after_revision,
+                        mutation_precondition, mutation_installation
+                 FROM evidence_denials WHERE evidence_id = ?1",
+                params![id.0],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map(|stored| {
+                assert_eq!(
+                    stored,
+                    (
+                        Some("blake3:current".into()),
+                        None,
+                        "stale_revision".into(),
+                        "not_attempted".into()
+                    )
+                )
+            })
+        })
+        .expect("queryable mutation columns");
+}
+
+#[test]
+fn pre_mutation_database_gains_queryable_columns_and_keeps_evidence() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("audit.db");
+    let id = {
+        let store = CepAuditStore::open(&path).expect("create current store");
+        store
+            .record_call_evidence(&CallEvidence {
+                turn_id: "turn-before-mutation",
+                session_id: "sess-1",
+                call_id: 12,
+                tool: "noop.echo",
+                outcome: EvidenceOutcome::Completed,
+                admission: &admission(&["session.result"]),
+                effects: Some(&effects_record()),
+                denied: Some(&empty_denials()),
+            })
+            .expect("record legacy evidence")
+    };
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open for downgrade fixture");
+        for table in ["evidence_effects", "evidence_denials"] {
+            for column in [
+                "mutation_before_revision",
+                "mutation_after_revision",
+                "mutation_precondition",
+                "mutation_installation",
+            ] {
+                conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
+                    .expect("remove post-v4 column");
+            }
+        }
+        conn.pragma_update(None, "user_version", EVIDENCE_SCHEMA_VERSION_PRE_MUTATION)
+            .expect("stamp v4 fixture");
+    }
+
+    let store = CepAuditStore::open(&path).expect("v4 store upgrades additively");
+    let stored = store
+        .call_evidence(id)
+        .expect("read legacy evidence")
+        .expect("evidence remains");
+    assert_eq!(stored.effects.effects[0].mutation, None);
+
+    store
+        .with_connection_for_tests(|conn| {
+            for table in ["evidence_effects", "evidence_denials"] {
+                let mut present = BTreeSet::new();
+                conn.pragma(None, "table_info", table, |row| {
+                    present.insert(row.get::<_, String>("name")?);
+                    Ok(())
+                })?;
+                for column in [
+                    "mutation_before_revision",
+                    "mutation_after_revision",
+                    "mutation_precondition",
+                    "mutation_installation",
+                ] {
+                    assert!(
+                        present.contains(column),
+                        "migration must add {table}.{column}"
+                    );
+                }
+            }
+            Ok(())
+        })
+        .expect("inspect upgraded shape");
+}
+
+#[test]
+fn corrupt_mutation_enum_label_is_reported_not_coerced() {
+    let store = CepAuditStore::in_memory().expect("store");
+    let admission = admission(&["workspace.mutation"]);
+    let effects = ObservedEffectsRecord {
+        version: OBSERVED_EFFECTS_RECORD_VERSION,
+        effects: vec![ObservedEffect {
+            seq: 0,
+            cell: Cell {
+                ctx_op: CtxOp::Mutate,
+                ext_impact: ExtImpact::Write,
+                scope: "workspace".into(),
+            },
+            scope: ObservedScope {
+                scope: "workspace".into(),
+                trust: Trust::In,
+                channel: ChannelKind::Workspace,
+            },
+            target: ObservedTarget::Path {
+                path: "a.txt".into(),
+            },
+            source: EffectSource::Operation,
+            context_measure: Some(1),
+            truncated: None,
+            visibility: None,
+            mutation: Some(MutationEvidence {
+                before_revision: None,
+                after_revision: Some("blake3:x".into()),
+                precondition: MutationPrecondition::Satisfied,
+                installation: MutationInstallation::Installed,
+            }),
+        }],
+    };
+    let id = store
+        .record_call_evidence(&CallEvidence {
+            turn_id: "turn-corrupt",
+            session_id: "sess-1",
+            call_id: 13,
+            tool: "mutate.create",
+            outcome: EvidenceOutcome::Completed,
+            admission: &admission,
+            effects: Some(&effects),
+            denied: Some(&empty_denials()),
+        })
+        .expect("record");
+
+    store
+        .with_connection_for_tests(|conn| {
+            conn.execute(
+                "UPDATE evidence_effects SET mutation_precondition = 'teleport' WHERE evidence_id = ?1",
+                params![id.0],
+            )
+            .map(|_| ())
+        })
+        .expect("corrupt label");
+
+    let err = store.call_evidence(id).expect_err("corrupt label");
+    assert!(
+        matches!(
+            err,
+            EvidenceError::UnreadableField {
+                field: "mutation_precondition",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -500,6 +786,7 @@ fn failed_call_retains_the_operation_effects_it_already_recorded() {
             context_measure: None,
             truncated: None,
             visibility: None,
+            mutation: None,
         }],
     };
     let denied = empty_denials();
@@ -951,6 +1238,7 @@ fn all_issue28_evidence_scenarios_round_trip() {
             context_measure: Some(19),
             truncated: None,
             visibility: None,
+            mutation: None,
         }],
     };
     let partial_denials = DeniedOperationsRecord {
@@ -963,6 +1251,7 @@ fn all_issue28_evidence_scenarios_round_trip() {
                 turn_id: "turn-1".into(),
             },
             reason: "capability not admitted".into(),
+            mutation: None,
         }],
     };
 
@@ -989,6 +1278,7 @@ fn all_issue28_evidence_scenarios_round_trip() {
                     path: "src/lib.rs".into(),
                 },
                 reason: "path target refused".into(),
+                mutation: None,
             },
             DeniedOperation {
                 seq: 1,
@@ -1002,6 +1292,7 @@ fn all_issue28_evidence_scenarios_round_trip() {
                     host: "example.com".into(),
                 },
                 reason: "host target refused".into(),
+                mutation: None,
             },
             DeniedOperation {
                 seq: 2,
@@ -1013,6 +1304,7 @@ fn all_issue28_evidence_scenarios_round_trip() {
                 },
                 target: ObservedTarget::None,
                 reason: "no target".into(),
+                mutation: None,
             },
         ],
     };

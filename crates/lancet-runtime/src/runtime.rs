@@ -29,6 +29,7 @@ use crate::error_map::{
 };
 use crate::evidence::CellEvidenceLedger;
 use crate::generated;
+use crate::host_mutate::WorkspaceMutationHost;
 use crate::host_workspace::WorkspaceObservationHost;
 use crate::limits::{AbortReason, ExecutionLimits, RecordingLimits, ResourceFootprint};
 
@@ -57,6 +58,12 @@ pub struct ComponentCallContext {
     /// Turn's observation budget are both per-turn, not per-call: a per-call copy
     /// of the budget would silently reset the per-turn ceiling.
     pub workspace: Option<Arc<WorkspaceObservationHost>>,
+    /// Host authority for the `workspace-mutate` imports (#31).
+    ///
+    /// Same fail-closed shape as [`Self::workspace`]: `None` refuses every
+    /// mutation import. Observation and mutation authorities are separate so a
+    /// Tool that only observes never receives a write host by accident.
+    pub mutate: Option<Arc<WorkspaceMutationHost>>,
 }
 
 /// Per-store state: the call context, resource limits, deadline, and abort
@@ -440,6 +447,11 @@ fn host_refusal(ctx: &ComponentCallContext) -> Option<CepError> {
     ctx.workspace
         .as_ref()
         .and_then(|workspace| workspace.take_refusal())
+        .or_else(|| {
+            ctx.mutate
+                .as_ref()
+                .and_then(|mutate| mutate.take_refusal(ctx.call_id))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +485,10 @@ fn build_linker(engine: &Engine) -> Result<Linker<StoreState>, wasmtime::Error> 
         |state| state,
     )?;
     bindings::lattice::tool_host::workspace_observe::add_to_linker::<
+        _,
+        wasmtime::component::HasSelf<_>,
+    >(&mut linker, |state| state)?;
+    bindings::lattice::tool_host::workspace_mutate::add_to_linker::<
         _,
         wasmtime::component::HasSelf<_>,
     >(&mut linker, |state| state)?;

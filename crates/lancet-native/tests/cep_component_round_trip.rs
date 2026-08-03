@@ -31,6 +31,8 @@ use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::evidence::{EffectSource, ObservedTarget};
 use lancet_protocol::{CapabilityAdmissionPolicy, CepErrorCode, Trust};
 use lancet_runtime::ComponentRuntime;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 /// The noop fixture's admission policy: the tool is enabled, and `deny`
 /// subtracts capability names by the profile's stage-2 rule.
@@ -62,7 +64,7 @@ async fn spawn_native_with_admission(
     Arc<CepAuditStore>,
     tokio::task::JoinHandle<()>,
 ) {
-    spawn_native_with_policies(policy, BTreeSet::new(), None).await
+    spawn_native_with_policies(policy, BTreeSet::new(), None, false).await
 }
 
 /// One server run carrying **both** vocabularies' policies: the Cell
@@ -71,6 +73,7 @@ async fn spawn_native_with_policies(
     policy: CapabilityAdmissionPolicy,
     denied_effect_kinds: BTreeSet<ImpactKind>,
     project_root: Option<&std::path::Path>,
+    allow_localhost: bool,
 ) -> (
     lancet_native::CepClient,
     Arc<CepAuditStore>,
@@ -89,7 +92,26 @@ async fn spawn_native_with_policies(
     };
     turn_policy.capability_admission = admission;
     turn_policy.denied_effect_kinds = denied_effect_kinds;
+    if allow_localhost {
+        turn_policy.network.allow_localhost = true;
+        turn_policy.network.allowed_hosts = vec!["127.0.0.1".into()];
+    }
     config.cep_context = Arc::new(CepTurnContext::from_policy(turn_policy));
+    if allow_localhost {
+        let mut hook_policy =
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+                project_root
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf(),
+            );
+        hook_policy.network.allow_localhost = true;
+        hook_policy.network.allowed_hosts = vec!["127.0.0.1".into()];
+        let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            hook_policy,
+        ));
+        config.policy_hook = hook.clone();
+        config.default_policy_hook = Some(hook);
+    }
     config.components = Some(components);
 
     let mut registry = MethodRegistry::new();
@@ -491,39 +513,34 @@ async fn unknown_deny_name_fails_server_construction() {
     );
 }
 
-/// D.6: a native method (`mutate.create`) still works alongside the Component
+/// D.6: a native method (`fetch.web`) still works alongside the Component
 /// path — the dispatch split doesn't break the remaining handlers.
 ///
-/// This used to exercise `observe.workspace`, which #30 migrated to a Component
+/// This used to exercise `mutate.create`, which #31 migrated to a Component
 /// Tool; a migrated method proves nothing about the *native* half of the split.
-/// `mutate.create` is a method the native registry still serves.
+/// `fetch.web` is the method the native registry still serves.
 #[tokio::test]
 async fn native_method_still_works_alongside_component() {
-    use lancet_catalog::methods::workspace::CreateParams;
+    use lancet_catalog::methods::external::FetchParams;
+    use std::collections::BTreeMap;
 
     let dir = tempfile::TempDir::new().expect("temp project");
     let (client, _audit, _task) = spawn_native_with_project_root(dir.path()).await;
+    let url = spawn_native_probe_server().await;
 
-    let result: serde_json::Value = client
-        .call_named(
-            "mutate.create",
-            CreateParams {
-                path: "coexist.txt".into(),
-                content: "coexist\n".into(),
-                create_parents: false,
+    // Proves the native half of the dispatch split still resolves: fetch.web
+    // is served by the typed registry even while Components coexist.
+    let value = client
+        .call_named::<_, serde_json::Value>(
+            "fetch.web",
+            FetchParams {
+                url,
+                headers: BTreeMap::new(),
             },
         )
         .await
-        .expect("native method still works");
-
-    assert!(
-        result.to_string().contains("coexist.txt"),
-        "the native create must report the path it wrote: {result}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("coexist.txt")).expect("written file"),
-        "coexist\n"
-    );
+        .expect("fetch.web must remain a native registry method");
+    assert_eq!(value["status"], 200);
 }
 
 /// #29.6: there is no native `session.todo_write` handler and no fallback.
@@ -589,12 +606,28 @@ fn todo_params() -> serde_json::Value {
 /// one that reaches its handler.
 /// Params for the native leg of the two-vocabulary tests.
 ///
-/// A *native* method is required there, and `observe.workspace` stopped being one
-/// in #30. `mutate.create` is the remaining native method whose success or
-/// refusal is observable on disk, which keeps those tests' claims checkable
-/// rather than inferred from an error code alone.
-fn native_probe_params() -> serde_json::Value {
-    serde_json::json!({"path": "probe-created.txt", "content": "x\n", "create_parents": false})
+/// A *native* method is required there, and `mutate.create` stopped being one
+/// in #31. `fetch.web` is the remaining native method, which keeps those tests'
+/// claims checkable rather than inferred from an error code alone.
+fn native_probe_params(url: &str) -> serde_json::Value {
+    serde_json::json!({ "url": url })
+}
+
+async fn spawn_native_probe_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind localhost fixture");
+    let addr = listener.local_addr().expect("fixture address");
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await;
+        }
+    });
+    format!("http://{addr}/")
 }
 
 /// As [`spawn_native_with_noop`], with the Local Workspace rooted at
@@ -610,7 +643,23 @@ async fn spawn_native_with_project_root(
         Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
     let mut config =
         ServerRunConfig::in_memory_for_tests().with_capability_admission(admission(&[]));
-    config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(project_root));
+    let mut turn_policy =
+        lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(project_root);
+    turn_policy.capability_admission = config.cep_context.policy.capability_admission.clone();
+    turn_policy.network.allow_localhost = true;
+    turn_policy.network.allowed_hosts = vec!["127.0.0.1".into()];
+    config.cep_context = Arc::new(CepTurnContext::from_policy(turn_policy));
+    let mut hook_policy =
+        lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+            project_root.to_path_buf(),
+        );
+    hook_policy.network.allow_localhost = true;
+    hook_policy.network.allowed_hosts = vec!["127.0.0.1".into()];
+    let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+        hook_policy,
+    ));
+    config.policy_hook = hook.clone();
+    config.default_policy_hook = Some(hook);
     config.components = Some(components);
 
     let mut registry = MethodRegistry::new();
@@ -649,13 +698,13 @@ async fn legacy_effect_deny_refuses_native_methods_and_never_component_calls() {
     let dir = tempfile::TempDir::new().expect("temp project");
     std::fs::write(dir.path().join("probe.txt"), "x\n").expect("seed file");
     let (client, audit, _task) =
-        spawn_native_with_policies(admission(&[]), denied, Some(dir.path())).await;
+        spawn_native_with_policies(admission(&[]), denied, Some(dir.path()), false).await;
 
-    // The native leg is `mutate.create`: `session.todo_write` (#29) and
-    // `observe.workspace` (#30) are Component Tools, so either would test the
-    // Component path twice and prove nothing about the legacy vocabulary's reach.
+    // The native leg is `fetch.web`: mutation/observation/todo are Component
+    // Tools (#29–#31), so any of those would test the Component path twice and
+    // prove nothing about the legacy vocabulary's reach.
     let err = client
-        .call_raw("mutate.create", native_probe_params())
+        .call_raw("fetch.web", native_probe_params("https://native.invalid/"))
         .await
         .expect_err("every declared impact kind is denied");
     assert_eq!(err.code, CepErrorCode::EffectViolation);
@@ -687,6 +736,7 @@ async fn cell_admission_denial_never_refuses_a_native_method() {
         CapabilityAdmissionPolicy::default(),
         BTreeSet::new(),
         Some(dir.path()),
+        true,
     )
     .await;
 
@@ -696,18 +746,14 @@ async fn cell_admission_denial_never_refuses_a_native_method() {
         .expect_err("no tool is enabled");
     assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
 
+    let url = spawn_native_probe_server().await;
     let result = client
-        .call_raw("mutate.create", native_probe_params())
+        .call_raw("fetch.web", native_probe_params(&url))
         .await
         .expect("Cell admission has no authority over a native method");
-    assert!(
-        result.to_string().contains("probe-created.txt"),
-        "the native create must report the path it wrote: {result}"
-    );
     assert_eq!(
-        std::fs::read_to_string(dir.path().join("probe-created.txt")).expect("written file"),
-        "x\n",
-        "the native write really happened; Cell admission did not gate it"
+        result["status"], 200,
+        "the native fetch must complete; Cell admission did not gate it: {result}"
     );
 }
 

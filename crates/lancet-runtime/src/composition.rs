@@ -439,10 +439,10 @@ fn channels_for_domain_imports(imports: &BTreeSet<String>) -> BTreeSet<ChannelKi
             .map_or(import.as_str(), |(name, _version)| name)
             .rsplit_once('/')
             .map_or("", |(_package, iface)| iface);
-        // #30: Policy-Visible Workspace observation. The host enforces every
-        // path decision behind it; the import is what makes the workspace
-        // channel reachable at all.
-        if interface == "workspace-observe" {
+        // #30 / #31: Policy-Visible Workspace observation and Structured
+        // Workspace Mutation. Either import makes the workspace channel
+        // reachable; the host enforces every path decision behind them.
+        if interface == "workspace-observe" || interface == "workspace-mutate" {
             channels.insert(ChannelKind::Workspace);
         }
     }

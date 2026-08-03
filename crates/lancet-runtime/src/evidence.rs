@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex};
 use lancet_protocol::cell::Cell;
 use lancet_protocol::evidence::{
     AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, DeniedOperationsRecord,
-    EffectSource, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect, ObservedEffectsRecord,
-    ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
+    EffectSource, MutationEvidence, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect,
+    ObservedEffectsRecord, ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
 };
 
 #[derive(Debug, Default)]
@@ -81,6 +81,7 @@ impl CellEvidenceLedger {
             context_measure,
             truncated: None,
             visibility: None,
+            mutation: None,
         });
     }
 
@@ -112,6 +113,31 @@ impl CellEvidenceLedger {
             context_measure: Some(bytes_returned),
             truncated: Some(truncated),
             visibility: Some(visibility),
+            mutation: None,
+        });
+    }
+
+    /// Record a successful Structured Workspace Mutation (#31).
+    pub fn record_mutation_effect(
+        &self,
+        cell: Cell,
+        scope: ObservedScope,
+        target: ObservedTarget,
+        mutation: MutationEvidence,
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        let seq = inner.seq;
+        inner.seq += 1;
+        inner.effects.push(ObservedEffect {
+            seq,
+            cell,
+            scope,
+            target,
+            source: EffectSource::Operation,
+            context_measure: None,
+            truncated: None,
+            visibility: None,
+            mutation: Some(mutation),
         });
     }
 
@@ -124,6 +150,19 @@ impl CellEvidenceLedger {
         target: ObservedTarget,
         reason: impl Into<String>,
     ) {
+        self.record_denied_with_mutation(cell, scope, target, reason, None);
+    }
+
+    /// Record a refused mutation import with explicit revision / precondition
+    /// facts (#31).
+    pub fn record_denied_with_mutation(
+        &self,
+        cell: Cell,
+        scope: ObservedScope,
+        target: ObservedTarget,
+        reason: impl Into<String>,
+        mutation: Option<MutationEvidence>,
+    ) {
         let mut inner = self.inner.lock().unwrap();
         let seq = inner.seq;
         inner.seq += 1;
@@ -133,6 +172,7 @@ impl CellEvidenceLedger {
             scope,
             target,
             reason: reason.into(),
+            mutation,
         });
     }
 

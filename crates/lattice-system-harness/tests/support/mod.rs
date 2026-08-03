@@ -162,6 +162,18 @@ pub(crate) fn tool_ok(outcome: &SendOutcome, name: &str) -> bool {
     })
 }
 
+/// True when a failed CEP call for `method` finished with `error_code`.
+pub(crate) fn finished_with_code(outcome: &SendOutcome, method: &str, code: &str) -> bool {
+    outcome.events.iter().any(|event| match event {
+        TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
+            raw.get("method").and_then(Value::as_str) == Some(method)
+                && raw.get("ok").and_then(Value::as_bool) == Some(false)
+                && raw.get("error_code").and_then(Value::as_str) == Some(code)
+        }
+        _ => false,
+    })
+}
+
 pub(crate) fn tool_call(id: &str, name: &str, args: &str) -> SseScript {
     SseScript::ToolCall {
         call_id: id.into(),

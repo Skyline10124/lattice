@@ -14,5 +14,3 @@ pub(crate) mod limits;
 pub mod parser;
 pub(crate) mod storage;
 pub mod types;
-
-pub use hash::content_hash;

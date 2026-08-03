@@ -157,6 +157,10 @@ enum DomainImport {
     /// Policy-Visible Workspace observation: read / list / grep / find, with all
     /// path safety, visibility, bounds, and evidence host-side (#30).
     WorkspaceObserve,
+    /// Structured Workspace Mutation: read-for-edit / create-if-absent /
+    /// replace-with-expected / refuse-edit, with path safety, precondition,
+    /// install, structured diagnostics, and evidence host-side (#31).
+    WorkspaceMutate,
 }
 
 impl DomainImport {
@@ -164,6 +168,7 @@ impl DomainImport {
     fn wit_interface(self) -> &'static str {
         match self {
             Self::WorkspaceObserve => "workspace-observe",
+            Self::WorkspaceMutate => "workspace-mutate",
         }
     }
 
@@ -171,10 +176,12 @@ impl DomainImport {
     ///
     /// The host's `Host` trait implementation is generated from this text by
     /// `wasmtime::component::bindgen!`, so the signatures here and
-    /// `lancet_runtime::host_workspace` are two views of one contract.
+    /// `lancet_runtime::host_workspace` / `host_mutate` are two views of one
+    /// contract.
     fn wit_definition(self) -> &'static str {
         match self {
             Self::WorkspaceObserve => WORKSPACE_OBSERVE_WIT,
+            Self::WorkspaceMutate => WORKSPACE_MUTATE_WIT,
         }
     }
 }
@@ -258,6 +265,90 @@ interface workspace-observe {
     grep: func(pattern: string, path: option<string>, max-results: option<u64>) -> result<grep-result, observe-error>;
     /// Glob-search visible paths beneath a root.
     find-files: func(pattern: string, path: option<string>, limit: option<u64>) -> result<find-result, observe-error>;
+}
+";
+
+/// The `workspace-mutate` interface (#31).
+/// Four Structured Workspace Operations. The guest never holds a path handle
+/// or write stream: every install re-enters the host with a string path the
+/// host re-resolves, authorizes, and either installs atomically or refuses.
+const WORKSPACE_MUTATE_WIT: &str = "\
+interface workspace-mutate {
+    /// Host-decided failure. Guest-facing messages are coarse; audit labels
+    /// stay on the host side.
+    variant mutate-error {
+        not-found(string),
+        already-exists(string),
+        stale-revision(string),
+        semantic-replan(string),
+        validation(string),
+        path-rejected(string),
+        denied(string),
+        limit-exceeded(string),
+        cancelled(string),
+        io-error(string),
+        invalid-request(string),
+    }
+
+    enum edit-refusal-kind {
+        validation,
+        replan,
+    }
+
+    record file-bytes {
+        /// Exact Local bytes (UTF-8 text Tools only, same as today).
+        content: string,
+        /// Host-computed `blake3:<64 hex>` Local Revision.
+        local-revision: string,
+    }
+
+    record create-result {
+        path: string,
+        bytes-written: u64,
+        /// Post-install Local Revision.
+        local-revision: string,
+        created-dirs: list<string>,
+    }
+
+    record replace-result {
+        path: string,
+        bytes-written: u64,
+        /// Post-install Local Revision of the installed candidate.
+        local-revision: string,
+    }
+
+    /// Read target bytes only when its current Local Revision matches the
+    /// caller's planning revision. A stale target is host-classified before
+    /// guest semantic compilation and never reaches an install operation.
+    read-for-edit: func(
+        path: string,
+        expected-revision: string,
+    ) -> result<file-bytes, mutate-error>;
+
+    /// ADR 0003 decision 8: O_EXCL / no-replace. Existing or raced target →
+    /// `already-exists` → host maps to Replan Required.
+    create-if-absent: func(
+        path: string,
+        content: string,
+        create-parents: bool,
+    ) -> result<create-result, mutate-error>;
+
+    /// Recheck `expected-revision` against current Local bytes, then
+    /// tempfile→fsync→rename atomic replace. Stale → `stale-revision`.
+    replace-with-expected: func(
+        path: string,
+        expected-revision: string,
+        content: string,
+    ) -> result<replace-result, mutate-error>;
+
+    /// Preserve guest-owned semantic edit diagnostics as host-authenticated
+    /// structured CEP refusals instead of collapsing them into a guest string.
+    refuse-edit: func(
+        path: string,
+        kind: edit-refusal-kind,
+        field: string,
+        reason: string,
+    ) -> mutate-error;
 }
 ";
 
@@ -1005,6 +1096,38 @@ toolchain = "rustc-1.96.0"
         assert!(!observe.contains("resource "), "{observe}");
         assert!(!observe.contains("borrow<"), "{observe}");
         assert!(!observe.contains("own<"), "{observe}");
+    }
+
+    /// #31: declaring `workspace-mutate` emits the interface and the world
+    /// import, with no resource handles — same closed shape as observe.
+    #[test]
+    fn declared_workspace_mutate_import_reaches_the_world_and_the_interface() {
+        let mut m = noop_manifest();
+        m.imports = vec![DomainImport::WorkspaceMutate];
+        let d = lower_manifest(&m).unwrap();
+        let wit = render_wit(&d, &m.imports);
+        assert!(wit.contains("interface workspace-mutate {"));
+        assert!(wit.contains("import workspace-mutate;"));
+        assert!(wit.contains("import host-control;"));
+        assert!(
+            !wit.contains("wasi:"),
+            "a domain import is not ambient WASI"
+        );
+        for func in [
+            "read-for-edit:",
+            "create-if-absent:",
+            "replace-with-expected:",
+            "refuse-edit:",
+        ] {
+            assert!(wit.contains(func), "missing {func} in {wit}");
+        }
+        let mutate = wit
+            .split("interface workspace-mutate {")
+            .nth(1)
+            .expect("the interface block");
+        assert!(!mutate.contains("resource "), "{mutate}");
+        assert!(!mutate.contains("borrow<"), "{mutate}");
+        assert!(!mutate.contains("own<"), "{mutate}");
     }
 
     /// The generated WIT is a digest input, so a repeated declaration must not

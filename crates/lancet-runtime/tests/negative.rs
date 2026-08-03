@@ -49,6 +49,7 @@ fn call_ctx(
         // These fixtures exercise control-only Tools; a call with no workspace
         // authority refuses every observation operation (#30).
         workspace: None,
+        mutate: None,
     };
     (ctx, rx, cancel_tx)
 }

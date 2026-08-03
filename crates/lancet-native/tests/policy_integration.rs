@@ -52,13 +52,13 @@ fn policy_input(method: &str, params: serde_json::Value) -> PolicyInput {
 
 #[test]
 fn integration_native_method_allowed() {
-    let hook = DefaultPolicyHook::new(test_config());
-    let input = policy_input(
-        "mutate.create",
-        json!({"path": "src/main.rs", "content": "fn main() {}", "create_parents": false}),
-    );
+    let mut config = test_config();
+    config.network.allow_public_https = true;
+    let hook = DefaultPolicyHook::new(config);
+    let input = policy_input("fetch.web", json!({"url": "https://example.com/page"}));
     let decision = hook.decide(&input);
-    // A catalog method inside the project root is allowed by default policy.
+    // The remaining native catalog method is allowed by default policy when
+    // its network gate is open (#31 retired mutate.create/edit from catalog).
     assert!(
         matches!(decision, PolicyDecision::Allowed),
         "expected Allowed, got {decision:?}"
@@ -68,8 +68,8 @@ fn integration_native_method_allowed() {
 /// A migrated method is not "allowed by default" here — it is not this hook's
 /// business at all.
 ///
-/// `DefaultPolicyHook` resolves against `lancet_catalog::catalog()`, and #30
-/// removed `observe.workspace` from it. The refusal is `NonDeterminable`
+/// `DefaultPolicyHook` resolves against `lancet_catalog::catalog()`, and #30/#31
+/// removed the Component Tools from it. The refusal is `NonDeterminable`
 /// ("unknown catalog method"), not a policy denial, which is the honest answer:
 /// a Component Tool's authorization is Cell admission plus the Tool Host's own
 /// checks, and a legacy hook that returned `Allowed` for it would be claiming an
@@ -77,7 +77,12 @@ fn integration_native_method_allowed() {
 #[test]
 fn integration_migrated_method_is_not_resolvable_by_the_legacy_hook() {
     let hook = DefaultPolicyHook::new(test_config());
-    for migrated in ["observe.workspace", "session.todo_write"] {
+    for migrated in [
+        "observe.workspace",
+        "session.todo_write",
+        "mutate.create",
+        "mutate.edit",
+    ] {
         let input = policy_input(
             migrated,
             json!({"mode": "read_file", "path": "src/main.rs"}),

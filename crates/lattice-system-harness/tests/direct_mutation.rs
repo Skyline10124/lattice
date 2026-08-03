@@ -25,9 +25,9 @@ use lattice_system_harness::{
 };
 use serde_json::Value;
 use support::{
-    assert_clean_send, direct_world, driver, evidence, finish_scenario, last_tool_content, require,
-    sequence, tool_call, tool_failed, tool_ok, tool_result_value, wire_fake_llm,
-    wire_gated_fake_llm,
+    assert_clean_send, direct_world, driver, evidence, finish_scenario, finished_with_code,
+    last_tool_content, require, sequence, tool_call, tool_failed, tool_ok, tool_result_value,
+    wire_fake_llm, wire_gated_fake_llm,
 };
 
 fn is_non_completed_terminal(outcome: &lattice_system_harness::SendOutcome) -> bool {
@@ -327,16 +327,10 @@ fn direct_mutation_stale_edit_and_external_visibility() {
             tool_failed(&stale.parsed, "mutate.edit"),
             "stale edit must fail",
         )?;
-        let replan_required = stale.parsed.events.iter().any(|event| match event {
-            TurnEventLine::Unknown { type_name, raw } if type_name == "cep_call_finished" => {
-                raw.get("method").and_then(Value::as_str) == Some("mutate.edit")
-                    && raw.get("ok").and_then(Value::as_bool) == Some(false)
-                    && raw.get("error_code").and_then(Value::as_str) == Some("ReplanRequired")
-            }
-            _ => false,
-        });
+        // Host `StaleRevision` records a typed refusal; runtime prefers it over
+        // the guest's `Err(String)` retelling so the wire stays ReplanRequired.
         require(
-            replan_required,
+            finished_with_code(&stale.parsed, "mutate.edit", "ReplanRequired"),
             format!(
                 "stale edit must emit ReplanRequired: {:?}",
                 stale.parsed.events
@@ -441,7 +435,7 @@ fn direct_mutation_no_rollback_after_provider_failure() {
     );
 }
 
-/// Write policy, system exclusion, and preflight effect denial produce no
+/// Write policy, system exclusion, and Cell capability denial produce no
 /// filesystem side effect.
 #[test]
 fn direct_mutation_denials_have_no_side_effect() {
@@ -492,11 +486,14 @@ fn direct_mutation_denials_have_no_side_effect() {
     let caps2 = server2.captured_requests();
     drop(server2);
 
+    // Legacy `[lancet.effects] deny = ["workspace_mutation"]` gates native
+    // catalog declared kinds. Component mutate.create is Cell-admitted (#31),
+    // so the equivalent pre-install refuse is `[lancet.capabilities] deny`.
     let (world3, spec3) = direct_world(
         "direct-mut-deny-effect",
         "dl-deff",
         "[\"mutate.create\"]",
-        "\n[lancet.effects]\ndeny = [\"workspace_mutation\"]\n",
+        "\n[lancet.capabilities]\ndeny = [\"workspace.mutation\"]\n",
     );
     let server3 = wire_fake_llm(
         &world3,
@@ -526,6 +523,13 @@ fn direct_mutation_denials_have_no_side_effect() {
             !world.project_dir().join("blocked/x.txt").exists(),
             "write-policy denial left a file",
         )?;
+        require(
+            finished_with_code(&write_deny.parsed, "mutate.create", "EffectViolation"),
+            format!(
+                "write-policy denial must be EffectViolation: {:?}",
+                write_deny.parsed.events
+            ),
+        )?;
 
         assert_clean_send(&sys_deny)?;
         require(
@@ -536,23 +540,34 @@ fn direct_mutation_denials_have_no_side_effect() {
             !world2.project_dir().join(".lattice/evil.txt").exists(),
             "system-exclusion denial left a file",
         )?;
+        require(
+            finished_with_code(&sys_deny.parsed, "mutate.create", "PathContainment"),
+            format!(
+                "system exclusion must be PathContainment: {:?}",
+                sys_deny.parsed.events
+            ),
+        )?;
 
         assert_clean_send(&effect_deny)?;
         require(
             tool_failed(&effect_deny.parsed, "mutate.create"),
-            "effect denial must fail tool",
+            "capability denial must fail tool",
         )?;
         require(
             !world3.project_dir().join("effect-denied.txt").exists(),
-            "preflight effect denial left a file",
+            "capability denial left a file",
         )?;
-        require(caps3.len() >= 2, "effect denial needs tool result capture")?;
+        require(
+            caps3.len() >= 2,
+            "capability denial needs tool result capture",
+        )?;
         let err_text = last_tool_content(&caps3[1]).unwrap_or_default();
         require(
-            err_text.to_lowercase().contains("effect")
+            err_text.to_lowercase().contains("capability")
                 || err_text.to_lowercase().contains("denied")
+                || err_text.to_lowercase().contains("not granted")
                 || err_text.to_lowercase().contains("policy"),
-            format!("effect denial tool message weak: {err_text}"),
+            format!("capability denial tool message weak: {err_text}"),
         )?;
         Ok(())
     })();
@@ -565,16 +580,17 @@ fn direct_mutation_denials_have_no_side_effect() {
     let _ = evidence2.finish(false);
     finish_scenario(
         evidence3,
-        &[("effect deny", &effect_deny.command)],
+        &[("capability deny", &effect_deny.command)],
         caps3,
         result,
     );
 }
 
-/// Two gated sends prepared from one session parent: one winner commits;
-/// Local mutation assertions remain independent of session commit success.
+/// Two gated sends create the same absent target: exactly one Component call
+/// installs and the other returns `ReplanRequired`. Session commit competition
+/// is a separate layer and does not weaken the Local mutation assertion.
 #[test]
-fn direct_mutation_concurrent_commit_race() {
+fn direct_mutation_concurrent_same_target_create_has_one_winner() {
     let driver = driver();
     let (world, spec) = direct_world("direct-mut-race", "dl-race", "[\"mutate.create\"]", "");
 
@@ -585,13 +601,13 @@ fn direct_mutation_concurrent_commit_race() {
             tool_call(
                 "r1",
                 "mutate.create",
-                r#"{"path":"race-a.txt","content":"a\n","create_parents":false}"#,
+                r#"{"path":"race.txt","content":"a\n","create_parents":false}"#,
             ),
             SseScript::plain("a done"),
             tool_call(
                 "r2",
                 "mutate.create",
-                r#"{"path":"race-b.txt","content":"b\n","create_parents":false}"#,
+                r#"{"path":"race.txt","content":"b\n","create_parents":false}"#,
             ),
             SseScript::plain("b done"),
         ]),
@@ -611,6 +627,35 @@ fn direct_mutation_concurrent_commit_race() {
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
+        let tool_successes = [&a, &b]
+            .into_iter()
+            .filter(|outcome| tool_ok(&outcome.parsed, "mutate.create"))
+            .count();
+        let tool_failures = [&a, &b]
+            .into_iter()
+            .filter(|outcome| tool_failed(&outcome.parsed, "mutate.create"))
+            .count();
+        require(
+            tool_successes == 1 && tool_failures == 1,
+            format!(
+                "same-target create must have exactly one Tool winner and one loser; a={:?} b={:?}",
+                a.type_sequence(),
+                b.type_sequence()
+            ),
+        )?;
+        let loser = if tool_failed(&a.parsed, "mutate.create") {
+            &a
+        } else {
+            &b
+        };
+        require(
+            finished_with_code(&loser.parsed, "mutate.create", "ReplanRequired"),
+            format!(
+                "same-target loser must be ReplanRequired: {:?}",
+                loser.type_sequence()
+            ),
+        )?;
+
         let a_completed = a.has_committed_completed();
         let b_completed = b.has_committed_completed();
         require(
@@ -639,13 +684,16 @@ fn direct_mutation_concurrent_commit_race() {
                 ),
             )?;
         }
-        if tool_ok(&a.parsed, "mutate.create") || tool_ok(&b.parsed, "mutate.create") {
-            require(
-                world.project_dir().join("race-a.txt").is_file()
-                    || world.project_dir().join("race-b.txt").is_file(),
-                "successful mutate.create must leave Local bytes",
-            )?;
-        }
+        let race_path = world.project_dir().join("race.txt");
+        require(
+            race_path.is_file(),
+            "successful mutate.create must leave race.txt",
+        )?;
+        let bytes = fs::read_to_string(&race_path).unwrap_or_default();
+        require(
+            bytes == "a\n" || bytes == "b\n",
+            format!("race winner left unexpected bytes: {bytes:?}"),
+        )?;
         Ok(())
     })();
 

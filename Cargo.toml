@@ -22,6 +22,9 @@ members = [
     "crates/lattice-system-harness",
     "tools/noop",
     "tools/observe-workspace",
+    "tools/mutate-shared",
+    "tools/mutate-create",
+    "tools/mutate-edit",
     "tools/todo-write",
     "xtask",
 ]

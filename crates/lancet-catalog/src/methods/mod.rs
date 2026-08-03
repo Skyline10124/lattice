@@ -9,23 +9,18 @@ pub mod scaffold;
 pub mod workspace;
 
 pub use external::Fetch;
-// `ObserveWorkspace` and its four mode params/result types are gone (#30): the
-// method is an embedded Component Tool and `tools/observe-workspace/manifest.toml`
-// is its sole contract authority.
-pub use workspace::{Create, Edit, EditOperation, EditParams, EditResult};
+// `ObserveWorkspace` (#30), `Create`, and `Edit` (#31) are gone: those methods
+// are embedded Component Tools and their source manifests are the sole contract
+// authorities (`tools/observe-workspace/manifest.toml`,
+// `tools/mutate-create/manifest.toml`, `tools/mutate-edit/manifest.toml`).
 
 #[cfg(feature = "inspect-scaffold")]
 pub use scaffold::{Inspect, Navigate, ScaffoldStubResult};
 
 mod sealed {
-    use super::{
-        external::Fetch,
-        workspace::{Create, Edit},
-    };
+    use super::external::Fetch;
     use crate::method::sealed::Sealed;
 
-    impl Sealed for Create {}
-    impl Sealed for Edit {}
     impl Sealed for Fetch {}
 }
 
@@ -34,10 +29,11 @@ mod tests {
     use super::*;
     use crate::method::CepMethod;
 
-    /// The three native methods this crate still defines. `observe.workspace`
-    /// (#30) and `session.todo_write` (#29) are absent because they are
-    /// Component Tools with no `CepMethod` type left to name.
-    const NATIVE_METHOD_NAMES: [&str; 3] = [Create::NAME, Edit::NAME, Fetch::NAME];
+    /// The one native method this crate still defines. `observe.workspace`
+    /// (#30), `session.todo_write` (#29), and `mutate.create`/`mutate.edit`
+    /// (#31) are absent because they are Component Tools with no `CepMethod`
+    /// type left to name.
+    const NATIVE_METHOD_NAMES: [&str; 1] = [Fetch::NAME];
 
     #[test]
     fn all_catalog_method_names_are_dotted_without_slashes() {

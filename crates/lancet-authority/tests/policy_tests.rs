@@ -51,27 +51,18 @@ fn allows_observation_without_denied_patterns() {
 }
 
 #[test]
-fn allows_mutation_with_no_denied_patterns() {
-    // Blacklist semantics: no denied patterns → all paths allowed
-    let mut config = project_config();
-    config.workspace.denied_write_patterns.clear();
-    let hook = DefaultPolicyHook::new(config);
-    let input = policy_input(
-        "mutate.create",
-        json!({"path": "src/new.rs", "content": "x"}),
-    );
-    assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
-}
-
-#[test]
-fn allows_mutation_not_in_deny_list() {
+fn denies_migrated_mutations_as_unknown_legacy_methods() {
     let hook = DefaultPolicyHook::new(project_config());
-    let input = policy_input(
-        "mutate.create",
-        json!({"path": "src/new.rs", "content": "x"}),
-    );
-    // src/new.rs is not in the deny list (only .git/** is) → allowed
-    assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
+    for method in ["mutate.create", "mutate.edit"] {
+        let input = policy_input(method, json!({"path": "src/new.rs"}));
+        assert!(matches!(
+            hook.decide(&input),
+            PolicyDecision::Denied {
+                reason_code: PolicyReasonCode::NonDeterminable,
+                ..
+            }
+        ));
+    }
 }
 
 #[test]
@@ -132,14 +123,11 @@ fn denies_observation_budget_exhausted() {
 #[test]
 fn decision_is_deterministic() {
     let hook = DefaultPolicyHook::new(project_config());
-    let input = policy_input("mutate.edit", json!({"path": "src/lib.rs", "edits": []}));
+    let input = policy_input("fetch.web", json!({"url": "https://example.com/doc"}));
     let first = hook.decide_with_evidence(&input);
     let second = hook.decide_with_evidence(&input);
     assert_eq!(first.decision, second.decision);
-    assert_eq!(
-        first.evidence.resolved_paths,
-        second.evidence.resolved_paths
-    );
+    assert_eq!(first.evidence.network_host, second.evidence.network_host);
 }
 
 #[test]

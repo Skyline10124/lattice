@@ -110,7 +110,8 @@ the dependents in order:
   definitions.
 - **Provider protocol details** stay in `lattice-llm`; higher layers consume
   typed events and errors.
-- **Native fs/shell/web/mutation/verify/transport** stays in `lancet-native`.
+- **Native web/transport/server lifecycle** stays in `lancet-native`. Workspace
+  observation and mutation Tool Host imports live in `lancet-runtime` (#30/#31).
 - **LANCET runtime composition** stays in `lancet-api`; anything that drives CEP
   (CLI, tests, embedders) spawns through `lancet_api::LancetServer`/`LancetRuntime`.
 - **Public session/turn API** stays in `lattice-api` (profile→policy translation
@@ -234,9 +235,10 @@ step 1 or step 9; the nightly `full-gate` lane runs step 9 and installs the
 pinned `wasm-tools` for it. See [docs/TESTING.md](docs/TESTING.md) for the full
 lane-by-lane breakdown.
 
-CI (`.github/workflows/ci.yml`) runs the fmt/clippy/test gates across
-`ubuntu-latest` and `macos-latest` on pushes to `main` and on pull requests, so
-a clean local run avoids surprises.
+CI (`.github/workflows/ci.yml`) runs the fmt/clippy/test gates on
+`ubuntu-latest` for pushes to `main` and pull requests. LATTICE currently
+supports Linux hosts only; macOS and Windows are not release or CI targets.
+A clean local run avoids surprises.
 
 Open a PR against **`main`**. There is currently no `.github/PULL_REQUEST_TEMPLATE.md`,
 so in your PR description please:

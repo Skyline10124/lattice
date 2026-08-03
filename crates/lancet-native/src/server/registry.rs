@@ -4,7 +4,6 @@
 //! Native handler context and registry type binding.
 
 use crate::server::call_durable_metadata::CallDurableMetadata;
-use crate::workspace::LocalWorkspace;
 use lancet_audit::{CepAuditContext, CepAuditStore, RejectionRecord};
 use lancet_authority::policy::CepTurnContext;
 use lancet_authority::policy::default::DefaultPolicyHook;
@@ -20,9 +19,9 @@ pub type MethodRegistry = lancet_dispatch::MethodRegistry<HandlerContext>;
 
 /// Per-call context passed to native registered handlers.
 ///
-/// Carries the one concrete [`LocalWorkspace`] shared by the server run.
 /// There is no backend identity, Upper identity, or replaceable workspace
-/// implementation on the call context.
+/// implementation on the native call context. Component calls receive their
+/// concrete Local Workspace authority through Tool Host imports instead.
 #[derive(Clone)]
 pub struct HandlerContext {
     pub call_id: u64,
@@ -38,8 +37,6 @@ pub struct HandlerContext {
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     pub audit: Arc<CepAuditStore>,
     pub cep_mode: CepMode,
-    /// The one concrete Local Workspace this server run operates on.
-    pub(crate) workspace: Arc<LocalWorkspace>,
 }
 
 impl std::fmt::Debug for HandlerContext {
@@ -56,7 +53,6 @@ impl std::fmt::Debug for HandlerContext {
             .field("default_policy_hook", &self.default_policy_hook)
             .field("audit_context", &self.audit_context)
             .field("cep_mode", &self.cep_mode)
-            .field("workspace", &"<LocalWorkspace>")
             .finish()
     }
 }
@@ -99,7 +95,6 @@ mod tests {
 
     mod durable_metadata {
         use super::*;
-        use crate::workspace::LocalWorkspace;
         use lancet_audit::{RejectionRecord, RejectionStage};
         use lancet_authority::policy::default::PolicyConfig;
         use serde_json::Value;
@@ -122,7 +117,6 @@ mod tests {
                 audit_context: Arc::new(RwLock::new(CepAuditContext::default())),
                 audit: Arc::new(CepAuditStore::in_memory().expect("audit")),
                 cep_mode: CepMode::Off,
-                workspace: Arc::new(LocalWorkspace::new(root)),
             }
         }
 

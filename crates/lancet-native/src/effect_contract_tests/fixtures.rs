@@ -8,7 +8,6 @@ use super::support::{effect_contract_harness, rt};
 use lancet_authority::effect::ledger::ObservedEffect;
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::CatalogMethod;
-use lancet_protocol::effect_types::ImpactKind;
 
 pub(super) fn test_registry() -> crate::MethodRegistry {
     let mut registry = crate::MethodRegistry::new();
@@ -16,32 +15,11 @@ pub(super) fn test_registry() -> crate::MethodRegistry {
     registry
 }
 
-/// No-op: envelope declaration is no longer needed in direct authority mode.
-pub(super) fn declare_active_envelope(_ctx: &crate::server::registry::HandlerContext, _root: &str) {
-    // Envelope authority removed; this is now a no-op.
-}
-
 // `observation_region` went with the native observation handler (#30). It built
 // the authorized region for `observe.workspace`, which is a Component Tool now:
 // its authority is Cell admission plus the Tool Host's own path checks, not a
 // legacy effect region. No native method declares `WorkspaceObservation` any
 // more, so a region for it would have no caller.
-
-pub(super) fn mutation_region(_root: &str) -> AuthorizedEffectRegion {
-    let mut kinds = std::collections::BTreeSet::new();
-    kinds.insert(ImpactKind::WorkspaceMutation);
-    AuthorizedEffectRegion {
-        kinds,
-        read_paths: Vec::new(),
-        observation_roots: Vec::new(),
-        denied_write_paths: Vec::new(),
-        // Blacklist semantics: empty deny list → all workspace paths allowed
-        denied_write_path_prefixes: Vec::new(),
-        hosts: Vec::new(),
-        session_state_allowed: false,
-        command_allowed: false,
-    }
-}
 
 pub(super) fn setup_tempdir_with_files() -> TempDir {
     let dir = TempDir::new().unwrap();
@@ -100,6 +78,7 @@ where
     outcome.observed_effects
 }
 
+#[allow(dead_code)]
 pub(super) fn dispatch_success_effects<M>(
     params: M::Params,
     ctx: crate::server::registry::HandlerContext,

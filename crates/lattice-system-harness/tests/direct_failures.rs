@@ -600,8 +600,10 @@ fn direct_failure_stale_parent_commit_failed() {
     let (gated_server, gate) =
         wire_gated_fake_llm(&world, "dl-stale", SseScript::plain("stale turn tokens"));
     let running_a = send.spawn("stalled turn A").expect("spawn A");
+    // Cold start loads four embedded Component Tools (#31); 10s was flaky when
+    // this test ran alone without a warm target/debug cache.
     gated_server
-        .wait_for_requests(1, Duration::from_secs(10))
+        .wait_for_requests(1, Duration::from_secs(60))
         .expect("turn A must reach the gated fake LLM");
 
     // (3) Retarget world env to a second non-gated fake LLM and complete turn B

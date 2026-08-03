@@ -19,11 +19,10 @@
 
 use lancet_api::{LancetRuntime, LancetRuntimeConfig};
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
-use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::methods::workspace::{Create, CreateParams, Edit, EditOperation, EditParams};
 use lancet_cep::ToolExposure;
 use lancet_protocol::Retriability;
+use lancet_protocol::evidence::{MutationInstallation, MutationPrecondition, ObservedTarget};
 use tempfile::TempDir;
 
 /// The migrated Component Tool's method name (#29). Not a catalog constant: its
@@ -37,10 +36,12 @@ const OBSERVE_WORKSPACE: &str = "observe.workspace";
 
 /// The two embedded Component Tools of the default distribution, in the order
 /// their source directories sort.
-const COMPONENT_TOOLS: [&str; 2] = [OBSERVE_WORKSPACE, TODO_WRITE];
+const MUTATE_CREATE: &str = "mutate.create";
+const MUTATE_EDIT: &str = "mutate.edit";
+const COMPONENT_TOOLS: [&str; 4] = [OBSERVE_WORKSPACE, MUTATE_CREATE, MUTATE_EDIT, TODO_WRITE];
 
 /// Build a production runtime rooted at `root` with all five shipped Tools
-/// enabled — the three native catalog methods plus the two embedded Components —
+/// enabled — the one native catalog method plus four embedded Components —
 /// and an empty write-deny list.
 fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
     let mut policy = PolicyConfig::defaults_for_project_root(root.to_path_buf());
@@ -96,13 +97,13 @@ async fn direct_local_runtime_exposes_closed_five_method_catalog() {
     got.sort();
     assert_eq!(got, expected, "Agent-visible catalog must be exactly five");
 
-    // Three of the five come from the native catalog; the other two are the
+    // One of the five comes from the native catalog; the other four are the
     // embedded Components, projected from their generated descriptors. The split
-    // moved with #30 — the Agent-visible five did not, which is the point: a
+    // moved with #31 — the Agent-visible five did not, which is the point: a
     // migration is invisible from the model's side of the boundary.
     let native: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     let exposure = ToolExposure::from_catalog_enabled(&native).expect("exposure");
-    assert_eq!(exposure.definitions().len(), 3);
+    assert_eq!(exposure.definitions().len(), 1);
     for migrated in COMPONENT_TOOLS {
         assert!(
             !native.contains(&migrated.to_string()),
@@ -268,11 +269,10 @@ async fn policy_deny_blocks_create_on_direct_local() {
     let client = runtime.client();
 
     let err = client
-        .call::<Create>(CreateParams {
-            path: "secret/leak.txt".into(),
-            content: "x".into(),
-            create_parents: true,
-        })
+        .call_raw(
+            "mutate.create",
+            serde_json::json!({"path": "secret/leak.txt", "content": "x", "create_parents": true}),
+        )
         .await
         .expect_err("denied write must fail");
     // The denied-write pattern is enforced by the guard / effect region
@@ -300,11 +300,10 @@ async fn create_rejects_existing_target_with_replan_required() {
     let client = runtime.client();
 
     let err = client
-        .call::<Create>(CreateParams {
-            path: "exists.txt".into(),
-            content: "second".into(),
-            create_parents: false,
-        })
+        .call_raw(
+            "mutate.create",
+            serde_json::json!({"path": "exists.txt", "content": "second", "create_parents": false}),
+        )
         .await
         .expect_err("create on existing target must fail");
     // ADR 0003 decision 7: a stale create precondition (target exists) maps
@@ -337,11 +336,10 @@ async fn create_install_is_no_replace_not_overwrite() {
 
     // Create succeeds on an absent target.
     client
-        .call::<Create>(CreateParams {
-            path: "race.txt".into(),
-            content: "agent\n".into(),
-            create_parents: false,
-        })
+        .call_raw(
+            "mutate.create",
+            serde_json::json!({"path": "race.txt", "content": "agent\n", "create_parents": false}),
+        )
         .await
         .expect("first create on absent target");
     assert_eq!(
@@ -352,11 +350,7 @@ async fn create_install_is_no_replace_not_overwrite() {
     // A second create on the now-existing target must fail with
     // ReplanRequired (no-replace install), leaving the first content intact.
     let err = client
-        .call::<Create>(CreateParams {
-            path: "race.txt".into(),
-            content: "attacker\n".into(),
-            create_parents: false,
-        })
+        .call_raw("mutate.create", serde_json::json!({"path": "race.txt", "content": "attacker\n", "create_parents": false}))
         .await
         .expect_err("second create must not overwrite");
     assert_eq!(err.retriability, Retriability::RequiresReplan);
@@ -380,15 +374,7 @@ async fn edit_stale_hash_leaves_target_unchanged_and_replans() {
     // A deliberately wrong hash (the Local Revision has drifted).
     let stale_hash = "blake3:0000000000000000000000000000000000000000000000000000000000000000";
     let err = client
-        .call::<Edit>(EditParams {
-            path: "edit.txt".into(),
-            expected_hash: stale_hash.into(),
-            edits: vec![EditOperation::ReplaceText {
-                old: "line one".into(),
-                new: "line ONE".into(),
-                occurrence: None,
-            }],
-        })
+        .call_raw("mutate.edit", serde_json::json!({"path": "edit.txt", "expected_hash": stale_hash, "edits": [{"op": "replace_text", "old": "line one", "new": "line ONE"}]}))
         .await
         .expect_err("stale hash must replan");
     assert_eq!(
@@ -407,6 +393,46 @@ async fn edit_stale_hash_leaves_target_unchanged_and_replans() {
     assert_eq!(on_disk, body.as_bytes());
 }
 
+/// Guest-owned semantic diagnostics re-enter the host so their pre-migration
+/// structured CEP classes survive the Component boundary.
+#[tokio::test]
+async fn edit_semantic_diagnostics_preserve_structured_codes() {
+    let dir = TempDir::new().unwrap();
+    let body = "same\nsame\n";
+    std::fs::write(dir.path().join("diag.txt"), body).unwrap();
+    let runtime = direct_local_runtime(dir.path());
+    let client = runtime.client();
+    let expected = format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex());
+
+    let ambiguous = client
+        .call_raw("mutate.edit", serde_json::json!({"path": "diag.txt", "expected_hash": expected, "edits": [{"op": "replace_text", "old": "same", "new": "other"}]}))
+        .await
+        .expect_err("ambiguous edit must replan");
+    assert_eq!(
+        ambiguous.code,
+        lancet_protocol::CepErrorCode::ReplanRequired
+    );
+
+    let no_op = client
+        .call_raw("mutate.edit", serde_json::json!({"path": "diag.txt", "expected_hash": expected, "edits": [{"op": "replace_text", "old": "same", "new": "same", "occurrence": 1}]}))
+        .await
+        .expect_err("no-op edit must remain a validation error");
+    assert_eq!(no_op.code, lancet_protocol::CepErrorCode::SchemaMismatch);
+
+    let oversized_occurrence = client
+        .call_raw("mutate.edit", serde_json::json!({"path": "diag.txt", "expected_hash": expected, "edits": [{"op": "replace_text", "old": "same", "new": "other", "occurrence": 4294967297_u64}]}))
+        .await
+        .expect_err("occurrence outside the wasm32 index range must fail schema validation");
+    assert_eq!(
+        oversized_occurrence.code,
+        lancet_protocol::CepErrorCode::SchemaMismatch
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("diag.txt")).unwrap(),
+        body
+    );
+}
+
 /// mutate.edit with the correct expected_hash atomically installs the result
 /// on Local.
 #[tokio::test]
@@ -419,18 +445,16 @@ async fn edit_correct_hash_atomically_installs() {
 
     let expected = format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex());
     let result = client
-        .call::<Edit>(EditParams {
-            path: "ok.txt".into(),
-            expected_hash: expected,
-            edits: vec![EditOperation::ReplaceText {
-                old: "hello".into(),
-                new: "goodbye".into(),
-                occurrence: None,
-            }],
-        })
+        .call_raw("mutate.edit", serde_json::json!({"path": "ok.txt", "expected_hash": expected, "edits": [{"op": "replace_text", "old": "hello", "new": "goodbye"}]}))
         .await
         .expect("edit installs");
-    assert_eq!(result.changed_files.len(), 1);
+    assert_eq!(
+        result["changed_files"]
+            .as_array()
+            .expect("changed_files")
+            .len(),
+        1
+    );
 
     let on_disk = std::fs::read(dir.path().join("ok.txt")).unwrap();
     assert_eq!(on_disk, b"goodbye world\n");
@@ -447,11 +471,7 @@ async fn successful_mutation_survives_later_failure() {
 
     // 1. Successful create.
     client
-        .call::<Create>(CreateParams {
-            path: "survives.txt".into(),
-            content: "persisted\n".into(),
-            create_parents: false,
-        })
+        .call_raw("mutate.create", serde_json::json!({"path": "survives.txt", "content": "persisted\n", "create_parents": false}))
         .await
         .expect("create");
     assert!(dir.path().join("survives.txt").exists());
@@ -460,15 +480,7 @@ async fn successful_mutation_survives_later_failure() {
     std::fs::write(dir.path().join("other.txt"), "x\n").unwrap();
     let stale = "blake3:0000000000000000000000000000000000000000000000000000000000000000";
     let _ = client
-        .call::<Edit>(EditParams {
-            path: "other.txt".into(),
-            expected_hash: stale.into(),
-            edits: vec![EditOperation::ReplaceText {
-                old: "x".into(),
-                new: "y".into(),
-                occurrence: None,
-            }],
-        })
+        .call_raw("mutate.edit", serde_json::json!({"path": "other.txt", "expected_hash": stale, "edits": [{"op": "replace_text", "old": "x", "new": "y"}]}))
         .await;
 
     // The earlier successful create is still on disk — Direct-Local does not
@@ -477,17 +489,85 @@ async fn successful_mutation_survives_later_failure() {
     assert_eq!(on_disk, b"persisted\n");
 }
 
+#[tokio::test]
+async fn cancelled_component_mutation_before_entry_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let runtime = direct_local_runtime(dir.path());
+    let client = runtime.client();
+    let (call, control) = client.start_call_raw(
+        MUTATE_CREATE.to_string(),
+        serde_json::json!({
+            "path": "cancelled.txt",
+            "content": "must-not-land\n",
+            "create_parents": false
+        }),
+    );
+    control.cancel();
+
+    let err = call
+        .await
+        .expect_err("a pre-cancelled mutation must not enter the Component");
+    assert_eq!(err.code, lancet_protocol::CepErrorCode::CallCancelled);
+    assert!(!dir.path().join("cancelled.txt").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn component_mutation_install_failure_leaves_no_partial_target() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Root and some unusual filesystems bypass the permission failure this
+    // product-level test needs. Detect that directly instead of assuming an
+    // effective uid, then leave the deterministic fault to Host unit tests.
+    let probe = locked.join(".permission-probe");
+    if std::fs::write(&probe, b"").is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_file(probe);
+        eprintln!("skipping read-only install fault: this process can write mode 0555 dirs");
+        return;
+    }
+
+    let runtime = direct_local_runtime(dir.path());
+    let err = runtime
+        .client()
+        .call_raw(
+            MUTATE_CREATE,
+            serde_json::json!({
+                "path": "locked/partial.txt",
+                "content": "must-not-land\n",
+                "create_parents": false
+            }),
+        )
+        .await
+        .expect_err("read-only parent must fail the Component install");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(err.code, lancet_protocol::CepErrorCode::ExecutionFailed);
+    assert!(!locked.join("partial.txt").exists());
+    assert!(
+        std::fs::read_dir(&locked).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".lattice-tmp-")),
+        "failed Component install must leave neither target nor temp residue"
+    );
+}
+
 /// Audit records method-local evidence (guarded path + Local Revision) and
 /// carries no routing identity: no `execution_backend`, no
 /// `upper_workspace_id`, no adapter-preflight or generic routing invocation
 /// flags (#60 (Codeberg #38)).
 ///
-/// Both vocabularies get a leg, because #30 split where "method-local evidence"
-/// is written. A native mutation still records the guarded path and the Local
-/// Revision inline in `metadata_json`; a Component records its concrete path
-/// target in the evidence table and leaves a pointer in the row. The
-/// no-routing-identity assertion is the same for both — that is the #60 subject,
-/// and it must not depend on which vocabulary authorized the call.
+/// Both migrated Component paths get a leg: mutation and observation record
+/// their concrete targets in the versioned evidence tables and leave only an
+/// evidence pointer in the audit row. The no-routing-identity assertion is the
+/// same for both — that is the #60 subject.
 #[tokio::test]
 async fn audit_records_method_local_evidence_without_routing_metadata() {
     let dir = TempDir::new().unwrap();
@@ -496,13 +576,9 @@ async fn audit_records_method_local_evidence_without_routing_metadata() {
     let client = runtime.client();
 
     client
-        .call::<Create>(CreateParams {
-            path: "b.txt".into(),
-            content: "audit-body\n".into(),
-            create_parents: false,
-        })
+        .call_raw("mutate.create", serde_json::json!({"path": "b.txt", "content": "audit-body\n", "create_parents": false}))
         .await
-        .expect("native create");
+        .expect("component create");
     client
         .call_raw(
             OBSERVE_WORKSPACE,
@@ -518,26 +594,56 @@ async fn audit_records_method_local_evidence_without_routing_metadata() {
         .expect("rows");
     assert_eq!(rows.len(), 2, "audit must record both calls: {rows:?}");
 
-    // ── The native leg: method-local evidence inline in the row ──────────
+    // ── The mutate.create Component leg: Cell evidence, not native metadata ──
     let create_row = rows
         .iter()
-        .find(|row| row.method == Create::NAME)
-        .expect("the native call is audited");
+        .find(|row| row.method == "mutate.create")
+        .expect("the create call is audited");
     let create_meta = create_row.metadata_json.as_deref().unwrap_or("{}");
-    // Method-local evidence: the request target, the guarded normalized
-    // path, and the content hash (Local Revision) of the written file.
     assert!(
-        create_meta.contains("b.txt"),
-        "audit metadata must record the real Local request path: {create_meta}"
+        create_meta.contains("evidence_id") || create_meta.contains("component_cells"),
+        "Component mutate.create must point at Cell evidence: {create_meta}"
     );
     assert!(
-        create_meta.contains("\"guarded_path\":\"b.txt\""),
-        "audit metadata must record the guarded normalized path: {create_meta}"
+        create_meta.contains("mutate:write:workspace")
+            || create_meta.contains("alloc:write:workspace"),
+        "Component mutate.create must record mutation/result cells: {create_meta}"
     );
     assert!(
-        create_meta.contains("content_hash") && create_meta.contains("blake3:"),
-        "audit metadata must record the Local Revision (content_hash): {create_meta}"
+        dir.path().join("b.txt").is_file(),
+        "mutate.create Component must have installed the file on disk"
     );
+    let create_evidence_id = serde_json::from_str::<serde_json::Value>(create_meta)
+        .expect("create metadata json")["evidence_id"]
+        .as_i64()
+        .expect("the create Component row points at its evidence");
+    let create_evidence = runtime
+        .audit()
+        .call_evidence(lancet_native::EvidenceId(create_evidence_id))
+        .expect("create evidence read")
+        .expect("create evidence row exists");
+    assert_eq!(create_evidence.tool, MUTATE_CREATE);
+    let create_effect = create_evidence
+        .effects
+        .effects
+        .iter()
+        .find(|effect| matches!(&effect.target, ObservedTarget::Path { path } if path == "b.txt"))
+        .expect("create evidence names the resolved target");
+    assert_eq!(create_effect.context_measure, None);
+    let mutation = create_effect
+        .mutation
+        .as_ref()
+        .expect("create effect carries MutationEvidence");
+    assert_eq!(mutation.before_revision, None);
+    assert!(
+        mutation
+            .after_revision
+            .as_deref()
+            .is_some_and(|revision| revision.starts_with("blake3:")),
+        "create after revision must be host-computed: {mutation:?}"
+    );
+    assert_eq!(mutation.precondition, MutationPrecondition::Satisfied);
+    assert_eq!(mutation.installation, MutationInstallation::Installed);
 
     // ── The Component leg: the same fact, one indirection away ───────────
     let observe_row = rows
@@ -565,7 +671,7 @@ async fn audit_records_method_local_evidence_without_routing_metadata() {
     assert!(
         evidence.effects.effects.iter().any(|effect| matches!(
             &effect.target,
-            lancet_protocol::evidence::ObservedTarget::Path { path } if path == "a.txt"
+            ObservedTarget::Path { path } if path == "a.txt"
         )),
         "the observation's evidence must name the resolved Local path: {:?}",
         evidence.effects.effects

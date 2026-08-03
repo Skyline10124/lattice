@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::methods::workspace::{Create, CreateParams, CreateResult};
+use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::test_method::{TestEcho, TestEchoParams, TestEchoResult};
 use lancet_native::{CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::effect_types::ImpactKind;
@@ -118,19 +118,19 @@ async fn cep_executor_adapter_parse_error_maps_to_32700() {
 /// A single-name enabled set lets that name through the adapter and the
 /// arguments reach the handler.
 ///
-/// Driven through `mutate.create` since #30: this fixture needs a *registrable*
-/// handler seam, and the method that used to play the part (`observe.workspace`)
-/// is a Component Tool now, with no `register_method` seam at all. The
-/// Component equivalent is `component_adapter::cep_executor_adapter_executes_component_tool`.
+/// Driven through `fetch.web`: this fixture needs a *registrable* handler seam.
+/// Component Tools have no `register_method` seam; their adapter coverage lives
+/// in `component_adapter::cep_executor_adapter_executes_component_tool`.
 #[tokio::test]
 async fn cep_executor_adapter_allows_enabled_native_method() {
     let mut registry = MethodRegistry::new();
     registry
-        .register_method::<Create, _, _>(|params: CreateParams, _ctx| async move {
-            Ok(CreateResult {
-                path: params.path,
-                bytes_written: params.content.len() as u64,
-                created_dirs: Vec::new(),
+        .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
+            Ok(FetchResult {
+                status: 200,
+                body: "ok-from-handler".into(),
+                content_type: None,
+                truncated: None,
             })
         })
         .unwrap();
@@ -141,7 +141,7 @@ async fn cep_executor_adapter_allows_enabled_native_method() {
             .await;
     });
     let definitions = lancet_cep::project_tool_definitions(catalog());
-    let adapter = CepExecutorAdapter::new(client, &definitions, [Create::NAME.to_string()]);
+    let adapter = CepExecutorAdapter::new(client, &definitions, ["fetch.web".to_string()]);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
 
@@ -149,14 +149,16 @@ async fn cep_executor_adapter_allows_enabled_native_method() {
         .execute(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
-                name: Create::NAME.to_string(),
-                arguments: r#"{"path":"src/lib.rs","content":"x","create_parents":false}"#
-                    .to_string(),
+                name: "fetch.web".to_string(),
+                arguments: r#"{"url":"https://example.com/"}"#.to_string(),
             },
         })
         .await
         .expect("enabled tool should execute");
-    assert!(result.contains("src/lib.rs"));
+    assert!(
+        result.contains("ok-from-handler") || result.contains("status"),
+        "handler result must surface through the adapter: {result}"
+    );
 }
 
 #[tokio::test]
@@ -179,20 +181,19 @@ async fn cep_executor_adapter_unknown_method_maps_to_32601() {
 
 /// Params the handler's type cannot accept fail as invalid_params (-32602).
 ///
-/// `mutate.create` since #30, for the same reason as
-/// `cep_executor_adapter_allows_enabled_native_method`: this asserts the
-/// *native registry's* server-side validation, which needs a registered
-/// handler. `content` is the omitted required field (`create_parents` has a
-/// serde default, so leaving that out would deserialize fine).
+/// Driven through `fetch.web`: this asserts the *native registry's* server-side
+/// validation, which needs a registered handler. `url` is the omitted required
+/// field.
 #[tokio::test]
 async fn cep_executor_adapter_invalid_params_maps_to_32602() {
     let mut registry = MethodRegistry::new();
     registry
-        .register_method::<Create, _, _>(|params: CreateParams, _ctx| async move {
-            Ok(CreateResult {
-                path: params.path,
-                bytes_written: params.content.len() as u64,
-                created_dirs: Vec::new(),
+        .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
+            Ok(FetchResult {
+                status: 200,
+                body: "ok".into(),
+                content_type: None,
+                truncated: None,
             })
         })
         .unwrap();
@@ -202,8 +203,8 @@ async fn cep_executor_adapter_invalid_params_maps_to_32602() {
         .execute(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
-                name: Create::NAME.to_string(),
-                arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+                name: "fetch.web".to_string(),
+                arguments: r#"{"headers":{}}"#.to_string(),
             },
         })
         .await
@@ -314,7 +315,7 @@ cep_family_test!(
     cep_executor_adapter_effect_family_preserves_payload,
     CepErrorCode::EffectViolation,
     CepErrorData::Effect(Box::new(EffectErrorData {
-        method: Create::NAME.into(),
+        method: "mutate.create".into(),
         declared_effect: vec![ImpactKind::WorkspaceMutation],
         authorized_effect: vec![ImpactKind::WorkspaceMutation],
         observed_effects: vec![
@@ -384,6 +385,8 @@ mod cep_native_registry {
     async fn cep_native_registry_production_runtime_uses_native_audit_stage() {
         use lattice_agent::LlmClient;
         use lattice_agent::testing::FakeStreamingLlmClient;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         use crate::turn::test_support::build_test_production_deps;
 
@@ -398,33 +401,57 @@ mod cep_native_registry {
                 .build(),
         );
 
+        // Localhost echo — avoids depending on public HTTPS for an audit-stage pin.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let body = b"native-audit";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+            }
+        });
+        let url = format!("http://127.0.0.1:{}/", addr.port());
+
         // A native method: this test asserts the *native* audit stage, so a
         // Component Tool would be labeled `cell_component` and prove the
-        // opposite. It used to drive `observe.workspace`, which #30 migrated —
-        // driving it here would now assert the Component stage under a name that
-        // promises the native one. `mutate.create` is native and still is.
+        // opposite. It used to drive `observe.workspace` / `mutate.create`;
+        // both migrated to Components (#30/#31). `fetch.web` remains native.
+        let lancet = lattice_profile::LancetSection {
+            network: Some(lattice_profile::LancetNetworkSection {
+                allow_localhost: Some(true),
+                allowed_hosts: vec!["127.0.0.1".into(), "localhost".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         let deps = build_test_production_deps(
             dir.path().to_str().unwrap(),
-            &[Create::NAME.to_string()],
+            &["fetch.web".to_string()],
             llm,
             true,
-            None,
+            Some(&lancet),
         )
         .await;
 
         deps.cep_client
-            .call::<Create>(CreateParams {
-                path: "hello.txt".into(),
-                content: "native audit".into(),
-                create_parents: false,
+            .call::<Fetch>(FetchParams {
+                url,
+                headers: Default::default(),
             })
             .await
-            .expect("native mutate.create");
+            .expect("native fetch.web");
 
         let row = deps.audit.row_by_audit_id(1).unwrap();
         assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
         assert!(row.policy_enforced);
-        assert_eq!(row.impact_kind, "workspace_mutation");
+        assert_eq!(row.impact_kind, "external_observation");
         assert_eq!(row.model_id.as_deref(), Some("test-model"));
         assert_eq!(row.runtime_version.as_deref(), Some("0.0.0-test"));
     }

@@ -21,15 +21,15 @@ use lancet_runtime::{
 };
 use tokio::sync::{mpsc, watch};
 
-/// The default distribution's built-in Tools, as this slice leaves them. #31/#32
-/// add the two mutation methods and `fetch.web`; until then this list is the
-/// closed catalog a built runtime carries, and pinning it here makes an
-/// accidental addition or removal a test failure rather than a silent change of
-/// the shipped catalog.
-///
-/// Ordered by manifest path, which is how `tool-codegen` discovers them:
-/// `tools/observe-workspace` sorts before `tools/todo-write`.
-const EXPECTED_BUILTIN_TOOLS: [&str; 2] = ["observe.workspace", "session.todo_write"];
+/// The default distribution's built-in Tools after #31. Ordered by manifest
+/// path discovery order in `tool-codegen`: mutate-create, mutate-edit,
+/// observe-workspace, todo-write.
+const EXPECTED_BUILTIN_TOOLS: [&str; 4] = [
+    "mutate.create",
+    "mutate.edit",
+    "observe.workspace",
+    "session.todo_write",
+];
 
 fn policy() -> CapabilityAdmissionPolicy {
     CapabilityAdmissionPolicy {
@@ -64,6 +64,7 @@ fn call_ctx(
         // These fixtures exercise control-only Tools; a call with no workspace
         // authority refuses every observation operation (#30).
         workspace: None,
+        mutate: None,
     };
     (ctx, evidence, cancel_tx)
 }

@@ -22,8 +22,8 @@ use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, policy::CepMode};
 use lancet_runtime::{
     AdmissionDenial, BudgetCharge, BudgetRefusal, CellEvidenceLedger, ComponentCallContext,
-    ComponentRuntime, WorkspaceHistory, WorkspaceObservationHost, admit_tool,
-    validate_policy_against_catalog,
+    ComponentRuntime, WorkspaceHistory, WorkspaceMutationHost, WorkspaceObservationHost,
+    admit_tool, validate_policy_against_catalog,
 };
 use serde_json::{Value, json};
 use std::future::Future;
@@ -216,6 +216,48 @@ fn workspace_observation_host(
     )))
 }
 
+/// Host authority for `workspace-mutate`, granted only to a Tool that declares
+/// a workspace-channel scope *and* whose name is a mutation method the
+/// default policy knows how to build a write-deny region for.
+fn workspace_mutation_host(
+    descriptor: &lancet_protocol::cell::ToolDescriptor,
+    method: &str,
+    workspace: &Arc<LocalWorkspace>,
+    cep_context: &Arc<CepTurnContext>,
+    default_policy_hook: Option<&DefaultPolicyHook>,
+    history: Arc<WorkspaceHistory>,
+) -> Option<Arc<WorkspaceMutationHost>> {
+    use lancet_protocol::cell::ChannelKind;
+
+    if !matches!(method, "mutate.create" | "mutate.edit") {
+        return None;
+    }
+
+    let workspace_scopes: Vec<&lancet_protocol::cell::ScopeDecl> = descriptor
+        .scopes
+        .iter()
+        .filter(|scope| scope.channel == ChannelKind::Workspace)
+        .collect();
+    let [scope] = workspace_scopes.as_slice() else {
+        return None;
+    };
+
+    let region = default_policy_hook
+        .map(|hook| {
+            hook.config()
+                .workspace
+                .authorized_region_for(method, &cep_context.policy)
+        })
+        .unwrap_or_else(lancet_authority::effect::region::AuthorizedEffectRegion::empty);
+
+    Some(Arc::new(WorkspaceMutationHost::new(
+        Arc::clone(workspace),
+        region,
+        Some(history),
+        scope.name.clone(),
+    )))
+}
+
 /// The method names that resolve to both vocabularies.
 ///
 /// Split out as a pure function because the collision is not constructible
@@ -320,9 +362,9 @@ async fn handle_request(
         default_policy_hook,
         cep_mode,
         components,
-        // Already attached to `workspace` by `run_native`; the handler path
-        // reaches the history through the Local Workspace, never directly.
-        workspace_history: _,
+        // Attached to `workspace` by `run_native`; also passed into the
+        // `workspace-mutate` host so create/edit can append private history.
+        workspace_history,
     } = config;
 
     let id = call.id();
@@ -440,6 +482,14 @@ async fn handle_request(
                         &cep_context,
                         default_policy_hook.as_deref(),
                     );
+                    let mutate_host = workspace_mutation_host(
+                        &admitted.descriptor,
+                        &method,
+                        &workspace,
+                        &cep_context,
+                        default_policy_hook.as_deref(),
+                        Arc::clone(&workspace_history),
+                    );
                     let comp_ctx = ComponentCallContext {
                         call_id: id,
                         turn_id: turn_id.clone(),
@@ -448,6 +498,7 @@ async fn handle_request(
                         evidence: component_evidence.clone(),
                         admitted: Arc::new(admitted),
                         workspace: workspace_host,
+                        mutate: mutate_host,
                     };
                     rt.call(&method, params, comp_ctx).await
                 }
@@ -472,7 +523,6 @@ async fn handle_request(
                 audit_context: Arc::clone(&audit_context),
                 audit: Arc::clone(&audit),
                 cep_mode: cep_mode.clone(),
-                workspace,
             };
             registry.dispatch(&method, params, ctx).await
         }

@@ -9,7 +9,6 @@ use std::sync::Arc;
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
-use lancet_catalog::methods::workspace::Create;
 use lancet_native::{
     CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE,
     ServerRunConfig, register_production_method_registry,
@@ -76,7 +75,9 @@ fn assert_dispatchable_method(method: &str) {
 /// The embedded Component Tools of the default distribution. `observe.workspace`
 /// joined `session.todo_write` here in #30, which is why the native catalog is
 /// down to three methods while the Agent-visible surface is still five.
-const COMPONENT_TOOLS: [&str; 2] = [OBSERVE_WORKSPACE, TODO_WRITE];
+const MUTATE_CREATE: &str = "mutate.create";
+const MUTATE_EDIT: &str = "mutate.edit";
+const COMPONENT_TOOLS: [&str; 4] = [OBSERVE_WORKSPACE, MUTATE_CREATE, MUTATE_EDIT, TODO_WRITE];
 
 /// The migrated Tool's method name. Not a catalog constant any more: its name
 /// lives in `tools/todo-write/manifest.toml`.
@@ -116,7 +117,7 @@ async fn cep_round_trip_impact_matrix() {
 
     let (adapter, _audit) = production_adapter(
         root.to_str().unwrap(),
-        &[OBSERVE_WORKSPACE, Create::NAME, TODO_WRITE],
+        &[OBSERVE_WORKSPACE, "mutate.create", TODO_WRITE],
         false,
     )
     .await;
@@ -144,7 +145,7 @@ async fn cep_round_trip_impact_matrix() {
         },
         ImpactRow {
             impact: ImpactKind::WorkspaceMutation,
-            method: Create::NAME,
+            method: "mutate.create",
             arguments: serde_json::json!({
                 "path": "created.txt",
                 "content": "written via adapter"

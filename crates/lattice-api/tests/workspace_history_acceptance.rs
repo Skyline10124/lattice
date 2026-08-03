@@ -26,9 +26,7 @@ use lancet_api::{
     AuditBacking, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory, WorkspaceHistoryBacking,
 };
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
-use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::methods::workspace::{Create, CreateParams, Edit, EditOperation, EditParams};
 use lancet_protocol::CepErrorCode;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
@@ -41,7 +39,12 @@ use tempfile::TempDir;
 /// catalog constants: their descriptor authority is their source manifest
 /// (`tools/*/manifest.toml`), and #29/#30 deleted the `lancet-catalog` types
 /// that used to name them.
-const COMPONENT_TOOLS: [&str; 2] = ["observe.workspace", "session.todo_write"];
+const COMPONENT_TOOLS: [&str; 4] = [
+    "observe.workspace",
+    "mutate.create",
+    "mutate.edit",
+    "session.todo_write",
+];
 
 // ─── Runtime-layer harness ──────────────────────────────────────────────────
 
@@ -128,11 +131,10 @@ async fn create_file(
 ) -> Result<(), CepErrorCode> {
     runtime
         .client()
-        .call::<Create>(CreateParams {
-            path: path.into(),
-            content: content.into(),
-            create_parents: true,
-        })
+        .call_raw(
+            "mutate.create",
+            serde_json::json!({"path": path, "content": content, "create_parents": true}),
+        )
         .await
         .map(|_| ())
         .map_err(|err| err.code)
@@ -147,15 +149,7 @@ async fn replace_text(
 ) -> Result<(), CepErrorCode> {
     runtime
         .client()
-        .call::<Edit>(EditParams {
-            path: path.into(),
-            expected_hash: expected_hash.into(),
-            edits: vec![EditOperation::ReplaceText {
-                old: old.into(),
-                new: new.into(),
-                occurrence: None,
-            }],
-        })
+        .call_raw("mutate.edit", serde_json::json!({"path": path, "expected_hash": expected_hash, "edits": [{"op": "replace_text", "old": old, "new": new}]}))
         .await
         .map(|_| ())
         .map_err(|err| err.code)
@@ -343,12 +337,18 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
     };
     let denied_runtime = LancetRuntime::build(LancetRuntimeConfig {
         project_root: denied_root.path().to_path_buf(),
-        enabled_tools: catalog().iter().map(|d| d.name.to_string()).collect(),
+        enabled_tools: catalog()
+            .iter()
+            .map(|d| d.name.to_string())
+            .chain(COMPONENT_TOOLS.iter().map(|n| (*n).to_string()))
+            .collect(),
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: AuditBacking::InMemory,
+        // Admit mutate.create so Cell admission is not the denier — the write
+        // Guard is (#31).
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
-            enabled_tools: std::iter::once("session.todo_write".to_string()).collect(),
+            enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
             ..Default::default()
         },
         workspace_history: history_backing(denied_state.path()),
@@ -359,21 +359,20 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
     let denial = create_file(&denied_runtime, "README.md", "nope\n")
         .await
         .expect_err("guard must deny");
-    assert_eq!(denial, CepErrorCode::GuardDenied);
+    // The host refusal outranks the guest's string retelling, so the Guard
+    // denial keeps its structured Cell-era code through Component dispatch.
+    assert_eq!(denial, CepErrorCode::EffectViolation);
     assert_eq!(
         denied_runtime.workspace_history().current().unwrap(),
         None,
         "a policy denial records nothing"
     );
 
-    // 4. Effect-kind denial. This test builds a `PolicyConfig`, so the denial
-    //    it observes is the `DefaultPolicyHook` impact-kind gate, which also
-    //    runs before the handler. The transport's declared-effect-kind gate
-    //    (#71) is the other pre-dispatch layer; which of the two fires first is
-    //    not this test's subject — it only asserts that a denied mutation
-    //    installs nothing and records nothing. Layer attribution is covered by
-    //    `lancet_native`'s `denied_effect_kind_blocks_*` tests, which assert
-    //    the `declared effect denied` message.
+    // 4. Capability denial for the mutate cell. Legacy ImpactKind /
+    //    declared-effect-kind gates (#71) apply to native catalog methods;
+    //    Component mutate.create is authorized by Cell admission (#31), so the
+    //    pre-install refusal here is `denied_capabilities`. Subject: a denied
+    //    mutation installs nothing and records nothing.
     let effect_root = TempDir::new().unwrap();
     let effect_state = TempDir::new().unwrap();
     let mut policy = PolicyConfig::defaults_for_project_root(effect_root.path().to_path_buf());
@@ -381,18 +380,20 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         denied_write_patterns: Vec::new(),
         ..Default::default()
     };
-    policy
-        .denied_effect_kinds
-        .insert(lancet_protocol::effect_types::ImpactKind::WorkspaceMutation);
     let effect_runtime = LancetRuntime::build(LancetRuntimeConfig {
         project_root: effect_root.path().to_path_buf(),
-        enabled_tools: catalog().iter().map(|d| d.name.to_string()).collect(),
+        enabled_tools: catalog()
+            .iter()
+            .map(|d| d.name.to_string())
+            .chain(COMPONENT_TOOLS.iter().map(|n| (*n).to_string()))
+            .collect(),
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: AuditBacking::InMemory,
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
-            enabled_tools: std::iter::once("session.todo_write".to_string()).collect(),
-            ..Default::default()
+            enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
+            denied_capabilities: std::iter::once("workspace.mutation".to_string()).collect(),
+            max_boundary: lancet_protocol::cell::Trust::In,
         },
         workspace_history: history_backing(effect_state.path()),
         model_id: "test".into(),
@@ -696,7 +697,7 @@ async fn history_adds_no_agent_visible_method() {
 #[tokio::test]
 async fn every_mutating_catalog_method_records() {
     let env = HistoryRuntime::build();
-    let mutating: Vec<&str> = vec![Create::NAME, Edit::NAME];
+    let mutating: Vec<&str> = vec!["mutate.create", "mutate.edit"];
 
     let mut seen = Vec::new();
     create_file(&env.runtime, "m.txt", "v1\n").await.unwrap();
