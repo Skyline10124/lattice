@@ -48,13 +48,13 @@ pub struct AuditQueryArgs {
     pub json: bool,
 }
 
-/// Replay a single turn's provenance from audit rows.
+/// Replay a single turn's finalized audit calls.
 #[derive(Args, Debug, Clone)]
 pub struct AuditReplayArgs {
     /// Session id scope (must match rows in the audit store).
     #[arg(long)]
     pub session: Option<String>,
-    /// Turn id to reconstruct (required).
+    /// Turn id to read (required).
     #[arg(long)]
     pub turn: String,
     /// Emit JSON instead of a human-readable summary.
@@ -66,7 +66,7 @@ pub struct AuditReplayArgs {
 pub enum AuditAction {
     /// Query or tail audit rows (default when no subcommand is given).
     Query(AuditQueryArgs),
-    /// Reconstruct a turn's provenance trace and in-toto statement from audit rows.
+    /// Read a turn's finalized audit calls.
     Replay(AuditReplayArgs),
 }
 
@@ -143,23 +143,17 @@ fn render_query_output(output: &lancet_api::AuditQueryOutput, json: bool) -> Res
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "session_id": &output.session_id,
                 "row_count": output.row_count,
-                "fragment": &output.fragment,
+                "rows": &output.rows,
             }))?
         );
     } else {
-        println!(
-            "session={} rows={} activities={} entities={} agents={}",
-            output.session_id,
-            output.row_count,
-            output.fragment.activities.len(),
-            output.fragment.entities.len(),
-            output.fragment.agents.len()
-        );
-        for activity in &output.fragment.activities {
+        println!("session={} rows={}", output.session_id, output.row_count);
+        for row in &output.rows {
             println!(
-                "  {} {} {:?}",
-                activity.id, activity.method, activity.impact_kind
+                "  audit_id={} method={} impact={}",
+                row.audit_id, row.method, row.impact_kind
             );
         }
     }
@@ -171,6 +165,7 @@ fn render_tail_output(output: &lancet_api::AuditTailOutput, json: bool) -> Resul
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "session_id": &output.session_id,
                 "rows": &output.rows,
                 "last_audit_id": output.last_audit_id,
                 "done": output.done,
@@ -186,13 +181,10 @@ fn render_tail_output(output: &lancet_api::AuditTailOutput, json: bool) -> Resul
             output.done,
             output.batches,
         );
-        for p in &output.rows {
+        for row in &output.rows {
             println!(
                 "  {} {} {} {}",
-                p["audit_id"],
-                p["method"].as_str().unwrap_or("?"),
-                p["impact_kind"].as_str().unwrap_or("?"),
-                p["summary"].as_str().unwrap_or("")
+                row.audit_id, row.method, row.impact_kind, row.summary
             );
         }
     }
@@ -205,36 +197,23 @@ fn render_replay_output(replay: &lancet_api::AuditReplayResult, json: bool) -> R
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "trace": &replay.trace,
-                "statement": &replay.statement,
-                "stored_statement_match": &replay.stored_statement_match,
-                "source_audit_range_or_hash": &replay.source_audit_range_or_hash,
             }))?
         );
     } else {
         println!(
-            "turn={} calls={} activities={} was_informed_by={}",
+            "turn={} calls={}",
             replay.trace.turn_id,
-            replay.trace.calls.len(),
-            replay.trace.fragment.activities.len(),
-            replay.trace.fragment.was_informed_by.len(),
+            replay.trace.calls.len()
         );
         for call in &replay.trace.calls {
             println!(
-                "  audit_id={} call_id={} {} {:?} {}",
+                "  audit_id={} call_id={} method={} impact={} {}",
                 call.audit_id,
                 call.call_id,
                 call.method,
                 call.impact_kind,
                 call.outcome_summary.as_deref().unwrap_or(""),
             );
-        }
-        match replay.stored_statement_match {
-            Some(true) => println!("attestation: stored statement matches derived"),
-            Some(false) => println!("attestation: stored statement DOES NOT match derived"),
-            None => println!("attestation: no stored statement for this turn"),
-        }
-        if let Some(hash) = &replay.source_audit_range_or_hash {
-            println!("source_audit_range_or_hash: {hash}");
         }
     }
     Ok(())

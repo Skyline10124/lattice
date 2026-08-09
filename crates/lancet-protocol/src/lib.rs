@@ -10,10 +10,9 @@
 //! - **Execution envelopes** (`envelope`) — intent, capabilities, scope, impact, and guard verdicts.
 //! - **Cell effect model** (`cell`) — ADR 0004 `CtxOp`/`ExtImpact`/scope/trust/capability core.
 //! - **Admission evidence** (`evidence`) — approved capabilities vs observed effects.
-//! - **Canonical JSON** (`canonical`) — deterministic bytes for measures and attestations.
+//! - **Canonical JSON** (`canonical`) — deterministic bytes for protocol consumers.
 //! - **Typed errors** (`error`) — error families with structured data and retriability.
 //! - **Policy hook API** (`policy`) — deterministic policy seam data types.
-//! - **Provenance wire types** (`provenance`) — PROV and unsigned in-toto shapes.
 //!
 //! This crate is pure data: no I/O, no runtime, no tokio.
 
@@ -26,7 +25,6 @@ pub mod evidence;
 pub mod frame;
 pub mod jsonrpc;
 pub mod policy;
-pub mod provenance;
 
 // Public re-exports of common types
 pub use canonical::canonical_json;
@@ -53,10 +51,4 @@ pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};
 pub use policy::{
     CepMode, GuardVerdict, PolicyActionRequired, PolicyAuditContext, PolicyAuthorityInput,
     PolicyBudgetSnapshot, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
-};
-pub use provenance::{
-    CEP_TURN_ATTESTATION_PREDICATE_TYPE, CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2, InTotoStatement,
-    InTotoSubjectDescriptor, ProvActivity, ProvAgent, ProvEntity, ProvGraphFragment, ProvUsed,
-    ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy, TurnAttestationPredicate,
-    TurnCallSummary, TurnExecutionTrace,
 };

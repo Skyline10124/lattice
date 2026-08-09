@@ -2672,6 +2672,8 @@ dependencies = [
  "lancet-native",
  "lancet-protocol",
  "lancet-runtime",
+ "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -2683,7 +2685,6 @@ dependencies = [
 name = "lancet-audit"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "dirs",
  "lancet-catalog",
  "lancet-protocol",

@@ -14,7 +14,7 @@
 //!   6. Direct-Local harness scenarios against the release binary (`LATTICE_BIN`)
 //!   7. offline correctness suites (with an anti-vacuous zero-pass guard)
 //!   8. dogfood impact matrix
-//!   9. audit replay + operator cross-validation (exact-named tests)
+//!   9. release operator N/C/M audit matrix (exact-named test)
 //!  10. `lattice --json lancet doctor` (JSON saved as evidence)
 //!
 //! SKIPPED IS NOT PASS: every planned step is seeded `blocked` and only
@@ -390,30 +390,21 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         "dogfood_impact_matrix",
     ]);
 
-    // Exact-named tests so a renamed test fails loudly instead of filtering
-    // to zero (which the zero-pass guard also rejects).
-    let mut audit_replay = Command::new("cargo");
-    audit_replay.current_dir(&ctx.root).args([
-        "test",
-        "-p",
-        "lattice-api",
-        "--test",
-        "audit_turn_provenance",
-        "full_turn_audit_rows_and_replay_fragment",
-        "--",
-        "--exact",
-    ]);
-
-    let mut audit_cross_validate = Command::new("cargo");
-    audit_cross_validate
+    // Exact-named, feature-gated release scenario so a renamed test fails
+    // loudly instead of filtering to zero (which the zero-pass guard also
+    // rejects). Its fixture/assertions are independent of `direct_operator`.
+    let mut release_operator_matrix = Command::new("cargo");
+    release_operator_matrix
         .current_dir(&ctx.root)
         .args([
             "test",
             "-p",
             "lattice-system-harness",
+            "--features",
+            "release-operator",
             "--test",
-            "direct_operator",
-            "direct_operator_audit_session_lancet_cross_validate",
+            "release_operator",
+            "release_operator_native_component_mixed_matrix",
             "--",
             "--exact",
         ])
@@ -477,14 +468,9 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
             action: Action::CargoTest(dogfood),
         },
         Planned {
-            id: "audit_replay",
-            display: display_command(&audit_replay, false),
-            action: Action::CargoTest(audit_replay),
-        },
-        Planned {
-            id: "audit_cross_validate",
-            display: display_command(&audit_cross_validate, false),
-            action: Action::CargoTest(audit_cross_validate),
+            id: "release_operator_matrix",
+            display: display_command(&release_operator_matrix, false),
+            action: Action::CargoTest(release_operator_matrix),
         },
         Planned {
             id: "doctor",
@@ -934,6 +920,38 @@ mod tests {
                 "{bad:?} required step must fail the gate"
             );
         }
+    }
+
+    #[test]
+    fn release_operator_step_targets_its_own_feature_gated_binary_matrix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = Ctx {
+            root: temp.path().to_path_buf(),
+            lattice_bin: temp.path().join("target/release/lattice"),
+            harness_failures: temp.path().join("harness-failures"),
+            evidence_dir: temp.path().join("rollout-evidence"),
+            doctor_home: temp.path().join("doctor-home"),
+        };
+        let plan = build_plan(&ctx);
+        let step = plan
+            .iter()
+            .find(|step| step.id == "release_operator_matrix")
+            .expect("release operator step");
+
+        assert!(
+            step.display.contains("--features release-operator")
+                && step.display.contains("--test release_operator")
+                && step
+                    .display
+                    .contains("release_operator_native_component_mixed_matrix"),
+            "release lane must execute its own release-binary matrix: {}",
+            step.display
+        );
+        assert!(
+            !step.display.contains("--test direct_operator"),
+            "release lane must not rerun the Direct-Local scenario: {}",
+            step.display
+        );
     }
 
     fn sample_record() -> RolloutRecord {

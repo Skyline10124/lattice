@@ -60,11 +60,11 @@ lattice-system-harness (black-box tests; must not depend on product crates).
 
 | Crate | Role |
 |---|---|
-| `lancet-protocol` | Pure CEP wire/data contracts: JSON-RPC frames, errors, policy/effect/provenance types. No I/O, no tokio. |
+| `lancet-protocol` | Pure CEP wire/data contracts: JSON-RPC frames, errors, policy/effect and versioned Cell-evidence types. No I/O, no tokio. |
 | `lancet-catalog` | Typed CEP method contracts, descriptors, and the static production catalog. |
 | `lancet-dispatch` | Method registry, typed CEP dispatch, in-process transport, cancellation. |
 | `lancet-cep` | Public CEP facade; projects LLM-facing tool schemas from the catalog. |
-| `lancet-audit` | CEP audit persistence, query filters, attestation persistence. |
+| `lancet-audit` | CEP audit persistence, query filters, typed operator reads, and versioned Cell evidence. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger. |
 | `lancet-native` | Production native handlers, server lifecycle, and the concrete guarded Local Workspace (observation, mutation, fetch). |
 | `lancet-runtime` | ADR 0004 target: WASM Component engine, closed composition gate, Tool Host enforcement. Not yet the production path. |

@@ -49,15 +49,15 @@ Confirmed `*_tests.rs` and `tests/` examples include
 `crates/lattice-api/src/turn/{cep_tests,stream_tests,run_tests,live_tests,types_tests}.rs`,
 `crates/lattice-cli/src/commands/run_tests.rs`,
 `crates/lancet-authority/tests/` (guard-decide fuzz, `policy_tests.rs`),
-`crates/lancet-native/tests/` (CEP warn harness, policy integration, provenance
-isomorphism), and `crates/lattice-agent/tests/` (agent loop, streaming,
+`crates/lancet-native/tests/` (CEP warn harness, policy integration, Component
+evidence round trips), and `crates/lattice-agent/tests/` (agent loop, streaming,
 completion).
 
 **Pre-existing exception.** Several suites under `crates/lattice-api/tests/`
-(Direct-Local acceptance, dogfood matrix, release e2e, audit provenance) still
+(Direct-Local acceptance, dogfood matrix, and release e2e) still
 prove end-to-end behavior from inside a product crate, which the rule above
-forbids. They predate this architecture and are retained because the rollout
-gate consumes them as offline/dogfood/audit-replay evidence (§7). They are
+forbids. They predate this architecture and are retained because CI and the
+rollout gate consume their offline/dogfood evidence (§7). They are
 **not a precedent**: a new test of that shape belongs in layer 3.
 
 ### Layer 2 — Fast binary black-box
@@ -89,7 +89,8 @@ The Direct-Local matrix (landed in #46 (Codeberg #24), slices 0–8):
 - `direct_mutation.rs` — atomic mutation, concurrency, effect denial.
 - `direct_tools.rs` — fetch, todo, catalog, retired methods.
 - `direct_failures.rs` — provider failures, SIGINT, deadline, no-rollback.
-- `direct_operator.rs` — audit/session/lancet cross-validation.
+- `direct_operator.rs` — independent native/Component/mixed audit contracts,
+  query/tail cursors, replay completeness, and newest-20 status bounds.
 - `direct_secrets.rs` — sentinel scanning.
 - `direct_session_isolation.rs` — two-session graph isolation.
 - `direct_local_turn.rs` — plain-text turn, session reopen against changed
@@ -286,7 +287,7 @@ bundle under `$LATTICE_HARNESS_FAILURE_DIR/<scenario>/`.
 | --- | --- | --- |
 | A crate-internal contract (parsing, error mapping, pure logic, type invariant, closed-set check) | Layer 1: `#[cfg(test)]` in the product crate, a co-located `*_tests.rs`, or a per-crate `tests/` binary | the harness |
 | Fast CLI-surface behavior against the built binary (help, config, a subcommand's output) | Layer 2: a `fast_*` target or harness `src/` unit test in `lattice-system-harness` | a product crate's `#[cfg(test)]` |
-| Product behavior through a real turn / real Local Workspace mutation / audit replay / TUI wiring | Layer 3: a `direct_*` scenario, `direct_local_turn`, or `pty_tui_smoke` in `lattice-system-harness` | a product crate's `#[cfg(test)]` |
+| Product behavior through a real turn / real Local Workspace mutation / operator audit query-tail-replay / TUI wiring | Layer 3: a `direct_*` scenario, `direct_local_turn`, or `pty_tui_smoke` in `lattice-system-harness` | a product crate's `#[cfg(test)]` |
 | Interaction quality that only a human can judge (TUI feel, output readability, error phrasing) | Layer 4: a manual UX check | any automated gate — and it may never be a feature's *only* coverage |
 | A release-evidence step against the locked release binary | Not a test layer: a step in `xtask/src/rollout.rs` | a shell wrapper script |
 | Default-distribution built-in Tool behavior (the five shipped Tools) | Layer 3: a `direct_*` scenario | a product crate's `#[cfg(test)]` |
@@ -343,7 +344,9 @@ cargo test -p lancet-authority
 
 ```bash
 cargo test -p lattice-system-harness --test direct_local_turn
-cargo test -p lattice-api --test audit_turn_provenance
+cargo test -p lattice-system-harness --test direct_operator
+cargo test -p lattice-system-harness --features release-operator \
+  --test release_operator release_operator_native_component_mixed_matrix -- --exact
 ```
 
 ### Single test function (substring match)
@@ -405,7 +408,7 @@ cargo xtask rollout --channel alpha
 ```
 
 Runs the release-evidence lane against a **locked release** binary and writes a
-versioned JSON record. The plan (12 steps, `xtask/src/rollout.rs`):
+versioned JSON record. The plan (11 steps, `xtask/src/rollout.rs`):
 
 1. `clean_worktree` — `git status --porcelain=v1 --untracked-files=no`;
    tracked dirt (staged or unstaged) is rejected. Untracked files are
@@ -423,12 +426,12 @@ versioned JSON record. The plan (12 steps, `xtask/src/rollout.rs`):
 8. `offline_correctness` — `cargo test` for `lancet-protocol`, `lancet-catalog`,
    `lancet-authority`, `lancet-audit`, `lancet-native`, `lattice-session`.
 9. `dogfood` — `cargo test -p lattice-api --test dogfood_impact_matrix`.
-10. `audit_replay` — `cargo test -p lattice-api --test audit_turn_provenance
-    full_turn_audit_rows_and_replay_fragment -- --exact`.
-11. `audit_cross_validate` — `cargo test -p lattice-system-harness --test
-    direct_operator direct_operator_audit_session_lancet_cross_validate --
-    --exact` against the release binary.
-12. `doctor` — `lattice --json lancet doctor` with a cleared env and temp HOME;
+10. `release_operator_matrix` — `cargo test -p lattice-system-harness
+    --features release-operator --test release_operator
+    release_operator_native_component_mixed_matrix -- --exact` against the
+    release binary. This feature-gated target owns N/C/M fixtures and
+    assertions independent of `direct_operator`.
+11. `doctor` — `lattice --json lancet doctor` with a cleared env and temp HOME;
     JSON saved to `target/rollout/evidence/doctor.json`.
 
 **Skipped is not pass:** every step is seeded `blocked` and overwritten only by

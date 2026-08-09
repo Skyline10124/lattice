@@ -6,7 +6,7 @@
 //! Uses a unique per-scenario provider-credential sentinel plus a
 //! denied-workspace-content sentinel, then scans every public sink
 //! (command stdout/stderr, parsed JSONL, session status/log, audit
-//! query/replay, lancet status, provenance JSON) and asserts no sentinel
+//! query/replay, and lancet status JSON) and asserts no sentinel
 //! leaks. A detected sentinel is an assertion failure.
 
 mod support;
@@ -24,7 +24,7 @@ use support::{
 const DENIED_CONTENT_SENTINEL: &str = "sentinel-denied-content-0xDEADBEEF";
 
 /// Scan every public sink for sentinels after a turn: stdout/stderr, parsed
-/// JSONL, session status/log, audit query/replay, lancet status, provenance.
+/// JSONL, session status/log, audit query/replay, and lancet status.
 /// The FAKE_API_KEY (provider credential) and the denied-content sentinel must
 /// not appear in any of them.
 #[test]

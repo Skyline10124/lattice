@@ -38,6 +38,7 @@ use lancet_protocol::evidence::{
     ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
 };
 use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
 
 /// Schema version of the evidence tables, stamped in `PRAGMA user_version`
 /// alongside the audit tables (they share one database file, so they share one
@@ -222,7 +223,8 @@ CREATE TABLE IF NOT EXISTS evidence_denials (
 /// How the call the evidence describes ended. Persisted so the denial and
 /// failure population is queryable without re-deriving it from the effects
 /// (decision 3): a permission system is designed from exactly this set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EvidenceOutcome {
     /// The Component ran and returned a validated result.
     Completed,

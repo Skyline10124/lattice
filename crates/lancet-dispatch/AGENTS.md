@@ -61,7 +61,7 @@ cancellation, and server runtime plumbing. ADR 0004 absorbs this behavior into
   completion.
 - Keep progress/event sends best-effort where backpressure would block call
   completion.
-- If transport lifecycle changes, run native policy/provenance and API
+- If transport lifecycle changes, run native policy/evidence and API
   round-trip tests, not only local unit tests.
 - Add tests before changing error mapping, cancellation semantics, or event sink
   behavior.

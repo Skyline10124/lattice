@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Canonical JSON serialization — the single implementation behind the
-//! deterministic context measure (#28 D12) and v2 attestation statement
-//! bytes (D8).
+//! deterministic context measures and versioned Cell-evidence construction.
 //!
 //! Object keys are sorted explicitly at every depth: `serde_json::Map`
 //! iteration order is a build-time choice (the `preserve_order` feature),

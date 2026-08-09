@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use lancet_authority::CepTurnContext;
 use lancet_native::{
-    AuditQueryFilters, CepAuditStore, CepServerNativeExt, CepTransport, EvidenceId, EvidenceLookup,
+    AuditQueryFilters, CepAuditStore, CepServerNativeExt, CepTransport, EvidenceId,
     EvidenceOutcome, MethodRegistry, ServerRunConfig, StoredCallEvidence,
     register_production_method_registry,
 };
@@ -437,15 +437,11 @@ async fn component_rows_are_labeled_cell_governed_not_unrouted() {
     assert_eq!(denied_rows[0].method, "noop.echo");
 }
 
-/// #28 b22 / A2 / B11: a real partial-deny call carries its denial all the way
-/// into the PROV activity attributes and the v2 attestation predicate — no
-/// hand-built audit row anywhere in this path.
+/// #28 b22 / A2 / B11: a real partial-deny call carries its denial into the
+/// versioned Cell evidence table — no hand-built audit row anywhere in this
+/// path.
 #[tokio::test]
-async fn real_denial_reaches_prov_attributes_and_the_v2_predicate() {
-    use lancet_native::build_in_toto_statement_with_evidence;
-    use lancet_native::provenance::project_rows_with_evidence;
-    use lancet_protocol::provenance::CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2;
-
+async fn real_denial_reaches_cell_evidence() {
     let (client, audit, _task) = spawn_native_with_admission(admission(&["session.events"])).await;
     let _: serde_json::Value = client
         .call_named("noop.echo", serde_json::json!({ "message": "denied-op" }))
@@ -453,40 +449,24 @@ async fn real_denial_reaches_prov_attributes_and_the_v2_predicate() {
         .expect("the tool stays callable with one capability");
     audit.await_pending().await;
 
-    let rows = audit
-        .query_rows(&AuditQueryFilters {
-            turn_id: Some("test-turn".to_string()),
-            ..Default::default()
-        })
-        .expect("audit query");
-
-    // #112: the projection resolves the row's `evidence_id` through the store.
-    let resolve = |id: EvidenceId| audit.call_evidence(id).ok().flatten();
-    let lookup = EvidenceLookup::new(&resolve);
-    let attributes = &project_rows_with_evidence(&rows, &lookup).activities[0].attributes;
-    let denied = attributes["denied_operations"]["denied"]
-        .as_array()
-        .expect("the denial reaches the PROV activity attributes");
+    let evidence = noop_evidence(&audit).await;
+    let denied = &evidence.denied.denied;
     assert_eq!(denied.len(), 1);
-    assert_eq!(denied[0]["cell"]["ctx_op"], "mutate");
-    assert_eq!(denied[0]["target"]["turn_id"], "test-turn");
-    let reason = denied[0]["reason"].as_str().expect("denial reason");
+    assert_eq!(denied[0].cell.ctx_op, CtxOp::Mutate);
+    assert_eq!(
+        denied[0].target,
+        ObservedTarget::Session {
+            turn_id: "test-turn".to_string()
+        }
+    );
+    let reason = denied[0].reason.as_str();
     assert!(
         reason.contains("not covered by an admitted capability"),
-        "the projected reason must be the one the host recorded: {reason}"
+        "the stored reason must be the one the host recorded: {reason}"
     );
-
-    let statement =
-        build_in_toto_statement_with_evidence("test-turn", &rows, "lattice-test/1", &lookup);
     assert_eq!(
-        statement.predicate_type,
-        CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2
-    );
-    let evidence = &statement.predicate["evidence"][0];
-    assert_eq!(evidence["denied_operations"]["denied"][0]["reason"], reason);
-    assert_eq!(
-        evidence["admission"]["denied_capabilities"],
-        serde_json::json!(["session.events"]),
+        evidence.admission.denied_capabilities,
+        vec!["session.events".to_string()],
         "'why authorized' stays a field of its own beside the denial"
     );
 }

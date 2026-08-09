@@ -113,7 +113,7 @@ pub struct LancetRuntimeConfig {
     pub workspace_history: WorkspaceHistoryBacking,
     /// Model identifier recorded in the audit context.
     pub model_id: String,
-    /// Runtime version string recorded in the audit context and attestations.
+    /// Runtime version string recorded in the audit context.
     pub runtime_version: String,
 }
 

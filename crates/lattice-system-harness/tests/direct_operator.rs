@@ -4,17 +4,18 @@
 //! Direct-Local operator paths: audit query/replay, lancet status, session
 //! status/log cross-validation (issue #46 (Codeberg #24) slice 6).
 //!
-//! After a real success turn and a real denial turn, run bounded public
-//! commands and assert row counts, methods, impacts, verdicts, activity
-//! order, and stored attestation match. Unknown session/turn are explicit
-//! nonzero failures.
+//! A single real turn emits native `fetch.web` and Component
+//! `session.todo_write` calls. The scenario checks their individual and mixed
+//! query/tail/replay/status representations through the public binary.
 
 mod support;
 
 use std::process::Output;
+use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, SendExecution, SessionSendDriver, SseScript, TurnEventLine,
+    AssertError, FixtureHttpServer, HttpFixture, SendExecution, SessionSendDriver, SseScript,
+    TurnEventLine,
 };
 use serde_json::Value;
 use support::{
@@ -33,18 +34,34 @@ fn parse_json(out: &Output) -> Value {
     })
 }
 
-/// Collect `method` values from an audit query fragment's activities.
-fn fragment_activities(query: &Value) -> Vec<&str> {
-    query
-        .get("fragment")
-        .and_then(|f| f.get("activities"))
+fn operator_rows(value: &Value) -> &[Value] {
+    value
+        .get("rows")
         .and_then(Value::as_array)
-        .map(|acts| {
-            acts.iter()
-                .filter_map(|a| a.get("method").and_then(Value::as_str))
-                .collect()
-        })
-        .unwrap_or_default()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| panic!("expected operator rows: {value}"))
+}
+
+fn row_for_method<'a>(rows: &'a [Value], method: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row.get("method").and_then(Value::as_str) == Some(method))
+        .unwrap_or_else(|| panic!("missing {method} row: {rows:?}"))
+}
+
+fn row_methods(rows: &[Value]) -> Vec<&str> {
+    rows.iter()
+        .filter_map(|row| row.get("method").and_then(Value::as_str))
+        .collect()
+}
+
+/// Read the call rows embedded in an operator replay trace.
+fn replay_calls(value: &Value) -> &[Value] {
+    value
+        .get("trace")
+        .and_then(|trace| trace.get("calls"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| panic!("expected replay trace.calls: {value}"))
 }
 
 /// Extract the turn_id from a turn_started event in a SendExecution.
@@ -55,62 +72,369 @@ fn turn_id_of(outcome: &SendExecution) -> Option<String> {
     })
 }
 
-/// After a success turn (observe.workspace) and a denial turn (mutate.create
-/// denied by write policy), audit query returns rows for both with correct
-/// methods, impacts, and verdicts; audit replay reconstructs the success turn;
-/// lancet status reports recent calls; session status/log agree.
+fn fetch_network_profile() -> String {
+    "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n".to_string()
+}
+
+fn row_has_expected_evidence(row: &Value, expect_evidence: bool) -> bool {
+    if expect_evidence {
+        row.pointer("/evidence/outcome").and_then(Value::as_str) == Some("completed")
+    } else {
+        row.get("evidence").is_some_and(Value::is_null)
+    }
+}
+
+struct SingleOperatorExpectation<'a> {
+    session_id: &'a str,
+    turn_id: &'a str,
+    method: &'a str,
+    impact: &'a str,
+    capability: Option<&'a str>,
+    verdict: &'a str,
+    expect_evidence: bool,
+}
+
+fn assert_single_operator_case(
+    world: &lattice_system_harness::ScenarioWorld,
+    spec: &lattice_system_harness::ScenarioSpec,
+    expectation: SingleOperatorExpectation<'_>,
+) -> Result<(), AssertError> {
+    let SingleOperatorExpectation {
+        session_id,
+        turn_id,
+        method,
+        impact,
+        capability,
+        verdict,
+        expect_evidence,
+    } = expectation;
+    let mut query_args = vec![
+        "--json",
+        "audit",
+        "query",
+        "--session",
+        session_id,
+        "--turn",
+        turn_id,
+        "--method",
+        method,
+        "--impact",
+        impact,
+        "--verdict",
+        "success",
+    ];
+    if let Some(capability) = capability {
+        query_args.extend(["--capability", capability]);
+    }
+    let query = cli(world, spec, &query_args);
+    require(
+        query.status.success(),
+        format!(
+            "{method} filtered query failed: {}",
+            String::from_utf8_lossy(&query.stderr)
+        ),
+    )?;
+    let query_json = parse_json(&query);
+    let rows = operator_rows(&query_json);
+    require(
+        query_json.get("row_count").and_then(Value::as_u64) == Some(1)
+            && rows.len() == 1
+            && rows[0].get("method").and_then(Value::as_str) == Some(method)
+            && row_has_expected_evidence(&rows[0], expect_evidence),
+        format!("{method} query contract mismatch: {query_json}"),
+    )?;
+    let audit_id = rows[0]
+        .get("audit_id")
+        .and_then(Value::as_i64)
+        .expect("query audit_id");
+
+    // Query pagination uses the inclusive `--since` lower bound. The public
+    // query remains capped by the adapter while preserving this row exactly.
+    let cursor = audit_id.to_string();
+    let page = cli(
+        world,
+        spec,
+        &[
+            "--json",
+            "audit",
+            "query",
+            "--session",
+            session_id,
+            "--since",
+            &cursor,
+        ],
+    );
+    require(page.status.success(), format!("{method} query page failed"))?;
+    let page_json = parse_json(&page);
+    let page_rows = operator_rows(&page_json);
+    require(
+        page_json.get("row_count").and_then(Value::as_u64) == Some(1)
+            && page_rows.len() == 1
+            && page_rows[0].get("audit_id").and_then(Value::as_i64) == Some(audit_id),
+        format!("{method} query page/limit mismatch: {page_json}"),
+    )?;
+
+    let tail = cli(
+        world,
+        spec,
+        &[
+            "--json",
+            "audit",
+            "query",
+            "--session",
+            session_id,
+            "--tail",
+            "--since",
+            "0",
+        ],
+    );
+    require(tail.status.success(), format!("{method} tail failed"))?;
+    let tail_json = parse_json(&tail);
+    let tail_rows = operator_rows(&tail_json);
+    require(
+        tail_rows.len() == 1
+            && tail_rows[0].get("method").and_then(Value::as_str) == Some(method)
+            && row_has_expected_evidence(&tail_rows[0], expect_evidence),
+        format!("{method} tail contract mismatch: {tail_json}"),
+    )?;
+
+    let continued = cli(
+        world,
+        spec,
+        &[
+            "--json",
+            "audit",
+            "query",
+            "--session",
+            session_id,
+            "--tail",
+            "--since",
+            &cursor,
+        ],
+    );
+    require(
+        continued.status.success(),
+        format!("{method} tail continuation failed"),
+    )?;
+    let continued_json = parse_json(&continued);
+    require(
+        operator_rows(&continued_json).is_empty()
+            && continued_json.get("last_audit_id").and_then(Value::as_i64) == Some(audit_id),
+        format!("{method} exclusive tail cursor mismatch: {continued_json}"),
+    )?;
+
+    let replay = cli(
+        world,
+        spec,
+        &[
+            "--json",
+            "audit",
+            "replay",
+            "--session",
+            session_id,
+            "--turn",
+            turn_id,
+        ],
+    );
+    require(replay.status.success(), format!("{method} replay failed"))?;
+    let replay_json = parse_json(&replay);
+    let calls = replay_calls(&replay_json);
+    require(
+        calls.len() == 1
+            && calls[0].get("method").and_then(Value::as_str) == Some(method)
+            && row_has_expected_evidence(&calls[0], expect_evidence),
+        format!("{method} replay contract mismatch: {replay_json}"),
+    )?;
+
+    let status = cli(world, spec, &["--json", "lancet", "status"]);
+    require(status.status.success(), format!("{method} status failed"))?;
+    let status_json = parse_json(&status);
+    let recent = status_json
+        .get("recent_calls")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("status recent_calls: {status_json}"));
+    let entry = row_for_method(recent, method);
+    require(
+        recent.len() <= 20
+            && entry.get("verdict").and_then(Value::as_str) == Some(verdict)
+            && entry.get("duration_ms").and_then(Value::as_i64).is_some()
+            && row_has_expected_evidence(entry, expect_evidence),
+        format!("{method} bounded status contract mismatch: {status_json}"),
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn direct_operator_native_without_evidence_contract() {
+    let driver = driver();
+    let web = FixtureHttpServer::start(HttpFixture::plain("native operator fixture"))
+        .expect("fixture HTTP server");
+    let fetch_url = web.url_path("/native-operator");
+    let (world, spec) = direct_world(
+        "direct-operator-native",
+        "dl-op-native",
+        "[\"fetch.web\"]",
+        &fetch_network_profile(),
+    );
+    let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
+    let server = wire_fake_llm(
+        &world,
+        "dl-op-native",
+        sequence(vec![
+            tool_call("n-only", "fetch.web", &fetch_args),
+            SseScript::plain("native complete"),
+        ]),
+    );
+    let scenario_evidence = evidence(&world, &spec);
+    let send =
+        SessionSendDriver::new(&driver, &world, &spec, "dl-op-native", "main").expect("session");
+    let sid = send.session_id().to_string();
+    let turn = send
+        .send("run native operator fixture")
+        .expect("native turn");
+    let turn_id = turn_id_of(&turn).expect("turn id");
+    let captures = server.captured_requests();
+
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&turn)?;
+        require(turn.has_committed_completed(), "native turn must complete")?;
+        web.wait_for_requests(1, Duration::from_secs(5))
+            .map_err(|error| AssertError::StdoutMissing {
+                expected: format!("fetch fixture did not receive a request: {error}"),
+            })?;
+        assert_single_operator_case(
+            &world,
+            &spec,
+            SingleOperatorExpectation {
+                session_id: &sid,
+                turn_id: &turn_id,
+                method: "fetch.web",
+                impact: "external_observation",
+                capability: Some("fetch_url"),
+                verdict: "native_handler",
+                expect_evidence: false,
+            },
+        )
+    })();
+
+    finish_scenario(
+        scenario_evidence,
+        &[("native operator turn", &turn.command)],
+        captures,
+        result,
+    );
+}
+
+#[test]
+fn direct_operator_component_with_evidence_contract() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-operator-component",
+        "dl-op-component",
+        "[\"session.todo_write\"]",
+        "",
+    );
+    let server = wire_fake_llm(
+        &world,
+        "dl-op-component",
+        sequence(vec![
+            tool_call(
+                "c-only",
+                "session.todo_write",
+                r#"{"todos":[{"content":"component operator","status":"pending"}]}"#,
+            ),
+            SseScript::plain("component complete"),
+        ]),
+    );
+    let scenario_evidence = evidence(&world, &spec);
+    let send =
+        SessionSendDriver::new(&driver, &world, &spec, "dl-op-component", "main").expect("session");
+    let sid = send.session_id().to_string();
+    let turn = send
+        .send("run Component operator fixture")
+        .expect("Component turn");
+    let turn_id = turn_id_of(&turn).expect("turn id");
+    let captures = server.captured_requests();
+
+    let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&turn)?;
+        require(
+            turn.has_committed_completed(),
+            "Component turn must complete",
+        )?;
+        assert_single_operator_case(
+            &world,
+            &spec,
+            SingleOperatorExpectation {
+                session_id: &sid,
+                turn_id: &turn_id,
+                method: "session.todo_write",
+                impact: "unknown",
+                capability: None,
+                verdict: "component_handler",
+                expect_evidence: true,
+            },
+        )
+    })();
+
+    finish_scenario(
+        scenario_evidence,
+        &[("Component operator turn", &turn.command)],
+        captures,
+        result,
+    );
+}
+
+/// N/C/M public-binary matrix: native fetch has no Cell evidence, the
+/// Component call has table-backed evidence, and every operator surface keeps
+/// both records in its ordinary finalized-row collection.
 #[test]
 fn direct_operator_audit_session_lancet_cross_validate() {
     let driver = driver();
+    let web = FixtureHttpServer::start(HttpFixture::plain("operator fetch fixture"))
+        .expect("fixture HTTP server");
+    let fetch_url = web.url_path("/operator-matrix");
     let (world, spec) = direct_world(
         "direct-operator-cross",
         "dl-op",
-        "[\"observe.workspace\",\"mutate.create\"]",
-        "[lancet.workspace]\ndenied_write_patterns = [\"locked/**\"]\n",
+        "[\"fetch.web\",\"session.todo_write\"]",
+        &fetch_network_profile(),
     );
-    world
-        .write_project_file("readme.txt", "hello\n")
-        .expect("seed file");
-    world.commit_all("seed").expect("commit");
-    world
-        .write_project_file("locked/secret.txt", "deny-me\n")
-        .expect("locked file");
-    world.commit_all("locked seed").expect("commit");
-
+    let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
     let server = wire_fake_llm(
         &world,
         "dl-op",
         sequence(vec![
-            // Turn 1: successful observation.
-            tool_call("o1", "observe.workspace", r#"{"path":"readme.txt"}"#),
-            SseScript::plain("observed"),
-            // Turn 2: denied mutation (locked/** pattern).
+            tool_call("n1", "fetch.web", &fetch_args),
             tool_call(
-                "m1",
-                "mutate.create",
-                r#"{"path":"locked/x.txt","content":"x\n","create_parents":false}"#,
+                "c1",
+                "session.todo_write",
+                r#"{"todos":[{"content":"operator matrix","status":"pending"}]}"#,
             ),
-            SseScript::plain("denied as expected"),
+            SseScript::plain("native and Component calls complete"),
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-op", "main").expect("session");
     let sid = send.session_id().to_string();
 
-    let t1 = send.send("observe readme").expect("turn 1");
-    let t2 = send.send("create in locked").expect("turn 2");
-    let turn_id_1 = turn_id_of(&t1).expect("turn 1 turn_id");
+    let turn = send
+        .send("run native and Component operator matrix")
+        .expect("mixed turn");
+    let turn_id = turn_id_of(&turn).expect("turn id");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
-        assert_clean_send(&t1)?;
-        assert_clean_send(&t2)?;
-        require(t1.has_committed_completed(), "turn 1 must complete")?;
-        require(
-            t2.has_committed_completed(),
-            "turn 2 must complete even though the tool was denied",
-        )?;
+        assert_clean_send(&turn)?;
+        require(turn.has_committed_completed(), "mixed turn must complete")?;
+        web.wait_for_requests(1, Duration::from_secs(5))
+            .map_err(|error| AssertError::StdoutMissing {
+                expected: format!("fetch fixture did not receive a request: {error}"),
+            })?;
 
+        // M query: the ordinary row set contains both classes and no raw
+        // metadata. Query order is the audit-id order used by tail/replay.
         let q = cli(
             &world,
             &spec,
@@ -125,27 +449,45 @@ fn direct_operator_audit_session_lancet_cross_validate() {
             .get("row_count")
             .and_then(Value::as_u64)
             .expect("row_count");
+        let rows = operator_rows(&query_obj);
         require(
-            row_count > 0,
-            format!("audit query must return rows: {query_obj}"),
+            row_count as usize == rows.len(),
+            format!("query row_count must equal rows.len: {query_obj}"),
         )?;
-        let acts = fragment_activities(&query_obj);
-        require(!acts.is_empty(), "fragment activities must be non-empty")?;
-        let methods: Vec<&str> = acts.clone();
+        let methods = row_methods(rows);
         require(
-            methods.contains(&"observe.workspace"),
-            format!("audit rows must include observe.workspace: {methods:?}"),
+            methods.contains(&"fetch.web"),
+            format!("audit rows must include native fetch.web: {methods:?}"),
         )?;
         require(
-            methods.contains(&"mutate.create"),
-            format!("audit rows must include mutate.create: {methods:?}"),
+            methods.contains(&"session.todo_write"),
+            format!("audit rows must include Component session.todo_write: {methods:?}"),
         )?;
-        // Success/denied verdicts are validated via the --verdict filters below
-        // (the PROV projection's `semantic_status` is an internal stage label,
-        // not the success/denied verdict).
+        let native = row_for_method(rows, "fetch.web");
+        let component = row_for_method(rows, "session.todo_write");
+        let component_audit_id = component
+            .get("audit_id")
+            .and_then(Value::as_i64)
+            .expect("Component audit id");
+        require(
+            native.get("evidence").is_some_and(Value::is_null),
+            format!("N query row must serialize evidence=null: {native}"),
+        )?;
+        require(
+            component
+                .pointer("/evidence/outcome")
+                .and_then(Value::as_str)
+                == Some("completed"),
+            format!("C query row must serialize structured evidence: {component}"),
+        )?;
+        require(
+            component.get("metadata_json").is_none(),
+            format!("query must not expose metadata_json: {component}"),
+        )?;
 
-        // audit query --method filter narrows to one method.
-        let qm = cli(
+        // N query filters remain row filters even when the native row has no
+        // evidence pointer.
+        let qn = cli(
             &world,
             &spec,
             &[
@@ -154,21 +496,34 @@ fn direct_operator_audit_session_lancet_cross_validate() {
                 "query",
                 "--session",
                 &sid,
+                "--turn",
+                &turn_id,
                 "--method",
-                "observe.workspace",
+                "fetch.web",
+                "--impact",
+                "external_observation",
+                "--capability",
+                "fetch_url",
+                "--verdict",
+                "success",
             ],
         );
-        require(qm.status.success(), "audit query --method failed")?;
-        let query_m = parse_json(&qm);
-        let acts_m = fragment_activities(&query_m);
-        require(!acts_m.is_empty(), "method filter must return activities")?;
+        require(qn.status.success(), "native filtered audit query failed")?;
+        let native_query = parse_json(&qn);
+        let native_filtered = operator_rows(&native_query);
         require(
-            acts_m.iter().all(|m| *m == "observe.workspace"),
-            "method filter must narrow to observe.workspace",
+            native_filtered.len() == 1
+                && native_filtered[0].get("method").and_then(Value::as_str) == Some("fetch.web")
+                && native_filtered[0]
+                    .get("evidence")
+                    .is_some_and(Value::is_null),
+            format!("N filters must retain fetch.web with null evidence: {native_filtered:?}"),
         )?;
 
-        // audit query --verdict denied narrows to the denial.
-        let qv = cli(
+        // C query filters retain the Component's persisted impact label and
+        // structured evidence. The legacy capability filter remains a native
+        // metadata filter, so the Component proof uses its applicable filters.
+        let qc = cli(
             &world,
             &spec,
             &[
@@ -177,25 +532,59 @@ fn direct_operator_audit_session_lancet_cross_validate() {
                 "query",
                 "--session",
                 &sid,
+                "--turn",
+                &turn_id,
+                "--method",
+                "session.todo_write",
+                "--impact",
+                "unknown",
                 "--verdict",
-                "denied",
+                "success",
             ],
         );
-        require(qv.status.success(), "audit query --verdict failed")?;
-        let query_v = parse_json(&qv);
-        let v_count = query_v
-            .get("row_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        require(v_count > 0, "verdict filter must return rows")?;
-        let acts_v = fragment_activities(&query_v);
-        require(!acts_v.is_empty(), "verdict filter must return activities")?;
+        require(qc.status.success(), "Component filtered audit query failed")?;
+        let component_query = parse_json(&qc);
+        let component_filtered = operator_rows(&component_query);
         require(
-            acts_v.contains(&"mutate.create"),
-            "verdict=denied filter must include mutate.create",
+            component_filtered.len() == 1
+                && component_filtered[0].get("method").and_then(Value::as_str)
+                    == Some("session.todo_write")
+                && component_filtered[0]
+                    .pointer("/evidence/outcome")
+                    .and_then(Value::as_str)
+                    == Some("completed"),
+            format!("C filters must retain structured evidence: {component_filtered:?}"),
         )?;
 
-        // audit query --tail --since 0 streams all rows.
+        // Query pagination keeps the inclusive lower-bound row and applies the
+        // adapter's database cap before materialization.
+        let component_cursor = component_audit_id.to_string();
+        let page = cli(
+            &world,
+            &spec,
+            &[
+                "--json",
+                "audit",
+                "query",
+                "--session",
+                &sid,
+                "--since",
+                &component_cursor,
+            ],
+        );
+        require(page.status.success(), "mixed query page failed")?;
+        let page_json = parse_json(&page);
+        let page_rows = operator_rows(&page_json);
+        require(
+            page_json.get("row_count").and_then(Value::as_u64) == Some(1)
+                && page_rows.len() == 1
+                && page_rows[0].get("audit_id").and_then(Value::as_i64) == Some(component_audit_id)
+                && page_rows[0].get("method").and_then(Value::as_str) == Some("session.todo_write"),
+            format!("mixed query page/limit mismatch: {page_json}"),
+        )?;
+
+        // M tail: both rows appear in audit-id order, with the same optional
+        // evidence shape as query.
         let qt = cli(
             &world,
             &spec,
@@ -212,14 +601,50 @@ fn direct_operator_audit_session_lancet_cross_validate() {
         );
         require(qt.status.success(), "audit query --tail failed")?;
         let query_t = parse_json(&qt);
-        let tail_rows = query_t
-            .get("rows")
-            .and_then(Value::as_array)
-            .map(Vec::len)
-            .unwrap_or(0);
-        require(tail_rows > 0, format!("tail must stream rows: {query_t}"))?;
+        let tail_rows = operator_rows(&query_t);
+        let tail_native = row_for_method(tail_rows, "fetch.web");
+        let tail_component = row_for_method(tail_rows, "session.todo_write");
+        require(
+            tail_native.get("evidence").is_some_and(Value::is_null)
+                && tail_component
+                    .pointer("/evidence/outcome")
+                    .and_then(Value::as_str)
+                    == Some("completed"),
+            format!("M tail must retain N/C evidence shape: {query_t}"),
+        )?;
+        let native_audit_id = native
+            .get("audit_id")
+            .and_then(Value::as_i64)
+            .expect("native audit id");
+        let native_cursor = native_audit_id.to_string();
+        let continued = cli(
+            &world,
+            &spec,
+            &[
+                "--json",
+                "audit",
+                "query",
+                "--session",
+                &sid,
+                "--tail",
+                "--since",
+                &native_cursor,
+            ],
+        );
+        require(continued.status.success(), "tail continuation failed")?;
+        let continued_query = parse_json(&continued);
+        let continued_rows = operator_rows(&continued_query);
+        require(
+            continued_rows.iter().all(|row| {
+                row.get("audit_id")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|id| id > native_audit_id)
+            }) && row_methods(continued_rows).contains(&"session.todo_write"),
+            format!("tail cursor must be exclusive without skipping C: {continued_rows:?}"),
+        )?;
 
-        // audit replay --turn <turn_id_1> reconstructs the success turn.
+        // M replay uses the same turn, preserving audit-id order and both
+        // evidence variants without a statement/projection surface.
         let rp = cli(
             &world,
             &spec,
@@ -230,7 +655,7 @@ fn direct_operator_audit_session_lancet_cross_validate() {
                 "--session",
                 &sid,
                 "--turn",
-                &turn_id_1,
+                &turn_id,
             ],
         );
         require(
@@ -247,28 +672,34 @@ fn direct_operator_audit_session_lancet_cross_validate() {
             .and_then(Value::as_str)
             .unwrap_or("");
         require(
-            replay_turn == turn_id_1.as_str(),
+            replay_turn == turn_id.as_str(),
             format!(
-                "replay trace.turn_id mismatch: expected {turn_id_1}, got {replay_turn:?}: {replay}"
+                "replay trace.turn_id mismatch: expected {turn_id}, got {replay_turn:?}: {replay}"
             ),
         )?;
-        let replay_activities = replay
-            .get("trace")
-            .map(fragment_activities)
-            .unwrap_or_default();
+        let calls = replay_calls(&replay);
+        let replay_ids: Vec<i64> = calls
+            .iter()
+            .filter_map(|call| call.get("audit_id").and_then(Value::as_i64))
+            .collect();
+        let mut sorted_ids = replay_ids.clone();
+        sorted_ids.sort();
         require(
-            replay_activities.contains(&"observe.workspace"),
-            format!("replay trace must include observe.workspace activity: {replay_activities:?}"),
+            replay_ids == sorted_ids,
+            format!("replay must retain audit-id order: {calls:?}"),
         )?;
         require(
-            replay
-                .get("stored_statement_match")
-                .and_then(Value::as_bool)
-                == Some(true),
-            format!("replay must report matching stored attestation: {replay}"),
+            row_for_method(calls, "fetch.web")
+                .get("evidence")
+                .is_some_and(Value::is_null)
+                && row_for_method(calls, "session.todo_write")
+                    .pointer("/evidence/outcome")
+                    .and_then(Value::as_str)
+                    == Some("completed"),
+            format!("M replay must retain N/C evidence shape: {replay}"),
         )?;
 
-        // lancet status --json reports recent calls.
+        // M status: bounded recent calls do not filter by evidence presence.
         let ls = cli(&world, &spec, &["--json", "lancet", "status"]);
         require(
             ls.status.success(),
@@ -278,9 +709,33 @@ fn direct_operator_audit_session_lancet_cross_validate() {
             ),
         )?;
         let status = parse_json(&ls);
+        let recent_calls = status
+            .get("recent_calls")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("status recent_calls: {status}"));
+        let status_native = row_for_method(recent_calls, "fetch.web");
+        let status_component = row_for_method(recent_calls, "session.todo_write");
         require(
-            status.get("recent_calls").is_some() || !status.is_null(),
-            format!("lancet status must report recent calls: {status}"),
+            recent_calls.len() <= 20
+                && status_native.get("evidence").is_some_and(Value::is_null)
+                && status_native.get("verdict").and_then(Value::as_str) == Some("native_handler")
+                && status_native
+                    .get("duration_ms")
+                    .and_then(Value::as_i64)
+                    .is_some()
+                && status_component
+                    .pointer("/evidence/outcome")
+                    .and_then(Value::as_str)
+                    == Some("completed")
+                && status_component.get("verdict").and_then(Value::as_str)
+                    == Some("component_handler")
+                && status_component
+                    .get("duration_ms")
+                    .and_then(Value::as_i64)
+                    .is_some()
+                && status.get("last_guard_verdict").and_then(Value::as_str)
+                    == Some("component_handler"),
+            format!("M status must retain N/C recent calls: {status}"),
         )?;
 
         // session status --json agrees on session id and agent.
@@ -296,7 +751,7 @@ fn direct_operator_audit_session_lancet_cross_validate() {
             format!("session status agent mismatch: {sstatus}"),
         )?;
 
-        // session log --json shows both turns.
+        // Session log remains independent of the operator DTO change.
         let sl = cli(&world, &spec, &["--json", "session", "log", &sid]);
         require(sl.status.success(), "session log failed")?;
         let slog = parse_json(&sl);
@@ -305,8 +760,8 @@ fn direct_operator_audit_session_lancet_cross_validate() {
             .and_then(Value::as_array)
             .expect("session log turns array");
         require(
-            turns.len() >= 2,
-            format!("session log must show >=2 turns: {}", turns.len()),
+            !turns.is_empty(),
+            format!("session log must show the mixed turn: {}", turns.len()),
         )?;
 
         Ok(())
@@ -314,11 +769,164 @@ fn direct_operator_audit_session_lancet_cross_validate() {
 
     finish_scenario(
         scenario_evidence,
-        &[("turn 1", &t1.command), ("turn 2", &t2.command)],
-        Vec::new(),
+        &[("mixed native/component turn", &turn.command)],
+        captures,
         result,
     );
-    let _ = captures;
+}
+
+#[test]
+fn direct_operator_status_bounds_twenty_newest_mixed_calls() {
+    let driver = driver();
+    let web = FixtureHttpServer::start(HttpFixture::plain("bounded status fixture"))
+        .expect("fixture HTTP server");
+    let fetch_url = web.url_path("/bounded-status");
+    let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
+    let (world, spec) = direct_world(
+        "direct-operator-status-bound",
+        "dl-op-bound",
+        "[\"fetch.web\",\"session.todo_write\"]",
+        &fetch_network_profile(),
+    );
+    let mut scripts = Vec::new();
+    for index in 0..11 {
+        scripts.push(tool_call(
+            &format!("bound-native-{index}"),
+            "fetch.web",
+            &fetch_args,
+        ));
+        scripts.push(tool_call(
+            &format!("bound-component-{index}"),
+            "session.todo_write",
+            &format!(r#"{{"todos":[{{"content":"bounded {index}","status":"pending"}}]}}"#),
+        ));
+        scripts.push(SseScript::plain(format!("bounded turn {index} complete")));
+    }
+    let server = wire_fake_llm(&world, "dl-op-bound", sequence(scripts));
+    let scenario_evidence = evidence(&world, &spec);
+    let send =
+        SessionSendDriver::new(&driver, &world, &spec, "dl-op-bound", "main").expect("session");
+    let sid = send.session_id().to_string();
+    let turns: Vec<_> = (0..11)
+        .map(|index| {
+            send.send(&format!("run bounded mixed operator turn {index}"))
+                .expect("mixed turn")
+        })
+        .collect();
+    let captures = server.captured_requests();
+
+    let result: Result<(), AssertError> = (|| {
+        for turn in &turns {
+            assert_clean_send(turn)?;
+            require(
+                turn.has_committed_completed(),
+                "bounded mixed turn must complete",
+            )?;
+        }
+        web.wait_for_requests(11, Duration::from_secs(5))
+            .map_err(|error| AssertError::StdoutMissing {
+                expected: format!("fetch fixture did not receive 11 requests: {error}"),
+            })?;
+
+        let query = cli(
+            &world,
+            &spec,
+            &["--json", "audit", "query", "--session", &sid],
+        );
+        require(query.status.success(), "bounded fixture query failed")?;
+        let query_json = parse_json(&query);
+        let all_rows = operator_rows(&query_json);
+        require(
+            query_json.get("row_count").and_then(Value::as_u64) == Some(22) && all_rows.len() == 22,
+            format!("bounded fixture must create 22 finalized rows: {query_json}"),
+        )?;
+
+        let status = cli(&world, &spec, &["--json", "lancet", "status"]);
+        require(status.status.success(), "bounded fixture status failed")?;
+        let status_json = parse_json(&status);
+        let recent = status_json
+            .get("recent_calls")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("status recent_calls: {status_json}"));
+        require(
+            recent.len() == 20,
+            format!("status must expose exactly the newest 20 of 22 rows: {status_json}"),
+        )?;
+        let recent_ids: Vec<i64> = recent
+            .iter()
+            .map(|row| {
+                row.get("audit_id")
+                    .and_then(Value::as_i64)
+                    .expect("recent audit_id")
+            })
+            .collect();
+        require(
+            recent_ids.windows(2).all(|pair| pair[0] > pair[1]),
+            format!("recent calls must be newest-first: {recent_ids:?}"),
+        )?;
+        let omitted_oldest: Vec<i64> = all_rows[..2]
+            .iter()
+            .map(|row| {
+                row.get("audit_id")
+                    .and_then(Value::as_i64)
+                    .expect("audit_id")
+            })
+            .collect();
+        require(
+            omitted_oldest
+                .iter()
+                .all(|audit_id| !recent_ids.contains(audit_id)),
+            format!("status must omit the two oldest rows: {recent_ids:?}"),
+        )?;
+        require(
+            recent.iter().all(|row| {
+                let method = row.get("method").and_then(Value::as_str);
+                let verdict = row.get("verdict").and_then(Value::as_str);
+                let duration = row.get("duration_ms").and_then(Value::as_i64);
+                match method {
+                    Some("fetch.web") => {
+                        verdict == Some("native_handler")
+                            && duration.is_some()
+                            && row_has_expected_evidence(row, false)
+                    }
+                    Some("session.todo_write") => {
+                        verdict == Some("component_handler")
+                            && duration.is_some()
+                            && row_has_expected_evidence(row, true)
+                    }
+                    _ => false,
+                }
+            }) && recent
+                .iter()
+                .filter(|row| row.get("method").and_then(Value::as_str) == Some("fetch.web"))
+                .count()
+                == 10
+                && recent
+                    .iter()
+                    .filter(|row| {
+                        row.get("method").and_then(Value::as_str) == Some("session.todo_write")
+                    })
+                    .count()
+                    == 10
+                && status_json
+                    .get("last_guard_verdict")
+                    .and_then(Value::as_str)
+                    == Some("component_handler"),
+            format!("bounded status must preserve ten N and ten C rows: {status_json}"),
+        )?;
+
+        Ok(())
+    })();
+
+    let summaries: Vec<String> = (0..turns.len())
+        .map(|index| format!("bounded mixed turn {index}"))
+        .collect();
+    let commands: Vec<(&str, &lattice_system_harness::CommandOutcome)> = summaries
+        .iter()
+        .zip(&turns)
+        .map(|(summary, turn)| (summary.as_str(), &turn.command))
+        .collect();
+    finish_scenario(scenario_evidence, &commands, captures, result);
 }
 
 /// An unknown session query returns an empty success (no rows), not a panic.

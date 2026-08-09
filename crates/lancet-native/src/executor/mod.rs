@@ -7,8 +7,8 @@
 //!
 //! This module is not part of the public CEP surface. The public tool
 //! contract is the CEP method catalog in `lancet_catalog` (CATALOG and
-//! params/results), plus protocol errors, envelopes, policy, and provenance
-//! wire types in `lancet_protocol`.
+//! params/results), plus protocol errors, envelopes, policy, and evidence
+//! types in `lancet_protocol`.
 
 pub(crate) mod error;
 pub(crate) mod web;

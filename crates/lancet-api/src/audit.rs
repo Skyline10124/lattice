@@ -13,11 +13,12 @@
 //! `lancet-cep`, or `lancet-runtime`, so the boundary holds structurally rather
 //! than by assertion.
 
+use lancet_audit::OperatorAuditError;
 pub use lancet_audit::{
     AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput, AuditReplayRequest,
-    AuditRequest, AuditTailOutput,
+    AuditReplayResult, AuditRequest, AuditTailOutput, OperatorAuditRow, OperatorCellEvidence,
+    OperatorReplayCall, OperatorTailRow, OperatorTurnTrace,
 };
-use lancet_audit::{AuditReplayResult, OperatorAuditError};
 
 use crate::error::{LancetError, LancetResult};
 
@@ -52,7 +53,7 @@ pub async fn tail_audit(request: AuditRequest) -> LancetResult<AuditTailOutput> 
         .map_err(map_operator_error)
 }
 
-/// Reconstruct turn trace, in-toto statement, and attestation comparison.
+/// Read one turn's finalized operator calls.
 ///
 /// Delegates to [`lancet_audit::replay_audit`]; see its docs for the output
 /// contract.
@@ -65,7 +66,6 @@ pub async fn replay_audit(request: AuditReplayRequest) -> LancetResult<AuditRepl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store_turn_attestation;
     use lancet_audit::{
         AuditOutcome, CallAuditMetadata, CepAuditContext, CepAuditStore, ScopedXdgStateHome,
         audit_db_path_for_project_in,
@@ -155,7 +155,7 @@ mod tests {
         let output = query_audit(request).await.expect("query");
         assert_eq!(output.session_id, session);
         assert_eq!(output.row_count, 2);
-        assert_eq!(output.fragment.activities.len(), 2);
+        assert_eq!(output.rows.len(), 2);
     }
 
     /// The error mapping must land operator `Config` errors on
@@ -166,37 +166,5 @@ mod tests {
         let request = AuditRequest::new(iso.project_path());
         let err = query_audit(request).await.expect_err("missing store");
         assert!(matches!(err, LancetError::Config(_)));
-    }
-
-    /// Cross-crate wiring: an attestation persisted via this crate's
-    /// [`store_turn_attestation`] (which derives its statement from the same
-    /// rows + runtime version) must be reported back by the facade's
-    /// `replay_audit` as `stored_statement_match == Some(true)`.
-    #[tokio::test]
-    async fn replay_audit_matches_stored_attestation() {
-        let iso = IsolatedProjectAudit::setup();
-        let session = "sess-replay-match";
-        let turn_id = "turn-op";
-        // Seed two finalized rows for the turn so the derived statement is non-trivial.
-        let audit = seed_audit_db(iso.state_path(), iso.project_path(), session, 2);
-        let ctx = CepAuditContext {
-            turn_id: turn_id.into(),
-            session_id: session.into(),
-            model_id: "cli-model".into(),
-            runtime_version: "test".into(),
-        };
-        // Persist the attestation from the same rows + runtime version that
-        // `replay_audit` will derive, so the stored and derived statements match.
-        store_turn_attestation(&audit, &ctx, turn_id).expect("store attestation");
-
-        let request = AuditReplayRequest::new(iso.project_path(), session, turn_id);
-        let replay = replay_audit(request).await.expect("replay");
-        assert_eq!(
-            replay.stored_statement_match,
-            Some(true),
-            "stored attestation should match the derived statement"
-        );
-        assert!(replay.statement.is_some());
-        assert!(replay.source_audit_range_or_hash.is_some());
     }
 }

@@ -255,8 +255,8 @@ tail_audit, replay_audit}` (`lattice audit` CLI). Agents cannot invoke audit
 reads as CEP tools.
 
 Since GitHub #39 those three `lancet-api` entry points are one-line delegations: the
-DTOs, pagination loop, filter construction, wire projection, attestation
-comparison, and contract tests live in `lancet-audit`
+DTOs, pagination loop, filter construction, typed Cell-evidence materialization,
+and contract tests live in `lancet-audit`
 (`src/operator.rs`, `src/operator_tests.rs`), and the external project-keyed
 path helpers in `lancet-audit/src/store_path.rs` (re-exported by
 `lancet-api::config`). The public `lancet_api::*` paths are unchanged. Because
@@ -316,7 +316,8 @@ embeddable and keeps each crate's concerns from leaking downward.
 One sentence per crate:
 
 - **`lancet-protocol`** — Pure CEP wire/data contracts (JSON-RPC frames,
-  typed errors, policy hook data, effect types, provenance wire types); no I/O
+  typed errors, policy hook data, effect types, and versioned Cell-evidence
+  types); no I/O
   and no tokio. The bottom contract.
 - **`net-guard`** — Neutral URL/DNS safety leaf: base-URL validation,
   public-address resolution, private/reserved IP checks, and
@@ -329,12 +330,12 @@ One sentence per crate:
   in-process transport (`CepClient`/`CepTransport`), cancellation, and event
   sinks.
 - **`lancet-audit`** — CEP audit persistence, query filters, stage/impact
-  labels, provenance projection, attestation persistence (CEP audit SQLite
-  lives here), and — since GitHub #39 — the whole operator read path: `query_audit` /
-  `tail_audit` / `replay_audit` with their DTOs, project-keyed store-path
-  resolution, and the workspace-wide `ScopedXdgStateHome` test helper behind
-  the `test-support` feature. It must never depend on `lancet-native`,
-  `lancet-dispatch`, `lancet-cep`, or `lancet-runtime`.
+  labels, versioned Cell evidence (CEP audit SQLite lives here), and — since
+  GitHub #39 — the whole operator read path: `query_audit` / `tail_audit` /
+  `replay_audit` with typed DTOs, project-keyed store-path resolution, and the
+  workspace-wide `ScopedXdgStateHome` test helper behind the `test-support`
+  feature. It must never depend on `lancet-native`, `lancet-dispatch`,
+  `lancet-cep`, or `lancet-runtime`.
 - **`lancet-authority`** — Policy semantics, capability matching, Guard L1
   path/scope checks, effect ledger, and effect-region checks.
 - **`lancet-cep`** — Public CEP facade over protocol/catalog/dispatch, plus

@@ -85,19 +85,6 @@ const REQUIRED_AUDIT_COLUMNS: [&str; 10] = [
     "policy_enforced",
 ];
 
-/// `attestation_records` columns an unversioned database must already have.
-/// Every column of this table is NOT NULL, so an older shape cannot be repaired
-/// additively either; detection covers both tables the store writes, not just
-/// the call rows (C5).
-const REQUIRED_ATTESTATION_COLUMNS: [&str; 6] = [
-    "turn_id",
-    "session_id",
-    "statement_json",
-    "predicate_type",
-    "generated_at",
-    "source_audit_range_or_hash",
-];
-
 /// Returns true when `method` is an inspect/navigate scaffold stub.
 pub fn is_scaffold_method(method: &str) -> bool {
     SCAFFOLD_METHODS.contains(&method)
@@ -210,7 +197,8 @@ fn is_production_catalog_method(method: &str) -> bool {
 pub struct CepAuditContext {
     pub turn_id: String,
     pub session_id: String,
-    /// Resolved model id for PROV Agent reconstruction; empty in tests unless set.
+    /// Resolved model id retained as an operator-visible audit-row fact; empty
+    /// in tests unless set.
     pub model_id: String,
     /// Runtime / crate version string persisted on each row.
     pub runtime_version: String,
@@ -269,17 +257,18 @@ pub struct AuditQueryFilters {
     pub exclude_method_prefix: Option<String>,
     /// Database-level row cap for this query, clamped to [`AUDIT_QUERY_MAX_ROWS`].
     pub limit: Option<usize>,
+    /// Database ordering applied before `limit`.
+    pub order: AuditQueryOrder,
 }
 
-/// Stored unsigned in-toto-shaped attestation for a turn.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AttestationRecord {
-    pub turn_id: String,
-    pub session_id: String,
-    pub statement_json: String,
-    pub predicate_type: String,
-    pub generated_at: String,
-    pub source_audit_range_or_hash: String,
+/// Audit-id ordering for a filtered operator read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AuditQueryOrder {
+    /// Oldest to newest; the default for query, tail, and replay.
+    #[default]
+    Ascending,
+    /// Newest to oldest; used by bounded recent-call summaries.
+    Descending,
 }
 
 /// Durable record of one explicit Rewind (GitHub #64).
@@ -514,9 +503,9 @@ impl CepAuditStore {
 
     /// Create or adopt the schema and stamp [`AUDIT_SCHEMA_VERSION`].
     ///
-    /// An unversioned database is adopted only when both `cep_audit_entries`
-    /// and `attestation_records` still carry every required column; an older
-    /// shape is reported with an operator action instead of being altered, so
+    /// An unversioned database is adopted only when `cep_audit_entries` still
+    /// carries every required column; an older shape is reported with an
+    /// operator action instead of being altered, so
     /// audit history is never silently dropped or rewritten (the read-only
     /// legacy import stays the supported way to carry it forward). Detection is
     /// by column name: a table whose names match but whose column types differ
@@ -585,14 +574,6 @@ impl CepAuditStore {
                 model_id TEXT,
                 runtime_version TEXT
              );
-             CREATE TABLE IF NOT EXISTS attestation_records (
-                turn_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                statement_json TEXT NOT NULL,
-                predicate_type TEXT NOT NULL,
-                generated_at TEXT NOT NULL,
-                source_audit_range_or_hash TEXT NOT NULL
-             );
              CREATE TABLE IF NOT EXISTS rewind_records (
                 rewind_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -605,7 +586,8 @@ impl CepAuditStore {
                 restored_json TEXT,
                 conflicts_json TEXT,
                 recorded_at TEXT NOT NULL
-             );",
+             );
+             DROP TABLE IF EXISTS attestation_records;",
         )
         .map_err(|source| AuditError::Database {
             path: self.path.clone(),
@@ -703,16 +685,11 @@ impl CepAuditStore {
             })
     }
 
-    /// Required columns absent from either table this store writes, qualified by
-    /// table name, or `None` when both are complete or absent (fresh file).
+    /// Required columns absent from the audit-row table, qualified by table
+    /// name, or `None` when the table is complete or absent (fresh file).
     fn missing_required_columns(&self, conn: &Connection) -> Result<Option<String>, AuditError> {
-        let mut missing = Vec::new();
-        for (table, required) in [
-            ("cep_audit_entries", &REQUIRED_AUDIT_COLUMNS[..]),
-            ("attestation_records", &REQUIRED_ATTESTATION_COLUMNS[..]),
-        ] {
-            missing.extend(self.missing_columns_of(conn, table, required)?);
-        }
+        let missing =
+            self.missing_columns_of(conn, "cep_audit_entries", &REQUIRED_AUDIT_COLUMNS)?;
         if missing.is_empty() {
             Ok(None)
         } else {
@@ -963,7 +940,7 @@ impl CepAuditStore {
         })
     }
 
-    /// Filtered read for PROV projection and operator audit APIs (parameterized SQL only).
+    /// Filtered read for operator audit APIs (parameterized SQL only).
     pub fn query_rows(&self, filters: &AuditQueryFilters) -> Result<Vec<AuditRow>, AuditError> {
         let mut sql = String::from(
             "SELECT audit_id, call_id, method, started_at, ended_at, result_or_error, impact_kind,
@@ -1053,7 +1030,10 @@ impl CepAuditStore {
 
         let effective_limit = filters.limit.map(|limit| limit.min(AUDIT_QUERY_MAX_ROWS));
 
-        sql.push_str(" ORDER BY audit_id ASC");
+        match filters.order {
+            AuditQueryOrder::Ascending => sql.push_str(" ORDER BY audit_id ASC"),
+            AuditQueryOrder::Descending => sql.push_str(" ORDER BY audit_id DESC"),
+        }
         if let Some(limit) = effective_limit {
             sql.push_str(" LIMIT ?");
             bind.push(Box::new(limit as i64));
@@ -1079,60 +1059,6 @@ impl CepAuditStore {
             })?);
         }
         Ok(out)
-    }
-
-    pub fn insert_attestation(&self, record: &AttestationRecord) -> Result<(), AuditError> {
-        let conn = self.conn.lock().expect("audit mutex poisoned");
-        conn.execute(
-            "INSERT INTO attestation_records (
-                turn_id, session_id, statement_json, predicate_type, generated_at,
-                source_audit_range_or_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                record.turn_id,
-                record.session_id,
-                record.statement_json,
-                record.predicate_type,
-                record.generated_at,
-                record.source_audit_range_or_hash,
-            ],
-        )
-        .map_err(|source| AuditError::Database {
-            path: self.path.clone(),
-            source,
-        })?;
-        Ok(())
-    }
-
-    pub fn attestation_for_turn(
-        &self,
-        turn_id: &str,
-    ) -> Result<Option<AttestationRecord>, AuditError> {
-        let conn = self.conn.lock().expect("audit mutex poisoned");
-        let result = conn.query_row(
-            "SELECT turn_id, session_id, statement_json, predicate_type, generated_at,
-                    source_audit_range_or_hash
-             FROM attestation_records WHERE turn_id = ?1",
-            params![turn_id],
-            |row| {
-                Ok(AttestationRecord {
-                    turn_id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    statement_json: row.get(2)?,
-                    predicate_type: row.get(3)?,
-                    generated_at: row.get(4)?,
-                    source_audit_range_or_hash: row.get(5)?,
-                })
-            },
-        );
-        match result {
-            Ok(record) => Ok(Some(record)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(source) => Err(AuditError::Database {
-                path: self.path.clone(),
-                source,
-            }),
-        }
     }
 
     /// Append one durable Rewind record (#64).
@@ -1210,19 +1136,6 @@ impl CepAuditStore {
         Ok(out)
     }
 
-    pub fn delete_attestation_for_turn(&self, turn_id: &str) -> Result<(), AuditError> {
-        let conn = self.conn.lock().expect("audit mutex poisoned");
-        conn.execute(
-            "DELETE FROM attestation_records WHERE turn_id = ?1",
-            params![turn_id],
-        )
-        .map_err(|source| AuditError::Database {
-            path: self.path.clone(),
-            source,
-        })?;
-        Ok(())
-    }
-
     pub fn row_count(&self) -> Result<usize, AuditError> {
         let conn = self.conn.lock().expect("audit mutex poisoned");
         let count: i64 = conn
@@ -1238,8 +1151,8 @@ impl CepAuditStore {
 
     /// Import historical audit rows from `source_path` when this store is empty.
     ///
-    /// Opens the source read-only, copies `cep_audit_entries` and `attestation_records`
-    /// into the destination in one transaction, preserves row ids and metadata, and
+    /// Opens the source read-only, copies `cep_audit_entries` into the
+    /// destination in one transaction, preserves row ids and metadata, and
     /// never writes to or mutates the source database or its WAL/SHM sidecars.
     /// Idempotent: no-op when the destination already has audit rows.
     pub fn import_legacy_read_only_if_empty(
@@ -1366,56 +1279,6 @@ fn import_legacy_tables(
         })?;
     }
 
-    let mut attestation_stmt = source
-        .prepare(
-            "SELECT turn_id, session_id, statement_json, predicate_type, generated_at,
-                    source_audit_range_or_hash
-             FROM attestation_records",
-        )
-        .map_err(|source| AuditError::Database {
-            path: dest_path.to_path_buf(),
-            source,
-        })?;
-    let attestation_rows = attestation_stmt
-        .query_map([], |row| {
-            Ok(AttestationRecord {
-                turn_id: row.get(0)?,
-                session_id: row.get(1)?,
-                statement_json: row.get(2)?,
-                predicate_type: row.get(3)?,
-                generated_at: row.get(4)?,
-                source_audit_range_or_hash: row.get(5)?,
-            })
-        })
-        .map_err(|source| AuditError::Database {
-            path: dest_path.to_path_buf(),
-            source,
-        })?;
-    for row in attestation_rows {
-        let record = row.map_err(|source| AuditError::Database {
-            path: dest_path.to_path_buf(),
-            source,
-        })?;
-        dest.execute(
-            "INSERT INTO attestation_records (
-                turn_id, session_id, statement_json, predicate_type, generated_at,
-                source_audit_range_or_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                record.turn_id,
-                record.session_id,
-                record.statement_json,
-                record.predicate_type,
-                record.generated_at,
-                record.source_audit_range_or_hash,
-            ],
-        )
-        .map_err(|source| AuditError::Database {
-            path: dest_path.to_path_buf(),
-            source,
-        })?;
-    }
-
     let _ = dest.execute(
         "UPDATE sqlite_sequence SET seq = (SELECT COALESCE(MAX(audit_id), 0) FROM cep_audit_entries)
          WHERE name = 'cep_audit_entries'",
@@ -1424,7 +1287,7 @@ fn import_legacy_tables(
     Ok(())
 }
 
-/// Materialized audit row for tests and PROV projection.
+/// Materialized audit row for tests and operator reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditRow {
     pub audit_id: i64,

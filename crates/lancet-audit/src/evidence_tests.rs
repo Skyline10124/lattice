@@ -1063,14 +1063,6 @@ fn incompatible_evidence_table_shape_is_actionable_and_leaves_history() {
                 guard_stage TEXT NOT NULL,
                 policy_enforced INTEGER NOT NULL
              );
-             CREATE TABLE attestation_records (
-                turn_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                statement_json TEXT NOT NULL,
-                predicate_type TEXT NOT NULL,
-                generated_at TEXT NOT NULL,
-                source_audit_range_or_hash TEXT NOT NULL
-             );
              CREATE TABLE evidence_calls (
                 evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 turn_id TEXT NOT NULL
@@ -1145,14 +1137,6 @@ fn pre_evidence_database_gains_the_tables_and_keeps_history() {
                 guard_stage TEXT NOT NULL,
                 policy_enforced INTEGER NOT NULL,
                 metadata_json TEXT
-             );
-             CREATE TABLE attestation_records (
-                turn_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                statement_json TEXT NOT NULL,
-                predicate_type TEXT NOT NULL,
-                generated_at TEXT NOT NULL,
-                source_audit_range_or_hash TEXT NOT NULL
              );
              INSERT INTO cep_audit_entries
                 (call_id, method, started_at, ended_at, result_or_error, impact_kind,

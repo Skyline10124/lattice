@@ -22,7 +22,7 @@ agent loop over `lancet-api`'s CEP runtime.
   mapping, and `build_production_turn_deps` (delegates composition to
   `lancet_api::LancetRuntime::build`). Runtime assembly itself is in `lancet-api`.
 - `src/turn/mapping.rs` and `src/turn/types.rs` own public event/result mapping.
-- Integration tests cover CEP round trips, audit provenance, release flows, and
+- Integration tests cover CEP round trips, typed operator audit reads, release flows, and
   consistency.
 - Audit-path tests serialise `XDG_STATE_HOME` through
   `lancet_audit::ScopedXdgStateHome`, pulled in via

@@ -152,8 +152,8 @@ pub fn admit_tool(
         admitted.insert(capability.name.clone(), capability.clone());
     }
 
-    // Every list is sorted and deduplicated by construction, so audit and
-    // attestation bytes are stable across runs.
+    // Every list is sorted and deduplicated by construction, so persisted
+    // evidence is stable across runs.
     let evidence = AdmissionEvidence {
         version: ADMISSION_EVIDENCE_VERSION,
         tool: descriptor.name.clone(),
@@ -578,7 +578,7 @@ mod tests {
     }
 
     /// Evidence lists are sorted regardless of declaration order, so the
-    /// audit/attestation bytes of one call are stable.
+    /// audit/evidence bytes of one call are stable.
     #[test]
     fn evidence_lists_are_sorted() {
         let admitted = admit_tool(

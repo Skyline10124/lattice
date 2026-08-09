@@ -30,6 +30,14 @@
 > Active 场景 ID 登记在此表。#40 退役的 KVM-lane 场景词汇已从 machine ledger
 > 与本目录中完全移除；其语义由已落地的 `direct_*` exact scenarios 接管。
 > #46 residual closeout 已将 #72 遗留的 3 个 `planned_direct_*` 落地为 exact external scenarios 并删除对应内部测试；场景目录不再保留 planned residual。退役词汇的迁移记录见 FIX.md。
+>
+> **#114 supersession（2026-08-09）:** 本清单是 2026-07-09 的历史
+> 枚举快照。凡引用 `provenance.rs`、`attestation_records`、
+> `audit_turn_provenance.rs`、`prov_isomorphism.rs` 或
+> `stored_statement_match` 的旧 identity，均已随 Turn/audit provenance
+> 与 attestation surface 一并退休；不再是 active 测试或 release gate。
+> 现行替代是 `direct_operator_*` 的 Direct-Local N/C/M contracts 与
+> feature-gated `release_operator_native_component_mixed_matrix` release gate。
 
 | ID | 说明 | 状态 |
 | --- | --- | --- |
@@ -48,7 +56,11 @@
 | `direct_failure_disconnect_before_output_commits_error` | Direct-Local: stream failure event order + durable error log | **已落地** `tests/direct_failures.rs`；#72 补齐 exact assertions |
 | `direct_failure_sigint_while_stalled_commits_cancelled` | Direct-Local: cooperative cancellation + durable cancelled log | **已落地** `tests/direct_failures.rs`；#72 补齐 exact assertions |
 | `direct_failure_profile_deadline_while_stalled_commits_error` | Direct-Local: product deadline on stalled provider | **已落地** `tests/direct_failures.rs` |
-| `direct_operator_audit_session_lancet_cross_validate` | Direct-Local: audit query/tail/replay + stored attestation match | **已落地** `tests/direct_operator.rs`；#72 补齐 exact assertion |
+| `direct_operator_native_without_evidence_contract` | Direct-Local: native-only query/page/tail/replay/status with `evidence: null` | **已落地** `tests/direct_operator.rs`（#114） |
+| `direct_operator_component_with_evidence_contract` | Direct-Local: Component-only query/page/tail/replay/status with typed evidence | **已落地** `tests/direct_operator.rs`（#114） |
+| `direct_operator_audit_session_lancet_cross_validate` | Direct-Local: mixed native/Component audit query-tail-replay and status evidence | **已落地** `tests/direct_operator.rs`（#114） |
+| `direct_operator_status_bounds_twenty_newest_mixed_calls` | Direct-Local: 22 mixed rows produce newest-first bounded 20-row status with verdict/duration | **已落地** `tests/direct_operator.rs`（#114） |
+| `release_operator_native_component_mixed_matrix` | Release binary: independent feature-gated N/C/M fixtures over query/page/tail/replay/status | **已落地** `tests/release_operator.rs`（#114 rollout gate） |
 | `direct_operator_audit_query_unknown_session_empty` | Direct-Local: unknown-session audit query empty success | **已落地** `tests/direct_operator.rs` |
 | `direct_operator_audit_replay_unknown_turn_fails` | Direct-Local: unknown-turn replay exact diagnostic | **已落地** `tests/direct_operator.rs`；#72 补齐 exact assertion |
 | `direct_session_*_isolation` | Direct-Local: branch/checkout/create/reset/diff session isolation | **已落地** `tests/direct_session_isolation.rs` |
@@ -60,31 +72,31 @@
 
 | 决定 | 条数 |
 | --- | ---: |
-| 保留 | 1190 |
+| 保留 | 1172 |
 | 提升 | 42 |
-| 删除 | 217 |
+| 删除 | 235 |
 | **合计** | **1449** |
 
 #### 按 crate
 
 | crate | 保留 | 提升 | 删除 | 合计 |
 | --- | ---: | ---: | ---: | ---: |
-| `lattice-api` | 234 | 0 | 26 | 260 |
+| `lattice-api` | 231 | 0 | 29 | 260 |
 | `lattice-cli` | 117 | 41 | 27 | 185 |
 | `lattice-workspace` | 0 | 0 | 158 | 158 |
 | `lancet-authority` | 135 | 0 | 0 | 135 |
 | `lattice-llm` | 133 | 0 | 0 | 133 |
-| `lancet-native` | 107 | 0 | 0 | 107 |
+| `lancet-native` | 104 | 0 | 3 | 107 |
 | `lattice-profile` | 96 | 0 | 1 | 97 |
 | `lattice-agent` | 70 | 0 | 1 | 71 |
 | `lattice-session` | 69 | 0 | 2 | 71 |
 | `lattice-system-harness` | 56 | 1 | 0 | 57 |
-| `lancet-audit` | 44 | 0 | 0 | 44 |
-| `lancet-protocol` | 36 | 0 | 0 | 36 |
+| `lancet-audit` | 36 | 0 | 8 | 44 |
+| `lancet-protocol` | 33 | 0 | 3 | 36 |
 | `lancet-catalog` | 30 | 0 | 1 | 31 |
 | `xtask` | 26 | 0 | 0 | 26 |
 | `net-guard` | 15 | 0 | 0 | 15 |
-| `lancet-api` | 7 | 0 | 1 | 8 |
+| `lancet-api` | 6 | 0 | 2 | 8 |
 | `lancet-cep` | 7 | 0 | 0 | 7 |
 | `lancet-dispatch` | 5 | 0 | 0 | 5 |
 | `lattice-tui` | 3 | 0 | 0 | 3 |
@@ -222,9 +234,9 @@ codeberg issue 跟踪重写。
 
 | 决定 | 条数 |
 | --- | ---: |
-| 保留 | 1190 |
+| 保留 | 1172 |
 | 提升 | 42 |
-| 删除 | 217 |
+| 删除 | 235 |
 | **合计** | **1449** |
 
 ## 1.6 #24 slice 2 执行状态（2026-07-22）
@@ -296,7 +308,9 @@ codeberg issue 跟踪重写。
 
 ## 1.9 #24 slice 6 执行状态（2026-07-22）
 
-> 外部测试 `crates/lattice-system-harness/tests/direct_operator.rs`（3 场景）+ `tests/direct_secrets.rs`（2 场景）已实现并通过全部 gate。
+> 外部测试 `crates/lattice-system-harness/tests/direct_operator.rs`（#46 当时
+> 3 场景；#114 后 6 场景）+ `tests/direct_secrets.rs`（2 场景）已实现并通过
+> 全部 gate；#114 另有 feature-gated `release_operator.rs`。
 > 产品变更：`TurnStarted` 添加 additive `turn_id` 字段（audit replay 需要稳定 turn 标识）。
 
 ### 已删除（4 条，提升->删除）
@@ -308,11 +322,11 @@ codeberg issue 跟踪重写。
 | `audit_query_empty_result_for_unknown_session` | `direct_operator_audit_query_unknown_session_empty` | exit 0 + row_count==0 |
 | `audit_replay_reconstructs_turn_trace_for_seeded_db` | `direct_operator_audit_session_lancet_cross_validate` | replay trace.turn_id 非空 + observe.workspace activity |
 
-### #72 补齐并删除（2 条）
+### #72 补齐并删除（2 条；其中 attestation 断言已由 #114 退休）
 
 | ledger identity | replacement scenario | 未覆盖半 |
 | --- | --- | --- |
-| `audit_replay_reports_stored_attestation_match` | `direct_operator_audit_session_lancet_cross_validate` | #72 补齐 public replay JSON stored_statement_match=true |
+| `audit_replay_reports_stored_attestation_match` | n/a — #114 退休该输出 | turn attestation 与 `stored_statement_match` 已删除；release matrix 改断言 N/C/M typed evidence |
 | `cep_status_seeded_audit_json` | `direct_tools_todo_write_success` | #72 真实 todo Turn 后断言 recent_calls 含 todo_write + last_guard_verdict 非空 |
 
 
@@ -371,7 +385,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 
 ## 1.12 GitHub #39 operator audit 下沉（2026-07-27）
 
-> operator audit 读路径（DTO / 分页 / 过滤 / 投影 / attestation 比对）从 `lancet-api`
+> operator audit 读路径（DTO / 分页 / 过滤 / typed evidence materialization）从 `lancet-api`
 > 下沉到 `lancet-audit`，`crates/lancet-catalog/src/methods/audit.rs` 整体删除。
 > 本节只记录 ledger 影响：**没有任何测试被「提升」或被外部场景取代**，10 条 identity 仅换 crate/文件，
 > 1 条随被测 DTO 一并删除。
@@ -393,7 +407,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 
 另有 4 条留在 `lancet-api` 但行号刷新：`query_audit_reads_store_without_cep_server`
 （audit.rs:145）、`query_audit_errors_when_store_missing`（audit.rs:160）、
-`replay_audit_matches_stored_attestation`（audit.rs:172）、
+`replay_audit_matches_stored_attestation`（audit.rs:172，后由 #114 退休）、
 `external_audit_external_for_project_in_resolves_under_state_root`（config.rs:116）。
 
 ### 已删除（1 条，保留->删除）
@@ -416,14 +430,23 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 - lancet-catalog：保留 31->30，删除 0->1
 - 全量：保留 1191->1190，删除 216->217，提升 42 不变（总 identity 1449 不变；layer 仍为 local 1372 / fast 45 / Direct-Local 32）
 
-> 计数基线说明：上列「全量」数字对齐 `docs/test-triage-decisions.json` 的真实计数
-> （改动前 keep 1191 / elevate 42 / delete 216）。早期批次说明里的 running total
-> （如 §1.9 的「删除 211->214」）与 machine ledger 存在 **2 条固有偏差**，属既有历史记录，
-> 非 #39 引入，本次不改写；以 machine ledger 与本节汇总表为准。
+### #114 provenance/attestation retirement delta（2026-08-09）
+
+- `lancet-api`：保留 7->6，删除 1->2
+- `lancet-audit`：保留 44->36，删除 0->8
+- `lancet-native`：保留 107->104，删除 0->3
+- `lancet-protocol`：保留 36->33，删除 0->3
+- `lattice-api`：保留 234->231，删除 26->29
+- 全量：保留 1190->1172，删除 217->235，提升 42 不变（总 identity 1449 不变）
+
+> 计数基线说明：上列 #39 的「全量」数字是当时的历史记录；#114 后当前
+> `docs/test-triage-decisions.json` 真实计数为 keep 1172 / elevate 42 / delete 235。
+> 早期批次说明里的 running total（如 §1.9 的「删除 211->214」）与 machine ledger
+> 存在既有历史偏差，非 #114 引入；以本节 #114 delta、汇总表和 machine ledger 为准。
 
 ## 2. 逐条清单
 
-### `lancet-api`（保留 7 / 提升 0 / 删除 1）
+### `lancet-api`（保留 6 / 提升 0 / 删除 2）
 
 > GitHub #39 将 10 条 identity 迁往 `lancet-audit`（6 条 `audit.rs` → `operator_tests.rs`，
 > 4 条 `config.rs` → `store_path.rs`），决定/目标层/理由均不变，见下方 `lancet-audit` 小节。
@@ -432,60 +455,60 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | --- | --- | --- | --- | --- | --- |
 | `query_audit_reads_store_without_cep_server` | `crates/lancet-api/src/audit.rs:145` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `query_audit_errors_when_store_missing` | `crates/lancet-api/src/audit.rs:160` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `replay_audit_matches_stored_attestation` | `crates/lancet-api/src/audit.rs:172` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `replay_audit_matches_stored_attestation` | `crates/lancet-api/src/audit.rs:172` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
 | `operator_audit_module_does_not_reference_cep_server_types` | `crates/lancet-api/src/audit.rs:745` | 删除 | 局部不变量 | n/a — 无替代场景（源码字符串扫描；边界由 xtask/依赖图负责） | 扫描源码字符串/import 的架构检查；删除（RFC #41 决定六） |
 | `external_audit_external_for_project_in_resolves_under_state_root` | `crates/lancet-api/src/config.rs:116` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `runtime_config_defaults_have_null_execution` | `crates/lancet-api/src/runtime.rs:246` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `production_runtime_rejects_retired_exec_command_run_as_method_not_found` | `crates/lancet-api/src/runtime.rs:259` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `production_runtime_rejects_retired_mutate_batch_as_method_not_found` | `crates/lancet-api/src/runtime.rs:313` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 
-### `lancet-audit`（保留 44 / 提升 0 / 删除 0）
+### `lancet-audit`（保留 36 / 提升 0 / 删除 8）
 
 > GitHub #39 从 `lancet-api` 迁入 10 条 identity（`operator_tests.rs` 6 条 + `store_path.rs` 4 条）。
 > 决定、目标层与理由逐字保留，只更新 crate 与 `文件` 定位。
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
-| `open_rejects_symlinked_audit_parent` | `crates/lancet-audit/src/audit_tests.rs:32` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `open_rejects_symlinked_audit_database_file` | `crates/lancet-audit/src/audit_tests.rs:53` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `for_production_dispatch_labels_known_native_and_unknown_unrouted` | `crates/lancet-audit/src/audit_tests.rs:79` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_success_appends_one_row_with_required_fields` | `crates/lancet-audit/src/audit_tests.rs:93` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_error_path_finalizes_ended_at` | `crates/lancet-audit/src/audit_tests.rs:132` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_unknown_method_and_cancel_paths_finalize` | `crates/lancet-audit/src/audit_tests.rs:164` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_rows_store_summaries_not_full_payloads` | `crates/lancet-audit/src/audit_tests.rs:217` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_failed_insert_does_not_increment_pending` | `crates/lancet-audit/src/audit_tests.rs:253` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_failed_finalize_still_decrements_pending` | `crates/lancet-audit/src/audit_tests.rs:272` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_native_and_unrouted_rows_coexist` | `crates/lancet-audit/src/audit_tests.rs:302` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_metadata_json_excludes_full_payloads` | `crates/lancet-audit/src/audit_tests.rs:368` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_effective_boundary_metadata_round_trips_compactly` | `crates/lancet-audit/src/audit_tests.rs:400` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `impact_kind_label_round_trips_all_variants` | `crates/lancet-audit/src/audit_tests.rs:492` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `start_call_persists_model_and_runtime_columns` | `crates/lancet-audit/src/audit_tests.rs:511` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `attestation_round_trip` | `crates/lancet-audit/src/audit_tests.rs:543` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `query_rows_filters_by_session_and_method` | `crates/lancet-audit/src/audit_tests.rs:561` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `query_rows_filters_by_verdict` | `crates/lancet-audit/src/audit_tests.rs:620` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `query_rows_filters_by_capability` | `crates/lancet-audit/src/audit_tests.rs:692` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `query_rows_applies_database_limit_and_excluded_method_prefix` | `crates/lancet-audit/src/audit_tests.rs:744` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `query_rows_excludes_unfinalized_rows` | `crates/lancet-audit/src/audit_tests.rs:791` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `merge_finalize_metadata_adds_required_capability` | `crates/lancet-audit/src/audit_tests.rs:813` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `cep_audit_await_pending_waits_for_finalization` | `crates/lancet-audit/src/audit_tests.rs:825` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `rejection_stage_serializes_stable_snake_case_labels` | `crates/lancet-audit/src/audit_tests.rs:855` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `rejection_stage_filters_rows_by_metadata_json` | `crates/lancet-audit/src/audit_tests.rs:872` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `import_legacy_read_only_if_empty_copies_both_tables` | `crates/lancet-audit/src/audit_tests.rs:974` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `import_legacy_read_only_if_empty_is_noop_when_destination_has_rows` | `crates/lancet-audit/src/audit_tests.rs:1014` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
+| `open_rejects_symlinked_audit_parent` | `crates/lancet-audit/src/audit_tests.rs:32` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `open_rejects_symlinked_audit_database_file` | `crates/lancet-audit/src/audit_tests.rs:53` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `for_production_dispatch_labels_known_native_and_unknown_unrouted` | `crates/lancet-audit/src/audit_tests.rs:79` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_success_appends_one_row_with_required_fields` | `crates/lancet-audit/src/audit_tests.rs:93` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_error_path_finalizes_ended_at` | `crates/lancet-audit/src/audit_tests.rs:132` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_unknown_method_and_cancel_paths_finalize` | `crates/lancet-audit/src/audit_tests.rs:164` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_rows_store_summaries_not_full_payloads` | `crates/lancet-audit/src/audit_tests.rs:217` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_failed_insert_does_not_increment_pending` | `crates/lancet-audit/src/audit_tests.rs:253` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_failed_finalize_still_decrements_pending` | `crates/lancet-audit/src/audit_tests.rs:272` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_native_and_unrouted_rows_coexist` | `crates/lancet-audit/src/audit_tests.rs:302` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_metadata_json_excludes_full_payloads` | `crates/lancet-audit/src/audit_tests.rs:368` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_effective_boundary_metadata_round_trips_compactly` | `crates/lancet-audit/src/audit_tests.rs:400` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `impact_kind_label_round_trips_all_variants` | `crates/lancet-audit/src/audit_tests.rs:492` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `start_call_persists_model_and_runtime_columns` | `crates/lancet-audit/src/audit_tests.rs:511` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `open_removes_retired_turn_attestation_table` | `crates/lancet-audit/src/audit_tests.rs:198` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `query_rows_filters_by_session_and_method` | `crates/lancet-audit/src/audit_tests.rs:561` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `query_rows_filters_by_verdict` | `crates/lancet-audit/src/audit_tests.rs:620` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `query_rows_filters_by_capability` | `crates/lancet-audit/src/audit_tests.rs:692` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `query_rows_applies_database_limit_and_excluded_method_prefix` | `crates/lancet-audit/src/audit_tests.rs:744` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `query_rows_excludes_unfinalized_rows` | `crates/lancet-audit/src/audit_tests.rs:791` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `merge_finalize_metadata_adds_required_capability` | `crates/lancet-audit/src/audit_tests.rs:813` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `cep_audit_await_pending_waits_for_finalization` | `crates/lancet-audit/src/audit_tests.rs:825` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `rejection_stage_serializes_stable_snake_case_labels` | `crates/lancet-audit/src/audit_tests.rs:855` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `rejection_stage_filters_rows_by_metadata_json` | `crates/lancet-audit/src/audit_tests.rs:872` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `import_legacy_read_only_if_empty_copies_audit_rows` | `crates/lancet-audit/src/audit_tests.rs:1437` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
+| `import_legacy_read_only_if_empty_is_noop_when_destination_has_rows` | `crates/lancet-audit/src/audit_tests.rs:1014` | 保留 | 局部不变量 | — | audit 持久化/过滤/Cell evidence 局部契约；保留 |
 | `tail_audit_paginates_large_result_without_cep_server` | `crates/lancet-audit/src/operator_tests.rs:87` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `replay_audit_returns_trace_for_turn` | `crates/lancet-audit/src/operator_tests.rs:137` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `query_audit_excludes_unfinalized_rows_during_active_turn` | `crates/lancet-audit/src/operator_tests.rs:238` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `operator_audit_reads_concurrent_with_active_writer` | `crates/lancet-audit/src/operator_tests.rs:288` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `query_audit_reads_legacy_table_missing_optional_columns` | `crates/lancet-audit/src/operator_tests.rs:403` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `query_audit_reads_legacy_table_without_attestation_records` | `crates/lancet-audit/src/operator_tests.rs:465` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
-| `build_statement_lists_materials` | `crates/lancet-audit/src/provenance/attestation.rs:145` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `source_audit_range_hash_is_stable` | `crates/lancet-audit/src/provenance/attestation.rs:191` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `canonicalize_strips_timestamps` | `crates/lancet-audit/src/provenance/canonicalize.rs:76` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `project_rows_builds_activity_per_row` | `crates/lancet-audit/src/provenance/projector.rs:278` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `parse_impact_kind_warns_on_unknown_label` | `crates/lancet-audit/src/provenance/projector.rs:297` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `project_turn_trace_orders_calls` | `crates/lancet-audit/src/provenance/projector.rs:310` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `boundary_observed_projection` | `crates/lancet-audit/src/provenance/projector.rs:323` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
-| `preflight_and_policy_metadata_project_to_activity_attributes` | `crates/lancet-audit/src/provenance/projector.rs:361` | 保留 | 局部不变量 | — | audit 持久化/过滤/provenance 投影局部契约；保留 |
+| `query_audit_reads_legacy_call_table` | `crates/lancet-audit/src/operator_tests.rs:984` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
+| `build_statement_lists_materials` | `crates/lancet-audit/src/provenance/attestation.rs:145` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `source_audit_range_hash_is_stable` | `crates/lancet-audit/src/provenance/attestation.rs:191` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `canonicalize_strips_timestamps` | `crates/lancet-audit/src/provenance/canonicalize.rs:76` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `project_rows_builds_activity_per_row` | `crates/lancet-audit/src/provenance/projector.rs:278` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `parse_impact_kind_warns_on_unknown_label` | `crates/lancet-audit/src/provenance/projector.rs:297` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `project_turn_trace_orders_calls` | `crates/lancet-audit/src/provenance/projector.rs:310` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `boundary_observed_projection` | `crates/lancet-audit/src/provenance/projector.rs:323` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `preflight_and_policy_metadata_project_to_activity_attributes` | `crates/lancet-audit/src/provenance/projector.rs:361` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
 | `external_audit_distinct_project_keys` | `crates/lancet-audit/src/store_path.rs:137` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `external_audit_symlink_canonical_identity` | `crates/lancet-audit/src/store_path.rs:154` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
 | `external_audit_invalid_canonical_identity_errors` | `crates/lancet-audit/src/store_path.rs:166` | 保留 | 局部不变量 | — | LancetRuntime 组合/配置/audit 只读 API 局部契约；保留 |
@@ -689,7 +712,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `registry_duplicate_registration_returns_error` | `crates/lancet-dispatch/src/registry.rs:293` | 保留 | 局部不变量 | — | lancet-dispatch 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `transport_round_trip_returns_typed_result` | `crates/lancet-dispatch/src/transport.rs:426` | 保留 | 局部不变量 | — | lancet-dispatch 局部不变量（wire/安全/dispatch/投影）；保留 |
 
-### `lancet-native`（保留 107 / 提升 0 / 删除 0）
+### `lancet-native`（保留 104 / 提升 0 / 删除 3）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -797,11 +820,11 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `integration_web_fetch_allowed_for_allowed_host` | `crates/lancet-native/tests/policy_integration.rs:89` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
 | `integration_budget_exceeded_denies_observation` | `crates/lancet-native/tests/policy_integration.rs:104` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
 | `integration_todo_budget_exceeded_denies_todo_write` | `crates/lancet-native/tests/policy_integration.rs:130` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
-| `read_only_turn_projection_is_isomorphic` | `crates/lancet-native/tests/prov_isomorphism.rs:58` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
-| `mutation_turn_projection_is_isomorphic` | `crates/lancet-native/tests/prov_isomorphism.rs:86` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
-| `mixed_turn_projection_is_isomorphic` | `crates/lancet-native/tests/prov_isomorphism.rs:121` | 保留 | 局部不变量 | — | native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留 |
+| `read_only_turn_projection_is_isomorphic` | `crates/lancet-native/tests/prov_isomorphism.rs:58` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `mutation_turn_projection_is_isomorphic` | `crates/lancet-native/tests/prov_isomorphism.rs:86` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `mixed_turn_projection_is_isomorphic` | `crates/lancet-native/tests/prov_isomorphism.rs:121` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
 
-### `lancet-protocol`（保留 36 / 提升 0 / 删除 0）
+### `lancet-protocol`（保留 33 / 提升 0 / 删除 3）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -838,9 +861,9 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `policy_reason_code_has_expected_variants` | `crates/lancet-protocol/src/policy.rs:339` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `policy_action_required_has_expected_variants` | `crates/lancet-protocol/src/policy.rs:361` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
 | `policy_hook_is_object_safe` | `crates/lancet-protocol/src/policy.rs:380` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
-| `prov_graph_fragment_round_trips` | `crates/lancet-protocol/src/provenance.rs:161` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
-| `prov_activity_attributes_default_for_legacy_fragments` | `crates/lancet-protocol/src/provenance.rs:203` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
-| `in_toto_statement_deserializes_with_unknown_fields` | `crates/lancet-protocol/src/provenance.rs:218` | 保留 | 局部不变量 | — | lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留 |
+| `prov_graph_fragment_round_trips` | `crates/lancet-protocol/src/provenance.rs:161` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `prov_activity_attributes_default_for_legacy_fragments` | `crates/lancet-protocol/src/provenance.rs:203` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `in_toto_statement_deserializes_with_unknown_fields` | `crates/lancet-protocol/src/provenance.rs:218` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
 
 ### `lattice-agent`（保留 70 / 提升 0 / 删除 1）
 
@@ -918,7 +941,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `fake_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:473` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 | `fake_stream_chat_returns_err_when_queue_exhausted` | `crates/lattice-agent/tests/streaming_seam.rs:486` | 保留 | 局部不变量 | — | AgentLoop 状态机/消息装配/可注入 trait 局部契约；保留 |
 
-### `lattice-api`（保留 234 / 提升 0 / 删除 26）
+### `lattice-api`（保留 231 / 提升 0 / 删除 29）
 
 | 测试 | 文件 | 决定 | 目标层 | 替代场景 | 理由 |
 | --- | --- | --- | --- | --- | --- |
@@ -964,8 +987,8 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `cep_executor_adapter_effect_family_preserves_payload` | `crates/lattice-api/src/turn/cep_tests.rs:291` | 保留 | 局部不变量 | - | lattice-api 局部契约（CEP error family 负载保持）；保留 |
 | `turn_runtime_constructs_one_adapter_per_turn` | `crates/lattice-api/src/turn/cep_tests.rs:307` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `cep_native_registry_production_runtime_uses_native_audit_stage` | `crates/lattice-api/src/turn/cep_tests.rs:354` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `attestation_matches_replay_statement` | `crates/lattice-api/src/turn/cep_tests.rs:414` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
-| `replay_without_stored_attestation` | `crates/lattice-api/src/turn/cep_tests.rs:485` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
+| `attestation_matches_replay_statement` | `crates/lattice-api/src/turn/cep_tests.rs:414` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
+| `replay_without_stored_attestation` | `crates/lattice-api/src/turn/cep_tests.rs:485` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
 | `completed_content_only` | `crates/lattice-api/src/turn/collector.rs:209` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `multi_round_tool_loop_uses_final_stop_tokens` | `crates/lattice-api/src/turn/collector.rs:253` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
 | `tool_call_round_content_preserved_when_turn_ends_on_tool_calls` | `crates/lattice-api/src/turn/collector.rs:314` | 保留 | 局部不变量 | — | 公开 API 类型/错误/事件映射局部契约；保留 |
@@ -1030,7 +1053,7 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `upper_lease_destroy_consumes_handle_once` | `crates/lattice-api/src/turn/upper.rs:516` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `workspace_execution_backend_changed_paths_from_typed_entries` | `crates/lattice-api/src/turn/workspace_backend.rs:447` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `workspace_execution_backend_maps_content_too_large` | `crates/lattice-api/src/turn/workspace_backend.rs:482` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
-| `full_turn_audit_rows_and_replay_fragment` | `crates/lattice-api/tests/audit_turn_provenance.rs:145` | 保留 | 局部不变量 | — | #72 final review：direct_operator_audit_session_lancet_cross_validate 已覆盖 public query/filter/tail/replay；原测试仍直接断言 audit DB 持久化、逐 row call/method/impact/turn/session/model 字段与 replay activity 精确计数，这些 store/projection seam 不由 binary 完整暴露，改判 keep/local_invariant。 |
+| `full_turn_audit_rows_and_replay_fragment` | `crates/lattice-api/tests/audit_turn_provenance.rs:145` | 删除 | 局部不变量 | `n/a — GitHub #114 retired the Turn/audit provenance and attestation surface` | #114：对应 source/test 已删除；typed finalized-row operator evidence 由 Direct-Local release matrix 覆盖。 |
 | `cep_mode_enforce_effect_overreach_denied` | `crates/lattice-api/tests/cep_mode_integration.rs:100` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `cep_mode_warn_effect_overreach_ok_with_audit_warning` | `crates/lattice-api/tests/cep_mode_integration.rs:143` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
 | `effect_deny_rejects_in_warn_mode` | `crates/lattice-api/tests/cep_mode_integration.rs:169` | 保留 | 局部不变量 | — | lattice-api 局部契约（非成品端到端路径）；保留 |
@@ -2002,4 +2025,3 @@ slice 8 当时的“20 条半保留”是未逐条复核的错误概括。#72 fi
 | `direct_failure_sigint_while_stalled` | Direct-Local: SIGINT 协作取消（stall）→ cancelled commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
 | `direct_failure_profile_deadline` | Direct-Local: profile deadline（stall）→ error commit | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
 | `direct_failure_mutation_survives` | Direct-Local: 成功 mutation 后 provider 失败，Local bytes 保留（无回滚） | **已落地** `tests/direct_failures.rs`（#24 slice 5） |
-

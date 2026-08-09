@@ -4,7 +4,7 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "CEP pure wire/data contracts: JSON-RPC frames, envelopes, policy seam, provenance wire types, and typed errors"
+description = "CEP pure wire/data contracts: JSON-RPC frames, envelopes, policy seam, Cell evidence, and typed errors"
 
 [features]
 default = []

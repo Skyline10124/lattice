@@ -158,8 +158,8 @@ pub struct LancetRuntimeParts {
 ///
 /// This is the unified entry point for driving LANCET independently of any host
 /// application. Build it from a [`LancetRuntimeConfig`], call typed methods via
-/// [`LancetRuntime::client`], and persist turn attestations via
-/// [`crate::store_turn_attestation`].
+/// [`LancetRuntime::client`], and read finalized operator audit rows through
+/// the direct-store API.
 pub struct LancetRuntime {
     client: CepClient,
     audit: Arc<CepAuditStore>,
