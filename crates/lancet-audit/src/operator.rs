@@ -45,19 +45,14 @@
 
 use std::path::{Path, PathBuf};
 
-use lancet_protocol::effect_types::ImpactKind;
-use lancet_protocol::provenance::{InTotoStatement, ProvGraphFragment, TurnExecutionTrace};
+use lancet_protocol::evidence::{AdmissionEvidence, DeniedOperationsRecord, ObservedEffectsRecord};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 use crate::audit::{
-    AUDIT_QUERY_MAX_ROWS, AuditQueryFilters, AuditRow, CepAuditStore, impact_kind_from_label,
-    impact_kind_label,
+    AUDIT_QUERY_MAX_ROWS, AuditQueryFilters, AuditRow, CepAuditStore, SEMANTIC_STAGE_COMPONENT,
+    impact_kind_from_label, impact_kind_label,
 };
-use crate::provenance::{
-    EvidenceLookup, project_rows_with_evidence, project_turn_trace_with_evidence,
-    rebuild_in_toto_statement_with_evidence, source_audit_range_hash,
-};
+use crate::evidence::{EvidenceId, EvidenceOutcome, StoredCallEvidence};
 use crate::store_path::audit_db_path_for_project;
 
 /// Maximum rows emitted per tail batch (matches former native handler cap).
@@ -115,25 +110,82 @@ impl AuditRequest {
     }
 }
 
+/// Optional structured Cell evidence attached to a finalized audit row.
+///
+/// The evidence tables remain the authority for these records.  This DTO does
+/// not expose SQLite's transitional `evidence_id`; it carries only the existing
+/// protocol evidence serde shapes required by an operator read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorCellEvidence {
+    pub outcome: EvidenceOutcome,
+    pub admission: AdmissionEvidence,
+    pub effects: ObservedEffectsRecord,
+    pub denied: DeniedOperationsRecord,
+}
+
+impl From<StoredCallEvidence> for OperatorCellEvidence {
+    fn from(value: StoredCallEvidence) -> Self {
+        Self {
+            outcome: value.outcome,
+            admission: value.admission,
+            effects: value.effects,
+            denied: value.denied,
+        }
+    }
+}
+
+/// One finalized SQLite audit row as exposed to operator query reads.
+///
+/// `call_id` is the transitional SQLite row value, not an InvocationId.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorAuditRow {
+    pub audit_id: i64,
+    pub call_id: u64,
+    pub method: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub result_or_error: String,
+    pub impact_kind: String,
+    pub turn_id: String,
+    pub session_id: String,
+    pub semantic_stage: String,
+    pub semantic_status: Option<String>,
+    pub guard_stage: String,
+    pub policy_enforced: bool,
+    pub model_id: Option<String>,
+    pub runtime_version: Option<String>,
+    pub evidence: Option<OperatorCellEvidence>,
+}
+
 /// Result of a bounded audit query.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditQueryOutput {
     pub session_id: String,
     pub row_count: usize,
-    pub fragment: ProvGraphFragment,
+    pub rows: Vec<OperatorAuditRow>,
+}
+
+/// Compact finalized audit row emitted by audit tail.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorTailRow {
+    pub audit_id: i64,
+    pub method: String,
+    pub impact_kind: String,
+    pub summary: String,
+    pub evidence: Option<OperatorCellEvidence>,
 }
 
 /// Result of a bounded audit tail.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditTailOutput {
     pub session_id: String,
-    pub rows: Vec<Value>,
+    pub rows: Vec<OperatorTailRow>,
     pub last_audit_id: i64,
     pub done: bool,
     pub batches: usize,
 }
 
-/// Replay request for operator provenance reconstruction.
+/// Replay request for an operator turn read.
 #[derive(Clone, Debug)]
 pub struct AuditReplayRequest {
     pub project_root: PathBuf,
@@ -155,33 +207,43 @@ impl AuditReplayRequest {
     }
 }
 
-/// Replay result: reconstructed trace plus attestation comparison.
+/// Operator replay trace for one turn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorTurnTrace {
+    pub turn_id: String,
+    pub calls: Vec<OperatorReplayCall>,
+}
+
+/// One finalized call in an operator replay trace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorReplayCall {
+    pub audit_id: i64,
+    /// Textual form of the transitional SQLite row value, not an InvocationId.
+    pub call_id: String,
+    pub method: String,
+    pub impact_kind: String,
+    pub outcome_summary: Option<String>,
+    pub evidence: Option<OperatorCellEvidence>,
+}
+
+/// Replay result for an operator turn read.
 ///
-/// Serde shape is wire-stable (moved verbatim from the retired catalog DTO);
-/// deliberately **no** schema derive — operator DTOs are not Tool schema types.
+/// Deliberately no schema derive: operator DTOs are not Tool schema types.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditReplayResult {
-    pub trace: TurnExecutionTrace,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub statement: Option<InTotoStatement>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stored_statement_match: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_audit_range_or_hash: Option<String>,
+    pub trace: OperatorTurnTrace,
 }
 
 /// Query finalized audit rows directly from the project audit store.
 pub async fn query_audit(request: AuditRequest) -> OperatorAuditResult<AuditQueryOutput> {
-    let impact_kind = parse_impact_kind(request.impact.as_deref())?;
+    let impact_kind = parse_impact_label(request.impact.as_deref())?;
     let session_id = request.session_id.clone();
     let store = open_project_audit_store(&request.project_root).await?;
     let filters = AuditQueryFilters {
         session_id: Some(session_id.clone()),
         turn_id: request.turn_id,
         method: request.method,
-        impact_kind: impact_kind
-            .as_ref()
-            .map(|k| impact_kind_label(k).to_string()),
+        impact_kind,
         capability: request.capability,
         verdict: request.verdict,
         since_audit_id: request.since_audit_id,
@@ -191,14 +253,15 @@ pub async fn query_audit(request: AuditRequest) -> OperatorAuditResult<AuditQuer
     let rows = store
         .query_rows(&filters)
         .map_err(|err| OperatorAuditError::Internal(format!("audit query: {err}")))?;
+    let rows = rows
+        .iter()
+        .map(|row| materialize_operator_audit_row(&store, row))
+        .collect::<OperatorAuditResult<Vec<_>>>()?;
     let row_count = rows.len();
-    // #112: resolve each Component row's Cell evidence through the same store.
-    let resolve = |id: crate::evidence::EvidenceId| resolve_evidence_for_projection(&store, id);
-    let fragment = project_rows_with_evidence(&rows, &EvidenceLookup::new(&resolve));
     Ok(AuditQueryOutput {
         session_id,
         row_count,
-        fragment,
+        rows,
     })
 }
 
@@ -223,9 +286,23 @@ pub async fn query_audit(request: AuditRequest) -> OperatorAuditResult<AuditQuer
 /// downgrade is accepted because `--tail` is an operator path and typical
 /// store sizes complete in milliseconds.
 pub async fn tail_audit(request: AuditRequest) -> OperatorAuditResult<AuditTailOutput> {
+    let impact_kind = parse_impact_label(request.impact.as_deref())?;
     let session_id = request.session_id.clone();
     let store = open_project_audit_store(&request.project_root).await?;
     let mut since = request.since_audit_id.unwrap_or(0);
+    // `query_rows` expresses its cursor as `audit_id >= ?`. There is no i64
+    // successor to the largest legal SQLite id, so incrementing it would
+    // saturate and repeat the cursor row. Treat that terminal cursor as an
+    // empty, completed tail instead.
+    if since == i64::MAX {
+        return Ok(AuditTailOutput {
+            session_id,
+            rows: Vec::new(),
+            last_audit_id: since,
+            done: true,
+            batches: 1,
+        });
+    }
     let mut rows = Vec::new();
     // Tail cursor state carried across batches (formerly the catalog
     // `AuditTailResult` wire DTO; the wire type died with the CEP method).
@@ -244,11 +321,19 @@ pub async fn tail_audit(request: AuditRequest) -> OperatorAuditResult<AuditTailO
             )));
         }
 
-        let since_filter = if since > 0 { Some(since + 1) } else { None };
+        let since_filter = if since > 0 {
+            Some(since.saturating_add(1))
+        } else {
+            None
+        };
         let filters = AuditQueryFilters {
             session_id: Some(session_id.clone()),
+            turn_id: request.turn_id.clone(),
+            method: request.method.clone(),
+            impact_kind: impact_kind.clone(),
+            capability: request.capability.clone(),
+            verdict: request.verdict.clone(),
             since_audit_id: since_filter,
-            exclude_method_prefix: Some("observe.audit".into()),
             limit: Some(AUDIT_TAIL_MAX_ROWS + 1),
             ..Default::default()
         };
@@ -264,12 +349,7 @@ pub async fn tail_audit(request: AuditRequest) -> OperatorAuditResult<AuditTailO
         };
 
         for row in emit_rows {
-            rows.push(json!({
-                "audit_id": row.audit_id,
-                "method": row.method,
-                "impact_kind": row.impact_kind,
-                "summary": tail_row_summary(row),
-            }));
+            rows.push(materialize_operator_tail_row(&store, row)?);
         }
 
         last_audit_id = emit_rows.last().map(|r| r.audit_id).unwrap_or(since);
@@ -291,22 +371,11 @@ pub async fn tail_audit(request: AuditRequest) -> OperatorAuditResult<AuditTailO
     })
 }
 
-/// Reconstruct turn trace, in-toto statement, and attestation comparison from stored rows.
+/// Read the finalized calls of one turn directly from the audit store.
 ///
-/// # Output contract (wire superset over the retired agent-exposed handler)
-///
-/// `replay_audit` is an **operator-only** read; it is not an agent-exposed
-/// CEP method, so it does not self-audit (no `record_durable_metadata`, no
-/// `record_effect`). The retired native `observe.audit_replay` handler did
-/// both, because it ran as an agent capability under policy gating.
-///
-/// The wire [`AuditReplayResult`] is a **superset** of that retired handler's
-/// result: `stored_statement_match` and `source_audit_range_or_hash` were
-/// durable-metadata-only in the old handler (written via
-/// `record_durable_metadata`, returned as `None` on the wire); here they are
-/// returned on the wire directly. This is an intentional improvement for the
-/// operator path — the operator reads `replay_audit`'s output, not the audit
-/// store's metadata — and is accepted as the post-retirement shape.
+/// `replay_audit` is operator-only: it neither composes a CEP server nor
+/// self-audits. It returns row facts in audit-id order; it does not rebuild a
+/// projection graph or a Turn statement.
 pub async fn replay_audit(request: AuditReplayRequest) -> OperatorAuditResult<AuditReplayResult> {
     if request.turn_id.trim().is_empty() {
         return Err(OperatorAuditError::Config("turn_id is required".into()));
@@ -315,7 +384,9 @@ pub async fn replay_audit(request: AuditReplayRequest) -> OperatorAuditResult<Au
     let filters = AuditQueryFilters {
         session_id: Some(request.session_id.clone()),
         turn_id: Some(request.turn_id.clone()),
-        limit: Some(AUDIT_QUERY_MAX_ROWS),
+        // Replay is the complete finalized call set for one turn. The public
+        // query API remains bounded, but that cap must not truncate a replay.
+        limit: None,
         ..Default::default()
     };
     let rows = store
@@ -328,41 +399,16 @@ pub async fn replay_audit(request: AuditReplayRequest) -> OperatorAuditResult<Au
         )));
     }
 
-    let runtime = rows
+    let calls = rows
         .iter()
-        .find_map(|r| r.runtime_version.as_deref().filter(|s| !s.is_empty()))
-        .unwrap_or("lattice")
-        .to_string();
-
-    // #112: Cell evidence lives in the evidence table, so the replay resolves
-    // each Component row's `evidence_id` through the same store it read the
-    // rows from. A row that resolves to nothing projects without evidence
-    // rather than with a fabricated record.
-    let resolve = |id: crate::evidence::EvidenceId| resolve_evidence_for_projection(&store, id);
-    let lookup = EvidenceLookup::new(&resolve);
-
-    let trace = project_turn_trace_with_evidence(&request.turn_id, &rows, &lookup);
-    // #28 D8: the stored `predicate_type` is the authority on replay, so a
-    // turn attested as v1 re-projects as v1 even on a binary that would emit
-    // v2 for the same rows. An unattested turn falls back to row evidence.
-    let stored = store.attestation_for_turn(&request.turn_id).ok().flatten();
-    let statement = Some(rebuild_in_toto_statement_with_evidence(
-        &request.turn_id,
-        &rows,
-        &runtime,
-        stored.as_ref().map(|record| record.predicate_type.as_str()),
-        &lookup,
-    ));
-    let stored_statement_match = stored.as_ref().and_then(|record| {
-        stored_statement_matches_derived(&record.statement_json, statement.as_ref())
-    });
-    let range_hash = source_audit_range_hash(&rows);
+        .map(|row| materialize_operator_replay_call(&store, row))
+        .collect::<OperatorAuditResult<Vec<_>>>()?;
 
     Ok(AuditReplayResult {
-        trace,
-        statement,
-        stored_statement_match,
-        source_audit_range_or_hash: Some(range_hash),
+        trace: OperatorTurnTrace {
+            turn_id: request.turn_id,
+            calls,
+        },
     })
 }
 
@@ -379,58 +425,170 @@ async fn open_project_audit_store(project_root: &Path) -> OperatorAuditResult<Ce
         .map_err(|err| OperatorAuditError::Internal(format!("open audit store: {err}")))
 }
 
-fn tail_row_summary(row: &AuditRow) -> String {
-    row.result_or_error
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{} (in progress)", row.method))
+fn materialize_operator_audit_row(
+    store: &CepAuditStore,
+    row: &AuditRow,
+) -> OperatorAuditResult<OperatorAuditRow> {
+    Ok(OperatorAuditRow {
+        audit_id: row.audit_id,
+        call_id: row.call_id,
+        method: row.method.clone(),
+        started_at: row.started_at.clone(),
+        ended_at: finalized_field(row, "ended_at", &row.ended_at)?,
+        result_or_error: finalized_field(row, "result_or_error", &row.result_or_error)?,
+        impact_kind: row.impact_kind.clone(),
+        turn_id: row.turn_id.clone(),
+        session_id: row.session_id.clone(),
+        semantic_stage: row.semantic_stage.clone(),
+        semantic_status: row.semantic_status.clone(),
+        guard_stage: row.guard_stage.clone(),
+        policy_enforced: row.policy_enforced,
+        model_id: row.model_id.clone(),
+        runtime_version: row.runtime_version.clone(),
+        evidence: materialize_operator_cell_evidence(store, row)?,
+    })
 }
 
-fn stored_statement_matches_derived(
-    stored_json: &str,
-    derived: Option<&InTotoStatement>,
-) -> Option<bool> {
-    let derived = derived?;
-    let stored: InTotoStatement = serde_json::from_str(stored_json).ok()?;
-    Some(stored.predicate_type == derived.predicate_type && stored.predicate == derived.predicate)
+fn materialize_operator_tail_row(
+    store: &CepAuditStore,
+    row: &AuditRow,
+) -> OperatorAuditResult<OperatorTailRow> {
+    Ok(OperatorTailRow {
+        audit_id: row.audit_id,
+        method: row.method.clone(),
+        impact_kind: row.impact_kind.clone(),
+        summary: finalized_field(row, "result_or_error", &row.result_or_error)?,
+        evidence: materialize_operator_cell_evidence(store, row)?,
+    })
 }
 
-fn parse_impact_kind(label: Option<&str>) -> OperatorAuditResult<Option<ImpactKind>> {
+fn materialize_operator_replay_call(
+    store: &CepAuditStore,
+    row: &AuditRow,
+) -> OperatorAuditResult<OperatorReplayCall> {
+    // `query_rows` only yields finalized records. Keep the field optional in the
+    // wire DTO because the established replay shape makes the summary optional.
+    let _ = finalized_field(row, "ended_at", &row.ended_at)?;
+    let outcome_summary = Some(finalized_field(
+        row,
+        "result_or_error",
+        &row.result_or_error,
+    )?);
+    Ok(OperatorReplayCall {
+        audit_id: row.audit_id,
+        call_id: row.call_id.to_string(),
+        method: row.method.clone(),
+        impact_kind: row.impact_kind.clone(),
+        outcome_summary,
+        evidence: materialize_operator_cell_evidence(store, row)?,
+    })
+}
+
+fn finalized_field(
+    row: &AuditRow,
+    field: &str,
+    value: &Option<String>,
+) -> OperatorAuditResult<String> {
+    value.clone().ok_or_else(|| {
+        OperatorAuditError::Internal(format!(
+            "audit row {} is not finalized: {field} is NULL",
+            row.audit_id
+        ))
+    })
+}
+
+/// Attach the Cell evidence selected by an audit row's internal pointer.
+///
+/// `metadata_json` never crosses this boundary. A missing pointer is a valid
+/// no-evidence state for every finalized row. Once a pointer exists, all
+/// lookup failures are operator-read errors: returning `None` would silently
+/// turn a corrupt evidence reference into a no-evidence row.
+pub fn materialize_operator_cell_evidence(
+    store: &CepAuditStore,
+    row: &AuditRow,
+) -> OperatorAuditResult<Option<OperatorCellEvidence>> {
+    let Some(evidence_id) = evidence_id_from_metadata(row)? else {
+        return Ok(None);
+    };
+    let stored = store.call_evidence(evidence_id).map_err(|error| {
+        OperatorAuditError::Internal(format!(
+            "audit row {} evidence_id {}: read Cell evidence: {error}",
+            row.audit_id, evidence_id.0
+        ))
+    })?;
+    let stored = stored.ok_or_else(|| {
+        OperatorAuditError::Internal(format!(
+            "audit row {} evidence_id {}: referenced Cell evidence record is missing",
+            row.audit_id, evidence_id.0
+        ))
+    })?;
+    if stored.session_id != row.session_id
+        || stored.turn_id != row.turn_id
+        || stored.call_id != row.call_id
+        || stored.tool != row.method
+    {
+        return Err(OperatorAuditError::Internal(format!(
+            "audit row {} evidence_id {}: referenced Cell evidence does not match the audit row",
+            row.audit_id, evidence_id.0
+        )));
+    }
+    Ok(Some(stored.into()))
+}
+
+fn evidence_id_from_metadata(row: &AuditRow) -> OperatorAuditResult<Option<EvidenceId>> {
+    let Some(raw) = row.metadata_json.as_deref() else {
+        return Ok(None);
+    };
+    let metadata: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(metadata) => metadata,
+        // Native metadata is an internal summary only. A malformed historic
+        // native blob cannot make a no-evidence row disappear from the full
+        // finalized-row collection. Component metadata stays strict because
+        // malformed JSON cannot establish whether a pointer was present.
+        Err(_) if row.semantic_stage != SEMANTIC_STAGE_COMPONENT => return Ok(None),
+        Err(error) => {
+            return Err(OperatorAuditError::Internal(format!(
+                "audit row {} metadata_json is not valid JSON: {error}",
+                row.audit_id
+            )));
+        }
+    };
+    let Some(object) = metadata.as_object() else {
+        if row.semantic_stage != SEMANTIC_STAGE_COMPONENT {
+            return Ok(None);
+        }
+        return Err(OperatorAuditError::Internal(format!(
+            "audit row {} metadata_json is not a JSON object",
+            row.audit_id
+        )));
+    };
+    let Some(raw_id) = object.get("evidence_id") else {
+        return Ok(None);
+    };
+    let id = raw_id.as_i64().filter(|id| *id > 0).ok_or_else(|| {
+        OperatorAuditError::Internal(format!(
+            "audit row {} has an invalid evidence_id pointer",
+            row.audit_id
+        ))
+    })?;
+    Ok(Some(EvidenceId(id)))
+}
+
+fn parse_impact_label(label: Option<&str>) -> OperatorAuditResult<Option<String>> {
     let Some(label) = label else {
         return Ok(None);
     };
+    // Component rows intentionally carry the persisted `unknown` label: there
+    // is no legacy ImpactKind to coerce them into. Keep it queryable as a row
+    // label while retaining the established validation for every legacy label.
+    if label == "unknown" {
+        return Ok(Some(label.to_string()));
+    }
     impact_kind_from_label(label)
         .ok_or_else(|| OperatorAuditError::Config(format!("unknown impact kind: {label}")))
-        .map(Some)
+        .map(|kind| Some(impact_kind_label(&kind).to_string()))
 }
 
 #[cfg(test)]
 #[path = "operator_tests.rs"]
 mod tests;
-
-/// Resolve a call's evidence for a projection, surfacing a read failure instead
-/// of degrading silently.
-///
-/// `EvidenceLookup` returns `Option`, so a refused read (an unsupported record
-/// version, a corrupt column) and a call that genuinely produced no evidence are
-/// the same value to the projection. That matters: `version_from_rows` picks the
-/// attestation predicate version by whether the lookup resolves, so a swallowed
-/// error would make the attestation *shape* a function of store health rather
-/// than of what the turn did. The projection still degrades — it has no error
-/// channel — but the failure is no longer invisible.
-fn resolve_evidence_for_projection(
-    store: &CepAuditStore,
-    id: crate::evidence::EvidenceId,
-) -> Option<crate::evidence::StoredCallEvidence> {
-    match store.call_evidence(id) {
-        Ok(found) => found,
-        Err(error) => {
-            tracing::error!(
-                evidence_id = id.0,
-                %error,
-                "failed to read Cell evidence for a projection; the projection omits it"
-            );
-            None
-        }
-    }
-}

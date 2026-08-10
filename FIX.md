@@ -5382,3 +5382,97 @@ weaken Linux behavior.
 `docs/**`; `crates/lancet-{audit,authority,native,runtime}/**`;
 `crates/lattice-{api,cli,session,system-harness}/**`; root/scoped `AGENTS.md`;
 `FINDINGS.md`; `FIX.md`.
+
+## GitHub #114: retire Turn/audit provenance and attestation — 2026-08-09
+
+Severity: MEDIUM (the operator audit surface still exposed a second, retired
+provenance/attestation model instead of the durable Cell-evidence records).
+
+**Problem:** Query, tail, replay, and status did not share one typed,
+finalized-row adapter. Native and Component calls were split by the retired
+projection path; raw metadata, provenance fragments, unsigned Turn statements,
+and `attestation_records` remained reachable even though versioned Cell
+evidence was already the durable record.
+
+**Fix summary:**
+- Replaced operator query/tail/replay outputs with serde DTOs over every
+  finalized SQLite audit row and a compact replay-call trace.
+- Added optional typed `OperatorCellEvidence` to query, tail, replay, and
+  LANCET status: native rows serialize `evidence: null`; Component rows resolve
+  the existing versioned Cell evidence. Missing, dangling, unsupported,
+  corrupt, or mismatched Component evidence is a read error.
+- Removed the protocol provenance module, audit projector/canonicalizer,
+  attestation writer/store API, old tests, and Turn-attestation writes; store
+  open now drops the retired `attestation_records` table without a migration.
+- Replaced the release gate's deleted replay test with a release-binary
+  native/Component/mixed operator-audit and status matrix. Updated active
+  architecture, audit, test, and crate guidance without changing artifact
+  identity or bundle-provenance contracts.
+
+**Verification:**
+- `cargo test -p lancet-audit` — 81 passed.
+- `cargo test -p lancet-api` — 8 passed.
+- `cargo test -p lattice-cli` — 132 unit and 4 integration tests passed.
+- `cargo test -p lancet-native --test cep_component_round_trip` — 17 passed.
+- `cargo test -p lattice-api --test dogfood_impact_matrix` and
+  `cargo test -p lattice-api --test release_e2e` — passed.
+- Host exact `direct_operator_audit_session_lancet_cross_validate` — passed.
+- `cargo xtask ci` — passed on the host, including Clippy, boundaries,
+  workspace tests, Direct-Local harness, and Component digest verification.
+- `git diff --check` — passed.
+
+**Changed files:** `crates/lancet-{protocol,audit,cep,dispatch,native,runtime,api}/**`,
+`crates/lattice-{api,cli,system-harness}/**`, `xtask/src/rollout.rs`, active
+`docs/**`, root/scoped `AGENTS.md`, `FINDINGS.md`, and `FIX.md`.
+
+## GitHub #114 review closeout: honor every finalized-row contract — 2026-08-10
+
+Severity: HIGH (the first implementation hid valid pointerless Component rows
+and left replay/status/release coverage weaker than the accepted contract).
+
+**Problem:** The initial #114 implementation treated a finalized Component row
+without `evidence_id` as corrupt, capped turn replay at 10,000 rows, loaded the
+entire audit table before slicing status to 20, and reused one mixed
+Direct-Local test as the release gate. Its first commit was also labeled
+`refactor` despite deliberate public JSON/API/database behavior changes.
+
+**Fix summary:**
+- Made a missing pointer a valid `evidence: null` state for every finalized
+  row. A present, readable, row-matching pointer materializes existing evidence
+  independent of semantic stage; dangling, unsupported, corrupt, or mismatched
+  pointers still fail the operator read. No native evidence producer was added.
+- Removed the query cap from turn replay and added a 10,001-row regression;
+  query retains its 10,000-row cap and inclusive cursor pagination.
+- Added typed audit ordering and changed status to ask SQLite for
+  `audit_id DESC LIMIT 20` before materialization. The regression places an
+  unreadable 21st row outside the window and verifies newest-first output,
+  verdict, duration, and optional evidence.
+- Split the Direct-Local contract into native-only, Component-only, mixed, and
+  22-to-20 bounded-status scenarios. Added a feature-gated
+  `release_operator` target with independent N/C/M fixtures and assertions;
+  rollout executes it instead of rerunning `direct_operator`.
+- Rewrote the unpushed feature history to two commits headed by
+  `feat(audit)!`, preserving a separate append-only records commit.
+
+**Verification:**
+- RED: pointerless Component query/status returned `missing its evidence_id
+  pointer`; matching cross-stage pointer returned `non-Component audit row`;
+  10,001-row replay returned 10,000; bounded status decoded an unreadable row
+  outside its newest-20 window; rollout still named the `direct_operator` test.
+- `cargo test -p lancet-audit` — 83 passed.
+- `cargo test -p lancet-api` — 9 passed.
+- `cargo test -p xtask` — 113 passed.
+- Host `direct_operator` target — 6 passed, including independent N/C/M and
+  exact 22-to-20 status coverage.
+- Host feature-gated `release_operator_native_component_mixed_matrix` — 1
+  passed against the built binary.
+- `cargo xtask ci` — passed on the host, including formatting, Clippy,
+  dependency boundaries, workspace tests, Direct-Local scenarios, and
+  Component digest verification.
+- `git diff --check` — passed.
+
+No unresolved #114 residual remains for `FINDINGS.md`.
+
+**Changed files:** `crates/lancet-audit/**`, `crates/lancet-api/**`,
+`crates/lattice-system-harness/**`, `xtask/src/rollout.rs`, `docs/**`, scoped
+`AGENTS.md`, and `FIX.md`.

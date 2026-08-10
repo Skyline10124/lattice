@@ -9,8 +9,8 @@
 //! concrete target). A capability alias is admission evidence only; it is
 //! never reported as an effect.
 //!
-//! These records are persisted in versioned evidence tables and attestation
-//! predicates, so they follow the `provenance.rs` persisted-root convention:
+//! These records are persisted in versioned evidence tables and exposed by
+//! operator audit DTOs, so they follow the persisted-root convention:
 //! no `deny_unknown_fields` anywhere, and readers check `version` before
 //! interpreting the contents.
 
@@ -179,8 +179,8 @@ pub struct DeniedOperationsRecord {
 
 /// Why a call was authorized (B5/A2/B6): the capability *names* the
 /// admission stages approved, plus what each stage removed. Producers emit
-/// every list sorted and deduplicated so audit and attestation bytes are
-/// stable. A denied call still carries this record — with an empty or
+/// every list sorted and deduplicated so persisted evidence is stable. A denied
+/// call still carries this record — with an empty or
 /// partial approved set — so the denial keeps its "why".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AdmissionEvidence {

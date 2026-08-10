@@ -63,6 +63,7 @@ fn status_json_value(output: &LancetStatusOutput) -> serde_json::Value {
             "impact": c.impact,
             "verdict": c.verdict,
             "duration_ms": c.duration_ms,
+            "evidence": c.evidence,
         })).collect::<Vec<_>>(),
         "last_guard_verdict": output.last_guard_verdict,
     })

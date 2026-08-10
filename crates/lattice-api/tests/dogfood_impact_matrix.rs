@@ -9,7 +9,7 @@
 //! handler or an embedded Component.
 //!
 //! Two vocabularies coexist in one turn, and the matrix names both:
-//! - Native methods carry a legacy `ImpactKind` (`external_observation` for
+//! - Native methods carry a legacy persisted impact label (`external_observation` for
 //!   `fetch.web`) and the `cep_native` semantic stage.
 //! - Component Tools are authorized by Cell admission, carry no legacy impact
 //!   kind (the audit column reads `"unknown"`), and are staged `cell_component`.
@@ -22,7 +22,7 @@
 //! 2. Assert the audit row: `impact_kind`, `semantic_stage`,
 //!    `policy_enforced = true`, redacted metadata (no secret bodies).
 //! 3. Verify that all rows share one `turn_id` before calling operator `replay_audit`.
-//! 4. Assert PROV `activities` order and `wasInformedBy` chain from replay.
+//! 4. Assert typed operator replay call order and labels.
 
 use std::sync::Arc;
 
@@ -35,7 +35,6 @@ use lancet_native::{
     CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE,
     ServerRunConfig, register_production_method_registry,
 };
-use lancet_protocol::effect_types::ImpactKind;
 
 use tempfile::TempDir;
 
@@ -397,7 +396,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
         );
     }
 
-    // ── Step 3: operator replay_audit PROV assertions ───────────────────
+    // ── Step 3: typed operator replay assertions ─────────────────────────
 
     let replay_result = replay_audit(AuditReplayRequest::new(
         canonical.as_path(),
@@ -414,13 +413,12 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "replay trace must carry fixed turn_id"
     );
 
-    let activities = &trace.fragment.activities;
     assert_eq!(
-        activities.len(),
+        trace.calls.len(),
         all_rows.len(),
-        "replay activities count must match all audit rows ({}), got {}",
+        "replay call count must match all audit rows ({}), got {}",
         all_rows.len(),
-        activities.len()
+        trace.calls.len()
     );
 
     // Verify activities are in execution order by checking audit_id ascending.
@@ -432,49 +430,33 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "replay calls must be in audit_id order"
     );
 
-    // Only native rows can attribute a legacy ImpactKind in the PROV projection.
-    // `WorkspaceObservation` left in #30; `WorkspaceMutation` left in #31 with
-    // the native mutate handlers. The Component rows still carry an
-    // `impact_kind` field, but it is a mandatory-field placeholder — asserted
-    // via `impact_kind_attributed=false` below, not via this list.
-    let activity_impact_kinds: Vec<&ImpactKind> =
-        activities.iter().map(|a| &a.impact_kind).collect();
+    // Only native rows carry a legacy persisted impact label. `observe.workspace`
+    // and `mutate.*` are Components, so their rows retain `unknown` rather than
+    // being coerced into a legacy enum value.
+    let replay_impact_kinds: Vec<&str> = trace
+        .calls
+        .iter()
+        .map(|call| call.impact_kind.as_str())
+        .collect();
     assert!(
-        activity_impact_kinds.contains(&&ImpactKind::ExternalObservation),
-        "replay activities must include ExternalObservation"
+        replay_impact_kinds.contains(&"external_observation"),
+        "replay calls must include the native external_observation label"
     );
     assert!(
-        !activity_impact_kinds.contains(&&ImpactKind::WorkspaceMutation),
-        "mutate.* Components must not attribute WorkspaceMutation in PROV: {activity_impact_kinds:?}"
+        !replay_impact_kinds.contains(&"workspace_mutation"),
+        "mutate.* Components must not claim a legacy workspace_mutation label: {replay_impact_kinds:?}"
     );
     // Only the Components this matrix actually drives (mutate.create is enabled
     // for admission but not called here).
     for component in [OBSERVE_WORKSPACE, MUTATE_EDIT, TODO_WRITE] {
-        let component_activity = activities
+        let component_call = trace
+            .calls
             .iter()
-            .find(|a| a.method == component)
+            .find(|call| call.method == component)
             .unwrap_or_else(|| panic!("the Component call {component} must appear in the trace"));
         assert_eq!(
-            component_activity.attributes.get("impact_kind_attributed"),
-            Some(&serde_json::Value::Bool(false)),
-            "a Cell-governed activity must state that its impact kind is a placeholder: {component}"
-        );
-    }
-
-    // Verify wasInformedBy chain: N rows → N-1 relations linking consecutive activities.
-    let was_informed_by = &trace.fragment.was_informed_by;
-    assert_eq!(
-        was_informed_by.len(),
-        all_rows.len().saturating_sub(1),
-        "replay must have {} wasInformedBy relations (consecutive pairs), got {}",
-        all_rows.len().saturating_sub(1),
-        was_informed_by.len()
-    );
-    // Each wasInformedBy must link two distinct activities.
-    for wib in was_informed_by {
-        assert_ne!(
-            wib.informed_activity_id, wib.informing_activity_id,
-            "wasInformedBy must link distinct activities"
+            component_call.impact_kind, "unknown",
+            "a Cell-governed call retains its persisted impact label: {component}"
         );
     }
 }

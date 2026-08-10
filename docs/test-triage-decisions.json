@@ -54,10 +54,10 @@
     "name": "replay_audit_matches_stored_attestation",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-audit",
@@ -110,14 +110,14 @@
   {
     "crate": "lancet-audit",
     "file": "crates/lancet-audit/src/operator_tests.rs",
-    "line": 465,
-    "name": "query_audit_reads_legacy_table_without_attestation_records",
+    "line": 950,
+    "name": "query_audit_reads_legacy_call_table",
     "ignored": false,
     "async": true,
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "LancetRuntime 组合/配置/audit 只读 API 局部契约；保留"
+    "reason": "#114：legacy audit call tables remain readable without the retired attestation surface."
   },
   {
     "crate": "lancet-audit",
@@ -386,14 +386,14 @@
   {
     "crate": "lancet-audit",
     "file": "crates/lancet-audit/src/audit_tests.rs",
-    "line": 543,
-    "name": "attestation_round_trip",
+    "line": 198,
+    "name": "open_removes_retired_turn_attestation_table",
     "ignored": false,
     "async": false,
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "reason": "#114：open removes the retired attestation table; the operator store retains only audit rows and versioned Cell evidence."
   },
   {
     "crate": "lancet-audit",
@@ -506,14 +506,14 @@
   {
     "crate": "lancet-audit",
     "file": "crates/lancet-audit/src/audit_tests.rs",
-    "line": 974,
-    "name": "import_legacy_read_only_if_empty_copies_both_tables",
+    "line": 1437,
+    "name": "import_legacy_read_only_if_empty_copies_audit_rows",
     "ignored": false,
     "async": false,
     "decision": "keep",
     "target_layer": "local_invariant",
     "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "reason": "#114：legacy import copies audit rows only; turn attestation rows are retired rather than migrated."
   },
   {
     "crate": "lancet-audit",
@@ -534,10 +534,10 @@
     "name": "build_statement_lists_materials",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-audit",
@@ -546,10 +546,10 @@
     "name": "source_audit_range_hash_is_stable",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-audit",
@@ -558,10 +558,10 @@
     "name": "canonicalize_strips_timestamps",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-audit",
@@ -570,10 +570,10 @@
     "name": "project_rows_builds_activity_per_row",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-audit",
@@ -582,10 +582,10 @@
     "name": "parse_impact_kind_warns_on_unknown_label",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-audit",
@@ -594,10 +594,10 @@
     "name": "project_turn_trace_orders_calls",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-audit",
@@ -606,10 +606,10 @@
     "name": "boundary_observed_projection",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-audit",
@@ -618,10 +618,10 @@
     "name": "preflight_and_policy_metadata_project_to_activity_attributes",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "audit 持久化/过滤/provenance 投影局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-authority",
@@ -4014,10 +4014,10 @@
     "name": "read_only_turn_projection_is_isomorphic",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-native",
@@ -4026,10 +4026,10 @@
     "name": "mutation_turn_projection_is_isomorphic",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-native",
@@ -4038,10 +4038,10 @@
     "name": "mixed_turn_projection_is_isomorphic",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "native handler 路径/scope/verify/edit/shell/fetch/effect-contract 局部安全契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-protocol",
@@ -4446,10 +4446,10 @@
     "name": "prov_graph_fragment_round_trips",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-protocol",
@@ -4458,10 +4458,10 @@
     "name": "prov_activity_attributes_default_for_legacy_fragments",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lancet-protocol",
@@ -4470,10 +4470,10 @@
     "name": "in_toto_statement_deserializes_with_unknown_fields",
     "ignored": false,
     "async": false,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "lancet-protocol 局部不变量（wire/安全/dispatch/投影）；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lattice-agent",
@@ -5766,10 +5766,10 @@
     "name": "attestation_matches_replay_statement",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "公开 API 类型/错误/事件映射局部契约；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lattice-api",
@@ -5778,10 +5778,10 @@
     "name": "replay_without_stored_attestation",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "lattice-api 局部契约（非成品端到端路径）；保留"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lattice-api",
@@ -6630,10 +6630,10 @@
     "name": "full_turn_audit_rows_and_replay_fragment",
     "ignored": false,
     "async": true,
-    "decision": "keep",
+    "decision": "delete",
     "target_layer": "local_invariant",
-    "replacement": null,
-    "reason": "#72 final review：direct_operator_audit_session_lancet_cross_validate 已覆盖 public query/filter/tail/replay；原测试仍直接断言 audit DB 持久化、逐 row call/method/impact/turn/session/model 字段与 replay activity 精确计数，这些 store/projection seam 不由 binary 完整暴露，改判 keep/local_invariant。"
+    "replacement": "n/a — GitHub #114 retired the Turn/audit provenance and attestation surface",
+    "reason": "#114：对应的 provenance/attestation source or test was deleted; typed finalized-row operator evidence is covered by the Direct-Local release matrix."
   },
   {
     "crate": "lattice-api",
@@ -8457,7 +8457,7 @@
     "decision": "delete",
     "target_layer": "direct_local_binary",
     "replacement": "direct_operator_audit_session_lancet_cross_validate",
-    "reason": "#24 slice 6 assertion-level superset review：direct_operator_audit_session_lancet_cross_validate：row_count>0 + 两个方法 + method/verdict 过滤 + tail rows + session status/log。已删除原测试。"
+    "reason": "#114：the retired fragment output is gone; direct_operator_audit_session_lancet_cross_validate covers the typed query rows, filters, tail, replay, and status matrix."
   },
   {
     "crate": "lattice-cli",
@@ -8516,8 +8516,8 @@
     "async": true,
     "decision": "delete",
     "target_layer": "direct_local_binary",
-    "replacement": "direct_operator_audit_session_lancet_cross_validate",
-    "reason": "#72 assertion-level superset：direct_operator_audit_session_lancet_cross_validate 以真实 Turn 生成 attestation，public audit replay 成功且 JSON stored_statement_match=true；exact scenario 已通过后删除原测试。"
+    "replacement": "n/a — GitHub #114 retired stored statement matching",
+    "reason": "#114：turn attestations and stored_statement_match were deleted; the release matrix asserts native/Component/mixed typed evidence instead."
   },
   {
     "crate": "lattice-cli",

@@ -5,6 +5,12 @@ Base: `538b476e` (post-#27 WASM Component Tool substrate).
 Requirement ids: B1–B11 (issue body), C1–C8 (review comments), A1–A4 (automation
 comment). This document is also the B9/C7/A4 **legacy deletion gate** record (§11).
 
+> **#114 update (2026-08-09):** The versioned Cell-evidence model remains
+> current. The Turn/audit provenance projection, in-toto attestation writer,
+> `attestation_records` table, and replay statement comparison described in
+> this historical design are retired. Current operator reads expose typed
+> finalized audit rows with optional Cell evidence; see `docs/LANCET.md`.
+
 ## 1. Goal
 
 One unified Cell authorization and evidence path for Component Tools:

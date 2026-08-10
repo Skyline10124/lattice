@@ -4,7 +4,7 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LANCET unified public API: CEP runtime composition, policy/audit/attestation, independent of the LATTICE session/agent layers"
+description = "LANCET unified public API: CEP runtime composition and operator audit reads, independent of the LATTICE session/agent layers"
 
 [dependencies]
 lancet-protocol = { workspace = true }
@@ -16,6 +16,7 @@ lancet-authority = { workspace = true }
 lancet-native = { workspace = true }
 lancet-runtime = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -25,7 +26,8 @@ tracing = { workspace = true }
 # test builds get `ScopedXdgStateHome` (shared XDG/env test isolation).
 lancet-audit = { workspace = true, features = ["test-support"] }
 lancet-catalog = { workspace = true }
-# `test-utils` exposes `ComponentRuntime::noop_fixture()`, which the #28
-# attestation tests compose a server over.
+# `test-utils` exposes `ComponentRuntime::noop_fixture()` for Component
+# lifecycle tests.
 lancet-runtime = { workspace = true, features = ["test-utils"] }
+rusqlite = { workspace = true }
 tempfile = { workspace = true }

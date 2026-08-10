@@ -6,8 +6,8 @@
 //! This crate is the single front door for driving LANCET's Controlled Execution
 //! Protocol (CEP) runtime, independent of any host application. It owns runtime
 //! composition — spawning a native CEP server over an in-process transport and
-//! handing back a typed [`CepClient`] — plus CEP tool exposure and turn
-//! attestation.
+//! handing back a typed [`CepClient`] — plus CEP tool exposure and direct
+//! operator audit reads.
 //!
 //! # Why this crate exists
 //!
@@ -34,9 +34,7 @@
 //!   [`LancetRuntimeConfig`].
 //! - [`LancetServer::spawn`] — low-level launcher for callers that build a
 //!   bespoke [`ServerRunConfig`].
-//! - [`store_turn_attestation`] — persist an unsigned in-toto attestation.
 
-mod attestation;
 mod audit;
 mod config;
 mod doctor;
@@ -45,10 +43,10 @@ mod rewind;
 mod runtime;
 mod status;
 
-pub use attestation::store_turn_attestation;
 pub use audit::{
     AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput, AuditReplayRequest,
-    AuditRequest, AuditTailOutput, query_audit, replay_audit, tail_audit,
+    AuditReplayResult, AuditRequest, AuditTailOutput, OperatorAuditRow, OperatorCellEvidence,
+    OperatorReplayCall, OperatorTailRow, OperatorTurnTrace, query_audit, replay_audit, tail_audit,
 };
 pub use config::{
     AuditBacking, ExternalAuditPathError, LancetRuntimeConfig, audit_db_path_for_project,
@@ -57,7 +55,6 @@ pub use config::{
 };
 pub use doctor::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 pub use error::{LancetError, LancetResult};
-pub use lancet_audit::AuditReplayResult;
 pub use rewind::{
     WorkspaceRewindConflict, WorkspaceRewindError, WorkspaceRewindOutcome, WorkspaceRewindReport,
     plan_workspace_rewind, record_rewind_audit, rewind_audit_records, rewind_workspace,

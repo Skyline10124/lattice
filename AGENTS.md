@@ -124,11 +124,11 @@ accumulating.
 
 | Crate | Role |
 |---|---|
-| `lancet-protocol` | Pure CEP wire/data contracts: JSON-RPC frames, errors, policy hook types, effect types, provenance wire types. No I/O and no tokio. |
+| `lancet-protocol` | Pure CEP wire/data contracts: JSON-RPC frames, errors, policy hook types, effect types, and versioned Cell-evidence types. No I/O and no tokio. |
 | `lancet-catalog` | Legacy central Tool-contract authority scheduled for removal by ADR 0004 after source manifests and generated descriptors take over. |
 | `lancet-dispatch` | Current generic registry/transport surface scheduled for absorption into `lancet-runtime`. |
 | `lancet-cep` | Current CEP/catalog projection facade scheduled for absorption or retirement after descriptor-generated projection lands. |
-| `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, provenance projection, attestation persistence, and (since #112) the versioned Cell evidence tables that are the durable home of `AdmissionEvidence` / `ObservedEffectsRecord` / `DeniedOperationsRecord`. |
+| `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, typed operator query/tail/replay DTOs, and (since #112) the versioned Cell evidence tables that are the durable home of `AdmissionEvidence` / `ObservedEffectsRecord` / `DeniedOperationsRecord`. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger, and effect-region checks. |
 | `lancet-native` | Current native handler/server surface for the method still native (`fetch.web`), plus the CEP server lifecycle and the Component/native dispatch split. ADR 0004 moves the remaining built-ins to Components and absorbs the rest into `lancet-runtime`. |
 | `lancet-runtime` | Component engine, generated descriptor inventory, Tool Host enforcement, the concrete Local Workspace and its Policy-Visible visibility engine (moved down here in #30), audit/effect integration, and private gix history. The production Component path since #29; #31/#32 finish absorbing dispatch/transport. |
@@ -229,8 +229,8 @@ accumulating.
 - The legacy effect vocabulary (`ImpactKind`, `EffectScopeKind`,
   `OverlayBehavior`, `FailureSemantics`, `BaseAuthorityRequirement`) is deleted
   only when **all four** hold: (1) native methods migrated to Component Tools;
-  (2) audit rows and attestations produced only through the v2 evidence path,
-  v1 kept read-only; (3) profile `[lancet.effects]` replaced by
+  (2) structured Cell evidence is produced only through the versioned evidence
+  path, with legacy records kept read-only; (3) profile `[lancet.effects]` replaced by
   `[lancet.capabilities]` for every consumer; (4) `lancet-cep`/`lancet-catalog`
   retired per ADR 0004. Until then the `lancet-native` transport dispatch split
   is the single seam between the two vocabularies, and no new consumer of the

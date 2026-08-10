@@ -97,7 +97,7 @@ harness/lancet boundary checks). Reproduce CI locally with `cargo xtask ci`.
 | `cargo run -p lattice-cli -- <subcommand>` | Run the `lattice` binary without installing (e.g. `models --auth`, `doctor`, `session new ...`). |
 | `cargo install --path crates/lattice-cli` | Install the release binary to `$CARGO_HOME/bin`. |
 | `cargo xtask ci` | Local mirror of the CI lane (fmt, clippy, build `lattice`, harness boundary, `cargo test --workspace`). |
-| `cargo xtask rollout --channel alpha` | Alpha rollout gate: rejects a tracked-dirty worktree, builds a locked release binary, runs Direct-Local/offline/dogfood/audit-replay/doctor evidence steps against it, and writes a versioned JSON record to `target/rollout/`. See [docs/TESTING.md](./TESTING.md). |
+| `cargo xtask rollout --channel alpha` | Alpha rollout gate: rejects a tracked-dirty worktree, builds a locked release binary, runs Direct-Local/offline/dogfood/release-operator-matrix/doctor evidence steps against it, and writes a versioned JSON record to `target/rollout/`. See [docs/TESTING.md](./TESTING.md). |
 
 Note: `.cargo/config.toml` defines only the `xtask` cargo alias
 (`xtask = "run --package xtask --"`); it pins no `target-dir` or `TMPDIR`.

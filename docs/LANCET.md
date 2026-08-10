@@ -32,12 +32,12 @@ plus base-authority planning. The underlying contract remains split across
 | ----------- | ------------- |
 | `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
 | `lancet-catalog::CATALOG` | The **native** CEP catalog plus descriptor metadata for methods that still use typed native handlers. Since GitHub #31 it is `fetch.web` only. The Agent-visible five-Tool distribution (`observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`, `session.todo_write`) is closed composition: four embedded Components plus this one native method. (`session.envelope`, `exec.command_run`, `mutate.batch`, post-mutation verify, and agent-visible audit CEP methods were removed - catalog and tests assert their absence.) |
-| `lancet-api::audit` | Stable operator entry points for audit query/tail/replay over the project-keyed audit store (`query_audit`, `tail_audit`, `replay_audit`); a thin facade that delegates to `lancet-audit::operator`, which owns the DTOs, pagination, filters, and projection. Not agent CEP methods. |
+| `lancet-api::audit` | Stable operator entry points for audit query/tail/replay over the project-keyed audit store (`query_audit`, `tail_audit`, `replay_audit`); a thin facade that delegates to `lancet-audit::operator`, which owns typed DTOs, pagination, filters, and Cell-evidence materialization. Not agent CEP methods. |
 | Method params/results | Typed `*Params` / `*Result` structs per catalog method in `lancet-catalog` |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
 | `PolicyHook` / `PolicyDecision` | Pluggable policy hook interface in `lancet-protocol` |
-| Audit/provenance schemas | `ProvGraphFragment` wire shapes in `lancet-protocol`; audit rows, filters, attestation persistence, operator read DTOs, and project-keyed store-path resolution in `lancet-audit` |
+| Audit/evidence schemas | Versioned Cell-evidence shapes in `lancet-protocol`; audit rows, filters, typed operator read DTOs, and project-keyed store-path resolution in `lancet-audit` |
 
 Internal implementation is split across `lancet-authority` (default policy, Guard L1, active envelope, effect-region semantics) and `lancet-native` (production handlers, transport lifecycle, edit/web integration).
 
@@ -67,17 +67,17 @@ The canonical method names are grouped by primary effect class:
 | `session.todo_write` | Session-state mutation for todo state. |
 
 Audit query, tail, and turn replay are **not** catalog methods. Operators use
-`lattice audit` (default: query/tail; `lattice audit replay --turn <id>` for
-turn provenance reconstruction), backed by `lancet-api::{query_audit,
-tail_audit, replay_audit}`, which delegate to `lancet-audit::operator`; see
-**Provenance Audit** below. The operator DTOs never lived in `CATALOG`, and
+`lattice audit` (default: query/tail; `lattice audit replay --turn <id>` for a
+turn's finalized call trace), backed by `lancet-api::{query_audit, tail_audit,
+replay_audit}`, which delegate to `lancet-audit::operator`; see **Operator
+Audit** below. The operator DTOs never lived in `CATALOG`, and
 since GitHub #39 they no longer live in `lancet-catalog` at all.
 
 ### Rollout gate and self-check
 
 - **Alpha rollout gate:** `cargo xtask rollout --channel alpha` - rejects a
   tracked-dirty worktree, builds a locked release binary, runs
-  Direct-Local/offline/dogfood/audit-replay/doctor evidence steps against it,
+  Direct-Local/offline/dogfood/release-operator-matrix/doctor evidence steps against it,
   and writes a versioned JSON record to `target/rollout/`. See
   [docs/TESTING.md](./TESTING.md).
 - **LANCET self-check:** `lattice lancet doctor` (or `cargo run -p lattice-cli
@@ -195,102 +195,62 @@ the retired `exec.command_run` command-isolation subsystem and were removed
 with it - see [docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed subsystems".
 Git history retains the non-claims narrative.
 
-## Provenance Audit
+## Operator Audit
 
-### Flat Store, Projected Graph
+### Flat Store and Cell Evidence
 
 Audit rows live in SQLite (`cep_audit_entries`). Production persistence uses the
 **external project-keyed path** under the Linux XDG state directory
 (`$XDG_STATE_HOME/lattice/projects/<sha256-canonical-root>/cep_audit.db` via
 `audit_db_path_for_project`, defined in `lancet_audit::store_path` and
-re-exported as `lancet_api::audit_db_path_for_project`). Each finalized CEP call is one
-append-only row. **PROV-DM** structure (`Activity`, `Entity`, `Agent`, relations)
-is **not** stored as a graph; it is **projected** at read time into a
-`ProvGraphFragment` wire type (operator `query_audit` / `replay_audit`).
+re-exported as `lancet_api::audit_db_path_for_project`). Each finalized CEP call
+is one append-only row. The row carries `session_id`, `turn_id`, nullable
+`model_id` / `runtime_version`, lifecycle labels, and a compact result summary.
 
 The database carries its schema version in `PRAGMA user_version`. A newer
-version, or an unversioned database whose `cep_audit_entries` or
-`attestation_records` shape predates the current columns, fails the open with an
-actionable error naming the path and the missing table-qualified columns; the
-file is never altered, so audit history is neither dropped nor rewritten. The
-read-only legacy import path is unaffected. Failing with an action is the
-deliberate choice over opening the old database read-only beside a fresh one:
-one project root keeps one append-only history, and no reader joins two files
-for a turn's replay or attestation range.
+version, or an unversioned database whose required `cep_audit_entries` shape
+cannot be adopted, fails the open with an actionable error without rewriting
+audit history. The former turn-attestation table, `attestation_records`, is
+retired and is dropped on store open; no attestation migration is retained.
 
-### Agent Triple
+Handler and transport layers may keep compact query keys in `metadata_json`,
+including native `required_capability`, observed capability labels, and a
+Component row's internal `evidence_id`. The field is not an operator response
+surface and never serializes through audit query, tail, replay, or status.
 
-Rows carry `session_id`, `turn_id`, and nullable `model_id` / `runtime_version` columns populated from `CepAuditContext` at `start_call` so replay can reconstruct the Agent node from audit alone.
-
-### Metadata Seeds
-
-Handler and transport layers write compact `metadata_json` keys such as paths
-and `content_hash`. These fields are intentionally summary-only:
-full request and response bodies are not stored in audit metadata.
-
-Native handlers also persist compact execution evidence:
-
-- `cep_policy` records the policy decision, declared effect ceiling,
-  capability-match summary, budget/network facts when available, and the
-  post-policy authorized region summary.
-- `cep_preflight` records method-local pre-execution facts. Command calls
-  include declared/effective impact, effective effect kinds,
-  RunCommand allowlist evidence, and WritePath region summaries for
-  workspace-mutating commands. Mutation calls include target paths, out-of-scope
-  paths, expected-hash status, verify configuration, and replan reason when
-  known.
-- `approval_request` is emitted only for `PolicyDecision::HumanReview`. It is
-  approval-ready evidence for a future outer loop: method, reason, required
-  capability, and retry hint. LANCET does not auto-approve
-  or prompt interactively in the native handler.
-
-Operator audit APIs and `replay_audit` project `cep_policy`,
-`cep_preflight`, `approval_request`, and `effective_boundary` from flat row
-metadata into PROV activity attributes. This keeps audit rows append-only while
-making preflight and approval evidence visible to replay clients.
-
-Transport finalize merges catalog `required_capability` and effect-ledger `observed_capabilities` without changing the audit write lifecycle.
-
-Component Tool calls record why the call was authorized apart from what it did:
-`admission_evidence` holds the approved/denied/boundary-excluded capability
-names, `observed_effects` the actual Cell + `ObservedScope` + concrete target
-entries, and `denied_operations` the per-operation refusals. All three are
-versioned objects with seq-ordered inner arrays, so a reader checks `version`
-before interpreting any of them. `component_cells` remains the 4-segment query key and is
-derived from the effect ledger, so a multi-effect call cannot disagree with
-itself. Operator audit APIs and `replay_audit` project all three into PROV
-activity attributes.
-
-### Attestations
-
-Per-turn **unsigned in-toto** statements are stored in `attestation_records` in the same audit database (not git-tracked files). Signing and key management are deferred beyond alpha; wire shapes remain forward-compatible.
-
-Predicate versions coexist. A turn is attested with the v2 predicate iff one of
-its rows carries versioned evidence metadata, else v1; v2 statement bytes are
-canonical JSON. On replay the stored `predicate_type` wins, so a stored v1
-statement is never re-projected as v2 and a v2 statement compares byte for byte.
-
-### Time-Range Proxy
-
-Monotonic `audit_id` range (`since_audit_id` / `until_audit_id`) is the
-primary time-order proxy when wall-clock `started_at` bounds are omitted.
-Optional `started_after` / `started_before` filter on the millis `started_at`
-column.
+Component Tool calls persist the existing versioned Cell-evidence records in
+`evidence_calls`, `evidence_effects`, and `evidence_denials`. The records carry
+why admission succeeded or failed, observed effects, and denied operations;
+their versions are checked before a reader interprets them. A Component audit
+row may point at those records through its internal `evidence_id`. A missing
+pointer is valid for native and Component rows alike and exposes
+`evidence: null`; the row remains visible. A present but dangling, malformed,
+unsupported, corrupt, or row-mismatched pointer is an operator read error, not
+a no-evidence value.
 
 ### Operator audit reads
 
 Audit store reads are **host/operator only**. `lattice audit` calls
-`lancet-api::{query_audit, tail_audit}` against the project-keyed store (no CEP
-server). `replay_audit` rebuilds turn traces and optional in-toto statements from
-stored rows. `CepAuditStore::query_rows` returns only **finalized** rows
-(`ended_at` and `result_or_error` set). Agents do not receive `ReadAudit` or
-audit methods in `[tools].enabled`.
+`lancet-api::{query_audit, tail_audit, replay_audit}` against the project-keyed
+store, with no CEP server. `CepAuditStore::query_rows` returns only **finalized**
+rows (`ended_at` and `result_or_error` set), ordered by `audit_id`. Agents do not
+receive `ReadAudit` or audit methods in `[tools].enabled`.
+
+`query_audit` emits `{ session_id, row_count, rows }`, where each row contains
+the full finalized audit fact set plus `evidence`; its database query remains
+capped at 10,000 rows and supports the inclusive `since` lower bound.
+`tail_audit` emits compact rows and uses an exclusive `audit_id` cursor.
+`replay_audit` returns every finalized row for the selected turn in audit-id
+order, without inheriting the query cap; it does not rebuild a graph, statement,
+source range, or attestation comparison. Status asks SQLite for
+`audit_id DESC LIMIT 20`, then exposes those newest rows in that order. Query
+and tail retain the session, turn, method, impact, capability, verdict, and
+cursor filters.
 
 Since GitHub #39 the `lancet-api` entry points are one-line delegations and the
 behavior — request DTOs, the `AUDIT_TAIL_MAX_ROWS` / `AUDIT_TAIL_MAX_BATCHES`
-pagination loop, filter construction, wire projection, and the replay
-attestation comparison — lives in `lancet-audit::operator`, with the contract
-tests in `lancet-audit::operator_tests`. "No CEP server" is enforced
+pagination loop, filter construction, typed evidence materialization, and
+contract tests — lives in `lancet-audit::operator`. "No CEP server" is enforced
 structurally: `lancet-audit` depends on none of `lancet-native`,
 `lancet-dispatch`, `lancet-cep`, or `lancet-runtime`, so the read path cannot
 name a server, transport, or registry type. The tail cancellation contract

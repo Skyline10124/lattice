@@ -60,8 +60,9 @@ integration-test target of any product crate.
   (turn lifecycle + reopen), `direct_observation` (visibility/bounds),
   `direct_mutation` (atomic mutation/concurrency/effect denial), `direct_tools`
   (fetch/todo/catalog/retired methods), `direct_failures` (provider
-  failures/SIGINT/deadline/no-rollback), `direct_operator` (audit/session/
-  lancet cross-validation), `direct_secrets` (sentinel scanning),
+  failures/SIGINT/deadline/no-rollback), `direct_operator` (independent native,
+  Component, mixed, and newest-20 audit/status contracts), `direct_secrets`
+  (sentinel scanning),
   `direct_session_isolation` (two-session graph isolation),
   `direct_workspace_history` (#63: a real turn's installed mutation is
   recorded in the private bare history under the scenario's isolated HOME,
@@ -74,6 +75,11 @@ integration-test target of any product crate.
   `TurnCommit.workspace_history_oid` binding is not observable through the
   CLI by design (#63 adds no user command), so it stays a library-layer
   assertion.
+- **Release operator matrix** (`tests/release_operator.rs`, feature
+  `release-operator`): a separate N/C/M fixture and assertion set driven only
+  by `cargo xtask rollout` against the locked release binary. The ordinary
+  harness suite does not build this target, and the rollout gate does not
+  rerun a `direct_operator` test as a release substitute.
 - **PTY smoke** (`tests/pty_tui_smoke.rs`): proves the TUI entrypoint wires
   into the same Direct-Local `stream_turn` chain. Also ordinary-lane since
   #62; the retired KVM-lane opt-in gate and its `layer_guard` module are

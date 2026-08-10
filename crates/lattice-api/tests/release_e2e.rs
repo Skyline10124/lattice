@@ -5,8 +5,8 @@
 //!
 //! Validates the full edit → edit cycle in a **single `run_turn`**
 //! with a multi-round `FakeStreamingLlmClient` under the Direct-Local runtime.
-//! Uses a persisted on-disk audit DB so the attestation can be inspected after
-//! the turn completes.
+//! Uses a persisted on-disk audit DB so finalized operator rows can be
+//! inspected after the turn completes.
 //!
 //! Filter: `release_e2e_criterion_8`
 
@@ -141,7 +141,8 @@ fn make_release_e2e_request(
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
-        // Persist audit to disk so we can inspect attestation after run_turn.
+        // Persist audit to disk so the finalized operator rows remain available
+        // after run_turn.
         test_persist_audit: Some(false),
     }
 }
@@ -155,9 +156,8 @@ fn make_release_e2e_request(
 // 1. Turn completes with status=Completed.
 // 2. Direct-Local edits are verified via tool outcomes (section 6).
 // 3. Session has exactly one commit in the graph.
-// 4. On-disk attestation has correct in-toto subject / predicate / materials.
-// 5. Audit rows are in edit → edit order.
-// 6. Both mutate.edit tool results succeed without profile verify configured.
+// 4. Audit rows are in edit → edit order.
+// 5. Both mutate.edit tool results succeed without profile verify configured.
 
 /// Create an unattached branch at the current HEAD without checking it out.
 fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
@@ -292,7 +292,7 @@ async fn release_e2e_criterion_8() {
         .expect("session log must be readable");
     assert_eq!(log.len(), 1, "session must have exactly one commit");
 
-    // ── 4. Attestation: subject / predicate / materials ──────────────────
+    // ── 4. Finalized audit rows: ordered Component calls ─────────────────
     //
     // The audit DB was persisted to disk (test_persist_audit: Some(false)).
     let audit_path =
@@ -304,52 +304,6 @@ async fn release_e2e_criterion_8() {
     let audit = CepAuditStore::open(&audit_path).expect("open on-disk audit DB");
 
     let turn_id = format!("{}:root", result.session_id);
-    let attestation = audit
-        .attestation_for_turn(&turn_id)
-        .expect("attestation lookup must not error")
-        .expect("attestation must be stored after run_turn completes");
-
-    // Parse the stored JSON statement.
-    let stmt: serde_json::Value = serde_json::from_str(&attestation.statement_json)
-        .expect("statement_json must be valid JSON");
-
-    // subject: non-empty array; first entry name must start with "turn:"
-    let subjects = stmt["subject"]
-        .as_array()
-        .expect("statement.subject must be a JSON array");
-    assert!(!subjects.is_empty(), "statement.subject must be non-empty");
-    assert!(
-        subjects
-            .iter()
-            .any(|s| s["name"].as_str().unwrap_or("").starts_with("turn:")),
-        "statement.subject must include an entry with name starting with 'turn:'; got: {subjects:?}"
-    );
-
-    // predicate_type: mutate.edit is a Component Tool (#31), so the turn
-    // attests as v2 (Cell evidence vocabulary), not legacy v1.
-    assert_eq!(
-        attestation.predicate_type, "https://lattice.dev/attestation/cep-turn/v2",
-        "predicate_type must be CEP_TURN_ATTESTATION_PREDICATE_TYPE_V2"
-    );
-
-    // predicate.materials: must include mutate.edit in the sequence
-    let materials = stmt["predicate"]["materials"]
-        .as_array()
-        .expect("predicate.materials must be a JSON array");
-    assert!(
-        !materials.is_empty(),
-        "predicate.materials must be non-empty"
-    );
-    let method_names: Vec<&str> = materials
-        .iter()
-        .filter_map(|m| m["method"].as_str())
-        .collect();
-    assert!(
-        method_names.contains(&"mutate.edit"),
-        "materials must include mutate.edit; got: {method_names:?}"
-    );
-
-    // ── 5. Audit PROV ordering: mutate.edit → mutate.edit ─
     let rows = audit
         .query_rows(&AuditQueryFilters {
             turn_id: Some(turn_id.clone()),
@@ -383,7 +337,7 @@ async fn release_e2e_criterion_8() {
         "first edit must precede second edit in audit; order: {methods:?}"
     );
 
-    // ── 6. Tool results: both edits succeed without profile verify ─
+    // ── 5. Tool results: both edits succeed without profile verify ─
     let edit_results: Vec<_> = result
         .tool_results
         .iter()
@@ -411,7 +365,9 @@ async fn release_e2e_criterion_8() {
     );
 
     println!(
-        "release criterion-8 PASSED: session={}, turn_id={}, attestation_predicate={}",
-        result.session_id, turn_id, attestation.predicate_type
+        "release criterion-8 PASSED: session={}, turn_id={}, finalized_rows={}",
+        result.session_id,
+        turn_id,
+        rows.len()
     );
 }

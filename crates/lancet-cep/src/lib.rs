@@ -27,14 +27,11 @@ pub use lancet_dispatch::{
     ServerCall, ServerRuntime, duplicate_registration, wire_code_for_error,
 };
 pub use lancet_protocol::{
-    CEP_TURN_ATTESTATION_PREDICATE_TYPE, CepError, CepErrorCode, CepErrorData, CepErrorFamily,
-    CepMode, EffectDecl, EffectKindSet, EffectScopeKind, ErrorObject, FailureSemantics,
-    GuardVerdict, Id, ImpactKind, InTotoStatement, InTotoSubjectDescriptor, Notification,
+    CepError, CepErrorCode, CepErrorData, CepErrorFamily, CepMode, EffectDecl, EffectKindSet,
+    EffectScopeKind, ErrorObject, FailureSemantics, GuardVerdict, Id, ImpactKind, Notification,
     OverlayBehavior, PolicyActionRequired, PolicyAuditContext, PolicyBudgetSnapshot,
-    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, ProvActivity, ProvAgent, ProvEntity,
-    ProvGraphFragment, ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy,
-    Request, Response, Retriability, ToolCall, ToolError, ToolEvent, ToolResult,
-    TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace,
+    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, Request, Response, Retriability,
+    ToolCall, ToolError, ToolEvent, ToolResult,
 };
 
 pub mod methods {

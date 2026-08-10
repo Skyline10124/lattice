@@ -12,7 +12,7 @@
 //! admission evidence only and never appears as an effect.
 //!
 //! One `seq` counter orders effects and denials together, so a multi-effect
-//! call keeps its per-call total order into audit and attestation.
+//! call keeps its per-call total order into audit and evidence storage.
 //!
 //! The ledger is backed by `Arc<Mutex<...>>` so a clone taken before the call
 //! shares the same records: the call moves one clone into the wasmtime

@@ -7,6 +7,14 @@ authors = ["Ast Rin"]
 description = "External system tests for the lattice binary (no product crate dependencies)"
 publish = false
 
+[features]
+release-operator = []
+
+[[test]]
+name = "release_operator"
+path = "tests/release_operator.rs"
+required-features = ["release-operator"]
+
 [dependencies]
 # General hashing library (not a product crate): scenarios need the same
 # Local Revision string the product computes to script `mutate.edit`

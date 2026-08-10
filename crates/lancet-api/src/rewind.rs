@@ -311,7 +311,7 @@ pub fn rewind_workspace(
 
 /// Append one durable Rewind audit record to the project's audit database.
 ///
-/// Same direct-store shape as `query_audit`/`store_turn_attestation`: the
+/// Same direct-store shape as `query_audit`: the
 /// path is resolved and the store opened inside this crate. The record holds
 /// hashes, paths, and object ids only — never file content.
 pub fn record_rewind_audit(project_root: &Path, record: &RewindAuditRecord) -> LancetResult<()> {

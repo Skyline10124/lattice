@@ -226,6 +226,6 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 - Local: `cargo test -p lancet-native`.
 - Handler/lifecycle changes: also run affected `lattice-api` round-trip,
-  policy, provenance, and release tests.
+  policy, operator-audit, and release tests.
 - Edit/security changes need focused regression tests for path, symlink, scope,
   verify, and effect-region behavior.

@@ -21,8 +21,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use lattice_session::{GraphHead, TurnCommitStatus};
 
-use lancet_api::store_turn_attestation;
-
 use super::cep::{ProductionTurnDeps, map_cep_tool_event};
 use super::execute::{
     TurnCommitContext, build_commit_input, build_profile_snapshot_metadata, derive_terminal_event,
@@ -366,13 +364,6 @@ async fn run_live_turn_task(
             None
         }
     };
-
-    {
-        let ctx = audit_context.read().await;
-        if let Err(err) = store_turn_attestation(&audit, &ctx, &turn_id) {
-            eprintln!("failed to store turn attestation for {turn_id}: {err}");
-        }
-    }
 
     // 7. Terminal event derived from AgentTurnResult.status.
     if let Some(terminal) = derive_terminal_event(&agent_result) {

@@ -136,8 +136,8 @@ settings below: `[lancet.effects] deny` and `[lancet.policy] methods.*` key on
 `[lancet.capabilities]` instead. The other four methods are unaffected.
 
 Audit inspection is **not** a catalog method. Use `lattice audit` (operator CLI)
-against the project-keyed audit store; do not list `observe.audit` or
-`observe.audit_replay` in `[tools].enabled`.
+against the project-keyed audit store; audit command names do not belong in
+`[tools].enabled`.
 
 There is no `session.envelope` method. Scaffold methods (`workspace.inspect`,
 `workspace.navigate`) are feature-gated inspection-only and are **not** part of

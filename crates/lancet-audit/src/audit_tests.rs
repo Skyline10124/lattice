@@ -195,17 +195,17 @@ fn open_rejects_old_shape_database_without_touching_it() {
 }
 
 #[test]
-fn open_rejects_old_shape_attestation_table_without_touching_it() {
-    // C5 covers every table this store writes: an unversioned file whose call
-    // rows match today's shape but whose attestation table does not would be
-    // adopted and stamped v1, then die at the first attestation INSERT.
+fn open_removes_retired_turn_attestation_table() {
+    // #114 intentionally removes all stored Turn statements. A historical
+    // table may be present alongside otherwise usable audit rows; opening the
+    // store removes only that retired projection surface.
     let root = unique_test_dir("schema-old-attestation");
     let path = root.join("audit.db");
     write_legacy_audit_fixture(&path);
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
-            "DROP TABLE attestation_records;
+            "DROP TABLE IF EXISTS attestation_records;
              CREATE TABLE attestation_records (
                 turn_id TEXT PRIMARY KEY,
                 statement_json TEXT NOT NULL,
@@ -214,24 +214,16 @@ fn open_rejects_old_shape_attestation_table_without_touching_it() {
         )
         .unwrap();
     }
-    set_schema_version(&path, 0);
-    let before = std::fs::read(&path).unwrap();
-
-    let err = match CepAuditStore::open(&path) {
-        Ok(_) => panic!("an old-shape attestation table must not be opened"),
-        Err(err) => err,
-    };
-    assert!(matches!(err, AuditError::IncompatibleSchema { .. }));
-    let message = err.to_string();
-    assert!(
-        message.contains("attestation_records.predicate_type"),
-        "the missing column must be named with its table: {message}"
-    );
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        before,
-        "a refused open must leave the database byte-identical"
-    );
+    CepAuditStore::open(&path).expect("open removes retired table");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let table_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'attestation_records'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(table_count, 0, "Turn attestation table must be retired");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -738,24 +730,6 @@ fn start_call_persists_model_and_runtime_columns() {
     let row = store.row_by_audit_id(start.audit_id).unwrap();
     assert_eq!(row.model_id.as_deref(), Some("claude-sonnet"));
     assert_eq!(row.runtime_version.as_deref(), Some("0.1.0-test"));
-}
-
-#[test]
-fn attestation_round_trip() {
-    let store = CepAuditStore::in_memory().unwrap();
-    let record = AttestationRecord {
-        turn_id: "turn-a".into(),
-        session_id: "session-a".into(),
-        statement_json: r#"{"subject":[]}"#.into(),
-        predicate_type: "https://lattice.dev/attestation/cep-turn/v1".into(),
-        generated_at: "1".into(),
-        source_audit_range_or_hash: "1-3".into(),
-    };
-    store.insert_attestation(&record).unwrap();
-    let loaded = store.attestation_for_turn("turn-a").unwrap().unwrap();
-    assert_eq!(loaded, record);
-    store.delete_attestation_for_turn("turn-a").unwrap();
-    assert!(store.attestation_for_turn("turn-a").unwrap().is_none());
 }
 
 #[test]
@@ -1278,8 +1252,8 @@ fn merge_finalize_metadata_points_at_evidence_instead_of_carrying_it() {
 
 #[test]
 fn merge_finalize_metadata_is_order_independent() {
-    // The metadata bytes feed attestation, so nothing may depend on the
-    // iteration order of the caller's containers.
+    // The metadata query keys must stay deterministic, so nothing may depend
+    // on the iteration order of the caller's containers.
     let admission = admission_evidence();
     let denied = denied_operations();
     let mut reversed = effects_record();
@@ -1457,20 +1431,10 @@ fn write_legacy_audit_fixture(path: &std::path::Path) {
             Some(r#"{"required_capability":"inspect"}"#),
         )
         .unwrap();
-    legacy
-        .insert_attestation(&AttestationRecord {
-            turn_id: "legacy-turn".into(),
-            session_id: "legacy-session".into(),
-            statement_json: r#"{"_type":"https://in-toto.io/Statement/v1"}"#.into(),
-            predicate_type: "https://lattice.dev/attestations/cep-turn/v1".into(),
-            generated_at: "1".into(),
-            source_audit_range_or_hash: "1-1".into(),
-        })
-        .unwrap();
 }
 
 #[test]
-fn import_legacy_read_only_if_empty_copies_both_tables() {
+fn import_legacy_read_only_if_empty_copies_audit_rows() {
     let root = unique_test_dir("import-legacy");
     let legacy_path = root.join("legacy.db");
     let dest_path = root.join("dest.db");
@@ -1485,13 +1449,6 @@ fn import_legacy_read_only_if_empty_copies_both_tables() {
     assert_eq!(dest.row_count().unwrap(), 1);
     let row = dest.row_by_audit_id(1).unwrap();
     assert_eq!(row.turn_id, "legacy-turn");
-    assert_eq!(
-        dest.attestation_for_turn("legacy-turn")
-            .unwrap()
-            .expect("attestation")
-            .session_id,
-        "legacy-session"
-    );
 
     let source_meta_after = std::fs::metadata(&legacy_path).unwrap();
     let source_bytes_after = std::fs::read(&legacy_path).unwrap();
@@ -1536,7 +1493,6 @@ fn import_legacy_read_only_if_empty_is_noop_when_destination_has_rows() {
     assert_eq!(dest.row_count().unwrap(), 1);
     let row = dest.row_by_audit_id(1).unwrap();
     assert_eq!(row.turn_id, "turn-1");
-    assert!(dest.attestation_for_turn("legacy-turn").unwrap().is_none());
 
     let _ = std::fs::remove_dir_all(&root);
 }
