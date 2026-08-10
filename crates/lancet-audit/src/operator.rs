@@ -554,7 +554,13 @@ fn evidence_id_from_metadata(row: &AuditRow) -> OperatorAuditResult<Option<Evide
         }
     };
     let Some(object) = metadata.as_object() else {
-        return Ok(None);
+        if row.semantic_stage != SEMANTIC_STAGE_COMPONENT {
+            return Ok(None);
+        }
+        return Err(OperatorAuditError::Internal(format!(
+            "audit row {} metadata_json is not a JSON object",
+            row.audit_id
+        )));
     };
     let Some(raw_id) = object.get("evidence_id") else {
         return Ok(None);

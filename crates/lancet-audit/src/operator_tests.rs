@@ -318,6 +318,18 @@ async fn component_evidence_pointer_failures_are_operator_read_errors() {
         |conn| {
             conn.execute(
                 "UPDATE cep_audit_entries SET metadata_json = ?1",
+                rusqlite::params!["[]"],
+            )
+            .expect("replace Component metadata with a non-object value");
+        },
+        "metadata_json is not a JSON object",
+    )
+    .await;
+
+    assert_component_evidence_read_error(
+        |conn| {
+            conn.execute(
+                "UPDATE cep_audit_entries SET metadata_json = ?1",
                 rusqlite::params![r#"{"evidence_id":999999}"#],
             )
             .expect("replace evidence pointer");
