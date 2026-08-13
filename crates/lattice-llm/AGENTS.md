@@ -29,6 +29,12 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 - Keep provider protocol quirks inside provider modules or the client layer.
 - Higher layers should consume typed `LlmEvent`, `LlmError`, and model metadata.
 - Preserve SSRF protections on every network-facing change.
+- ADR 0005 makes provider Tool Call IDs optional opaque wire metadata, never
+  LANCET invocation identity. GitHub #142 moves provider-neutral messages and
+  bounded part-local replay state into `lattice-conversation`; same-provider
+  replay must preserve real IDs/signatures/part order, while cross-provider
+  projection must not leak source-provider opaque state. Do not synthesize
+  `tc_*` IDs as domain identity.
 
 ## Recent Issues
 

@@ -15,8 +15,10 @@ the versioned Cell evidence tables. The evidence tables are the durable home of
   labels, impact labels, call metadata, and Cell-evidence read/write entry
   points.
 - `src/evidence.rs` owns `evidence_calls`, `evidence_effects`, and
-  `evidence_denials`; `EvidenceId` is a durable per-call identity, never an
-  `audit_id`. Record versions are validated on read.
+  `evidence_denials`; current `EvidenceId` is the durable SQLite lookup key for
+  those three records and is never an `audit_id`. It is not ADR 0005's public
+  invocation identity and is deleted with the SQLite path in #139-B. Record
+  versions are validated on read.
 - `src/operator.rs` owns `AuditRequest`, `AuditQueryOutput`,
   `AuditTailOutput`, `AuditReplayRequest`, `AuditReplayResult`,
   `OperatorAuditRow`, `OperatorCellEvidence`, the tail limits, and async
@@ -53,6 +55,16 @@ the versioned Cell evidence tables. The evidence tables are the durable home of
 - Turn/audit provenance projection and turn attestation storage were retired by
   GitHub #114. Do not recreate them. Artifact identity and bundle provenance
   are separate contracts and remain intact.
+- `audit_id`, numeric `call_id`, and `evidence_id` are transitional SQLite
+  storage values, not ADR 0005 invocation identity. #139-A adds a real but
+  non-production Git InvocationStore using the #142 typed InvocationId; the
+  existing #114 SQLite operator Adapter remains authoritative until #139-B
+  atomically switches it and deletes the SQLite identity/path. Never dual-write,
+  import legacy rows, or expose two production Adapters.
+- `lattice-store` supplies only generic Git mechanics. Reservation,
+  DispatchStarted, terminal Cell evidence, query/tail/replay semantics, and the
+  single append-only invocation ledger remain owned here. Operator reads must
+  stay usable without composing CEP/runtime.
 
 ## Recent Issues
 

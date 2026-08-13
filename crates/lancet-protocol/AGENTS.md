@@ -41,6 +41,12 @@ evidence types. It has no I/O and no Tokio dependency.
 - Turn/audit provenance and in-toto attestation wire types were retired by
   GitHub #114. Preserve artifact identity and bundle provenance contracts where
   they are owned; do not recreate a second operator projection vocabulary here.
+- ADR 0005 assigns the shared `InvocationId` and `TurnId` data types here.
+  GitHub #142 adds strict lowercase hyphenated UUID-v4
+  parse/display/serde/schema and tests; this crate validates but does not
+  generate IDs. Until #139-B, do not thread InvocationId into production
+  JSON-RPC, transport, events, evidence, or operator DTOs, and never add a
+  second String/newtype identity.
 
 ## Recent Issues
 
@@ -62,6 +68,11 @@ evidence types. It has no I/O and no Tokio dependency.
   JSON-RPC wire-code tests.
 - When adding evidence fields, update authority validation, durable storage,
   runtime production, and operator DTO tests in the same series.
+- ADR 0005/#139-B replaces the numeric JSON-RPC request `id` with the canonical
+  string form of an already-reserved InvocationId; it does not reintroduce the
+  deleted `session.envelope` Tool. Reservation creates the invocation and the
+  request dispatches it. Notification params may reference an existing
+  InvocationId for control, but cannot reserve or dispatch an effectful Tool.
 - Do not extend the legacy `ImpactKind` vocabulary. Its retirement still needs
   the four preconditions in root `AGENTS.md`.
 

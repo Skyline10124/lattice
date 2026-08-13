@@ -44,8 +44,24 @@ were retired; the git-backed store is the only production path (gix).
   under `refs/lattice/candidates/<id>/<turn>`. Do not add remote push refspecs
   for `refs/lattice/**`.
 - Mutable session metadata lives in sidecar files, never in Git objects.
-- The Git store performs single-ref operations only; the `lattice-workspace`
-  multi-ref promotion transaction surface was deleted with that crate in #62.
+- Current production Git operations are single-ref; the old
+  `lattice-workspace` promotion transaction surface was deleted with that crate
+  in #62. This is not a target prohibition: ADR 0005/#144 final Turn publication
+  uses `lattice-store`'s one-repository multi-ref transaction to advance the
+  conversation head, create the Turn pin, update state when needed, and delete
+  `active-turn` atomically.
+- ADR 0005 keeps Session graph and PendingTurn semantics in this crate while
+  #143 moves only shared Git durability mechanics into `lattice-store`. #144
+  adds one durable active Turn per session, immutable CAS stages, a full-Turn
+  session execution lock, ResultDraft publication classification, and the pure
+  reconciliation reducer. Do not put InvocationStore/evidence semantics here,
+  open two repository write locks together, or redispatch model/Tool work while
+  reopening a PendingTurn.
+- The sidecar rule above describes current code only. ADR 0005/#143 hard-cuts
+  mutable `.lattice/sessions/**` metadata into immutable `SessionState` objects
+  and session-scoped refs in the global `$XDG_STATE_HOME/lattice/sessions.git`;
+  no sidecar reader/import or second authority remains. A Session is permanently
+  bound to one path-derived `ProjectStoreKey`.
 
 ## Recent Issues
 
