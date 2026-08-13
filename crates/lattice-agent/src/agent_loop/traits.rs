@@ -146,7 +146,7 @@ pub enum ProvisionalDecision {
 /// to complete the turn. Errors propagate as terminal agent errors.
 ///
 /// The trait is workspace-agnostic: it uses only `GraphMessage` from
-/// `lattice-session` and carries no workspace, Git, snapshot, or
+/// `lattice-conversation` and carries no workspace, Git, snapshot, or
 /// disposition concepts.
 #[async_trait::async_trait]
 pub trait ProvisionalCompletionHook: Send {

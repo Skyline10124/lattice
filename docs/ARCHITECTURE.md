@@ -96,7 +96,7 @@ there is no dual write, import, legacy reader, or runtime backend switch.
 
 ## 2. Component diagram
 
-The workspace has 19 crates grouped into layers. Arrows point from a higher
+The workspace has 20 crates grouped into layers. Arrows point from a higher
 layer toward the lower-layer crates it depends on. The diagram below shows the
 runtime crates; `lattice-tool-prelude` (guest SDK) and
 `lattice-system-harness` (black-box tests) sit outside it by contract.
@@ -116,9 +116,9 @@ graph TD
     %% Layer 3 — native handlers
     NATIVE["lancet-native"]
 
-    %% Layer 2.5 — CEP facade
+    %% Layer 2.5 — CEP facade / runtime
     CEP["lancet-cep"]
-
+    RUNTIME["lancet-runtime"]
     %% Layer 2 — dispatch / audit / authority
     DISPATCH["lancet-dispatch"]
     AUDIT["lancet-audit"]
@@ -155,19 +155,23 @@ graph TD
     NAPI --> AUTHORITY
     NAPI --> CATALOG
     NAPI --> PROTOCOL
+    NAPI --> RUNTIME
 
-    %% Layer 3 -> 2 + 1 + 0
+    %% Layer 3 -> 2.5 + 2 + 1 + 0
     NATIVE --> DISPATCH
     NATIVE --> AUDIT
     NATIVE --> AUTHORITY
     NATIVE --> CATALOG
     NATIVE --> PROTOCOL
     NATIVE --> NETGUARD
+    NATIVE --> RUNTIME
     %% Layer 2.5 -> 2 + 1 + 0
     CEP --> DISPATCH
     CEP --> CATALOG
     CEP --> PROTOCOL
-
+    RUNTIME --> DISPATCH
+    RUNTIME --> AUTHORITY
+    RUNTIME --> PROTOCOL
     %% Layer 2 -> 1 + 0
     DISPATCH --> CATALOG
     DISPATCH --> PROTOCOL
@@ -204,8 +208,8 @@ Layer model (verified against each crate's `Cargo.toml` `[dependencies]`):
 | 2 | `lancet-audit` | `lancet-protocol`, `lancet-catalog` |
 | 2 | `lancet-authority` | `lancet-protocol`, `lancet-catalog`, `net-guard` |
 | 2.5 | `lancet-cep` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch` |
-| 3 | `lancet-native` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `net-guard` |
-| 3.5 | `lancet-api` | `lancet-cep`, `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `lancet-native` |
+| 3 | `lancet-native` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `net-guard`, `lancet-runtime` |
+| 3.5 | `lancet-api` | `lancet-cep`, `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `lancet-native`, `lancet-runtime` |
 | 4 | `lattice-api` | `lancet-api` + `lattice-agent`, `lattice-profile`, `lattice-session`, `lattice-llm` |
 | 5 | `lattice-tui` | `lattice-api` |
 | 5 | `lattice-cli` | `lattice-api`, `lattice-tui` |
