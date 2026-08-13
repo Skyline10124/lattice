@@ -76,7 +76,7 @@ pub(super) fn build_commit_input(
         disposition,
         lifecycle,
         commit_message,
-        usage: Some(agent_result.usage.clone()),
+        usage: Some(agent_result.usage),
         terminal_reason: agent_result.terminal_reason.clone(),
     }
 }

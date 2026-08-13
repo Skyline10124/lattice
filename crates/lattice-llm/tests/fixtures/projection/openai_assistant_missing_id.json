@@ -1,0 +1,25 @@
+{
+  "id": "chatcmpl-Z9y8X7",
+  "object": "chat.completion",
+  "created": 1760000001,
+  "model": "openai-compatible-finetune",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Paris\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ]
+}

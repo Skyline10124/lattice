@@ -6,6 +6,7 @@
 mod client;
 mod endpoints;
 mod logging;
+pub mod provider_projection;
 mod providers;
 mod router;
 pub mod sse;

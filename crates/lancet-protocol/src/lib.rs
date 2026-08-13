@@ -16,6 +16,7 @@
 //!
 //! This crate is pure data: no I/O, no runtime, no tokio.
 
+pub mod address;
 pub mod canonical;
 pub mod capability;
 pub mod cell;
@@ -23,10 +24,12 @@ pub mod effect_types;
 pub mod error;
 pub mod evidence;
 pub mod frame;
+pub mod identity;
 pub mod jsonrpc;
 pub mod policy;
 
 // Public re-exports of common types
+pub use address::{ModelAttemptKey, ModelMessageAddress, PlanKey, ToolCallAddress};
 pub use canonical::canonical_json;
 pub use capability::RequiredCapability;
 pub use cell::{
@@ -47,6 +50,7 @@ pub use evidence::{
     WorkspaceVisibilityEvidence,
 };
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};
+pub use identity::{IdParseError, InvocationId, SessionId, TurnId};
 pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};
 pub use policy::{
     CepMode, GuardVerdict, PolicyActionRequired, PolicyAuditContext, PolicyAuthorityInput,

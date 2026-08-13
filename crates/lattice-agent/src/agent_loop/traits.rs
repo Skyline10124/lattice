@@ -128,13 +128,13 @@ pub trait LlmClient: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum ProvisionalDecision {
     /// Continue the loop with the supplied workspace fact message.
-    Continue(lattice_session::GraphMessage),
+    Continue(lattice_conversation::GraphMessage),
     /// Terminate the loop with an explicit exhaustion fact.
     Complete {
         cleanup_exhausted: bool,
         /// Optional terminal fact appended to the transcript on completion
         /// the loop appends it to `all_messages` before returning.
-        final_message: Option<lattice_session::GraphMessage>,
+        final_message: Option<lattice_conversation::GraphMessage>,
     },
 }
 
@@ -152,6 +152,6 @@ pub enum ProvisionalDecision {
 pub trait ProvisionalCompletionHook: Send {
     async fn on_provisional_complete(
         &mut self,
-        assistant: &lattice_session::GraphMessage,
+        assistant: &lattice_conversation::GraphMessage,
     ) -> Result<ProvisionalDecision, String>;
 }

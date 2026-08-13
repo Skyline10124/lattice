@@ -10,6 +10,13 @@ records, and the **git-backed** session graph store (`GitSessionGraphStore`).
 The previous SQLite-backed store and its one-shot SQLite→Git migration path
 were retired; the git-backed store is the only production path (gix).
 
+Since #142 the pure-data transcript types (`GraphMessage`, `GraphToolCall`,
+`HeadTranscript`) and the usage contract (`TurnUsage`, a rename of
+`lattice_conversation::TokenUsage`) are owned by `lattice-conversation` and
+re-exported here unchanged; this crate remains the persistence owner. Do not
+edit the re-exported serde shapes in place — they are frozen for committed
+payload compatibility.
+
 ## Sub-Architecture
 
 - `src/graph.rs` owns public graph traits and data models.

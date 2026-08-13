@@ -5,6 +5,7 @@ members = [
     "crates/lattice-llm",
     "crates/lattice-api",
     "crates/lattice-session",
+    "crates/lattice-conversation",
     "crates/lattice-agent",
     "crates/lancet-protocol",
     "crates/lancet-catalog",
@@ -42,6 +43,7 @@ net-guard       = { path = "crates/net-guard" }
 lattice-llm      = { path = "crates/lattice-llm" }
 lattice-api      = { path = "crates/lattice-api" }
 lattice-session  = { path = "crates/lattice-session" }
+lattice-conversation = { path = "crates/lattice-conversation" }
 lattice-agent    = { path = "crates/lattice-agent" }
 lancet-protocol = { path = "crates/lancet-protocol" }
 lancet-catalog  = { path = "crates/lancet-catalog" }

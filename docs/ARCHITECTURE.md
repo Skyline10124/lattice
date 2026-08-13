@@ -132,6 +132,7 @@ graph TD
     %% Layer 0 — leaves
     PROTOCOL["lancet-protocol"]
     NETGUARD["net-guard"]
+    CONVERSATION["lattice-conversation"]
     LLM["lattice-llm"]
     SESSION["lattice-session"]
     %% Layer 5 -> 4
@@ -180,8 +181,11 @@ graph TD
     CATALOG --> PROTOCOL
     PROFILE --> PROTOCOL
     AGENT --> LLM
-    AGENT --> SESSION
+    AGENT --> CONVERSATION
     LLM --> NETGUARD
+    LLM --> CONVERSATION
+    SESSION --> CONVERSATION
+    CONVERSATION --> PROTOCOL
 ```
 
 Layer model (verified against each crate's `Cargo.toml` `[dependencies]`):
@@ -190,11 +194,12 @@ Layer model (verified against each crate's `Cargo.toml` `[dependencies]`):
 |---|---|---|
 | 0 (leaf) | `lancet-protocol` | — |
 | 0 (leaf) | `net-guard` | — |
-| 0 (leaf) | `lattice-llm` | `net-guard` |
-| 0 (leaf) | `lattice-session` | — |
+| 0.5 | `lattice-conversation` | `lancet-protocol` |
+| 0.5 | `lattice-llm` | `net-guard`, `lattice-conversation` |
 | 1 | `lancet-catalog` | `lancet-protocol` |
 | 1 | `lattice-profile` | `lancet-protocol` |
-| 1 | `lattice-agent` | `lattice-llm`, `lattice-session` |
+| 1 | `lattice-session` | `lattice-conversation` |
+| 1 | `lattice-agent` | `lattice-llm`, `lattice-conversation` |
 | 2 | `lancet-dispatch` | `lancet-protocol`, `lancet-catalog` |
 | 2 | `lancet-audit` | `lancet-protocol`, `lancet-catalog` |
 | 2 | `lancet-authority` | `lancet-protocol`, `lancet-catalog`, `net-guard` |
@@ -430,10 +435,13 @@ One sentence per crate:
   delegating facade over `lancet-audit`'s operator read path, not an owner of
   it.
 - **`lattice-llm`** — Provider adapters, SSE streaming, model routing,
-  tool-call vocabulary, and logging. URL/DNS safety primitives live in the
-  shared `net-guard` leaf and are composed here.
+  tool-call vocabulary, the provider replay/projection seam
+  (`provider_projection`, #142), and logging. URL/DNS safety primitives live
+  in the shared `net-guard` leaf and are composed here.
 - **`lattice-session`** — Session graph contract, immutable turn commits,
-  branch refs, HEAD state, and the git-backed `GitSessionGraphStore`.
+  branch refs, HEAD state, and the git-backed `GitSessionGraphStore`. The
+  pure-data transcript types (`GraphMessage` family, `TurnUsage`) are
+  re-exported from `lattice-conversation` since #142; persistence stays here.
 - **`lattice-profile`** — Strict `agent.toml` schema, discovery, defaults, and
   LANCET profile sections (no isolation section).
 - **`lattice-agent`** — Multi-turn `AgentLoop`, turn state machine, message
@@ -447,11 +455,15 @@ One sentence per crate:
 - **`lattice-cli`** — Binary entry point and argument dispatch over
   API/session/model/audit commands, plus the `lattice-tui` presentation crate.
 
-Accepted ADR 0005 crates, not yet members of the current workspace:
+`lattice-conversation` joined the workspace in #142:
 
-- **`lattice-conversation`** (#142) — Data-only ordered message, ToolCall
-  typestate, ToolResult, provider replay, usage, and interruption contracts;
-  depends on `lancet-protocol` for the one typed InvocationId.
+- **`lattice-conversation`** — Data-only provider-neutral conversation
+  contract: ordered `NativeMessage`/`MessagePart` with `UnboundToolCall` /
+  `BoundToolCall` typestates, ToolResult closure, semantic/replay digests,
+  per-attempt usage and interruption/rejection records, and the migrated
+  `GraphMessage` transcript family; depends only on `lancet-protocol`.
+
+Accepted ADR 0005 crates, not yet members of the current workspace:
 - **`lattice-store`** (#143) — Domain-neutral Linux/private-Git durability
   kernel. Session, invocation/evidence/operator, and workspace-history domain
   semantics stay in their owning crates.

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
-use lattice_session::{GraphMessage, GraphToolCall, TurnUsage};
+use lattice_conversation::{GraphMessage, GraphToolCall, TokenUsage};
 use tokio::time::Instant;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -206,7 +206,7 @@ impl AgentLoop {
                 return AgentTurnResult {
                     messages: Vec::new(),
                     assistant_output: String::new(),
-                    usage: TurnUsage {
+                    usage: TokenUsage {
                         prompt_tokens: 0,
                         completion_tokens: 0,
                         total_tokens: 0,
@@ -222,7 +222,7 @@ impl AgentLoop {
 
         let mut all_messages: Vec<GraphMessage> = Vec::new();
         let mut all_events: Vec<AgentTurnEvent> = Vec::new();
-        let mut accumulated_usage = TurnUsage {
+        let mut accumulated_usage = TokenUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
@@ -532,7 +532,7 @@ impl AgentLoop {
                             live_events,
                             AgentTurnEvent::ModelFinished {
                                 finish_reason: finish_reason.clone(),
-                                usage: stream_result.usage.clone(),
+                                usage: stream_result.usage,
                             },
                         )
                         .await;
@@ -713,7 +713,7 @@ impl AgentLoop {
                         live_events,
                         AgentTurnEvent::ModelFinished {
                             finish_reason: finish_reason.clone(),
-                            usage: stream_result.usage.clone(),
+                            usage: stream_result.usage,
                         },
                     )
                     .await;
@@ -957,7 +957,7 @@ struct StreamResult {
     assistant_content: String,
     reasoning_content: String,
     tool_calls: Vec<PendingToolCall>,
-    usage: Option<TurnUsage>,
+    usage: Option<TokenUsage>,
     finish_reason: Option<String>,
     outcome: StreamOutcome,
 }
@@ -997,7 +997,7 @@ impl AgentLoop {
         let mut assistant_content = String::new();
         let mut reasoning_content = String::new();
         let mut pending_calls: Vec<PendingToolCall> = Vec::new();
-        let mut usage: Option<TurnUsage> = None;
+        let mut usage: Option<TokenUsage> = None;
         let mut finish_reason: Option<String> = None;
 
         loop {
@@ -1140,7 +1140,7 @@ impl AgentLoop {
                     usage: u,
                 } => {
                     finish_reason = Some(fr);
-                    usage = u.map(|tu| TurnUsage {
+                    usage = u.map(|tu| TokenUsage {
                         prompt_tokens: tu.prompt_tokens as u64,
                         completion_tokens: tu.completion_tokens as u64,
                         total_tokens: tu.total_tokens as u64,

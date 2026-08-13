@@ -1,0 +1,50 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
+//! Provider-neutral, data-only conversation contract (ADR 0005 §7).
+//!
+//! This crate owns:
+//!
+//! - ordered [`NativeMessage`] / [`MessagePart`] values with the
+//!   [`UnboundToolCall`] / [`BoundToolCall`] typestates;
+//! - the provider-neutral Tool result closure ([`ToolResultOutcome`]);
+//! - semantic and replay digests ([`digest`]);
+//! - per-attempt usage and interruption/rejection records ([`attempt`]);
+//! - provider origin and bounded part-local opaque replay state;
+//! - the migrated pure-data transcript types ([`GraphMessage`],
+//!   [`GraphToolCall`], [`HeadTranscript`]) previously owned by
+//!   `lattice-session`.
+//!
+//! It depends only on the data-only `lancet-protocol` and neutral data
+//! dependencies. It owns no filesystem, store, lock, runtime, provider HTTP
+//! client, or ID generator.
+
+pub mod attempt;
+pub mod digest;
+pub mod graph_types;
+pub mod history;
+pub mod limits;
+pub mod message;
+pub mod outcome;
+pub mod tool_call;
+pub mod usage;
+
+pub use lancet_protocol::canonical_json;
+
+pub use attempt::{AttemptInterruption, AttemptOutcome, AttemptRejection, ModelAttemptRecord};
+pub use digest::{arguments_digest, replay_state_digest, semantic_digest};
+pub use graph_types::{GraphMessage, GraphToolCall, HeadTranscript};
+pub use history::ConversationHistory;
+pub use limits::{
+    AttemptAssembly, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
+    MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES,
+};
+pub use message::{
+    MAX_OPAQUE_REPLAY_STATE_BYTES, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    OpaqueProviderState, OpaqueReplayStateError, ProviderOrigin, ToolCallState,
+};
+pub use outcome::ToolResultOutcome;
+pub use tool_call::{
+    BoundToolCall, RawToolCall, ToolCallValidation, UnboundToolCall, validate_tool_call_batch,
+};
+pub use usage::TokenUsage;

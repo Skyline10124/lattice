@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use lattice_session::GraphMessage;
+use lattice_conversation::GraphMessage;
 
 /// Convert a `GraphMessage` to an `lattice_llm::Message` for the LLM request.
 pub(crate) fn convert_to_llm_message(msg: &GraphMessage) -> Result<lattice_llm::Message, String> {
@@ -53,7 +53,7 @@ pub(crate) fn graph_messages_to_llm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_session::GraphToolCall;
+    use lattice_conversation::GraphToolCall;
 
     #[test]
     fn append_llm_message_extends_provider_cache() {

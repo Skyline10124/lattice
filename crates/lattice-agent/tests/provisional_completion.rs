@@ -16,8 +16,8 @@ use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnRequest, AgentTurnStatus, LlmClient, LlmRetryConfig,
     ProvisionalCompletionHook, ProvisionalDecision, ToolCallExecutor, ToolExecutionError,
 };
+use lattice_conversation::{GraphMessage, HeadTranscript};
 use lattice_llm::ToolDefinition;
-use lattice_session::{GraphMessage, HeadTranscript};
 
 struct FakeLlm {
     responses: std::sync::Mutex<Vec<Result<lattice_llm::ChatResponse, String>>>,

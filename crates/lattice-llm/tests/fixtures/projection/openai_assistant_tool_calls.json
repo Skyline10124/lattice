@@ -1,0 +1,35 @@
+{
+  "id": "chatcmpl-A1b2C3",
+  "object": "chat.completion",
+  "created": 1760000000,
+  "model": "deepseek-reasoner",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "reasoning_content": "The user wants the weather; call get_weather first, then get_time.",
+        "content": "Let me check that for you.",
+        "tool_calls": [
+          {
+            "id": "call_9f8e7d6c5b",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Tokyo\",\"unit\":\"celsius\"}"
+            }
+          },
+          {
+            "id": "call_1a2b3c4d5e",
+            "type": "function",
+            "function": {
+              "name": "get_time",
+              "arguments": "{\"timezone\":\"JST\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ]
+}

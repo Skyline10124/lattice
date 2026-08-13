@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use lattice_conversation::{GraphMessage, HeadTranscript, TokenUsage};
 use lattice_llm::ToolDefinition;
-use lattice_session::{GraphMessage, HeadTranscript, TurnUsage};
 
 use super::traits::CepErrorPayload;
 
@@ -115,7 +115,7 @@ pub struct AgentTurnResult {
     /// The final assistant output text.
     pub assistant_output: String,
     /// Accumulated token usage across all LLM calls in this turn.
-    pub usage: TurnUsage,
+    pub usage: TokenUsage,
     /// Summary of tool executions for API display.
     pub tool_results: Vec<AgentToolResultSummary>,
     /// Terminal status of the turn.
@@ -196,7 +196,7 @@ pub enum AgentTurnEvent {
     /// "no `ModelFinished` implies Completed".
     ModelFinished {
         finish_reason: String,
-        usage: Option<TurnUsage>,
+        usage: Option<TokenUsage>,
     },
     /// A CEP call has started on the embedded server (distinct from model-facing tool calls).
     CepCallStarted {

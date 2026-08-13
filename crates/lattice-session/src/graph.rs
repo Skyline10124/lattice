@@ -9,45 +9,12 @@ use sha2::{Digest, Sha256};
 pub const COMMIT_MESSAGE_MAX_CHARS: usize = 72;
 pub const COMMIT_PAYLOAD_SCHEMA_VERSION: u32 = 1;
 
-/// A single transcript message: user, assistant, or tool role.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GraphMessage {
-    pub role: String,
-    pub content: String,
-    #[serde(default)]
-    pub reasoning_content: Option<String>,
-    #[serde(default)]
-    pub tool_calls: Option<Vec<GraphToolCall>>,
-    #[serde(default)]
-    pub tool_call_id: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-}
-
-/// A tool call request in an assistant message.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GraphToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-}
-
-/// Complete ordered transcript for the current branch HEAD.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HeadTranscript {
-    pub session_id: String,
-    #[serde(default)]
-    pub parent_commit_id: Option<String>,
-    pub messages: Vec<GraphMessage>,
-}
-
-/// Token usage for a completed turn.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TurnUsage {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-}
+// Conversation pure-data types are owned by `lattice-conversation` since
+// GitHub #142 (ADR 0005 §7); this crate re-exports them unchanged and remains
+// the persistence owner. `TurnUsage` is the historical name of the
+// provider-neutral `TokenUsage` contract.
+pub use lattice_conversation::TokenUsage as TurnUsage;
+pub use lattice_conversation::{GraphMessage, GraphToolCall, HeadTranscript};
 
 /// A session: container for branches, HEAD, and commits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -594,7 +561,7 @@ pub fn prepare_turn_commit(input: &TurnCommitInput, created_at: &str) -> Prepare
         disposition: input.disposition.clone(),
         lifecycle: input.lifecycle.clone(),
         commit_message: input.commit_message.clone(),
-        usage: input.usage.clone(),
+        usage: input.usage,
         terminal_reason: input.terminal_reason.clone(),
         workspace_history_oid: input.workspace_history_oid.clone(),
         created_at: created_at.to_string(),

@@ -79,12 +79,14 @@ runtime crates": a summarized edge cannot be checked against
 `cargo metadata`, and the previous summary hid seven live edges.
 
 ```text
-Layer 0 (leaf):  lancet-protocol   lattice-session
+Layer 0 (leaf):  lancet-protocol
 Layer 0.5:       net-guard                       (no workspace deps; see note)
-                 lattice-llm(->net-guard)
+                 lattice-conversation(->protocol)
+                 lattice-llm(->net-guard,conversation)
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
-                 lattice-agent(->llm,session)
+                 lattice-session(->conversation)
+                 lattice-agent(->llm,conversation)
 Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
                  lancet-authority(->protocol,catalog,net-guard)
@@ -114,13 +116,8 @@ not claims about `Cargo.toml` until the named issue lands. All unchanged edges
 remain exactly as listed in the current graph above:
 
 ```text
-ADD lattice-conversation -> lancet-protocol              # #142
 ADD lattice-store                                           # #143, no workspace deps
-ADD lattice-llm -> lattice-conversation                   # #142
-ADD lattice-agent -> lattice-conversation                 # #142
-DEL lattice-agent -> lattice-session                      # #142
-ADD lattice-session -> lancet-protocol,lattice-conversation,lattice-store
-                                                          # #142/#143/#144
+ADD lattice-session -> lancet-protocol,lattice-store          # #143/#144
 ADD lancet-runtime -> lattice-store                        # #143
 ADD lancet-audit -> lattice-store                          # #139-A
 ADD lattice-api -> lancet-audit,lattice-conversation      # #139-B
@@ -143,11 +140,10 @@ System Path Exclusion predicate are policy *semantics* and stay in
 `lancet-authority`, so the runtime consumes them rather than reimplementing them.
 The edge points down (2.5 -> 2) and closes no cycle.
 
-`net-guard` and `lattice-llm` sit at 0.5 rather than 0 because `lattice-llm`
-depends on `net-guard`. Only `net-guard` is a true leaf of that pair;
-`lancet-protocol` and `lattice-session` are the crates with no
-workspace-internal dependencies at all.
-
+`net-guard`, `lattice-conversation`, and `lattice-llm` sit at 0.5 rather than 0
+because `lattice-llm` depends on `net-guard` and (since #142)
+`lattice-conversation`. `lancet-protocol` and `net-guard` are the crates with
+no workspace-internal dependencies at all.
 `lattice-api` and `lattice-cli` reach past the `lancet-api` facade into
 individual LANCET crates. Those edges point downward, so they are not layering
 violations, but they are load-bearing: `lattice-api` owns the profile→policy
@@ -177,20 +173,20 @@ accumulating.
 | `lattice-tool-prelude` | ADR 0004 target guest SDK for source manifests, generated WIT bindings, descriptor helpers, and built-in Source Tools. |
 | `lancet-api` | Unified public API. During migration it composes native CEP pieces; the target composes `lancet-runtime` without depending on LATTICE session/agent/profile layers. |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, public-address resolution, private/reserved IP checks, and rebinding-domain checks. Depends only on `url` and `std`. |
-| `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, HTTP request pinning, and logging. |
-| `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`). |
+| `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, HTTP request pinning, logging, and (since #142) the pure-data provider replay/projection seam over `lattice-conversation`. |
+| `lattice-conversation` | ADR 0005 §7 data-only provider-neutral conversation contract: ordered `NativeMessage`/`MessagePart` with `UnboundToolCall`/`BoundToolCall` typestates, ToolResult closure, semantic/replay digests, per-attempt usage and interruption/rejection records, and (since #142) the migrated `GraphMessage` transcript family. Depends only on `lancet-protocol`; no I/O, stores, runtimes, or ID generators. |
+| `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`). Re-exports the `lattice-conversation` transcript types (`GraphMessage` family, `TurnUsage`); persistence stays here. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
 | `lattice-tui` | Inline CLI chat REPL over `lattice-api` sessions and `stream_turn` via `rustyline` (no alternate screen, no ratatui/crossterm). Owns readline state, turn execution, and token/status rendering to stdout/stderr. |
 | `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
 
-Two accepted ADR 0005 crates are intentionally absent from the current-role
-table until their prerequisites land: `lattice-conversation` is the data-only
-conversation contract from #142, and `lattice-store` is the domain-neutral Git
-durability kernel from #143. Adding either name to the current dependency graph
+One accepted ADR 0005 crate is intentionally absent from the current-role
+table until its prerequisites land: `lattice-store` is the domain-neutral Git
+durability kernel from #143. Adding its name to the current dependency graph
 before its real `workspace = true` edge exists would make that graph false.
-
+(`lattice-conversation` landed in #142 and appears in the table above.)
 ## CEP And LANCET Contracts
 
 - `lancet-protocol` is the bottom contract. Keep it data-only and runtime-free.
