@@ -23,7 +23,10 @@ mod anthropic;
 mod gemini;
 mod openai;
 
-use lattice_conversation::{NativeMessage, ProviderOrigin, ToolCallValidation, UnboundToolCall};
+use lattice_conversation::{
+    AttemptInterruption, MessageSemantic, NativeMessage, ProviderOrigin, ToolCallValidation,
+    UnboundToolCall,
+};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -70,6 +73,15 @@ pub enum ProjectionError {
     /// invalid (ADR 0005 §7).
     #[error("invalid tool call: {0}")]
     InvalidToolCall(#[from] ToolCallValidation),
+    /// Assembling the wire body crossed a protocol hard limit (ADR 0005 §10).
+    /// The message is rejected whole; no partial conversation is returned.
+    #[error("{provider} wire exceeds a protocol limit: {interruption:?}")]
+    OutputLimitExceeded {
+        /// The provider being projected.
+        provider: ProviderOrigin,
+        /// The typed interruption recording which limit was crossed.
+        interruption: AttemptInterruption,
+    },
 }
 
 /// Extract a provider-neutral unbound message from an official wire
@@ -107,19 +119,32 @@ pub fn native_to_wire(
 
 /// Project a message to another provider's neutral semantics.
 ///
-/// Only semantics cross: every part-local replay state is dropped and no
-/// provider call ID survives, so no source opaque bytes leak into the target
-/// provider. Switching back to the source provider must use the retained
-/// original message, not this projection.
+/// Only neutral semantics cross. Three classes of source state are dropped:
+///
+/// - every part-local opaque replay state (signatures, thought state);
+/// - every provider call ID;
+/// - every [`MessageSemantic::Reasoning`] part.
+///
+/// Reasoning is dropped because ADR 0005 §7 fixes that "cross-provider
+/// projection does not replay source reasoning": a provider's chain of thought
+/// is its own protocol state and must never be written into a different
+/// provider's reasoning channel. Keeping the reasoning part would survive into
+/// [`native_to_wire`] and appear verbatim in the target request body.
+///
+/// Remaining parts keep their relative order. Switching back to the source
+/// provider must use the retained original message, not this projection.
 pub fn project_cross_provider(
     message: &NativeMessage<UnboundToolCall>,
     target: ProviderOrigin,
 ) -> NativeMessage<UnboundToolCall> {
     let mut projected = message.clone();
     projected.provider_origin = Some(target);
+    projected
+        .parts
+        .retain(|part| !matches!(part.semantic, MessageSemantic::Reasoning { .. }));
     for part in &mut projected.parts {
         part.replay_state = None;
-        if let lattice_conversation::MessageSemantic::ToolCall { call } = &mut part.semantic {
+        if let MessageSemantic::ToolCall { call } = &mut part.semantic {
             call.provider_call_id = None;
         }
     }

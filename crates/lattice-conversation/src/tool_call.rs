@@ -50,7 +50,14 @@ impl ToolCallState for UnboundToolCall {
     }
 }
 /// A Tool call bound to its canonical `InvocationId` and structural address.
+///
+/// Deserialization is checked: `arguments_digest` is recomputed from
+/// `arguments` and must match the stored value byte for byte. A payload whose
+/// digest does not describe its own arguments is rejected rather than silently
+/// accepted, so a `BoundToolCall` value always carries a digest that really
+/// validates its binding (ADR 0005 §7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "BoundToolCallWire")]
 pub struct BoundToolCall {
     /// The canonical invocation identity (ADR 0005 §1).
     pub invocation_id: InvocationId,
@@ -68,6 +75,43 @@ pub struct BoundToolCall {
     pub arguments_digest: [u8; 32],
     /// The structural pre-commit address of this call's part.
     pub address: ToolCallAddress,
+}
+
+/// Unchecked deserialization shim for [`BoundToolCall`]. Identical field names
+/// and serde shape; the digest precondition is enforced in `TryFrom`.
+#[derive(Deserialize)]
+struct BoundToolCallWire {
+    invocation_id: InvocationId,
+    #[serde(default)]
+    provider_call_id: Option<String>,
+    name: String,
+    arguments: Value,
+    #[serde(with = "hex_digest")]
+    arguments_digest: [u8; 32],
+    address: ToolCallAddress,
+}
+
+/// The stored `arguments_digest` does not describe the stored `arguments`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("arguments_digest does not match the canonical digest of arguments")]
+pub struct ArgumentsDigestMismatch;
+
+impl TryFrom<BoundToolCallWire> for BoundToolCall {
+    type Error = ArgumentsDigestMismatch;
+
+    fn try_from(wire: BoundToolCallWire) -> Result<Self, Self::Error> {
+        if arguments_digest(&wire.arguments) != wire.arguments_digest {
+            return Err(ArgumentsDigestMismatch);
+        }
+        Ok(Self {
+            invocation_id: wire.invocation_id,
+            provider_call_id: wire.provider_call_id,
+            name: wire.name,
+            arguments: wire.arguments,
+            arguments_digest: wire.arguments_digest,
+            address: wire.address,
+        })
+    }
 }
 
 impl sealed::Sealed for BoundToolCall {}
@@ -409,6 +453,49 @@ mod tests {
         assert_eq!(bound.arguments_digest, arguments_digest(&bound.arguments));
 
         // Serde roundtrip keeps the digest in lowercase hex form.
+        let json = serde_json::to_string(&bound).expect("serialize");
+        let back: BoundToolCall = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(bound, back);
+    }
+
+    #[test]
+    fn tampered_arguments_digest_is_rejected_on_deserialize() {
+        // A digest that does not describe its own arguments must never
+        // deserialize: the binding tuple would otherwise validate nothing.
+        let bound = validate_tool_call_batch(&[raw("read_file", r#"{"path":"a"}"#)])
+            .expect("valid")
+            .into_iter()
+            .next()
+            .expect("one call")
+            .bind(
+                InvocationId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").expect("invocation id"),
+                address(),
+            );
+
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&bound).expect("serialize"))
+                .expect("value");
+        payload["arguments_digest"] = serde_json::Value::String("0".repeat(64));
+        let error = serde_json::from_value::<BoundToolCall>(payload).expect_err("must reject");
+        assert!(
+            error.to_string().contains("arguments_digest"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn digest_consistent_payload_still_deserializes() {
+        // The checked path must not reject legitimate payloads, including a
+        // non-canonical key order in the stored arguments object.
+        let bound = validate_tool_call_batch(&[raw("read_file", r#"{"b":2,"a":1}"#)])
+            .expect("valid")
+            .into_iter()
+            .next()
+            .expect("one call")
+            .bind(
+                InvocationId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").expect("invocation id"),
+                address(),
+            );
         let json = serde_json::to_string(&bound).expect("serialize");
         let back: BoundToolCall = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(bound, back);

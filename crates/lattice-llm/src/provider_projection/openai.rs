@@ -18,14 +18,37 @@
 //! OpenAI-compatible wire carries no signature state, so no part gains
 //! replay state here. Tool call IDs are preserved verbatim when present and
 //! left `None` when absent; they are never synthesized.
+//!
+//! Two lossy properties of the writer are deliberate and fixed here:
+//!
+//! 1. **Arguments are re-serialized canonically.** ADR 0005 §7 requires
+//!    execution to use the canonical arguments object rather than the
+//!    provider's textual spelling, so `native_to_wire` emits
+//!    `canonical_json(arguments)`. Replay of a non-canonically spelled
+//!    provider body is therefore *semantically* identical but **not**
+//!    byte-identical (`{"b": 2, "a": 1}` replays as `{"a":1,"b":2}`).
+//! 2. **Interleaved text parts merge.** The OpenAI wire has a single
+//!    `content` string, so `[Text("A"), ToolCall, Text("B")]` writes back as
+//!    `content: "AB"`. The text/tool interleaving is not recoverable from the
+//!    wire. This is inherent to the format, not a defect of the mapping.
+//!
+//! Assembly is metered against the ADR 0005 §10 protocol limits; crossing one
+//! fails the whole body closed rather than returning a partial message.
 
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, RawToolCall,
-    UnboundToolCall, validate_tool_call_batch,
+    AttemptAssembly, MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin,
+    RawToolCall, UnboundToolCall, validate_tool_call_batch,
 };
 use serde_json::{Value, json};
 
 use super::ProjectionError;
+
+fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
+    ProjectionError::OutputLimitExceeded {
+        provider: ProviderOrigin::OpenAiCompatible,
+        interruption,
+    }
+}
 
 fn malformed(detail: impl Into<String>) -> ProjectionError {
     ProjectionError::MalformedWire {
@@ -43,14 +66,17 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
         .ok_or_else(|| malformed("missing choices[0].message"))?;
 
     let mut parts: Vec<MessagePart<UnboundToolCall>> = Vec::new();
+    let mut assembly = AttemptAssembly::new();
 
     if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
+        assembly.push_reasoning(reasoning).map_err(limit_exceeded)?;
         parts.push(MessagePart::semantic_only(MessageSemantic::Reasoning {
             text: reasoning.to_string(),
         }));
     }
     match message.get("content") {
         Some(Value::String(text)) => {
+            assembly.push_assistant(text).map_err(limit_exceeded)?;
             parts.push(MessagePart::semantic_only(MessageSemantic::Text {
                 text: text.clone(),
             }));
@@ -80,6 +106,10 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
                     Some(Value::Null) | None => None,
                     _ => return Err(malformed("tool_calls[].id is not a string")),
                 };
+                assembly.begin_tool_call();
+                assembly
+                    .push_tool_arguments(arguments)
+                    .map_err(limit_exceeded)?;
                 raw_calls.push(RawToolCall {
                     provider_call_id,
                     name: name.to_string(),

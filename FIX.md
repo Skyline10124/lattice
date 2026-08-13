@@ -72,6 +72,62 @@ touched, and no second identity seam was introduced.
 `crates/lattice-agent/` (dependency swap); workspace `Cargo.toml`
 registration; root `AGENTS.md`, `docs/ARCHITECTURE.md`, crate AGENTS files.
 
+### 审查修复轮次 — 2026-08-13
+
+独立只读审查（verdict: REQUEST CHANGES）提出 1 个 P0、1 个 P1、4 个 P2、1 个 P3。
+本轮逐条修复，并补齐审查判定为「部分满足」的 2 条验收标准。
+
+- **P0-1 cross-provider projection 重放 source reasoning**
+  （`provider_projection/mod.rs::project_cross_provider`）。原实现只清除
+  `replay_state` 与 `provider_call_id`，保留 `MessageSemantic::Reasoning`，
+  经 `native_to_wire` 后 Anthropic 的思维链会原样出现在 OpenAI 的
+  `reasoning_content` 与 Gemini 的 `thought: true` part 中，违反 ADR 0005 §7
+  「cross-provider projection does not replay source reasoning」。修复：投影时
+  `retain` 掉全部 Reasoning part。原有两处 `assert_eq!(semantic_digest(...))`
+  实际上把「reasoning 幸存」错误固化为期望，已改为断言投影不含 Reasoning 且
+  digest 必然不同；另补 `cross_provider_projection_preserves_non_reasoning_semantics`
+  证明非 reasoning 语义仍无损跨越。
+- **P1-1 seam 绕过 protocol hard limits**。`AttemptAssembly` 此前在模块外零调用方，
+  三个 `wire_to_native` 只继承 per-call 8 MiB 限制。修复：新增
+  `ProjectionError::OutputLimitExceeded { provider, interruption }`，三个 projector
+  边解析边经 `AttemptAssembly` 计量（text→`push_assistant`、
+  reasoning/thinking→`push_reasoning`、每个 call 前 `begin_tool_call()` 后
+  `push_tool_arguments`），任一 push 越限即 fail closed，绝不返回部分 `NativeMessage`。
+- **P2-1 Anthropic text block 写出 `signature`**（`anthropic.rs`）。`signature` 只属于
+  `thinking`/`redacted_thinking`；reader 对 text block 无读取分支，round-trip 会静默
+  丢弃。修复：writer 遇到带 `replay_state` 的 Text part 返回 `UnsupportedPart`，
+  与 OpenAI writer 已有守卫对齐。
+- **P2-2 same-provider replay 的 arguments 归一化**（`openai.rs`）。canonical 化是
+  ADR 0005 §7 的执行要求，但此前未被记录，且 6 个 fixture 全是 canonical 拼写导致
+  `openai_same_provider_replay_is_exact` 空洞通过。修复：在模块 doc 中显式记录该有损
+  归一化，并新增用非 canonical 拼写断言「语义等同、字节不等同」的测试。
+- **P2-3 `BoundToolCall` digest 未校验**（`tool_call.rs`）。derive 的 `Deserialize`
+  接受任意 64 位 hex，全零 digest 可与真实 arguments 并存。修复：改用
+  `#[serde(try_from = "BoundToolCallWire")]`，反序列化时重算并比对，不一致返回
+  `ArgumentsDigestMismatch`。序列化形状不变（仍是小写 hex）。
+- **P2-4 OpenAI writer 合并交错 text part**。属 OpenAI 单一 `content` 字符串的固有
+  限制，语义不变；修复为在模块 doc 中记录并新增测试固化该行为。
+- **P3-1 `LimitKind` 未导出**。已加入 `lattice-conversation` 的 `pub use limits::{…}`。
+
+**补齐的验收标准：**
+
+- 「provider fixtures … A→B 不泄漏」：原测试只对 native 结构体断言，漏掉了 wire 这一层。
+  新增 `cross_provider_wire_never_carries_source_reasoning`，对
+  Anthropic→OpenAI、Anthropic→Gemini、Gemini→OpenAI 三组执行
+  `wire_to_native → project_cross_provider → native_to_wire`，断言产出的 wire 中
+  不含 source reasoning 正文、不含 `reasoning_content`、不含 `"thought"`。
+  已验证该测试在移除 P0 修复后失败、恢复后通过。
+- 「protocol hard-limit fixtures；plus-one 产生 typed interruption 而非 partial
+  conversation」：新增 4 个 seam 层限额测试，覆盖 assistant / reasoning 的精确边界与
+  plus-one、16 MiB attempt 总量（跨两个 tool call，避开 per-call 预算）的精确边界与
+  plus-one，以及 Anthropic/Gemini 的 per-call arguments 限额，全部断言返回 `Err`
+  而非部分消息。限额数据在测试中程序化构造，不落盘为 fixture。
+
+**本轮验证：** `cargo test` — lancet-protocol 83、lattice-conversation 31（+2）、
+lattice-llm 133 + provider_projection 23（+9）、lattice-session 54、lattice-agent
+8/4/11；`cargo xtask lancet-boundary` 7/7 PASS；`cargo xtask ci` all checks passed。
+
+
 ## GitHub #99：工作区 `.env` 的信任边界 — 2026-07-31
 
 Severity: HIGH（策略绕过 + 对话正文与凭据外泄，前置条件仅「在不受信任的仓库目录里跑一次

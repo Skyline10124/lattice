@@ -36,6 +36,13 @@ ADR 0005 §7 (landed in GitHub #142):
 - Replay state is preserved verbatim, bounded at 64 KiB per part, and never
   filtered out even on an otherwise-empty part.
 - Per-attempt `Option<TokenUsage>`: missing is unknown, never zero.
+- `BoundToolCall` deserialization is checked: `arguments_digest` is recomputed
+  from `arguments` and must match, so a stored digest always describes its own
+  arguments (`ArgumentsDigestMismatch` otherwise).
+- `AttemptAssembly` is the ADR 0005 §10 byte accountant. Any code that
+  assembles a complete attempt — including the `lattice-llm`
+  `provider_projection` seam — must meter through it rather than assembling
+  first and checking afterwards.
 
 ## Verification
 

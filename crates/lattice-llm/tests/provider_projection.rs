@@ -6,8 +6,9 @@
 //! byte-fixed official response body.
 
 use lattice_conversation::{
-    MessageSemantic, NativeMessage, OpaqueProviderState, ProviderOrigin, UnboundToolCall,
-    replay_state_digest, semantic_digest,
+    AttemptInterruption, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
+    MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MessageSemantic, NativeMessage,
+    OpaqueProviderState, ProviderOrigin, UnboundToolCall, replay_state_digest, semantic_digest,
 };
 use lattice_llm::provider_projection::{
     ProjectionError, native_to_wire, project_cross_provider, wire_to_native,
@@ -278,7 +279,17 @@ fn cross_provider_projection_never_leaks_source_state() {
     for (_, call) in projected.tool_calls() {
         assert_eq!(call.provider_call_id, None);
     }
-    assert_eq!(semantic_digest(&projected), source_semantic);
+    // Reasoning does not cross providers (ADR 0005 §7), so the projection
+    // carries no Reasoning part and its semantic digest necessarily differs
+    // from a source that had one.
+    assert!(
+        !projected
+            .parts
+            .iter()
+            .any(|part| matches!(part.semantic, MessageSemantic::Reasoning { .. })),
+        "projection must not carry source reasoning"
+    );
+    assert_ne!(semantic_digest(&projected), source_semantic);
     assert_ne!(replay_state_digest(&projected), source_replay);
 
     // No source opaque byte survives in any serialization of the projection.
@@ -317,7 +328,89 @@ fn cross_provider_gemini_to_openai_drops_signatures() {
         !serialized.contains("CigIARAB"),
         "no signature bytes survive"
     );
+    // The Gemini source carries a thought part, which does not cross.
+    assert!(
+        !projected
+            .parts
+            .iter()
+            .any(|part| matches!(part.semantic, MessageSemantic::Reasoning { .. })),
+        "projection must not carry source reasoning"
+    );
+    assert_ne!(semantic_digest(&projected), semantic_digest(&source));
+}
+
+#[test]
+fn cross_provider_projection_preserves_non_reasoning_semantics() {
+    // A source without reasoning crosses losslessly: dropping reasoning is the
+    // only semantic difference the projection introduces.
+    let source = wire_to_native(
+        ProviderOrigin::Anthropic,
+        &fixture("anthropic_text_only.json"),
+    )
+    .expect("projection");
+    let projected = project_cross_provider(&source, ProviderOrigin::Gemini);
     assert_eq!(semantic_digest(&projected), semantic_digest(&source));
+    assert_eq!(projected.parts.len(), source.parts.len());
+}
+
+#[test]
+fn cross_provider_wire_never_carries_source_reasoning() {
+    // The regression this pins: reasoning used to survive projection and be
+    // written verbatim into the target provider's reasoning channel
+    // (`reasoning_content` for OpenAI, a `thought: true` part for Gemini).
+    // ADR 0005 §7: "cross-provider projection does not replay source
+    // reasoning". Asserting on the native struct alone missed this, so the
+    // assertion has to happen on the emitted wire.
+    let cases: [(ProviderOrigin, &str, ProviderOrigin, &str); 3] = [
+        (
+            ProviderOrigin::Anthropic,
+            "anthropic_thinking_tool_use.json",
+            ProviderOrigin::OpenAiCompatible,
+            "Need the weather first, then the time; both are independent calls.",
+        ),
+        (
+            ProviderOrigin::Anthropic,
+            "anthropic_thinking_tool_use.json",
+            ProviderOrigin::Gemini,
+            "Need the weather first, then the time; both are independent calls.",
+        ),
+        (
+            ProviderOrigin::Gemini,
+            "gemini_thought_signature.json",
+            ProviderOrigin::OpenAiCompatible,
+            "Plan: check weather, then time.",
+        ),
+    ];
+
+    for (source_origin, fixture_name, target, reasoning_text) in cases {
+        let source =
+            wire_to_native(source_origin, &fixture(fixture_name)).expect("source projection");
+        // Precondition: the source really does carry that reasoning text.
+        assert!(
+            source.parts.iter().any(|part| matches!(
+                &part.semantic,
+                MessageSemantic::Reasoning { text } if text == reasoning_text
+            )),
+            "fixture {fixture_name} must carry the reasoning under test"
+        );
+
+        let projected = project_cross_provider(&source, target);
+        let wire = native_to_wire(target, &projected).expect("target wire");
+        let serialized = serde_json::to_string(&wire).expect("serialize");
+
+        assert!(
+            !serialized.contains(reasoning_text),
+            "{source_origin:?} → {target:?} leaked source reasoning into the wire: {serialized}"
+        );
+        assert!(
+            !serialized.contains("reasoning_content"),
+            "{source_origin:?} → {target:?} emitted a reasoning channel: {serialized}"
+        );
+        assert!(
+            !serialized.contains("\"thought\""),
+            "{source_origin:?} → {target:?} emitted a thought part: {serialized}"
+        );
+    }
 }
 
 // ─── Fail-closed boundaries ───────────────────────────────────────────────
@@ -370,4 +463,209 @@ fn invalid_tool_call_on_the_wire_rejects_the_whole_message() {
             lattice_conversation::ToolCallValidation::DuplicateToolCallId { .. }
         ))
     ));
+}
+
+// ─── Anthropic text-block signature guard (P2-1) ──────────────────────────
+
+#[test]
+fn anthropic_text_part_with_replay_state_is_rejected() {
+    // `signature` belongs only to thinking blocks. Emitting it on a text block
+    // would write a field the reader silently drops on the way back, so the
+    // writer fails closed instead.
+    let message: NativeMessage<UnboundToolCall> = NativeMessage::new(
+        lattice_conversation::MessageRole::Assistant,
+        Some(ProviderOrigin::Anthropic),
+        vec![lattice_conversation::MessagePart {
+            semantic: MessageSemantic::Text {
+                text: "hi".to_string(),
+            },
+            replay_state: Some(
+                OpaqueProviderState::new("not-an-anthropic-text-field").expect("state"),
+            ),
+        }],
+    );
+    assert!(matches!(
+        native_to_wire(ProviderOrigin::Anthropic, &message),
+        Err(ProjectionError::UnsupportedPart {
+            provider: ProviderOrigin::Anthropic,
+            part_ordinal: 0,
+        })
+    ));
+}
+
+// ─── OpenAI writer lossiness, explicitly pinned (P2-2, P2-4) ──────────────
+
+#[test]
+fn openai_replay_normalizes_non_canonical_arguments_spelling() {
+    // ADR 0005 §7 requires the canonical arguments object for execution, so
+    // replay is semantically identical but not byte-identical when the
+    // provider spelled its arguments non-canonically. The checked-in fixtures
+    // are all canonical, so this is the case they cannot cover.
+    let wire = serde_json::json!({"choices": [{"message": {
+        "role": "assistant",
+        "content": Value::Null,
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "t", "arguments": "{\"b\": 2, \"a\": 1}"}
+        }]
+    }}]});
+    let native = wire_to_native(ProviderOrigin::OpenAiCompatible, &wire).expect("projection");
+    let replayed = native_to_wire(ProviderOrigin::OpenAiCompatible, &native).expect("replay");
+
+    let original_args = wire["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .expect("original arguments");
+    let replayed_args = replayed["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .expect("replayed arguments");
+
+    // Not byte-identical …
+    assert_ne!(replayed_args, original_args);
+    assert_eq!(replayed_args, r#"{"a":1,"b":2}"#);
+    // … but semantically identical.
+    let original_value: Value = serde_json::from_str(original_args).expect("original json");
+    let replayed_value: Value = serde_json::from_str(replayed_args).expect("replayed json");
+    assert_eq!(original_value, replayed_value);
+}
+
+#[test]
+fn openai_writer_merges_interleaved_text_parts() {
+    // The OpenAI wire has one `content` string, so interleaving is not
+    // representable and merges. Pinned so the loss is a known property rather
+    // than a silent surprise.
+    let wire = serde_json::json!({"role": "assistant", "content": [
+        {"type": "text", "text": "BEFORE"},
+        {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"a": 1}},
+        {"type": "text", "text": "AFTER"}
+    ]});
+    let source = wire_to_native(ProviderOrigin::Anthropic, &wire).expect("projection");
+    assert_eq!(source.parts.len(), 3);
+
+    let projected = project_cross_provider(&source, ProviderOrigin::OpenAiCompatible);
+    let replayed = native_to_wire(ProviderOrigin::OpenAiCompatible, &projected).expect("replay");
+    assert_eq!(replayed["content"], serde_json::json!("BEFOREAFTER"));
+}
+
+// ─── Protocol hard limits enforced at the seam (P1-1) ─────────────────────
+
+fn limit_kind(result: Result<NativeMessage<UnboundToolCall>, ProjectionError>) -> LimitKind {
+    match result {
+        Err(ProjectionError::OutputLimitExceeded {
+            interruption: AttemptInterruption::OutputLimitExceeded { kind, .. },
+            ..
+        }) => kind,
+        Ok(_) => panic!("oversized wire must not produce a message"),
+        Err(other) => panic!("expected OutputLimitExceeded, got {other:?}"),
+    }
+}
+
+fn openai_content_wire(content: String) -> Value {
+    serde_json::json!({"choices": [{"message": {
+        "role": "assistant",
+        "content": content,
+    }}]})
+}
+
+fn openai_reasoning_wire(reasoning: String) -> Value {
+    serde_json::json!({"choices": [{"message": {
+        "role": "assistant",
+        "content": Value::Null,
+        "reasoning_content": reasoning,
+    }}]})
+}
+
+#[test]
+fn assistant_content_limit_is_enforced_at_the_seam() {
+    let exact = openai_content_wire("x".repeat(MAX_ASSISTANT_CONTENT_BYTES));
+    let native = wire_to_native(ProviderOrigin::OpenAiCompatible, &exact).expect("exact boundary");
+    assert_eq!(native.parts.len(), 1);
+
+    let over = openai_content_wire("x".repeat(MAX_ASSISTANT_CONTENT_BYTES + 1));
+    assert_eq!(
+        limit_kind(wire_to_native(ProviderOrigin::OpenAiCompatible, &over)),
+        LimitKind::AssistantContent
+    );
+}
+
+#[test]
+fn reasoning_content_limit_is_enforced_at_the_seam() {
+    let exact = openai_reasoning_wire("r".repeat(MAX_REASONING_CONTENT_BYTES));
+    wire_to_native(ProviderOrigin::OpenAiCompatible, &exact).expect("exact boundary");
+
+    let over = openai_reasoning_wire("r".repeat(MAX_REASONING_CONTENT_BYTES + 1));
+    assert_eq!(
+        limit_kind(wire_to_native(ProviderOrigin::OpenAiCompatible, &over)),
+        LimitKind::ReasoningContent
+    );
+}
+
+#[test]
+fn attempt_total_limit_is_enforced_at_the_seam() {
+    // 2 MiB assistant + 2 MiB reasoning + 12 MiB of tool arguments spread over
+    // two calls (the per-call budget is 8 MiB and resets per call, so only the
+    // 16 MiB aggregate can trip here).
+    let filler =
+        MAX_MODEL_ATTEMPT_BYTES - MAX_ASSISTANT_CONTENT_BYTES - MAX_REASONING_CONTENT_BYTES;
+    let overhead = r#"{"a":""}"#.len();
+    let per_call = filler / 2;
+    assert!(per_call <= MAX_TOOL_CALL_ARGUMENTS_BYTES);
+
+    let build = |extra: usize| {
+        let first = per_call - overhead;
+        let second = filler - per_call - overhead + extra;
+        serde_json::json!({"choices": [{"message": {
+            "role": "assistant",
+            "content": "x".repeat(MAX_ASSISTANT_CONTENT_BYTES),
+            "reasoning_content": "r".repeat(MAX_REASONING_CONTENT_BYTES),
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "t",
+                        "arguments": format!("{{\"a\":\"{}\"}}", "z".repeat(first)),
+                    }
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {
+                        "name": "t",
+                        "arguments": format!("{{\"a\":\"{}\"}}", "z".repeat(second)),
+                    }
+                }
+            ]
+        }}]})
+    };
+
+    let exact = build(0);
+    wire_to_native(ProviderOrigin::OpenAiCompatible, &exact).expect("exact attempt boundary");
+
+    let over = build(1);
+    assert_eq!(
+        limit_kind(wire_to_native(ProviderOrigin::OpenAiCompatible, &over)),
+        LimitKind::ModelAttemptTotal
+    );
+}
+
+#[test]
+fn tool_arguments_limit_is_enforced_for_anthropic_and_gemini() {
+    // Every provider projector meters, not just the OpenAI one.
+    let oversized = "z".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES);
+    let anthropic = serde_json::json!({"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_1", "name": "t", "input": {"a": oversized}}
+    ]});
+    assert_eq!(
+        limit_kind(wire_to_native(ProviderOrigin::Anthropic, &anthropic)),
+        LimitKind::ToolCallArguments
+    );
+
+    let gemini = serde_json::json!({"candidates": [{"content": {"role": "model", "parts": [
+        {"functionCall": {"name": "t", "args": {"a": oversized}}}
+    ]}}]});
+    assert_eq!(
+        limit_kind(wire_to_native(ProviderOrigin::Gemini, &gemini)),
+        LimitKind::ToolCallArguments
+    );
 }

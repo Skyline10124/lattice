@@ -36,7 +36,7 @@ pub use digest::{arguments_digest, replay_state_digest, semantic_digest};
 pub use graph_types::{GraphMessage, GraphToolCall, HeadTranscript};
 pub use history::ConversationHistory;
 pub use limits::{
-    AttemptAssembly, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
+    AttemptAssembly, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
     MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES,
 };
 pub use message::{
@@ -45,6 +45,7 @@ pub use message::{
 };
 pub use outcome::ToolResultOutcome;
 pub use tool_call::{
-    BoundToolCall, RawToolCall, ToolCallValidation, UnboundToolCall, validate_tool_call_batch,
+    ArgumentsDigestMismatch, BoundToolCall, RawToolCall, ToolCallValidation, UnboundToolCall,
+    validate_tool_call_batch,
 };
 pub use usage::TokenUsage;

@@ -19,14 +19,24 @@
 //! replay state. A real `functionCall.id` is preserved when present; when
 //! absent the call stays `None` and no `tc_*`-style synthetic ID is ever
 //! generated.
+//!
+//! Assembly is metered against the ADR 0005 §10 protocol limits; crossing one
+//! fails the whole body closed rather than returning a partial message.
 
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState, ProviderOrigin,
-    RawToolCall, UnboundToolCall, validate_tool_call_batch,
+    AttemptAssembly, MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState,
+    ProviderOrigin, RawToolCall, UnboundToolCall, validate_tool_call_batch,
 };
 use serde_json::{Value, json};
 
 use super::ProjectionError;
+
+fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
+    ProjectionError::OutputLimitExceeded {
+        provider: ProviderOrigin::Gemini,
+        interruption,
+    }
+}
 
 fn malformed(detail: impl Into<String>) -> ProjectionError {
     ProjectionError::MalformedWire {
@@ -67,6 +77,7 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
 
     let mut pending: Vec<Pending> = Vec::new();
     let mut raw_calls: Vec<RawToolCall> = Vec::new();
+    let mut assembly = AttemptAssembly::new();
     for part in wire_parts {
         let replay_state = replay_state_of(part)?;
         let thought = part.get("thought").and_then(Value::as_bool) == Some(true);
@@ -88,6 +99,10 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
                 Some(Value::Null) | None => None,
                 _ => return Err(malformed("functionCall id is not a string")),
             };
+            assembly.begin_tool_call();
+            assembly
+                .push_tool_arguments(&arguments)
+                .map_err(limit_exceeded)?;
             raw_calls.push(RawToolCall {
                 provider_call_id,
                 name: name.to_string(),
@@ -105,8 +120,10 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
         match part.get("text") {
             Some(Value::String(text)) => {
                 let semantic = if thought {
+                    assembly.push_reasoning(text).map_err(limit_exceeded)?;
                     MessageSemantic::Reasoning { text: text.clone() }
                 } else {
+                    assembly.push_assistant(text).map_err(limit_exceeded)?;
                     MessageSemantic::Text { text: text.clone() }
                 };
                 // An empty text part with a signature is preserved, not

@@ -17,7 +17,12 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 - `src/provider_projection/` owns the pure-data provider replay/projection
   seam (#142): official wire JSON ↔ `lattice-conversation` `NativeMessage`,
   with official-wire fixtures in `tests/fixtures/projection/`. It is not
-  wired into the production codecs until #139-B.
+  wired into the production codecs until #139-B. `wire_to_native` meters every
+  body through `lattice_conversation::AttemptAssembly`, so an over-limit wire
+  fails closed with `ProjectionError::OutputLimitExceeded` instead of yielding
+  a partial message. `project_cross_provider` drops replay state, provider
+  call IDs, **and** reasoning parts: ADR 0005 §7 forbids replaying source
+  reasoning into another provider.
 - `src/sse.rs` owns streaming parser behavior.
 - `src/router.rs` and `src/endpoints.rs` own model alias/provider resolution.
 - `net-guard` owns shared URL validation, DNS checks, private-address
