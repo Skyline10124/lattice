@@ -19,14 +19,81 @@ workspace where dependencies only ever point from higher layers to lower layers,
 with no reverse dependencies, so the LANCET CEP runtime (the `lancet-*` crates)
 can be embedded without pulling in the LATTICE session/agent/profile layers.
 
+That dependency property does not imply an accepted standalone product caller.
+ADR 0005/#139-B restricts production invocation initiation to
+`lattice-api::TurnCoordinator`; lower-level LANCET composition remains
+independent for layering and internal tests, not for a Session-less direct CEP
+product contract.
+
 The production execution path is **Direct-Local** (ADR 0003): structured
 LANCET Tools observe and mutate the canonical Local Workspace directly behind
 host-enforced policy, Guard L1 path checks, effect checks, and audit. There is
 no sandbox VM, workspace projection, or per-turn provisioning — the
 MSB/Upper path and the `lattice-workspace` crate were removed in
 #62 (Codeberg #40). The session graph store is git-backed
-(`GitSessionGraphStore` over the project's `git2` object database); the
-previous SQLite graph store has been removed.
+(`GitSessionGraphStore` over a gix repository rooted at the configured session
+store directory); the previous SQLite graph store has been removed.
+
+### 1.1 Accepted durable Turn target (ADR 0005)
+
+ADR 0005 fixes the target architecture that GitHub #141–#144 and #139 deliver.
+It is intentionally distinct from the current transition graph below:
+
+- strict `lancet-protocol::InvocationId` and `TurnId` types identify Tool
+  execution and accepted Turns; provider Tool Call IDs remain optional provider
+  replay metadata;
+- data-only `lattice-conversation` owns ordered native messages, bound/unbound
+  Tool Calls, ToolResult outcomes, usage, and interruption records;
+- domain-neutral `lattice-store` supplies private-Git creation, object/ref CAS,
+  Linux flock/fsync/rename durability, retention, and typed store errors;
+- `lattice-session`, `lancet-audit`, and `lancet-runtime` retain SessionStore,
+  InvocationStore/operator, and WorkspaceHistory semantics in three physical
+  repositories and failure domains;
+- `lattice-api::TurnCoordinator` becomes the only cross-store Turn saga;
+  `lattice-agent` becomes a one-provider-attempt driver with no store or Tool
+  execution authority;
+- durable PendingTurn stages and a pure reconciliation reducer close interrupted
+  work without retrying a provider request or redispatching a Tool.
+
+```mermaid
+graph TD
+    PROTOCOL["lancet-protocol<br/>InvocationId + Cell evidence"]
+    CONVERSATION["lattice-conversation<br/>data only"]
+    STORE["lattice-store<br/>Git durability kernel"]
+    LLM["lattice-llm<br/>provider codecs"]
+    AGENT["lattice-agent<br/>ModelStepDriver"]
+    SESSION["lattice-session<br/>SessionStore + PendingTurn"]
+    AUDIT["lancet-audit<br/>InvocationStore + operator reads"]
+    RUNTIME["lancet-runtime<br/>WorkspaceHistory + Tool Host"]
+    API["lattice-api<br/>TurnCoordinator"]
+
+    CONVERSATION --> PROTOCOL
+    LLM --> CONVERSATION
+    AGENT --> LLM
+    AGENT --> CONVERSATION
+    SESSION --> CONVERSATION
+    SESSION --> STORE
+    AUDIT --> PROTOCOL
+    AUDIT --> STORE
+    RUNTIME --> STORE
+    API --> SESSION
+    API --> AUDIT
+    API --> RUNTIME
+    API --> AGENT
+```
+
+The kernel is shared, not the transaction. State is rooted below
+`$XDG_STATE_HOME/lattice`: one global `sessions.git`, with project-keyed
+`invocations.git` and `workspace-history.git`. They have different typed
+handles, refs, locks, state machines, and failures. The global order is
+SessionExecutionLock, optional project WorkspaceOperationLock, then zero or one
+repository write lock; code never holds two repository write locks at once.
+
+The implementation order is #141, #142/#143, #144, #139-A, and #139-B. #139-A
+builds and measures a real but non-production InvocationStore. #139-B performs
+the one production hard cut and deletes the transitional SQLite identity/path;
+there is no dual write, import, legacy reader, or runtime backend switch.
+
 ## 2. Component diagram
 
 The workspace has 19 crates grouped into layers. Arrows point from a higher
@@ -221,7 +288,7 @@ All file paths verified by reading the source.
 | Abstraction | Kind | Location | Notes |
 |---|---|---|---|
 | `SessionGraphStore` | trait | `crates/lattice-session/src/graph.rs:390` | Backend-neutral session graph contract: commits, branch refs, HEAD, diffs. |
-| `GitSessionGraphStore` | struct | `crates/lattice-session/src/git_graph/mod.rs:37` | Git-backed store over the project's `git2` object database; commits live under `refs/lattice/sessions/**`, mutable metadata in sidecar files. Replaces the removed SQLite store. |
+| `GitSessionGraphStore` | struct | `crates/lattice-session/src/git_graph/mod.rs:37` | Git-backed gix store rooted at its configured directory; commits live under `refs/lattice/sessions/**`, mutable metadata in sidecar files. Replaces the removed SQLite store. |
 | `AgentLoop` | struct | `crates/lattice-agent/src/agent_loop/mod.rs:99` | Multi-turn loop: turn state machine, message assembly, tool rounds, cancellation, deadlines. `AgentLoopConfig` at line 79. |
 | `LlmClient` | trait | `crates/lattice-agent/src/agent_loop/traits.rs:53` | Injectable LLM client for the agent loop (chat + streaming). Concrete adapters live in `lattice-llm`; `ToolCallExecutor` (line 44) is the sibling tool-execution trait. |
 | `ToolCallExecutor` | trait | `crates/lattice-agent/src/agent_loop/traits.rs:44` | Injectable tool executor; production impl is `CepExecutorAdapter`. |
@@ -229,7 +296,7 @@ All file paths verified by reading the source.
 | `CepClient` | struct | `crates/lancet-dispatch/src/transport.rs:76` | Typed CEP JSON-RPC client over an in-process transport. Re-exported by `lancet-native` (`src/lib.rs`) and `lancet-api`. |
 | `CepExecutorAdapter` | struct | `crates/lattice-api/src/turn/cep.rs:75` | Maps LLM-shape `ToolCall`s into typed CEP method invocations via `CepClient`; implements `ToolCallExecutor`. Holds catalog/enabled name sets. |
 | `CATALOG` | static | `crates/lancet-catalog/src/catalog.rs` | `LazyLock<[MethodDescriptor; 1]>` — the remaining native production method (`fetch.web`). The Agent-visible five-Tool set is closed composition of this catalog plus four embedded Components. |
-| `LocalWorkspace` | module | `crates/lancet-native/src/workspace/` | Concrete guarded Local Workspace host: secure path resolution, bounded observation, Mutation Preconditions, atomic installation. Not a pluggable seam (ADR 0003). |
+| `LocalWorkspace` | module | `crates/lancet-runtime/src/workspace/` | Concrete guarded Local Workspace host: secure path resolution, bounded observation, Mutation Preconditions, atomic installation. Moved down in #30; not a pluggable seam (ADR 0003). |
 | `CepError` | struct | `crates/lancet-protocol/src/error.rs:216` | Typed CEP error with `data` + `Retriability`. Wire codes in reserved JSON-RPC range `-32000..-32099`. |
 | `CepErrorCode` | enum | `crates/lancet-protocol/src/error.rs:46` | Closed enum of CEP error codes, segmented by family (Validation/Permission/Execution/State/Guard/Effect). |
 | `stream_turn` | fn | `crates/lattice-api/src/turn/execute.rs:259` | `pub async fn stream_turn(...) -> Result<TurnEventStream>` — the single live execution core. |
@@ -253,6 +320,15 @@ embedded Component Tools whose descriptor authority is `tools/*/manifest.toml`
 project-keyed CEP audit SQLite store through `lancet-api::{query_audit,
 tail_audit, replay_audit}` (`lattice audit` CLI). Agents cannot invoke audit
 reads as CEP tools.
+
+GitHub #114 removed Turn/audit PROV, in-toto statements, attestations, and
+stored-vs-derived projection. The current operator DTOs materialize every
+finalized SQLite audit row; a row without `evidence_id` remains visible with
+`evidence: null`, while a valid pointer attaches the existing typed Cell
+evidence. Raw `metadata_json` is not an operator wire field. Under ADR 0005 this
+whole SQLite surface is transitional: #139-A develops the Git Adapter without
+connecting it to production, and #139-B switches operator reads and deletes the
+SQLite IDs/backend in one change.
 
 Since GitHub #39 those three `lancet-api` entry points are one-line delegations: the
 DTOs, pagination loop, filter construction, typed Cell-evidence materialization,
@@ -323,9 +399,10 @@ One sentence per crate:
   public-address resolution, private/reserved IP checks, and
   rebinding-domain checks.
 - **`lancet-catalog`** — Typed CEP method contracts, params/results,
-  descriptors, and the static production `CATALOG` (5 agent-visible methods);
-  it holds no operator-only contracts (`methods/audit.rs` was deleted in GitHub #39);
-  depends only on protocol.
+  descriptors, and the static native production `CATALOG` (one remaining
+  method, `fetch.web`). The five agent-visible Tools are its closed composition
+  with four embedded Components. It holds no operator-only contracts
+  (`methods/audit.rs` was deleted in GitHub #39) and depends only on protocol.
 - **`lancet-dispatch`** — Generic method registry, typed CEP dispatch,
   in-process transport (`CepClient`/`CepTransport`), cancellation, and event
   sinks.
@@ -342,10 +419,10 @@ One sentence per crate:
   catalog-derived `ToolDefinition`/`ToolExposure` and `BaseAuthorityPlan`; no
   native execution, no policy side effects, no audit persistence, no
   `lattice-*` deps.
-- **`lancet-native`** — Production native handlers, server lifecycle, the
-  concrete guarded Local Workspace host (secure path resolution, bounded
-  observation, Mutation Preconditions, atomic installation), edit/web
-  helpers, audit integration, and effect-contract enforcement.
+- **`lancet-native`** — Remaining native `fetch.web` handler, server lifecycle,
+  transport/audit integration, rewind adapter, edit/web helpers, and the
+  Component/native dispatch split. The concrete guarded Local Workspace moved
+  to `lancet-runtime` in #30.
 - **`lancet-api`** — Unified LANCET public API: composes `LancetRuntime` /
   `LancetServer` (server lifecycle, `CepClient`, audit, tool definitions)
   from the native crates, taking LANCET-native policy types; independent of
@@ -369,3 +446,12 @@ One sentence per crate:
   alternate screen, no ratatui).
 - **`lattice-cli`** — Binary entry point and argument dispatch over
   API/session/model/audit commands, plus the `lattice-tui` presentation crate.
+
+Accepted ADR 0005 crates, not yet members of the current workspace:
+
+- **`lattice-conversation`** (#142) — Data-only ordered message, ToolCall
+  typestate, ToolResult, provider replay, usage, and interruption contracts;
+  depends on `lancet-protocol` for the one typed InvocationId.
+- **`lattice-store`** (#143) — Domain-neutral Linux/private-Git durability
+  kernel. Session, invocation/evidence/operator, and workspace-history domain
+  semantics stay in their owning crates.

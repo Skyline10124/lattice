@@ -25,6 +25,20 @@ explicit architecture decision and a complete native implementation.
 - [LANCET](LANCET.md) - CEP and LANCET reference. Read its drift notice: current
   contracts and explicitly retained legacy sections coexist in this document.
 
+## Architecture Decisions
+
+- [ADR 0001](adr/0001-workspace-vcs-replaces-guest-git-promotion.md) — historical
+  Workspace VCS design, superseded by ADR 0002.
+- [ADR 0002](adr/0002-turn-scoped-msb-workspace.md) — historical turn-scoped MSB
+  design, superseded by ADR 0003.
+- [ADR 0003](adr/0003-lancet-operates-directly-on-local-workspace.md) — guarded
+  Direct-Local Workspace execution.
+- [ADR 0004](adr/0004-build-closed-wasm-tool-catalog.md) — build-closed WASM
+  Component Tool catalog and Tool Host authority.
+- [ADR 0005](adr/0005-durable-turn-invocation-and-private-git-stores.md) — typed
+  Turn/Invocation identity, data-only conversation contracts, private-Git
+  durability kernel, PendingTurn reconciliation, and ordered #139 hard cut.
+
 ## Operational Records
 
 - [Test triage](TEST-TRIAGE.md) and

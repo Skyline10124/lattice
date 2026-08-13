@@ -18,6 +18,19 @@
 > those surfaces as migration residue, not extension points. Command execution,
 > post-mutation verify, agent-visible audit, and SQLite session storage remain
 > retired. Final line-by-line synchronization is tracked by #36.
+>
+> ADR 0005 additionally fixes the durable invocation target. Provider Tool Call
+> IDs remain provider replay metadata; one typed InvocationId eventually spans
+> transcript binding, CEP execution, Host context, history, terminal Cell
+> evidence, and operator output. GitHub #141–#144 establish the architecture,
+> data contracts, generic private-Git kernel, and PendingTurn journal. #139-A
+> then builds a non-production InvocationStore; only #139-B switches the live
+> path and deletes the transitional SQLite audit/evidence identity. There is no
+> dual write, legacy reader/import, Standalone invocation, or direct CEP product
+> caller in that target.
+> The JSON-RPC request object remains during migration; its canonical string
+> `id` becomes the already-reserved InvocationId in #139-B. This is unrelated to
+> the deleted `session.envelope` Tool.
 
 LATTICE agents execute tools through **LANCET**, the controlled execution and failure-learning subsystem. LANCET uses **CEP** (Controlled Execution Protocol) internally: JSON-RPC methods with capability envelopes, policy gating, path guards, and a flat append-only audit store.
 
@@ -227,6 +240,13 @@ pointer is valid for native and Component rows alike and exposes
 `evidence: null`; the row remains visible. A present but dangling, malformed,
 unsupported, corrupt, or row-mismatched pointer is an operator read error, not
 a no-evidence value.
+
+This SQLite shape is the complete transitional operator authority after #114,
+not the ADR 0005 target. Its `audit_id`, numeric `call_id`, and `evidence_id`
+are private/transitional storage values rather than invocation identity. #139-B
+replaces them with the `lancet-audit` Git InvocationStore Adapter in one hard
+cut; #139-A must not expose its parallel foundation as a second production
+read path.
 
 ### Operator audit reads
 

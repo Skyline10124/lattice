@@ -136,6 +136,16 @@ per-call admission step.
 - `WorkspaceHistory` never touches the Local Workspace or the user's project
   `.git`, never writes a compensation commit, and exposes no user command
   surface. Callers record only after an install has already succeeded.
+- ADR 0005/#143 moves WorkspaceHistory's generic repository/ref/lock/fsync
+  mechanics to `lattice-store`, not its mutation/rewind semantics. This crate
+  continues to own the typed history handle and Local mutation integration.
+  Never merge workspace history with sessions/invocations or hold its repository
+  write lock together with another repository lock.
+- ADR 0005 also adds one external project-scoped WorkspaceOperationLock shared
+  with observation and rewind. Mutation holds it exclusive from precondition
+  check through atomic install and history publication; rewind holds it across
+  plan/restore/ref move. The kernel repository lock remains narrower and is not
+  duplicated.
 - No runtime registration API: the catalog is immutable after `compose`.
   The public constructor (`from_embedded`) reads `inventory` + the
   generated `EXPECTED_COMPONENTS` only.

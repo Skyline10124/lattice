@@ -38,6 +38,19 @@ agent loop over `lancet-api`'s CEP runtime.
 - Keep LANCET execution implementation below this crate. It currently lives in
   `lancet-native`; after ADR 0004 convergence it lives in `lancet-runtime`.
   Neither path belongs in the session/turn facade.
+- ADR 0005 assigns the future cross-store saga here. In #139-B,
+  `TurnCoordinator` owns the full-Turn session execution lock, PendingTurn,
+  exact binding plan, InvocationStore reservation/finalization, Tool dispatch,
+  ResultDraft, reconciliation, and final Turn commit through narrow domain
+  interfaces. It must never hold two repository write locks, invent a
+  cross-store transaction, or expose a Standalone/direct CEP product caller.
+  Until #139-B, keep `stream_turn` as the one live core and do not add a
+  parallel coordinator path.
+- `TurnCoordinator` is the only Turn saga owner, but not the only cross-store
+  workflow in this crate: explicit rewind is owned by a separate
+  `RewindCoordinator`. Both obey SessionExecutionLock -> project
+  WorkspaceOperationLock -> at most one repository write lock. PendingTurn does
+  not silently become a rewind crash journal.
 
 ## Recent Issues
 

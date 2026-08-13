@@ -29,6 +29,14 @@ traits.
 - Do not implement session storage; consume `lattice-session` graph values.
 - Keep tool execution injectable so `lattice-api` can provide CEP execution.
 - `buffered` event sequence remains authoritative; live sink is best-effort.
+- ADR 0005 is the accepted target, staged rather than current behavior. #142
+  moves conversation data to `lattice-conversation` and deletes this crate's
+  dependency on `lattice-session`; #139-B then narrows Agent to a one-provider-
+  attempt `ModelStepDriver`. The target Agent receives assembled history, owns
+  no store handle, and does not own retry/backoff, generate InvocationId,
+  dispatch Tools, reconcile PendingTurn, or commit a Turn. Do not create an
+  intermediate callback-based persistence seam while the production loop is
+  still here.
 
 ## Recent Issues
 

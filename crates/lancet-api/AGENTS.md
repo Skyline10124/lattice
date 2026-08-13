@@ -4,10 +4,14 @@ Crate-local guidance for `lancet-api`.
 
 ## Role
 
-This crate is the unified public API for driving LANCET's Controlled Execution
-Protocol runtime independently of LATTICE session/agent/profile layers. During
-the migration it composes native CEP crates; the ADR 0004 target keeps this
-facade while concrete composition moves into `lancet-runtime`.
+This crate is the LANCET-native facade for runtime composition and operator
+reads, independent of LATTICE session/agent/profile layers. During the current
+migration it still exposes `LancetRuntime`/`LancetServer` and composes native
+CEP crates; ADR 0004 moves concrete composition into `lancet-runtime`.
+ADR 0005 supersedes the current direct-embedder product interpretation:
+#139-B permits only `lattice-api` to initiate a production invocation. The
+lower-level API remains nameable for internal runtime/transport tests, not as a
+Standalone Tool-execution product contract.
 
 ## Sub-Architecture
 
@@ -33,6 +37,10 @@ facade while concrete composition moves into `lancet-runtime`.
   host (currently `lattice-api::turn::cep`).
 - Native handler/transport implementation stays in `lancet-native` until its
   migration into `lancet-runtime`; do not add another production assembly path.
+- Do not add a Standalone invocation context or advertise direct CEP execution
+  as a supported product. Until #139-B the existing entry points are migration
+  reality; the hard cut, not an additive compatibility wrapper, removes their
+  product invocation role.
 - Operator audit reads are direct-store APIs, never Agent Tools. Keep pagination,
   filtering, evidence materialization, and DTO behavior in `lancet-audit`; this
   facade stays thin.

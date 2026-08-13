@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-07-16
 - Amends: ADR 0003 catalog and handler-ownership decisions
+- Amended by: ADR 0005 invocation identity, operator storage, and
+  session-bound orchestration decisions
 - Canonical vocabulary: root `CONTEXT.md`
 
 ## Context
@@ -90,3 +92,8 @@ starts because build scripts and procedural macros execute as host code.
 - A native executable is not a Tool Bundle. Runtime dynamic loading, arbitrary
   Agent commands, user processes, hosted backend processes, and ambient Tool
   access remain prohibited.
+- ADR 0005 keeps Tool runtime convergence here but assigns conversation,
+  InvocationStore/operator reads, and cross-store Turn orchestration to
+  `lattice-conversation`, `lancet-audit`, and `lattice-api`. LANCET has no
+  Standalone/direct CEP product invocation contract; #32 waits for the #139-B
+  InvocationId hard cut before the remaining native Tool migration.

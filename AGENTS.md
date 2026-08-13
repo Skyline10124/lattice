@@ -50,8 +50,23 @@ and operators may install precompiled Tool Bundles before rebuilding a new
 closed runtime. The MSB/Upper path and `lattice-workspace` crate were removed
 in GitHub #62; the central catalog authority, native handlers, and native/CEP/dispatch
 split remain migration residue. Do not add projection, checkpoint, ambient Tool
-authority, runtime code loading, user-process, or arbitrary-command
-capabilities while completing the migration.
+split remain migration residue. Do not add workspace projection/checkpoint,
+ambient Tool authority, runtime code loading, user-process, or
+arbitrary-command capabilities while completing the migration. ADR 0005's
+PendingTurn is a conversation recovery journal, not a workspace checkpoint.
+
+ADR 0005 is the accepted durable Turn and invocation target. It introduces one
+typed `InvocationId`, a data-only `lattice-conversation` contract, a generic
+private-Git `lattice-store` kernel, durable PendingTurn reconciliation, and a
+`lattice-api::TurnCoordinator`. Session, invocation/evidence/operator, and
+workspace-history semantics remain three separate domains in
+`lattice-session`, `lancet-audit`, and `lancet-runtime`; sharing Git mechanics
+does not merge their repositories, locks, state machines, or failure domains.
+Implementation is ordered by GitHub #141–#144 and #139-A/#139-B. Do not connect
+the production Tool path to InvocationStore before #139-A's correctness and
+performance gates pass, and do not add compatibility dual writes or legacy
+read/import paths.
+
 The workspace dependency graph is layered. Keep dependencies pointing from
 higher layers to lower layers; do not introduce reverse dependencies. The graph
 below describes the current transition state. ADR 0004 absorbs or retires the
@@ -93,6 +108,33 @@ workspace-internal dependencies by contract. The prelude is a guest SDK
 only reach the product through the built binary (`cargo xtask
 harness-boundary` enforces this, transitively).
 ```
+
+ADR 0005 adds the following dependency deltas in prerequisite order; they are
+not claims about `Cargo.toml` until the named issue lands. All unchanged edges
+remain exactly as listed in the current graph above:
+
+```text
+ADD lattice-conversation -> lancet-protocol              # #142
+ADD lattice-store                                           # #143, no workspace deps
+ADD lattice-llm -> lattice-conversation                   # #142
+ADD lattice-agent -> lattice-conversation                 # #142
+DEL lattice-agent -> lattice-session                      # #142
+ADD lattice-session -> lancet-protocol,lattice-conversation,lattice-store
+                                                          # #142/#143/#144
+ADD lancet-runtime -> lattice-store                        # #143
+ADD lancet-audit -> lattice-store                          # #139-A
+ADD lattice-api -> lancet-audit,lattice-conversation      # #139-B
+# lattice-api -> lancet-native remains through #139-B and is deleted by #34
+```
+
+`lattice-store` owns only repository creation/opening, canonical bytes, object
+and ref CAS, Linux flock/fsync/rename durability, retention, and typed store
+errors. It must not depend on or absorb session, runtime, provider, or audit
+domains. All state is below `$XDG_STATE_HOME/lattice`: one global
+`sessions.git`, plus project-keyed `invocations.git` and
+`workspace-history.git`. `ProjectStoreKey` hashes the canonical Linux path bytes
+of the full Local Workspace root; it is an address, not content/project identity.
+Code must never hold two repository write locks simultaneously.
 
 `lancet-runtime -> lancet-authority` arrived with #30, when the concrete Local
 Workspace moved down into `lancet-runtime`: the visibility engine's decision
@@ -142,6 +184,12 @@ accumulating.
 | `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
 | `lattice-tui` | Inline CLI chat REPL over `lattice-api` sessions and `stream_turn` via `rustyline` (no alternate screen, no ratatui/crossterm). Owns readline state, turn execution, and token/status rendering to stdout/stderr. |
 | `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
+
+Two accepted ADR 0005 crates are intentionally absent from the current-role
+table until their prerequisites land: `lattice-conversation` is the data-only
+conversation contract from #142, and `lattice-store` is the domain-neutral Git
+durability kernel from #143. Adding either name to the current dependency graph
+before its real `workspace = true` edge exists would make that graph false.
 
 ## CEP And LANCET Contracts
 
@@ -213,14 +261,20 @@ accumulating.
   configuration are retired surface; do not reintroduce them.
 - Cell evidence is persisted in `lancet-audit`'s versioned evidence tables
   (`evidence_calls` / `evidence_effects` / `evidence_denials`), keyed by a
-  store-generated `evidence_id` that a CEP audit row merely points at. That
-  identity is deliberately not `audit_id`: ADR 0004 decision 8 deletes the audit
-  store, and the evidence identity must outlive it. Do not put structured
-  evidence back into `metadata_json`, and do not add a second record shape
-  beside `lancet_protocol::evidence`.
+  store-generated `evidence_id` that a CEP audit row merely points at. After
+  #114 this is explicitly a transitional SQLite lookup key, not a public
+  invocation identity. ADR 0005/#139-B replaces public call/audit/evidence IDs
+  with one `InvocationId` and deletes the SQLite identity/path in the same hard
+  cut; #139-A's Git Adapter stays non-production until then. Do not put
+  structured evidence back into `metadata_json`, expose `evidence_id` as a
+  domain identity, or add a second record shape beside
+  `lancet_protocol::evidence`.
 - SQLite for CEP audit records belongs in `lancet-audit`; the conversation
   graph is git-backed (git refs under `refs/lattice/sessions/<id>/**`) and
-  lives in `lattice-session`. SQLite session graph storage was retired.
+  lives in `lattice-session`. SQLite session graph storage was retired. This is
+  the current state: #139-B atomically switches the operator Adapter to
+  `invocations.git` and deletes the SQLite audit/evidence backend rather than
+  dual-writing or importing it.
 - Operator audit read (query/tail/replay) is implemented in `lancet-audit`
   and only re-exported by `lancet-api`; it is never an Agent Tool. Keep
   `lancet-audit` free of `lancet-native`/`lancet-dispatch`/`lancet-cep`/
@@ -280,6 +334,16 @@ successfully installed Atomic Local Mutation in the private gix history and
 stamps the resulting object id on the Turn commit; only the explicit `/rewind`
 path (GitHub #64) restores from it.
 
+ADR 0005's ordered target replaces the monolithic production loop only in
+#139-B: `lattice-api::TurnCoordinator` owns the full-Turn session execution
+lock, PendingTurn journal, binding plan, batch reservation, Tool dispatch,
+ResultDraft, terminal finalization, reconciliation, and final Turn commit.
+`lattice-agent` then drives one model step and owns no store, InvocationId
+allocation, Tool execution, or Turn commit. Reopen only completes closure from
+durable facts; it never resends a provider request or redispatches a Tool.
+There is no Standalone/direct CEP product invocation contract, and a JSON-RPC
+notification cannot create an invocation.
+
 ## Review Records
 
 - `FIX.md` is the append-only changelog for applied fixes. Never delete or
@@ -335,9 +399,12 @@ path (GitHub #64) restores from it.
   to substitute.
 - Keep LANCET runtime composition and its public surface in `lancet-api`; it
   takes LANCET-native policy types and must not depend on LATTICE
-  session/agent/profile crates. Anything that drives CEP (CLI, tests, embedders)
-  should spawn through `lancet_api::LancetServer`/`LancetRuntime`, not hand-roll
-  the registry/transport/server dance.
+  session/agent/profile crates. During the current transition, callers that
+  drive CEP must spawn through `lancet_api::LancetServer`/`LancetRuntime`, not
+  hand-roll the registry/transport/server dance. ADR 0005/#139-B removes the
+  Standalone/direct-embedder product contract: only `lattice-api` may initiate
+  a production invocation, while lower-level transport/runtime tests remain
+  internal and must supply explicit typed binding facts.
 - Keep public session and turn API contracts in `lattice-api`; it owns the
   profile→policy translation and the agent-loop wiring over `lancet-api`. Keep
   TUI terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
