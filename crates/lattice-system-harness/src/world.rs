@@ -53,7 +53,8 @@ impl ScenarioWorld {
         let root = tempfile::TempDir::with_prefix(prefix)?;
         let home = root.path().join("home");
         let project = root.path().join("project");
-        let session_store = home.join(".config").join("lattice").join("sessions");
+        // #143: durable session state lives under the XDG *state* root.
+        let session_store = home.join(".local/state").join("lattice");
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(&session_store)?;
         std::fs::create_dir_all(project.join(".lattice"))?;
@@ -109,6 +110,8 @@ impl ScenarioWorld {
         &self.project
     }
 
+    /// The private-state root holding `sessions.git`, the per-project stores,
+    /// and the lock tree (ADR 0005 §3).
     pub fn session_store_dir(&self) -> &Path {
         &self.session_store
     }

@@ -28,21 +28,41 @@ pub(crate) fn lattice_config_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Directory holding CLI/TUI *configuration-adjacent* session files (the REPL
+/// history file). Durable session state does not live here: since #143 the
+/// session store is `$XDG_STATE_HOME/lattice/sessions.git`.
 pub(crate) fn default_session_dir() -> PathBuf {
     lattice_config_dir().join("lattice").join("sessions")
+}
+
+/// The private-state layout every durable store is addressed through
+/// (ADR 0005 §3).
+pub(crate) fn state_layout() -> Result<lattice_session::StateLayout> {
+    Ok(lattice_session::StateLayout::resolve()?)
+}
+
+/// The global session store path (`$XDG_STATE_HOME/lattice/sessions.git`).
+pub(crate) fn session_store_path() -> Result<PathBuf> {
+    Ok(state_layout()?
+        .lattice_root()
+        .join(lattice_session::git_graph::SESSIONS_REPO_NAME))
 }
 
 /// Open the session store strictly: for every command except `session new`
 /// the store must already exist (#143 — no open-failed-init).
 fn session_api() -> Result<SessionApi> {
-    let git_repo_path = default_session_dir().join("sessions.git");
-    Ok(SessionApi::git_open(git_repo_path)?)
+    match SessionApi::git_open_layout(&state_layout()?) {
+        Ok(api) => Ok(api),
+        Err(lattice_api::ApiError::StoreUnavailable(detail)) => Err(anyhow::anyhow!(
+            "{detail}; run `lattice session new` to create the first session"
+        )),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// First-create-or-validate the session store: `session new` only.
 fn session_api_for_new() -> Result<SessionApi> {
-    let git_repo_path = default_session_dir().join("sessions.git");
-    Ok(SessionApi::git_create(git_repo_path)?)
+    Ok(SessionApi::git_create_layout(&state_layout()?)?)
 }
 
 #[derive(Subcommand)]

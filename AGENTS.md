@@ -85,13 +85,13 @@ Layer 0.5:       net-guard                       (no workspace deps; see note)
                  lattice-llm(->net-guard,conversation)
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
-                 lattice-session(->conversation)
+                 lattice-session(->conversation,lattice-store)
                  lattice-agent(->llm,conversation)
 Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
                  lancet-authority(->protocol,catalog,net-guard)
 Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
-                 lancet-runtime(->protocol,dispatch,authority)
+                 lancet-runtime(->protocol,dispatch,authority,lattice-store)
 Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
                                authority,net-guard,runtime)
 Layer 3.5:       lancet-api(->protocol,catalog,dispatch,cep,audit,
@@ -117,8 +117,9 @@ remain exactly as listed in the current graph above:
 
 ```text
 # lattice-store landed in #143 with no workspace deps and appears in the graph above
-ADD lattice-session -> lancet-protocol,lattice-store          # #143/#144
-ADD lancet-runtime -> lattice-store                        # #143
+# lattice-session -> lattice-store and lancet-runtime -> lattice-store landed
+# in #143 and are already in the graph above
+ADD lattice-session -> lancet-protocol                     # #144
 ADD lancet-audit -> lattice-store                          # #139-A
 ADD lattice-api -> lancet-audit,lattice-conversation      # #139-B
 # lattice-api -> lancet-native remains through #139-B and is deleted by #34
@@ -175,7 +176,7 @@ accumulating.
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, public-address resolution, private/reserved IP checks, and rebinding-domain checks. Depends only on `url` and `std`. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, HTTP request pinning, logging, and (since #142) the pure-data provider replay/projection seam over `lattice-conversation`. |
 | `lattice-conversation` | ADR 0005 §7 data-only provider-neutral conversation contract: ordered `NativeMessage`/`MessagePart` with `UnboundToolCall`/`BoundToolCall` typestates, ToolResult closure, semantic/replay digests, per-attempt usage and interruption/rejection records, and (since #142) the migrated `GraphMessage` transcript family. Depends only on `lancet-protocol`; no I/O, stores, runtimes, or ID generators. |
-| `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`). Re-exports the `lattice-conversation` transcript types (`GraphMessage` family, `TurnUsage`); persistence stays here. |
+| `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`) over the `lattice-store` kernel: immutable `SessionState` objects in the global `sessions.git`, plus the per-session execution lock. Re-exports the `lattice-conversation` transcript types (`GraphMessage` family, `TurnUsage`); persistence stays here. |
 | `lattice-store` | ADR 0005 domain-neutral private-Git/Linux durability kernel (landed in #143): XDG state topology, `ProjectStoreKey` derivation, typed create/open with `refs/lattice/meta` identity, canonical bytes, object/commit mechanics, ref CAS and multi-ref transactions, per-repository flock, fsync/rename durability barriers, atomic first-create, retention primitives, and per-location capability probes. No domain schemas and no workspace-internal dependencies by contract. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
@@ -265,8 +266,10 @@ store migrations. `lattice-conversation` landed in #142.
   domain identity, or add a second record shape beside
   `lancet_protocol::evidence`.
 - SQLite for CEP audit records belongs in `lancet-audit`; the conversation
-  graph is git-backed (git refs under `refs/lattice/sessions/<id>/**`) and
-  lives in `lattice-session`. SQLite session graph storage was retired. This is
+  graph is git-backed (git refs under `refs/lattice/sessions/<id>/**` in
+  `$XDG_STATE_HOME/lattice/sessions.git`) and lives in `lattice-session`;
+  since #143 there are no mutable `.lattice/sessions/**` sidecars and every
+  store is strictly opened. SQLite session graph storage was retired. This is
   the current state: #139-B atomically switches the operator Adapter to
   `invocations.git` and deletes the SQLite audit/evidence backend rather than
   dual-writing or importing it.

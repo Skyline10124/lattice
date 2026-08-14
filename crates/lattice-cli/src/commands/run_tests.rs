@@ -61,11 +61,17 @@ fn run_validate_agents_dir_resolves_symlink_prefix_before_safety_check() {
     assert!(err.contains("/tmp"));
 }
 
+/// #143: the durable session store is addressed through the XDG *state*
+/// root, never the configuration root.
 #[test]
-fn run_default_session_dir_under_lattice_sessions() {
-    let dir = crate::commands::session::default_session_dir();
-    assert!(dir.to_string_lossy().contains("lattice"));
-    assert!(dir.to_string_lossy().contains("sessions"));
+fn session_store_lives_under_the_xdg_state_root() {
+    let path = crate::commands::session::session_store_path().expect("resolve store path");
+    let shown = path.to_string_lossy().into_owned();
+    assert!(shown.ends_with("lattice/sessions.git"), "{shown}");
+    assert!(
+        !shown.contains("/.config/"),
+        "durable session state must not live under the config root: {shown}"
+    );
 }
 
 struct StubLlmClient;

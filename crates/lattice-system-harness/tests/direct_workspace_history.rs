@@ -257,17 +257,17 @@ fn direct_workspace_history_records_installed_mutation() {
             "history must live outside the project .git",
         )?;
 
-        // Reachability must come from the per-record pin refs, not merely from
-        // `current` still pointing at the tip — that is the whole point of the
-        // pins once an explicit Rewind (#64) starts moving `current` backwards.
-        // Drop `current`, then prune everything unreachable: the recorded
-        // commit must still resolve, kept alive by its pin alone.
+        // #143: normal recording writes no per-record refs — everything it
+        // appends is an ancestor of `current`, and that is what keeps prior
+        // object ids reachable. Prove it survives a real prune while
+        // `current` stands, and that no stray per-record namespace was
+        // resurrected.
         let pins = pinned_records(&repo_path).map_err(|e| AssertError::StdoutMissing {
             expected: format!("readable pin refs: {e}"),
         })?;
         require(
-            !pins.is_empty(),
-            "each recorded commit must be pinned by an internal ref",
+            pins.is_empty(),
+            format!("normal recording must not write per-record refs: {pins:?}"),
         )?;
         let tip = current_tip(&repo_path).map_err(|e| AssertError::StdoutMissing {
             expected: format!("readable current ref: {e}"),
@@ -282,14 +282,6 @@ fn direct_workspace_history_records_installed_mutation() {
                     expected: format!("git {args:?} runs: {e}"),
                 })
         };
-        let dropped = git(&["update-ref", "-d", "refs/lattice/workspace-history/current"])?;
-        require(
-            dropped.status.success(),
-            format!(
-                "dropping current failed: {}",
-                String::from_utf8_lossy(&dropped.stderr)
-            ),
-        )?;
         let gc = git(&["gc", "--prune=now", "--aggressive"])?;
         require(
             gc.status.success(),
@@ -297,11 +289,11 @@ fn direct_workspace_history_records_installed_mutation() {
         )?;
         let after_gc =
             recorded_files_at(&repo_path, &tip).map_err(|e| AssertError::StdoutMissing {
-                expected: format!("pinned history survives prune without current: {e}"),
+                expected: format!("recorded history survives a prune: {e}"),
             })?;
         require(
             after_gc == recorded,
-            "internal pin refs must keep prior object ids reachable through a prune",
+            "recorded history must stay reachable through a prune",
         )?;
         Ok(())
     })();

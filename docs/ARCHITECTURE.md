@@ -299,7 +299,9 @@ All file paths verified by reading the source.
 | Abstraction | Kind | Location | Notes |
 |---|---|---|---|
 | `SessionGraphStore` | trait | `crates/lattice-session/src/graph.rs:390` | Backend-neutral session graph contract: commits, branch refs, HEAD, diffs. |
-| `GitSessionGraphStore` | struct | `crates/lattice-session/src/git_graph/mod.rs:37` | Git-backed gix store rooted at its configured directory; commits live under `refs/lattice/sessions/**`, mutable metadata in sidecar files. Replaces the removed SQLite store. |
+| `GitSessionGraphStore` | struct | `crates/lattice-session/src/git_graph/mod.rs` | Git-backed store over the `lattice-store` kernel in the global `$XDG_STATE_HOME/lattice/sessions.git`. Turn commits under `refs/lattice/sessions/<id>/heads/<branch>`, immutable `SessionState` objects under `refs/lattice/sessions/<id>/state`; no sidecar files since #143, and opening never initializes. |
+| `StoreRepo` | struct | `crates/lattice-store/src/repo.rs` | The durability kernel's one repository handle: typed create/open with `refs/lattice/meta` identity, object/tree/commit writes, ref CAS and multi-ref transactions, the per-repository write lock, retention pins, and fsync publication barriers. |
+| `WorkspaceHistory` | struct | `crates/lancet-runtime/src/history.rs` | Private durable history of installed Atomic Local Mutations, a project-scoped kernel store at `projects/<ProjectStoreKey>/workspace-history.git`. Owns baseline/mutation/rewind semantics and the per-project `WorkspaceOperationLock`; durability primitives come from `lattice-store`. |
 | `AgentLoop` | struct | `crates/lattice-agent/src/agent_loop/mod.rs:99` | Multi-turn loop: turn state machine, message assembly, tool rounds, cancellation, deadlines. `AgentLoopConfig` at line 79. |
 | `LlmClient` | trait | `crates/lattice-agent/src/agent_loop/traits.rs:53` | Injectable LLM client for the agent loop (chat + streaming). Concrete adapters live in `lattice-llm`; `ToolCallExecutor` (line 44) is the sibling tool-execution trait. |
 | `ToolCallExecutor` | trait | `crates/lattice-agent/src/agent_loop/traits.rs:44` | Injectable tool executor; production impl is `CepExecutorAdapter`. |
@@ -469,7 +471,12 @@ One sentence per crate:
   per-attempt usage and interruption/rejection records, and the migrated
   `GraphMessage` transcript family; depends only on `lancet-protocol`.
 
-Accepted ADR 0005 crates, not yet members of the current workspace:
-- **`lattice-store`** (#143) — Domain-neutral Linux/private-Git durability
-  kernel. Session, invocation/evidence/operator, and workspace-history domain
-  semantics stay in their owning crates.
+`lattice-store` joined the workspace in #143:
+
+- **`lattice-store`** — Domain-neutral Linux/private-Git durability kernel:
+  XDG state topology, `ProjectStoreKey` addressing, typed create/open with a
+  recorded store identity, object/ref mechanics, flock/fsync/rename
+  durability, retention, and typed store errors. Session,
+  invocation/evidence/operator, and workspace-history domain semantics stay in
+  their owning crates. `lattice-session` and `lancet-runtime` were migrated
+  onto it in the same issue; `lancet-audit` follows in #139-A.

@@ -197,7 +197,9 @@ pub fn build_report() -> DoctorReport {
     }
 
     // Session store availability
-    let session_dir = crate::commands::session::default_session_dir();
+    // #143: the durable session store lives under the XDG *state* root.
+    let session_dir = crate::commands::session::session_store_path()
+        .unwrap_or_else(|_| crate::commands::session::default_session_dir());
     let session_store_available = session_dir.exists();
 
     // Alias table state

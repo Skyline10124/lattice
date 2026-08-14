@@ -39,15 +39,14 @@ fn required_project_branch(project_branch: Option<&str>) -> Result<&str> {
 }
 
 pub async fn run(options: TuiOptions) -> Result<std::process::ExitCode> {
-    let git_repo_path = options.session_dir.join("sessions.git");
-    // #143: opening an existing session strictly opens the store; creating a
+    // #143: durable session state lives in the global store under the XDG
+    // state root. Opening an existing session strictly opens it; creating a
     // session is the only first-create path. Both resolve the Local
     // Workspace root through the shared lattice-api resolver.
+    let layout = lattice_api::StateLayout::resolve().context("resolve state layout")?;
     let session_api = match &options.session_id {
-        Some(_) => SessionApi::git_open(git_repo_path.clone())
-            .with_context(|| format!("open session store {}", git_repo_path.display()))?,
-        None => SessionApi::git_create(git_repo_path.clone())
-            .with_context(|| format!("create session store {}", git_repo_path.display()))?,
+        Some(_) => SessionApi::git_open_layout(&layout).context("open session store")?,
+        None => SessionApi::git_create_layout(&layout).context("create session store")?,
     };
     let session = match &options.session_id {
         Some(session_id) => session_api
@@ -227,9 +226,8 @@ async fn execute_turn(
         );
     }
 
-    let git_repo_path = options.session_dir.join("sessions.git");
-    let session_api = SessionApi::git_open(git_repo_path.clone())
-        .with_context(|| format!("open session store {}", git_repo_path.display()))?;
+    let layout = lattice_api::StateLayout::resolve().context("resolve state layout")?;
+    let session_api = SessionApi::git_open_layout(&layout).context("open session store")?;
 
     // Cooperative cancellation flag: a Ctrl-C during the turn sets this and
     // the agent loop checkpoints out at its next cancel boundary.
