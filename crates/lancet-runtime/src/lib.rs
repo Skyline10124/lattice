@@ -31,9 +31,9 @@
 //!   evidence recording. Errors map to structured `CepError` codes
 //!   (`ToolTrap`/`ToolTimeout`/`ToolResourceExhausted`/`CallCancelled`).
 //! - **Private workspace history** — [`history::WorkspaceHistory`] appends
-//!   every successfully installed Atomic Local Mutation to a private bare
-//!   `gix` repository that lives outside the Local Workspace and the user's
-//!   project `.git` (GitHub #63).
+//!   every successfully installed Atomic Local Mutation to a project-scoped
+//!   `lattice-store` kernel repository that lives outside the Local Workspace
+//!   and the user's project `.git` (GitHub #63, migrated in #143).
 //! - **The concrete Local Workspace** — [`workspace::LocalWorkspace`] and the
 //!   [`workspace::VisibilityEngine`] moved down here in GitHub #30, because the
 //!   `workspace-observe` Tool Host imports execute observation and a host import

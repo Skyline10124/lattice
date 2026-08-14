@@ -5,8 +5,8 @@
 //!
 //! `SessionApi` wraps a [`SessionGraphStore`] trait object to provide an
 //! explicit durable session API for create/open/status/list/log/checkout/branch/
-//! diff/reset operations. Both SQLite and Git-backed stores are supported.
-
+//! diff/reset operations. The Git-backed store over the `lattice-store` kernel
+//! is the only production path since #143.
 use lattice_session::{
     GitSessionGraphStore, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
     ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit,
@@ -275,16 +275,7 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
             ApiError::NotFound(format!("commit '{}' not found", id))
         }
         lattice_session::SessionError::Conflict(msg) => ApiError::Conflict(msg),
-        lattice_session::SessionError::Io {
-            operation,
-            path,
-            source,
-        } => ApiError::Internal(format!(
-            "io error while {} '{}': {}",
-            operation,
-            path.display(),
-            source
-        )),
+        lattice_session::SessionError::InvalidInput(msg) => ApiError::BadRequest(msg),
         lattice_session::SessionError::Git(msg) => ApiError::Internal(format!("git error: {msg}")),
         lattice_session::SessionError::InvalidPersistedValue { field, value } => {
             ApiError::Internal(format!("invalid persisted value for '{field}': {value}"))
@@ -296,6 +287,12 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
             lattice_session::StoreError::NotInitialized { path } => ApiError::StoreUnavailable(
                 format!("session store not initialized at {}", path.display()),
             ),
+            // Identity/invariant failures are typed corruption, never "run
+            // session new": recreating over a damaged store is the recovery
+            // path ADR 0005 forbids.
+            lattice_session::StoreError::Corruption { detail } => ApiError::Internal(format!(
+                "session store identity/invariant violation: {detail}"
+            )),
             other => ApiError::Internal(format!("store kernel error: {other}")),
         },
     }

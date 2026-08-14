@@ -180,6 +180,9 @@ fn status_reports_session_busy_under_an_exclusive_lock() {
         .join("locks")
         .join("sessions")
         .join("sess-busy.lock");
+    // Cross-process exclusive owner via the `flock(1)` utility, which ADR
+    // 0005 §4 lists among the required Linux facilities and the kernel's own
+    // tests require; absence is an environment failure, not a pass.
     let holder = std::process::Command::new("flock")
         .arg("-x")
         .arg(&lock_path)
@@ -187,11 +190,7 @@ fn status_reports_session_busy_under_an_exclusive_lock() {
         .arg("5")
         .spawn();
 
-    let Ok(mut holder) = holder else {
-        // `flock(1)` is not installed; the lock contract is still covered by
-        // the lattice-store kernel's own cross-process test.
-        return;
-    };
+    let mut holder = holder.expect("the flock(1) utility must be installed on a Linux dev host");
     // Give the child time to acquire.
     std::thread::sleep(std::time::Duration::from_millis(300));
 

@@ -258,10 +258,10 @@ impl StoreRepo {
             store_schema_version: meta.store_schema_version,
             scope: meta.scope,
         };
-        let parent = path.parent().ok_or_else(|| StoreError::Corruption {
+        let parent = path.parent().ok_or_else(|| StoreError::InvalidInput {
             detail: format!("store path '{}' has no parent", path.display()),
         })?;
-        let name = path.file_name().ok_or_else(|| StoreError::Corruption {
+        let name = path.file_name().ok_or_else(|| StoreError::InvalidInput {
             detail: format!("store path '{}' has no file name", path.display()),
         })?;
 
@@ -274,8 +274,9 @@ impl StoreRepo {
         let _create_lock = acquire_flock_strict(&create_lock_path, Blocking::Block)?;
 
         // 2. Loser path: a concurrent creator (or an earlier success) already
-        //    published. Validate the winner and observe the same parent
-        //    durability barrier.
+        //    published. The identity is re-validated against the expectation
+        //    derived from the addressing, so a directory whose recorded scope
+        //    does not match its address fails closed here too.
         if path.exists() {
             let repo = Self::open(path, &expected)?;
             fsync_dir(parent)?;
@@ -852,13 +853,13 @@ fn collect_tree_files(
 /// the `refs/lattice/` namespace.
 fn validate_ref_name(ref_name: &str) -> Result<()> {
     if !ref_name.starts_with(LATTICE_REF_PREFIX) {
-        return Err(StoreError::Git(format!(
-            "ref '{ref_name}' is outside the {LATTICE_REF_PREFIX} namespace"
-        )));
+        return Err(StoreError::InvalidInput {
+            detail: format!("ref '{ref_name}' is outside the {LATTICE_REF_PREFIX} namespace"),
+        });
     }
-    let _: gix::refs::FullName = ref_name
-        .try_into()
-        .map_err(|e| StoreError::Git(format!("illegal ref name '{ref_name}': {e}")))?;
+    let _: gix::refs::FullName = ref_name.try_into().map_err(|e| StoreError::InvalidInput {
+        detail: format!("illegal ref name '{ref_name}': {e}"),
+    })?;
     Ok(())
 }
 
@@ -871,12 +872,20 @@ fn classify_ref_error(ref_name: &str, error: gix::reference::edit::Error) -> Sto
             Prepare::MustNotExist { .. }
             | Prepare::MustExist { .. }
             | Prepare::ReferenceOutOfDate { .. }
-            | Prepare::DeleteReferenceMustExist { .. }
-            | Prepare::LockAcquire { .. },
+            | Prepare::DeleteReferenceMustExist { .. },
         ) => StoreError::CasConflict {
             ref_name: ref_name.to_string(),
             detail: error.to_string(),
         },
+        // A ref-lock acquisition failure is contention on the ref itself,
+        // not a lost precondition: the caller's expectation may still hold on
+        // the other side of the lock, so this must not be retried as a CAS
+        // race. It is a Git-mechanics failure, surfaced as such.
+        gix::reference::edit::Error::FileTransactionPrepare(Prepare::LockAcquire { .. }) => {
+            StoreError::Git(format!(
+                "lock acquire while updating ref {ref_name}: {error}"
+            ))
+        }
         _ => StoreError::Git(format!("update ref {ref_name}: {error}")),
     }
 }
@@ -1116,7 +1125,8 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap();
-        // Same store via a different key: scope mismatch corruption.
+        // Same store via a different key: the other project's directory does
+        // not exist, so this is a typed miss, not corruption.
         let other = ProjectStoreKey::from_canonical_path_bytes(b"/other");
         let err = StoreRepo::open_project(
             &layout,
@@ -1127,6 +1137,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, StoreError::NotInitialized { .. }));
+
+        // The scope check itself, without addressing indirection: address the
+        // existing store by its real directory, but under a Global
+        // expectation that contradicts the recorded project scope.
+        let real_path = layout.project_store(&key, "workspace-history.git");
+        let err = StoreRepo::open(
+            &real_path,
+            &ExpectedMeta {
+                store_kind: "workspace-history".into(),
+                store_schema_version: 1,
+                scope: StoreScope::Global,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, StoreError::Corruption { ref detail } if detail.contains("scope")),
+            "a recorded project scope must fail closed under a global expectation: {err:?}"
+        );
 
         // Scope forgery: hand-build a repo whose recorded key differs from
         // its directory key and require open to reject it.
@@ -1223,7 +1251,10 @@ mod tests {
         let err = repo
             .cas_ref("refs/heads/main", blob, RefExpectation::MustNotExist, "t")
             .unwrap_err();
-        assert!(matches!(err, StoreError::Git(_)));
+        assert!(
+            matches!(err, StoreError::InvalidInput { ref detail } if detail.contains("namespace")),
+            "an out-of-namespace ref is invalid input, not a git failure: {err:?}"
+        );
     }
 
     #[test]

@@ -76,20 +76,24 @@ pub(crate) fn validate_turn_ref_id(turn_id: &str) -> Result<()> {
 
 fn validate_ref_component(value: &str, field: &str) -> Result<()> {
     if value.is_empty() {
-        return Err(SessionError::Git(format!("{field} must not be empty")));
+        return Err(SessionError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
     }
     if value.len() > 128 {
-        return Err(SessionError::Git(format!("{field} exceeds 128 characters")));
+        return Err(SessionError::InvalidInput(format!(
+            "{field} exceeds 128 characters"
+        )));
     }
     let mut chars = value.chars();
     let first = chars.next().expect("non-empty");
     if !first.is_ascii_alphanumeric() {
-        return Err(SessionError::Git(format!(
+        return Err(SessionError::InvalidInput(format!(
             "{field} must start with alphanumeric character"
         )));
     }
     if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-        return Err(SessionError::Git(format!(
+        return Err(SessionError::InvalidInput(format!(
             "{field} must contain only alphanumeric, '.', '_', or '-'"
         )));
     }
@@ -199,7 +203,7 @@ pub(crate) fn write_state_commit(
     state: &SessionState,
 ) -> Result<gix::ObjectId> {
     let value = serde_json::to_value(state)
-        .map_err(|e| SessionError::Git(format!("serialize state: {e}")))?;
+        .map_err(|e| SessionError::InvalidInput(format!("serialize state: {e}")))?;
     let bytes = crate::graph::canonical_json_bytes(&value);
     let blob = store.write_blob(&bytes)?;
     let tree = store.write_tree(TreeSpec::new().upsert(
@@ -208,7 +212,7 @@ pub(crate) fn write_state_commit(
         blob,
     ))?;
     let timestamp = chrono::DateTime::parse_from_rfc3339(&state.updated_at)
-        .map_err(|e| SessionError::Git(format!("parse state timestamp: {e}")))?
+        .map_err(|e| SessionError::InvalidInput(format!("parse state timestamp: {e}")))?
         .timestamp();
     let parents: Vec<gix::ObjectId> = previous.into_iter().collect();
     let oid = store.write_commit_at(

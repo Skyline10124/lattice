@@ -11,7 +11,6 @@
 //! Since GitHub #143 the store is built on the `lattice-store` kernel and
 //! lives in the global `$XDG_STATE_HOME/lattice/sessions.git`; the
 //! `ProjectStoreKey` type is re-exported for the composition layer.
-use std::path::PathBuf;
 
 pub use lattice_store::{Blocking, FlockGuard, LockMode, ProjectStoreKey, StateLayout, StoreError};
 pub mod graph;
@@ -38,15 +37,12 @@ pub type Result<T> = std::result::Result<T, SessionError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    #[error("io error while {operation} '{path}': {source}")]
-    Io {
-        operation: &'static str,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("invalid branch name: format or length violation")]
     InvalidBranchName,
+    /// A caller violated a session-store input contract (empty/illegal id,
+    /// unserializable value). API misuse, not store damage.
+    #[error("invalid session input: {0}")]
+    InvalidInput(String),
     #[error("session '{0}' not found")]
     NotFound(String),
     #[error("transaction conflict: {0}")]

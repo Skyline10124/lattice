@@ -109,6 +109,13 @@ pub enum WorkspaceHistoryError {
     /// The private repository could not be opened, created, or written.
     #[error("private workspace history repository: {0}")]
     Repo(String),
+    /// The kernel error, taxonomy preserved (ADR 0005 §4 typed failures).
+    ///
+    /// `From<StoreError>` keeps `NotInitialized`/`Corruption`/`Busy`/
+    /// `LockUpgrade`/`CasConflict`/`MissingPrimitive` matchable so a domain
+    /// caller never has to sniff a Display string.
+    #[error("store kernel error: {0}")]
+    Kernel(#[source] StoreError),
     /// A mutation path was not a workspace-relative file path.
     #[error("workspace history path '{path}' rejected: {reason}")]
     Path {
@@ -129,7 +136,7 @@ pub enum WorkspaceHistoryError {
 
 impl From<StoreError> for WorkspaceHistoryError {
     fn from(err: StoreError) -> Self {
-        Self::Repo(err.to_string())
+        Self::Kernel(err)
     }
 }
 
@@ -1867,8 +1874,11 @@ mod tests {
 
         let err = WorkspaceHistory::open(backing).expect_err("absent store must fail");
         assert!(
-            matches!(err, WorkspaceHistoryError::Repo(ref msg) if msg.contains("not initialized")),
-            "expected a not-initialized error, got {err:?}"
+            matches!(
+                err,
+                WorkspaceHistoryError::Kernel(StoreError::NotInitialized { .. })
+            ),
+            "expected typed NotInitialized, got {err:?}"
         );
         assert!(
             !store_path.exists(),
@@ -1921,8 +1931,11 @@ mod tests {
             .lock_workspace_operation(LockMode::Exclusive, Blocking::Block)
             .expect_err("upgrade must be rejected");
         assert!(
-            matches!(err, WorkspaceHistoryError::Repo(ref msg) if msg.contains("upgrade")),
-            "expected a lock-upgrade error, got {err:?}"
+            matches!(
+                err,
+                WorkspaceHistoryError::Kernel(StoreError::LockUpgrade { .. })
+            ),
+            "expected typed LockUpgrade, got {err:?}"
         );
     }
 

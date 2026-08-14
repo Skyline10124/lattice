@@ -110,4 +110,14 @@ pub enum StoreError {
     /// Git object/reference mechanics failure.
     #[error("git error: {0}")]
     Git(String),
+
+    /// A caller violated a documented kernel precondition or input contract
+    /// (e.g. an empty store name or a ref outside `refs/lattice/`). This is
+    /// an API misuse, not store damage — unlike `Corruption`, the store's
+    /// contents are not at fault.
+    #[error("invalid kernel input: {detail}")]
+    InvalidInput {
+        /// What was invalid.
+        detail: String,
+    },
 }

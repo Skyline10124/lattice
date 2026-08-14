@@ -110,19 +110,18 @@ fn test_status_empty_session() {
 }
 
 #[test]
-fn test_repo_auto_init_bare_on_fresh_dir() {
-    // A fresh install with no pre-existing Git repo must
-    // auto-initialize a bare repo on first access instead of crashing.
-    // This is the safety net for after Plan 07 deletes SessionApi::sqlite().
-    let dir = temp_dir("auto_init_bare");
+fn create_builds_a_fresh_kernel_store() {
+    // `create` is the sole initialization path (#143): it builds the store on
+    // the kernel and returns a usable handle. Strict-open fail-closed coverage
+    // lives in `state_and_locks.rs::open_absent_store_fails_closed_without_creating_it`.
+    let dir = temp_dir("fresh_kernel_store");
     // Intentionally do NOT call setup_git_repo — dir does not exist yet.
     let store =
         GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
 
-    // First session creation triggers repo() which auto-inits the bare repo.
     store
         .create_session("sess-auto-init", None, "coder", "main", &test_project_key())
-        .expect("create session on fresh bare repo");
+        .expect("create session on fresh kernel store");
 
     // The session is usable: a follow-up open succeeds and a commit lands.
     let session = store.open_session("sess-auto-init").expect("open");
