@@ -27,17 +27,19 @@ deployment platform.
 
 ## Workspace
 
-LATTICE is a Cargo workspace of 19 crates, layered so dependencies always
+LATTICE is a Cargo workspace of 20 crates, layered so dependencies always
 point from higher layers down. See [AGENTS.md](AGENTS.md) for the authoritative
 graph with every edge spelled out.
 
 ```text
-Layer 0 (leaf):  lancet-protocol   lattice-session
+Layer 0 (leaf):  lancet-protocol
 Layer 0.5:       net-guard
-                 lattice-llm(->net-guard)
+                 lattice-conversation(->protocol)
+                 lattice-llm(->net-guard,conversation)
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
-                 lattice-agent(->llm,session)
+                 lattice-session(->conversation)
+                 lattice-agent(->llm,conversation)
 Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
                  lancet-authority(->protocol,catalog,net-guard)
@@ -49,7 +51,8 @@ Layer 3.5:       lancet-api(->protocol,catalog,dispatch,cep,audit,authority,
                             native,runtime)
 Layer 4:         lattice-api(->lancet-api,lancet-protocol,lancet-catalog,
                              lancet-authority,lancet-native,lattice-agent,
-                             lattice-llm,lattice-profile,lattice-session)
+                             lattice-conversation,lattice-llm,lattice-profile,
+                             lattice-session)
 Layer 5:         lattice-tui(->lattice-api + presentation deps)
                  lattice-cli(->lattice-api,lattice-session,lattice-tui,
                               lancet-api + presentation deps)
@@ -70,7 +73,8 @@ lattice-system-harness (black-box tests; must not depend on product crates).
 | `lancet-runtime` | ADR 0004 target: WASM Component engine, closed composition gate, Tool Host enforcement. Not yet the production path. |
 | `lancet-api` | Unified LANCET public API composing the CEP runtime (`LancetRuntime`/`LancetServer`). |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, private/reserved IP checks. |
-| `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security. |
+| `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security, and the pure-data provider replay/projection seam. |
+| `lattice-conversation` | Provider-neutral data-only conversation contract: ordered `NativeMessage` with bound/unbound ToolCall typestates, semantic/replay digests, per-attempt usage, and the transcript types. No I/O, no stores, no ID generators. |
 | `lattice-session` | Session graph contract and the **git-backed** graph store (`GitSessionGraphStore`). |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, LANCET `[lancet]` policy sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly. |
