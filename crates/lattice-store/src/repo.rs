@@ -71,6 +71,11 @@ pub struct StoreRepo {
     git_dir: PathBuf,
     repo: Mutex<gix::Repository>,
     meta: StoreMeta,
+    /// Objects written through this handle since the last
+    /// [`Self::fsync_pending`] barrier, so writers can fsync exactly what
+    /// they created without threading every intermediate oid through their
+    /// tree-building code.
+    pending: Mutex<std::collections::BTreeSet<gix::ObjectId>>,
 }
 
 impl std::fmt::Debug for StoreRepo {
@@ -194,6 +199,7 @@ impl StoreRepo {
             git_dir: path.to_path_buf(),
             repo: Mutex::new(repo),
             meta,
+            pending: Mutex::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -320,6 +326,7 @@ impl StoreRepo {
                 git_dir: temp.clone(),
                 repo: Mutex::new(temp_repo),
                 meta: meta.clone(),
+                pending: Mutex::new(std::collections::BTreeSet::new()),
             };
             this.cas_ref(
                 META_REF,
@@ -531,10 +538,13 @@ impl StoreRepo {
 
     /// Write a blob.
     pub fn write_blob(&self, bytes: &[u8]) -> Result<gix::ObjectId> {
-        self.repo()
+        let oid = self
+            .repo()
             .write_blob(bytes)
             .map(|id| id.detach())
-            .map_err(|e| StoreError::Git(format!("write blob: {e}")))
+            .map_err(|e| StoreError::Git(format!("write blob: {e}")))?;
+        self.note_pending(oid);
+        Ok(oid)
     }
 
     /// Apply a [`TreeSpec`] and write the resulting tree.
@@ -557,10 +567,13 @@ impl StoreRepo {
                 .remove(name)
                 .map_err(|e| StoreError::Git(format!("remove {name}: {e}")))?;
         }
-        editor
+        let oid = editor
             .write()
             .map(|id| id.detach())
-            .map_err(|e| StoreError::Git(format!("write tree: {e}")))
+            .map_err(|e| StoreError::Git(format!("write tree: {e}")))?;
+        drop(repo);
+        self.note_pending(oid);
+        Ok(oid)
     }
 
     /// Write a commit at an explicit unix timestamp (deterministic callers
@@ -579,11 +592,14 @@ impl StoreRepo {
         };
         let mut time_buf = gix::date::parse::TimeBuf::default();
         let sig_ref = sig.to_ref(&mut time_buf);
-        let repo = self.repo();
-        let commit = repo
-            .new_commit_as(sig_ref, sig_ref, message, tree, parents.iter().copied())
-            .map_err(|e| StoreError::Git(format!("create commit: {e}")))?;
-        Ok(commit.id)
+        let oid = {
+            let repo = self.repo();
+            repo.new_commit_as(sig_ref, sig_ref, message, tree, parents.iter().copied())
+                .map_err(|e| StoreError::Git(format!("create commit: {e}")))?
+                .id
+        };
+        self.note_pending(oid);
+        Ok(oid)
     }
 
     /// CAS one ref to `new` under `expect`.
@@ -704,10 +720,28 @@ impl StoreRepo {
         fsync_publication(&self.git_dir, oids, refs)
     }
 
+    /// Publication barrier over every object written through this handle
+    /// since the last barrier, plus the given refs. The pending set is
+    /// drained whether or not the barrier succeeds.
+    pub fn fsync_pending(&self, refs: &[&str]) -> Result<()> {
+        let oids: Vec<gix::ObjectId> = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *pending).into_iter().collect()
+        };
+        fsync_publication(&self.git_dir, &oids, refs)
+    }
+
     // ─── Internals ─────────────────────────────────────────────────────
 
     fn repo(&self) -> MutexGuard<'_, gix::Repository> {
         self.repo.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn note_pending(&self, oid: gix::ObjectId) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(oid);
     }
 }
 
