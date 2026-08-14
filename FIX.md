@@ -127,6 +127,14 @@ registration; root `AGENTS.md`, `docs/ARCHITECTURE.md`, crate AGENTS files.
 lattice-llm 133 + provider_projection 23（+9）、lattice-session 54、lattice-agent
 8/4/11；`cargo xtask lancet-boundary` 7/7 PASS；`cargo xtask ci` all checks passed。
 
+**留给 #139-B 的两条前置约束**（两轮审查共同指向，已写入
+`crates/lattice-conversation/src/digest.rs` 与 `AGENTS.md`，此处存档）：
+
+1. `AttemptAssembly` 的限额计量是约定式的，没有机器门禁。#139-B 接入 production
+   codec 时，任何新的 attempt 组装路径都必须经它计量，否则 P1-1 会以另一种形式复发。
+2. binding digest 必须对**存储的原始 message**（含 reasoning）计算，绝不能对
+   `project_cross_provider` 的输出计算 —— 后者按 ADR 0005 §7 有意丢弃 reasoning 与
+   replay metadata，对其取 digest 会把 Turn 绑定到一条 provider 从未产出的 message。
 
 ## GitHub #99：工作区 `.env` 的信任边界 — 2026-07-31
 

@@ -33,6 +33,10 @@ ADR 0005 §7 (landed in GitHub #142):
 - `semantic_digest` excludes provider origin, provider call IDs, and replay
   state; `replay_state_digest` covers exactly those. Provider metadata must
   never cross into the semantic digest.
+- Binding digests are computed over the message as stored, reasoning included —
+  never over a `project_cross_provider` output, which intentionally drops
+  reasoning and replay metadata and would bind a Turn to a message no provider
+  produced. #139-B must observe this when it wires reservation.
 - Replay state is preserved verbatim, bounded at 64 KiB per part, and never
   filtered out even on an otherwise-empty part.
 - Per-attempt `Option<TokenUsage>`: missing is unknown, never zero.

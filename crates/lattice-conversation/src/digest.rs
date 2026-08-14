@@ -12,6 +12,14 @@
 //! - [`replay_state_digest`]: provider origin, real provider call IDs, and
 //!   part-local opaque replay state, in order.
 //!
+//! Binding digests are computed over the message as stored — the provider's
+//! own message, reasoning parts included. They are never computed over a
+//! cross-provider projection: `provider_projection::project_cross_provider`
+//! drops reasoning parts and replay metadata by design (ADR 0005 §7), so its
+//! output is a wire-facing derivative and digesting it would bind a Turn to a
+//! message the provider never produced. #139-B must observe this when it wires
+//! reservation to the production path.
+//!
 //! Every digest is SHA-256 over a domain separator, an explicit byte length,
 //! and the canonical JSON bytes of the projected value (the same construction
 //! ADR 0005 §2 fixes for `ProjectStoreKey`; §7 fixes it for argument digests).
