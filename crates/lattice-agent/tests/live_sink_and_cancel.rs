@@ -19,8 +19,8 @@ use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, AgentTurnRequest, AgentTurnStatus, LlmClient,
     LlmRetryConfig, ToolCallExecutor, ToolExecutionError,
 };
+use lattice_conversation::HeadTranscript;
 use lattice_llm::{LlmEvent, ToolCall, ToolDefinition};
-use lattice_session::HeadTranscript;
 
 // ---------------------------------------------------------------------------
 // Test helpers (duplicated from streaming_delta.rs — Rust integration tests
@@ -450,7 +450,7 @@ async fn scenario_06_cancel_after_first_tool_in_multi_tool_batch() {
     )));
 
     // First tool's GraphMessage IS in transcript; second tool's is NOT.
-    let tool_msgs: Vec<&lattice_session::GraphMessage> = result
+    let tool_msgs: Vec<&lattice_conversation::GraphMessage> = result
         .messages
         .iter()
         .filter(|m| m.role == "tool")

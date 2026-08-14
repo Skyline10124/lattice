@@ -1,0 +1,32 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {
+            "text": "Plan: check weather, then time.",
+            "thought": true,
+            "thoughtSignature": "CigIARABGkh4dGh5YnJpZC1zaWduYXR1cmUtb24tdGhvdWdodA=="
+          },
+          {
+            "text": "",
+            "thoughtSignature": "CigIARABGkh4ZW1wdHktdGV4dC1wYXJ0LXNpZ25hdHVyZQ=="
+          },
+          {
+            "functionCall": {
+              "name": "get_weather",
+              "args": {
+                "city": "Tokyo",
+                "unit": "celsius"
+              },
+              "id": "fc-2026-08-13-001"
+            },
+            "thoughtSignature": "CigIARABGkh4c2lnbmF0dXJlLW9uLWZ1bmN0aW9uLWNhbGw="
+          }
+        ]
+      },
+      "finishReason": "STOP"
+    }
+  ]
+}

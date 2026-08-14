@@ -2,6 +2,140 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #142：建立 InvocationId 与 lattice-conversation 纯数据 contract — 2026-08-13
+
+Scope: feature implementation (ADR 0005 §1/§7 prerequisite, ordered #141 → #142
+→ #143 → #144 → #139). Additive only: no production JSON-RPC/transport/
+events/cancellation/SQLite/operator/WorkspaceHistory/dispatch path was
+touched, and no second identity seam was introduced.
+
+**What landed:**
+
+- `lancet-protocol::identity`: strict `InvocationId` / `TurnId` (lowercase
+  hyphenated UUID v4; rejects uppercase, unhyphenated, non-v4, non-RFC-4122
+  variant spellings) and `SessionId` (32 lowercase hex, matching the existing
+  `Uuid::new_v4().simple()` production shape). Parse/display/serde/schemars
+  only — no generation, no I/O, no tokio, no String alias, no second newtype.
+- `lancet-protocol::address`: provider-neutral structured addresses
+  (`ModelMessageAddress { SessionId, TurnId, model_step_ordinal }`,
+  `ToolCallAddress { message, part_ordinal }`, `ModelAttemptKey`, `PlanKey`).
+  Placed in protocol because #139-A's `lancet-audit` InvocationStore consumes
+  binding tuples without a `lattice-conversation` edge (ADR 0005 §19).
+- New data-only crate `lattice-conversation`: ordered
+  `NativeMessage<ToolCallState>` / `MessagePart` (outer struct: semantic +
+  optional bounded part-local `OpaqueProviderState`, 64 KiB cap, never
+  filtered even on empty parts), `UnboundToolCall`/`BoundToolCall` typestates,
+  `ToolResultOutcome` closed sum, distinct `semantic_digest` /
+  `replay_state_digest`, strict `validate_tool_call_batch` (arguments must be
+  one JSON object; empty string/array/scalar/malformed/duplicate/incomplete
+  fail closed; no empty-to-`{}` normalization), canonical `arguments_digest`
+  (SHA-256 over domain separator + u64_be byte length + canonical bytes),
+  per-attempt `Option<TokenUsage>` (missing = unknown, never zero), typed
+  `AttemptInterruption`/`AttemptRejection`, and protocol hard limits (8 MiB
+  arguments / 2 MiB assistant / 2 MiB reasoning / 16 MiB attempt; plus-one
+  produces a typed `OutputLimitExceeded`, never partial conversation).
+- `lattice-llm::provider_projection` (new pure-data seam, not wired into the
+  production codecs): official wire JSON ↔ `NativeMessage` for
+  OpenAI-compatible / Anthropic / Gemini, preserving part order, real
+  provider call IDs, Anthropic thinking signatures, and Gemini
+  thoughtSignatures in place (including on empty text parts); same-provider
+  replay is fixture-exact; cross-provider projection drops all replay state
+  and provider call IDs (verified byte-level non-leakage); missing provider
+  IDs stay `None` and no `tc_*` synthetic IDs exist.
+- Conversation pure-data ownership migration: `GraphMessage` / `GraphToolCall`
+  / `HeadTranscript` / `TurnUsage` moved verbatim (serde shape frozen) into
+  `lattice-conversation` and re-exported by `lattice-session`; `lattice-agent`
+  now depends on `lattice-llm` + `lattice-conversation` only (verified zero
+  `lattice-session` edges via `cargo tree`). `TurnUsage` is a rename of the
+  new provider-neutral `TokenUsage { u64 × 3 }`; `lattice_llm::TokenUsage`
+  (u32) stays for the wire with the existing checked widening at the Agent
+  boundary (#139-B unifies them).
+- Root `AGENTS.md` graph/roles, `docs/ARCHITECTURE.md` layer model + mermaid,
+  and crate AGENTS files updated; plan doc
+  `docs/plans/2026-08-13-issue142-invocation-conversation.md` records the
+  acceptance mapping and the four grill decisions.
+
+**Verification:**
+
+- `cargo test -p lancet-protocol` (83), `-p lattice-conversation` (29),
+  `-p lattice-llm --test provider_projection` (14 fixture tests), migration
+  regression `-p lattice-agent -p lattice-session -p lattice-api`.
+- `cargo tree -p lattice-agent --prefix none | grep -c lattice-session` → 0.
+- `cargo xtask ci` — all checks passed (fmt, clippy `-D warnings`, builds,
+  boundary gates, per-crate tests, tool-build verify).
+
+**Changed files (high level):** new `crates/lattice-conversation/` crate;
+`crates/lancet-protocol/src/{identity,address}.rs` + lib wiring; new
+`crates/lattice-llm/src/provider_projection/` + `tests/provider_projection.rs`
++ `tests/fixtures/projection/*.json`; ownership edits in
+`crates/lattice-session/src/graph.rs` (re-export) and
+`crates/lattice-agent/` (dependency swap); workspace `Cargo.toml`
+registration; root `AGENTS.md`, `docs/ARCHITECTURE.md`, crate AGENTS files.
+
+### 审查修复轮次 — 2026-08-13
+
+独立只读审查（verdict: REQUEST CHANGES）提出 1 个 P0、1 个 P1、4 个 P2、1 个 P3。
+本轮逐条修复，并补齐审查判定为「部分满足」的 2 条验收标准。
+
+- **P0-1 cross-provider projection 重放 source reasoning**
+  （`provider_projection/mod.rs::project_cross_provider`）。原实现只清除
+  `replay_state` 与 `provider_call_id`，保留 `MessageSemantic::Reasoning`，
+  经 `native_to_wire` 后 Anthropic 的思维链会原样出现在 OpenAI 的
+  `reasoning_content` 与 Gemini 的 `thought: true` part 中，违反 ADR 0005 §7
+  「cross-provider projection does not replay source reasoning」。修复：投影时
+  `retain` 掉全部 Reasoning part。原有两处 `assert_eq!(semantic_digest(...))`
+  实际上把「reasoning 幸存」错误固化为期望，已改为断言投影不含 Reasoning 且
+  digest 必然不同；另补 `cross_provider_projection_preserves_non_reasoning_semantics`
+  证明非 reasoning 语义仍无损跨越。
+- **P1-1 seam 绕过 protocol hard limits**。`AttemptAssembly` 此前在模块外零调用方，
+  三个 `wire_to_native` 只继承 per-call 8 MiB 限制。修复：新增
+  `ProjectionError::OutputLimitExceeded { provider, interruption }`，三个 projector
+  边解析边经 `AttemptAssembly` 计量（text→`push_assistant`、
+  reasoning/thinking→`push_reasoning`、每个 call 前 `begin_tool_call()` 后
+  `push_tool_arguments`），任一 push 越限即 fail closed，绝不返回部分 `NativeMessage`。
+- **P2-1 Anthropic text block 写出 `signature`**（`anthropic.rs`）。`signature` 只属于
+  `thinking`/`redacted_thinking`；reader 对 text block 无读取分支，round-trip 会静默
+  丢弃。修复：writer 遇到带 `replay_state` 的 Text part 返回 `UnsupportedPart`，
+  与 OpenAI writer 已有守卫对齐。
+- **P2-2 same-provider replay 的 arguments 归一化**（`openai.rs`）。canonical 化是
+  ADR 0005 §7 的执行要求，但此前未被记录，且 6 个 fixture 全是 canonical 拼写导致
+  `openai_same_provider_replay_is_exact` 空洞通过。修复：在模块 doc 中显式记录该有损
+  归一化，并新增用非 canonical 拼写断言「语义等同、字节不等同」的测试。
+- **P2-3 `BoundToolCall` digest 未校验**（`tool_call.rs`）。derive 的 `Deserialize`
+  接受任意 64 位 hex，全零 digest 可与真实 arguments 并存。修复：改用
+  `#[serde(try_from = "BoundToolCallWire")]`，反序列化时重算并比对，不一致返回
+  `ArgumentsDigestMismatch`。序列化形状不变（仍是小写 hex）。
+- **P2-4 OpenAI writer 合并交错 text part**。属 OpenAI 单一 `content` 字符串的固有
+  限制，语义不变；修复为在模块 doc 中记录并新增测试固化该行为。
+- **P3-1 `LimitKind` 未导出**。已加入 `lattice-conversation` 的 `pub use limits::{…}`。
+
+**补齐的验收标准：**
+
+- 「provider fixtures … A→B 不泄漏」：原测试只对 native 结构体断言，漏掉了 wire 这一层。
+  新增 `cross_provider_wire_never_carries_source_reasoning`，对
+  Anthropic→OpenAI、Anthropic→Gemini、Gemini→OpenAI 三组执行
+  `wire_to_native → project_cross_provider → native_to_wire`，断言产出的 wire 中
+  不含 source reasoning 正文、不含 `reasoning_content`、不含 `"thought"`。
+  已验证该测试在移除 P0 修复后失败、恢复后通过。
+- 「protocol hard-limit fixtures；plus-one 产生 typed interruption 而非 partial
+  conversation」：新增 4 个 seam 层限额测试，覆盖 assistant / reasoning 的精确边界与
+  plus-one、16 MiB attempt 总量（跨两个 tool call，避开 per-call 预算）的精确边界与
+  plus-one，以及 Anthropic/Gemini 的 per-call arguments 限额，全部断言返回 `Err`
+  而非部分消息。限额数据在测试中程序化构造，不落盘为 fixture。
+
+**本轮验证：** `cargo test` — lancet-protocol 83、lattice-conversation 31（+2）、
+lattice-llm 133 + provider_projection 23（+9）、lattice-session 54、lattice-agent
+8/4/11；`cargo xtask lancet-boundary` 7/7 PASS；`cargo xtask ci` all checks passed。
+
+**留给 #139-B 的两条前置约束**（两轮审查共同指向，已写入
+`crates/lattice-conversation/src/digest.rs` 与 `AGENTS.md`，此处存档）：
+
+1. `AttemptAssembly` 的限额计量是约定式的，没有机器门禁。#139-B 接入 production
+   codec 时，任何新的 attempt 组装路径都必须经它计量，否则 P1-1 会以另一种形式复发。
+2. binding digest 必须对**存储的原始 message**（含 reasoning）计算，绝不能对
+   `project_cross_provider` 的输出计算 —— 后者按 ADR 0005 §7 有意丢弃 reasoning 与
+   replay metadata，对其取 digest 会把 Turn 绑定到一条 provider 从未产出的 message。
+
 ## GitHub #99：工作区 `.env` 的信任边界 — 2026-07-31
 
 Severity: HIGH（策略绕过 + 对话正文与凭据外泄，前置条件仅「在不受信任的仓库目录里跑一次

@@ -8,6 +8,7 @@ description = "LATTICE LLM vocabulary and function-call facade"
 
 [dependencies]
 net-guard = { workspace = true }
+lattice-conversation = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

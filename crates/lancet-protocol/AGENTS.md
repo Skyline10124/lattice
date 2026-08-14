@@ -27,6 +27,11 @@ evidence types. It has no I/O and no Tokio dependency.
 - `src/error.rs` owns `CepError`, families, wire codes, and retriability.
 - `src/policy.rs` owns deterministic policy hook input/output data.
 - `src/boundary.rs` owns host/isolation boundary report wire shapes.
+- `src/identity.rs` owns the strict typed identities (#142, ADR 0005 §1):
+  `InvocationId`/`TurnId` (lowercase hyphenated UUID v4) and `SessionId` (32
+  lowercase hex). Parse/display/serde/schema only — never a generator.
+- `src/address.rs` owns the provider-neutral structured addresses:
+  `ModelMessageAddress`, `ToolCallAddress`, `ModelAttemptKey`, `PlanKey`.
 - Public re-exports in `src/lib.rs` are the crate contract; keep them stable.
 
 ## Boundaries

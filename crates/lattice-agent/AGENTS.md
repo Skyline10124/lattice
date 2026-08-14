@@ -26,11 +26,14 @@ traits.
 ## Boundaries
 
 - Do not construct native LANCET transports or call native executor helpers.
-- Do not implement session storage; consume `lattice-session` graph values.
+- Do not implement session storage; consume conversation data from
+  `lattice-conversation` (`lattice-session` re-exports it for persistence
+  consumers). Since #142 this crate has no `lattice-session` edge and must
+  not re-acquire one.
 - Keep tool execution injectable so `lattice-api` can provide CEP execution.
 - `buffered` event sequence remains authoritative; live sink is best-effort.
 - ADR 0005 is the accepted target, staged rather than current behavior. #142
-  moves conversation data to `lattice-conversation` and deletes this crate's
+  moved conversation data to `lattice-conversation` and deleted this crate's
   dependency on `lattice-session`; #139-B then narrows Agent to a one-provider-
   attempt `ModelStepDriver`. The target Agent receives assembled history, owns
   no store handle, and does not own retry/backoff, generate InvocationId,

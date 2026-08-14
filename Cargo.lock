@@ -2822,8 +2822,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "lattice-conversation",
  "lattice-llm",
- "lattice-session",
  "serde_json",
  "tokio",
  "unicode-width",
@@ -2892,11 +2892,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-conversation"
+version = "0.1.0"
+dependencies = [
+ "lancet-protocol",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lattice-llm"
 version = "0.1.0"
 dependencies = [
  "bytes",
  "futures",
+ "lattice-conversation",
  "net-guard",
  "reqwest",
  "serde",
@@ -2926,6 +2938,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "gix",
+ "lattice-conversation",
  "serde",
  "serde_json",
  "sha2 0.11.0",

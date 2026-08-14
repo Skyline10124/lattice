@@ -14,6 +14,15 @@ endpoint metadata, request-time DNS pinning, and logging setup.
   responses, roles, targets, and token usage.
 - `src/client.rs` owns HTTP client behavior and request-time security hooks.
 - `src/providers/` owns provider-specific protocol adapters.
+- `src/provider_projection/` owns the pure-data provider replay/projection
+  seam (#142): official wire JSON ↔ `lattice-conversation` `NativeMessage`,
+  with official-wire fixtures in `tests/fixtures/projection/`. It is not
+  wired into the production codecs until #139-B. `wire_to_native` meters every
+  body through `lattice_conversation::AttemptAssembly`, so an over-limit wire
+  fails closed with `ProjectionError::OutputLimitExceeded` instead of yielding
+  a partial message. `project_cross_provider` drops replay state, provider
+  call IDs, **and** reasoning parts: ADR 0005 §7 forbids replaying source
+  reasoning into another provider.
 - `src/sse.rs` owns streaming parser behavior.
 - `src/router.rs` and `src/endpoints.rs` own model alias/provider resolution.
 - `net-guard` owns shared URL validation, DNS checks, private-address
@@ -30,8 +39,8 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 - Higher layers should consume typed `LlmEvent`, `LlmError`, and model metadata.
 - Preserve SSRF protections on every network-facing change.
 - ADR 0005 makes provider Tool Call IDs optional opaque wire metadata, never
-  LANCET invocation identity. GitHub #142 moves provider-neutral messages and
-  bounded part-local replay state into `lattice-conversation`; same-provider
+  LANCET invocation identity. Since GitHub #142 provider-neutral messages and
+  bounded part-local replay state live in `lattice-conversation`; same-provider
   replay must preserve real IDs/signatures/part order, while cross-provider
   projection must not leak source-provider opaque state. Do not synthesize
   `tc_*` IDs as domain identity.

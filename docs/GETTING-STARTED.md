@@ -42,7 +42,7 @@ make WASM, macOS, Windows, BSD, or generic Unix a supported host platform.
 
 ## 2. Installation
 
-LATTICE is a Cargo workspace of 19 crates. Clone the repository and build it
+LATTICE is a Cargo workspace of 20 crates. Clone the repository and build it
 with cargo.
 
 1. Clone the repo:

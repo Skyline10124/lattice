@@ -1,0 +1,35 @@
+{
+  "id": "msg_01XyZ9",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "Need the weather first, then the time; both are independent calls.",
+      "signature": "ErUBCkYIAxgCIkD3c2FmZGVmNTQ2Ny0xMjM0LWFiY2QtZXhhbXBsZXNpZ25hdHVyZQ=="
+    },
+    {
+      "type": "text",
+      "text": "I'll look both up."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01AbCdEfGh",
+      "name": "get_weather",
+      "input": {
+        "city": "Tokyo",
+        "unit": "celsius"
+      }
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_02BcDeFgHi",
+      "name": "get_time",
+      "input": {
+        "timezone": "JST"
+      }
+    }
+  ],
+  "stop_reason": "tool_use"
+}

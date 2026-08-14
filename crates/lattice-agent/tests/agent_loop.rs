@@ -8,8 +8,8 @@ use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnRequest, AgentTurnStatus, CepErrorPayload, LlmClient,
     LlmRetryConfig, ToolCallExecutor, ToolExecutionError,
 };
+use lattice_conversation::HeadTranscript;
 use lattice_llm::ToolDefinition;
-use lattice_session::HeadTranscript;
 
 fn read_file_tool_definition() -> ToolDefinition {
     ToolDefinition::new(

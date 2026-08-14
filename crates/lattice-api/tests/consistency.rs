@@ -43,7 +43,7 @@ fn last_usage(session_store: &GitSessionGraphStore, session_id: &str) -> Option<
         .log(session_id)
         .expect("log after commit")
         .last()
-        .and_then(|entry| entry.usage.clone())
+        .and_then(|entry| entry.usage)
         .map(TurnUsageSummary::from)
         .and_then(|usage| {
             if usage.prompt_tokens == 0 && usage.completion_tokens == 0 && usage.total_tokens == 0 {

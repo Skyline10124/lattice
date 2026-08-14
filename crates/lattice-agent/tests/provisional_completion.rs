@@ -16,8 +16,8 @@ use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnRequest, AgentTurnStatus, LlmClient, LlmRetryConfig,
     ProvisionalCompletionHook, ProvisionalDecision, ToolCallExecutor, ToolExecutionError,
 };
+use lattice_conversation::{GraphMessage, HeadTranscript};
 use lattice_llm::ToolDefinition;
-use lattice_session::{GraphMessage, HeadTranscript};
 
 struct FakeLlm {
     responses: std::sync::Mutex<Vec<Result<lattice_llm::ChatResponse, String>>>,
@@ -254,7 +254,7 @@ async fn provisional_complete_contract_hook_receives_assistant_message() {
 #[tokio::test]
 async fn provisional_complete_contract_no_workspace_dependency() {
     // This test verifies at compile time that the hook trait uses only
-    // GraphMessage (from lattice-session) and no workspace/Git/disposition types.
+    // GraphMessage (from lattice-conversation) and no workspace/Git/disposition types.
     // If ProvisionalCompletionHook or ProvisionalDecision imported workspace
     // types, this file would fail to compile since we import nothing from
     // lattice-workspace or lattice-api here.

@@ -96,7 +96,7 @@ there is no dual write, import, legacy reader, or runtime backend switch.
 
 ## 2. Component diagram
 
-The workspace has 19 crates grouped into layers. Arrows point from a higher
+The workspace has 20 crates grouped into layers. Arrows point from a higher
 layer toward the lower-layer crates it depends on. The diagram below shows the
 runtime crates; `lattice-tool-prelude` (guest SDK) and
 `lattice-system-harness` (black-box tests) sit outside it by contract.
@@ -116,9 +116,9 @@ graph TD
     %% Layer 3 — native handlers
     NATIVE["lancet-native"]
 
-    %% Layer 2.5 — CEP facade
+    %% Layer 2.5 — CEP facade / runtime
     CEP["lancet-cep"]
-
+    RUNTIME["lancet-runtime"]
     %% Layer 2 — dispatch / audit / authority
     DISPATCH["lancet-dispatch"]
     AUDIT["lancet-audit"]
@@ -132,6 +132,7 @@ graph TD
     %% Layer 0 — leaves
     PROTOCOL["lancet-protocol"]
     NETGUARD["net-guard"]
+    CONVERSATION["lattice-conversation"]
     LLM["lattice-llm"]
     SESSION["lattice-session"]
     %% Layer 5 -> 4
@@ -154,19 +155,23 @@ graph TD
     NAPI --> AUTHORITY
     NAPI --> CATALOG
     NAPI --> PROTOCOL
+    NAPI --> RUNTIME
 
-    %% Layer 3 -> 2 + 1 + 0
+    %% Layer 3 -> 2.5 + 2 + 1 + 0
     NATIVE --> DISPATCH
     NATIVE --> AUDIT
     NATIVE --> AUTHORITY
     NATIVE --> CATALOG
     NATIVE --> PROTOCOL
     NATIVE --> NETGUARD
+    NATIVE --> RUNTIME
     %% Layer 2.5 -> 2 + 1 + 0
     CEP --> DISPATCH
     CEP --> CATALOG
     CEP --> PROTOCOL
-
+    RUNTIME --> DISPATCH
+    RUNTIME --> AUTHORITY
+    RUNTIME --> PROTOCOL
     %% Layer 2 -> 1 + 0
     DISPATCH --> CATALOG
     DISPATCH --> PROTOCOL
@@ -180,8 +185,11 @@ graph TD
     CATALOG --> PROTOCOL
     PROFILE --> PROTOCOL
     AGENT --> LLM
-    AGENT --> SESSION
+    AGENT --> CONVERSATION
     LLM --> NETGUARD
+    LLM --> CONVERSATION
+    SESSION --> CONVERSATION
+    CONVERSATION --> PROTOCOL
 ```
 
 Layer model (verified against each crate's `Cargo.toml` `[dependencies]`):
@@ -190,17 +198,18 @@ Layer model (verified against each crate's `Cargo.toml` `[dependencies]`):
 |---|---|---|
 | 0 (leaf) | `lancet-protocol` | — |
 | 0 (leaf) | `net-guard` | — |
-| 0 (leaf) | `lattice-llm` | `net-guard` |
-| 0 (leaf) | `lattice-session` | — |
+| 0.5 | `lattice-conversation` | `lancet-protocol` |
+| 0.5 | `lattice-llm` | `net-guard`, `lattice-conversation` |
 | 1 | `lancet-catalog` | `lancet-protocol` |
 | 1 | `lattice-profile` | `lancet-protocol` |
-| 1 | `lattice-agent` | `lattice-llm`, `lattice-session` |
+| 1 | `lattice-session` | `lattice-conversation` |
+| 1 | `lattice-agent` | `lattice-llm`, `lattice-conversation` |
 | 2 | `lancet-dispatch` | `lancet-protocol`, `lancet-catalog` |
 | 2 | `lancet-audit` | `lancet-protocol`, `lancet-catalog` |
 | 2 | `lancet-authority` | `lancet-protocol`, `lancet-catalog`, `net-guard` |
 | 2.5 | `lancet-cep` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch` |
-| 3 | `lancet-native` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `net-guard` |
-| 3.5 | `lancet-api` | `lancet-cep`, `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `lancet-native` |
+| 3 | `lancet-native` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `net-guard`, `lancet-runtime` |
+| 3.5 | `lancet-api` | `lancet-cep`, `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `lancet-native`, `lancet-runtime` |
 | 4 | `lattice-api` | `lancet-api` + `lattice-agent`, `lattice-profile`, `lattice-session`, `lattice-llm` |
 | 5 | `lattice-tui` | `lattice-api` |
 | 5 | `lattice-cli` | `lattice-api`, `lattice-tui` |
@@ -430,10 +439,13 @@ One sentence per crate:
   delegating facade over `lancet-audit`'s operator read path, not an owner of
   it.
 - **`lattice-llm`** — Provider adapters, SSE streaming, model routing,
-  tool-call vocabulary, and logging. URL/DNS safety primitives live in the
-  shared `net-guard` leaf and are composed here.
+  tool-call vocabulary, the provider replay/projection seam
+  (`provider_projection`, #142), and logging. URL/DNS safety primitives live
+  in the shared `net-guard` leaf and are composed here.
 - **`lattice-session`** — Session graph contract, immutable turn commits,
-  branch refs, HEAD state, and the git-backed `GitSessionGraphStore`.
+  branch refs, HEAD state, and the git-backed `GitSessionGraphStore`. The
+  pure-data transcript types (`GraphMessage` family, `TurnUsage`) are
+  re-exported from `lattice-conversation` since #142; persistence stays here.
 - **`lattice-profile`** — Strict `agent.toml` schema, discovery, defaults, and
   LANCET profile sections (no isolation section).
 - **`lattice-agent`** — Multi-turn `AgentLoop`, turn state machine, message
@@ -447,11 +459,15 @@ One sentence per crate:
 - **`lattice-cli`** — Binary entry point and argument dispatch over
   API/session/model/audit commands, plus the `lattice-tui` presentation crate.
 
-Accepted ADR 0005 crates, not yet members of the current workspace:
+`lattice-conversation` joined the workspace in #142:
 
-- **`lattice-conversation`** (#142) — Data-only ordered message, ToolCall
-  typestate, ToolResult, provider replay, usage, and interruption contracts;
-  depends on `lancet-protocol` for the one typed InvocationId.
+- **`lattice-conversation`** — Data-only provider-neutral conversation
+  contract: ordered `NativeMessage`/`MessagePart` with `UnboundToolCall` /
+  `BoundToolCall` typestates, ToolResult closure, semantic/replay digests,
+  per-attempt usage and interruption/rejection records, and the migrated
+  `GraphMessage` transcript family; depends only on `lancet-protocol`.
+
+Accepted ADR 0005 crates, not yet members of the current workspace:
 - **`lattice-store`** (#143) — Domain-neutral Linux/private-Git durability
   kernel. Session, invocation/evidence/operator, and workspace-history domain
   semantics stay in their owning crates.

@@ -12,8 +12,8 @@ use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, AgentTurnRequest, AgentTurnStatus, LlmClient,
     LlmRetryConfig, ToolCallExecutor, ToolExecutionError,
 };
+use lattice_conversation::HeadTranscript;
 use lattice_llm::{LlmError, LlmEvent, TokenUsage, ToolDefinition};
-use lattice_session::HeadTranscript;
 
 // ---------------------------------------------------------------------------
 // Helpers
