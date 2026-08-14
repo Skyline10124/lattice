@@ -5610,3 +5610,73 @@ No unresolved #114 residual remains for `FINDINGS.md`.
 **Changed files:** `crates/lancet-audit/**`, `crates/lancet-api/**`,
 `crates/lattice-system-harness/**`, `xtask/src/rollout.rs`, `docs/**`, scoped
 `AGENTS.md`, and `FIX.md`.
+
+## GitHub #143: `lattice-store` private-Git durability kernel + Session/WorkspaceHistory migration — 2026-08-16
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| #143 | FEATURE | Session graph and WorkspaceHistory each hand-rolled their own bare-repo init, locks, fsync, and reachability; mutable `.lattice/sessions/**` sidecars were a second, non-Git authority; the store auto-initialized on open, and session state lived under the configuration root. | Added the ADR 0005 domain-neutral `lattice-store` kernel and hard-cut both domains onto it. |
+
+### What landed
+
+- New Layer-0 `crates/lattice-store`: XDG `StateLayout` topology,
+  `ProjectStoreKey` (domain-separated SHA-256 over the raw bytes of the full
+  canonical Local Workspace root), typed strict-open/first-create with a
+  `refs/lattice/meta` identity record (kernel format + domain store kind and
+  schema version + Global/Project scope), object/tree/commit writes, ref CAS
+  and multi-ref transactions, the standard per-repository write lock,
+  fsync/rename publication barriers, atomic first-create (sibling temp +
+  `renameat2(RENAME_NOREPLACE)` + parent fsync + winner/loser revalidation),
+  retention pins, per-location capability probes, and typed store errors.
+- `lattice-session`: mutable sidecars replaced by immutable `SessionState`
+  commits at `refs/lattice/sessions/<id>/state` (canonical JSON, parent-chained)
+  and session branches at `refs/lattice/sessions/<id>/heads/<branch>`; commits
+  and resets publish head+state in one multi-ref transaction plus one
+  `fsync_pending` barrier. `SessionGraphStore` gained `lock_execution`; every
+  mutation takes the per-session `SessionExecutionLock` then the repository
+  write lock, and `status` takes a non-blocking shared hold and reports
+  `SessionBusy`. `create_session` takes a `ProjectStoreKey`; the store is
+  strictly opened and never initializes on open.
+- `lancet-runtime`: `WorkspaceHistory` is a project-scoped kernel store at
+  `projects/<ProjectStoreKey>/workspace-history.git`. Normal recording writes
+  no per-record refs (everything appended is an ancestor of `current`); a
+  Rewind retains the abandoned tip through the kernel retention pin first.
+  The per-project `WorkspaceOperationLock` is wired at the ADR 0005 §5 lock
+  order: observation shared; mutation and rewind exclusive, strictly wider
+  than the repository write lock taken underneath.
+- `lattice-api`: new `LocalWorkspaceRoot` resolver (`root.rs`) shared by
+  CLI and TUI, and `stores.rs` project-store composition. `session new` is
+  the only first-create path: it resolves the root, derives the key,
+  first-creates the project's stores, and only then publishes the
+  SessionState. Every other path strictly opens; expected-missing stores
+  fail closed with an actionable error.
+- CLI/TUI address stores through the XDG state root
+  (`$XDG_STATE_HOME/lattice/sessions.git`); the config-root directory keeps
+  only the REPL history file.
+- `invocations.git` is deliberately absent (owned by #139-A); no migration of
+  old config-root session state or old WorkspaceHistory state; the
+  transitional SQLite audit path is untouched until #139-B.
+
+### Verification
+
+- `cargo xtask ci` — full pass on the host (fmt, Clippy, boundaries,
+  workspace tests, tool digests, harness scenarios), with `LATTICE_BIN`
+  unset so the harness uses the freshly built worktree binary.
+- New acceptance coverage:
+  `crates/lattice-store/tests/integration.rs`,
+  `crates/lattice-session/src/git_graph/tests/state_and_locks.rs`,
+  the operation-lock tests at the end of
+  `crates/lancet-runtime/src/history.rs`, and the rewritten
+  `crates/lattice-api/tests/workspace_history_acceptance.rs`.
+- Independent three-focus review found no BLOCKER; the MAJOR findings
+  (flattened kernel errors into domain strings, vacuous/weak tests, stale
+  docs) were fixed in the review-fix commit (`StoreError::InvalidInput`,
+  typed `WorkspaceHistoryError::Kernel`, `SessionError::InvalidInput`,
+  ref-lock contention no longer mapped to `CasConflict`).
+
+### Changed files
+
+`crates/lattice-store/**`, `crates/lattice-session/**`,
+`crates/lancet-runtime/**`, `crates/lattice-api/**`, `crates/lattice-cli/**`,
+`crates/lattice-tui/**`, `crates/lattice-system-harness/**`, `Cargo.toml`,
+`docs/**`, scoped `AGENTS.md`, and `FIX.md`.
