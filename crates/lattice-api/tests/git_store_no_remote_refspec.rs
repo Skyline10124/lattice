@@ -15,21 +15,26 @@ use lattice_session::{
 };
 use tempfile::TempDir;
 
-fn init_git_repo(dir: &std::path::Path) {
-    let _ = lattice_session::test_utils::init_empty_repo(dir);
+fn test_store_key() -> lattice_session::ProjectStoreKey {
+    lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-api-tests/project")
 }
 
 #[test]
 fn git_store_no_remote_push_refspec_for_lattice_refs() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path();
-    init_git_repo(dir);
 
-    let store = GitSessionGraphStore::new(dir);
+    let store = GitSessionGraphStore::create(dir.join("sessions.git")).expect("create store");
 
     let session_id = "abcdef0123456789abcdef0123456789".to_string();
     store
-        .create_session(&session_id, Some("no-remote-test"), "coder", "main")
+        .create_session(
+            &session_id,
+            Some("no-remote-test"),
+            "coder",
+            "main",
+            &test_store_key(),
+        )
         .expect("create_session");
 
     // Commit a turn so refs/lattice/sessions/<id>/main actually exists.
@@ -52,10 +57,11 @@ fn git_store_no_remote_push_refspec_for_lattice_refs() {
     };
     let commit = store.commit_turn(input).expect("commit_turn");
 
-    let repo = gix::open_opts(dir, gix::open::Options::isolated()).expect("open repo");
+    let repo = gix::open_opts(dir.join("sessions.git"), gix::open::Options::isolated())
+        .expect("open repo");
 
     // Confirm the session ref actually exists under refs/lattice/**.
-    let session_ref = format!("refs/lattice/sessions/{session_id}/main");
+    let session_ref = format!("refs/lattice/sessions/{session_id}/heads/main");
     let r = repo
         .find_reference(session_ref.as_str())
         .expect("session ref should exist after commit");

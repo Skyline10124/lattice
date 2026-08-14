@@ -18,8 +18,8 @@ use lattice_session::{
 };
 use tempfile::TempDir;
 
-fn init_git_repo(dir: &std::path::Path) {
-    let _ = lattice_session::test_utils::init_empty_repo(dir);
+fn test_store_key() -> lattice_session::ProjectStoreKey {
+    lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-api-tests/project")
 }
 
 fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCommitInput {
@@ -54,12 +54,17 @@ fn prepare(session_id: &str, parent_ids: Vec<String>, label: &str) -> PreparedTu
 fn git_store_concurrent_commit_same_parent_second_conflicts() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path().to_path_buf();
-    init_git_repo(&dir);
 
-    let store = GitSessionGraphStore::new(&dir);
+    let store = GitSessionGraphStore::create(dir.join("sessions.git")).expect("create store");
     let session_id = "c0ffee1234567890abcdef1234567890".to_string();
     store
-        .create_session(&session_id, Some("concurrent-test"), "coder", "main")
+        .create_session(
+            &session_id,
+            Some("concurrent-test"),
+            "coder",
+            "main",
+            &test_store_key(),
+        )
         .expect("create_session");
 
     // 1. Commit the base turn A (no parents). Ref now points at A.
@@ -90,8 +95,9 @@ fn git_store_concurrent_commit_same_parent_second_conflicts() {
     );
 
     // 5. The ref must still point at B (C did not silently overwrite it).
-    let repo = gix::open_opts(&dir, gix::open::Options::isolated()).expect("open repo");
-    let ref_name = format!("refs/lattice/sessions/{session_id}/main");
+    let repo = gix::open_opts(dir.join("sessions.git"), gix::open::Options::isolated())
+        .expect("open repo");
+    let ref_name = format!("refs/lattice/sessions/{session_id}/heads/main");
     let branch_ref = repo
         .find_reference(ref_name.as_str())
         .expect("main ref should exist");
@@ -117,12 +123,18 @@ fn git_store_concurrent_commit_same_parent_second_conflicts() {
 fn git_store_threaded_concurrent_commits_one_wins_one_conflicts() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path().to_path_buf();
-    init_git_repo(&dir);
 
-    let store = Arc::new(GitSessionGraphStore::new(&dir));
+    let store =
+        Arc::new(GitSessionGraphStore::create(dir.join("sessions.git")).expect("create store"));
     let session_id = "dec0de1234567890abcdef1234567890".to_string();
     store
-        .create_session(&session_id, Some("threaded-concurrent"), "coder", "main")
+        .create_session(
+            &session_id,
+            Some("threaded-concurrent"),
+            "coder",
+            "main",
+            &test_store_key(),
+        )
         .expect("create_session");
 
     // Base commit A.

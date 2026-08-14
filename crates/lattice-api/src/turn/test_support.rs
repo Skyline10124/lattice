@@ -63,6 +63,13 @@ pub(super) async fn build_test_production_deps(
 
 pub(super) const TEST_SESSION_ID: &str = "test-session";
 
+/// The store key binding test sessions to the fixture's project root.
+pub(super) fn test_project_key(root: &std::path::Path) -> lattice_session::ProjectStoreKey {
+    crate::root::LocalWorkspaceRoot::from_path(root)
+        .expect("resolve fixture workspace root")
+        .store_key()
+}
+
 pub(super) struct TestFixture {
     pub(super) _dir: tempfile::TempDir,
     pub(super) project_root: String,
@@ -97,12 +104,18 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     init_test_git_repo(&root);
 
     let sessions_path = root.join("sessions.git");
-    std::fs::create_dir_all(&sessions_path).unwrap();
-    let session_api = SessionApi::git(&sessions_path);
-    let store: Box<dyn SessionGraphStore> =
-        Box::new(lattice_session::GitSessionGraphStore::new(&sessions_path));
+    let session_api = SessionApi::git_create(&sessions_path).expect("create session store");
+    let store: Box<dyn SessionGraphStore> = Box::new(
+        lattice_session::GitSessionGraphStore::open(&sessions_path).expect("open session store"),
+    );
     store
-        .create_session(TEST_SESSION_ID, None, "test", "main")
+        .create_session(
+            TEST_SESSION_ID,
+            None,
+            "test",
+            "main",
+            &test_project_key(&root),
+        )
         .expect("create default test session");
 
     TestFixture {

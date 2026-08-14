@@ -10,15 +10,14 @@ use lattice_api::SessionApi;
 use lattice_session::{GitSessionGraphStore, SessionGraphStore};
 use tempfile::TempDir;
 
-fn init_git_repo(dir: &std::path::Path) {
-    let _ = lattice_session::test_utils::init_empty_repo(dir);
+fn test_store_key() -> lattice_session::ProjectStoreKey {
+    lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-api-tests/project")
 }
 
 #[test]
 fn git_store_session_id_prefix_resolution() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path();
-    init_git_repo(dir);
 
     // Create a session with a known 32-char hex ID directly via the store,
     // since SessionApi::create_session generates a random UUID.
@@ -26,14 +25,20 @@ fn git_store_session_id_prefix_resolution() {
     assert_eq!(full_id.len(), 32);
     assert!(full_id.chars().all(|c| c.is_ascii_hexdigit()));
 
-    let store = GitSessionGraphStore::new(dir);
+    let store = GitSessionGraphStore::create(dir.join("sessions.git")).expect("create store");
     store
-        .create_session(&full_id, Some("prefix-resolve-test"), "coder", "main")
+        .create_session(
+            &full_id,
+            Some("prefix-resolve-test"),
+            "coder",
+            "main",
+            &test_store_key(),
+        )
         .expect("create_session via store");
 
     // Wrap the same store directory in SessionApi and query status with the
     // first 4 chars of the session ID.
-    let api = SessionApi::git(dir);
+    let api = SessionApi::git_open(dir.join("sessions.git")).expect("open store");
     let prefix: String = full_id.chars().take(4).collect();
     assert_eq!(prefix.len(), 4);
 

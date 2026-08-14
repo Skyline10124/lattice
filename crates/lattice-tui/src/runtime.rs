@@ -40,7 +40,15 @@ fn required_project_branch(project_branch: Option<&str>) -> Result<&str> {
 
 pub async fn run(options: TuiOptions) -> Result<std::process::ExitCode> {
     let git_repo_path = options.session_dir.join("sessions.git");
-    let session_api = SessionApi::git(git_repo_path.clone());
+    // #143: opening an existing session strictly opens the store; creating a
+    // session is the only first-create path. Both resolve the Local
+    // Workspace root through the shared lattice-api resolver.
+    let session_api = match &options.session_id {
+        Some(_) => SessionApi::git_open(git_repo_path.clone())
+            .with_context(|| format!("open session store {}", git_repo_path.display()))?,
+        None => SessionApi::git_create(git_repo_path.clone())
+            .with_context(|| format!("create session store {}", git_repo_path.display()))?,
+    };
     let session = match &options.session_id {
         Some(session_id) => session_api
             .open_session(OpenSessionRequest {
@@ -50,11 +58,14 @@ pub async fn run(options: TuiOptions) -> Result<std::process::ExitCode> {
         None => {
             let project_branch =
                 required_project_branch(options.project_branch.as_deref())?.to_string();
+            let workspace_root = lattice_api::resolve_local_workspace_root()
+                .context("resolve local workspace root")?;
             session_api
                 .create_session(CreateSessionRequest {
                     label: None,
                     active_agent: options.agent.clone(),
                     project_branch,
+                    project_store_key: workspace_root.store_key_hex(),
                 })
                 .context("create chat session")?
         }
@@ -217,7 +228,8 @@ async fn execute_turn(
     }
 
     let git_repo_path = options.session_dir.join("sessions.git");
-    let session_api = SessionApi::git(git_repo_path);
+    let session_api = SessionApi::git_open(git_repo_path.clone())
+        .with_context(|| format!("open session store {}", git_repo_path.display()))?;
 
     // Cooperative cancellation flag: a Ctrl-C during the turn sets this and
     // the agent loop checkpoints out at its next cancel boundary.

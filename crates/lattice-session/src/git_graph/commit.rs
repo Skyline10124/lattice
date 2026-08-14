@@ -1,17 +1,18 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
+
 //! Commit creation, transcript reconstruction, and log.
 
 use chrono::Utc;
-use gix::refs::transaction::PreviousValue;
+use lattice_store::{Blocking, LockMode, RefExpectation, RefTxnEdit};
 
 use super::helpers::{
-    GitSessionManifest, MANIFEST_SCHEMA_VERSION, build_root_tree, build_turn_tree,
-    candidate_ref_name, derive_turn_id, lattice_signature, parse_manifest, parse_oid,
-    read_session_meta, read_tree_blob, serialize_manifest, validate_turn_id,
-    walk_commits_oldest_first,
+    GitSessionManifest, MANIFEST_SCHEMA_VERSION, build_agent_json, build_audit_json,
+    build_root_tree, build_turn_tree, derive_turn_id, messages_to_jsonl, parse_manifest,
+    parse_messages_jsonl, parse_oid, serialize_manifest, walk_commits_oldest_first,
 };
 use super::session::resolve_head_oid;
+use super::state::{self, SessionHead};
 use super::{DEFAULT_BRANCH, GitSessionGraphStore};
 use crate::graph::{
     HeadTranscript, PreparedTurnCommit, TurnCommit, TurnCommitInput, TurnCommitStatus,
@@ -33,15 +34,20 @@ impl GitSessionGraphStore {
         let commit = &prepared.commit;
         let session_id = &commit.session_id;
 
-        let meta = read_session_meta(&self.dir, session_id)?;
-        let branch = meta
-            .head_branch
-            .clone()
-            .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
-        let repo = self.repo()?;
+        // Mutation: session execution lock (re-entrant under the caller's
+        // full-Turn hold) then the repository write lock.
+        let _exec =
+            self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
+        let _write = self.kernel().write_lock()?;
 
-        // Resolve current HEAD OID for CAS check.
-        let head_oid = resolve_head_oid(&repo, &meta, session_id)?;
+        let (state_oid, session_state) = state::read_state(self.kernel(), session_id)?;
+        let branch = match &session_state.head {
+            SessionHead::Attached { branch } => branch.clone(),
+            SessionHead::Detached { .. } => DEFAULT_BRANCH.to_string(),
+        };
+
+        // Resolve current HEAD OID for the parent checks and the CAS.
+        let head_oid = resolve_head_oid(self.kernel(), &session_state, session_id)?;
 
         if commit.parent_ids.is_empty() {
             if head_oid.is_some() {
@@ -70,100 +76,101 @@ impl GitSessionGraphStore {
         // Build manifest and tree.
         let manifest = build_manifest_from_prepared(&prepared);
         let manifest_bytes = serialize_manifest(&manifest)?;
-        let messages_jsonl = super::helpers::messages_to_jsonl(&prepared.messages)?;
-        let agent_json = super::helpers::build_agent_json(&commit.agent_name);
+        let messages_jsonl = messages_to_jsonl(&prepared.messages)?;
+        let agent_json = build_agent_json(&commit.agent_name);
         let profile_json = commit.profile_snapshot_json.clone();
-        let audit_json = super::helpers::build_audit_json(&commit.lifecycle);
+        let audit_json = build_audit_json(&commit.lifecycle);
 
         let turn_tree_oid = build_turn_tree(
-            &repo,
+            self.kernel(),
             &manifest_bytes,
             &messages_jsonl,
             &agent_json,
             &profile_json,
             &audit_json,
         )?;
-        let root_tree_oid = build_root_tree(&repo, turn_tree_oid)?;
+        let root_tree_oid = build_root_tree(self.kernel(), turn_tree_oid)?;
 
         // Build signature from created_at timestamp.
         let ts = chrono::DateTime::parse_from_rfc3339(&commit.created_at)
             .map_err(|e| SessionError::Git(format!("parse commit timestamp: {e}")))?
             .timestamp();
-        let sig = lattice_signature(ts);
-        let mut time_buf = gix::date::parse::TimeBuf::default();
-        let sig_ref = sig.to_ref(&mut time_buf);
 
         let parent_oids: Result<Vec<gix::ObjectId>> =
             commit.parent_ids.iter().map(|pid| parse_oid(pid)).collect();
         let parent_oids = parent_oids?;
 
-        // Write commit without updating any ref; CAS is applied next.
-        let commit_obj = repo
-            .new_commit_as(
-                sig_ref,
-                sig_ref,
-                &commit.commit_message,
-                root_tree_oid,
-                parent_oids.iter().copied(),
-            )
-            .map_err(|e| SessionError::Git(format!("create commit: {e}")))?;
-        let commit_oid = commit_obj.id;
+        // Write the commit; publication is one multi-ref transaction below.
+        let commit_oid = self.kernel().write_commit_at(
+            root_tree_oid,
+            &parent_oids,
+            &commit.commit_message,
+            ts,
+        )?;
 
-        // Update session branch ref atomically via compare-and-set.
-        //
-        // The earlier head_oid check is a non-atomic read; the actual ref
-        // mutation must re-verify the current target before writing, otherwise
-        // a concurrent process could move the ref between the check and the
-        // force update, silently losing the other writer's commit.
-        let ref_name = super::helpers::session_ref_name(session_id, &branch)?;
-        let constraint = match head_oid {
-            Some(expected) => PreviousValue::MustExistAndMatch(gix::refs::Target::Object(expected)),
-            None => PreviousValue::MustNotExist,
+        // One atomic publication: advance the conversation branch under CAS,
+        // record the new head in the state object, and (when present) pin
+        // the candidate ref. Any precondition failure leaves the whole
+        // transaction unpublished.
+        let head_ref = state::head_ref_name(session_id, &branch)?;
+        let branch_expect = match head_oid {
+            Some(expected) => RefExpectation::MustMatch(expected),
+            None => RefExpectation::MustNotExist,
         };
-        match repo.reference(ref_name.as_str(), commit_oid, constraint, "lattice commit") {
-            Ok(_) => {}
-            Err(e) => {
-                // Map constraint failures to Conflict so concurrent writers
-                // surface a clean CAS error rather than a raw git error.
-                let msg = e.to_string();
-                if msg.contains("exist") || msg.contains("match") || msg.contains("constraint") {
-                    return Err(SessionError::Conflict(
-                        "session branch ref moved during commit".to_string(),
-                    ));
-                }
-                return Err(SessionError::Git(format!("update session branch ref: {e}")));
-            }
-        }
 
-        // Candidate ref creation (SC4): keep clean-turn commit ranges reachable.
-        if let Some(ref lifecycle) = prepared.commit.lifecycle
+        let mut new_state = session_state.clone();
+        new_state.updated_at = Utc::now().to_rfc3339();
+        let new_state_oid = state::write_state_commit(self.kernel(), Some(state_oid), &new_state)?;
+
+        let mut edits = vec![
+            RefTxnEdit {
+                name: head_ref.clone(),
+                expect: branch_expect,
+                new: Some(commit_oid),
+            },
+            RefTxnEdit {
+                name: state::state_ref_name(session_id)?,
+                expect: RefExpectation::MustMatch(state_oid),
+                new: Some(new_state_oid),
+            },
+        ];
+
+        // Candidate ref (SC4): keep clean-turn commit ranges reachable.
+        let mut candidate_ref = None;
+        if let Some(lifecycle) = &prepared.commit.lifecycle
             && lifecycle.candidate_oid.is_some()
         {
             let turn_id = &manifest.turn_id;
-            validate_turn_id(turn_id)?;
-            let cand_ref = candidate_ref_name(session_id, turn_id)?;
-            match repo.reference(
-                cand_ref.as_str(),
-                commit_oid,
-                PreviousValue::MustNotExist,
-                "lattice candidate",
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    // Idempotent: candidate ref already pinned.
-                    let msg = e.to_string();
-                    if !(msg.contains("exist") || msg.contains("MustNotExist")) {
-                        return Err(SessionError::Git(format!("create candidate ref: {e}")));
-                    }
-                }
+            state::validate_turn_ref_id(turn_id)?;
+            let cand_ref = state::candidate_ref_name(session_id, turn_id)?;
+            // Idempotent: a candidate already pinned at this exact commit is
+            // a no-op under gix MustNotExist semantics; a different target
+            // aborts the whole transaction.
+            if self.kernel().ref_target(&cand_ref)? != Some(commit_oid) {
+                edits.push(RefTxnEdit {
+                    name: cand_ref.clone(),
+                    expect: RefExpectation::MustNotExist,
+                    new: Some(commit_oid),
+                });
+                candidate_ref = Some(cand_ref);
             }
         }
 
-        // Update meta head_commit_id.
-        let mut updated_meta = meta;
-        updated_meta.head_commit_id = Some(commit_oid.to_string());
-        updated_meta.updated_at = Utc::now().to_rfc3339();
-        super::helpers::write_session_meta(&self.dir, session_id, &updated_meta)?;
+        self.kernel()
+            .ref_transaction(&edits)
+            .map_err(|err| match err {
+                lattice_store::StoreError::CasConflict { .. } => {
+                    SessionError::Conflict("session branch ref moved during commit".to_string())
+                }
+                other => SessionError::Store(other),
+            })?;
+
+        let state_ref_string = state::state_ref_name(session_id)?;
+        let mut published_refs: Vec<&str> = vec![head_ref.as_str(), state_ref_string.as_str()];
+        if let Some(cand) = &candidate_ref {
+            published_refs.push(cand.as_str());
+        }
+        self.kernel().fsync_pending(&published_refs)?;
 
         let oid_str = commit_oid.to_string();
         let message_ids: Vec<String> = (0..prepared.messages.len())
@@ -176,9 +183,8 @@ impl GitSessionGraphStore {
     }
 
     pub(super) fn head_transcript_impl(&self, session_id: &str) -> Result<HeadTranscript> {
-        let meta = read_session_meta(&self.dir, session_id)?;
-        let repo = self.repo()?;
-        let head_oid = match resolve_head_oid(&repo, &meta, session_id)? {
+        let (_, session_state) = state::read_state(self.kernel(), session_id)?;
+        let head_oid = match resolve_head_oid(self.kernel(), &session_state, session_id)? {
             Some(oid) => oid,
             None => {
                 return Ok(HeadTranscript {
@@ -189,13 +195,13 @@ impl GitSessionGraphStore {
             }
         };
 
-        let oids = walk_commits_oldest_first(&repo, head_oid, None)?;
+        let oids = walk_commits_oldest_first(self.kernel(), head_oid, None)?;
         let mut all_messages = Vec::new();
         for oid in oids {
-            let bytes = read_tree_blob(&repo, oid, "turn/messages.jsonl")?;
+            let bytes = self.kernel().read_tree_blob(oid, "turn/messages.jsonl")?;
             let jsonl = String::from_utf8(bytes)
                 .map_err(|e| SessionError::Git(format!("messages.jsonl not utf8: {e}")))?;
-            let messages = super::helpers::parse_messages_jsonl(&jsonl)?;
+            let messages = parse_messages_jsonl(&jsonl)?;
             all_messages.extend(messages);
         }
 
@@ -207,19 +213,18 @@ impl GitSessionGraphStore {
     }
 
     pub(super) fn log_impl(&self, session_id: &str) -> Result<Vec<TurnLogEntry>> {
-        let meta = read_session_meta(&self.dir, session_id)?;
-        let repo = self.repo()?;
-        let head_oid = match resolve_head_oid(&repo, &meta, session_id)? {
+        let (_, session_state) = state::read_state(self.kernel(), session_id)?;
+        let head_oid = match resolve_head_oid(self.kernel(), &session_state, session_id)? {
             Some(oid) => oid,
             None => return Ok(Vec::new()),
         };
 
-        let oids = walk_commits_oldest_first(&repo, head_oid, None)?;
+        let oids = walk_commits_oldest_first(self.kernel(), head_oid, None)?;
         let mut entries = Vec::new();
         for oid in oids {
-            let manifest_bytes = read_tree_blob(&repo, oid, "turn/manifest.json")?;
+            let manifest_bytes = self.kernel().read_tree_blob(oid, "turn/manifest.json")?;
             let manifest = parse_manifest(&manifest_bytes)?;
-            let messages_bytes = read_tree_blob(&repo, oid, "turn/messages.jsonl")?;
+            let messages_bytes = self.kernel().read_tree_blob(oid, "turn/messages.jsonl")?;
             let messages_jsonl = String::from_utf8(messages_bytes)
                 .map_err(|e| SessionError::Git(format!("messages.jsonl not utf8: {e}")))?;
             let (message_count, tool_message_count) = count_messages(&messages_jsonl);
@@ -239,18 +244,14 @@ impl GitSessionGraphStore {
         session_id: &str,
         commit_id: &str,
     ) -> Result<Option<TurnCommit>> {
-        let repo = self.repo()?;
         let oid = match parse_oid(commit_id) {
             Ok(o) => o,
             Err(_) => return Ok(None),
         };
-        let commit = match repo.find_commit(oid) {
-            Ok(c) => c,
-            Err(_) => return Ok(None),
-        };
-        // Confirm it is a real object of commit kind (find_commit already peels).
-        let _ = commit;
-        let manifest_bytes = match read_tree_blob(&repo, oid, "turn/manifest.json") {
+        if self.kernel().commit_tree(oid).is_err() {
+            return Ok(None);
+        }
+        let manifest_bytes = match self.kernel().read_tree_blob(oid, "turn/manifest.json") {
             Ok(b) => b,
             Err(_) => return Ok(None),
         };
@@ -260,10 +261,10 @@ impl GitSessionGraphStore {
         if manifest.session_id != session_id {
             return Ok(None);
         }
-        let messages_bytes = read_tree_blob(&repo, oid, "turn/messages.jsonl")?;
+        let messages_bytes = self.kernel().read_tree_blob(oid, "turn/messages.jsonl")?;
         let messages_jsonl = String::from_utf8(messages_bytes)
             .map_err(|e| SessionError::Git(format!("messages.jsonl not utf8: {e}")))?;
-        let messages = super::helpers::parse_messages_jsonl(&messages_jsonl)?;
+        let messages = parse_messages_jsonl(&messages_jsonl)?;
         let message_ids: Vec<String> = (0..messages.len())
             .map(|i| format!("{commit_id}:{i}"))
             .collect();
@@ -272,7 +273,7 @@ impl GitSessionGraphStore {
         // Read the full profile snapshot JSON from the commit tree so that
         // consumers relying on `profile_snapshot_json` (replay, audit) get the
         // real payload instead of an empty string.
-        let profile_bytes = read_tree_blob(&repo, oid, "turn/profile.json")?;
+        let profile_bytes = self.kernel().read_tree_blob(oid, "turn/profile.json")?;
         let profile_json = String::from_utf8(profile_bytes)
             .map_err(|e| SessionError::Git(format!("profile.json not utf8: {e}")))?;
         turn.profile_snapshot_json = profile_json;

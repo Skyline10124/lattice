@@ -2939,6 +2939,7 @@ dependencies = [
  "chrono",
  "gix",
  "lattice-conversation",
+ "lattice-store",
  "serde",
  "serde_json",
  "sha2 0.11.0",

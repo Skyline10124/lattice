@@ -37,10 +37,15 @@ impl lattice_agent::ToolCallExecutor for NoOpToolExecutor {
 }
 
 fn make_session(dir: &std::path::Path) -> SessionApi {
-    let api = SessionApi::git(dir);
+    let api = SessionApi::git_create(dir.join("sessions.git")).expect("create session store");
+    // These turns run with `test_project_root: None`, so the live workspace
+    // root is the process CWD; bind the session to it.
+    let key = crate::root::LocalWorkspaceRoot::resolve()
+        .expect("resolve cwd")
+        .store_key();
     let _ = api
         .store()
-        .create_session(TEST_SESSION_ID, None, "test", "main");
+        .create_session(TEST_SESSION_ID, None, "test", "main", &key);
     api
 }
 

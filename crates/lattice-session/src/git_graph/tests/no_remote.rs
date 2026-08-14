@@ -12,10 +12,10 @@ use crate::graph::{
 #[test]
 fn test_no_remote_push_refspec() {
     let dir = temp_dir("no_remote_refspec");
-    setup_git_repo(dir.path());
-    let store = GitSessionGraphStore::new(dir.path());
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
     store
-        .create_session("sess-remote", None, "coder", "main")
+        .create_session("sess-remote", None, "coder", "main", &test_project_key())
         .expect("create session");
 
     let lifecycle = TurnLifecycleEvidence {
@@ -35,7 +35,11 @@ fn test_no_remote_push_refspec() {
 
     // Inspect the repository config via gix — there must be no remote and no
     // push refspec that mentions refs/lattice.
-    let repo = gix::open_opts(dir.path(), gix::open::Options::isolated()).expect("open repo");
+    let repo = gix::open_opts(
+        dir.path().join("sessions.git"),
+        gix::open::Options::isolated(),
+    )
+    .expect("open repo");
     let remotes: Vec<_> = repo.remote_names().into_iter().collect();
     assert!(
         remotes.is_empty(),

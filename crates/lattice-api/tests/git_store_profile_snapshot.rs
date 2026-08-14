@@ -15,21 +15,26 @@ use lattice_session::{
 };
 use tempfile::TempDir;
 
-fn init_git_repo(dir: &std::path::Path) {
-    let _ = lattice_session::test_utils::init_empty_repo(dir);
+fn test_store_key() -> lattice_session::ProjectStoreKey {
+    lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-api-tests/project")
 }
 
 #[test]
 fn git_store_get_turn_commit_includes_profile_snapshot_json() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path();
-    init_git_repo(dir);
 
-    let store = GitSessionGraphStore::new(dir);
+    let store = GitSessionGraphStore::create(dir.join("sessions.git")).expect("create store");
 
     let session_id = "11223344556677889900aabbccddeeff".to_string();
     store
-        .create_session(&session_id, Some("profile-snapshot-test"), "coder", "main")
+        .create_session(
+            &session_id,
+            Some("profile-snapshot-test"),
+            "coder",
+            "main",
+            &test_store_key(),
+        )
         .expect("create_session");
 
     // A non-trivial, non-empty profile JSON payload.

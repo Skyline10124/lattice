@@ -24,13 +24,15 @@ payload compatibility.
   helpers.
 - `src/git_graph/mod.rs` owns the `GitSessionGraphStore` struct, lazy repository
   handle, and `SessionGraphStore` trait impl delegation.
-- `src/git_graph/session.rs` owns session metadata sidecar I/O
-  (`.lattice/sessions/<id>/meta.json`), create/open/list/status logic.
+- `src/git_graph/session.rs` owns create/open/list/status over immutable
+  `SessionState` objects (no sidecars since #143).
+- `src/git_graph/state.rs` owns the `SessionState` payload, the session ref
+  namespace (`state`, `heads/<branch>`, candidates), and state publication.
 - `src/git_graph/commit.rs` owns Git tree building, commit creation, transcript
   reconstruction via Revwalk, and manifest serialization.
-- `src/git_graph/refs.rs` owns branch, checkout, reset, and diff via gix ref
-  APIs and `merge_base`.
-- `src/git_graph/helpers.rs` owns shared gix tree/blob/sidecar helpers.
+- `src/git_graph/refs.rs` owns branch, checkout, reset, and diff over
+  session-scoped refs and `lattice-store`'s `merge_base`.
+- `src/git_graph/helpers.rs` owns shared manifest/tree/JSONL helpers.
 - `src/git_graph/tests/` owns Git-backed persistence and topology regression
   coverage.
 - `src/test_utils.rs` (feature `test-utils`) owns shared gix fixture helpers
@@ -47,31 +49,40 @@ payload compatibility.
 - The session graph is git-backed and separate from CEP audit SQLite in
   `lancet-audit`. Do not reintroduce a SQLite session graph store.
 - Treat commit IDs and canonical JSON hashing as durable graph contracts.
-- Git session commits live under `refs/lattice/sessions/<id>/**`; candidate refs
-  under `refs/lattice/candidates/<id>/<turn>`. Do not add remote push refspecs
-  for `refs/lattice/**`.
-- Mutable session metadata lives in sidecar files, never in Git objects.
-- Current production Git operations are single-ref; the old
-  `lattice-workspace` promotion transaction surface was deleted with that crate
-  in #62. This is not a target prohibition: ADR 0005/#144 final Turn publication
-  uses `lattice-store`'s one-repository multi-ref transaction to advance the
-  conversation head, create the Turn pin, update state when needed, and delete
-  `active-turn` atomically.
+- Session refs live in the global `$XDG_STATE_HOME/lattice/sessions.git`:
+  `refs/lattice/sessions/<id>/state`, `refs/lattice/sessions/<id>/heads/<branch>`,
+  candidates under `refs/lattice/candidates/<id>/<turn>`. `turns/<id>` and
+  `active-turn` are reserved for #144. Do not add remote push refspecs for
+  `refs/lattice/**`.
+- Since #143 every session fact is an immutable `SessionState` commit; mutable
+  `.lattice/sessions/**` sidecars are gone, with no reader, importer, or second
+  authority. A Session is permanently bound to one path-derived
+  `ProjectStoreKey` supplied by the composition layer — this crate never
+  derives it from the process cwd.
+- The store never initializes on open: `GitSessionGraphStore::open` fails
+  closed (`NotInitialized`/`Corruption`), and `create` is reserved for the
+  `session new` composition path.
+- Every mutation takes the per-session execution lock
+  (`locks/sessions/<id>.lock`) and then the repository write lock, in that
+  order. `status` takes a non-blocking shared hold and reports `SessionBusy`.
+  Never open two repository write locks together.
+- Publication is one multi-ref transaction plus one `fsync_pending` barrier:
+  conversation head, session state, and any candidate pin advance together or
+  not at all.
 - ADR 0005 keeps Session graph and PendingTurn semantics in this crate while
-  #143 moves only shared Git durability mechanics into `lattice-store`. #144
-  adds one durable active Turn per session, immutable CAS stages, a full-Turn
-  session execution lock, ResultDraft publication classification, and the pure
-  reconciliation reducer. Do not put InvocationStore/evidence semantics here,
-  open two repository write locks together, or redispatch model/Tool work while
+  #143 moved shared Git durability mechanics into `lattice-store`. #144 adds
+  one durable active Turn per session, immutable CAS stages, ResultDraft
+  publication classification, and the pure reconciliation reducer. Do not put
+  InvocationStore/evidence semantics here, or redispatch model/Tool work while
   reopening a PendingTurn.
-- The sidecar rule above describes current code only. ADR 0005/#143 hard-cuts
-  mutable `.lattice/sessions/**` metadata into immutable `SessionState` objects
-  and session-scoped refs in the global `$XDG_STATE_HOME/lattice/sessions.git`;
-  no sidecar reader/import or second authority remains. A Session is permanently
-  bound to one path-derived `ProjectStoreKey`.
 
 ## Recent Issues
 
+- ADDED #143: the store is built on the `lattice-store` kernel. Sessions live
+  in the global `sessions.git`; `SessionState` commits replaced sidecars;
+  `create_session` takes a `ProjectStoreKey`; `SessionGraphStore` gained
+  `lock_execution`; `SessionError` gained `SessionBusy` and `Store`.
+  Acceptance lives in `src/git_graph/tests/state_and_locks.rs`.
 - ADDED #63: `TurnCommitInput`/`TurnCommit` carry `workspace_history_oid` and
   the git manifest persists it (`skip_serializing_if`, so history-less turns
   stay byte-identical to pre-#63 manifests). It is manifest-only — no
@@ -86,14 +97,12 @@ payload compatibility.
 
 ## Next Actions
 
-- Keep topology tests for linear, merge, diamond, branch reset, and detached
-  HEAD paths when changing transcript or ref logic.
-- Keep test helpers hidden and clearly non-production.
 - Keep Git store topology tests for linear, merge, diamond, branch reset, and
   detached HEAD paths when changing transcript or ref logic.
-- Keep sidecar I/O atomic (temp + rename) and test crash-recovery paths.
-- Do not reintroduce SQLite session storage or a git2 dependency; keep the
-  store on gix.
+- Keep test helpers hidden and clearly non-production.
+- Do not reintroduce sidecar metadata, a sidecar importer, SQLite session
+  storage, or a git2 dependency; durability primitives belong to
+  `lattice-store`, and this crate must not hand-roll them.
 - Keep `workspace_history_oid` manifest-only and optional; adding it to the
   canonical seed would move every turn id. Note `deny_unknown_fields`: an
   older binary cannot read a manifest that carries the field.

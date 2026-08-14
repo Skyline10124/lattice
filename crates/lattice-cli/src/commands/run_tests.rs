@@ -133,12 +133,16 @@ async fn run_integration_commits_existing_session() {
         .collect();
     let _ = lattice_session::test_utils::init_fixture_repo(temp.path(), &__refs);
 
-    let session_api = lattice_api::SessionApi::git(temp.path());
+    let session_api =
+        lattice_api::SessionApi::git_create(temp.path().join("sessions.git")).unwrap();
     let created = session_api
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "test".to_string(),
             project_branch: "main".to_string(),
+            project_store_key: lattice_api::LocalWorkspaceRoot::from_path(temp.path())
+                .unwrap()
+                .store_key_hex(),
         })
         .expect("create session");
     let llm = std::sync::Arc::new(StubLlmClient);

@@ -27,6 +27,9 @@ pub struct GraphSession {
     pub updated_at: String,
     #[serde(default)]
     pub project_target_branch: Option<String>,
+    /// Lowercase-hex `ProjectStoreKey` this session is permanently bound to
+    /// (ADR 0005 §2, since GitHub #143).
+    pub project_store_key: String,
 }
 
 /// Ref kind: branch or detached HEAD.
@@ -328,6 +331,8 @@ pub struct SessionStatus {
     pub commit_count: usize,
     #[serde(default)]
     pub project_target_branch: Option<String>,
+    /// The `ProjectStoreKey` binding (lowercase hex) of this session.
+    pub project_store_key: String,
 }
 
 /// Session summary for list display.
@@ -345,6 +350,8 @@ pub struct SessionGraphSummary {
     pub updated_at: String,
     #[serde(default)]
     pub project_target_branch: Option<String>,
+    /// The `ProjectStoreKey` binding (lowercase hex) of this session.
+    pub project_store_key: String,
 }
 
 /// Graph-path diff result.
@@ -370,12 +377,16 @@ pub struct ResetResult {
 
 /// Narrow session graph store contract.
 pub trait SessionGraphStore: Send + Sync {
+    /// Create a session permanently bound to `project_store_key` (ADR 0005
+    /// §2: the key is a storage address derived by the composition layer;
+    /// this crate never derives it from the process cwd).
     fn create_session(
         &self,
         session_id: &str,
         label: Option<&str>,
         active_agent_name: &str,
         project_target_branch: &str,
+        project_store_key: &lattice_store::ProjectStoreKey,
     ) -> crate::Result<GraphSession>;
 
     fn open_session(&self, session_id: &str) -> crate::Result<GraphSession>;
@@ -414,6 +425,18 @@ pub trait SessionGraphStore: Send + Sync {
         session_id: &str,
         commit_id: &str,
     ) -> crate::Result<Option<TurnCommit>>;
+
+    /// Acquire the per-session execution lock (ADR 0005 §5): exclusive for
+    /// the full live Turn, reconciliation, rewind, reset, checkout, branch
+    /// switch, and every Session state/branch mutation. Same-process
+    /// nesting is re-entrant. A non-blocking shared acquisition returns
+    /// `SessionError::SessionBusy` when an exclusive owner exists.
+    fn lock_execution(
+        &self,
+        session_id: &str,
+        mode: lattice_store::LockMode,
+        blocking: lattice_store::Blocking,
+    ) -> crate::Result<lattice_store::FlockGuard>;
 }
 
 /// Derive commit message from first user message.
@@ -694,6 +717,10 @@ mod graph_contract {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             project_target_branch: None,
+            project_store_key: lattice_store::ProjectStoreKey::from_canonical_path_bytes(
+                b"/lattice-session-tests/project",
+            )
+            .to_string(),
         };
         assert_eq!(session.session_id, "sess-1");
 
@@ -788,6 +815,7 @@ mod graph_contract {
             branches: vec![],
             commit_count: 5,
             project_target_branch: None,
+            project_store_key: "k".repeat(64),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("commit_count"));
@@ -801,6 +829,7 @@ mod graph_contract {
             commit_count: 5,
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             project_target_branch: None,
+            project_store_key: "k".repeat(64),
         };
         assert_eq!(summary.commit_count, 5);
     }

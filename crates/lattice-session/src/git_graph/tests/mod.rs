@@ -8,6 +8,7 @@ mod head_transcript;
 mod no_remote;
 mod pointer_ops;
 mod session_meta;
+mod state_and_locks;
 
 use std::path::Path;
 
@@ -18,8 +19,6 @@ use crate::graph::{
     derive_commit_message,
 };
 use crate::test_helpers::{assistant_msg, user_msg};
-use crate::test_utils::init_empty_repo;
-
 /// A fixture directory that lives only as long as the test holds it.
 ///
 /// Earlier revisions built a host-global path
@@ -51,10 +50,6 @@ pub(crate) fn temp_dir(name: &str) -> Fixture {
     Fixture { dir }
 }
 
-pub(crate) fn setup_git_repo(dir: &std::path::Path) -> gix::Repository {
-    init_empty_repo(dir)
-}
-
 pub(crate) fn commit_input(
     session_id: &str,
     parent_ids: Vec<String>,
@@ -79,6 +74,11 @@ pub(crate) fn commit_input(
         terminal_reason: None,
     }
 }
+/// A fixed test project key: session-store tests have no real workspace, so
+/// they bind sessions to one well-known storage address.
+pub(crate) fn test_project_key() -> lattice_store::ProjectStoreKey {
+    lattice_store::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-session-tests/project")
+}
 
 pub(crate) fn setup_session_with_commits(
     store: &crate::git_graph::GitSessionGraphStore,
@@ -87,7 +87,7 @@ pub(crate) fn setup_session_with_commits(
     _label: Option<&str>,
 ) -> Vec<String> {
     store
-        .create_session(session_id, None, "coder", "main")
+        .create_session(session_id, None, "coder", "main", &test_project_key())
         .expect("create session");
     let mut commit_ids = Vec::new();
     for i in 0..n {

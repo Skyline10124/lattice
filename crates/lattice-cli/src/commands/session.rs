@@ -32,9 +32,17 @@ pub(crate) fn default_session_dir() -> PathBuf {
     lattice_config_dir().join("lattice").join("sessions")
 }
 
+/// Open the session store strictly: for every command except `session new`
+/// the store must already exist (#143 — no open-failed-init).
 fn session_api() -> Result<SessionApi> {
     let git_repo_path = default_session_dir().join("sessions.git");
-    Ok(SessionApi::git(git_repo_path))
+    Ok(SessionApi::git_open(git_repo_path)?)
+}
+
+/// First-create-or-validate the session store: `session new` only.
+fn session_api_for_new() -> Result<SessionApi> {
+    let git_repo_path = default_session_dir().join("sessions.git");
+    Ok(SessionApi::git_create(git_repo_path)?)
 }
 
 #[derive(Subcommand)]
@@ -129,7 +137,12 @@ pub async fn run(
     json: bool,
     verbose: bool,
 ) -> Result<std::process::ExitCode> {
-    let api = session_api()?;
+    // `session new` is the only first-create path; every other subcommand
+    // strictly opens the existing store (#143).
+    let api = match &action {
+        SessionAction::New { .. } => session_api_for_new()?,
+        _ => session_api()?,
+    };
     match action {
         SessionAction::New {
             agent,
@@ -221,10 +234,12 @@ fn cmd_new_api(
     json: bool,
 ) -> Result<()> {
     let _loaded = load_agent_checked(agent)?;
+    let workspace_root = lattice_api::resolve_local_workspace_root()?;
     let session = api.create_session(CreateSessionRequest {
         label: label.map(str::to_string),
         active_agent: agent.to_string(),
         project_branch: project_branch.to_string(),
+        project_store_key: workspace_root.store_key_hex(),
     })?;
     if json {
         let value = serde_json::json!({
@@ -1107,12 +1122,17 @@ mod session_cli {
 mod project_branch_tests {
     use lattice_api::SessionApi;
 
+    fn test_store_key() -> String {
+        lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-cli-tests/project")
+            .to_string()
+    }
+
     fn temp_api(name: &str) -> SessionApi {
         let dir = std::env::temp_dir()
             .join("lattice-cli-project-branch-tests")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
-        SessionApi::git(dir)
+        SessionApi::git_create(dir.join("sessions.git")).expect("create store")
     }
 
     #[test]
@@ -1123,6 +1143,7 @@ mod project_branch_tests {
                 label: Some("branch test".to_string()),
                 active_agent: "coder".to_string(),
                 project_branch: "develop".to_string(),
+                project_store_key: test_store_key(),
             })
             .expect("create session");
 
@@ -1141,6 +1162,7 @@ mod project_branch_tests {
             label: Some("list test".to_string()),
             active_agent: "coder".to_string(),
             project_branch: "release/v1".to_string(),
+            project_store_key: test_store_key(),
         })
         .expect("create session");
 

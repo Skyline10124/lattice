@@ -16,6 +16,7 @@
 mod models;
 mod profile;
 mod rewind;
+pub mod root;
 mod session;
 pub mod turn;
 
@@ -29,6 +30,7 @@ pub use rewind::{
     RewindConflict, RewindOutcome, RewindPathConflict, RewindPathPreflight, RewindRestoredPath,
     RewindStep, RewindSuccess, SessionHeadMove, rewind_to_turn,
 };
+pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
 pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
 pub use turn::{
     LifecycleFailureKind, RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus,

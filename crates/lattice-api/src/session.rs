@@ -28,6 +28,12 @@ pub enum ApiError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("busy: {0}")]
+    Busy(String),
+
+    #[error("store unavailable: {0}")]
+    StoreUnavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, ApiError>;
@@ -37,6 +43,10 @@ pub struct CreateSessionRequest {
     pub label: Option<String>,
     pub active_agent: String,
     pub project_branch: String,
+    /// Lowercase-hex `ProjectStoreKey` the new session is permanently bound
+    /// to. Obtain it from `crate::root::resolve_local_workspace_root` (or
+    /// `LocalWorkspaceRoot::from_path`); the session store never derives it.
+    pub project_store_key: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -53,10 +63,38 @@ impl SessionApi {
         Self { store }
     }
 
-    pub fn git(dir: impl Into<PathBuf>) -> Self {
-        Self {
-            store: Box::new(GitSessionGraphStore::new(dir)),
-        }
+    /// Strictly open the git-backed session store at `dir`
+    /// (`$XDG_STATE_HOME/lattice/sessions.git` in production). Absent or
+    /// identity-invalid stores fail closed — never auto-initialize.
+    pub fn git_open(dir: impl Into<PathBuf>) -> Result<Self> {
+        Ok(Self {
+            store: Box::new(GitSessionGraphStore::open(dir).map_err(map_session_error)?),
+        })
+    }
+
+    /// First-create (or validate) the git-backed session store at `dir`.
+    /// Reserved for the `session new` composition path (ADR 0005 §3).
+    pub fn git_create(dir: impl Into<PathBuf>) -> Result<Self> {
+        Ok(Self {
+            store: Box::new(GitSessionGraphStore::create(dir).map_err(map_session_error)?),
+        })
+    }
+
+    /// Strictly open the global `sessions.git` from the XDG state layout.
+    pub fn git_open_layout(layout: &lattice_session::StateLayout) -> Result<Self> {
+        Ok(Self {
+            store: Box::new(GitSessionGraphStore::open_layout(layout).map_err(map_session_error)?),
+        })
+    }
+
+    /// First-create (or validate) the global `sessions.git` in the XDG state
+    /// layout. Reserved for `session new`.
+    pub fn git_create_layout(layout: &lattice_session::StateLayout) -> Result<Self> {
+        Ok(Self {
+            store: Box::new(
+                GitSessionGraphStore::create_layout(layout).map_err(map_session_error)?,
+            ),
+        })
     }
 
     #[cfg(test)]
@@ -113,6 +151,8 @@ impl SessionApi {
                 "project_branch must not be blank".into(),
             ));
         }
+        let key = lattice_session::ProjectStoreKey::parse(&request.project_store_key)
+            .map_err(|e| ApiError::BadRequest(format!("invalid project_store_key: {e}")))?;
         let session_id = Uuid::new_v4().simple().to_string();
         self.store
             .create_session(
@@ -120,6 +160,7 @@ impl SessionApi {
                 request.label.as_deref(),
                 &request.active_agent,
                 &request.project_branch,
+                &key,
             )
             .map_err(map_session_error)
     }
@@ -238,6 +279,15 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
         lattice_session::SessionError::InvalidPersistedValue { field, value } => {
             ApiError::Internal(format!("invalid persisted value for '{field}': {value}"))
         }
+        lattice_session::SessionError::SessionBusy(id) => ApiError::Busy(format!(
+            "session '{id}' is busy: another operation holds its execution lock"
+        )),
+        lattice_session::SessionError::Store(store_err) => match store_err {
+            lattice_session::StoreError::NotInitialized { path } => ApiError::StoreUnavailable(
+                format!("session store not initialized at {}", path.display()),
+            ),
+            other => ApiError::Internal(format!("store kernel error: {other}")),
+        },
     }
 }
 
@@ -258,8 +308,16 @@ mod session_graph {
         dir
     }
 
+    fn test_store_key() -> lattice_session::ProjectStoreKey {
+        lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-api-tests/project")
+    }
+
+    fn test_store_key_hex() -> String {
+        test_store_key().to_string()
+    }
+
     fn api(dir_name: &str) -> SessionApi {
-        SessionApi::git(temp_dir(dir_name))
+        SessionApi::git_create(temp_dir(dir_name).join("sessions.git")).expect("create store")
     }
 
     use lattice_session::test_helpers::{assistant_msg, user_msg};
@@ -271,7 +329,7 @@ mod session_graph {
         label: Option<&str>,
     ) -> Vec<String> {
         api.store()
-            .create_session(session_id, label, "coder", "main")
+            .create_session(session_id, label, "coder", "main", &test_store_key())
             .expect("create");
 
         let mut commit_ids: Vec<String> = Vec::new();
@@ -317,6 +375,7 @@ mod session_graph {
                 label: Some("my session".into()),
                 active_agent: "coder".into(),
                 project_branch: "main".to_string(),
+                project_store_key: test_store_key_hex(),
             })
             .expect("create_session");
 
@@ -381,6 +440,7 @@ mod session_graph {
                 label: None,
                 active_agent: "coder".into(),
                 project_branch: "main".to_string(),
+                project_store_key: test_store_key_hex(),
             })
             .expect("create");
         assert_eq!(created.session_id.len(), 32);
@@ -555,6 +615,7 @@ mod session_graph {
                 label: None,
                 active_agent: "coder".into(),
                 project_branch: "main".to_string(),
+                project_store_key: test_store_key_hex(),
             });
             let _ = api.open_session(OpenSessionRequest { id: String::new() });
             let _ = api.status("");
@@ -590,6 +651,7 @@ mod session_graph {
                 label: None,
                 active_agent: "coder".into(),
                 project_branch: String::new(),
+                project_store_key: test_store_key_hex(),
             })
             .unwrap_err();
         let msg = format!("{}", err);
@@ -607,6 +669,7 @@ mod session_graph {
                 label: None,
                 active_agent: "coder".into(),
                 project_branch: "   ".to_string(),
+                project_store_key: test_store_key_hex(),
             })
             .unwrap_err();
         let msg = format!("{}", err);
@@ -624,6 +687,7 @@ mod session_graph {
                 label: None,
                 active_agent: "coder".into(),
                 project_branch: "feature/my-branch".to_string(),
+                project_store_key: test_store_key_hex(),
             })
             .expect("create");
         assert_eq!(

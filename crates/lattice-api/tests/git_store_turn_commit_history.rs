@@ -15,22 +15,27 @@ use lattice_session::{
 };
 use tempfile::TempDir;
 
-fn init_git_repo(dir: &std::path::Path) {
-    let _ = lattice_session::test_utils::init_empty_repo(dir);
+fn test_store_key() -> lattice_session::ProjectStoreKey {
+    lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-api-tests/project")
 }
 
 #[test]
 fn git_store_turn_commit_creates_git_history() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path();
-    init_git_repo(dir);
 
-    let store = GitSessionGraphStore::new(dir);
+    let store = GitSessionGraphStore::create(dir.join("sessions.git")).expect("create store");
 
     // Create a session to commit against.
     let session_id = "abcdef0123456789abcdef0123456789".to_string();
     store
-        .create_session(&session_id, Some("history-test"), "coder", "main")
+        .create_session(
+            &session_id,
+            Some("history-test"),
+            "coder",
+            "main",
+            &test_store_key(),
+        )
         .expect("create_session");
 
     // Build a minimal first turn (no parents).
@@ -76,7 +81,8 @@ fn git_store_turn_commit_creates_git_history() {
     //    repository independently (not through the store) to confirm the
     //    object was actually persisted to .git/objects.
     let oid = gix::ObjectId::from_hex(commit.commit_id.as_bytes()).expect("parse oid");
-    let repo = gix::open_opts(dir, gix::open::Options::isolated()).expect("open repo");
+    let repo = gix::open_opts(dir.join("sessions.git"), gix::open::Options::isolated())
+        .expect("open repo");
     let git_commit = repo
         .find_commit(oid)
         .expect("commit object must exist in git object database");
@@ -90,7 +96,7 @@ fn git_store_turn_commit_creates_git_history() {
 
     // 4. The session branch ref points at the new commit, confirming the
     //    history is reachable (not a dangling object).
-    let ref_name = format!("refs/lattice/sessions/{session_id}/main");
+    let ref_name = format!("refs/lattice/sessions/{session_id}/heads/main");
     let branch_ref = repo
         .find_reference(ref_name.as_str())
         .expect("session branch ref should exist");

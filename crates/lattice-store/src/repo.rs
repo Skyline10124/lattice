@@ -318,9 +318,7 @@ impl StoreRepo {
         ));
 
         let create_result: Result<()> = (|| {
-            let temp_repo = gix::init_bare(&temp).map_err(|e| {
-                StoreError::Git(format!("init bare repository in '{}': {e}", temp.display()))
-            })?;
+            let temp_repo = init_bare_recovering_cwd(&temp)?;
             let meta_commit = write_meta_commit(&temp_repo, &meta)?;
             let this = StoreRepo {
                 git_dir: temp.clone(),
@@ -779,6 +777,32 @@ fn classify_ref_error(ref_name: &str, error: gix::reference::edit::Error) -> Sto
 }
 
 /// Write the identity commit for a fresh repository (meta.json in a tree).
+/// `gix::init_bare` with one recovery retry: gix reads the process CWD even
+/// for an absolute target, so an init after the process's CWD was deleted
+/// (removed checkout, unmounted volume) fails with `CurrentDir`. Point the
+/// CWD somewhere that exists and try again; the partially created temp from
+/// the failed attempt is removed first.
+fn init_bare_recovering_cwd(temp: &Path) -> Result<gix::Repository> {
+    match gix::init_bare(temp) {
+        Ok(repo) => Ok(repo),
+        Err(err) if format!("{err:?}").contains("CurrentDir") => {
+            std::env::set_current_dir(std::env::temp_dir()).map_err(|source| StoreError::Io {
+                operation: "recovering process cwd for git init",
+                path: temp.to_path_buf(),
+                source,
+            })?;
+            let _ = std::fs::remove_dir_all(temp);
+            gix::init_bare(temp).map_err(|e| {
+                StoreError::Git(format!("init bare repository in '{}': {e}", temp.display()))
+            })
+        }
+        Err(err) => Err(StoreError::Git(format!(
+            "init bare repository in '{}': {err}",
+            temp.display()
+        ))),
+    }
+}
+
 fn write_meta_commit(repo: &gix::Repository, meta: &StoreMeta) -> Result<gix::ObjectId> {
     let bytes = meta::serialize_meta(meta)?;
     let blob = repo
