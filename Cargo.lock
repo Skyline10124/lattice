@@ -2948,6 +2948,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-store"
+version = "0.1.0"
+dependencies = [
+ "gix",
+ "libc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lattice-system-harness"
 version = "0.1.0"
 dependencies = [

@@ -96,7 +96,7 @@ there is no dual write, import, legacy reader, or runtime backend switch.
 
 ## 2. Component diagram
 
-The workspace has 20 crates grouped into layers. Arrows point from a higher
+The workspace has 21 crates grouped into layers. Arrows point from a higher
 layer toward the lower-layer crates it depends on. The diagram below shows the
 runtime crates; `lattice-tool-prelude` (guest SDK) and
 `lattice-system-harness` (black-box tests) sit outside it by contract.
@@ -131,6 +131,7 @@ graph TD
 
     %% Layer 0 — leaves
     PROTOCOL["lancet-protocol"]
+    STORE["lattice-store"]
     NETGUARD["net-guard"]
     CONVERSATION["lattice-conversation"]
     LLM["lattice-llm"]
@@ -197,6 +198,7 @@ Layer model (verified against each crate's `Cargo.toml` `[dependencies]`):
 | Layer | Crate | Depends on |
 |---|---|---|
 | 0 (leaf) | `lancet-protocol` | — |
+| 0 (leaf) | `lattice-store` | — |
 | 0 (leaf) | `net-guard` | — |
 | 0.5 | `lattice-conversation` | `lancet-protocol` |
 | 0.5 | `lattice-llm` | `net-guard`, `lattice-conversation` |

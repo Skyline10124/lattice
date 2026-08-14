@@ -27,12 +27,12 @@ deployment platform.
 
 ## Workspace
 
-LATTICE is a Cargo workspace of 20 crates, layered so dependencies always
+LATTICE is a Cargo workspace of 21 crates, layered so dependencies always
 point from higher layers down. See [AGENTS.md](AGENTS.md) for the authoritative
 graph with every edge spelled out.
 
 ```text
-Layer 0 (leaf):  lancet-protocol
+Layer 0 (leaf):  lancet-protocol  lattice-store
 Layer 0.5:       net-guard
                  lattice-conversation(->protocol)
                  lattice-llm(->net-guard,conversation)
@@ -76,6 +76,7 @@ lattice-system-harness (black-box tests; must not depend on product crates).
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security, and the pure-data provider replay/projection seam. |
 | `lattice-conversation` | Provider-neutral data-only conversation contract: ordered `NativeMessage` with bound/unbound ToolCall typestates, semantic/replay digests, per-attempt usage, and the transcript types. No I/O, no stores, no ID generators. |
 | `lattice-session` | Session graph contract and the **git-backed** graph store (`GitSessionGraphStore`). |
+| `lattice-store` | ADR 0005 domain-neutral private-Git/Linux durability kernel: XDG topology, `ProjectStoreKey`, typed create/open, ref CAS/transactions, flock, durability barriers, atomic first-create, capability probes. No domain schemas, no workspace deps. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, LANCET `[lancet]` policy sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly. |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution (`stream_turn`). |
