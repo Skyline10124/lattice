@@ -839,6 +839,9 @@ mod turn_wiring {
         let _xdg = lancet_audit::ScopedXdgStateHome::new();
         let project = TempDir::new().unwrap();
         init_git_repo(project.path());
+        // Durable path: the project's stores exist before the Turn, exactly
+        // as `session new` leaves them (#143).
+        crate::turn::test_support::ensure_project_stores(project.path());
         let legacy_dir = project.path().join(".lattice");
         std::fs::create_dir_all(&legacy_dir).unwrap();
         let legacy_path = legacy_dir.join("cep_audit.db");

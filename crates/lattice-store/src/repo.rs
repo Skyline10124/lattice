@@ -28,6 +28,7 @@
 //! The create lock and the repository write lock never overlap: the create
 //! lock is released before [`StoreRepo::open`] returns the repository.
 
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -474,6 +475,59 @@ impl StoreRepo {
         Ok(commit.parent_ids().map(|id| id.detach()).collect())
     }
 
+    /// Commit message, verbatim.
+    pub fn commit_message(&self, commit_oid: gix::ObjectId) -> Result<String> {
+        let repo = self.repo();
+        let commit = repo
+            .find_commit(commit_oid)
+            .map_err(|e| StoreError::Git(format!("find commit {commit_oid}: {e}")))?;
+        Ok(commit.message_raw_sloppy().to_string())
+    }
+
+    /// Commit timestamp in unix seconds, when the commit records a readable
+    /// time.
+    pub fn commit_time(&self, commit_oid: gix::ObjectId) -> Result<Option<i64>> {
+        let repo = self.repo();
+        let commit = repo
+            .find_commit(commit_oid)
+            .map_err(|e| StoreError::Git(format!("find commit {commit_oid}: {e}")))?;
+        Ok(commit.time().ok().map(|time| time.seconds))
+    }
+
+    /// Read the blob at `path` inside a tree. `None` when the path is absent
+    /// or is not a blob.
+    pub fn read_tree_path(&self, tree_oid: gix::ObjectId, path: &str) -> Result<Option<Vec<u8>>> {
+        let repo = self.repo();
+        let tree = repo
+            .find_tree(tree_oid)
+            .map_err(|e| StoreError::Git(format!("find tree {tree_oid}: {e}")))?;
+        let Some(entry) = tree
+            .lookup_entry_by_path(path)
+            .map_err(|e| StoreError::Git(format!("lookup '{path}' in tree: {e}")))?
+        else {
+            return Ok(None);
+        };
+        let object = entry
+            .object()
+            .map_err(|e| StoreError::Git(format!("load '{path}' from tree: {e}")))?;
+        match object.try_into_blob() {
+            Ok(blob) => Ok(Some(blob.data.clone())),
+            // A tree (or anything else) at that path is not blob content.
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Every blob in a tree, keyed by its full path.
+    pub fn tree_files(&self, tree_oid: gix::ObjectId) -> Result<BTreeMap<String, Vec<u8>>> {
+        let repo = self.repo();
+        let tree = repo
+            .find_tree(tree_oid)
+            .map_err(|e| StoreError::Git(format!("find tree {tree_oid}: {e}")))?;
+        let mut out = BTreeMap::new();
+        collect_tree_files(&tree, "", &mut out)?;
+        Ok(out)
+    }
+
     /// Read the blob at `path` inside a commit's tree.
     pub fn read_tree_blob(&self, commit_oid: gix::ObjectId, path: &str) -> Result<Vec<u8>> {
         let repo = self.repo();
@@ -695,6 +749,21 @@ impl StoreRepo {
         }
     }
 
+    /// Whether `oid` currently carries a retention pin.
+    pub fn is_retained(&self, oid: gix::ObjectId) -> Result<bool> {
+        let ref_name = format!("{RETAINED_REF_PREFIX}/{oid}");
+        Ok(self.ref_target(&ref_name)? == Some(oid))
+    }
+
+    /// Every currently pinned object id.
+    pub fn retained_pins(&self) -> Result<Vec<gix::ObjectId>> {
+        Ok(self
+            .enumerate_refs(&format!("{RETAINED_REF_PREFIX}/"))?
+            .into_iter()
+            .map(|(_, oid)| oid)
+            .collect())
+    }
+
     /// Release a retention pin. Idempotent.
     pub fn release(&self, oid: gix::ObjectId) -> Result<()> {
         let ref_name = format!("{RETAINED_REF_PREFIX}/{oid}");
@@ -741,6 +810,42 @@ impl StoreRepo {
             .unwrap_or_else(|e| e.into_inner())
             .insert(oid);
     }
+}
+
+/// Recursively collect every blob in `tree` into `out`, keyed by full path.
+fn collect_tree_files(
+    tree: &gix::Tree<'_>,
+    prefix: &str,
+    out: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    for entry in tree.iter() {
+        let entry = entry.map_err(|e| StoreError::Git(format!("iterate tree: {e}")))?;
+        let name = entry.filename().to_string();
+        let full = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let object = entry
+            .object()
+            .map_err(|e| StoreError::Git(format!("load tree object: {e}")))?;
+        match object.kind {
+            gix::object::Kind::Tree => {
+                let subtree = object
+                    .try_into_tree()
+                    .map_err(|e| StoreError::Git(format!("peel subtree: {e}")))?;
+                collect_tree_files(&subtree, &full, out)?;
+            }
+            gix::object::Kind::Blob => {
+                let blob = object
+                    .try_into_blob()
+                    .map_err(|e| StoreError::Git(format!("peel blob: {e}")))?;
+                out.insert(full, blob.data.clone());
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Validate a ref name the kernel will write: syntactically legal and inside

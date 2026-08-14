@@ -20,25 +20,26 @@ pub use lancet_audit::{
     audit_state_root, project_state_dir, project_state_dir_in, project_storage_key,
 };
 
-/// Private workspace-history repository backing under a caller-supplied state
+/// Private workspace-history store backing under a caller-supplied state
 /// root (tests/embedders).
+///
+/// Since #143 the store is addressed by the kernel's `ProjectStoreKey`,
+/// derived from the canonical Local Workspace root's raw path bytes.
 pub fn workspace_history_backing_in(
     external_state_root: &Path,
     project_root: &Path,
 ) -> Result<WorkspaceHistoryBacking, ExternalAuditPathError> {
-    Ok(WorkspaceHistoryBacking::under_project_state_dir(
-        project_state_dir_in(external_state_root, project_root)?,
-    ))
+    WorkspaceHistoryBacking::for_project_in(external_state_root, project_root)
+        .map_err(|err| ExternalAuditPathError::Canonicalize(err.to_string()))
 }
 
-/// Private workspace-history repository backing under the Linux XDG state
+/// Private workspace-history store backing under the Linux XDG state
 /// directory.
 pub fn workspace_history_backing(
     project_root: &Path,
 ) -> Result<WorkspaceHistoryBacking, ExternalAuditPathError> {
-    Ok(WorkspaceHistoryBacking::under_project_state_dir(
-        project_state_dir(project_root)?,
-    ))
+    WorkspaceHistoryBacking::for_project(project_root)
+        .map_err(|err| ExternalAuditPathError::Canonicalize(err.to_string()))
 }
 
 /// Where CEP audit records are persisted for the runtime.

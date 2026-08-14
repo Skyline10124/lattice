@@ -30,6 +30,8 @@ use lancet_protocol::evidence::{
     MutationEvidence, MutationInstallation, MutationPrecondition, ObservedTarget,
 };
 
+use lattice_store::{Blocking, LockMode};
+
 use crate::admission::{AdmittedTool, authorize_operation, resolve_scope};
 use crate::evidence::CellEvidenceLedger;
 use crate::history::{MutationRecord, RecordedMutation, WorkspaceHistory};
@@ -569,6 +571,19 @@ impl WorkspaceMutationHost {
             .map_err(|err| self.refuse_early(ctx, ws_path.as_str(), err))?;
         let resolved = ws_path.as_str().to_string();
         self.authorize(ctx, &resolved, path)?;
+        // ADR 0005 §5 lock order: the per-project `WorkspaceOperationLock`
+        // (exclusive for a mutation) is taken first and held from here
+        // through install and history publication; the private history takes
+        // the repository write lock underneath it. The in-process gate keeps
+        // the two Host instances over one workspace serialized as well.
+        let _operation_guard = self
+            .workspace
+            .lock_operation(LockMode::Exclusive, Blocking::Block)
+            .map_err(|err| MutateError::History {
+                requested: path.to_string(),
+                detail: err.to_string(),
+            })
+            .inspect_err(|err| self.record_refusal(ctx, &resolved, err))?;
         let _mutation_guard = self
             .mutation_gate
             .lock()
@@ -684,6 +699,19 @@ impl WorkspaceMutationHost {
             .map_err(|err| self.refuse_early(ctx, ws_path.as_str(), err))?;
         let resolved = ws_path.as_str().to_string();
         self.authorize(ctx, &resolved, path)?;
+        // ADR 0005 §5 lock order: the per-project `WorkspaceOperationLock`
+        // (exclusive for a mutation) is taken first and held from here
+        // through install and history publication; the private history takes
+        // the repository write lock underneath it. The in-process gate keeps
+        // the two Host instances over one workspace serialized as well.
+        let _operation_guard = self
+            .workspace
+            .lock_operation(LockMode::Exclusive, Blocking::Block)
+            .map_err(|err| MutateError::History {
+                requested: path.to_string(),
+                detail: err.to_string(),
+            })
+            .inspect_err(|err| self.record_refusal(ctx, &resolved, err))?;
         let _mutation_guard = self
             .mutation_gate
             .lock()
@@ -1078,10 +1106,16 @@ mod tests {
 
     fn private_history() -> (tempfile::TempDir, Arc<WorkspaceHistory>) {
         let state = tempfile::TempDir::new().expect("private state root");
+        let workspace_root = state.path().join("workspace");
+        fs::create_dir_all(&workspace_root).expect("workspace root");
         let history = Arc::new(
-            WorkspaceHistory::open(WorkspaceHistoryBacking::Repo(
-                state.path().join("history.git"),
-            ))
+            WorkspaceHistory::create(
+                WorkspaceHistoryBacking::for_project_in(
+                    &state.path().join("state"),
+                    &workspace_root,
+                )
+                .expect("derive backing"),
+            )
             .expect("history"),
         );
         (state, history)

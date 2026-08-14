@@ -18,6 +18,7 @@ mod profile;
 mod rewind;
 pub mod root;
 mod session;
+pub mod stores;
 pub mod turn;
 
 pub use lattice_session::{

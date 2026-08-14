@@ -206,6 +206,15 @@ pub fn rewind_workspace(
         Restore(RewindRestoreError),
     }
 
+    // ADR 0005 §5: a Rewind is a workspace mutation, so it holds the
+    // per-project `WorkspaceOperationLock` exclusively across preflight,
+    // restore, and the history ref move. The history's repository write lock
+    // is taken underneath it inside `rewind_with`, never the reverse.
+    let _operation_guard = history.lock_workspace_operation(
+        lancet_runtime::LockMode::Exclusive,
+        lancet_runtime::Blocking::Block,
+    )?;
+
     // Steps are captured before the restore runs so every failure mode —
     // conflict, restore error, ref-move failure — can still surface what the
     // rewind had planned; the outcome joins once the executor returns.

@@ -61,7 +61,7 @@ impl HistoryRuntime {
     fn build() -> Self {
         let root = TempDir::new().expect("workspace root");
         let state = TempDir::new().expect("state root");
-        let runtime = build_runtime(root.path(), &history_backing(state.path()));
+        let runtime = build_runtime(root.path(), &history_backing(state.path(), root.path()));
         Self {
             runtime,
             root,
@@ -81,8 +81,14 @@ impl HistoryRuntime {
     }
 }
 
-fn history_backing(state_root: &Path) -> WorkspaceHistoryBacking {
-    WorkspaceHistoryBacking::under_project_state_dir(state_root)
+/// The project-scoped history backing for one workspace root, with the store
+/// first-created — #143 strict open requires the store to exist, and
+/// production creates it in `session new`.
+fn history_backing(state_root: &Path, workspace_root: &Path) -> WorkspaceHistoryBacking {
+    let backing = lancet_api::workspace_history_backing_in(state_root, workspace_root)
+        .expect("derive history backing");
+    lancet_api::WorkspaceHistory::create(backing.clone()).expect("create history store");
+    backing
 }
 
 fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntime {
@@ -351,7 +357,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
             enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
             ..Default::default()
         },
-        workspace_history: history_backing(denied_state.path()),
+        workspace_history: history_backing(denied_state.path(), denied_root.path()),
         model_id: "test".into(),
         runtime_version: "test".into(),
     })
@@ -395,7 +401,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
             denied_capabilities: std::iter::once("workspace.mutation".to_string()).collect(),
             max_boundary: lancet_protocol::cell::Trust::In,
         },
-        workspace_history: history_backing(effect_state.path()),
+        workspace_history: history_backing(effect_state.path(), effect_root.path()),
         model_id: "test".into(),
         runtime_version: "test".into(),
     })
@@ -465,8 +471,12 @@ async fn an_installed_mutation_survives_later_failures_without_compensation() {
     );
 }
 
-/// AC8: prior object ids stay reachable through internal refs, with no
-/// time-based expiry, and the user's project refs are untouched.
+/// AC8: prior object ids stay reachable with no time-based expiry, and the
+/// user's project refs are untouched.
+///
+/// #143 narrowed the mechanism: normal recording writes no per-record refs,
+/// because everything it appends is an ancestor of `current`. Only a Rewind,
+/// which moves `current` backwards, needs the kernel's retention pin.
 #[tokio::test]
 async fn prior_object_ids_stay_reachable_through_internal_refs() {
     let env = HistoryRuntime::build();
@@ -480,15 +490,14 @@ async fn prior_object_ids_stay_reachable_through_internal_refs() {
     for oid in [&first, &second] {
         assert!(
             history.is_reachable(oid).expect("reachability"),
-            "prior object id {oid} must stay pinned by an internal ref"
+            "prior object id {oid} must stay reachable"
         );
         assert!(history.resolve(oid).unwrap().is_some());
     }
 
-    // The pins are real refs under the private namespace, not reflog entries.
     let repo = gix::open_opts(history.repo_path().unwrap(), gix::open::Options::isolated())
         .expect("open private history");
-    let pinned: Vec<String> = repo
+    let record_pins: Vec<String> = repo
         .references()
         .expect("refs")
         .prefixed("refs/lattice/workspace-history/records/")
@@ -497,8 +506,32 @@ async fn prior_object_ids_stay_reachable_through_internal_refs() {
         .map(|r| r.name().as_bstr().to_string())
         .collect();
     assert!(
-        pinned.len() >= 3,
-        "each recorded commit must be pinned: {pinned:?}"
+        record_pins.is_empty(),
+        "normal recording must not write per-record refs: {record_pins:?}"
+    );
+
+    // A Rewind abandons the tip, so it retains it first: the object stays
+    // resolvable through a real ref, never a reflog entry.
+    let abandoned = env.current().unwrap();
+    history
+        .rewind_with(Some(&first), |_| Ok::<(), std::convert::Infallible>(()))
+        .expect("rewind runs");
+    assert_eq!(env.current().as_deref(), Some(first.as_str()));
+    assert!(
+        history.is_reachable(&abandoned).expect("reachability"),
+        "the abandoned tip must stay reachable after the rewind"
+    );
+    let retained: Vec<String> = repo
+        .references()
+        .expect("refs")
+        .prefixed("refs/lattice/retained/")
+        .expect("prefix")
+        .filter_map(|r| r.ok())
+        .map(|r| r.name().as_bstr().to_string())
+        .collect();
+    assert!(
+        retained.iter().any(|name| name.ends_with(&abandoned)),
+        "the abandoned tip must carry a retention pin: {retained:?}"
     );
 }
 

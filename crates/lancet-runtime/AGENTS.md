@@ -46,15 +46,17 @@ per-call admission step.
   server dispatch (D.3) paths.
 - `src/history.rs` owns `WorkspaceHistory`, `WorkspaceHistoryBacking`,
   `MutationRecord`, `RecordedMutation`, and `HistorySnapshot` — the private
-  durable history of successfully installed Atomic Local Mutations (#63). A
-  private **bare** `gix` repository outside the Local Workspace and outside
-  the user's project `.git`; Git blobs/trees/commits express before/after
-  state, `refs/lattice/workspace-history/current` tracks the newest recorded
-  mutation, and `refs/lattice/workspace-history/records/<oid>` pins every
-  recorded commit so prior object ids stay reachable without time-based
-  expiry. Recording is serialized behind a mutex so concurrent mutations
-  chain in real execution order. Never a Git subprocess, never `git2`, never
-  a parallel receipt/SQLite store.
+  durable history of successfully installed Atomic Local Mutations (#63),
+  built on the `lattice-store` kernel since #143. A project-scoped store
+  outside the Local Workspace and outside the user's project `.git`; Git
+  blobs/trees/commits express before/after state and
+  `refs/lattice/workspace-history/current` tracks the newest recorded
+  mutation. Normal recording writes no per-record refs (everything it appends
+  is an ancestor of `current`); a Rewind retains the tip it abandons through
+  the kernel's `refs/lattice/retained/<oid>` pin, which is what keeps prior
+  object ids resolvable without time-based expiry. Recording and rewinding
+  serialize on the kernel's repository write lock. Never a Git subprocess,
+  never `git2`, never a parallel receipt/SQLite store.
 - `src/bindings.rs` owns the `wasmtime::component::bindgen!` expansion for
   the Tool Host WIT world (`lattice:tool-host@0.1.0`).
 - `src/host.rs` implements the `host-control` interface on `StoreState`
@@ -136,16 +138,24 @@ per-call admission step.
 - `WorkspaceHistory` never touches the Local Workspace or the user's project
   `.git`, never writes a compensation commit, and exposes no user command
   surface. Callers record only after an install has already succeeded.
-- ADR 0005/#143 moves WorkspaceHistory's generic repository/ref/lock/fsync
-  mechanics to `lattice-store`, not its mutation/rewind semantics. This crate
-  continues to own the typed history handle and Local mutation integration.
-  Never merge workspace history with sessions/invocations or hold its repository
-  write lock together with another repository lock.
-- ADR 0005 also adds one external project-scoped WorkspaceOperationLock shared
-  with observation and rewind. Mutation holds it exclusive from precondition
-  check through atomic install and history publication; rewind holds it across
-  plan/restore/ref move. The kernel repository lock remains narrower and is not
-  duplicated.
+- ADR 0005/#143 moved WorkspaceHistory's repository/ref/lock/fsync mechanics
+  to `lattice-store`, not its mutation/rewind semantics. This crate owns the
+  typed history handle and Local mutation integration and must not hand-roll
+  durability primitives. Never merge workspace history with
+  sessions/invocations or hold its repository write lock together with another
+  repository lock.
+- The history store is project-scoped
+  (`projects/<ProjectStoreKey>/workspace-history.git`) and strictly opened:
+  `WorkspaceHistory::open` fails closed on a missing store, and `create` is
+  reserved for the `session new` composition path.
+- The per-project `WorkspaceOperationLock`
+  (`locks/projects/<ProjectStoreKey>/workspace.lock`) is reached through
+  `WorkspaceHistory::lock_workspace_operation` /
+  `LocalWorkspace::lock_operation`. Observation takes it shared; mutation
+  holds it exclusive from the precondition check through atomic install and
+  history publication; rewind holds it across plan/restore/ref move. The
+  kernel repository write lock is strictly narrower and is taken underneath
+  it, never the reverse, and a shared hold is never upgraded.
 - No runtime registration API: the catalog is immutable after `compose`.
   The public constructor (`from_embedded`) reads `inventory` + the
   generated `EXPECTED_COMPONENTS` only.
@@ -193,12 +203,17 @@ per-call admission step.
   outside it. #64 added `plan_rewind` / `rewind_with`: the walk from
   `current` back to a target identity, the per-path preflight/restore states
   derived from parent trees, and the guarded backwards move of `current`
-  (deleting it for an empty target) under the same recording lock. The
+  (deleting it for an empty target) under the kernel's repository write lock,
+  after retaining the abandoned tip. The
   restore itself is the caller's closure — do not pull filesystem writes,
   a second history store, or an Agent-visible history command in here.
 - Keep the baseline rule content-based: the parent tree must equal the
   before state the installer observed, since the Local Workspace is shared
   with the user and drifts.
+- Keep the operation-lock order intact when touching observation or mutation:
+  `WorkspaceOperationLock` first, at most one repository write lock under it,
+  no upgrade from shared. A new mutation entry point must take the exclusive
+  hold before its precondition read, not after.
 
 ## Record Maintenance
 

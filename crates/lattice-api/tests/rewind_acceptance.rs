@@ -64,7 +64,7 @@ impl RewindRuntime {
     fn build() -> Self {
         let root = TempDir::new().expect("workspace root");
         let state = TempDir::new().expect("state root");
-        let runtime = build_runtime(root.path(), &backing(state.path()));
+        let runtime = build_runtime(root.path(), &backing(state.path(), root.path()));
         Self {
             runtime,
             root,
@@ -77,7 +77,7 @@ impl RewindRuntime {
     }
 
     fn backing(&self) -> WorkspaceHistoryBacking {
-        backing(self.state.path())
+        backing(self.state.path(), self.root.path())
     }
 
     fn current(&self) -> Option<String> {
@@ -93,8 +93,14 @@ impl RewindRuntime {
     }
 }
 
-fn backing(state_root: &Path) -> WorkspaceHistoryBacking {
-    WorkspaceHistoryBacking::under_project_state_dir(state_root)
+/// The project-scoped history backing for one workspace root, with the store
+/// first-created — #143 strict open requires the store to exist, and
+/// production creates it in `session new`.
+fn backing(state_root: &Path, workspace_root: &Path) -> WorkspaceHistoryBacking {
+    let backing = lancet_api::workspace_history_backing_in(state_root, workspace_root)
+        .expect("derive history backing");
+    lancet_api::WorkspaceHistory::create(backing.clone()).expect("create history store");
+    backing
 }
 
 fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntime {

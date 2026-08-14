@@ -1,18 +1,20 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Private workspace mutation history (GitHub #63).
+//! Private workspace mutation history (GitHub #63, migrated to the
+//! `lattice-store` kernel in #143).
 //!
 //! Every Atomic Local Mutation that LATTICE **successfully installs** is
 //! appended to a durable history that is independent of the Session History,
 //! of the Local Workspace, and of the user's project `.git`.
 //!
-//! The history is a private **bare** repository driven by `gix` — no Git
-//! subprocess, no `git2`. LATTICE mutation state is expressed with ordinary
-//! Git objects: blobs for file content, trees for the before/after state of
-//! the paths LATTICE has touched, commits for ordering and parent
-//! relationships, and internal refs for reachability. There is no parallel
-//! custom blob format, receipt store, or SQLite workspace graph.
+//! The history is a project-scoped store in the private-Git kernel: blobs for
+//! file content, trees for the before/after state of the paths LATTICE has
+//! touched, commits for ordering and parent relationships, and kernel refs for
+//! reachability. There is no parallel custom blob format, receipt store, or
+//! SQLite workspace graph, and this module owns no durability primitives of
+//! its own — object writing, ref CAS, the repository write lock, retention,
+//! and fsync barriers all belong to the kernel.
 //!
 //! ## What is and is not recorded
 //!
@@ -26,17 +28,19 @@
 //! ## Layout
 //!
 //! ```text
-//! <state>/lattice/projects/<project-key>/workspace-history.git   (bare)
+//! $XDG_STATE_HOME/lattice/projects/<ProjectStoreKey>/workspace-history.git
+//!   refs/lattice/meta                           -> kernel store identity
 //!   refs/lattice/workspace-history/current      -> newest recorded mutation
-//!   refs/lattice/workspace-history/records/<oid> -> one pin per recorded commit
+//!   refs/lattice/retained/<oid>                 -> kernel retention pin
 //! ```
 //!
-//! `current` moves forward on every recorded mutation. The per-record pin refs
-//! exist so prior object IDs stay reachable forever even after `current` moves
-//! backwards — an explicit Rewind (GitHub #64) never has to rely on ancestry,
-//! and nothing here uses time-based expiry, compensation commits, or reflog
-//! retention. The repository is private state; the user's project refs are
-//! never touched.
+//! `current` moves forward on every recorded mutation. Normal recording writes
+//! no per-record refs: everything it appends is an ancestor of `current`. An
+//! explicit Rewind (GitHub #64) moves `current` *backwards*, so it retains the
+//! abandoned tip through the kernel's retention primitive first — that is what
+//! keeps prior object ids resolvable forever, with no time-based expiry,
+//! compensation commit, or reflog dependency. The store is private state; the
+//! user's project refs are never touched.
 //!
 //! ## Before/after state
 //!
@@ -59,36 +63,40 @@
 //!
 //! ## Concurrency
 //!
-//! One handle serializes its own recording behind a mutex, but a second
-//! LATTICE process — or a second runtime in one process — holds its own
-//! handle. The compare-and-set on `current` is the real arbiter: a writer that
-//! loses re-reads the tip and appends on top of the winner, because the bytes
-//! it is recording are already installed on disk and dropping them would lose
-//! real history.
+//! Recording and rewinding hold the kernel's standard per-repository write
+//! lock across the read-build-publish sequence, so a second LATTICE process —
+//! or a second runtime in one process — cannot interleave. The compare-and-set
+//! on `current` remains the fail-closed arbiter: a writer that somehow loses
+//! re-reads the tip and appends on top of the winner, because the bytes it is
+//! recording are already installed on disk and dropping them would lose real
+//! history.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 #[cfg(any(test, feature = "test-fault-injection"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gix::objs::tree::EntryKind;
-use gix::refs::transaction::PreviousValue;
+
+use lattice_store::{
+    Blocking, LockMode, ProjectStoreKey, RefExpectation, StateLayout, StoreError, StoreRepo,
+    TreeSpec,
+};
 
 /// Ref holding the newest recorded mutation commit.
 pub const CURRENT_REF: &str = "refs/lattice/workspace-history/current";
 
-/// Namespace holding one permanent pin ref per recorded commit.
-pub const RECORD_REF_PREFIX: &str = "refs/lattice/workspace-history/records";
-
-/// Directory name of the private bare history repository.
+/// Directory name of the project-scoped history store.
 pub const HISTORY_REPO_DIR: &str = "workspace-history.git";
 
-/// Cross-process recording lock inside the private repository.
-const HISTORY_LOCK_FILE: &str = "lattice-history.lock";
+/// Kernel store kind recorded in `refs/lattice/meta`.
+pub const HISTORY_STORE_KIND: &str = "workspace-history";
 
-const HISTORY_AUTHOR_NAME: &str = "LATTICE";
-const HISTORY_AUTHOR_EMAIL: &str = "lattice@localhost";
+/// Domain schema version of this store's contents.
+pub const HISTORY_STORE_SCHEMA_VERSION: u32 = 1;
+
+/// Lock file name of the per-project `WorkspaceOperationLock` (ADR 0005 §5).
+pub const WORKSPACE_OPERATION_LOCK: &str = "workspace.lock";
 
 /// Trailer key marking a commit as a mutation or a baseline.
 const KIND_TRAILER: &str = "lattice-history-kind";
@@ -119,26 +127,75 @@ pub enum WorkspaceHistoryError {
     },
 }
 
+impl From<StoreError> for WorkspaceHistoryError {
+    fn from(err: StoreError) -> Self {
+        Self::Repo(err.to_string())
+    }
+}
+
 /// Where the private workspace history lives.
 #[derive(Debug, Clone)]
 pub enum WorkspaceHistoryBacking {
     /// No history recording.
     ///
     /// For unit-test servers and embedders that have no per-project state
-    /// root. Production turn runtimes always resolve a [`Self::Repo`] path.
+    /// root. Production turn runtimes always resolve a [`Self::Project`].
     Disabled,
-    /// Private bare repository at this path, created if absent.
-    Repo(PathBuf),
+    /// Project-scoped store under a state layout, addressed by the Local
+    /// Workspace root's [`ProjectStoreKey`].
+    Project {
+        /// The private-state layout the store lives under.
+        layout: StateLayout,
+        /// Storage address derived from the canonical workspace root.
+        key: ProjectStoreKey,
+    },
 }
 
 impl WorkspaceHistoryBacking {
-    /// Private history repository under a per-project state directory.
+    /// Project-scoped backing under a caller-supplied state root
+    /// (tests/embedders).
     ///
-    /// `project_state_dir` is the same per-project directory that holds the
-    /// CEP audit database, so the history lands outside both the Local
-    /// Workspace and the user's project `.git`.
-    pub fn under_project_state_dir(project_state_dir: impl AsRef<Path>) -> Self {
-        Self::Repo(project_state_dir.as_ref().join(HISTORY_REPO_DIR))
+    /// `workspace_root` is the full canonical Local Workspace root; the key is
+    /// derived from its raw path bytes by the kernel (ADR 0005 §2).
+    pub fn for_project_in(
+        state_root: &Path,
+        workspace_root: &Path,
+    ) -> Result<Self, WorkspaceHistoryError> {
+        Ok(Self::Project {
+            layout: StateLayout::in_state_root(state_root),
+            key: ProjectStoreKey::derive(workspace_root)?,
+        })
+    }
+
+    /// Project-scoped backing under the XDG state root (production).
+    pub fn for_project(workspace_root: &Path) -> Result<Self, WorkspaceHistoryError> {
+        Ok(Self::Project {
+            layout: StateLayout::resolve()?,
+            key: ProjectStoreKey::derive(workspace_root)?,
+        })
+    }
+
+    /// Backing for an already-derived storage address.
+    pub fn for_key(layout: StateLayout, key: ProjectStoreKey) -> Self {
+        Self::Project { layout, key }
+    }
+
+    /// Path of the history store, when enabled.
+    pub fn store_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Disabled => None,
+            Self::Project { layout, key } => Some(layout.project_store(key, HISTORY_REPO_DIR)),
+        }
+    }
+
+    /// Path of the per-project `WorkspaceOperationLock`, when enabled.
+    pub fn operation_lock_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Disabled => None,
+            Self::Project { layout, key } => {
+                Some(layout.project_lock(key, WORKSPACE_OPERATION_LOCK))
+            }
+        }
     }
 }
 
@@ -189,19 +246,16 @@ pub struct HistorySnapshot {
 /// The private, durable record of successfully installed Atomic Local
 /// Mutations.
 ///
-/// Deep module: repository creation, object writing, ordering, ref movement,
-/// and reachability all live behind this type. Callers hand it a
+/// Deep module: store creation, object writing, ordering, ref movement, and
+/// reachability all live behind this type. Callers hand it a
 /// [`MutationRecord`] after a successful install and read back object ids.
 pub struct WorkspaceHistory {
     /// `None` when recording is disabled.
-    ///
-    /// `gix::Repository` is `Send` but not `Sync`, and the mutex additionally
-    /// serializes recording so concurrent mutations chain in real execution
-    /// order with true parent relationships.
-    repo: Option<Mutex<gix::Repository>>,
-    path: Option<PathBuf>,
-    /// Advisory lock file serializing recording across handles and processes.
-    lock_path: Option<PathBuf>,
+    store: Option<StoreRepo>,
+    /// Path of the per-project `WorkspaceOperationLock`. `None` when
+    /// recording is disabled, which is also the only case with no project
+    /// binding to lock against.
+    operation_lock: Option<PathBuf>,
     /// One-shot record failure for tests of the post-install durability edge.
     #[cfg(any(test, feature = "test-fault-injection"))]
     fail_record: AtomicBool,
@@ -210,36 +264,68 @@ pub struct WorkspaceHistory {
 impl std::fmt::Debug for WorkspaceHistory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkspaceHistory")
-            .field("path", &self.path)
+            .field("path", &self.repo_path())
             .finish()
     }
 }
 
 impl WorkspaceHistory {
-    /// Open (or create) the history for `backing`.
+    /// Strictly open the history for `backing`.
+    ///
+    /// A missing or identity-invalid store fails closed (#143): opening never
+    /// initializes. The store is first-created by the `session new`
+    /// composition path.
     pub fn open(backing: WorkspaceHistoryBacking) -> Result<Self, WorkspaceHistoryError> {
-        match backing {
+        match &backing {
             WorkspaceHistoryBacking::Disabled => Ok(Self::disabled()),
-            WorkspaceHistoryBacking::Repo(path) => {
-                let repo = open_or_init_bare(&path)?;
-                let lock_path = repo.path().join(HISTORY_LOCK_FILE);
-                Ok(Self {
-                    repo: Some(Mutex::new(repo)),
-                    path: Some(path),
-                    lock_path: Some(lock_path),
-                    #[cfg(any(test, feature = "test-fault-injection"))]
-                    fail_record: AtomicBool::new(false),
-                })
+            WorkspaceHistoryBacking::Project { layout, key } => {
+                let store = StoreRepo::open_project(
+                    layout,
+                    key,
+                    HISTORY_REPO_DIR,
+                    HISTORY_STORE_KIND,
+                    HISTORY_STORE_SCHEMA_VERSION,
+                )?;
+                Ok(Self::from_store(store, backing.operation_lock_path()))
             }
+        }
+    }
+
+    /// First-create (or validate) the history store for `backing`.
+    ///
+    /// The only initialization path, reserved for the composition entry point
+    /// that creates a project's stores.
+    pub fn create(backing: WorkspaceHistoryBacking) -> Result<Self, WorkspaceHistoryError> {
+        match &backing {
+            WorkspaceHistoryBacking::Disabled => Ok(Self::disabled()),
+            WorkspaceHistoryBacking::Project { layout, key } => {
+                let store = StoreRepo::create_project(
+                    layout,
+                    key,
+                    HISTORY_REPO_DIR,
+                    HISTORY_STORE_KIND,
+                    HISTORY_STORE_SCHEMA_VERSION,
+                    |_| Ok(()),
+                )?;
+                Ok(Self::from_store(store, backing.operation_lock_path()))
+            }
+        }
+    }
+
+    fn from_store(store: StoreRepo, operation_lock: Option<PathBuf>) -> Self {
+        Self {
+            store: Some(store),
+            operation_lock,
+            #[cfg(any(test, feature = "test-fault-injection"))]
+            fail_record: AtomicBool::new(false),
         }
     }
 
     /// A history that records nothing.
     pub fn disabled() -> Self {
         Self {
-            repo: None,
-            path: None,
-            lock_path: None,
+            store: None,
+            operation_lock: None,
             #[cfg(any(test, feature = "test-fault-injection"))]
             fail_record: AtomicBool::new(false),
         }
@@ -247,21 +333,42 @@ impl WorkspaceHistory {
 
     /// Whether mutations are recorded.
     pub fn is_enabled(&self) -> bool {
-        self.repo.is_some()
+        self.store.is_some()
     }
 
-    /// Path of the private bare repository, when enabled.
+    /// Path of the private store, when enabled.
     pub fn repo_path(&self) -> Option<&Path> {
-        self.path.as_deref()
+        self.store.as_ref().map(|store| store.git_dir())
+    }
+
+    /// Acquire the per-project `WorkspaceOperationLock` (ADR 0005 §5).
+    ///
+    /// Observation takes it shared; mutation and Rewind take it exclusively
+    /// and hold it from the precondition read through install and history
+    /// publication. It is strictly outside the repository write lock — a
+    /// holder may take at most one repository write lock underneath it, and
+    /// never the reverse — and the kernel's registry rejects an upgrade from
+    /// a shared hold.
+    ///
+    /// Returns `Ok(None)` when recording is disabled: there is no project
+    /// binding to serialize against.
+    pub fn lock_workspace_operation(
+        &self,
+        mode: LockMode,
+        blocking: Blocking,
+    ) -> Result<Option<lattice_store::FlockGuard>, WorkspaceHistoryError> {
+        let Some(path) = self.operation_lock.as_deref() else {
+            return Ok(None);
+        };
+        Ok(Some(lattice_store::acquire_flock(path, mode, blocking)?))
     }
 
     /// The object id `current` points at, if any mutation has been recorded.
     pub fn current(&self) -> Result<Option<String>, WorkspaceHistoryError> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let repo = repo.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(ref_target(&repo, CURRENT_REF)?.map(|oid| oid.to_string()))
+        Ok(store.ref_target(CURRENT_REF)?.map(|oid| oid.to_string()))
     }
 
     /// Record one successfully installed mutation.
@@ -273,7 +380,7 @@ impl WorkspaceHistory {
         &self,
         record: &MutationRecord,
     ) -> Result<Option<RecordedMutation>, WorkspaceHistoryError> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
         #[cfg(any(test, feature = "test-fault-injection"))]
@@ -283,14 +390,11 @@ impl WorkspaceHistory {
             ));
         }
         let path = normalize_history_path(&record.path)?;
-        let repo = repo.lock().unwrap_or_else(|e| e.into_inner());
-        // The in-process mutex only covers this handle. A second LATTICE
-        // runtime — in this process or another — has its own handle, so the
-        // read-build-advance sequence is additionally serialized by an
-        // advisory lock on a file inside the private repository. The kernel
-        // releases it if the holder dies.
-        let _guard = RecordingLock::acquire(self.lock_path.as_deref())?;
-        record_locked(&repo, &path, record).map(Some)
+        // The kernel's standard per-repository write lock covers the whole
+        // read-build-publish sequence, across handles and processes; the
+        // kernel releases it if the holder dies.
+        let _write = store.write_lock()?;
+        record_locked(store, &path, record).map(Some)
     }
 
     /// Fail the next enabled history append before any history object or ref
@@ -305,36 +409,44 @@ impl WorkspaceHistory {
     /// Returns `Ok(None)` when recording is disabled or the object is not a
     /// commit in this history.
     pub fn resolve(&self, oid: &str) -> Result<Option<HistorySnapshot>, WorkspaceHistoryError> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
         let object_id = parse_oid(oid)?;
-        let repo = repo.lock().unwrap_or_else(|e| e.into_inner());
-        let Ok(commit) = repo.find_commit(object_id) else {
+        let Ok(tree) = store.commit_tree(object_id) else {
             return Ok(None);
         };
-        let tree = commit
-            .tree()
-            .map_err(|e| WorkspaceHistoryError::Repo(format!("read history tree: {e}")))?;
-        let mut files = BTreeMap::new();
-        collect_tree_files(&tree, "", &mut files)?;
         Ok(Some(HistorySnapshot {
             commit_id: object_id.to_string(),
-            files,
+            files: store.tree_files(tree)?,
         }))
     }
 
-    /// Whether `oid` is still reachable through this history's internal refs.
+    /// Whether `oid` is still reachable in this history.
     ///
-    /// Reachability is what keeps prior object ids resolvable; it never
-    /// depends on `current` still pointing at or past them.
+    /// Reachable means an ancestor of `current` — the normal case, which needs
+    /// no per-record refs — or pinned by the kernel's retention primitive,
+    /// which is how a Rewind keeps the tip it abandoned resolvable. It never
+    /// depends on `current` still pointing at or past the object.
     pub fn is_reachable(&self, oid: &str) -> Result<bool, WorkspaceHistoryError> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(false);
         };
         let object_id = parse_oid(oid)?;
-        let repo = repo.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(ref_target(&repo, &record_ref_name(&object_id))? == Some(object_id))
+        // Tips that keep history alive: the live `current`, plus every
+        // retention pin a Rewind left on a tip it abandoned. An object is
+        // reachable when it is one of those tips or an ancestor of one.
+        let mut tips = store.retained_pins()?;
+        if let Some(current) = store.ref_target(CURRENT_REF)? {
+            tips.push(current);
+        }
+        if tips.contains(&object_id) {
+            return Ok(true);
+        }
+        if tips.is_empty() {
+            return Ok(false);
+        }
+        Ok(store.rev_walk(&tips, &[])?.contains(&object_id))
     }
 }
 
@@ -367,74 +479,56 @@ pub struct RewindStep {
 }
 
 /// The final on-disk state one path must reach for a Rewind to complete.
-///
-/// `expected` is what the Local Workspace must currently hold (the recorded
-/// post-state of the newest reversed mutation of the path); `restore` is what
-/// the path becomes (the parent-tree state of the oldest reversed mutation of
-/// the path). `None` means absence on both sides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RewindPathRestore {
     /// Workspace-relative path.
     pub path: String,
-    /// Bytes the path must currently hold, or `None` when it must be absent.
+    /// Bytes recorded for the path at the current tip, or `None` when the
+    /// history records it as absent there.
     pub expected: Option<Vec<u8>>,
-    /// Bytes to restore, or `None` to delete the path.
+    /// Bytes the path must hold after the Rewind, or `None` to delete it.
     pub restore: Option<Vec<u8>>,
 }
 
-/// A planned Rewind: which mutation commits are reversed and what every
-/// affected path must currently hold and will be restored to.
+/// A complete Rewind: which mutations are reversed and what each path becomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RewindPlan {
-    /// The commit `current` pointed at when the plan was built.
+    /// The history object id the Rewind starts from.
     pub from: Option<String>,
-    /// The commit `current` will point at afterwards (`None` deletes it).
+    /// The history object id the Rewind lands on.
     pub to: Option<String>,
-    /// Reversed mutation commits, newest first.
-    ///
-    /// This is the recorded chain order, which is the order the installs were
-    /// serialized into the history — the reverse of execution order. Two
-    /// concurrent recorders on distinct paths can land in either order
-    /// relative to each other; the restore does not depend on it, since each
-    /// path's state is resolved independently.
+    /// Reversed mutations, newest-first.
     pub steps: Vec<RewindStep>,
-    /// Per-path preflight/restore states, one entry per distinct path.
+    /// Final per-path restores, sorted by path.
     pub restores: Vec<RewindPathRestore>,
 }
 
 impl RewindPlan {
-    /// Whether the plan changes nothing (target already is the identity).
+    /// Whether the plan reverses nothing.
     pub fn is_empty(&self) -> bool {
-        self.steps.is_empty() && self.from == self.to
+        self.steps.is_empty() && self.restores.is_empty()
     }
 }
 
-/// Failure of an explicit Rewind.
-///
-/// `E` is the caller's own abort reason, produced by the apply closure —
-/// typically a structured same-path conflict report or a restore I/O error.
+/// Failure planning or applying a Rewind.
 #[derive(Debug, thiserror::Error)]
 pub enum RewindError<E> {
-    /// Reading or writing the private history repository failed.
+    /// The private history could not be read or written.
     #[error(transparent)]
     History(#[from] WorkspaceHistoryError),
-    /// Recording is disabled, so there is no history to rewind.
-    #[error("workspace history is disabled; nothing to rewind")]
+    /// Recording is disabled, so there is nothing to rewind.
+    #[error("workspace history is disabled")]
     Disabled,
-    /// The target identity is not on the chain reachable from `current`.
-    #[error("rewind target '{target}' is not reachable from the current history identity")]
+    /// The requested target is not on the recorded chain.
+    #[error("rewind target '{target}' is not reachable from the current history tip")]
     TargetUnreachable {
-        /// The requested target object id (hex), or "<none>" for empty.
+        /// The requested target object id.
         target: String,
     },
-    /// The planned restores do not cover every path the range changed.
-    ///
-    /// A mutation commit could not be read as one, so proceeding would move
-    /// `current` over a path that was never verified or restored.
-    #[error("rewind plan does not cover changed path(s): {paths:?}")]
+    /// The plan does not cover every path whose recorded state differs.
+    #[error("rewind plan does not cover changed paths: {}", paths.join(", "))]
     PlanIncomplete {
-        /// Paths that differ between the target and the tip but have no
-        /// planned restore.
+        /// Paths the plan failed to cover.
         paths: Vec<String>,
     },
     /// The apply closure refused the plan; no ref was moved.
@@ -451,40 +545,39 @@ impl WorkspaceHistory {
     /// Plan — without applying — the Rewind from `current` back to `target`.
     ///
     /// Read-only inspection surface. The authoritative plan is rebuilt under
-    /// the recording lock inside [`WorkspaceHistory::rewind_with`].
+    /// the repository write lock inside [`WorkspaceHistory::rewind_with`].
     pub fn plan_rewind(
         &self,
         target: Option<&str>,
     ) -> Result<RewindPlan, RewindError<std::convert::Infallible>> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(store) = self.store.as_ref() else {
             return Err(RewindError::Disabled);
         };
-        let repo = repo.lock().unwrap_or_else(|e| e.into_inner());
-        plan_rewind_locked(&repo, target)
+        plan_rewind_locked(store, target)
     }
 
     /// Rewind the history to `target`, letting `apply` restore the workspace.
     ///
-    /// The whole sequence — plan, apply (preflight + restore), and the
-    /// compare-and-set that moves `current` backwards — runs under the same
-    /// advisory lock that serializes recording, so a concurrent *recorder*
-    /// can never interleave. The lock covers history writes, not the Local
-    /// Workspace: a Turn installing a mutation takes it only after its bytes
-    /// are already on disk, so a concurrently running Turn can still write a
-    /// path while a Rewind is between verifying and restoring it. `apply` returning `Err` aborts before
-    /// any ref moves. Pin refs are never touched, so every reversed commit
-    /// stays reachable afterwards.
+    /// The whole sequence — plan, apply (preflight + restore), retention of
+    /// the abandoned tip, and the compare-and-set that moves `current`
+    /// backwards — runs under the kernel's repository write lock, so a
+    /// concurrent *recorder* can never interleave. The lock covers history
+    /// writes, not the Local Workspace: a Turn installing a mutation takes it
+    /// only after its bytes are already on disk, so a concurrently running
+    /// Turn can still write a path while a Rewind is between verifying and
+    /// restoring it. `apply` returning `Err` aborts before any ref moves. The
+    /// abandoned tip is retained first, so every reversed commit stays
+    /// reachable afterwards.
     pub fn rewind_with<E>(
         &self,
         target: Option<&str>,
         apply: impl FnOnce(&RewindPlan) -> Result<(), E>,
     ) -> Result<RewindPlan, RewindError<E>> {
-        let Some(repo) = self.repo.as_ref() else {
+        let Some(store) = self.store.as_ref() else {
             return Err(RewindError::Disabled);
         };
-        let repo = repo.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = RecordingLock::acquire(self.lock_path.as_deref())?;
-        let plan = match plan_rewind_locked(&repo, target) {
+        let _write = store.write_lock().map_err(WorkspaceHistoryError::from)?;
+        let plan = match plan_rewind_locked(store, target) {
             Ok(plan) => plan,
             Err(err) => return Err(err.into_apply_never()),
         };
@@ -498,8 +591,13 @@ impl WorkspaceHistory {
                 .map(parse_oid)
                 .transpose()?
                 .expect("a non-empty rewind always starts from a commit");
-            move_current_backwards(&repo, expected, plan.to.as_deref())
-                .map_err(|e| RewindError::RefMove(e))?;
+            // Retention before the ref moves: once `current` steps back, the
+            // abandoned tip is only reachable through this pin.
+            store
+                .retain(expected)
+                .map_err(WorkspaceHistoryError::from)?;
+            move_current_backwards(store, expected, plan.to.as_deref())
+                .map_err(RewindError::RefMove)?;
         }
         Ok(plan)
     }
@@ -523,11 +621,13 @@ impl RewindError<std::convert::Infallible> {
 
 /// Walk `current` back to `target` and build the reversal plan.
 fn plan_rewind_locked(
-    repo: &gix::Repository,
+    store: &StoreRepo,
     target: Option<&str>,
 ) -> Result<RewindPlan, RewindError<std::convert::Infallible>> {
     let target_oid = target.map(parse_oid).transpose()?;
-    let from = ref_target(repo, CURRENT_REF)?;
+    let from = store
+        .ref_target(CURRENT_REF)
+        .map_err(WorkspaceHistoryError::from)?;
 
     let mut steps = Vec::new();
     // Newest-first walk: a later (re-)insert for the same path comes from an
@@ -547,18 +647,23 @@ fn plan_rewind_locked(
             }
             (Some(oid), Some(t)) if oid == t => break,
             (Some(oid), _) => {
-                let commit = repo.find_commit(oid).map_err(|e| {
-                    WorkspaceHistoryError::Repo(format!("find history commit {oid}: {e}"))
-                })?;
-                let message = commit.message_raw_sloppy().to_string();
-                let parent = commit.parent_ids().next().map(|id| id.detach());
+                let message = store
+                    .commit_message(oid)
+                    .map_err(WorkspaceHistoryError::from)?;
+                let parent = store
+                    .commit_parents(oid)
+                    .map_err(WorkspaceHistoryError::from)?
+                    .into_iter()
+                    .next();
                 let parent_tree = match parent {
-                    Some(parent_oid) => commit_tree_id(repo, parent_oid)?,
-                    None => gix::ObjectId::empty_tree(repo.object_hash()),
+                    Some(parent_oid) => Some(commit_tree_id(store, parent_oid)?),
+                    None => None,
                 };
-                let recorded_at = commit.time().ok().map(|time| time.seconds);
+                let recorded_at = store
+                    .commit_time(oid)
+                    .map_err(WorkspaceHistoryError::from)?;
                 if let Some(step) = parse_mutation_step(&oid, &message, recorded_at) {
-                    let before = tree_blob(repo, parent_tree, &step.path)?;
+                    let before = tree_blob(store, parent_tree, &step.path)?;
                     restores.insert(step.path.clone(), before);
                     steps.push(step);
                 }
@@ -570,15 +675,12 @@ fn plan_rewind_locked(
     // Preflight expectation per path: the state at `from` — the recorded
     // post-state of the newest reversed mutation of that path.
     let from_tree = match from {
-        Some(oid) => Some(commit_tree_id(repo, oid)?),
+        Some(oid) => Some(commit_tree_id(store, oid)?),
         None => None,
     };
     let mut path_restores = Vec::with_capacity(restores.len());
     for (path, restore) in restores {
-        let expected = match from_tree {
-            Some(tree) => tree_blob(repo, tree, &path)?,
-            None => None,
-        };
+        let expected = tree_blob(store, from_tree, &path)?;
         path_restores.push(RewindPathRestore {
             path,
             expected,
@@ -593,12 +695,12 @@ fn plan_rewind_locked(
     // unverified and unrestored — a Rewind reporting success over a path it
     // never touched. Fail closed instead.
     let target_tree = match target_oid {
-        Some(oid) => Some(commit_tree_id(repo, oid)?),
+        Some(oid) => Some(commit_tree_id(store, oid)?),
         None => None,
     };
     let planned: std::collections::BTreeSet<&str> =
         path_restores.iter().map(|r| r.path.as_str()).collect();
-    let uncovered: Vec<String> = changed_paths(repo, from_tree, target_tree)?
+    let uncovered: Vec<String> = changed_paths(store, from_tree, target_tree)?
         .into_iter()
         .filter(|path| !planned.contains(path.as_str()))
         .collect();
@@ -616,12 +718,12 @@ fn plan_rewind_locked(
 
 /// Paths whose recorded content differs between two history trees.
 fn changed_paths(
-    repo: &gix::Repository,
+    store: &StoreRepo,
     from: Option<gix::ObjectId>,
     to: Option<gix::ObjectId>,
 ) -> Result<Vec<String>, WorkspaceHistoryError> {
-    let from_files = tree_files(repo, from)?;
-    let to_files = tree_files(repo, to)?;
+    let from_files = tree_files(store, from)?;
+    let to_files = tree_files(store, to)?;
     let mut changed = Vec::new();
     for (path, bytes) in &from_files {
         if to_files.get(path) != Some(bytes) {
@@ -638,17 +740,13 @@ fn changed_paths(
 
 /// Every recorded file in a tree, or an empty map for no tree.
 fn tree_files(
-    repo: &gix::Repository,
+    store: &StoreRepo,
     tree: Option<gix::ObjectId>,
 ) -> Result<BTreeMap<String, Vec<u8>>, WorkspaceHistoryError> {
-    let mut files = BTreeMap::new();
-    if let Some(oid) = tree {
-        let tree = repo
-            .find_tree(oid)
-            .map_err(|e| WorkspaceHistoryError::Repo(format!("find history tree: {e}")))?;
-        collect_tree_files(&tree, "", &mut files)?;
+    match tree {
+        Some(oid) => Ok(store.tree_files(oid)?),
+        None => Ok(BTreeMap::new()),
     }
-    Ok(files)
 }
 
 /// Parse a history commit message into a rewind step.
@@ -704,104 +802,58 @@ fn parse_mutation_step(
 
 /// Move `current` backwards to `target`, or delete it for an empty target.
 ///
-/// Guarded: the ref must still equal `expected`, which the recording lock
-/// makes certain in-process; the constraint stays as the cross-process
-/// fail-closed arbiter. Pin refs are untouched.
+/// Guarded: the ref must still equal `expected`, which the repository write
+/// lock makes certain in-process; the CAS constraint stays as the fail-closed
+/// arbiter. Retention pins are untouched.
 fn move_current_backwards(
-    repo: &gix::Repository,
+    store: &StoreRepo,
     expected: gix::ObjectId,
     target: Option<&str>,
 ) -> Result<(), String> {
-    let constraint = PreviousValue::MustExistAndMatch(gix::refs::Target::Object(expected));
     match target {
         Some(target) => {
             let target_oid = parse_oid(target).map_err(|e| e.to_string())?;
-            repo.reference(
-                CURRENT_REF,
-                target_oid,
-                constraint,
-                "lattice workspace history rewind",
-            )
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            store
+                .cas_ref(
+                    CURRENT_REF,
+                    target_oid,
+                    RefExpectation::MustMatch(expected),
+                    "lattice workspace history rewind",
+                )
+                .map_err(|e| e.to_string())?;
         }
         None => {
-            let name: gix::refs::FullName = CURRENT_REF
-                .try_into()
-                .map_err(|e| format!("current ref name: {e}"))?;
-            repo.edit_reference(gix::refs::transaction::RefEdit {
-                change: gix::refs::transaction::Change::Delete {
-                    expected: constraint,
-                    log: gix::refs::transaction::RefLog::AndReference,
-                },
-                name,
-                deref: false,
-            })
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            store
+                .delete_ref(CURRENT_REF, RefExpectation::MustMatch(expected))
+                .map_err(|e| e.to_string())?;
         }
     }
+    store
+        .fsync_pending(&[CURRENT_REF])
+        .map_err(|e| e.to_string())
 }
 
 // ─── Recording ──────────────────────────────────────────────────────────────
 
-/// Advisory exclusive lock held for one record operation.
-///
-/// Serializes the read-build-advance sequence across every handle and process
-/// that shares one private history. `flock` is the right primitive here: the
-/// kernel releases it when the holder's file descriptor closes, including on
-/// process death, so a crashed LATTICE cannot wedge the history behind a stale
-/// lock file the way an `O_EXCL` marker would.
-struct RecordingLock {
-    _file: std::fs::File,
-}
-
-impl RecordingLock {
-    fn acquire(path: Option<&Path>) -> Result<Self, WorkspaceHistoryError> {
-        use std::os::unix::io::AsRawFd;
-
-        let path = path
-            .ok_or_else(|| WorkspaceHistoryError::Repo("history lock path is unset".to_string()))?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| {
-                WorkspaceHistoryError::Repo(format!("open history lock {}: {e}", path.display()))
-            })?;
-        // SAFETY: `file` owns a valid open descriptor for the duration of
-        // the call, and `flock` only sets an advisory lock on it.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(WorkspaceHistoryError::Repo(format!(
-                "lock history for recording: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(Self { _file: file })
-    }
-}
-
 /// How many times a losing compare-and-set on `current` is retried.
 ///
-/// `current` only ever moves forward by one commit per recorded mutation, so a
-/// loser just needs to rebuild on the new tip. The bound exists so a pathological
-/// writer cannot spin forever; it is far above any real contention.
+/// The repository write lock already serializes LATTICE writers, so a loss
+/// means a foreign writer touched the store. `current` only ever moves forward
+/// by one commit per recorded mutation, so a loser just needs to rebuild on
+/// the new tip; the bound exists so a pathological writer cannot spin forever.
 const ADVANCE_RETRY_LIMIT: usize = 64;
 
 fn record_locked(
-    repo: &gix::Repository,
+    store: &StoreRepo,
     path: &str,
     record: &MutationRecord,
 ) -> Result<RecordedMutation, WorkspaceHistoryError> {
-    // The in-process mutex serializes this handle, but a second LATTICE
-    // process (or a second runtime in one process) has its own handle and its
-    // own lock — the ref compare-and-set is the only real arbiter. A loser
-    // must rebuild on the winner's tip rather than drop the mutation: the
-    // bytes are already installed on disk, so failing to record would lose
+    // A loser must rebuild on the winner's tip rather than drop the mutation:
+    // the bytes are already installed on disk, so failing to record would lose
     // history for a mutation that really happened.
     let mut last_conflict = None;
     for _ in 0..ADVANCE_RETRY_LIMIT {
-        match try_record_once(repo, path, record)? {
+        match try_record_once(store, path, record)? {
             RecordAttempt::Recorded(recorded) => return Ok(recorded),
             RecordAttempt::CurrentMoved(err) => last_conflict = Some(err),
         }
@@ -820,14 +872,14 @@ enum RecordAttempt {
 }
 
 fn try_record_once(
-    repo: &gix::Repository,
+    store: &StoreRepo,
     path: &str,
     record: &MutationRecord,
 ) -> Result<RecordAttempt, WorkspaceHistoryError> {
-    let parent = ref_target(repo, CURRENT_REF)?;
+    let parent = store.ref_target(CURRENT_REF)?;
     let parent_tree = match parent {
-        Some(oid) => commit_tree_id(repo, oid)?,
-        None => gix::ObjectId::empty_tree(repo.object_hash()),
+        Some(oid) => commit_tree_id_err(store, oid)?,
+        None => store.empty_tree_oid(),
     };
 
     // Baseline: the mutation commit's parent tree must be the real before
@@ -840,144 +892,81 @@ fn try_record_once(
     // Absence is a state too: a create whose path is still present in the tree
     // (LATTICE created it, the user deleted it, LATTICE created it again)
     // baselines by *removing* the path.
-    let recorded_before = tree_blob(repo, parent_tree, path)?;
+    let recorded_before = store.read_tree_path(parent_tree, path)?;
     let needs_baseline = recorded_before.as_deref() != record.before.as_deref();
     let (effective_parent, effective_tree, baseline_commit_id) = if needs_baseline {
         let tree = match record.before.as_deref() {
-            Some(before) => upsert_path(repo, parent_tree, path, before)?,
-            None => remove_path(repo, parent_tree, path)?,
+            Some(before) => upsert_path(store, parent_tree, path, before)?,
+            None => remove_path(store, parent_tree, path)?,
         };
         let message = baseline_message(record, path);
-        let commit = write_commit(repo, &message, tree, parent, record.recorded_at)?;
+        let commit = write_commit(store, &message, tree, parent, record.recorded_at)?;
         (Some(commit), tree, Some(commit.to_string()))
     } else {
         (parent, parent_tree, None)
     };
 
-    let tree = upsert_path(repo, effective_tree, path, &record.after)?;
+    let tree = upsert_path(store, effective_tree, path, &record.after)?;
     let message = mutation_message(record, path);
-    let commit = write_commit(repo, &message, tree, effective_parent, record.recorded_at)?;
+    let commit = write_commit(store, &message, tree, effective_parent, record.recorded_at)?;
 
-    // Pin every recorded commit before moving `current`, so a crash between
-    // the two leaves the objects reachable rather than dangling.
-    if needs_baseline && let Some(baseline) = effective_parent {
-        pin_record(repo, baseline)?;
-    }
-    pin_record(repo, commit)?;
-    match advance_current(repo, parent, commit)? {
-        AdvanceOutcome::Advanced => Ok(RecordAttempt::Recorded(RecordedMutation {
-            commit_id: commit.to_string(),
-            baseline_commit_id,
-            parent_commit_id: parent.map(|oid| oid.to_string()),
-        })),
-        AdvanceOutcome::Conflict(err) => Ok(RecordAttempt::CurrentMoved(err)),
+    // Everything appended here is an ancestor of the new `current`, so the
+    // normal path needs no per-record refs: the CAS below is what publishes
+    // it, and the barrier makes objects and ref durable together.
+    let expect = match parent {
+        Some(oid) => RefExpectation::MustMatch(oid),
+        None => RefExpectation::MustNotExist,
+    };
+    match store.cas_ref(
+        CURRENT_REF,
+        commit,
+        expect,
+        "lattice workspace history mutation",
+    ) {
+        Ok(()) => {
+            store.fsync_pending(&[CURRENT_REF])?;
+            Ok(RecordAttempt::Recorded(RecordedMutation {
+                commit_id: commit.to_string(),
+                baseline_commit_id,
+                parent_commit_id: parent.map(|oid| oid.to_string()),
+            }))
+        }
+        Err(StoreError::CasConflict { detail, .. }) => Ok(RecordAttempt::CurrentMoved(detail)),
+        Err(err) => Err(err.into()),
     }
 }
 
 fn upsert_path(
-    repo: &gix::Repository,
+    store: &StoreRepo,
     base_tree: gix::ObjectId,
     path: &str,
     content: &[u8],
 ) -> Result<gix::ObjectId, WorkspaceHistoryError> {
-    let blob = repo
-        .write_blob(content)
-        .map(|id| id.detach())
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("write history blob: {e}")))?;
-    let mut editor = repo
-        .edit_tree(base_tree)
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("open history tree editor: {e}")))?;
-    editor
-        .upsert(path, EntryKind::Blob, blob)
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("upsert '{path}' into history: {e}")))?;
-    editor
-        .write()
-        .map(|id| id.detach())
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("write history tree: {e}")))
+    let blob = store.write_blob(content)?;
+    let mut spec = TreeSpec::from(base_tree);
+    spec.upsert(path, EntryKind::Blob, blob);
+    Ok(store.write_tree(&spec)?)
+}
+
+fn remove_path(
+    store: &StoreRepo,
+    base_tree: gix::ObjectId,
+    path: &str,
+) -> Result<gix::ObjectId, WorkspaceHistoryError> {
+    let mut spec = TreeSpec::from(base_tree);
+    spec.remove(path);
+    Ok(store.write_tree(&spec)?)
 }
 
 fn write_commit(
-    repo: &gix::Repository,
+    store: &StoreRepo,
     message: &str,
     tree: gix::ObjectId,
     parent: Option<gix::ObjectId>,
     recorded_at: i64,
 ) -> Result<gix::ObjectId, WorkspaceHistoryError> {
-    let signature = history_signature(recorded_at);
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let signature_ref = signature.to_ref(&mut time_buf);
-    let commit = repo
-        .new_commit_as(signature_ref, signature_ref, message, tree, parent)
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("write history commit: {e}")))?;
-    Ok(commit.id)
-}
-
-/// Pin a recorded commit so it stays reachable regardless of `current`.
-///
-/// Idempotent: re-recording an identical mutation resolves to the same object
-/// id, and an already-present pin is not an error.
-fn pin_record(repo: &gix::Repository, commit: gix::ObjectId) -> Result<(), WorkspaceHistoryError> {
-    let name = record_ref_name(&commit);
-    match repo.reference(
-        name.as_str(),
-        commit,
-        PreviousValue::MustNotExist,
-        "lattice workspace history record",
-    ) {
-        Ok(_) => Ok(()),
-        Err(err) => {
-            if ref_target(repo, &name)? == Some(commit) {
-                Ok(())
-            } else {
-                Err(WorkspaceHistoryError::Repo(format!(
-                    "pin history record {commit}: {err}"
-                )))
-            }
-        }
-    }
-}
-
-/// Result of one compare-and-set on `current`.
-enum AdvanceOutcome {
-    Advanced,
-    /// `current` no longer matched `expected`; the caller must rebuild.
-    Conflict(String),
-}
-
-/// Compare-and-set `current` from `expected` to `next`.
-///
-/// A constraint failure is a normal outcome under concurrent recorders, not an
-/// error: the caller re-reads the tip and appends again.
-fn advance_current(
-    repo: &gix::Repository,
-    expected: Option<gix::ObjectId>,
-    next: gix::ObjectId,
-) -> Result<AdvanceOutcome, WorkspaceHistoryError> {
-    let constraint = match expected {
-        Some(oid) => PreviousValue::MustExistAndMatch(gix::refs::Target::Object(oid)),
-        None => PreviousValue::MustNotExist,
-    };
-    match repo.reference(
-        CURRENT_REF,
-        next,
-        constraint,
-        "lattice workspace history mutation",
-    ) {
-        Ok(_) => Ok(AdvanceOutcome::Advanced),
-        Err(err) => {
-            // Distinguish "someone else moved it" from a real repository
-            // failure by re-reading: if the tip is no longer what we built on,
-            // this was contention.
-            let current = ref_target(repo, CURRENT_REF)?;
-            if current == expected {
-                Err(WorkspaceHistoryError::Repo(format!(
-                    "advance history current ref: {err}"
-                )))
-            } else {
-                Ok(AdvanceOutcome::Conflict(err.to_string()))
-            }
-        }
-    }
+    let parents: Vec<gix::ObjectId> = parent.into_iter().collect();
+    Ok(store.write_commit_at(tree, &parents, message, recorded_at)?)
 }
 
 // ─── Commit messages ────────────────────────────────────────────────────────
@@ -1012,157 +1001,32 @@ fn baseline_message(record: &MutationRecord, path: &str) -> String {
     )
 }
 
-// ─── Repository helpers ─────────────────────────────────────────────────────
+// ─── Store helpers ──────────────────────────────────────────────────────────
 
-/// Open the private bare repository, creating it on first use.
-///
-/// `isolated()` keeps the user's global/system Git configuration out of the
-/// private history: it is LATTICE state, not a user repository.
-fn open_or_init_bare(path: &Path) -> Result<gix::Repository, WorkspaceHistoryError> {
-    if let Ok(repo) = gix::open_opts(path, gix::open::Options::isolated()) {
-        return Ok(repo);
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            WorkspaceHistoryError::Repo(format!(
-                "create history parent directory {}: {e}",
-                parent.display()
-            ))
-        })?;
-    }
-    let init_error = match gix::init_bare(path) {
-        // Re-open isolated so subsequent reads/writes ignore ambient Git config.
-        Ok(repo) => match gix::open_opts(repo.path(), gix::open::Options::isolated()) {
-            Ok(repo) => return Ok(repo),
-            Err(err) => err.to_string(),
-        },
-        Err(err) => err.to_string(),
-    };
-    // Two LATTICE processes can reach a not-yet-created history at the same
-    // time; the loser sees a half-written or already-initialized directory.
-    // A successful open now means the winner finished, which is a success for
-    // this caller too.
-    gix::open_opts(path, gix::open::Options::isolated()).map_err(|open_err| {
-        WorkspaceHistoryError::Repo(format!(
-            "open history repository {}: {open_err} (init failed: {init_error})",
-            path.display()
-        ))
-    })
-}
-
-fn ref_target(
-    repo: &gix::Repository,
-    name: &str,
-) -> Result<Option<gix::ObjectId>, WorkspaceHistoryError> {
-    match repo.try_find_reference(name) {
-        Ok(Some(reference)) => Ok(reference.target().try_id().map(|id| id.to_owned())),
-        Ok(None) => Ok(None),
-        Err(e) => Err(WorkspaceHistoryError::Repo(format!(
-            "find history ref {name}: {e}"
-        ))),
-    }
+fn commit_tree_id_err(
+    store: &StoreRepo,
+    commit: gix::ObjectId,
+) -> Result<gix::ObjectId, WorkspaceHistoryError> {
+    Ok(store.commit_tree(commit)?)
 }
 
 fn commit_tree_id(
-    repo: &gix::Repository,
+    store: &StoreRepo,
     commit: gix::ObjectId,
 ) -> Result<gix::ObjectId, WorkspaceHistoryError> {
-    let commit = repo
-        .find_commit(commit)
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("find history commit: {e}")))?;
-    commit
-        .tree_id()
-        .map(|id| id.detach())
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("read history commit tree id: {e}")))
+    commit_tree_id_err(store, commit)
 }
 
-/// Bytes recorded at `path` in `tree`, or `None` when the path is absent.
+/// Bytes recorded at `path` in `tree`, or `None` when the tree or path is
+/// absent.
 fn tree_blob(
-    repo: &gix::Repository,
-    tree: gix::ObjectId,
+    store: &StoreRepo,
+    tree: Option<gix::ObjectId>,
     path: &str,
 ) -> Result<Option<Vec<u8>>, WorkspaceHistoryError> {
-    let tree = repo
-        .find_tree(tree)
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("find history tree: {e}")))?;
-    let Some(entry) = tree
-        .lookup_entry_by_path(path)
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("lookup '{path}' in history: {e}")))?
-    else {
-        return Ok(None);
-    };
-    let object = entry
-        .object()
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("load '{path}' from history: {e}")))?;
-    match object.try_into_blob() {
-        Ok(blob) => Ok(Some(blob.data.clone())),
-        // A tree (or anything else) at that path is not recorded content.
-        Err(_) => Ok(None),
-    }
-}
-
-fn remove_path(
-    repo: &gix::Repository,
-    base_tree: gix::ObjectId,
-    path: &str,
-) -> Result<gix::ObjectId, WorkspaceHistoryError> {
-    let mut editor = repo
-        .edit_tree(base_tree)
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("open history tree editor: {e}")))?;
-    editor
-        .remove(path)
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("remove '{path}' from history: {e}")))?;
-    editor
-        .write()
-        .map(|id| id.detach())
-        .map_err(|e| WorkspaceHistoryError::Repo(format!("write history tree: {e}")))
-}
-
-fn collect_tree_files(
-    tree: &gix::Tree<'_>,
-    prefix: &str,
-    out: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(), WorkspaceHistoryError> {
-    for entry in tree.iter() {
-        let entry =
-            entry.map_err(|e| WorkspaceHistoryError::Repo(format!("iterate history tree: {e}")))?;
-        let name = entry.filename().to_string();
-        let full = if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        };
-        let object = entry
-            .object()
-            .map_err(|e| WorkspaceHistoryError::Repo(format!("load history object: {e}")))?;
-        match object.kind {
-            gix::object::Kind::Tree => {
-                let subtree = object.try_into_tree().map_err(|e| {
-                    WorkspaceHistoryError::Repo(format!("peel history subtree: {e}"))
-                })?;
-                collect_tree_files(&subtree, &full, out)?;
-            }
-            gix::object::Kind::Blob => {
-                let blob = object
-                    .try_into_blob()
-                    .map_err(|e| WorkspaceHistoryError::Repo(format!("peel history blob: {e}")))?;
-                out.insert(full, blob.data.clone());
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn record_ref_name(commit: &gix::ObjectId) -> String {
-    format!("{RECORD_REF_PREFIX}/{commit}")
-}
-
-fn history_signature(ts: i64) -> gix::actor::Signature {
-    gix::actor::Signature {
-        name: HISTORY_AUTHOR_NAME.into(),
-        email: HISTORY_AUTHOR_EMAIL.into(),
-        time: gix::date::Time::new(ts, 0),
+    match tree {
+        Some(oid) => Ok(store.read_tree_path(oid, path)?),
+        None => Ok(None),
     }
 }
 
@@ -1204,14 +1068,39 @@ fn normalize_history_path(path: &str) -> Result<String, WorkspaceHistoryError> {
     Ok(components.join("/"))
 }
 
+// The `WorkspaceOperationLock` lives on the handle
+// ([`WorkspaceHistory::lock_workspace_operation`]) so callers cannot address
+// a project's lock without the project binding it belongs to.
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gix::refs::transaction::PreviousValue;
     use tempfile::TempDir;
 
+    /// A history store first-created under `dir` as the state root, bound to
+    /// a fixed workspace root. Tests own both roots, so the derived
+    /// `ProjectStoreKey` is stable within one test.
     fn history_at(dir: &TempDir) -> WorkspaceHistory {
-        WorkspaceHistory::open(WorkspaceHistoryBacking::under_project_state_dir(dir.path()))
-            .expect("open history")
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace root");
+        WorkspaceHistory::create(
+            WorkspaceHistoryBacking::for_project_in(&dir.path().join("state"), &workspace)
+                .expect("derive backing"),
+        )
+        .expect("create history")
+    }
+
+    /// Strictly reopen the same store a `history_at` fixture created.
+    fn reopen_history_at(dir: &TempDir) -> WorkspaceHistory {
+        WorkspaceHistory::open(
+            WorkspaceHistoryBacking::for_project_in(
+                &dir.path().join("state"),
+                &dir.path().join("workspace"),
+            )
+            .expect("derive backing"),
+        )
+        .expect("open history")
     }
 
     fn create(path: &str, after: &str) -> MutationRecord {
@@ -1479,8 +1368,9 @@ mod tests {
             let history = history_at(&state);
             history.record(&create("a.txt", "1")).unwrap().unwrap()
         };
-        // A fresh handle stands in for a process restart.
-        let reopened = history_at(&state);
+        // A fresh handle stands in for a process restart: strict open, the
+        // production path, never a second create.
+        let reopened = reopen_history_at(&state);
         assert_eq!(
             reopened.current().unwrap().as_deref(),
             Some(recorded.commit_id.as_str())
@@ -1884,7 +1774,11 @@ mod tests {
             .unwrap();
         let tree = commit.tree_id().unwrap().detach();
         let parent = commit.parent_ids().next().map(|id| id.detach());
-        let signature = history_signature(1_700_000_010);
+        let signature = gix::actor::Signature {
+            name: "LATTICE".into(),
+            email: "lattice@localhost".into(),
+            time: gix::date::Time::new(1_700_000_010, 0),
+        };
         let mut time_buf = gix::date::parse::TimeBuf::default();
         let signature_ref = signature.to_ref(&mut time_buf);
         let opaque = repo
@@ -1939,6 +1833,108 @@ mod tests {
             history.current().unwrap(),
             None,
             "a rejected path must not move the current ref"
+        );
+    }
+
+    // ─── Operation lock (ADR 0005 §5, #143) ─────────────────────────────
+
+    /// The store is a kernel store with the domain's recorded identity, not a
+    /// hand-rolled bare repository.
+    #[test]
+    fn history_is_a_kernel_store_with_the_domain_identity() {
+        let state = TempDir::new().unwrap();
+        let history = history_at(&state);
+        let path = history.repo_path().expect("enabled").to_path_buf();
+        assert!(path.ends_with(HISTORY_REPO_DIR));
+
+        let repo = raw_repo(&history);
+        let meta = repo
+            .find_reference("refs/lattice/meta")
+            .expect("kernel identity ref exists");
+        assert!(meta.target().try_id().is_some());
+    }
+
+    /// Strict open: an absent store fails closed instead of initializing one.
+    #[test]
+    fn opening_an_absent_store_fails_closed() {
+        let state = TempDir::new().unwrap();
+        let workspace = state.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let backing =
+            WorkspaceHistoryBacking::for_project_in(&state.path().join("state"), &workspace)
+                .expect("derive backing");
+        let store_path = backing.store_path().expect("enabled backing");
+
+        let err = WorkspaceHistory::open(backing).expect_err("absent store must fail");
+        assert!(
+            matches!(err, WorkspaceHistoryError::Repo(ref msg) if msg.contains("not initialized")),
+            "expected a not-initialized error, got {err:?}"
+        );
+        assert!(
+            !store_path.exists(),
+            "strict open must not create the store"
+        );
+    }
+
+    /// The operation lock is the per-project lock under the state layout, and
+    /// it nests re-entrantly for one process's own mutation path.
+    #[test]
+    fn operation_lock_is_project_scoped_and_reentrant() {
+        let state = TempDir::new().unwrap();
+        let history = history_at(&state);
+
+        let guard = history
+            .lock_workspace_operation(LockMode::Exclusive, Blocking::Block)
+            .expect("acquire")
+            .expect("enabled history has a lock");
+        assert!(
+            guard.path().starts_with(state.path().join("state")),
+            "lock must live under the state layout: {}",
+            guard.path().display()
+        );
+        assert!(guard.path().ends_with(WORKSPACE_OPERATION_LOCK));
+
+        // Re-entrant for the same process: a mutation that records while
+        // already holding the operation lock must not deadlock.
+        let nested = history
+            .lock_workspace_operation(LockMode::Exclusive, Blocking::NonBlocking)
+            .expect("re-entrant acquire");
+        drop(nested);
+
+        // The repository write lock is a *different*, narrower lock taken
+        // underneath — recording while the operation lock is held works.
+        history.record(&create("a.txt", "1")).unwrap().unwrap();
+        drop(guard);
+    }
+
+    /// Upgrading a shared operation hold to exclusive is rejected, so an
+    /// observation can never silently become a mutation.
+    #[test]
+    fn operation_lock_upgrade_is_rejected() {
+        let state = TempDir::new().unwrap();
+        let history = history_at(&state);
+
+        let _shared = history
+            .lock_workspace_operation(LockMode::Shared, Blocking::Block)
+            .expect("shared acquire");
+        let err = history
+            .lock_workspace_operation(LockMode::Exclusive, Blocking::Block)
+            .expect_err("upgrade must be rejected");
+        assert!(
+            matches!(err, WorkspaceHistoryError::Repo(ref msg) if msg.contains("upgrade")),
+            "expected a lock-upgrade error, got {err:?}"
+        );
+    }
+
+    /// A disabled history has no project binding, so it has no lock to take.
+    #[test]
+    fn disabled_history_has_no_operation_lock() {
+        let history = WorkspaceHistory::disabled();
+        assert!(
+            history
+                .lock_workspace_operation(LockMode::Exclusive, Blocking::Block)
+                .unwrap()
+                .is_none()
         );
     }
 }

@@ -175,6 +175,24 @@ impl LocalWorkspace {
         &self.root
     }
 
+    /// Acquire the per-project `WorkspaceOperationLock` for this workspace
+    /// (ADR 0005 §5).
+    ///
+    /// The lock belongs to the project binding the private history carries,
+    /// so it is reached through the history handle. Observation takes it
+    /// shared; a mutation takes it exclusively and holds it from the
+    /// precondition read through install and history publication, which is
+    /// strictly wider than the repository write lock the history append takes
+    /// underneath. `Ok(None)` means recording is disabled and there is no
+    /// project binding to serialize against.
+    pub fn lock_operation(
+        &self,
+        mode: lattice_store::LockMode,
+        blocking: lattice_store::Blocking,
+    ) -> Result<Option<lattice_store::FlockGuard>, WorkspaceHistoryError> {
+        self.history.lock_workspace_operation(mode, blocking)
+    }
+
     /// Append one successfully installed Atomic Local Mutation to the private
     /// history.
     ///

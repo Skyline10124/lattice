@@ -75,6 +75,10 @@ pub use history::{
     HistorySnapshot, MutationRecord, RecordedMutation, RewindError, RewindPathRestore, RewindPlan,
     RewindStep, WorkspaceHistory, WorkspaceHistoryBacking, WorkspaceHistoryError,
 };
+/// Lock and addressing vocabulary from the durability kernel, re-exported so
+/// callers holding a runtime handle need no direct kernel dependency
+/// (ADR 0005 §5).
+pub use lattice_store::{Blocking, FlockGuard, LockMode, ProjectStoreKey, StateLayout};
 
 pub use host_mutate::{
     CreateInstalled, FileBytes, MutateError, MutationCallContext, ReplaceInstalled,

@@ -145,6 +145,12 @@ impl SessionApi {
         }
     }
 
+    /// Create a session bound to `request.project_store_key`.
+    ///
+    /// ADR 0005 §3: this is the composition point that first-creates the
+    /// project's stores. The stores exist before the SessionState is
+    /// published, so no later path has to create anything lazily, and the
+    /// binding a Session carries always addresses stores that exist.
     pub fn create_session(&self, request: CreateSessionRequest) -> Result<GraphSession> {
         if request.project_branch.trim().is_empty() {
             return Err(ApiError::BadRequest(
@@ -153,6 +159,10 @@ impl SessionApi {
         }
         let key = lattice_session::ProjectStoreKey::parse(&request.project_store_key)
             .map_err(|e| ApiError::BadRequest(format!("invalid project_store_key: {e}")))?;
+        let layout = lattice_session::StateLayout::resolve()
+            .map_err(|e| ApiError::Internal(format!("resolve state layout: {e}")))?;
+        crate::stores::create_project_stores(&layout, key)?;
+
         let session_id = Uuid::new_v4().simple().to_string();
         self.store
             .create_session(

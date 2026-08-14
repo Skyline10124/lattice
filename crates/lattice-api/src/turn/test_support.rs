@@ -47,6 +47,12 @@ pub(super) async fn build_test_production_deps(
         std::fs::write(root.join("README.md"), "init\n").expect("write README");
         init_test_git_repo(root);
     }
+    if !in_memory_audit {
+        // A durable-audit fixture takes the production path, which strictly
+        // opens the project's stores; create them first, as `session new`
+        // does.
+        ensure_project_stores(root);
+    }
     let request = make_test_run_turn_request(llm.clone(), in_memory_audit, enabled_tools);
     super::cep::build_production_turn_deps(super::cep::ProductionTurnDepsInput {
         request: &request,
@@ -68,6 +74,16 @@ pub(super) fn test_project_key(root: &std::path::Path) -> lattice_session::Proje
     crate::root::LocalWorkspaceRoot::from_path(root)
         .expect("resolve fixture workspace root")
         .store_key()
+}
+
+/// First-create the project's durable stores for `project_root`, the way
+/// `session new` does in production (#143 — a Turn never creates them).
+///
+/// Callers must already have `XDG_STATE_HOME` pointed at a test-owned root.
+pub(super) fn ensure_project_stores(project_root: &std::path::Path) {
+    let layout = lattice_session::StateLayout::resolve().expect("resolve state layout");
+    crate::stores::create_project_stores(&layout, test_project_key(project_root))
+        .expect("create fixture project stores");
 }
 
 pub(super) struct TestFixture {

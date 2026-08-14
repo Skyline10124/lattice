@@ -103,10 +103,15 @@ pub fn fsync_publication(
 
     // Deepest-first ordering is irrelevant to correctness (each fsync is
     // independent) but syncing children before parents matches the usual
-    // durability write-down order.
+    // durability write-down order. A directory that no longer exists is
+    // skipped rather than an error: publishing a ref *deletion* can prune the
+    // now-empty directory that held it, and its surviving parents are synced
+    // in the same pass.
     dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
     for dir in dirs {
-        fsync_dir(&dir)?;
+        if dir.is_dir() {
+            fsync_dir(&dir)?;
+        }
     }
     Ok(())
 }
