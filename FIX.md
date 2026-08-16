@@ -2,6 +2,58 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #144 review round 2: journal contract depth + real process-crash gate — 2026-08-17
+
+Independent review of the #144 branch raised eleven findings (F1–F11). Each was
+re-checked against live issue #144, ADR 0005, and the source before any change;
+seven produced code or test fixes, one was refuted, and three are recorded as
+deferred/handoff items. Scope is unchanged: session-side only, synthetic
+Invocation facts, no production InvocationStore, Tool dispatch, FinalizeBudget
+approval, or JSON-RPC/numeric-ID/SQLite/operator/dispatch path.
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| #144-R1 | MEDIUM | AC#8 asks for target migration tests proving the legacy `WorkspaceDisposition`/`TurnLifecycleEvidence`/terminal-string fields carry no authority; only a single `terminal_reason == None` assertion existed. | Added migration coverage over all four `TurnOutcome` variants asserting the persisted manifest's `disposition`, `turn/audit.json` lifecycle evidence, and `terminal_reason` are a total projection of the typed outcome, plus a shape guard that `TurnCommitCandidate` can never grow those fields. Production deletion stays in #139-B (ADR 0005 §15/§20). |
+| #144-R2 | MEDIUM | AC#12 requires process-crash/kill points; the branch shipped only injected durability faults plus fresh-handle reopen. ADR 0005 §18 names SIGKILL/reopen and injected barriers as *two* mechanisms, and #143 already ships a real SIGKILL fixture. | Added `sigkill_leaves_only_the_old_tip_or_a_complete_new_one`: a self-re-exec child drives full Turn lifecycles in a temp state root and is SIGKILLed at three delays; a strict reopen must show a contiguous Turn-pin prefix, a branch head equal to the last pin, and any surviving `active-turn` exactly the next Turn with one deterministic closure. No power-loss claim. |
+| #144-R3 | MEDIUM | `validate_transition` accepted any legal attempt key after `StepClosed(ContinueModel)`: no step contiguity, no zero first attempt, and an empty `ordered_tool_results` left the previous step ordinal underivable. | `StepClosedKind::ContinueModel` now carries `model_step_ordinal`. It must be `< MAX_MODEL_STEPS`, non-empty closures must all address that step, `StepClosing -> StepClosed(ContinueModel)` must name the closed plan's step, and the next `ModelAttemptStarted` must be exactly `ordinal + 1` attempt 0. The store transition API can no longer write a non-contiguous edge. |
+| #144-R4 | LOW | `BindingPlan::validate` checks turn/step but not session, and a binding digest is self-consistent over its own tuple, so a cross-session address survived in the journal. | `PendingSnapshot::validate` — the layer that knows the expected `SessionId` — now cross-checks every planned/closing/closure binding address, the pinned `ResultDraft` address, and the pinned `TurnCommitCandidate` session, failing closed with `JournalCorruption`. |
+| #144-R5 | LOW | Strict open parsed the `active-turn` object and compared only its session, and accepted any `turns/<TurnId>` pin carrying a manifest. | Strict open now runs the full `PendingSnapshot::validate()` on `active-turn` and verifies the pinned commit's manifest names this session and this TurnId. Journal damage is reported as typed `SessionError::JournalCorruption` before the handle is returned, never repaired. |
+| #144-R6 | LOW | Nothing compared a snapshot's payload `predecessor` with the commit's git parent, so a forged chain with two different lineages read cleanly. | Every journal read validates lineage: a non-root snapshot's single git parent must equal its payload predecessor, and the `TurnStarted` root's parent must be exactly its frozen `parent_conversation_tip` (or absent). Covers the `Committed -> TurnClosing` link, which is read through the same path. |
+| #144-R7 | MEDIUM | `advance_pending_turn` published by CAS and then ran the ref durability barrier; a barrier failure returned `Durability` on an already-published snapshot, and the identical retry failed as an illegal transition (`Conflict`) instead of confirming its own publication. | The exact retry now reconstructs the candidate commit from the tip's own recorded predecessor and confirms `active-turn` points at that exact OID before re-running the barrier and returning the published tip. A different candidate, a different pinned commit time, or a CAS race is never accepted as success. |
+| #144-R9 | LOW | `build_candidate`'s comment claimed a snapshot without `recorded_at` fails closed; the code silently fell back to `root.accepted_at`. | `reconcile` now fails closed with `JournalCorruption` when the tip carries no journal committer time, and when that time is not a representable instant. No new clock is introduced. |
+| #144-R10 | INFO | FIX.md's #144 entry reported `cargo test -p lattice-store` as 50 passed. | Correction, recorded here rather than by rewriting the original entry: the real total is **49** (44 unit + 5 integration + 0 doc), re-measured twice on this worktree. The `lattice-session` figure of 132 was correct at that time and is now 148 with this round's sixteen new tests. |
+
+**Refuted (no change):** F8 — `finalize_turn` stamping `SessionState.updated_at`
+with a fresh clock is compliant. ADR 0005 §6 freezes exactly the `Committed`
+and `TurnCommit` candidates, both of which are rebuilt byte-identically from
+the pinned candidate on every retry; the state object is not part of that
+frozen identity, and a failed ref transaction leaves it unreachable from any
+authoritative ref.
+
+**Deferred (see FINDINGS.md):** F11 — ADR 0005 §9's clean-UUID-collision
+revision path needs InvocationStore facts that record which plan owns a
+recorded invocation. The synthetic facts vocabulary cannot express that, so a
+different reservation stays typed corruption; a boundary test now pins that
+semantics explicitly for the #139-A handoff.
+
+**Verification (this worktree):**
+
+- `cargo fmt --all --check` — clean.
+- `git diff --check` — clean.
+- `cargo test -p lattice-store` — 49 passed.
+- `cargo test -p lattice-session` — 148 passed.
+- `cargo test -p lattice-api` — 171 passed.
+- `cargo clippy -p lattice-session -p lattice-store --all-targets` — clean.
+- `cargo xtask lancet-boundary` — pass.
+- `cargo build -p lattice-cli` + `LATTICE_BIN="$PWD/target/debug/lattice" cargo test --workspace` and `cargo xtask ci` — pass.
+- Every new guard was verified red-before-green by neutralizing it and
+  confirming exactly the new tests fail.
+
+**Changed files:** `crates/lattice-session/src/pending/{contract,step,reconcile}.rs`,
+`crates/lattice-session/src/git_graph/{mod,pending}.rs`,
+`crates/lattice-session/src/git_graph/tests/{pending_journal,pending_crash}.rs`,
+`crates/lattice-session/AGENTS.md`, `FINDINGS.md`, `FIX.md`.
+
 ## GitHub #144：durable PendingTurn journal 与确定性 reconciliation — 2026-08-16
 
 Scope: feature implementation (ADR 0005 §9/§12/§14, ordered #141 → #142 →

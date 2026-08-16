@@ -39,8 +39,10 @@ payload compatibility.
   active-turn delete, all-or-nothing).
 - `src/git_graph/helpers.rs` owns shared manifest/tree/JSONL helpers.
 - `src/git_graph/tests/` owns Git-backed persistence and topology regression
-  coverage; `pending_journal.rs` covers the journal/finalization mechanics,
-  `pending_crash.rs` the crash-window fixtures, and `pending_fixtures.rs`
+  coverage; `pending_journal.rs` covers the journal/finalization mechanics
+  plus the strict-open, lineage, and legacy-projection migration guards,
+  `pending_crash.rs` the crash-window fixtures (injected durability faults
+  and one real SIGKILL child process), and `pending_fixtures.rs`
   the shared deterministic builders.
 - `src/test_utils.rs` (feature `test-utils`) owns shared gix fixture helpers
   for downstream crate tests.
@@ -101,6 +103,18 @@ payload compatibility.
   with the chain root grafted onto the frozen conversation tip.
   Acceptance lives in `pending*` tests under `src/git_graph/tests/` and
   inline reducer tests.
+- ADDED #144 review round 2: journal identity and lineage are cross-checked
+  in depth. `StepClosedKind::ContinueModel` carries `model_step_ordinal`, so
+  the transition contract decides step contiguity and the zero first attempt
+  from the two snapshots alone. `PendingSnapshot::validate` cross-checks every
+  binding/draft/candidate address against the journal's `SessionId`. Every
+  journal read requires the payload `predecessor` and the commit's git parent
+  to agree (the root's parent being its frozen conversation tip). Strict open
+  validates the whole `active-turn` snapshot and the `turns/<TurnId>` pin's
+  manifest identity. `advance_pending_turn` confirms an exact already-published
+  candidate before failing a retry as an illegal transition, and `reconcile`
+  fails closed when a tip carries no journal committer time. Real
+  process-crash coverage is `pending_crash.rs`'s SIGKILL child fixture.
 - ADDED #143: the store is built on the `lattice-store` kernel. Sessions live
   in the global `sessions.git`; `SessionState` commits replaced sidecars;
   `create_session` takes a `ProjectStoreKey`; `SessionGraphStore` gained
