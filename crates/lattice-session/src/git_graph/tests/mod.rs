@@ -7,6 +7,7 @@ mod commit_turn;
 mod head_transcript;
 mod no_remote;
 mod pending_fixtures;
+mod pending_crash;
 mod pending_journal;
 mod pointer_ops;
 mod session_meta;

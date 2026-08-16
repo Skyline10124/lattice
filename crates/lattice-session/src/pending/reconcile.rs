@@ -200,7 +200,17 @@ pub fn reconcile(
         PendingStage::TurnClosing(_) | PendingStage::Committed(_)
     ) {
         let root = require_root(snapshot)?;
-        let messages = candidate_messages(snapshot, root);
+        // The complete closure set this plan produces (the last cursor state
+        // of the closing loop), for the candidate's transcript framing.
+        let closures: Vec<ClosedBinding> = actions
+            .iter()
+            .filter_map(|action| match action {
+                ReconciliationAction::AdvanceStepClosing { state } => Some(state.closures.clone()),
+                _ => None,
+            })
+            .next_back()
+            .unwrap_or_default();
+        let messages = candidate_messages(snapshot, root, &closures);
         actions.push(ReconciliationAction::PublishTurnClosing {
             candidate: build_candidate(snapshot, root, outcome.clone(), messages),
         });
@@ -604,13 +614,19 @@ fn tip_usage(snapshot: &PendingSnapshot) -> Option<TokenUsage> {
 /// data: the frozen user message, the final message when one completed,
 /// and explicit closure framing for closed bindings (never model-authored
 /// speech, ADR 0005 §14).
-fn candidate_messages(snapshot: &PendingSnapshot, root: &TurnStartedFacts) -> Vec<GraphMessage> {
+fn candidate_messages(
+    snapshot: &PendingSnapshot,
+    root: &TurnStartedFacts,
+    closures: &[ClosedBinding],
+) -> Vec<GraphMessage> {
     let mut messages = vec![user_transcript(root)];
     match &snapshot.stage {
         PendingStage::MessageComplete { message, .. } => messages.push(native_transcript(message)),
         PendingStage::StepClosed {
             kind: StepClosedKind::FinishTurn { final_message },
         } => messages.push(native_transcript(final_message)),
+        // ContinueModel closures are already durable in the snapshot; the
+        // resumed closures from the plan append after them.
         PendingStage::StepClosed {
             kind: StepClosedKind::ContinueModel { ordered_tool_results, .. },
         } => {
@@ -618,12 +634,10 @@ fn candidate_messages(snapshot: &PendingSnapshot, root: &TurnStartedFacts) -> Ve
                 messages.push(closure_transcript(closure));
             }
         }
-        PendingStage::StepClosing(state) => {
-            for closure in &state.closures {
-                messages.push(closure_transcript(closure));
-            }
-        }
         _ => {}
+    }
+    for closure in closures {
+        messages.push(closure_transcript(closure));
     }
     messages
 }
@@ -1384,8 +1398,10 @@ mod tests {
                 _ => None,
             })
             .expect("candidate");
-        assert_eq!(candidate.messages.len(), 2); // user + closure 0
+        // user + the durable closure 0 + the resumed closure 1 framing.
+        assert_eq!(candidate.messages.len(), 3);
         assert_eq!(candidate.messages[1].role, "tool");
+        assert_eq!(candidate.messages[2].role, "tool");
     }
 
     #[test]
