@@ -148,7 +148,7 @@ pub enum StepClosedKind {
         final_message: NativeMessage<UnboundToolCall>,
     },
     /// The step's Tool results ask for another model step. At reopen this
-        /// never continues: the Turn closes interrupted.
+    /// never continues: the Turn closes interrupted.
     ContinueModel {
         /// Ordered closures of the step's bindings.
         ordered_tool_results: Vec<ClosedBinding>,
@@ -175,8 +175,8 @@ pub enum StepClosedKind {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::binding::PlannedBinding;
+    use super::*;
     use lancet_protocol::{ModelMessageAddress, SessionId, TurnId};
     use lattice_conversation::arguments_digest;
 
@@ -185,9 +185,10 @@ mod tests {
     }
 
     fn binding(ordinal: u32) -> PlannedBinding {
-        let invocation =
-            lancet_protocol::InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
-                .unwrap();
+        let invocation = lancet_protocol::InvocationId::parse(&format!(
+            "00000000-0000-4000-8000-{ordinal:012x}"
+        ))
+        .unwrap();
         let address = lancet_protocol::ToolCallAddress {
             message: ModelMessageAddress {
                 session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),

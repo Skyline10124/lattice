@@ -48,7 +48,7 @@ pub mod step;
 
 pub use binding::{BindingPlan, PlannedBinding, binding_digest};
 pub use config::{
-    MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_STEPS, MAX_USER_INPUT_BYTES, FrozenTurnConfig,
+    FrozenTurnConfig, MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_STEPS, MAX_USER_INPUT_BYTES,
     ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits, TurnStartedFacts,
 };
 pub use contract::{
@@ -56,7 +56,7 @@ pub use contract::{
     TurnClosingFacts, TurnCommitCandidate, validate_transition,
 };
 pub use draft::{
-    MAX_TOOL_CONTENT_BYTES, DraftClassification, DraftPublication, ResultDraft, ToolContentError,
+    DraftClassification, DraftPublication, MAX_TOOL_CONTENT_BYTES, ResultDraft, ToolContentError,
 };
 pub use facts::{
     ExecutionOutcome, IndeterminateReason, InvocationFact, InvocationFactsSnapshot,
@@ -105,9 +105,9 @@ pub(crate) mod hex_digest_option {
     ) -> Result<Option<[u8; 32]>, D::Error> {
         match Option::<String>::deserialize(deserializer)? {
             None => Ok(None),
-            Some(raw) => super::decode_hex(&raw)
-                .map(Some)
-                .ok_or_else(|| serde::de::Error::custom("digest must be 64 lowercase hex characters")),
+            Some(raw) => super::decode_hex(&raw).map(Some).ok_or_else(|| {
+                serde::de::Error::custom("digest must be 64 lowercase hex characters")
+            }),
         }
     }
 }
@@ -141,11 +141,13 @@ pub(crate) fn decode_hex(raw: &str) -> Option<[u8; 32]> {
 /// Pure builders for in-module tests (no store, no I/O).
 #[cfg(test)]
 pub(crate) mod tests_support {
-    use super::config::{FrozenTurnConfig, ToolCatalogEntry, ToolCatalogSnapshot,
-        TurnExecutionLimits, TurnStartedFacts};
+    use super::TurnOutcome;
+    use super::config::{
+        FrozenTurnConfig, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
+        TurnStartedFacts,
+    };
     use super::contract::TurnCommitCandidate;
     use super::outcome::{ClosureOrigin, TurnFinishReason};
-    use super::TurnOutcome;
     use lancet_protocol::{SessionId, TurnId};
     use lattice_conversation::{MessagePart, MessageRole, MessageSemantic, NativeMessage};
 
@@ -210,4 +212,3 @@ pub(crate) mod tests_support {
         }
     }
 }
-

@@ -182,15 +182,15 @@ fn validate_step_closed(kind: &StepClosedKind) -> Result<()> {
             for part in &final_message.parts {
                 if let MessageSemantic::ToolResult { .. } = part.semantic {
                     return Err(SessionError::JournalCorruption {
-                        detail: "FinishTurn final message must not carry tool results"
-                            .to_string(),
+                        detail: "FinishTurn final message must not carry tool results".to_string(),
                     });
                 }
             }
             Ok(())
         }
         StepClosedKind::ContinueModel {
-            ordered_tool_results, ..
+            ordered_tool_results,
+            ..
         } => {
             for closure in ordered_tool_results {
                 closure.binding.validate()?;
@@ -267,10 +267,8 @@ impl TurnCommitCandidate {
             });
         }
         chrono::DateTime::parse_from_rfc3339(&self.created_at)
-            .map_err(|e| {
-                SessionError::JournalCorruption {
-                    detail: format!("candidate created_at is not RFC 3339: {e}"),
-                }
+            .map_err(|e| SessionError::JournalCorruption {
+                detail: format!("candidate created_at is not RFC 3339: {e}"),
             })
             .map(|_| ())
     }
@@ -376,8 +374,7 @@ impl PendingSnapshot {
                 }
                 if facts.turn_id != self.turn_id || facts.session_id != self.session_id {
                     return Err(SessionError::JournalCorruption {
-                        detail: "TurnStarted facts do not match the snapshot identity"
-                            .to_string(),
+                        detail: "TurnStarted facts do not match the snapshot identity".to_string(),
                     });
                 }
             }
@@ -467,7 +464,11 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
         // A retry attempt after a pre-stream retryable failure of the same
         // step (ADR 0005 §10): new attempt ordinal, no new model step.
         (
-            ModelAttemptFailed { key: failed, retryable: true, .. },
+            ModelAttemptFailed {
+                key: failed,
+                retryable: true,
+                ..
+            },
             ModelAttemptStarted { key: started },
         ) => {
             if started.turn_id == failed.turn_id
@@ -483,7 +484,9 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
         }
         // The next model step after a ContinueModel step closure.
         (
-            StepClosed { kind: StepClosedKind::ContinueModel { .. } },
+            StepClosed {
+                kind: StepClosedKind::ContinueModel { .. },
+            },
             ModelAttemptStarted { key },
         ) => validate_attempt_key(key),
         // The first model step starts from TurnStarted.
@@ -515,9 +518,7 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
             {
                 Ok(())
             } else {
-                mismatch(
-                    "BindingPlanned step does not match the completing attempt".to_string(),
-                )
+                mismatch("BindingPlanned step does not match the completing attempt".to_string())
             }
         }
         // Bound follows the byte-equal exact plan.
@@ -581,8 +582,10 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                     // Closing the pinned binding: available material must be
                     // the pinned candidate's exact content.
                     let closure = next_state.closures.last().expect("extended by one");
-                    if let super::step::MaterialAvailability::Available { digest, byte_length } =
-                        &closure.material
+                    if let super::step::MaterialAvailability::Available {
+                        digest,
+                        byte_length,
+                    } = &closure.material
                         && (*digest != candidate.content_digest
                             || *byte_length != candidate.byte_length)
                     {
@@ -637,13 +640,13 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
         // turns this way.
         (
             TurnStarted(_)
-                | ModelAttemptStarted { .. }
-                | ModelAttemptFailed { .. }
-                | ModelAttemptInterrupted { .. }
-                | ModelAttemptRejected { .. }
-                | MessageComplete { .. }
-                | BindingPlanned { .. }
-                | Bound { .. },
+            | ModelAttemptStarted { .. }
+            | ModelAttemptFailed { .. }
+            | ModelAttemptInterrupted { .. }
+            | ModelAttemptRejected { .. }
+            | MessageComplete { .. }
+            | BindingPlanned { .. }
+            | Bound { .. },
             StepClosed { .. },
         ) => Ok(()),
         (StepClosed { .. }, TurnClosing(_)) => Ok(()),
@@ -662,14 +665,12 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::config::{
         FrozenTurnConfig, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
     };
+    use super::*;
     use lancet_protocol::{ModelMessageAddress, PlanKey, SessionId, ToolCallAddress};
-    use lattice_conversation::{
-        MessagePart, MessageRole, MessageSemantic, ProviderOrigin,
-    };
+    use lattice_conversation::{MessagePart, MessageRole, MessageSemantic, ProviderOrigin};
 
     const TURN: &str = "3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c";
     const SESSION: &str = "3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c";
@@ -800,7 +801,12 @@ mod tests {
     fn turn_started_must_be_first() {
         let started = turn_started();
         assert!(matches!(
-            validate_transition(&started, &PendingStage::ModelAttemptStarted { key: attempt_key(0, 0) }),
+            validate_transition(
+                &started,
+                &PendingStage::ModelAttemptStarted {
+                    key: attempt_key(0, 0)
+                }
+            ),
             Ok(())
         ));
         // A second TurnStarted after anything is illegal.
@@ -809,7 +815,9 @@ mod tests {
         assert!(
             validate_transition(
                 &started,
-                &PendingStage::ModelAttemptStarted { key: attempt_key(1, 0) }
+                &PendingStage::ModelAttemptStarted {
+                    key: attempt_key(1, 0)
+                }
             )
             .is_err()
         );
@@ -817,7 +825,9 @@ mod tests {
 
     #[test]
     fn retry_only_after_retryable_pre_stream_failure_of_next_ordinal() {
-        let started = PendingStage::ModelAttemptStarted { key: attempt_key(0, 0) };
+        let started = PendingStage::ModelAttemptStarted {
+            key: attempt_key(0, 0),
+        };
         let retryable = PendingStage::ModelAttemptFailed {
             key: attempt_key(0, 0),
             retryable: true,
@@ -828,20 +838,68 @@ mod tests {
             retryable: false,
             usage: None,
         };
-        assert!(validate_transition(&retryable, &PendingStage::ModelAttemptStarted { key: attempt_key(0, 1) }).is_ok());
+        assert!(
+            validate_transition(
+                &retryable,
+                &PendingStage::ModelAttemptStarted {
+                    key: attempt_key(0, 1)
+                }
+            )
+            .is_ok()
+        );
         // Non-retryable failures never continue.
-        assert!(validate_transition(&terminal, &PendingStage::ModelAttemptStarted { key: attempt_key(0, 1) }).is_err());
+        assert!(
+            validate_transition(
+                &terminal,
+                &PendingStage::ModelAttemptStarted {
+                    key: attempt_key(0, 1)
+                }
+            )
+            .is_err()
+        );
         // Retry must not skip an ordinal or change step.
-        assert!(validate_transition(&retryable, &PendingStage::ModelAttemptStarted { key: attempt_key(0, 2) }).is_err());
-        assert!(validate_transition(&retryable, &PendingStage::ModelAttemptStarted { key: attempt_key(1, 1) }).is_err());
-        assert!(validate_transition(&started, &PendingStage::ModelAttemptFailed { key: attempt_key(0, 1), retryable: true, usage: None }).is_err());
+        assert!(
+            validate_transition(
+                &retryable,
+                &PendingStage::ModelAttemptStarted {
+                    key: attempt_key(0, 2)
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            validate_transition(
+                &retryable,
+                &PendingStage::ModelAttemptStarted {
+                    key: attempt_key(1, 1)
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            validate_transition(
+                &started,
+                &PendingStage::ModelAttemptFailed {
+                    key: attempt_key(0, 1),
+                    retryable: true,
+                    usage: None
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn attempt_outcomes_must_follow_the_same_started_attempt() {
-        let started = PendingStage::ModelAttemptStarted { key: attempt_key(0, 0) };
+        let started = PendingStage::ModelAttemptStarted {
+            key: attempt_key(0, 0),
+        };
         for stage in [
-            PendingStage::ModelAttemptFailed { key: attempt_key(0, 0), retryable: false, usage: None },
+            PendingStage::ModelAttemptFailed {
+                key: attempt_key(0, 0),
+                retryable: false,
+                usage: None,
+            },
             PendingStage::ModelAttemptInterrupted {
                 key: attempt_key(0, 0),
                 reason: AttemptInterruption::StreamError,
@@ -867,7 +925,11 @@ mod tests {
         assert!(
             validate_transition(
                 &started,
-                &PendingStage::MessageComplete { key: attempt_key(0, 1), message: zero_tool_message(), usage: None }
+                &PendingStage::MessageComplete {
+                    key: attempt_key(0, 1),
+                    message: zero_tool_message(),
+                    usage: None
+                }
             )
             .is_err()
         );
@@ -885,11 +947,7 @@ mod tests {
         assert!(validate_transition(&planned, &bound).is_ok());
         let mut drifted = one_call_plan();
         drifted.bindings[0].descriptor_identity = "other".to_string();
-        assert!(validate_transition(
-            &planned,
-            &PendingStage::Bound { plan: drifted }
-        )
-        .is_err());
+        assert!(validate_transition(&planned, &PendingStage::Bound { plan: drifted }).is_err());
 
         let closing = PendingStage::StepClosing(step_closing_cursor_0(&one_call_plan()));
         assert!(validate_transition(&bound, &closing).is_ok());
@@ -939,7 +997,9 @@ mod tests {
             session_id: session_id(),
             turn_id: turn_id(),
             predecessor: None,
-            stage: PendingStage::ModelAttemptStarted { key: attempt_key(MAX_MODEL_STEPS, 0) },
+            stage: PendingStage::ModelAttemptStarted {
+                key: attempt_key(MAX_MODEL_STEPS, 0),
+            },
             recorded_at: None,
             root: None,
         };
@@ -947,7 +1007,9 @@ mod tests {
             snapshot.validate().is_err(),
             "a model step ordinal at the code-defined limit is corruption"
         );
-        snapshot.stage = PendingStage::ModelAttemptStarted { key: attempt_key(MAX_MODEL_STEPS - 1, 0) };
+        snapshot.stage = PendingStage::ModelAttemptStarted {
+            key: attempt_key(MAX_MODEL_STEPS - 1, 0),
+        };
         snapshot.validate().expect("the last legal step ordinal");
     }
 
@@ -963,7 +1025,8 @@ mod tests {
             model: "m".to_string(),
             provider: "p".to_string(),
             outcome: TurnOutcome::Interrupted {
-                reason: super::super::outcome::TurnInterruption::ProcessInterruptedBeforeModelAttempt,
+                reason:
+                    super::super::outcome::TurnInterruption::ProcessInterruptedBeforeModelAttempt,
             },
             origin: ClosureOrigin::Reconciled,
             commit_message: "hello".to_string(),
@@ -1005,7 +1068,10 @@ mod tests {
             root: None,
         };
         let value = serde_json::to_value(&snapshot).unwrap();
-        assert!(value.get("recorded_at").is_none(), "recorded_at stays off the wire");
+        assert!(
+            value.get("recorded_at").is_none(),
+            "recorded_at stays off the wire"
+        );
         let back: PendingSnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(back, snapshot);
         back.validate().expect("round-tripped");

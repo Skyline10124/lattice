@@ -61,7 +61,10 @@ pub fn binding_digest(
     descriptor_identity: &str,
     arguments_digest: &[u8; 32],
 ) -> [u8; 32] {
-    let digest_hex: String = arguments_digest.iter().map(|b| format!("{b:02x}")).collect();
+    let digest_hex: String = arguments_digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let payload = json!({
         "invocation_id": invocation_id.to_string(),
         "session_id": address.message.session_id.to_string(),
@@ -152,7 +155,9 @@ impl BindingPlan {
         let mut last_ordinal = None;
         for binding in &self.bindings {
             let ordinal = binding.address.part_ordinal;
-            if let Some(previous) = last_ordinal && ordinal <= previous {
+            if let Some(previous) = last_ordinal
+                && ordinal <= previous
+            {
                 return Err(SessionError::JournalCorruption {
                     detail: format!(
                         "binding part ordinals must strictly ascend: {ordinal} after {previous}"
@@ -171,13 +176,11 @@ impl BindingPlan {
                 });
             }
             binding.validate()?;
-            let part = self
-                .message
-                .parts
-                .get(ordinal as usize)
-                .ok_or_else(|| SessionError::JournalCorruption {
+            let part = self.message.parts.get(ordinal as usize).ok_or_else(|| {
+                SessionError::JournalCorruption {
                     detail: format!("binding points past the message parts: {ordinal}"),
-                })?;
+                }
+            })?;
             let lattice_conversation::MessageSemantic::ToolCall { call } = &part.semantic else {
                 return Err(SessionError::JournalCorruption {
                     detail: format!("binding points at a non-ToolCall part: {ordinal}"),
@@ -193,9 +196,7 @@ impl BindingPlan {
             }
             if arguments_digest(&call.arguments) != binding.arguments_digest {
                 return Err(SessionError::JournalCorruption {
-                    detail: format!(
-                        "binding arguments digest does not describe part {ordinal}"
-                    ),
+                    detail: format!("binding arguments digest does not describe part {ordinal}"),
                 });
             }
         }
@@ -217,9 +218,7 @@ impl BindingPlan {
 mod tests {
     use super::*;
     use lancet_protocol::{ModelMessageAddress, SessionId, TurnId};
-    use lattice_conversation::{
-        MessagePart, MessageRole, MessageSemantic, ProviderOrigin,
-    };
+    use lattice_conversation::{MessagePart, MessageRole, MessageSemantic, ProviderOrigin};
 
     fn turn_id() -> TurnId {
         TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap()
@@ -230,11 +229,7 @@ mod tests {
     }
 
     fn invocation_id(n: u8) -> InvocationId {
-        InvocationId::parse(&format!(
-            "00000000-0000-4000-8000-{:012x}",
-            n as u64
-        ))
-        .unwrap()
+        InvocationId::parse(&format!("00000000-0000-4000-8000-{:012x}", n as u64)).unwrap()
     }
 
     fn tool_message(calls: &[(&str, serde_json::Value)]) -> NativeMessage<UnboundToolCall> {
@@ -311,10 +306,7 @@ mod tests {
         let a = serde_json::json!({"a": 1});
         let b = serde_json::json!({"b": 2});
         let message = tool_message(&[("t.one", a.clone()), ("t.two", b.clone())]);
-        let partial = plan(
-            vec![binding(0, "t.one", &a)],
-            message,
-        );
+        let partial = plan(vec![binding(0, "t.one", &a)], message);
         assert!(matches!(
             partial.validate(),
             Err(SessionError::JournalCorruption { .. })
@@ -347,10 +339,7 @@ mod tests {
         let arguments = serde_json::json!({});
         let message = tool_message(&[("t", arguments.clone()), ("t2", arguments.clone())]);
         let unordered = plan(
-            vec![
-                binding(1, "t2", &arguments),
-                binding(0, "t", &arguments),
-            ],
+            vec![binding(1, "t2", &arguments), binding(0, "t", &arguments)],
             message.clone(),
         );
         assert!(unordered.validate().is_err());
@@ -380,13 +369,7 @@ mod tests {
             part_ordinal: 3,
         };
         let digest = |method: &str| {
-            PlannedBinding::compute_binding_digest(
-                &invocation,
-                &address,
-                method,
-                "d",
-                &[1u8; 32],
-            )
+            PlannedBinding::compute_binding_digest(&invocation, &address, method, "d", &[1u8; 32])
         };
         assert_eq!(digest("a"), digest("a"));
         assert_ne!(digest("a"), digest("b"));

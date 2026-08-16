@@ -7,13 +7,13 @@
 
 use lattice_store::{Blocking, LockMode, RefExpectation};
 
-use crate::git_graph::tests::{Fixture, temp_dir};
+use crate::SessionError;
 use crate::git_graph::GitSessionGraphStore;
+use crate::git_graph::tests::{Fixture, temp_dir};
 use crate::graph::{SessionGraphStore, TurnCommitStatus};
 use crate::pending::contract::PendingStage;
 use crate::pending::draft::ResultDraft;
 use crate::pending::{DraftClassification, DraftPublication};
-use crate::SessionError;
 
 use super::pending_fixtures::*;
 
@@ -67,13 +67,18 @@ fn turn_started_publishes_active_turn_grafted_on_the_conversation_tip() {
     // The journal chain root is grafted onto the frozen conversation tip.
     assert_eq!(
         store.kernel().commit_parents(started.oid).expect("parents"),
-        vec![store
-            .kernel()
-            .ref_target(&format!("refs/lattice/sessions/{session}/heads/main"))
-            .expect("head")
-            .expect("present")]
+        vec![
+            store
+                .kernel()
+                .ref_target(&format!("refs/lattice/sessions/{session}/heads/main"))
+                .expect("head")
+                .expect("present")
+        ]
     );
-    let read = store.read_active_turn(&session).expect("read").expect("some");
+    let read = store
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("some");
     assert_eq!(read, started);
     assert!(read.snapshot.predecessor.is_none());
     assert!(read.snapshot.recorded_at.is_some(), "recorded_at filled");
@@ -132,7 +137,10 @@ fn advance_validates_transitions_and_rejects_committed_via_active_turn() {
     let tip1 = store
         .advance_pending_turn(&session, started_stage, 100, &lock)
         .expect("advance");
-    assert_eq!(tip1.snapshot.predecessor.as_deref(), Some(started.oid.to_string().as_str()));
+    assert_eq!(
+        tip1.snapshot.predecessor.as_deref(),
+        Some(started.oid.to_string().as_str())
+    );
 
     // Illegal transition (retry after a non-started attempt) is a conflict.
     let bad = store.advance_pending_turn(
@@ -147,10 +155,15 @@ fn advance_validates_transitions_and_rejects_committed_via_active_turn() {
 
     // A stage of another Turn is invalid input.
     let mut foreign = attempt_key(0, 0);
-    foreign.turn_id = lancet_protocol::TurnId::parse("00000000-0000-4000-8000-00000000000f")
-        .expect("other turn");
+    foreign.turn_id =
+        lancet_protocol::TurnId::parse("00000000-0000-4000-8000-00000000000f").expect("other turn");
     assert!(matches!(
-        store.advance_pending_turn(&session, PendingStage::ModelAttemptStarted { key: foreign }, 102, &lock),
+        store.advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted { key: foreign },
+            102,
+            &lock
+        ),
         Err(SessionError::InvalidInput(_))
     ));
 
@@ -183,16 +196,28 @@ fn corrupt_active_target_is_typed_corruption() {
         .write_commit_at(blob, &[], "garbage", 1)
         .expect("commit");
     let ref_name = format!("refs/lattice/sessions/{session}/active-turn");
-    let current = store.kernel().ref_target(&ref_name).expect("ref").expect("present");
+    let current = store
+        .kernel()
+        .ref_target(&ref_name)
+        .expect("ref")
+        .expect("present");
     store
         .kernel()
-        .cas_ref(&ref_name, commit, RefExpectation::MustMatch(current), "tamper")
+        .cas_ref(
+            &ref_name,
+            commit,
+            RefExpectation::MustMatch(current),
+            "tamper",
+        )
         .expect("tamper");
 
     // Reading the tampered store's active turn is typed corruption.
     let err = store.read_active_turn(&session);
     assert!(
-        matches!(err, Err(SessionError::JournalCorruption { .. }) | Err(SessionError::Store(_))),
+        matches!(
+            err,
+            Err(SessionError::JournalCorruption { .. }) | Err(SessionError::Store(_))
+        ),
         "got {err:?}"
     );
 
@@ -328,7 +353,9 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
         )
         .expect("closing");
 
-    let committed = store.finalize_turn(&session, &turn_id(), &lock).expect("finalize");
+    let committed = store
+        .finalize_turn(&session, &turn_id(), &lock)
+        .expect("finalize");
     let commit_oid = committed.commit_id.clone();
 
     // Head advanced, pin created, active-turn deleted.
@@ -345,8 +372,10 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
     let turn_oid = crate::git_graph::helpers::parse_oid(&commit_oid).expect("oid");
     let parents = store.kernel().commit_parents(turn_oid).expect("parents");
     assert_eq!(parents.len(), 1);
-    let committed_parents =
-        store.kernel().commit_parents(parents[0]).expect("committed parents");
+    let committed_parents = store
+        .kernel()
+        .commit_parents(parents[0])
+        .expect("committed parents");
     assert_eq!(committed_parents, vec![closing_tip.oid]);
 
     // Transcript reconstruction skips journal commits and keeps both turns.
@@ -358,7 +387,9 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
     assert_eq!(store.log(&session).expect("log").len(), 2);
 
     // Finalize is idempotent: the exact pinned TurnCommit comes back.
-    let again = store.finalize_turn(&session, &turn_id(), &lock).expect("idempotent");
+    let again = store
+        .finalize_turn(&session, &turn_id(), &lock)
+        .expect("idempotent");
     assert_eq!(again.commit_id, commit_oid);
 }
 
@@ -461,5 +492,8 @@ fn finalize_conflict_publishes_nothing() {
     // Nothing published: active-turn still present, no pin, head untouched.
     assert!(store.read_active_turn(&session).expect("read").is_some());
     assert!(store.read_turn_pin(&session, TURN).expect("pin").is_none());
-    assert_eq!(store.kernel().ref_target(&head_ref).expect("head"), Some(moved));
+    assert_eq!(
+        store.kernel().ref_target(&head_ref).expect("head"),
+        Some(moved)
+    );
 }

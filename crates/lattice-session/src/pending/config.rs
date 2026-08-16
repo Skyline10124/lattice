@@ -235,11 +235,11 @@ impl FrozenTurnConfig {
                 detail: "frozen config agent/model/provider must not be empty".to_string(),
             });
         }
-        self.limits.validate().map_err(|e| {
-            SessionError::JournalCorruption {
+        self.limits
+            .validate()
+            .map_err(|e| SessionError::JournalCorruption {
                 detail: format!("frozen limits invalid: {e}"),
-            }
-        })?;
+            })?;
         self.catalog.validate()?;
         check_no_credential_keys(&self.profile_snapshot_json, "profile")?;
         check_no_credential_keys(&self.policy_snapshot_json, "policy")?;
@@ -343,9 +343,7 @@ impl TurnStartedFacts {
             )));
         }
         chrono::DateTime::parse_from_rfc3339(&self.accepted_at)
-            .map_err(|e| {
-                SessionError::InvalidInput(format!("accepted_at is not RFC 3339: {e}"))
-            })
+            .map_err(|e| SessionError::InvalidInput(format!("accepted_at is not RFC 3339: {e}")))
             .map(|_| ())?;
         self.config.validate()
     }
@@ -447,8 +445,7 @@ mod tests {
     #[test]
     fn frozen_config_rejects_credential_keys_at_any_depth() {
         let mut bad = config();
-        bad.profile_snapshot_json =
-            "{\"lancet\":{\"net\":{\"api_key\":\"sk-1\"}}}".to_string();
+        bad.profile_snapshot_json = "{\"lancet\":{\"net\":{\"api_key\":\"sk-1\"}}}".to_string();
         assert!(matches!(
             bad.validate(),
             Err(SessionError::InvalidInput { .. })
@@ -519,7 +516,9 @@ mod tests {
             config: config(),
             accepted_at: "2026-08-16T00:00:00Z".to_string(),
         };
-        facts.validate().expect("exact boundary user input is legal");
+        facts
+            .validate()
+            .expect("exact boundary user input is legal");
         facts.user_message = user_message(&"x".repeat(MAX_USER_INPUT_BYTES + 1));
         assert!(facts.validate().is_err());
     }

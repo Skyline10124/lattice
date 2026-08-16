@@ -141,7 +141,7 @@ pub enum TurnOutcome {
         reason: TurnCancellation,
     },
     /// The Turn was interrupted (process failure, partial stream, limit,
-        /// or reopen reconciliation).
+    /// or reopen reconciliation).
     Interrupted {
         /// Typed interruption reason.
         reason: TurnInterruption,
@@ -262,8 +262,8 @@ mod tests {
         for (outcome, status) in cases {
             assert_eq!(outcome.legacy_status(), status);
             // Serde round-trip keeps the typed value intact.
-            let back: TurnOutcome = serde_json::from_value(serde_json::to_value(&outcome).unwrap())
-                .unwrap();
+            let back: TurnOutcome =
+                serde_json::from_value(serde_json::to_value(&outcome).unwrap()).unwrap();
             assert_eq!(back, outcome);
         }
     }

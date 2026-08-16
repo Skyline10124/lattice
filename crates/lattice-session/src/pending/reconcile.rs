@@ -34,8 +34,7 @@ use super::facts::{
     NotExecutedReason, ResultMaterial, UnavailableMaterialReason,
 };
 use super::outcome::{
-    ClosureOrigin, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
-    TurnUsageAggregate,
+    ClosureOrigin, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome, TurnUsageAggregate,
 };
 use super::step::{ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState};
 use crate::graph::GraphMessage;
@@ -121,18 +120,27 @@ pub fn reconcile(
     let (outcome, mut actions) = match &snapshot.stage {
         PendingStage::TurnStarted { .. } => {
             let reason = TurnInterruption::ProcessInterruptedBeforeModelAttempt;
-            (interrupted(reason.clone()), vec![step_closed_interrupt(reason)])
+            (
+                interrupted(reason.clone()),
+                vec![step_closed_interrupt(reason)],
+            )
         }
         PendingStage::ModelAttemptStarted { .. } => {
             let reason = TurnInterruption::ProcessInterruptedDuringModelAttempt;
-            (interrupted(reason.clone()), vec![step_closed_interrupt(reason)])
+            (
+                interrupted(reason.clone()),
+                vec![step_closed_interrupt(reason)],
+            )
         }
         PendingStage::ModelAttemptFailed { key, retryable, .. } => {
             let root = require_root(snapshot)?;
             let exhausted = key.attempt_ordinal + 1 >= root.config.limits.max_model_attempts;
             if *retryable && !exhausted {
                 let reason = TurnInterruption::ProcessInterruptedDuringModelRetry;
-                (interrupted(reason.clone()), vec![step_closed_interrupt(reason)])
+                (
+                    interrupted(reason.clone()),
+                    vec![step_closed_interrupt(reason)],
+                )
             } else {
                 let reason = TurnFailure::ModelRequestFailed;
                 (
@@ -249,19 +257,18 @@ fn binding_window_closure(
         });
     }
     if publish_bound {
-        actions.push(ReconciliationAction::PublishBound {
-            plan: plan.clone(),
-        });
+        actions.push(ReconciliationAction::PublishBound { plan: plan.clone() });
     }
 
     // A terminal fact in the binding window is an ordering violation: the
     // terminal follows the draft, the draft follows the candidate pin, and
     // the pin lives in a StepClosing snapshot.
-    if plan
-        .bindings
-        .iter()
-        .any(|b| matches!(facts.state_of(&b.invocation_id), Some(InvocationFact::Terminal { .. })))
-    {
+    if plan.bindings.iter().any(|b| {
+        matches!(
+            facts.state_of(&b.invocation_id),
+            Some(InvocationFact::Terminal { .. })
+        )
+    }) {
         return Err(SessionError::JournalCorruption {
             detail: "terminal invocation fact before any StepClosing snapshot".to_string(),
         });
@@ -290,8 +297,7 @@ fn binding_window_closure(
             let reason = TurnInterruption::InvocationMayHaveOccurred {
                 invocation: plan.bindings[index].invocation_id,
             };
-            let classifications =
-                classifications_for(&plan.bindings, 0, Some(index), None);
+            let classifications = classifications_for(&plan.bindings, 0, Some(index), None);
             actions.extend(closing_loop_actions(
                 plan.plan_key,
                 &plan.bindings,
@@ -348,17 +354,13 @@ fn step_closing_closure(
     // (indeterminate ordinal, resume classification for the cursor binding)
     let (indeterminate_at, resume) = match (current, current_fact, candidate) {
         (None, _, _) => (None, None),
-        (
-            Some(_),
-            Some(InvocationFact::Terminal {
-                outcome,
-                material,
-            }),
-            Some(draft),
-        ) => {
+        (Some(_), Some(InvocationFact::Terminal { outcome, material }), Some(draft)) => {
             // Available material must be the pinned candidate's exact
             // content; a mismatch is corruption (ADR 0005 §12).
-            if let ResultMaterial::Available { digest, byte_length } = material
+            if let ResultMaterial::Available {
+                digest,
+                byte_length,
+            } = material
                 && (*digest != draft.content_digest || *byte_length != draft.byte_length)
             {
                 return Err(SessionError::JournalCorruption {
@@ -388,8 +390,7 @@ fn step_closing_closure(
     };
 
     let mut actions = Vec::new();
-    let classifications =
-        classifications_for(&state.bindings, cursor, indeterminate_at, resume);
+    let classifications = classifications_for(&state.bindings, cursor, indeterminate_at, resume);
     actions.extend(closing_loop_actions(
         state.plan_key,
         &state.bindings,
@@ -454,7 +455,9 @@ fn classifications_for(
                     not_executed_material(),
                 );
             }
-            if index == from && let Some(resume) = resume.clone() {
+            if index == from
+                && let Some(resume) = resume.clone()
+            {
                 return resume;
             }
             match indeterminate_at {
@@ -558,7 +561,10 @@ fn to_tool_result_outcome(outcome: &ExecutionOutcome) -> ToolResultOutcome {
 
 fn to_material_availability(material: &ResultMaterial) -> MaterialAvailability {
     match material {
-        ResultMaterial::Available { digest, byte_length } => MaterialAvailability::Available {
+        ResultMaterial::Available {
+            digest,
+            byte_length,
+        } => MaterialAvailability::Available {
             digest: *digest,
             byte_length: *byte_length,
         },
@@ -591,9 +597,12 @@ fn require_root(snapshot: &PendingSnapshot) -> Result<&TurnStartedFacts> {
     // store-filled chain-root facts.
     match &snapshot.stage {
         PendingStage::TurnStarted(facts) => Ok(facts),
-        _ => snapshot.root.as_ref().ok_or_else(|| SessionError::JournalCorruption {
-            detail: "snapshot carries no chain-root TurnStarted facts".to_string(),
-        }),
+        _ => snapshot
+            .root
+            .as_ref()
+            .ok_or_else(|| SessionError::JournalCorruption {
+                detail: "snapshot carries no chain-root TurnStarted facts".to_string(),
+            }),
     }
 }
 
@@ -628,7 +637,11 @@ fn candidate_messages(
         // ContinueModel closures are already durable in the snapshot; the
         // resumed closures from the plan append after them.
         PendingStage::StepClosed {
-            kind: StepClosedKind::ContinueModel { ordered_tool_results, .. },
+            kind:
+                StepClosedKind::ContinueModel {
+                    ordered_tool_results,
+                    ..
+                },
         } => {
             for closure in ordered_tool_results {
                 messages.push(closure_transcript(closure));
@@ -724,7 +737,10 @@ fn native_transcript(message: &NativeMessage<UnboundToolCall>) -> GraphMessage {
 /// model-authored speech.
 fn closure_transcript(closure: &ClosedBinding) -> GraphMessage {
     let material = match &closure.material {
-        MaterialAvailability::Available { digest, byte_length } => serde_json::json!({
+        MaterialAvailability::Available {
+            digest,
+            byte_length,
+        } => serde_json::json!({
             "available": true,
             "digest": encode_hex(digest),
             "byte_length": byte_length,
@@ -831,11 +847,7 @@ mod tests {
                 })
             })
             .collect();
-        let message = NativeMessage::new(
-            lattice_conversation::MessageRole::Assistant,
-            None,
-            calls,
-        );
+        let message = NativeMessage::new(lattice_conversation::MessageRole::Assistant, None, calls);
         let bindings = (0..count)
             .map(|i| {
                 let address = lancet_protocol::ToolCallAddress {
@@ -939,7 +951,11 @@ mod tests {
             "expected {expected_kind} in {kinds:?}"
         );
         // Reopen never continues model/tool execution.
-        assert!(!kinds.iter().any(|k| **k == *"dispatch" || **k == *"continue"));
+        assert!(
+            !kinds
+                .iter()
+                .any(|k| **k == *"dispatch" || **k == *"continue")
+        );
     }
 
     #[test]
@@ -1073,7 +1089,12 @@ mod tests {
         assert_eq!(candidate.messages.len(), 2);
         assert_eq!(candidate.messages[0].role, "user");
         assert_eq!(candidate.messages[1].content, "done");
-        assert_eq!(candidate.created_at, chrono::DateTime::from_timestamp(STEP_TIME, 0).unwrap().to_rfc3339());
+        assert_eq!(
+            candidate.created_at,
+            chrono::DateTime::from_timestamp(STEP_TIME, 0)
+                .unwrap()
+                .to_rfc3339()
+        );
     }
 
     #[test]
@@ -1154,7 +1175,12 @@ mod tests {
                     byte_length: None,
                 }
             );
-            assert!(plan_two.bindings.iter().any(|b| b.invocation_id == *invocation));
+            assert!(
+                plan_two
+                    .bindings
+                    .iter()
+                    .any(|b| b.invocation_id == *invocation)
+            );
         }
         // The closing loop is ordered and monotonic.
         let cursors: Vec<u32> = result
@@ -1178,14 +1204,18 @@ mod tests {
         });
         let facts = facts_with_plan(&plan_one, vec![InvocationFact::Reserved]);
         let result = reconcile(&snap, &facts).expect("plan");
-        assert!(result
-            .actions
-            .iter()
-            .any(|a| matches!(a, ReconciliationAction::PublishBound { .. })));
-        assert!(!result
-            .actions
-            .iter()
-            .any(|a| matches!(a, ReconciliationAction::ReserveExactPlan { .. })));
+        assert!(
+            result
+                .actions
+                .iter()
+                .any(|a| matches!(a, ReconciliationAction::PublishBound { .. }))
+        );
+        assert!(
+            !result
+                .actions
+                .iter()
+                .any(|a| matches!(a, ReconciliationAction::ReserveExactPlan { .. }))
+        );
     }
 
     #[test]
@@ -1246,15 +1276,17 @@ mod tests {
         let before_dispatch = result
             .actions
             .iter()
-            .filter(|a| matches!(
-                a,
-                ReconciliationAction::TerminalizeInvocation {
-                    outcome: ExecutionOutcome::NotExecuted {
-                        reason: NotExecutedReason::BeforeDispatch
-                    },
-                    ..
-                }
-            ))
+            .filter(|a| {
+                matches!(
+                    a,
+                    ReconciliationAction::TerminalizeInvocation {
+                        outcome: ExecutionOutcome::NotExecuted {
+                            reason: NotExecutedReason::BeforeDispatch
+                        },
+                        ..
+                    }
+                )
+            })
             .count();
         assert_eq!(before_dispatch, 2);
     }
@@ -1279,7 +1311,9 @@ mod tests {
             .actions
             .iter()
             .filter_map(|a| match a {
-                ReconciliationAction::TerminalizeInvocation { outcome, .. } => Some(outcome.clone()),
+                ReconciliationAction::TerminalizeInvocation { outcome, .. } => {
+                    Some(outcome.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -1445,8 +1479,7 @@ mod tests {
             current_candidate: Some(draft_for(&plan_one.bindings[0], "{}")),
         };
         let snap = snapshot(PendingStage::StepClosing(state));
-        let facts =
-            facts_with_plan(&plan_one, vec![InvocationFact::DispatchStarted]);
+        let facts = facts_with_plan(&plan_one, vec![InvocationFact::DispatchStarted]);
         let result = reconcile(&snap, &facts).expect("plan");
         assert!(matches!(
             interrupted_reason(&result),
@@ -1492,10 +1525,12 @@ mod tests {
             }
         ));
         // No new StepClosed action: the step is already closed.
-        assert!(!result
-            .actions
-            .iter()
-            .any(|a| matches!(a, ReconciliationAction::PublishStepClosed { .. })));
+        assert!(
+            !result
+                .actions
+                .iter()
+                .any(|a| matches!(a, ReconciliationAction::PublishStepClosed { .. }))
+        );
 
         // ContinueModel -> interrupted, never a next provider request.
         let snap = snapshot(PendingStage::StepClosed {
@@ -1551,10 +1586,12 @@ mod tests {
         assert_eq!(result.actions, vec![ReconciliationAction::FinalizeTurn]);
         assert_eq!(result.outcome, candidate.outcome);
 
-        let snap = snapshot(PendingStage::Committed(super::super::contract::CommittedFacts {
-            turn_id: turn_id(),
-            candidate: candidate.clone(),
-        }));
+        let snap = snapshot(PendingStage::Committed(
+            super::super::contract::CommittedFacts {
+                turn_id: turn_id(),
+                candidate: candidate.clone(),
+            },
+        ));
         let result = reconcile(&snap, &empty_facts()).expect("plan");
         assert_eq!(result.actions, vec![ReconciliationAction::FinalizeTurn]);
     }

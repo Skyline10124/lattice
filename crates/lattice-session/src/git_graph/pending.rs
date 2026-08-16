@@ -28,6 +28,7 @@ use lattice_store::{RefExpectation, RefTxnEdit, TreeSpec};
 
 use gix::objs::tree::EntryKind;
 
+use super::GitSessionGraphStore;
 use super::commit::turn_commit_from_manifest_and_oid;
 use super::helpers::{
     build_agent_json, build_audit_json, build_root_tree, build_turn_tree, messages_to_jsonl,
@@ -35,14 +36,13 @@ use super::helpers::{
 };
 use super::session::resolve_head_oid;
 use super::state::{self, SessionHead};
-use super::GitSessionGraphStore;
 use crate::graph::prepare_turn_commit;
+use crate::pending::TurnStartedFacts;
 use crate::pending::contract::{
     CommittedFacts, PENDING_SNAPSHOT_SCHEMA_VERSION, PendingSnapshot, PendingStage,
-    TurnCommitCandidate, TurnClosingFacts, validate_transition,
+    TurnClosingFacts, TurnCommitCandidate, validate_transition,
 };
 use crate::pending::draft::{DraftClassification, DraftPublication, ResultDraft};
-use crate::pending::{TurnStartedFacts};
 use crate::{Result, SessionError};
 
 /// File inside a journal snapshot commit's tree carrying the payload.
@@ -60,7 +60,9 @@ pub(crate) fn active_turn_ref_name(session_id: &str) -> Result<String> {
 pub(crate) fn turn_pin_ref_name(session_id: &str, turn_id: &str) -> Result<String> {
     state::validate_session_ref_id(session_id)?;
     state::validate_turn_ref_id(turn_id)?;
-    Ok(format!("refs/lattice/sessions/{session_id}/turns/{turn_id}"))
+    Ok(format!(
+        "refs/lattice/sessions/{session_id}/turns/{turn_id}"
+    ))
 }
 
 /// One published journal tip: the snapshot commit OID and the parsed
@@ -110,7 +112,10 @@ impl GitSessionGraphStore {
     /// Read the permanent Turn pin of one committed Turn, when present.
     pub fn read_turn_pin(&self, session_id: &str, turn_id: &str) -> Result<Option<String>> {
         let ref_name = turn_pin_ref_name(session_id, turn_id)?;
-        Ok(self.kernel().ref_target(&ref_name)?.map(|oid| oid.to_string()))
+        Ok(self
+            .kernel()
+            .ref_target(&ref_name)?
+            .map(|oid| oid.to_string()))
     }
 
     pub(crate) fn read_pending_snapshot_at(&self, oid: gix::ObjectId) -> Result<PendingTurnTip> {
@@ -134,16 +139,16 @@ impl GitSessionGraphStore {
         oid: gix::ObjectId,
         recorded_at: Option<i64>,
     ) -> Result<PendingTurnTip> {
-        let bytes = self.kernel().read_tree_blob(oid, PENDING_TREE_FILE).map_err(|_| {
-            SessionError::JournalCorruption {
+        let bytes = self
+            .kernel()
+            .read_tree_blob(oid, PENDING_TREE_FILE)
+            .map_err(|_| SessionError::JournalCorruption {
                 detail: format!("journal commit {oid} has no {PENDING_TREE_FILE}"),
-            }
-        })?;
-        let snapshot: PendingSnapshot = serde_json::from_slice(&bytes).map_err(|e| {
-            SessionError::JournalCorruption {
+            })?;
+        let snapshot: PendingSnapshot =
+            serde_json::from_slice(&bytes).map_err(|e| SessionError::JournalCorruption {
                 detail: format!("parse pending.json at {oid}: {e}"),
-            }
-        })?;
+            })?;
         let snapshot = PendingSnapshot {
             recorded_at,
             ..snapshot
@@ -230,7 +235,11 @@ impl GitSessionGraphStore {
             }
         }
 
-        if self.kernel().ref_target(&active_turn_ref_name(&session_id)?)?.is_some() {
+        if self
+            .kernel()
+            .ref_target(&active_turn_ref_name(&session_id)?)?
+            .is_some()
+        {
             return Err(SessionError::Conflict(format!(
                 "session '{session_id}' already has an active Turn"
             )));
@@ -256,7 +265,12 @@ impl GitSessionGraphStore {
         let oid = self.write_pending_commit(&snapshot, head_oid, timestamp)?;
         let ref_name = active_turn_ref_name(&session_id)?;
         self.kernel()
-            .cas_ref(&ref_name, oid, RefExpectation::MustNotExist, "lattice pending turn start")
+            .cas_ref(
+                &ref_name,
+                oid,
+                RefExpectation::MustNotExist,
+                "lattice pending turn start",
+            )
             .map_err(state::map_cas_conflict)?;
         self.kernel().fsync_pending(&[ref_name.as_str()])?;
         self.read_pending_snapshot_at(oid)
@@ -281,12 +295,11 @@ impl GitSessionGraphStore {
         let _write = self.kernel().write_lock()?;
 
         let ref_name = active_turn_ref_name(session_id)?;
-        let tip_oid = self
-            .kernel()
-            .ref_target(&ref_name)?
-            .ok_or_else(|| SessionError::Conflict(format!(
+        let tip_oid = self.kernel().ref_target(&ref_name)?.ok_or_else(|| {
+            SessionError::Conflict(format!(
                 "session '{session_id}' has no active Turn to advance"
-            )))?;
+            ))
+        })?;
         let tip = self.read_pending_snapshot_at(tip_oid)?;
         if tip.snapshot.session_id.as_str() != session_id {
             return Err(SessionError::JournalCorruption {
@@ -391,12 +404,11 @@ impl GitSessionGraphStore {
 
         let _write = self.kernel().write_lock()?;
         let ref_name = active_turn_ref_name(session_id)?;
-        let tip_oid = self
-            .kernel()
-            .ref_target(&ref_name)?
-            .ok_or_else(|| SessionError::Conflict(format!(
+        let tip_oid = self.kernel().ref_target(&ref_name)?.ok_or_else(|| {
+            SessionError::Conflict(format!(
                 "session '{session_id}' has no active Turn to finalize"
-            )))?;
+            ))
+        })?;
         let tip = self.read_pending_snapshot_at(tip_oid)?;
         if tip.snapshot.turn_id != *turn_id {
             return Err(SessionError::Conflict(format!(
@@ -464,9 +476,11 @@ impl GitSessionGraphStore {
         };
         let committed_bytes = canonical_snapshot_bytes(&committed_payload)?;
         let committed_blob = self.kernel().write_blob(&committed_bytes)?;
-        let committed_tree = self
-            .kernel()
-            .write_tree(TreeSpec::new().upsert(PENDING_TREE_FILE, EntryKind::Blob, committed_blob))?;
+        let committed_tree = self.kernel().write_tree(TreeSpec::new().upsert(
+            PENDING_TREE_FILE,
+            EntryKind::Blob,
+            committed_blob,
+        ))?;
         let commit_ts = parse_rfc3339_to_unix(&candidate.created_at, "candidate.created_at")?;
         let committed_oid = self.kernel().write_commit_at(
             committed_tree,
@@ -481,9 +495,12 @@ impl GitSessionGraphStore {
         for extra in &candidate.side_parent_ids {
             parent_oids.push(parse_oid(extra)?);
         }
-        let turn_commit_oid =
-            self.kernel()
-                .write_commit_at(root_tree, &parent_oids, &candidate.commit_message, commit_ts)?;
+        let turn_commit_oid = self.kernel().write_commit_at(
+            root_tree,
+            &parent_oids,
+            &candidate.commit_message,
+            commit_ts,
+        )?;
 
         // New session state (timestamp; detached head follows the new tip).
         let (state_oid, _) = state::read_state(self.kernel(), session_id)?;
@@ -492,8 +509,7 @@ impl GitSessionGraphStore {
         if let SessionHead::Detached { commit_id } = &mut new_state.head {
             *commit_id = turn_commit_oid.to_string();
         }
-        let new_state_oid =
-            state::write_state_commit(self.kernel(), Some(state_oid), &new_state)?;
+        let new_state_oid = state::write_state_commit(self.kernel(), Some(state_oid), &new_state)?;
 
         let mut edits = Vec::with_capacity(4);
         if let SessionHead::Attached { branch } = &session_state.head {
@@ -524,12 +540,14 @@ impl GitSessionGraphStore {
         });
 
         // Any CAS failure leaves the whole transaction unpublished.
-        self.kernel().ref_transaction(&edits).map_err(|err| match err {
-            lattice_store::StoreError::CasConflict { detail, .. } => {
-                SessionError::Conflict(format!("final turn publication conflict: {detail}"))
-            }
-            other => SessionError::Store(other),
-        })?;
+        self.kernel()
+            .ref_transaction(&edits)
+            .map_err(|err| match err {
+                lattice_store::StoreError::CasConflict { detail, .. } => {
+                    SessionError::Conflict(format!("final turn publication conflict: {detail}"))
+                }
+                other => SessionError::Store(other),
+            })?;
 
         let mut published: Vec<String> = vec![pin_ref.clone(), ref_name.clone()];
         if let SessionHead::Attached { branch } = &session_state.head {
@@ -570,7 +588,9 @@ impl GitSessionGraphStore {
             .map(|jsonl| jsonl.lines().filter(|l| !l.is_empty()).count())
             .unwrap_or(0);
         let mut turn_commit = turn_commit_from_manifest_and_oid(oid, &manifest);
-        turn_commit.message_ids = (0..count).map(|i| format!("{commit_oid_hex}:{i}")).collect();
+        turn_commit.message_ids = (0..count)
+            .map(|i| format!("{commit_oid_hex}:{i}"))
+            .collect();
         Ok(turn_commit)
     }
 
@@ -584,9 +604,11 @@ impl GitSessionGraphStore {
     ) -> Result<gix::ObjectId> {
         let bytes = canonical_snapshot_bytes(snapshot)?;
         let blob = self.kernel().write_blob(&bytes)?;
-        let tree = self
-            .kernel()
-            .write_tree(TreeSpec::new().upsert(PENDING_TREE_FILE, EntryKind::Blob, blob))?;
+        let tree = self.kernel().write_tree(TreeSpec::new().upsert(
+            PENDING_TREE_FILE,
+            EntryKind::Blob,
+            blob,
+        ))?;
         let parents: Vec<gix::ObjectId> = parent.into_iter().collect();
         Ok(self.kernel().write_commit_at(
             tree,

@@ -14,9 +14,11 @@
 
 use lattice_store::{Blocking, LockMode};
 
-use crate::git_graph::tests::{temp_dir, Fixture};
+use crate::SessionError;
 use crate::git_graph::GitSessionGraphStore;
+use crate::git_graph::tests::{Fixture, temp_dir};
 use crate::graph::{SessionGraphStore, TurnCommitStatus};
+use crate::pending::ResultDraft;
 use crate::pending::contract::{PendingStage, TurnClosingFacts};
 use crate::pending::facts::{
     ExecutionOutcome, InvocationFact, InvocationFactsSnapshot, PlanFacts, ResultMaterial,
@@ -25,8 +27,6 @@ use crate::pending::facts::{
 use crate::pending::outcome::{ClosureOrigin, TurnInterruption, TurnOutcome};
 use crate::pending::reconcile::{ReconciliationAction, reconcile};
 use crate::pending::step::{MaterialAvailability, StepClosingState};
-use crate::pending::ResultDraft;
-use crate::SessionError;
 
 use super::pending_fixtures::*;
 
@@ -46,7 +46,11 @@ impl<'a> JournalDriver<'a> {
         let lock = store
             .lock_execution(session, LockMode::Exclusive, Blocking::Block)
             .expect("lock");
-        Self { store, session, lock }
+        Self {
+            store,
+            session,
+            lock,
+        }
     }
 
     fn begin(&self) -> crate::git_graph::pending::PendingTurnTip {
@@ -162,7 +166,8 @@ fn every_stage_crash_window_recovers_one_deterministic_closure() {
     // One repository per stage so the matrix exercises independent crashes.
     for case in stage_cases() {
         let fixture = temp_dir("pending-crash-matrix");
-        let store = GitSessionGraphStore::create(fixture.path().join("sessions.git")).expect("store");
+        let store =
+            GitSessionGraphStore::create(fixture.path().join("sessions.git")).expect("store");
         let session = SESSION.to_string();
         let driver = JournalDriver::new(&store, &session);
         driver.begin();
@@ -377,9 +382,10 @@ fn reserved_facts(plan: &crate::pending::BindingPlan) -> InvocationFactsSnapshot
 
 fn dispatch_started_facts(plan: &crate::pending::BindingPlan) -> InvocationFactsSnapshot {
     let mut facts = reserved_facts(plan);
-    facts
-        .invocations
-        .insert(plan.bindings[0].invocation_id, InvocationFact::DispatchStarted);
+    facts.invocations.insert(
+        plan.bindings[0].invocation_id,
+        InvocationFact::DispatchStarted,
+    );
     facts
 }
 
@@ -407,15 +413,26 @@ fn crash_during_advance_keeps_the_previous_tip_and_retry_is_finite() {
         &lock,
     );
     assert!(
-        matches!(err, Err(SessionError::Store(lattice_store::StoreError::Durability { .. }))),
+        matches!(
+            err,
+            Err(SessionError::Store(
+                lattice_store::StoreError::Durability { .. }
+            ))
+        ),
         "got {err:?}"
     );
-    let tip = store.read_active_turn(&session).expect("read").expect("tip");
+    let tip = store
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("tip");
     assert_eq!(tip.oid, begun.oid, "previous tip remains published");
 
     // Reopen after the crash: the plan is the TurnStarted closure.
     let reopened = reopen(&fixture);
-    let tip = reopened.read_active_turn(&session).expect("read").expect("tip");
+    let tip = reopened
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("tip");
     let plan = reconcile(&tip.snapshot, &InvocationFactsSnapshot::empty()).expect("plan");
     assert!(matches!(
         plan.outcome,
@@ -449,7 +466,9 @@ fn unwritable_finalization_keeps_step_closing_and_active_turn() {
             final_message: assistant_text("done"),
         },
     });
-    driver.advance(PendingStage::TurnClosing(turn_closing(completed_candidate(None))));
+    driver.advance(PendingStage::TurnClosing(turn_closing(
+        completed_candidate(None),
+    )));
     drop(driver);
 
     {
@@ -469,7 +488,10 @@ fn unwritable_finalization_keeps_step_closing_and_active_turn() {
     // The next command reconciles only, with a finite budget: the plan for
     // the TurnClosing tip is exactly one FinalizeTurn.
     let reopened = reopen(&fixture);
-    let tip = reopened.read_active_turn(&session).expect("read").expect("tip");
+    let tip = reopened
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("tip");
     let plan = reconcile(&tip.snapshot, &InvocationFactsSnapshot::empty()).expect("plan");
     assert_eq!(plan.actions, vec![ReconciliationAction::FinalizeTurn]);
 
@@ -482,7 +504,10 @@ fn unwritable_finalization_keeps_step_closing_and_active_turn() {
         .expect("retry completes");
     assert!(reopened.read_active_turn(&session).expect("read").is_none());
     assert_eq!(
-        reopened.read_turn_pin(&session, TURN).expect("pin").as_deref(),
+        reopened
+            .read_turn_pin(&session, TURN)
+            .expect("pin")
+            .as_deref(),
         Some(committed.commit_id.as_str())
     );
 }
@@ -510,7 +535,9 @@ fn crash_after_final_publication_reports_failure_but_is_idempotent() {
             final_message: assistant_text("done"),
         },
     });
-    driver.advance(PendingStage::TurnClosing(turn_closing(completed_candidate(None))));
+    driver.advance(PendingStage::TurnClosing(turn_closing(
+        completed_candidate(None),
+    )));
     drop(driver);
 
     {
@@ -520,7 +547,12 @@ fn crash_after_final_publication_reports_failure_but_is_idempotent() {
         lattice_store::fault::fail_ref_fsync(true);
         let err = store.finalize_turn(&session, &turn_id(), &lock);
         assert!(
-            matches!(err, Err(SessionError::Store(lattice_store::StoreError::Durability { .. }))),
+            matches!(
+                err,
+                Err(SessionError::Store(
+                    lattice_store::StoreError::Durability { .. }
+                ))
+            ),
             "got {err:?}"
         );
     }
@@ -534,7 +566,10 @@ fn crash_after_final_publication_reports_failure_but_is_idempotent() {
     let again = reopened
         .finalize_turn(&session, &turn_id(), &lock)
         .expect("idempotent");
-    let pinned = reopened.read_turn_pin(&session, TURN).expect("pin").expect("pinned");
+    let pinned = reopened
+        .read_turn_pin(&session, TURN)
+        .expect("pin")
+        .expect("pinned");
     assert_eq!(again.commit_id, pinned);
 }
 
@@ -611,15 +646,16 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
             },
         },
     );
-    let tip = reopened.read_active_turn(&session).expect("read").expect("tip");
+    let tip = reopened
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("tip");
     let plan = reconcile(&tip.snapshot, &facts).expect("plan");
     let closure_material = plan
         .actions
         .iter()
         .find_map(|a| match a {
-            ReconciliationAction::AdvanceStepClosing { state } => {
-                state.closures.last().cloned()
-            }
+            ReconciliationAction::AdvanceStepClosing { state } => state.closures.last().cloned(),
             _ => None,
         })
         .expect("closure");
@@ -637,7 +673,10 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
     let durable = reopened
         .publish_draft(&draft, &lock)
         .expect("durable publish");
-    assert!(matches!(durable, crate::pending::DraftPublication::Durable { .. }));
+    assert!(matches!(
+        durable,
+        crate::pending::DraftPublication::Durable { .. }
+    ));
     let reopened = reopen(&fixture);
     assert_eq!(
         reopened.classify_draft(&draft).expect("classify"),
@@ -654,7 +693,10 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
             },
         },
     );
-    let tip = reopened.read_active_turn(&session).expect("read").expect("tip");
+    let tip = reopened
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("tip");
     let plan = reconcile(&tip.snapshot, &facts).expect("plan");
     let closure = plan
         .actions
@@ -671,7 +713,10 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
             byte_length: draft.byte_length,
         }
     );
-    assert_eq!(closure.outcome, lattice_conversation::ToolResultOutcome::Succeeded);
+    assert_eq!(
+        closure.outcome,
+        lattice_conversation::ToolResultOutcome::Succeeded
+    );
 }
 
 #[test]
@@ -721,7 +766,10 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
         .read_turn_pin(&session, TURN)
         .expect("pin")
         .expect("pinned");
-    let commit = reopened.get_turn_commit(&session, &pinned).expect("commit").expect("found");
+    let commit = reopened
+        .get_turn_commit(&session, &pinned)
+        .expect("commit")
+        .expect("found");
     // Interrupted closes as legacy `error` with no logic-bearing terminal
     // string; the typed outcome lives in the journal chain.
     assert_eq!(commit.status, TurnCommitStatus::Error);
@@ -731,7 +779,10 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
     // Committed -> ... -> TurnStarted, and the Committed object carries the
     // typed reconciled outcome.
     let commit_oid = crate::git_graph::helpers::parse_oid(&pinned).expect("oid");
-    let parents = reopened.kernel().commit_parents(commit_oid).expect("parents");
+    let parents = reopened
+        .kernel()
+        .commit_parents(commit_oid)
+        .expect("parents");
     assert_eq!(parents.len(), 1);
     let committed_tip = reopened
         .read_pending_snapshot_at(parents[0])
@@ -741,7 +792,10 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
             assert_eq!(facts.candidate.outcome, plan.outcome);
             assert_eq!(facts.candidate.origin, ClosureOrigin::Reconciled);
         }
-        other => panic!("expected Committed journal object, got {}", other.stage_name()),
+        other => panic!(
+            "expected Committed journal object, got {}",
+            other.stage_name()
+        ),
     }
     let root = reopened
         .resolve_turn_started(&committed_tip)

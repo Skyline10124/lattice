@@ -165,7 +165,11 @@ impl InvocationFactsSnapshot {
     /// contract: either no plan and no invocation records, or a plan whose
     /// bindings are exactly the recorded invocations. A partial or
     /// different plan is corruption (ADR 0005 §11/§14).
-    pub fn validate_against_plan(&self, plan_key: &PlanKey, bindings: &[PlannedBinding]) -> Result<(), crate::SessionError> {
+    pub fn validate_against_plan(
+        &self,
+        plan_key: &PlanKey,
+        bindings: &[PlannedBinding],
+    ) -> Result<(), crate::SessionError> {
         match (&self.plan, self.invocations.is_empty()) {
             (None, true) => Ok(()), // absent plan
             (None, false) => Err(crate::SessionError::JournalCorruption {
@@ -174,9 +178,8 @@ impl InvocationFactsSnapshot {
             (Some(recorded), _) => {
                 if &recorded.plan_key != plan_key || recorded.bindings != bindings {
                     return Err(crate::SessionError::JournalCorruption {
-                        detail:
-                            "recorded reservation differs from the durable exact plan"
-                                .to_string(),
+                        detail: "recorded reservation differs from the durable exact plan"
+                            .to_string(),
                     });
                 }
                 for binding in bindings {
@@ -210,14 +213,11 @@ mod tests {
     fn bindings(count: usize) -> Vec<PlannedBinding> {
         (0..count)
             .map(|index| {
-                let invocation = InvocationId::parse(&format!(
-                    "00000000-0000-4000-8000-{index:012x}"
-                ))
-                .unwrap();
+                let invocation =
+                    InvocationId::parse(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap();
                 let address = lancet_protocol::ToolCallAddress {
                     message: lancet_protocol::ModelMessageAddress {
-                        session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c")
-                            .unwrap(),
+                        session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
                         turn_id: plan_key().turn_id,
                         model_step_ordinal: 0,
                     },
@@ -291,7 +291,11 @@ mod tests {
 
         let mut different = plan.clone();
         different[0].descriptor_identity = "other".to_string();
-        assert!(facts.validate_against_plan(&plan_key(), &different).is_err());
+        assert!(
+            facts
+                .validate_against_plan(&plan_key(), &different)
+                .is_err()
+        );
     }
 
     #[test]

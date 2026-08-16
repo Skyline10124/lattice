@@ -14,8 +14,11 @@ use lattice_conversation::{
 
 use crate::pending::config::TurnStartedFacts;
 use crate::pending::outcome::{ClosureOrigin, TurnFinishReason};
-use crate::pending::{TurnCommitCandidate, TurnClosingFacts, TurnOutcome};
-use crate::pending::{FrozenTurnConfig, PlannedBinding, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits, TurnUsageAggregate};
+use crate::pending::{
+    FrozenTurnConfig, PlannedBinding, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
+    TurnUsageAggregate,
+};
+use crate::pending::{TurnClosingFacts, TurnCommitCandidate, TurnOutcome};
 use crate::test_helpers::user_msg;
 
 pub(crate) const SESSION: &str = "3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c";
@@ -88,7 +91,10 @@ pub(crate) fn assistant_text(text: &str) -> NativeMessage<UnboundToolCall> {
     )
 }
 
-pub(crate) fn tool_call_part(name: &str, arguments: serde_json::Value) -> MessagePart<UnboundToolCall> {
+pub(crate) fn tool_call_part(
+    name: &str,
+    arguments: serde_json::Value,
+) -> MessagePart<UnboundToolCall> {
     MessagePart::semantic_only(MessageSemantic::ToolCall {
         call: UnboundToolCall {
             provider_call_id: Some(format!("call-{name}")),

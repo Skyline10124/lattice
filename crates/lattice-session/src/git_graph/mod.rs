@@ -265,7 +265,11 @@ impl GitSessionGraphStore {
                             detail: format!("turn pin '{name}' does not point at a commit"),
                         })
                     })?;
-                    if self.store.read_tree_path(tree, "turn/manifest.json")?.is_none() {
+                    if self
+                        .store
+                        .read_tree_path(tree, "turn/manifest.json")?
+                        .is_none()
+                    {
                         return Err(SessionError::Store(lattice_store::StoreError::Corruption {
                             detail: format!(
                                 "turn pin '{name}' does not point at a conversation commit"
@@ -287,12 +291,10 @@ impl GitSessionGraphStore {
                                 ),
                             })
                         })?;
-                    let snapshot: crate::pending::PendingSnapshot =
-                        serde_json::from_slice(&bytes).map_err(|e| {
-                            SessionError::InvalidPersistedValue {
-                                field: "pending.json",
-                                value: e.to_string(),
-                            }
+                    let snapshot: crate::pending::PendingSnapshot = serde_json::from_slice(&bytes)
+                        .map_err(|e| SessionError::InvalidPersistedValue {
+                            field: "pending.json",
+                            value: e.to_string(),
                         })?;
                     if snapshot.session_id.as_str() != session_id {
                         return Err(SessionError::Store(lattice_store::StoreError::Corruption {
