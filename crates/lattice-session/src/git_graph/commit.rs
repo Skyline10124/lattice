@@ -6,6 +6,7 @@
 use chrono::Utc;
 use lattice_store::{Blocking, LockMode, RefExpectation, RefTxnEdit};
 
+use super::GitSessionGraphStore;
 use super::helpers::{
     GitSessionManifest, MANIFEST_SCHEMA_VERSION, build_agent_json, build_audit_json,
     build_root_tree, build_turn_tree, derive_turn_id, messages_to_jsonl, parse_manifest,
@@ -13,7 +14,6 @@ use super::helpers::{
 };
 use super::session::resolve_head_oid;
 use super::state::{self, SessionHead};
-use super::{DEFAULT_BRANCH, GitSessionGraphStore};
 use crate::graph::{
     HeadTranscript, PreparedTurnCommit, TurnCommit, TurnCommitInput, TurnCommitStatus,
     TurnLifecycleEvidence, TurnLogEntry, WorkspaceDisposition,
@@ -24,7 +24,18 @@ impl GitSessionGraphStore {
     pub(super) fn commit_turn_impl(&self, input: TurnCommitInput) -> Result<TurnCommit> {
         let now = Utc::now().to_rfc3339();
         let prepared = crate::graph::prepare_turn_commit(&input, &now);
-        self.commit_prepared_turn_impl(prepared)
+        let _exec = self.acquire_execution_lock(
+            &prepared.commit.session_id,
+            LockMode::Exclusive,
+            Blocking::Block,
+        )?;
+        self.commit_prepared_turn_locked_impl(prepared)
+    }
+
+    pub(super) fn commit_turn_impl_locked(&self, input: TurnCommitInput) -> Result<TurnCommit> {
+        let now = Utc::now().to_rfc3339();
+        let prepared = crate::graph::prepare_turn_commit(&input, &now);
+        self.commit_prepared_turn_locked_impl(prepared)
     }
 
     pub(super) fn commit_prepared_turn_impl(
@@ -35,15 +46,32 @@ impl GitSessionGraphStore {
         let session_id = &commit.session_id;
 
         // Mutation: session execution lock (re-entrant under the caller's
-        // full-Turn hold) then the repository write lock.
+        // explicit full-Turn hold) then the repository write lock.
         let _exec =
             self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
+        self.commit_prepared_turn_locked_impl(prepared)
+    }
+
+    /// Commit with an already-held SessionExecutionLock. The caller supplies
+    /// the lock capability through the trait's `commit_turn_locked` method;
+    /// this implementation only takes the narrower repository lock.
+    pub(super) fn commit_prepared_turn_locked_impl(
+        &self,
+        prepared: PreparedTurnCommit,
+    ) -> Result<TurnCommit> {
+        let commit = &prepared.commit;
+        let session_id = &commit.session_id;
         let _write = self.kernel().write_lock()?;
 
         let (state_oid, session_state) = state::read_state(self.kernel(), session_id)?;
         let branch = match &session_state.head {
             SessionHead::Attached { branch } => branch.clone(),
-            SessionHead::Detached { .. } => DEFAULT_BRANCH.to_string(),
+            SessionHead::Detached { .. } => {
+                return Err(SessionError::Conflict(
+                    "cannot commit a Turn while HEAD is detached; checkout a branch first"
+                        .to_string(),
+                ));
+            }
         };
 
         // Resolve current HEAD OID for the parent checks and the CAS.

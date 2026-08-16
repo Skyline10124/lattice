@@ -256,8 +256,34 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
             "loaded active agent profile is required".to_string(),
         ));
     }
-    let prepared = super::live::prepare_live_turn(&session, &request)?;
-    let project_root = resolve_project_root(&request);
+    let requested_root = resolve_project_root(&request)?;
+    let workspace_root = crate::root::LocalWorkspaceRoot::from_path(&requested_root)?;
+    let project_root = workspace_root
+        .canonical_path()
+        .to_str()
+        .ok_or_else(|| {
+            crate::session::ApiError::BadRequest(
+                "Local Workspace root must be valid UTF-8 for the runtime policy path".into(),
+            )
+        })?
+        .to_owned();
+    // Acquire the full SessionExecutionLock before taking the live snapshot;
+    // otherwise a concurrent Turn could move HEAD between preparation and
+    // dispatch. Blocking lock acquisition runs on Tokio's blocking pool.
+    let session_for_lock = session.clone();
+    let requested_session_id = request.session_id.clone();
+    let (_, execution_lock) =
+        tokio::task::spawn_blocking(move || session_for_lock.lock_execution(&requested_session_id))
+            .await
+            .map_err(|err| {
+                crate::session::ApiError::Internal(format!("acquire session lock task: {err}"))
+            })??;
+    let prepared = super::live::prepare_live_turn_locked(
+        &session,
+        &request,
+        workspace_root.canonical_path(),
+        &execution_lock,
+    )?;
     let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.lancet);
     let (model_id, _, _) = resolve_model_and_prompt(&request);
     let runtime_version = env!("CARGO_PKG_VERSION");
@@ -265,6 +291,8 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
     let deps = build_production_turn_deps(ProductionTurnDepsInput {
         request: &request,
         project_root: &project_root,
+        project_store_key: Some(prepared.project_store_key),
+        state_layout: session.state_layout(),
         enabled_tools: &enabled_tools,
         llm: production_llm(&request),
         lancet: cep,
@@ -272,5 +300,5 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
         runtime_version,
     })
     .await?;
-    super::live::stream_turn_live_prepared(session, prepared, request, deps).await
+    super::live::stream_turn_live_prepared(session, prepared, request, deps, execution_lock).await
 }

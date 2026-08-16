@@ -12,6 +12,8 @@
 //! lives in the global `$XDG_STATE_HOME/lattice/sessions.git`; the
 //! `ProjectStoreKey` type is re-exported for the composition layer.
 
+use std::path::PathBuf;
+
 pub use lattice_store::{Blocking, FlockGuard, LockMode, ProjectStoreKey, StateLayout, StoreError};
 pub mod graph;
 pub use graph::{
@@ -55,6 +57,25 @@ pub enum SessionError {
     InvalidPersistedValue { field: &'static str, value: String },
     #[error("session '{0}' is busy: an operation holds the execution lock")]
     SessionBusy(String),
+    /// A locked operation received a guard that does not prove exclusive
+    /// ownership of this session's exact execution-lock path.
+    #[error(
+        "invalid lock capability for session '{session_id}': expected {expected_mode:?} at '{}', got {actual_mode:?} at '{}'",
+        expected_path.display(),
+        actual_path.display()
+    )]
+    InvalidLockCapability {
+        /// Session whose locked operation was requested.
+        session_id: String,
+        /// Exact path the store requires.
+        expected_path: PathBuf,
+        /// Required lock strength.
+        expected_mode: lattice_store::LockMode,
+        /// Path carried by the supplied guard.
+        actual_path: PathBuf,
+        /// Lock strength carried by the supplied guard.
+        actual_mode: lattice_store::LockMode,
+    },
     #[error("store kernel error: {0}")]
     Store(#[from] lattice_store::StoreError),
 }

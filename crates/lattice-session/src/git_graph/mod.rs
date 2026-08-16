@@ -160,9 +160,10 @@ impl GitSessionGraphStore {
 
     /// Acquire the per-session execution lock: exclusive for the full live
     /// Turn, reconciliation, rewind, reset, checkout, branch switch, and
-    /// every Session state/branch mutation (ADR 0005 §5). Same-process
-    /// nesting is re-entrant; `Blocking::NonBlocking` + `LockMode::Shared`
-    /// reports `SessionBusy` when an exclusive owner exists.
+    /// every Session state/branch mutation (ADR 0005 §5). Independent
+    /// same-process acquisitions conflict; explicit guard passing is the only
+    /// re-entry path. `Blocking::NonBlocking` + `LockMode::Shared` reports
+    /// `SessionBusy` when an exclusive owner exists.
     pub(crate) fn acquire_execution_lock(
         &self,
         session_id: &str,
@@ -177,6 +178,32 @@ impl GitSessionGraphStore {
             }
             other => SessionError::Store(other),
         })
+    }
+
+    /// Validate the explicit ownership capability supplied to a locked API.
+    ///
+    /// A path-only check is insufficient: a shared guard on the right file is
+    /// still not ownership of the exclusive SessionExecutionLock. The guard
+    /// carries both facts, and this check is the single fail-closed seam used
+    /// by every `*_locked` implementation.
+    pub(crate) fn validate_execution_lock(
+        &self,
+        session_id: &str,
+        guard: &FlockGuard,
+    ) -> Result<()> {
+        state::validate_session_ref_id(session_id)?;
+        let expected_path = self.session_locks_dir.join(format!("{session_id}.lock"));
+        let expected_mode = LockMode::Exclusive;
+        if guard.path() != expected_path.as_path() || guard.mode() != expected_mode {
+            return Err(SessionError::InvalidLockCapability {
+                session_id: session_id.to_string(),
+                expected_path,
+                expected_mode,
+                actual_path: guard.path().to_path_buf(),
+                actual_mode: guard.mode(),
+            });
+        }
+        Ok(())
     }
 
     /// Domain invariant validation at open: every
@@ -329,5 +356,54 @@ impl SessionGraphStore for GitSessionGraphStore {
         blocking: Blocking,
     ) -> Result<FlockGuard> {
         GitSessionGraphStore::acquire_execution_lock(self, session_id, mode, blocking)
+    }
+
+    fn commit_turn_locked(
+        &self,
+        input: TurnCommitInput,
+        execution_lock: &FlockGuard,
+    ) -> Result<TurnCommit> {
+        self.validate_execution_lock(&input.session_id, execution_lock)?;
+        self.commit_turn_impl_locked(input)
+    }
+
+    fn status_locked(
+        &self,
+        session_id: &str,
+        execution_lock: &FlockGuard,
+    ) -> Result<SessionStatus> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        self.status_locked_impl(session_id)
+    }
+
+    fn branch_locked(
+        &self,
+        session_id: &str,
+        name: &str,
+        from: Option<&str>,
+        execution_lock: &FlockGuard,
+    ) -> Result<GraphRef> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        self.branch_locked_impl(session_id, name, from)
+    }
+
+    fn checkout_locked(
+        &self,
+        session_id: &str,
+        target: &str,
+        execution_lock: &FlockGuard,
+    ) -> Result<GraphHead> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        self.checkout_locked_impl(session_id, target)
+    }
+
+    fn reset_locked(
+        &self,
+        session_id: &str,
+        target: &str,
+        execution_lock: &FlockGuard,
+    ) -> Result<ResetResult> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        self.reset_locked_impl(session_id, target)
     }
 }

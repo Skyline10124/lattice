@@ -33,6 +33,7 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, SessionApi};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
+use lattice_session::StateLayout;
 use tempfile::TempDir;
 
 /// The embedded Component Tools of the default distribution. Literals, not
@@ -911,8 +912,17 @@ fn turn_request(
     }
 }
 
+fn test_state_layout() -> StateLayout {
+    let state_root = std::env::var_os("XDG_STATE_HOME").expect("ScopedState sets XDG_STATE_HOME");
+    StateLayout::in_state_root(Path::new(&state_root))
+}
+
+fn open_session_store(sessions: &Path) -> SessionApi {
+    SessionApi::git_open_with_layout(sessions, &test_state_layout()).expect("open session store")
+}
+
 fn new_session(sessions: &Path, project_root: &Path) -> String {
-    SessionApi::git_create(sessions)
+    SessionApi::git_create_with_layout(sessions, &test_state_layout())
         .expect("create session store")
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
@@ -965,7 +975,7 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
             .build(),
     );
     let first = lattice_api::run_turn(
-        SessionApi::git_open(&sessions).expect("open session store"),
+        open_session_store(&sessions),
         turn_request(&ws, "create it", &session_id, llm),
     )
     .await
@@ -978,7 +988,7 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
         .expect("read history")
         .expect("turn 1 recorded a mutation");
 
-    let api = SessionApi::git_open(&sessions).expect("open session store");
+    let api = open_session_store(&sessions);
     let commit = api
         .get_turn_commit(&session_id, &first.commit_id)
         .expect("get turn commit")
@@ -996,15 +1006,14 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
             .build(),
     );
     let second = lattice_api::run_turn(
-        SessionApi::git_open(&sessions).expect("open session store"),
+        open_session_store(&sessions),
         turn_request(&ws, "just talk", &session_id, llm2),
     )
     .await
     .expect("turn 2 runs");
     assert_eq!(second.status, RunTurnStatus::Completed);
 
-    let second_commit = SessionApi::git_open(&sessions)
-        .expect("open session store")
+    let second_commit = open_session_store(&sessions)
         .get_turn_commit(&session_id, &second.commit_id)
         .expect("get turn 2 commit")
         .expect("turn 2 commit exists");
@@ -1021,16 +1030,14 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
 
     // Branch movement: a new session branch off the first commit, then reopen
     // the store from scratch (process restart) and resolve both Turns again.
-    SessionApi::git_open(&sessions)
-        .expect("open session store")
+    open_session_store(&sessions)
         .branch(&session_id, "side", Some(&first.commit_id))
         .expect("create branch");
-    SessionApi::git_open(&sessions)
-        .expect("open session store")
+    open_session_store(&sessions)
         .checkout(&session_id, "side")
         .expect("checkout branch");
 
-    let reopened = SessionApi::git_open(&sessions).expect("open session store");
+    let reopened = open_session_store(&sessions);
     for (label, commit_id) in [("first", &first.commit_id), ("second", &second.commit_id)] {
         let found = reopened
             .get_turn_commit(&session_id, commit_id)
@@ -1086,7 +1093,7 @@ async fn turn_whose_mutation_fails_before_install_records_no_history_identity() 
     );
 
     let result = lattice_api::run_turn(
-        SessionApi::git_open(&sessions).expect("open session store"),
+        open_session_store(&sessions),
         turn_request(&ws, "try an impossible edit", &session_id, llm),
     )
     .await
@@ -1111,8 +1118,7 @@ async fn turn_whose_mutation_fails_before_install_records_no_history_identity() 
         "a pre-install failure must not move the current history ref"
     );
 
-    let commit = SessionApi::git_open(&sessions)
-        .expect("open session store")
+    let commit = open_session_store(&sessions)
         .get_turn_commit(&session_id, &result.commit_id)
         .expect("get turn commit")
         .expect("turn is committed");
@@ -1167,7 +1173,7 @@ async fn multi_mutation_turn_records_order_and_survives_a_failed_turn() {
     );
 
     let result = lattice_api::run_turn(
-        SessionApi::git_open(&sessions).expect("open session store"),
+        open_session_store(&sessions),
         turn_request(&ws, "do three things then fail", &session_id, llm),
     )
     .await
@@ -1201,8 +1207,7 @@ async fn multi_mutation_turn_records_order_and_survives_a_failed_turn() {
     assert_eq!(snapshot.files.get("one.txt").unwrap().as_slice(), b"3\n");
     assert_eq!(snapshot.files.get("two.txt").unwrap().as_slice(), b"2\n");
 
-    let commit = SessionApi::git_open(&sessions)
-        .expect("open session store")
+    let commit = open_session_store(&sessions)
         .get_turn_commit(&session_id, &result.commit_id)
         .expect("get turn commit")
         .expect("failed turn is still committed");

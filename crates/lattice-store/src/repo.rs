@@ -320,7 +320,7 @@ impl StoreRepo {
         ));
 
         let create_result: Result<()> = (|| {
-            let temp_repo = init_bare_recovering_cwd(&temp)?;
+            let temp_repo = init_bare(&temp)?;
             let meta_commit = write_meta_commit(&temp_repo, &meta)?;
             let this = StoreRepo {
                 git_dir: temp.clone(),
@@ -669,15 +669,21 @@ impl StoreRepo {
         log_message: &str,
     ) -> Result<()> {
         validate_ref_name(ref_name)?;
+        // Objects and their fanout directories must be durable before a ref
+        // can publish an oid that names them. The post-publication barrier is
+        // deliberately separate: CAS remains the publication authority.
+        self.fsync_pending(&[])?;
         self.repo()
             .reference(ref_name, new, expect.into(), log_message)
             .map(|_| ())
-            .map_err(|e| classify_ref_error(ref_name, e))
+            .map_err(|e| classify_ref_error(ref_name, e))?;
+        self.fsync_pending(&[ref_name])
     }
 
     /// Delete one ref under `expect`.
     pub fn delete_ref(&self, ref_name: &str, expect: RefExpectation) -> Result<()> {
         validate_ref_name(ref_name)?;
+        self.fsync_pending(&[])?;
         let name: gix::refs::FullName = ref_name
             .try_into()
             .map_err(|e| StoreError::Git(format!("ref name {ref_name}: {e}")))?;
@@ -691,7 +697,8 @@ impl StoreRepo {
                 deref: false,
             })
             .map(|_| ())
-            .map_err(|e| classify_ref_error(ref_name, e))
+            .map_err(|e| classify_ref_error(ref_name, e))?;
+        self.fsync_pending(&[ref_name])
     }
 
     /// Apply a multi-ref transaction atomically within this repository.
@@ -724,10 +731,14 @@ impl StoreRepo {
                 deref: false,
             });
         }
+        let ref_names: Vec<&str> = edits.iter().map(|edit| edit.name.as_str()).collect();
+        self.fsync_pending(&[])?;
         let repo = self.repo();
         repo.edit_references(gix_edits)
             .map(|_| ())
-            .map_err(|e| classify_ref_error("<transaction>", e))
+            .map_err(|e| classify_ref_error("<transaction>", e))?;
+        drop(repo);
+        self.fsync_pending(&ref_names)
     }
 
     // ─── Retention primitives ──────────────────────────────────────────
@@ -737,7 +748,7 @@ impl StoreRepo {
     pub fn retain(&self, oid: gix::ObjectId) -> Result<()> {
         let ref_name = format!("{RETAINED_REF_PREFIX}/{oid}");
         match self.ref_target(&ref_name)? {
-            Some(existing) if existing == oid => Ok(()),
+            Some(existing) if existing == oid => self.fsync_pending(&[ref_name.as_str()]),
             Some(_) => Err(StoreError::Corruption {
                 detail: format!("retention pin for {oid} points elsewhere"),
             }),
@@ -789,14 +800,20 @@ impl StoreRepo {
     }
 
     /// Publication barrier over every object written through this handle
-    /// since the last barrier, plus the given refs. The pending set is
-    /// drained whether or not the barrier succeeds.
+    /// since the last barrier, plus the given refs. Pending objects remain
+    /// pending when the barrier fails so a caller can retry without publishing
+    /// an oid whose first durability attempt failed.
     pub fn fsync_pending(&self, refs: &[&str]) -> Result<()> {
         let oids: Vec<gix::ObjectId> = {
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut *pending).into_iter().collect()
+            let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.iter().copied().collect()
         };
-        fsync_publication(&self.git_dir, &oids, refs)
+        fsync_publication(&self.git_dir, &oids, refs)?;
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        for oid in oids {
+            pending.remove(&oid);
+        }
+        Ok(())
     }
 
     // ─── Internals ─────────────────────────────────────────────────────
@@ -891,30 +908,13 @@ fn classify_ref_error(ref_name: &str, error: gix::reference::edit::Error) -> Sto
 }
 
 /// Write the identity commit for a fresh repository (meta.json in a tree).
-/// `gix::init_bare` with one recovery retry: gix reads the process CWD even
-/// for an absolute target, so an init after the process's CWD was deleted
-/// (removed checkout, unmounted volume) fails with `CurrentDir`. Point the
-/// CWD somewhere that exists and try again; the partially created temp from
-/// the failed attempt is removed first.
-fn init_bare_recovering_cwd(temp: &Path) -> Result<gix::Repository> {
-    match gix::init_bare(temp) {
-        Ok(repo) => Ok(repo),
-        Err(err) if format!("{err:?}").contains("CurrentDir") => {
-            std::env::set_current_dir(std::env::temp_dir()).map_err(|source| StoreError::Io {
-                operation: "recovering process cwd for git init",
-                path: temp.to_path_buf(),
-                source,
-            })?;
-            let _ = std::fs::remove_dir_all(temp);
-            gix::init_bare(temp).map_err(|e| {
-                StoreError::Git(format!("init bare repository in '{}': {e}", temp.display()))
-            })
-        }
-        Err(err) => Err(StoreError::Git(format!(
-            "init bare repository in '{}': {err}",
-            temp.display()
-        ))),
-    }
+/// Repository initialization is intentionally side-effect free with respect to
+/// process-global CWD. If the underlying Git library cannot resolve its
+/// required environment, creation fails as a typed Git error; it never changes
+/// another task's working directory or retries based on rendered debug text.
+fn init_bare(temp: &Path) -> Result<gix::Repository> {
+    gix::init_bare(temp)
+        .map_err(|e| StoreError::Git(format!("init bare repository in '{}': {e}", temp.display())))
 }
 
 fn write_meta_commit(repo: &gix::Repository, meta: &StoreMeta) -> Result<gix::ObjectId> {
@@ -1062,6 +1062,7 @@ fn ensure_dirs_durable(dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fault;
     use crate::layout::StateLayout;
 
     fn temp_layout() -> (tempfile::TempDir, StateLayout) {
@@ -1240,6 +1241,130 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, StoreError::CasConflict { .. }));
+    }
+
+    #[test]
+    fn ref_cas_requires_object_barrier_before_publication() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"barrier-before-cas").unwrap();
+        fault::fail_object_fsync(true);
+
+        let err = repo
+            .cas_ref(
+                "refs/lattice/barrier/pre",
+                blob,
+                RefExpectation::MustNotExist,
+                "barrier test",
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
+        assert_eq!(repo.ref_target("refs/lattice/barrier/pre").unwrap(), None);
+
+        repo.cas_ref(
+            "refs/lattice/barrier/pre",
+            blob,
+            RefExpectation::MustNotExist,
+            "barrier test retry",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ref_cas_reports_post_publication_barrier_failure() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"barrier-after-cas").unwrap();
+        fault::fail_ref_fsync(true);
+
+        let err = repo
+            .cas_ref(
+                "refs/lattice/barrier/post",
+                blob,
+                RefExpectation::MustNotExist,
+                "barrier test",
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
+        assert_eq!(
+            repo.ref_target("refs/lattice/barrier/post").unwrap(),
+            Some(blob)
+        );
+    }
+
+    #[test]
+    fn ref_transaction_requires_object_barrier_before_publication() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"transaction-before-cas").unwrap();
+        fault::fail_object_fsync(true);
+
+        let err = repo
+            .ref_transaction(&[RefTxnEdit {
+                name: "refs/lattice/barrier/transaction-pre".to_string(),
+                expect: RefExpectation::MustNotExist,
+                new: Some(blob),
+            }])
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
+        assert_eq!(
+            repo.ref_target("refs/lattice/barrier/transaction-pre")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn ref_transaction_reports_post_publication_barrier_failure() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"transaction-after-cas").unwrap();
+        fault::fail_ref_fsync(true);
+
+        let err = repo
+            .ref_transaction(&[RefTxnEdit {
+                name: "refs/lattice/barrier/transaction-post".to_string(),
+                expect: RefExpectation::MustNotExist,
+                new: Some(blob),
+            }])
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
+        assert_eq!(
+            repo.ref_target("refs/lattice/barrier/transaction-post")
+                .unwrap(),
+            Some(blob)
+        );
+    }
+
+    #[test]
+    fn retention_pin_barrier_fails_before_a_rewind_can_move_current() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"retention-barrier").unwrap();
+        fault::fail_ref_fsync(true);
+
+        let err = repo.retain(blob).unwrap_err();
+        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
+        // The ref edit may already be visible in this process when its
+        // post-publication fsync fails; the caller receives an error and must
+        // not proceed to move `current`.
+        assert_eq!(
+            repo.ref_target(&format!("{RETAINED_REF_PREFIX}/{blob}"))
+                .unwrap(),
+            Some(blob)
+        );
+
+        repo.retain(blob).expect("retry after a failed pin barrier");
+        assert_eq!(
+            repo.ref_target(&format!("{RETAINED_REF_PREFIX}/{blob}"))
+                .unwrap(),
+            Some(blob)
+        );
     }
 
     #[test]

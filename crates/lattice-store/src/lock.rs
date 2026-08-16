@@ -14,13 +14,11 @@
 //! `flock` conflicts with itself across two open file descriptions *even in
 //! one process*, so the registry mediates every acquisition:
 //!
-//! - [`acquire_flock`] is the **re-entrant operation lock**: real call paths
-//!   nest (a full-Turn exclusive hold re-enters the same session's lock when
-//!   the Turn commits). Same-mode nesting under an exclusive entry just
-//!   increments a counter; a *non-blocking shared* request under an exclusive
-//!   entry reports `Busy` so a coherent status read honestly reports the
-//!   exclusive owner; an exclusive request over a shared entry is a typed
-//!   `LockUpgrade` error (ADR 0005 forbids upgrading a shared lock).
+//! - [`acquire_flock`] is the **independent operation lock**: an acquisition
+//!   made without an existing guard is a new operation, even in this process.
+//!   Shared operations may coexist; an exclusive operation conflicts with any
+//!   existing operation. Legitimate nesting is explicit through
+//!   [`FlockGuard::reenter`], never inferred from a thread or task identity.
 //! - [`acquire_flock_strict`] is the **strict mutex**: first-create locks and
 //!   repository write locks must serialize even two independent operations in
 //!   one process, so a second acquisition waits on a condvar (blocking) or
@@ -79,12 +77,47 @@ fn registry_lock() -> MutexGuard<'static, HashMap<PathBuf, LockEntry>> {
 #[derive(Debug)]
 pub struct FlockGuard {
     path: PathBuf,
+    mode: LockMode,
 }
 
 impl FlockGuard {
     /// The lock file this guard holds.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The strength of the lock this guard holds.
+    pub fn mode(&self) -> LockMode {
+        self.mode
+    }
+
+    /// Explicitly nest this operation lock.
+    ///
+    /// The guard is the ownership capability. No thread ID or task-local
+    /// bookkeeping is used, so a caller must deliberately pass the guard into
+    /// the nested operation that is allowed to re-enter it. Strict repository
+    /// and create locks cannot be re-entered.
+    pub fn reenter(&self) -> Result<Self, StoreError> {
+        let mut map = registry_lock();
+        let Some(entry) = map.get_mut(&self.path) else {
+            return Err(StoreError::Lock {
+                operation: "re-entering a released lock",
+                path: self.path.clone(),
+                source: std::io::Error::other("lock guard is no longer registered"),
+            });
+        };
+        if entry.strict {
+            return Err(StoreError::Lock {
+                operation: "re-entering a strict lock",
+                path: self.path.clone(),
+                source: std::io::Error::other("strict locks are never re-entrant"),
+            });
+        }
+        entry.holders += 1;
+        Ok(Self {
+            path: self.path.clone(),
+            mode: self.mode,
+        })
     }
 }
 
@@ -111,46 +144,48 @@ impl Drop for FlockGuard {
 /// parent directories) on demand.
 ///
 /// See the module docs for the nesting matrix. `Busy` is returned for a
-/// non-blocking acquire that conflicts with another process, or for a
-/// non-blocking shared request while this process holds the lock exclusively.
-/// `LockUpgrade` is returned when an exclusive hold is requested over this
-/// process's shared hold.
+/// non-blocking acquire that conflicts with another operation or process.
+/// Blocking acquisitions wait for a conflicting same-process operation to
+/// release instead of treating it as an implicit re-entry.
 pub fn acquire_flock(
     path: &Path,
     mode: LockMode,
     blocking: Blocking,
 ) -> Result<FlockGuard, StoreError> {
     let mut map = registry_lock();
-    if let Some(entry) = map.get_mut(path) {
+    while let Some(entry) = map.get(path) {
         if entry.strict {
             return Err(StoreError::Lock {
-                operation: "nesting a strict lock",
+                operation: "acquiring an operation lock over a strict lock",
                 path: path.to_path_buf(),
                 source: std::io::Error::other("lock file used with mixed semantics"),
             });
         }
-        return match (entry.mode, mode, blocking) {
-            (LockMode::Shared, LockMode::Exclusive, _) => Err(StoreError::LockUpgrade {
+        // Independent shared operations can coexist. Every other same-process
+        // acquisition is a real conflict and must wait or report Busy. The
+        // only nesting exception is the explicit `FlockGuard::reenter` path.
+        if entry.mode == LockMode::Shared && mode == LockMode::Shared {
+            let entry = map.get_mut(path).expect("entry remains registered");
+            entry.holders += 1;
+            return Ok(FlockGuard {
                 path: path.to_path_buf(),
-            }),
-            (LockMode::Exclusive, LockMode::Shared, Blocking::NonBlocking) => {
-                Err(StoreError::Busy {
-                    path: path.to_path_buf(),
-                })
-            }
-            _ => {
-                entry.holders += 1;
-                Ok(FlockGuard {
-                    path: path.to_path_buf(),
-                })
-            }
-        };
+                mode,
+            });
+        }
+        if blocking == Blocking::NonBlocking {
+            return Err(StoreError::Busy {
+                path: path.to_path_buf(),
+            });
+        }
+        let notify = Arc::clone(&entry.notify);
+        map = notify.wait(map).unwrap_or_else(|e| e.into_inner());
     }
     let file = open_lock_file(path)?;
     let entry = syscall_flock(file, path, mode, blocking, false)?;
     map.insert(path.to_path_buf(), entry);
     Ok(FlockGuard {
         path: path.to_path_buf(),
+        mode,
     })
 }
 
@@ -174,6 +209,7 @@ pub fn acquire_flock_strict(path: &Path, blocking: Blocking) -> Result<FlockGuar
     map.insert(path.to_path_buf(), entry);
     Ok(FlockGuard {
         path: path.to_path_buf(),
+        mode: LockMode::Exclusive,
     })
 }
 
@@ -243,16 +279,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exclusive_nests_and_releases() {
+    fn independent_exclusive_acquisition_is_busy_and_releases() {
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("a.lock");
         let g1 = acquire_flock(&lock, LockMode::Exclusive, Blocking::Block).unwrap();
-        let g2 = acquire_flock(&lock, LockMode::Exclusive, Blocking::Block).unwrap();
-        drop(g1);
-        // Still held by g2: a non-blocking *shared* request must see Busy.
+        // An independent acquisition must not be inferred as a nested hold.
         let err = acquire_flock(&lock, LockMode::Shared, Blocking::NonBlocking).unwrap_err();
         assert!(matches!(err, StoreError::Busy { .. }));
-        drop(g2);
+        drop(g1);
         // Fully released: shared succeeds again.
         let g3 = acquire_flock(&lock, LockMode::Shared, Blocking::NonBlocking).unwrap();
         drop(g3);
@@ -263,9 +297,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("b.lock");
         let g1 = acquire_flock(&lock, LockMode::Shared, Blocking::Block).unwrap();
+        assert_eq!(g1.mode(), LockMode::Shared);
         let g2 = acquire_flock(&lock, LockMode::Shared, Blocking::NonBlocking).unwrap();
-        let err = acquire_flock(&lock, LockMode::Exclusive, Blocking::Block).unwrap_err();
-        assert!(matches!(err, StoreError::LockUpgrade { .. }));
+        assert_eq!(g2.mode(), LockMode::Shared);
+        let err = acquire_flock(&lock, LockMode::Exclusive, Blocking::NonBlocking).unwrap_err();
+        assert!(matches!(err, StoreError::Busy { .. }));
         drop(g2);
         drop(g1);
         let g3 = acquire_flock(&lock, LockMode::Exclusive, Blocking::NonBlocking).unwrap();
@@ -273,13 +309,46 @@ mod tests {
     }
 
     #[test]
-    fn shared_under_exclusive_blocking_nests() {
+    fn independent_shared_under_exclusive_is_busy() {
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("c.lock");
         let g1 = acquire_flock(&lock, LockMode::Exclusive, Blocking::Block).unwrap();
-        let g2 = acquire_flock(&lock, LockMode::Shared, Blocking::Block).unwrap();
-        drop(g2);
+        let err = acquire_flock(&lock, LockMode::Shared, Blocking::NonBlocking).unwrap_err();
+        assert!(matches!(err, StoreError::Busy { .. }));
         drop(g1);
+    }
+
+    #[test]
+    fn explicit_reentrant_guard_allows_legal_nesting() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("explicit-reentrant.lock");
+        let g1 = acquire_flock(&lock, LockMode::Exclusive, Blocking::Block).unwrap();
+        let g2 = g1.reenter().unwrap();
+        assert_eq!(g1.mode(), LockMode::Exclusive);
+        assert_eq!(g2.mode(), LockMode::Exclusive);
+        drop(g1);
+        let err = acquire_flock(&lock, LockMode::Exclusive, Blocking::NonBlocking).unwrap_err();
+        assert!(matches!(err, StoreError::Busy { .. }));
+        drop(g2);
+        let g3 = acquire_flock(&lock, LockMode::Exclusive, Blocking::NonBlocking).unwrap();
+        drop(g3);
+    }
+
+    #[test]
+    fn independent_same_process_exclusive_acquisition_cannot_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = std::sync::Arc::new(dir.path().join("independent-exclusive.lock"));
+        let first = acquire_flock(&lock, LockMode::Exclusive, Blocking::Block).unwrap();
+        let second_lock = std::sync::Arc::clone(&lock);
+        let result = std::thread::spawn(move || {
+            acquire_flock(&second_lock, LockMode::Exclusive, Blocking::NonBlocking)
+                .map(|_| ())
+                .map_err(|err| matches!(err, StoreError::Busy { .. }))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(result, Err(true));
+        drop(first);
     }
 
     #[test]

@@ -65,6 +65,9 @@ pub fn fsync_publication(
     written_oids: &[gix::ObjectId],
     written_refs: &[&str],
 ) -> Result<(), StoreError> {
+    if !written_oids.is_empty() {
+        crate::fault::object_fsync(git_dir)?;
+    }
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut push_dir = |dir: PathBuf| {
         if !dirs.contains(&dir) {
@@ -100,6 +103,12 @@ pub fn fsync_publication(
         }
     }
     push_dir(git_dir.to_path_buf());
+
+    if !written_refs.is_empty() {
+        // The ref edit has already been accepted by the caller at this point;
+        // a failure here is therefore a published-but-not-durable result.
+        crate::fault::ref_fsync(git_dir)?;
+    }
 
     // Deepest-first ordering is irrelevant to correctness (each fsync is
     // independent) but syncing children before parents matches the usual

@@ -57,6 +57,8 @@ pub(super) async fn build_test_production_deps(
     super::cep::build_production_turn_deps(super::cep::ProductionTurnDepsInput {
         request: &request,
         project_root,
+        project_store_key: None,
+        state_layout: None,
         enabled_tools,
         llm,
         lancet,
@@ -120,7 +122,9 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     init_test_git_repo(&root);
 
     let sessions_path = root.join("sessions.git");
-    let session_api = SessionApi::git_create(&sessions_path).expect("create session store");
+    let layout = lattice_session::StateLayout::in_state_root(&root.join(".test-state"));
+    let session_api =
+        SessionApi::git_create_with_layout(&sessions_path, &layout).expect("create session store");
     let store: Box<dyn SessionGraphStore> = Box::new(
         lattice_session::GitSessionGraphStore::open(&sessions_path).expect("open session store"),
     );

@@ -217,12 +217,127 @@ fn status_succeeds_once_the_lock_is_released() {
         let _guard = store
             .acquire_execution_lock("sess-free", LockMode::Exclusive, Blocking::Block)
             .expect("acquire");
-        // Same-process re-entrancy: a nested acquisition must not deadlock.
-        let _nested = store
-            .acquire_execution_lock("sess-free", LockMode::Exclusive, Blocking::NonBlocking)
-            .expect("re-entrant acquire");
+        // Same-process re-entrancy is explicit: the nested operation receives
+        // the existing guard rather than acquiring the path implicitly.
+        let _nested = _guard.reenter().expect("explicit re-entrant acquire");
     }
 
     let status = store.status("sess-free").expect("status after release");
     assert_eq!(status.session_id, "sess-free");
+}
+
+#[test]
+fn locked_apis_require_the_exact_exclusive_session_guard() {
+    fn assert_invalid_lock<T: std::fmt::Debug>(result: crate::Result<T>) {
+        assert!(
+            matches!(result, Err(SessionError::InvalidLockCapability { .. })),
+            "expected InvalidLockCapability, got {result:?}"
+        );
+    }
+
+    let dir = temp_dir("locked_guard_capability");
+    let store = GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create");
+    let ids_a = setup_session_with_commits(&store, "sess-guard-a", 1, None);
+    let ids_b = setup_session_with_commits(&store, "sess-guard-b", 1, None);
+
+    let guard_a = store
+        .acquire_execution_lock("sess-guard-a", LockMode::Exclusive, Blocking::Block)
+        .expect("exclusive guard A");
+    let guard_b = store
+        .acquire_execution_lock("sess-guard-b", LockMode::Exclusive, Blocking::Block)
+        .expect("exclusive guard B");
+
+    // A valid exclusive guard for another session is not an ownership
+    // capability for the requested session. Every locked entry point rejects
+    // it before touching refs or state.
+    assert_invalid_lock(store.status_locked("sess-guard-b", &guard_a));
+    assert_invalid_lock(store.branch_locked("sess-guard-b", "wrong", None, &guard_a));
+    assert_invalid_lock(store.checkout_locked("sess-guard-b", "main", &guard_a));
+    assert_invalid_lock(store.reset_locked("sess-guard-b", &ids_b[0], &guard_a));
+    assert_invalid_lock(store.commit_turn_locked(
+        commit_input(
+            "sess-guard-b",
+            vec![ids_b[0].clone()],
+            vec![user_msg("wrong guard")],
+            TurnCommitStatus::Completed,
+        ),
+        &guard_a,
+    ));
+
+    // The exact exclusive guard is accepted by both a locked read and a
+    // locked mutation.
+    assert_eq!(
+        store
+            .status_locked("sess-guard-b", &guard_b)
+            .expect("status with correct guard")
+            .session_id,
+        "sess-guard-b"
+    );
+    store
+        .commit_turn_locked(
+            commit_input(
+                "sess-guard-b",
+                vec![ids_b[0].clone()],
+                vec![user_msg("correct guard")],
+                TurnCommitStatus::Completed,
+            ),
+            &guard_b,
+        )
+        .expect("commit with correct guard");
+    drop(guard_b);
+    drop(guard_a);
+
+    // A shared guard on the exact session path still does not prove the
+    // exclusive ownership required by any locked API.
+    let shared = store
+        .acquire_execution_lock("sess-guard-a", LockMode::Shared, Blocking::Block)
+        .expect("shared guard");
+    assert_eq!(shared.mode(), LockMode::Shared);
+    assert_invalid_lock(store.status_locked("sess-guard-a", &shared));
+    assert_invalid_lock(store.branch_locked("sess-guard-a", "wrong", None, &shared));
+    assert_invalid_lock(store.checkout_locked("sess-guard-a", "main", &shared));
+    assert_invalid_lock(store.reset_locked("sess-guard-a", &ids_a[0], &shared));
+    assert_invalid_lock(store.commit_turn_locked(
+        commit_input(
+            "sess-guard-a",
+            vec![ids_a[0].clone()],
+            vec![user_msg("shared guard")],
+            TurnCommitStatus::Completed,
+        ),
+        &shared,
+    ));
+}
+
+#[test]
+fn list_propagates_corrupt_state_instead_of_dropping_the_session() {
+    let dir = temp_dir("list_corrupt_state");
+    let store = GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create");
+    setup_session_with_commits(&store, "sess-corrupt-list", 1, None);
+    let state_ref = state::state_ref_name("sess-corrupt-list").unwrap();
+    let state_oid = store
+        .kernel()
+        .ref_target(&state_ref)
+        .unwrap()
+        .expect("state ref");
+    let missing = gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
+    store
+        .kernel()
+        .cas_ref(
+            &state_ref,
+            missing,
+            lattice_store::RefExpectation::MustMatch(state_oid),
+            "test corrupt state",
+        )
+        .unwrap();
+
+    let err = store
+        .list()
+        .expect_err("list must surface the corrupt state");
+    assert!(
+        matches!(
+            err,
+            SessionError::Store(lattice_store::StoreError::Corruption { .. })
+        ),
+        "got {err:?}"
+    );
 }

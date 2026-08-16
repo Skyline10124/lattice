@@ -60,7 +60,9 @@ pub enum StoreError {
         source: std::io::Error,
     },
 
-    /// A shared hold may not be upgraded to exclusive (ADR 0005 §5).
+    /// Legacy lock-upgrade classification retained for API compatibility.
+    /// Current independent operation-lock conflicts are [`Self::Busy`]; the
+    /// kernel never infers ownership from a thread or task identity.
     #[error("lock upgrade forbidden: '{}'", .path.display())]
     LockUpgrade {
         /// The lock file.

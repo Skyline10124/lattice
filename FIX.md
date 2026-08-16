@@ -5680,3 +5680,31 @@ No unresolved #114 residual remains for `FINDINGS.md`.
 `crates/lancet-runtime/**`, `crates/lattice-api/**`, `crates/lattice-cli/**`,
 `crates/lattice-tui/**`, `crates/lattice-system-harness/**`, `Cargo.toml`,
 `docs/**`, scoped `AGENTS.md`, and `FIX.md`.
+
+## GitHub #143 review follow-up: session and durability correctness — 2026-08-16
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| #143-R1..R14 | BLOCKER/MAJOR | Review identified unvalidated ProjectStoreKey bindings, incomplete Turn/Rewind locking, swallowed checkpoint errors, same-process flock ambiguity, missing publication barriers, unsafe retention ordering, global test-state leakage, Tokio-worker blocking, detached-HEAD fallback to `main`, dropped list errors, doctor fallback, process-CWD recovery side effects, overstated filesystem claims, and an unused kernel dependency. | Bound every Session path to its canonical Local Workspace key and paired StateLayout; hold SessionExecutionLock and the shared WorkspaceOperationLock across the full live Turn close and Rewind; make lock ownership explicit and validate every locked API's exact exclusive guard capability; add pre/post object/ref barriers and durable retention checks; isolate tests and offload blocking regions; fail closed for detached HEAD and list/doctor/init errors; make the probe/test language honest; remove `rustix` and delete the obsolete `open_workspace_history` seam. |
+
+### Verification
+
+- `cargo test -p lattice-store --lib -- --test-threads=1` — 43 passed.
+- `cargo test -p lattice-store --test integration -- --test-threads=1` — 5 passed.
+- `cargo test -p lattice-session --tests -- --test-threads=1` — 65 passed.
+- `cargo test -p lattice-api --test rewind_acceptance -- --test-threads=1` — 17 passed.
+- `LATTICE_BIN="$PWD/target/debug/lattice" cargo test -p lattice-system-harness --test direct_failures -- --test-threads=1` — 8 passed.
+- `LATTICE_BIN="$PWD/target/debug/lattice" cargo test --workspace` — passed.
+- `cargo fmt --all --check`, `git diff --check`, `cargo xtask lancet-boundary` — passed.
+- `cargo xtask ci` — passed, including Clippy, build, boundaries, codegen,
+  per-crate tests, harness scenarios, and Component digest verification.
+
+The transitional SQLite audit key/hash split remains unchanged for #139-B.
+No real XDG state was cleaned, and no staging, commit, push, or GitHub update
+was performed.
+
+### Changed files
+
+`crates/lattice-store/**`, `crates/lattice-session/**`,
+`crates/lancet-runtime/**`, `crates/lattice-api/**`, `crates/lattice-cli/**`,
+`crates/lattice-system-harness/**`, `Cargo.lock`, and `FIX.md`.

@@ -112,8 +112,10 @@ pub enum WorkspaceHistoryError {
     /// The kernel error, taxonomy preserved (ADR 0005 §4 typed failures).
     ///
     /// `From<StoreError>` keeps `NotInitialized`/`Corruption`/`Busy`/
-    /// `LockUpgrade`/`CasConflict`/`MissingPrimitive` matchable so a domain
-    /// caller never has to sniff a Display string.
+    /// `CasConflict`/`MissingPrimitive` matchable so a domain caller never
+    /// has to sniff a Display string. Operation-lock conflicts are `Busy`;
+    /// the kernel retains the older `LockUpgrade` enum variant for API
+    /// compatibility, but this path never emits it.
     #[error("store kernel error: {0}")]
     Kernel(#[source] StoreError),
     /// A mutation path was not a workspace-relative file path.
@@ -817,6 +819,7 @@ fn move_current_backwards(
     expected: gix::ObjectId,
     target: Option<&str>,
 ) -> Result<(), String> {
+    let retained_ref = format!("{}/{}", lattice_store::RETAINED_REF_PREFIX, expected);
     match target {
         Some(target) => {
             let target_oid = parse_oid(target).map_err(|e| e.to_string())?;
@@ -836,7 +839,10 @@ fn move_current_backwards(
         }
     }
     store
-        .fsync_pending(&[CURRENT_REF])
+        // The retention pin was published before `current` moved. Include it
+        // in the closing barrier as an explicit invariant even though the
+        // kernel's retain CAS also applies its own publication barrier.
+        .fsync_pending(&[CURRENT_REF, retained_ref.as_str()])
         .map_err(|e| e.to_string())
 }
 
@@ -1887,7 +1893,7 @@ mod tests {
     }
 
     /// The operation lock is the per-project lock under the state layout, and
-    /// it nests re-entrantly for one process's own mutation path.
+    /// explicit guard passing is the only same-process re-entry path.
     #[test]
     fn operation_lock_is_project_scoped_and_reentrant() {
         let state = TempDir::new().unwrap();
@@ -1904,11 +1910,10 @@ mod tests {
         );
         assert!(guard.path().ends_with(WORKSPACE_OPERATION_LOCK));
 
-        // Re-entrant for the same process: a mutation that records while
-        // already holding the operation lock must not deadlock.
-        let nested = history
-            .lock_workspace_operation(LockMode::Exclusive, Blocking::NonBlocking)
-            .expect("re-entrant acquire");
+        // Re-entrant only through the explicit guard capability: a mutation
+        // that records while already holding the operation lock must not
+        // deadlock, and an independent acquire must not be mistaken for it.
+        let nested = guard.reenter().expect("explicit re-entrant acquire");
         drop(nested);
 
         // The repository write lock is a *different*, narrower lock taken
@@ -1917,7 +1922,7 @@ mod tests {
         drop(guard);
     }
 
-    /// Upgrading a shared operation hold to exclusive is rejected, so an
+    /// An independent exclusive operation over a shared hold is busy, so an
     /// observation can never silently become a mutation.
     #[test]
     fn operation_lock_upgrade_is_rejected() {
@@ -1928,14 +1933,11 @@ mod tests {
             .lock_workspace_operation(LockMode::Shared, Blocking::Block)
             .expect("shared acquire");
         let err = history
-            .lock_workspace_operation(LockMode::Exclusive, Blocking::Block)
-            .expect_err("upgrade must be rejected");
+            .lock_workspace_operation(LockMode::Exclusive, Blocking::NonBlocking)
+            .expect_err("independent exclusive acquire must be busy");
         assert!(
-            matches!(
-                err,
-                WorkspaceHistoryError::Kernel(StoreError::LockUpgrade { .. })
-            ),
-            "expected typed LockUpgrade, got {err:?}"
+            matches!(err, WorkspaceHistoryError::Kernel(StoreError::Busy { .. })),
+            "expected typed Busy, got {err:?}"
         );
     }
 

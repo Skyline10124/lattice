@@ -5,10 +5,9 @@
 //!
 //! Probes run against every real parent directory a store is published in —
 //! never once per host or inferred from a filesystem name. A missing
-//! primitive fails closed. Local Arch/Btrfs is the maintained full
-//! correctness/fault/performance gate; another filesystem that passes the
-//! same probes runs as `Unverified` without creating another maintenance
-//! promise.
+//! primitive fails closed. The maintained Arch/Btrfs environment is the full
+//! correctness/fault/performance gate; another filesystem that passes the same
+//! probes runs as `Unverified` without creating another maintenance promise.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -279,7 +278,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn probes_pass_on_the_maintained_btrfs_gate() {
+    fn probes_pass_on_a_temporary_smoke_location() {
         let dir = tempfile::tempdir().unwrap();
         let report = probe_location(dir.path()).unwrap();
         assert!(report.all_ok());

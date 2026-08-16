@@ -67,6 +67,13 @@ impl GitSessionGraphStore {
         // corruption.
         let _shared =
             self.acquire_execution_lock(session_id, LockMode::Shared, Blocking::NonBlocking)?;
+        self.status_locked_impl(session_id)
+    }
+
+    /// Read status while the caller already holds the exclusive execution
+    /// lock. This is the explicit full-Rewind/full-Turn path; it must not try
+    /// to infer ownership by acquiring the same path again.
+    pub(super) fn status_locked_impl(&self, session_id: &str) -> Result<SessionStatus> {
         let (_, session_state) = state::read_state(self.kernel(), session_id)?;
 
         let branches = enumerate_session_branches(self.kernel(), session_id)?;
@@ -97,18 +104,10 @@ impl GitSessionGraphStore {
             let Some((session_id, "state")) = rest.split_once('/') else {
                 continue;
             };
-            let Ok((_, session_state)) = state::read_state(self.kernel(), session_id) else {
-                continue;
-            };
-            let head_oid = resolve_head_oid(self.kernel(), &session_state, session_id)
-                .ok()
-                .flatten();
+            let (_, session_state) = state::read_state(self.kernel(), session_id)?;
+            let head_oid = resolve_head_oid(self.kernel(), &session_state, session_id)?;
             let commit_count = match head_oid {
-                Some(head) => self
-                    .kernel()
-                    .rev_walk(&[head], &[])
-                    .map(|w| w.len())
-                    .unwrap_or(0),
+                Some(head) => self.kernel().rev_walk(&[head], &[])?.len(),
                 None => 0,
             };
             let _ = oid;

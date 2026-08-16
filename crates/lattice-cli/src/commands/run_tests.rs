@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lattice_session::WorkspaceDisposition;
+use lattice_session::{StateLayout, WorkspaceDisposition};
 
 // ─── Stream timeout constants ───────────────────────────────────
 
@@ -139,8 +139,10 @@ async fn run_integration_commits_existing_session() {
         .collect();
     let _ = lattice_session::test_utils::init_fixture_repo(temp.path(), &__refs);
 
+    let layout = StateLayout::in_state_root(&temp.path().join("state"));
     let session_api =
-        lattice_api::SessionApi::git_create(temp.path().join("sessions.git")).unwrap();
+        lattice_api::SessionApi::git_create_with_layout(temp.path().join("sessions.git"), &layout)
+            .unwrap();
     let created = session_api
         .create_session(lattice_api::CreateSessionRequest {
             label: None,

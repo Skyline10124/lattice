@@ -24,6 +24,17 @@ impl GitSessionGraphStore {
         state::validate_session_ref_id(session_id)?;
         let _exec =
             self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
+        self.branch_locked_impl(session_id, name, from)
+    }
+
+    pub(super) fn branch_locked_impl(
+        &self,
+        session_id: &str,
+        name: &str,
+        from: Option<&str>,
+    ) -> Result<GraphRef> {
+        crate::validate_branch_name(name)?;
+        state::validate_session_ref_id(session_id)?;
         let _write = self.kernel().write_lock()?;
         let (_, session_state) = state::read_state(self.kernel(), session_id)?;
 
@@ -74,6 +85,11 @@ impl GitSessionGraphStore {
         state::validate_session_ref_id(session_id)?;
         let _exec =
             self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
+        self.checkout_locked_impl(session_id, target)
+    }
+
+    pub(super) fn checkout_locked_impl(&self, session_id: &str, target: &str) -> Result<GraphHead> {
+        state::validate_session_ref_id(session_id)?;
         let _write = self.kernel().write_lock()?;
         let (previous, mut session_state) = state::read_state(self.kernel(), session_id)?;
 
@@ -111,6 +127,11 @@ impl GitSessionGraphStore {
         state::validate_session_ref_id(session_id)?;
         let _exec =
             self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
+        self.reset_locked_impl(session_id, target)
+    }
+
+    pub(super) fn reset_locked_impl(&self, session_id: &str, target: &str) -> Result<ResetResult> {
+        state::validate_session_ref_id(session_id)?;
         let _write = self.kernel().write_lock()?;
         let (previous, mut session_state) = state::read_state(self.kernel(), session_id)?;
         let branch_name = match &session_state.head {

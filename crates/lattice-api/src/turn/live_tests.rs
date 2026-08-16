@@ -49,6 +49,10 @@ fn make_session(dir: &std::path::Path) -> SessionApi {
     api
 }
 
+fn open_session(dir: &std::path::Path) -> SessionApi {
+    SessionApi::git_open(dir.join("sessions.git")).expect("open session store")
+}
+
 fn make_agent_loop(client: FakeStreamingLlmClient) -> Arc<AgentLoop> {
     Arc::new(AgentLoop::new(AgentLoopConfig {
         llm: Arc::new(client),
@@ -148,6 +152,28 @@ fn happy_events() -> Vec<LlmEvent> {
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
+#[tokio::test]
+async fn stream_turn_live_rejects_a_project_store_key_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = make_session(dir.path());
+    let other_workspace = tempfile::tempdir().unwrap();
+    let client = FakeStreamingLlmClient::builder()
+        .push_events(happy_events())
+        .build();
+    let agent_loop = make_agent_loop(client);
+    let mut request = make_request("wrong workspace");
+    request.test_project_root = Some(other_workspace.path().to_string_lossy().into_owned());
+
+    let err = match stream_turn_live_with_agent(session, agent_loop, request, vec![]).await {
+        Ok(_) => panic!("a session bound to another workspace must fail closed"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, crate::session::ApiError::Conflict(_)),
+        "got {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn stream_turn_live_with_agent_startup_failure_no_stream() {
     let dir = tempfile::tempdir().unwrap();
@@ -330,7 +356,7 @@ async fn stream_turn_live_with_agent_receiver_drop_does_not_cancel() {
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            let session = make_session(dir.path());
+            let session = open_session(dir.path());
             if session.log(&session_id).map(|log| log.len()).unwrap_or(0) == 1 {
                 break;
             }
@@ -382,10 +408,9 @@ async fn stream_turn_live_with_agent_slow_observer_still_commits() {
         }
         // Stream dropped without draining token deltas — public channel backpressure.
     };
-
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            let session = make_session(dir.path());
+            let session = open_session(dir.path());
             if session.log(&session_id).map(|log| log.len()).unwrap_or(0) == 1 {
                 break;
             }

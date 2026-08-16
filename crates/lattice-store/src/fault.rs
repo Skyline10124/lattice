@@ -16,6 +16,8 @@ use std::cell::Cell;
 thread_local! {
     static FAIL_BEFORE_RENAME: Cell<bool> = const { Cell::new(false) };
     static FAIL_PARENT_FSYNC: Cell<bool> = const { Cell::new(false) };
+    static FAIL_OBJECT_FSYNC: Cell<bool> = const { Cell::new(false) };
+    static FAIL_REF_FSYNC: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Fail the next first-create on this thread just before the publication
@@ -30,6 +32,18 @@ pub fn fail_before_rename(on: bool) {
 #[cfg(any(test, feature = "test-fault-injection"))]
 pub fn fail_parent_fsync(on: bool) {
     FAIL_PARENT_FSYNC.with(|flag| flag.set(on));
+}
+
+/// Fail the next object durability barrier before a ref can be published.
+#[cfg(any(test, feature = "test-fault-injection"))]
+pub fn fail_object_fsync(on: bool) {
+    FAIL_OBJECT_FSYNC.with(|flag| flag.set(on));
+}
+
+/// Fail the next ref durability barrier after the ref edit has been published.
+#[cfg(any(test, feature = "test-fault-injection"))]
+pub fn fail_ref_fsync(on: bool) {
+    FAIL_REF_FSYNC.with(|flag| flag.set(on));
 }
 
 /// Injection point: before the `renameat2` publication.
@@ -71,4 +85,46 @@ pub(crate) fn parent_fsync(path: &std::path::Path) -> Result<(), crate::StoreErr
         }
     }
     crate::durability::fsync_dir(path)
+}
+
+/// Injection point before fsyncing newly-written objects.
+pub(crate) fn object_fsync(path: &std::path::Path) -> Result<(), crate::StoreError> {
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    {
+        let inject = FAIL_OBJECT_FSYNC.with(|flag| {
+            let on = flag.get();
+            flag.set(false);
+            on
+        });
+        if inject {
+            return Err(crate::StoreError::Durability {
+                operation: "injected object-fsync failure",
+                path: path.to_path_buf(),
+                source: std::io::Error::other("injected"),
+            });
+        }
+    }
+    let _ = path;
+    Ok(())
+}
+
+/// Injection point before fsyncing newly-written refs.
+pub(crate) fn ref_fsync(path: &std::path::Path) -> Result<(), crate::StoreError> {
+    #[cfg(any(test, feature = "test-fault-injection"))]
+    {
+        let inject = FAIL_REF_FSYNC.with(|flag| {
+            let on = flag.get();
+            flag.set(false);
+            on
+        });
+        if inject {
+            return Err(crate::StoreError::Durability {
+                operation: "injected ref-fsync failure",
+                path: path.to_path_buf(),
+                source: std::io::Error::other("injected"),
+            });
+        }
+    }
+    let _ = path;
+    Ok(())
 }

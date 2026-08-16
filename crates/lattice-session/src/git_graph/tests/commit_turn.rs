@@ -4,7 +4,7 @@
 //! Turn commit tests for the Git graph store.
 
 use super::*;
-use crate::git_graph::GitSessionGraphStore;
+use crate::git_graph::{GitSessionGraphStore, state};
 use crate::graph::TurnCommitStatus;
 
 #[test]
@@ -87,6 +87,42 @@ fn test_commit_turn_with_parent() {
     );
     let commit = store.commit_turn(input).expect("commit");
     assert_eq!(commit.parent_ids, vec![first_id]);
+}
+
+#[test]
+fn commit_turn_rejects_detached_head_instead_of_advancing_main() {
+    let dir = temp_dir("commit_detached");
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
+    let ids = setup_session_with_commits(&store, "sess-detached-commit", 2, None);
+    let detached = ids[0].clone();
+    let main_before = ids[1].clone();
+    store
+        .checkout("sess-detached-commit", &detached)
+        .expect("detach HEAD");
+
+    let err = store
+        .commit_turn(commit_input(
+            "sess-detached-commit",
+            vec![detached.clone()],
+            vec![user_msg("must fail")],
+            TurnCommitStatus::Completed,
+        ))
+        .expect_err("a detached HEAD is read-only for Turn commits");
+    assert!(
+        matches!(err, crate::SessionError::Conflict(_)),
+        "got {err:?}"
+    );
+    let main_ref = state::head_ref_name("sess-detached-commit", "main").unwrap();
+    assert_eq!(
+        store
+            .kernel()
+            .ref_target(&main_ref)
+            .unwrap()
+            .unwrap()
+            .to_string(),
+        main_before
+    );
 }
 
 #[test]

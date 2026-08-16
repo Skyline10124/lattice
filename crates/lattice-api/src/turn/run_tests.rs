@@ -284,7 +284,11 @@ async fn run_turn_commits_parent_from_initial_transcript() {
     let first_commit_id = first.commit_id.clone();
     let session_id = first.session_id.clone();
 
-    let session_api = SessionApi::git_open(&fixture.sessions_path).expect("open session store");
+    let layout = lattice_session::StateLayout::in_state_root(
+        &std::path::Path::new(&fixture.project_root).join(".test-state"),
+    );
+    let session_api = SessionApi::git_open_with_layout(&fixture.sessions_path, &layout)
+        .expect("open session store");
     let llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())

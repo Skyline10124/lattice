@@ -28,16 +28,3 @@ pub fn create_project_stores(layout: &StateLayout, key: ProjectStoreKey) -> Resu
     )?;
     Ok(())
 }
-
-/// Strictly open the workspace-history store for `key`.
-///
-/// A missing store is [`ApiError::StoreUnavailable`]: the project's stores are
-/// created by `session new`, never lazily on a Turn.
-pub fn open_workspace_history(
-    layout: &StateLayout,
-    key: ProjectStoreKey,
-) -> Result<WorkspaceHistory> {
-    WorkspaceHistory::open(WorkspaceHistoryBacking::for_key(layout.clone(), key)).map_err(|err| {
-        ApiError::StoreUnavailable(format!("open project workspace-history store: {err}"))
-    })
-}

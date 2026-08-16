@@ -13,6 +13,7 @@ use lattice_session::{
     TurnCommitInput, TurnLogEntry,
 };
 use std::path::PathBuf;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -54,13 +55,21 @@ pub struct OpenSessionRequest {
     pub id: String,
 }
 
+#[derive(Clone)]
 pub struct SessionApi {
-    store: Box<dyn SessionGraphStore>,
+    store: Arc<dyn SessionGraphStore>,
+    /// The private-state layout paired with this session repository. Custom
+    /// graph-only constructors deliberately have no project-store context and
+    /// cannot create or open project stores implicitly through XDG globals.
+    layout: Option<lattice_session::StateLayout>,
 }
 
 impl SessionApi {
     pub fn new(store: Box<dyn SessionGraphStore>) -> Self {
-        Self { store }
+        Self {
+            store: Arc::from(store),
+            layout: None,
+        }
     }
 
     /// Strictly open the git-backed session store at `dir`
@@ -68,7 +77,8 @@ impl SessionApi {
     /// identity-invalid stores fail closed — never auto-initialize.
     pub fn git_open(dir: impl Into<PathBuf>) -> Result<Self> {
         Ok(Self {
-            store: Box::new(GitSessionGraphStore::open(dir).map_err(map_session_error)?),
+            store: Arc::new(GitSessionGraphStore::open(dir).map_err(map_session_error)?),
+            layout: None,
         })
     }
 
@@ -76,14 +86,16 @@ impl SessionApi {
     /// Reserved for the `session new` composition path (ADR 0005 §3).
     pub fn git_create(dir: impl Into<PathBuf>) -> Result<Self> {
         Ok(Self {
-            store: Box::new(GitSessionGraphStore::create(dir).map_err(map_session_error)?),
+            store: Arc::new(GitSessionGraphStore::create(dir).map_err(map_session_error)?),
+            layout: None,
         })
     }
 
     /// Strictly open the global `sessions.git` from the XDG state layout.
     pub fn git_open_layout(layout: &lattice_session::StateLayout) -> Result<Self> {
         Ok(Self {
-            store: Box::new(GitSessionGraphStore::open_layout(layout).map_err(map_session_error)?),
+            store: Arc::new(GitSessionGraphStore::open_layout(layout).map_err(map_session_error)?),
+            layout: Some(layout.clone()),
         })
     }
 
@@ -91,10 +103,52 @@ impl SessionApi {
     /// layout. Reserved for `session new`.
     pub fn git_create_layout(layout: &lattice_session::StateLayout) -> Result<Self> {
         Ok(Self {
-            store: Box::new(
+            store: Arc::new(
                 GitSessionGraphStore::create_layout(layout).map_err(map_session_error)?,
             ),
+            layout: Some(layout.clone()),
         })
+    }
+
+    /// Open a custom session repository while explicitly pairing it with the
+    /// private-state layout used for project stores (tests/embedders).
+    pub fn git_open_with_layout(
+        dir: impl Into<PathBuf>,
+        layout: &lattice_session::StateLayout,
+    ) -> Result<Self> {
+        let dir = dir.into();
+        let store = GitSessionGraphStore::open(dir)
+            .map_err(map_session_error)?
+            .with_locks_dir(layout.session_locks_dir());
+        Ok(Self {
+            store: Arc::new(store),
+            layout: Some(layout.clone()),
+        })
+    }
+
+    /// Create a custom session repository while explicitly pairing it with the
+    /// private-state layout used for project stores (tests/embedders).
+    pub fn git_create_with_layout(
+        dir: impl Into<PathBuf>,
+        layout: &lattice_session::StateLayout,
+    ) -> Result<Self> {
+        let dir = dir.into();
+        let store = GitSessionGraphStore::create(dir)
+            .map_err(map_session_error)?
+            .with_locks_dir(layout.session_locks_dir());
+        Ok(Self {
+            store: Arc::new(store),
+            layout: Some(layout.clone()),
+        })
+    }
+
+    /// Pair a graph-only API handle with the explicit private-state layout
+    /// that owns its project stores. This is for embedders and fault-injection
+    /// adapters whose graph store is not constructed by one of the git
+    /// constructors above.
+    pub fn with_state_layout(mut self, layout: lattice_session::StateLayout) -> Self {
+        self.layout = Some(layout);
+        self
     }
 
     #[cfg(test)]
@@ -159,9 +213,13 @@ impl SessionApi {
         }
         let key = lattice_session::ProjectStoreKey::parse(&request.project_store_key)
             .map_err(|e| ApiError::BadRequest(format!("invalid project_store_key: {e}")))?;
-        let layout = lattice_session::StateLayout::resolve()
-            .map_err(|e| ApiError::Internal(format!("resolve state layout: {e}")))?;
-        crate::stores::create_project_stores(&layout, key)?;
+        let layout = self.layout.as_ref().ok_or_else(|| {
+            ApiError::Internal(
+                "session repository has no paired StateLayout; use git_*_layout for session new"
+                    .into(),
+            )
+        })?;
+        crate::stores::create_project_stores(layout, key)?;
 
         let session_id = Uuid::new_v4().simple().to_string();
         self.store
@@ -244,12 +302,100 @@ impl SessionApi {
             .map_err(map_session_error)
     }
 
-    /// Commit a completed turn atomically.
-    pub(crate) fn commit_turn(&self, input: TurnCommitInput) -> Result<TurnCommit> {
+    /// Acquire the exclusive SessionExecutionLock for a full live Turn or
+    /// Rewind. The blocking syscall is performed by the caller's blocking
+    /// offload boundary, not by this synchronous helper on an async worker.
+    pub(crate) fn lock_execution(
+        &self,
+        session_id: &str,
+    ) -> Result<(String, lattice_session::FlockGuard)> {
+        let resolved = self.resolve_id(session_id)?;
+        let guard = self
+            .store
+            .lock_execution(
+                &resolved,
+                lattice_session::LockMode::Exclusive,
+                lattice_session::Blocking::Block,
+            )
+            .map_err(map_session_error)?;
+        Ok((resolved, guard))
+    }
+
+    pub(crate) fn commit_turn_locked(
+        &self,
+        input: TurnCommitInput,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> Result<TurnCommit> {
         let resolved = self.resolve_id(&input.session_id)?;
         let mut input = input;
         input.session_id = resolved;
-        self.store.commit_turn(input).map_err(map_session_error)
+        self.store
+            .commit_turn_locked(input, execution_lock)
+            .map_err(map_session_error)
+    }
+
+    pub(crate) fn status_locked(
+        &self,
+        session_id: &str,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> Result<SessionStatus> {
+        let resolved = self.resolve_id(session_id)?;
+        self.store
+            .status_locked(&resolved, execution_lock)
+            .map_err(map_session_error)
+    }
+
+    pub(crate) fn branch_locked(
+        &self,
+        session_id: &str,
+        name: &str,
+        from: Option<&str>,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> Result<GraphRef> {
+        let resolved = self.resolve_id(session_id)?;
+        self.store
+            .branch_locked(&resolved, name, from, execution_lock)
+            .map_err(map_session_error)
+    }
+
+    pub(crate) fn checkout_locked(
+        &self,
+        session_id: &str,
+        target: &str,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> Result<GraphHead> {
+        let resolved = self.resolve_id(session_id)?;
+        self.store
+            .checkout_locked(&resolved, target, execution_lock)
+            .map_err(map_session_error)
+    }
+
+    pub(crate) fn reset_locked(
+        &self,
+        session_id: &str,
+        target: &str,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> Result<ResetResult> {
+        let resolved = self.resolve_id(session_id)?;
+        self.store
+            .reset_locked(&resolved, target, execution_lock)
+            .map_err(map_session_error)
+    }
+
+    pub(crate) fn state_layout(&self) -> Option<lattice_session::StateLayout> {
+        self.layout.clone()
+    }
+
+    pub(crate) fn workspace_history_backing(
+        &self,
+        key: lattice_session::ProjectStoreKey,
+    ) -> Result<lancet_api::WorkspaceHistoryBacking> {
+        let layout = self.layout.clone().ok_or_else(|| {
+            ApiError::Internal(
+                "session repository has no paired StateLayout for project stores".into(),
+            )
+        })?;
+        Ok(lancet_api::WorkspaceHistoryBacking::for_key(layout, key))
     }
 
     /// Look up one immutable turn commit by session and commit id.
@@ -276,6 +422,9 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
         }
         lattice_session::SessionError::Conflict(msg) => ApiError::Conflict(msg),
         lattice_session::SessionError::InvalidInput(msg) => ApiError::BadRequest(msg),
+        err @ lattice_session::SessionError::InvalidLockCapability { .. } => {
+            ApiError::Internal(format!("invalid session lock capability: {err}"))
+        }
         lattice_session::SessionError::Git(msg) => ApiError::Internal(format!("git error: {msg}")),
         lattice_session::SessionError::InvalidPersistedValue { field, value } => {
             ApiError::Internal(format!("invalid persisted value for '{field}': {value}"))
@@ -324,7 +473,10 @@ mod session_graph {
     }
 
     fn api(dir_name: &str) -> SessionApi {
-        SessionApi::git_create(temp_dir(dir_name).join("sessions.git")).expect("create store")
+        let state_root = temp_dir(dir_name);
+        let layout = lattice_session::StateLayout::in_state_root(&state_root);
+        SessionApi::git_create_with_layout(layout.lattice_root().join("sessions.git"), &layout)
+            .expect("create store")
     }
 
     use lattice_session::test_helpers::{assistant_msg, user_msg};
@@ -399,6 +551,24 @@ mod session_graph {
 
         assert_eq!(opened.session_id, created.session_id);
         assert_eq!(opened.label, Some("my session".to_string()));
+    }
+
+    #[test]
+    fn graph_only_constructor_cannot_create_project_stores_via_global_xdg() {
+        let root = temp_dir("graph_only_requires_layout");
+        let api = SessionApi::git_create(root.join("sessions.git")).expect("create store");
+        let err = api
+            .create_session(CreateSessionRequest {
+                label: None,
+                active_agent: "coder".into(),
+                project_branch: "main".to_string(),
+                project_store_key: test_store_key_hex(),
+            })
+            .expect_err("graph-only handles must not resolve global XDG state");
+        assert!(
+            matches!(&err, ApiError::Internal(message) if message.contains("paired StateLayout")),
+            "got {err:?}"
+        );
     }
 
     #[test]

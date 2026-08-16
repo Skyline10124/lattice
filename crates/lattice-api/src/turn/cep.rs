@@ -149,6 +149,11 @@ pub(crate) struct ProductionTurnDeps {
 pub(crate) struct ProductionTurnDepsInput<'a> {
     pub request: &'a RunTurnRequest,
     pub project_root: &'a str,
+    /// The binding validated from SessionState. Production turns must use this
+    /// key to locate history; the path-derived fallback is only for direct
+    /// LANCET fixture construction that has no SessionApi composition context.
+    pub project_store_key: Option<lattice_session::ProjectStoreKey>,
+    pub state_layout: Option<lattice_session::StateLayout>,
     pub enabled_tools: &'a [String],
     pub llm: Arc<dyn lattice_agent::LlmClient>,
     pub lancet: Option<&'a LancetSection>,
@@ -420,6 +425,8 @@ pub(crate) async fn build_production_turn_deps(
     let ProductionTurnDepsInput {
         request,
         project_root,
+        project_store_key,
+        state_layout,
         enabled_tools,
         llm,
         lancet,
@@ -447,12 +454,22 @@ pub(crate) async fn build_production_turn_deps(
     let (audit, workspace_history) = if in_memory_audit {
         (AuditBacking::InMemory, WorkspaceHistoryBacking::Disabled)
     } else {
+        let history_backing = match (state_layout, project_store_key) {
+            (Some(layout), Some(key)) => WorkspaceHistoryBacking::for_key(layout, key),
+            (None, None) => workspace_history_backing(Path::new(project_root)).map_err(|err| {
+                ApiError::Internal(format!("resolve workspace history path: {err}"))
+            })?,
+            _ => {
+                return Err(ApiError::Internal(
+                    "Session project-store layout and ProjectStoreKey must be supplied together"
+                        .into(),
+                ));
+            }
+        };
         (
             AuditBacking::external_for_project(Path::new(project_root))
                 .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?,
-            workspace_history_backing(Path::new(project_root)).map_err(|err| {
-                ApiError::Internal(format!("resolve workspace history path: {err}"))
-            })?,
+            history_backing,
         )
     };
 
@@ -894,6 +911,8 @@ mod turn_wiring {
         let deps = build_production_turn_deps(ProductionTurnDepsInput {
             request: &request,
             project_root: project.path().to_str().unwrap(),
+            project_store_key: None,
+            state_layout: None,
             enabled_tools: &enabled_tools,
             llm,
             lancet: None,
@@ -993,6 +1012,8 @@ enabled = ["{tool}"]
         build_production_turn_deps(ProductionTurnDepsInput {
             request: &request,
             project_root: project.path().to_str().unwrap(),
+            project_store_key: None,
+            state_layout: None,
             enabled_tools: &enabled_tools,
             llm,
             lancet: Some(&profile.profile.lancet),

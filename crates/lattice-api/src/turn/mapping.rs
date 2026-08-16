@@ -1,6 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use lattice_agent::{AgentTurnRequest, AgentTurnStatus, LlmRetryConfig};
@@ -33,13 +34,15 @@ pub(crate) fn resolve_model_and_prompt(
     (model, system_prompt, provider)
 }
 
-pub(crate) fn resolve_project_root(request: &RunTurnRequest) -> String {
+pub(crate) fn resolve_project_root(request: &RunTurnRequest) -> crate::session::Result<PathBuf> {
     if let Some(root) = &request.test_project_root {
-        return root.clone();
+        return Ok(PathBuf::from(root));
     }
-    std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "/".to_string())
+    std::env::current_dir().map_err(|err| {
+        crate::session::ApiError::Internal(format!(
+            "cannot resolve current Local Workspace root: {err}"
+        ))
+    })
 }
 
 /// Build an AgentTurnRequest from the API request, session context, and resolved model/prompt.

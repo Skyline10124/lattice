@@ -9,6 +9,7 @@
 //! `active_agent_name`.
 
 use lattice_api::{CreateSessionRequest, OpenSessionRequest, SessionApi};
+use lattice_session::StateLayout;
 use tempfile::TempDir;
 
 fn test_store_key() -> lattice_session::ProjectStoreKey {
@@ -19,7 +20,9 @@ fn test_store_key() -> lattice_session::ProjectStoreKey {
 fn git_store_create_and_reopen_preserves_identity() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path();
-    let api = SessionApi::git_create(dir.join("sessions.git")).expect("create store");
+    let layout = StateLayout::in_state_root(&dir.join("state"));
+    let api = SessionApi::git_create_with_layout(dir.join("sessions.git"), &layout)
+        .expect("create store");
 
     let created = api
         .create_session(CreateSessionRequest {
@@ -37,7 +40,8 @@ fn git_store_create_and_reopen_preserves_identity() {
 
     // Reopen the same session by ID using a fresh SessionApi handle over the
     // same Git-backed store directory.
-    let reopened_api = SessionApi::git_open(dir.join("sessions.git")).expect("open store");
+    let reopened_api =
+        SessionApi::git_open_with_layout(dir.join("sessions.git"), &layout).expect("open store");
     let reopened = reopened_api
         .open_session(OpenSessionRequest {
             id: session_id.clone(),

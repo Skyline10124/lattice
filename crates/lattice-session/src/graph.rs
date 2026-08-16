@@ -429,7 +429,9 @@ pub trait SessionGraphStore: Send + Sync {
     /// Acquire the per-session execution lock (ADR 0005 §5): exclusive for
     /// the full live Turn, reconciliation, rewind, reset, checkout, branch
     /// switch, and every Session state/branch mutation. Same-process
-    /// nesting is re-entrant. A non-blocking shared acquisition returns
+    /// re-entry is only legal when the caller explicitly passes the existing
+    /// guard to a `*_locked` method; an independent acquisition is a real
+    /// conflict. A non-blocking shared acquisition returns
     /// `SessionError::SessionBusy` when an exclusive owner exists.
     fn lock_execution(
         &self,
@@ -437,6 +439,47 @@ pub trait SessionGraphStore: Send + Sync {
         mode: lattice_store::LockMode,
         blocking: lattice_store::Blocking,
     ) -> crate::Result<lattice_store::FlockGuard>;
+
+    /// Commit while the caller already holds the SessionExecutionLock. The
+    /// explicit guard prevents lower layers from guessing same-task ownership;
+    /// production implementations skip a second path acquisition.
+    fn commit_turn_locked(
+        &self,
+        input: TurnCommitInput,
+        _execution_lock: &lattice_store::FlockGuard,
+    ) -> crate::Result<TurnCommit>;
+
+    /// Read mutable status while the caller already holds the execution lock.
+    fn status_locked(
+        &self,
+        session_id: &str,
+        _execution_lock: &lattice_store::FlockGuard,
+    ) -> crate::Result<SessionStatus>;
+
+    /// Branch mutation while the caller already holds the execution lock.
+    fn branch_locked(
+        &self,
+        session_id: &str,
+        name: &str,
+        from: Option<&str>,
+        _execution_lock: &lattice_store::FlockGuard,
+    ) -> crate::Result<GraphRef>;
+
+    /// Checkout mutation while the caller already holds the execution lock.
+    fn checkout_locked(
+        &self,
+        session_id: &str,
+        target: &str,
+        _execution_lock: &lattice_store::FlockGuard,
+    ) -> crate::Result<GraphHead>;
+
+    /// Reset mutation while the caller already holds the execution lock.
+    fn reset_locked(
+        &self,
+        session_id: &str,
+        target: &str,
+        _execution_lock: &lattice_store::FlockGuard,
+    ) -> crate::Result<ResetResult>;
 }
 
 /// Derive commit message from first user message.

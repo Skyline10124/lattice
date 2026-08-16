@@ -21,12 +21,22 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{GitSessionGraphStore, SessionGraphStore};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore, StateLayout};
 
 fn store_key_hex(root: &std::path::Path) -> String {
     lattice_api::LocalWorkspaceRoot::from_path(root)
         .expect("resolve workspace root")
         .store_key_hex()
+}
+
+fn create_session_store(path: &std::path::Path) -> lattice_api::SessionApi {
+    let layout = StateLayout::resolve().expect("resolve scoped test state layout");
+    lattice_api::SessionApi::git_create_with_layout(path, &layout).expect("create session store")
+}
+
+fn open_session_store(path: &std::path::Path) -> lattice_api::SessionApi {
+    let layout = StateLayout::resolve().expect("resolve scoped test state layout");
+    lattice_api::SessionApi::git_open_with_layout(path, &layout).expect("open session store")
 }
 
 // ── Streaming event helpers ──────────────────────────────────────────────────
@@ -254,8 +264,7 @@ async fn release_e2e_criterion_8() {
     let target = create_unattached_target_branch(&ws.root, "lattice-target-release");
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-    let session_id = lattice_api::SessionApi::git_create(&sessions_path)
-        .expect("create session store")
+    let session_id = create_session_store(&sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
@@ -266,7 +275,7 @@ async fn release_e2e_criterion_8() {
         .session_id;
 
     let result = lattice_api::run_turn(
-        lattice_api::SessionApi::git_open(&sessions_path).expect("open session store"),
+        open_session_store(&sessions_path),
         make_release_e2e_request(
             &ws,
             "Run release criterion-8 sequence",
