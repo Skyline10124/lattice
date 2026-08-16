@@ -226,6 +226,12 @@ impl GitSessionGraphStore {
         let oids = walk_commits_oldest_first(self.kernel(), head_oid, None)?;
         let mut all_messages = Vec::new();
         for oid in oids {
+            // PendingTurn journal snapshots live in the same ancestry (the
+            // TurnCommit's parent is the Committed journal object, #144);
+            // they carry pending.json, not conversation content.
+            if super::pending::is_journal_commit(self.kernel(), oid)? {
+                continue;
+            }
             let bytes = self.kernel().read_tree_blob(oid, "turn/messages.jsonl")?;
             let jsonl = String::from_utf8(bytes)
                 .map_err(|e| SessionError::Git(format!("messages.jsonl not utf8: {e}")))?;
@@ -250,6 +256,10 @@ impl GitSessionGraphStore {
         let oids = walk_commits_oldest_first(self.kernel(), head_oid, None)?;
         let mut entries = Vec::new();
         for oid in oids {
+            // Journal snapshots (#144) are ancestry, not conversation turns.
+            if super::pending::is_journal_commit(self.kernel(), oid)? {
+                continue;
+            }
             let manifest_bytes = self.kernel().read_tree_blob(oid, "turn/manifest.json")?;
             let manifest = parse_manifest(&manifest_bytes)?;
             let messages_bytes = self.kernel().read_tree_blob(oid, "turn/messages.jsonl")?;

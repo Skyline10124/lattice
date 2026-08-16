@@ -295,6 +295,9 @@ pub struct TurnStartedFacts {
     pub user_message: NativeMessage<UnboundToolCall>,
     /// Frozen effective configuration.
     pub config: FrozenTurnConfig,
+    /// Acceptance time (RFC 3339). The journal commit's own committer time
+    /// is derived from it; the store never invents a clock.
+    pub accepted_at: String,
 }
 
 impl TurnStartedFacts {
@@ -339,6 +342,11 @@ impl TurnStartedFacts {
                 "user input exceeds the byte bound: {text_bytes} > {MAX_USER_INPUT_BYTES}"
             )));
         }
+        chrono::DateTime::parse_from_rfc3339(&self.accepted_at)
+            .map_err(|e| {
+                SessionError::InvalidInput(format!("accepted_at is not RFC 3339: {e}"))
+            })
+            .map(|_| ())?;
         self.config.validate()
     }
 }
@@ -474,6 +482,7 @@ mod tests {
             parent_conversation_tip: None,
             user_message: message,
             config: config(),
+            accepted_at: "2026-08-16T00:00:00Z".to_string(),
         };
         facts(user_message("hello")).validate().expect("valid");
 
@@ -508,6 +517,7 @@ mod tests {
             parent_conversation_tip: None,
             user_message: user_message(&"x".repeat(MAX_USER_INPUT_BYTES)),
             config: config(),
+            accepted_at: "2026-08-16T00:00:00Z".to_string(),
         };
         facts.validate().expect("exact boundary user input is legal");
         facts.user_message = user_message(&"x".repeat(MAX_USER_INPUT_BYTES + 1));

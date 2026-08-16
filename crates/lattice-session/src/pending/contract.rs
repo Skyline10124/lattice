@@ -675,6 +675,7 @@ mod tests {
                     max_model_attempts: 2,
                 },
             },
+            accepted_at: "2026-08-16T00:00:00Z".to_string(),
         })
     }
 

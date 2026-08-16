@@ -1,0 +1,650 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
+//! PendingTurn journal persistence over the `lattice-store` kernel
+//! (ADR 0005 §9/§12, GitHub #144).
+//!
+//! ```text
+//! refs/lattice/sessions/<SessionId>/active-turn    -> current snapshot commit
+//! refs/lattice/sessions/<SessionId>/turns/<TurnId> -> TurnCommit conversation commit
+//! ```
+//!
+//! Each snapshot is a commit with canonical `pending.json` whose git parent
+//! is the predecessor snapshot; the `TurnStarted` snapshot's parent is the
+//! frozen parent conversation tip, grafting the chain onto the conversation
+//! graph at acceptance. Stage progression is one CAS per snapshot after
+//! pure [`validate_transition`]. `Committed` is constructed with the pinned
+//! TurnCommit candidate and published only by the final ref transaction,
+//! together with the branch/`state` advance and the `active-turn` deletion —
+//! so the journal chain stays reachable through `turns/<TurnId>` ->
+//! TurnCommit -> Committed -> predecessor after `active-turn` disappears.
+//!
+//! Locking: every journal publication holds the session execution lock and
+//! then the repository write lock, in that order (ADR 0005 §5). Reads pin
+//! the `active-turn` OID and read immutable objects without a lock.
+
+use chrono::Utc;
+use lattice_store::{RefExpectation, RefTxnEdit, TreeSpec};
+
+use gix::objs::tree::EntryKind;
+
+use super::commit::turn_commit_from_manifest_and_oid;
+use super::helpers::{
+    build_agent_json, build_audit_json, build_root_tree, build_turn_tree, messages_to_jsonl,
+    parse_oid, serialize_manifest,
+};
+use super::session::resolve_head_oid;
+use super::state::{self, SessionHead};
+use super::GitSessionGraphStore;
+use crate::graph::prepare_turn_commit;
+use crate::pending::contract::{
+    CommittedFacts, PENDING_SNAPSHOT_SCHEMA_VERSION, PendingSnapshot, PendingStage,
+    TurnCommitCandidate, TurnClosingFacts, validate_transition,
+};
+use crate::pending::draft::{DraftClassification, DraftPublication, ResultDraft};
+use crate::pending::{TurnStartedFacts};
+use crate::{Result, SessionError};
+
+/// File inside a journal snapshot commit's tree carrying the payload.
+pub(crate) const PENDING_TREE_FILE: &str = "pending.json";
+
+/// The direct active-Turn authority ref. Existence and target are the only
+/// authority for "a Turn is pending"; there is no second pending ref and no
+/// active-Turn field in `SessionState`.
+pub(crate) fn active_turn_ref_name(session_id: &str) -> Result<String> {
+    state::validate_session_ref_id(session_id)?;
+    Ok(format!("refs/lattice/sessions/{session_id}/active-turn"))
+}
+
+/// The create-once permanent pin for one committed Turn.
+pub(crate) fn turn_pin_ref_name(session_id: &str, turn_id: &str) -> Result<String> {
+    state::validate_session_ref_id(session_id)?;
+    state::validate_turn_ref_id(turn_id)?;
+    Ok(format!("refs/lattice/sessions/{session_id}/turns/{turn_id}"))
+}
+
+/// One published journal tip: the snapshot commit OID and the parsed
+/// snapshot (with `recorded_at` filled from the commit's committer time).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingTurnTip {
+    /// Journal commit OID of this snapshot.
+    pub oid: gix::ObjectId,
+    /// The parsed snapshot.
+    pub snapshot: PendingSnapshot,
+}
+
+/// Extract the Turn identity a stage carries, when it names one. `None`
+/// stages (`StepClosed`) inherit the predecessor tip's Turn.
+fn stage_turn_id(stage: &PendingStage) -> Option<lancet_protocol::TurnId> {
+    match stage {
+        PendingStage::TurnStarted(facts) => Some(facts.turn_id),
+        PendingStage::ModelAttemptStarted { key }
+        | PendingStage::ModelAttemptFailed { key, .. }
+        | PendingStage::ModelAttemptInterrupted { key, .. }
+        | PendingStage::ModelAttemptRejected { key, .. }
+        | PendingStage::MessageComplete { key, .. } => Some(key.turn_id),
+        PendingStage::BindingPlanned { plan, .. } | PendingStage::Bound { plan } => {
+            Some(plan.plan_key.turn_id)
+        }
+        PendingStage::StepClosing(inner) => Some(inner.plan_key.turn_id),
+        PendingStage::StepClosed { .. } => None,
+        PendingStage::TurnClosing(facts) => Some(facts.turn_id),
+        PendingStage::Committed(facts) => Some(facts.turn_id),
+    }
+}
+
+impl GitSessionGraphStore {
+    // ─── Reads (lock-free: pin the ref, read immutable objects) ────────
+
+    /// Read the current PendingTurn tip. `Ok(None)` when no Turn is
+    /// pending. A malformed or inconsistent snapshot is typed
+    /// [`SessionError::JournalCorruption`], never repaired.
+    pub fn read_active_turn(&self, session_id: &str) -> Result<Option<PendingTurnTip>> {
+        let ref_name = active_turn_ref_name(session_id)?;
+        let Some(oid) = self.kernel().ref_target(&ref_name)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.read_pending_snapshot_at(oid)?))
+    }
+
+    /// Read the permanent Turn pin of one committed Turn, when present.
+    pub fn read_turn_pin(&self, session_id: &str, turn_id: &str) -> Result<Option<String>> {
+        let ref_name = turn_pin_ref_name(session_id, turn_id)?;
+        Ok(self.kernel().ref_target(&ref_name)?.map(|oid| oid.to_string()))
+    }
+
+    pub(crate) fn read_pending_snapshot_at(&self, oid: gix::ObjectId) -> Result<PendingTurnTip> {
+        let bytes = self.kernel().read_tree_blob(oid, PENDING_TREE_FILE).map_err(|_| {
+            SessionError::JournalCorruption {
+                detail: format!("journal commit {oid} has no {PENDING_TREE_FILE}"),
+            }
+        })?;
+        let snapshot: PendingSnapshot = serde_json::from_slice(&bytes).map_err(|e| {
+            SessionError::JournalCorruption {
+                detail: format!("parse pending.json at {oid}: {e}"),
+            }
+        })?;
+        let recorded_at = self.kernel().commit_time(oid)?;
+        let snapshot = PendingSnapshot {
+            recorded_at,
+            ..snapshot
+        };
+        snapshot.validate()?;
+        Ok(PendingTurnTip { oid, snapshot })
+    }
+
+    /// Walk the predecessor chain back to the `TurnStarted` snapshot of the
+    /// pending Turn. The chain root carries the frozen parent conversation
+    /// tip the final transaction CASes against.
+    pub fn resolve_turn_started(&self, tip: &PendingTurnTip) -> Result<PendingTurnTip> {
+        let mut cursor = tip.clone();
+        loop {
+            if matches!(cursor.snapshot.stage, PendingStage::TurnStarted { .. }) {
+                return Ok(cursor);
+            }
+            let Some(predecessor) = cursor.snapshot.predecessor.as_deref() else {
+                return Err(SessionError::JournalCorruption {
+                    detail: format!(
+                        "journal chain of turn {} reached a non-TurnStarted root",
+                        tip.snapshot.turn_id
+                    ),
+                });
+            };
+            let oid = parse_oid(predecessor)?;
+            cursor = self.read_pending_snapshot_at(oid)?;
+        }
+    }
+
+    /// Classify a pinned draft candidate against the object database
+    /// (reopen path, ADR 0005 §12): the content-addressed object either
+    /// survived (`Durable`, and its bytes must equal the candidate's
+    /// canonical form) or was never durably written (`CleanAbsent`). The
+    /// lookup is read-only — classification must never materialize the
+    /// object it is asking about.
+    pub fn classify_draft(&self, candidate: &ResultDraft) -> Result<DraftClassification> {
+        let bytes = canonical_draft_bytes(candidate)?;
+        let oid = self.kernel().blob_id(&bytes)?;
+        if !self.kernel().has_object(oid)? {
+            return Ok(DraftClassification::CleanAbsent);
+        }
+        match self.kernel().read_blob(oid) {
+            Ok(found) if found == bytes => Ok(DraftClassification::Durable),
+            Ok(_) => Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "object {oid} does not carry the canonical bytes of the draft candidate"
+                ),
+            }),
+            Err(e) => Err(SessionError::Store(e)),
+        }
+    }
+
+    // ─── Publications (execution lock + repository write lock) ─────────
+
+    /// Publish the first journal snapshot of a Turn: `TurnStarted`
+    /// (ADR 0005 §8/§9). The frozen parent conversation tip must equal the
+    /// session's current head under the held locks; the snapshot commit's
+    /// git parent is that tip, grafting the journal chain onto the
+    /// conversation graph.
+    pub fn begin_pending_turn(
+        &self,
+        facts: TurnStartedFacts,
+        execution_lock: &lattice_store::FlockGuard,
+    ) -> Result<PendingTurnTip> {
+        let session_id = facts.session_id.as_str().to_string();
+        self.validate_execution_lock(&session_id, execution_lock)?;
+        facts.validate()?;
+        let _write = self.kernel().write_lock()?;
+
+        // The session must exist and be quiet: no active Turn may exist and
+        // the frozen tip must equal the resolved head.
+        let (_, session_state) = state::read_state(self.kernel(), &session_id)?;
+        let head_oid = resolve_head_oid(self.kernel(), &session_state, &session_id)?;
+        match (&facts.parent_conversation_tip, head_oid) {
+            (Some(frozen), Some(actual)) if frozen == &actual.to_string() => {}
+            (None, None) => {}
+            (frozen, actual) => {
+                return Err(SessionError::Conflict(format!(
+                    "TurnStarted parent tip {:?} does not match the current head {:?}",
+                    frozen, actual
+                )));
+            }
+        }
+
+        if self.kernel().ref_target(&active_turn_ref_name(&session_id)?)?.is_some() {
+            return Err(SessionError::Conflict(format!(
+                "session '{session_id}' already has an active Turn"
+            )));
+        }
+
+        let snapshot = PendingSnapshot {
+            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
+            session_id: facts.session_id,
+            turn_id: facts.turn_id,
+            predecessor: None,
+            stage: PendingStage::TurnStarted(facts),
+            recorded_at: None,
+        };
+        snapshot.validate()?;
+        let timestamp = parse_rfc3339_to_unix(
+            match &snapshot.stage {
+                PendingStage::TurnStarted(facts) => &facts.accepted_at,
+                _ => unreachable!(),
+            },
+            "accepted_at",
+        )?;
+        let oid = self.write_pending_commit(&snapshot, head_oid, timestamp)?;
+        let ref_name = active_turn_ref_name(&session_id)?;
+        self.kernel()
+            .cas_ref(&ref_name, oid, RefExpectation::MustNotExist, "lattice pending turn start")
+            .map_err(state::map_cas_conflict)?;
+        self.kernel().fsync_pending(&[ref_name.as_str()])?;
+        self.read_pending_snapshot_at(oid)
+    }
+
+    /// Advance the journal by one validated CAS snapshot. The transition
+    /// must satisfy [`validate_transition`] against the current tip, the
+    /// stage must belong to the same Turn, and `Committed` is rejected as
+    /// an `active-turn` target (the final ref transaction is its only
+    /// publication path). `recorded_at_unix` is the snapshot commit's
+    /// committer time; reconciliation callers pass the durable tip's own
+    /// time so recovery introduces no new clock.
+    pub fn advance_pending_turn(
+        &self,
+        session_id: &str,
+        next_stage: PendingStage,
+        recorded_at_unix: i64,
+        execution_lock: &lattice_store::FlockGuard,
+    ) -> Result<PendingTurnTip> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        next_stage.validate()?;
+        let _write = self.kernel().write_lock()?;
+
+        let ref_name = active_turn_ref_name(session_id)?;
+        let tip_oid = self
+            .kernel()
+            .ref_target(&ref_name)?
+            .ok_or_else(|| SessionError::Conflict(format!(
+                "session '{session_id}' has no active Turn to advance"
+            )))?;
+        let tip = self.read_pending_snapshot_at(tip_oid)?;
+        if tip.snapshot.session_id.as_str() != session_id {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "active-turn of '{session_id}' names session '{}'",
+                    tip.snapshot.session_id
+                ),
+            });
+        }
+        let turn_id = stage_turn_id(&next_stage).unwrap_or(tip.snapshot.turn_id);
+        if let Some(stage_turn) = stage_turn_id(&next_stage)
+            && stage_turn != tip.snapshot.turn_id
+        {
+            return Err(SessionError::InvalidInput(format!(
+                "stage belongs to turn {stage_turn}, but the active turn is {}",
+                tip.snapshot.turn_id
+            )));
+        }
+        validate_transition(&tip.snapshot.stage, &next_stage)
+            .map_err(|e| SessionError::Conflict(e.to_string()))?;
+
+        let snapshot = PendingSnapshot {
+            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
+            session_id: tip.snapshot.session_id,
+            turn_id,
+            predecessor: Some(tip.oid.to_string()),
+            stage: next_stage,
+            recorded_at: None,
+        };
+        snapshot.validate()?;
+        let oid = self.write_pending_commit(&snapshot, Some(tip_oid), recorded_at_unix)?;
+        self.kernel()
+            .cas_ref(
+                &ref_name,
+                oid,
+                RefExpectation::MustMatch(tip_oid),
+                "lattice pending turn advance",
+            )
+            .map_err(state::map_cas_conflict)?;
+        self.kernel().fsync_pending(&[ref_name.as_str()])?;
+        self.read_pending_snapshot_at(oid)
+    }
+
+    /// Publish one `ResultDraft` as a content-addressed blob and classify
+    /// the publication (ADR 0005 §12). Success is `Durable`; a durability
+    /// barrier failure classifies as `Uncertain` carrying the exact
+    /// candidate — the live owner must revalidate during its finite
+    /// FinalizeBudget, and a mismatch is corruption. The draft carries no
+    /// outcome and can never upgrade itself into one.
+    pub fn publish_draft(
+        &self,
+        candidate: &ResultDraft,
+        execution_lock: &lattice_store::FlockGuard,
+    ) -> Result<DraftPublication> {
+        candidate.validate()?;
+        let session_id = candidate.message.session_id.as_str().to_string();
+        self.validate_execution_lock(&session_id, execution_lock)?;
+        let _write = self.kernel().write_lock()?;
+
+        let bytes = canonical_draft_bytes(candidate)?;
+        let oid = self.kernel().write_blob(&bytes)?;
+        match self.kernel().fsync_pending(&[]) {
+            Ok(()) => Ok(DraftPublication::Durable {
+                draft_oid: oid.to_string(),
+            }),
+            Err(e @ lattice_store::StoreError::Durability { .. }) => {
+                // The write was attempted; durability is unproven.
+                let _ = e;
+                Ok(DraftPublication::Uncertain {
+                    candidate: candidate.clone(),
+                })
+            }
+            Err(other) => Err(SessionError::Store(other)),
+        }
+    }
+
+    /// The one final SessionStore ref transaction (ADR 0005 §6/§9):
+    /// advance the conversation branch (or detached state), create the
+    /// `turns/<TurnId>` pin, update `state`, and delete `active-turn` —
+    /// all-or-nothing. The `Committed` journal object (parent = the
+    /// `TurnClosing` tip) and the conversation TurnCommit (parents =
+    /// `[Committed] ++ candidate.parent_ids[1..]`) are constructed from the
+    /// pinned candidate so a retry after any failure republishes
+    /// byte-identical objects. Idempotent: if the transaction already
+    /// completed, the pinned TurnCommit is returned unchanged.
+    pub fn finalize_turn(
+        &self,
+        session_id: &str,
+        turn_id: &lancet_protocol::TurnId,
+        execution_lock: &lattice_store::FlockGuard,
+    ) -> Result<crate::graph::TurnCommit> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        let turn_id_str = turn_id.to_string();
+        let pin_ref = turn_pin_ref_name(session_id, &turn_id_str)?;
+
+        // Idempotent completion: the pin exists exactly when the
+        // transaction committed (ref transactions are atomic).
+        if let Some(pinned) = self.read_turn_pin(session_id, &turn_id_str)? {
+            return self.read_finalized_turn(session_id, &pinned);
+        }
+
+        let _write = self.kernel().write_lock()?;
+        let ref_name = active_turn_ref_name(session_id)?;
+        let tip_oid = self
+            .kernel()
+            .ref_target(&ref_name)?
+            .ok_or_else(|| SessionError::Conflict(format!(
+                "session '{session_id}' has no active Turn to finalize"
+            )))?;
+        let tip = self.read_pending_snapshot_at(tip_oid)?;
+        if tip.snapshot.turn_id != *turn_id {
+            return Err(SessionError::Conflict(format!(
+                "active turn {} is not the requested turn {turn_id}",
+                tip.snapshot.turn_id
+            )));
+        }
+        let candidate = match &tip.snapshot.stage {
+            PendingStage::TurnClosing(TurnClosingFacts { candidate, .. }) => candidate.clone(),
+            other => {
+                return Err(SessionError::InvalidInput(format!(
+                    "finalize requires a TurnClosing tip, found {}",
+                    other.stage_name()
+                )));
+            }
+        };
+
+        // The frozen parent tip must still be the conversation head.
+        let turn_started = self.resolve_turn_started(&tip)?;
+        let frozen_tip = match &turn_started.snapshot.stage {
+            PendingStage::TurnStarted(facts) => facts.parent_conversation_tip.clone(),
+            _ => unreachable!("resolve_turn_started returns a TurnStarted root"),
+        };
+        let (_, session_state) = state::read_state(self.kernel(), session_id)?;
+        let head_oid = resolve_head_oid(self.kernel(), &session_state, session_id)?;
+        match (&frozen_tip, head_oid) {
+            (Some(frozen), Some(actual)) if frozen == &actual.to_string() => {}
+            (None, None) => {}
+            (frozen, actual) => {
+                return Err(SessionError::Conflict(format!(
+                    "conversation head moved during the Turn: frozen {frozen:?}, head {actual:?}"
+                )));
+            }
+        }
+
+        // Build the conversation TurnCommit from the pinned candidate: the
+        // deterministic identity machinery runs over pinned inputs only.
+        let input = candidate_turn_commit_input(session_id, &candidate)?;
+        let prepared = prepare_turn_commit(&input, &candidate.created_at);
+        let manifest_bytes = serialize_manifest(&candidate_manifest(&prepared, &candidate))?;
+        let messages_jsonl = messages_to_jsonl(&prepared.messages)?;
+        let turn_tree = build_turn_tree(
+            self.kernel(),
+            &manifest_bytes,
+            &messages_jsonl,
+            &build_agent_json(&candidate.agent_name),
+            &candidate.profile_snapshot_json,
+            &build_audit_json(&None),
+        )?;
+        let root_tree = build_root_tree(self.kernel(), turn_tree)?;
+
+        // The Committed journal object: parent is the TurnClosing tip.
+        let committed_payload = PendingSnapshot {
+            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
+            session_id: tip.snapshot.session_id,
+            turn_id: tip.snapshot.turn_id,
+            predecessor: Some(tip_oid.to_string()),
+            stage: PendingStage::Committed(CommittedFacts {
+                turn_id: tip.snapshot.turn_id,
+                candidate: candidate.clone(),
+            }),
+            recorded_at: None,
+        };
+        let committed_bytes = canonical_snapshot_bytes(&committed_payload)?;
+        let committed_blob = self.kernel().write_blob(&committed_bytes)?;
+        let committed_tree = self
+            .kernel()
+            .write_tree(TreeSpec::new().upsert(PENDING_TREE_FILE, EntryKind::Blob, committed_blob))?;
+        let commit_ts = parse_rfc3339_to_unix(&candidate.created_at, "candidate.created_at")?;
+        let committed_oid = self.kernel().write_commit_at(
+            committed_tree,
+            &[tip_oid],
+            &format!("lattice pending turn committed {}", tip.snapshot.turn_id),
+            commit_ts,
+        )?;
+
+        // Conversation parents: the frozen tip stays reachable through the
+        // journal chain root; merge side-parents keep their place.
+        let mut parent_oids = vec![committed_oid];
+        for extra in candidate.parent_ids.iter().skip(1) {
+            parent_oids.push(parse_oid(extra)?);
+        }
+        let turn_commit_oid =
+            self.kernel()
+                .write_commit_at(root_tree, &parent_oids, &candidate.commit_message, commit_ts)?;
+
+        // New session state (timestamp; detached head follows the new tip).
+        let (state_oid, _) = state::read_state(self.kernel(), session_id)?;
+        let mut new_state = session_state.clone();
+        new_state.updated_at = Utc::now().to_rfc3339();
+        if let SessionHead::Detached { commit_id } = &mut new_state.head {
+            *commit_id = turn_commit_oid.to_string();
+        }
+        let new_state_oid =
+            state::write_state_commit(self.kernel(), Some(state_oid), &new_state)?;
+
+        let mut edits = Vec::with_capacity(4);
+        if let SessionHead::Attached { branch } = &session_state.head {
+            let head_ref = state::head_ref_name(session_id, branch)?;
+            edits.push(RefTxnEdit {
+                name: head_ref.clone(),
+                expect: match head_oid {
+                    Some(expected) => RefExpectation::MustMatch(expected),
+                    None => RefExpectation::MustNotExist,
+                },
+                new: Some(turn_commit_oid),
+            });
+        }
+        edits.push(RefTxnEdit {
+            name: pin_ref.clone(),
+            expect: RefExpectation::MustNotExist,
+            new: Some(turn_commit_oid),
+        });
+        edits.push(RefTxnEdit {
+            name: state::state_ref_name(session_id)?,
+            expect: RefExpectation::MustMatch(state_oid),
+            new: Some(new_state_oid),
+        });
+        edits.push(RefTxnEdit {
+            name: ref_name.clone(),
+            expect: RefExpectation::MustMatch(tip_oid),
+            new: None,
+        });
+
+        // Any CAS failure leaves the whole transaction unpublished.
+        self.kernel().ref_transaction(&edits).map_err(|err| match err {
+            lattice_store::StoreError::CasConflict { detail, .. } => {
+                SessionError::Conflict(format!("final turn publication conflict: {detail}"))
+            }
+            other => SessionError::Store(other),
+        })?;
+
+        let mut published: Vec<String> = vec![pin_ref.clone(), ref_name.clone()];
+        if let SessionHead::Attached { branch } = &session_state.head {
+            published.push(state::head_ref_name(session_id, branch)?);
+        }
+        published.push(state::state_ref_name(session_id)?);
+        let published: Vec<&str> = published.iter().map(String::as_str).collect();
+        self.kernel().fsync_pending(&published)?;
+
+        let manifest = candidate_manifest(&prepared, &candidate);
+        let oid_str = turn_commit_oid.to_string();
+        let message_ids: Vec<String> = (0..prepared.messages.len())
+            .map(|i| format!("{oid_str}:{i}"))
+            .collect();
+        let mut turn_commit = turn_commit_from_manifest_and_oid(turn_commit_oid, &manifest);
+        turn_commit.message_ids = message_ids;
+        Ok(turn_commit)
+    }
+
+    fn read_finalized_turn(
+        &self,
+        session_id: &str,
+        commit_oid_hex: &str,
+    ) -> Result<crate::graph::TurnCommit> {
+        let oid = parse_oid(commit_oid_hex)?;
+        let manifest_bytes = self.kernel().read_tree_blob(oid, "turn/manifest.json")?;
+        let manifest = super::helpers::parse_manifest(&manifest_bytes)?;
+        if manifest.session_id != session_id {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "turn pin of '{session_id}' points at a commit of session '{}'",
+                    manifest.session_id
+                ),
+            });
+        }
+        let messages_bytes = self.kernel().read_tree_blob(oid, "turn/messages.jsonl")?;
+        let count = String::from_utf8(messages_bytes)
+            .map(|jsonl| jsonl.lines().filter(|l| !l.is_empty()).count())
+            .unwrap_or(0);
+        let mut turn_commit = turn_commit_from_manifest_and_oid(oid, &manifest);
+        turn_commit.message_ids = (0..count).map(|i| format!("{commit_oid_hex}:{i}")).collect();
+        Ok(turn_commit)
+    }
+
+    /// Write one journal snapshot commit. Caller holds the execution lock
+    /// and the repository write lock.
+    fn write_pending_commit(
+        &self,
+        snapshot: &PendingSnapshot,
+        parent: Option<gix::ObjectId>,
+        timestamp: i64,
+    ) -> Result<gix::ObjectId> {
+        let bytes = canonical_snapshot_bytes(snapshot)?;
+        let blob = self.kernel().write_blob(&bytes)?;
+        let tree = self
+            .kernel()
+            .write_tree(TreeSpec::new().upsert(PENDING_TREE_FILE, EntryKind::Blob, blob))?;
+        let parents: Vec<gix::ObjectId> = parent.into_iter().collect();
+        Ok(self.kernel().write_commit_at(
+            tree,
+            &parents,
+            &format!(
+                "lattice pending turn {} {}",
+                snapshot.turn_id,
+                snapshot.stage.stage_name()
+            ),
+            timestamp,
+        )?)
+    }
+}
+
+/// Canonical payload bytes of one journal snapshot.
+pub(crate) fn canonical_snapshot_bytes(snapshot: &PendingSnapshot) -> Result<Vec<u8>> {
+    let value = serde_json::to_value(snapshot)
+        .map_err(|e| SessionError::InvalidInput(format!("serialize pending snapshot: {e}")))?;
+    Ok(crate::graph::canonical_json_bytes(&value))
+}
+
+pub(crate) fn canonical_draft_bytes(draft: &ResultDraft) -> Result<Vec<u8>> {
+    let value = serde_json::to_value(draft)
+        .map_err(|e| SessionError::InvalidInput(format!("serialize result draft: {e}")))?;
+    Ok(crate::graph::canonical_json_bytes(&value))
+}
+
+fn parse_rfc3339_to_unix(value: &str, field: &str) -> Result<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.timestamp())
+        .map_err(|e| SessionError::InvalidInput(format!("{field} is not RFC 3339: {e}")))
+}
+
+/// Project the pinned candidate onto today's conversation-commit input.
+/// The legacy status is a projection of the typed outcome (the journal
+/// chain remains the typed authority); `terminal_reason` stays empty
+/// because the typed reasons are the logic authority and free text is
+/// never logic-bearing. #139-B deletes the legacy fields.
+fn candidate_turn_commit_input(
+    session_id: &str,
+    candidate: &TurnCommitCandidate,
+) -> Result<crate::graph::TurnCommitInput> {
+    use crate::graph::{TurnCommitInput, WorkspaceDisposition};
+    Ok(TurnCommitInput {
+        session_id: session_id.to_string(),
+        parent_ids: candidate.parent_ids.clone(),
+        messages: candidate.messages.clone(),
+        agent_name: candidate.agent_name.clone(),
+        profile_snapshot_hash: candidate.profile_snapshot_hash.clone(),
+        profile_snapshot_json: candidate.profile_snapshot_json.clone(),
+        model: candidate.model.clone(),
+        provider: candidate.provider.clone(),
+        status: candidate.outcome.legacy_status(),
+        disposition: WorkspaceDisposition::NotApplicable,
+        lifecycle: None,
+        commit_message: candidate.commit_message.clone(),
+        usage: candidate.usage_aggregate.map(|aggregate| aggregate.usage()),
+        terminal_reason: None,
+        workspace_history_oid: candidate.workspace_history_oid.clone(),
+    })
+}
+
+/// The conversation manifest of a journal-finalized Turn: the existing v2
+/// shape with the Turn's **explicit** TurnId (never derived from a seed,
+/// ADR 0005 §1) and the typed outcome projected into the legacy fields.
+fn candidate_manifest(
+    prepared: &crate::graph::PreparedTurnCommit,
+    candidate: &TurnCommitCandidate,
+) -> super::helpers::GitSessionManifest {
+    let mut manifest = super::commit::build_manifest_from_prepared(prepared);
+    manifest.turn_id = candidate.turn_id.to_string();
+    manifest
+}
+
+/// Whether one commit in a conversation-history walk is a PendingTurn
+/// journal snapshot (carries `pending.json` instead of the `turn/` tree).
+/// Transcript reconstruction skips these; the journal chain is reachable
+/// but is not conversation content.
+pub(crate) fn is_journal_commit(
+    store: &lattice_store::StoreRepo,
+    oid: gix::ObjectId,
+) -> Result<bool> {
+    let tree = store.commit_tree(oid)?;
+    Ok(store.read_tree_path(tree, PENDING_TREE_FILE)?.is_some())
+}

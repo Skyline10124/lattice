@@ -33,6 +33,7 @@ use crate::{Result, SessionError};
 
 mod commit;
 pub(crate) mod helpers;
+pub(crate) mod pending;
 mod refs;
 mod session;
 pub(crate) mod state;
@@ -254,9 +255,54 @@ impl GitSessionGraphStore {
                         })
                     })?;
                 }
-                // turns/* and active-turn arrive with #144; tolerate forward
-                // namespacing only for those documented names.
-                s if s.starts_with("turns/") || s == "active-turn" => {}
+                // turns/<TurnId>: create-once permanent pin for one
+                // committed Turn (#144). Must point at a conversation
+                // commit (turn/manifest.json in its tree).
+                s if s.starts_with("turns/") => {
+                    state::validate_turn_ref_id(&s["turns/".len()..])?;
+                    let tree = self.store.commit_tree(oid).map_err(|_| {
+                        SessionError::Store(lattice_store::StoreError::Corruption {
+                            detail: format!("turn pin '{name}' does not point at a commit"),
+                        })
+                    })?;
+                    if self.store.read_tree_path(tree, "turn/manifest.json")?.is_none() {
+                        return Err(SessionError::Store(lattice_store::StoreError::Corruption {
+                            detail: format!(
+                                "turn pin '{name}' does not point at a conversation commit"
+                            ),
+                        }));
+                    }
+                }
+                // active-turn: the direct PendingTurn authority (#144).
+                // Must point at a journal snapshot naming this session.
+                "active-turn" => {
+                    let bytes = self
+                        .store
+                        .read_tree_blob(oid, pending::PENDING_TREE_FILE)
+                        .map_err(|_| {
+                            SessionError::Store(lattice_store::StoreError::Corruption {
+                                detail: format!(
+                                    "active-turn ref '{name}' has no {}",
+                                    pending::PENDING_TREE_FILE
+                                ),
+                            })
+                        })?;
+                    let snapshot: crate::pending::PendingSnapshot =
+                        serde_json::from_slice(&bytes).map_err(|e| {
+                            SessionError::InvalidPersistedValue {
+                                field: "pending.json",
+                                value: e.to_string(),
+                            }
+                        })?;
+                    if snapshot.session_id.as_str() != session_id {
+                        return Err(SessionError::Store(lattice_store::StoreError::Corruption {
+                            detail: format!(
+                                "active-turn of '{session_id}' names session '{}'",
+                                snapshot.session_id
+                            ),
+                        }));
+                    }
+                }
                 _ => {
                     return Err(SessionError::Store(lattice_store::StoreError::Corruption {
                         detail: format!("illegal session ref '{name}'"),

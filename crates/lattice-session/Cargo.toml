@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+lattice-store = { workspace = true, features = ["test-fault-injection"] }
 tempfile = { workspace = true }
 
 [features]
