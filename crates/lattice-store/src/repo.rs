@@ -454,6 +454,24 @@ impl StoreRepo {
         Ok(blob.data.clone())
     }
 
+    /// Compute the object id [`Self::write_blob`] would produce for `bytes`
+    /// without writing anything. Object identity is content addressing over
+    /// the canonical git blob header; read-side callers use this to look up
+    /// a candidate object a writer may or may not have published.
+    pub fn blob_id(&self, bytes: &[u8]) -> Result<gix::ObjectId> {
+        let mut hasher = gix::hash::hasher(self.repo().object_hash());
+        hasher.update(format!("blob {}\0", bytes.len()).as_bytes());
+        hasher.update(bytes);
+        hasher
+            .try_finalize()
+            .map_err(|e| StoreError::Git(format!("hash blob identity: {e}")))
+    }
+
+    /// Whether an object with this id exists in the object database.
+    pub fn has_object(&self, oid: gix::ObjectId) -> Result<bool> {
+        Ok(matches!(self.repo().try_find_object(oid), Ok(Some(_))))
+    }
+
     /// Read the tree of a commit.
     pub fn commit_tree(&self, commit_oid: gix::ObjectId) -> Result<gix::ObjectId> {
         let repo = self.repo();
@@ -1493,6 +1511,19 @@ mod tests {
         StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
         assert!(!orphan.exists());
         StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap();
+    }
+
+    #[test]
+    fn blob_id_predicts_write_blob_and_has_object_reports_existence() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let bytes = b"candidate bytes".to_vec();
+        let predicted = repo.blob_id(&bytes).unwrap();
+        assert!(!repo.has_object(predicted).unwrap(), "not written yet");
+        let written = repo.write_blob(&bytes).unwrap();
+        assert_eq!(predicted, written);
+        assert!(repo.has_object(predicted).unwrap());
     }
 
     #[test]

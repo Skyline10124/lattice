@@ -8,6 +8,7 @@ description = "LATTICE session graph and git-style conversation refs"
 
 [dependencies]
 chrono = { workspace = true }
+lancet-protocol = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-store = { workspace = true }
 gix = { workspace = true }
@@ -18,6 +19,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+lattice-store = { workspace = true, features = ["test-fault-injection"] }
 tempfile = { workspace = true }
 
 [features]
