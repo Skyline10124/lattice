@@ -28,13 +28,41 @@ pub(crate) fn lattice_config_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Directory holding CLI/TUI *configuration-adjacent* session files (the REPL
+/// history file). Durable session state does not live here: since #143 the
+/// session store is `$XDG_STATE_HOME/lattice/sessions.git`.
 pub(crate) fn default_session_dir() -> PathBuf {
     lattice_config_dir().join("lattice").join("sessions")
 }
 
+/// The private-state layout every durable store is addressed through
+/// (ADR 0005 §3).
+pub(crate) fn state_layout() -> Result<lattice_session::StateLayout> {
+    Ok(lattice_session::StateLayout::resolve()?)
+}
+
+/// The global session store path (`$XDG_STATE_HOME/lattice/sessions.git`).
+pub(crate) fn session_store_path() -> Result<PathBuf> {
+    Ok(state_layout()?
+        .lattice_root()
+        .join(lattice_session::git_graph::SESSIONS_REPO_NAME))
+}
+
+/// Open the session store strictly: for every command except `session new`
+/// the store must already exist (#143 — no open-failed-init).
 fn session_api() -> Result<SessionApi> {
-    let git_repo_path = default_session_dir().join("sessions.git");
-    Ok(SessionApi::git(git_repo_path))
+    match SessionApi::git_open_layout(&state_layout()?) {
+        Ok(api) => Ok(api),
+        Err(lattice_api::ApiError::StoreUnavailable(detail)) => Err(anyhow::anyhow!(
+            "{detail}; run `lattice session new` to create the first session"
+        )),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// First-create-or-validate the session store: `session new` only.
+fn session_api_for_new() -> Result<SessionApi> {
+    Ok(SessionApi::git_create_layout(&state_layout()?)?)
 }
 
 #[derive(Subcommand)]
@@ -129,25 +157,33 @@ pub async fn run(
     json: bool,
     verbose: bool,
 ) -> Result<std::process::ExitCode> {
-    let api = session_api()?;
     match action {
-        SessionAction::New {
-            agent,
-            project_branch,
-            label,
-        } => {
-            cmd_new_api(&api, &agent, &project_branch, label.as_deref(), json)?;
-            Ok(std::process::ExitCode::SUCCESS)
-        }
-        SessionAction::Agent { session_id, agent } => {
-            cmd_agent_api(&api, &session_id, &agent, json)?;
-            Ok(std::process::ExitCode::SUCCESS)
-        }
         SessionAction::Send { session_id, prompt } => {
+            // Store open is filesystem work but does not acquire a blocking
+            // domain lock. The live prompt path itself offloads its full
+            // SessionExecutionLock/WorkspaceOperationLock critical section.
+            let api = tokio::task::spawn_blocking(session_api)
+                .await
+                .map_err(|err| anyhow::anyhow!("session store open worker failed: {err}"))??;
             let exit = cmd_send_api(&api, &session_id, prompt, json, verbose).await;
             Ok(exit)
         }
-        other => run_with_api(&api, other, json),
+        action => {
+            // `session new` is the only first-create path; every other
+            // subcommand strictly opens the existing store (#143). Keep the
+            // potentially blocking first-create flock off the Tokio worker.
+            let create = matches!(&action, SessionAction::New { .. });
+            let api = tokio::task::spawn_blocking(move || {
+                if create {
+                    session_api_for_new()
+                } else {
+                    session_api()
+                }
+            })
+            .await
+            .map_err(|err| anyhow::anyhow!("session store setup worker failed: {err}"))??;
+            run_with_api(&api, action, json).await
+        }
     }
 }
 
@@ -155,7 +191,22 @@ pub async fn run(
 ///
 /// This is the testable seam: production `run()` constructs the default API
 /// and delegates here. Tests pass a temp-backed `SessionApi` directly.
-pub(crate) fn run_with_api(
+pub(crate) async fn run_with_api(
+    api: &SessionApi,
+    action: SessionAction,
+    json: bool,
+) -> Result<std::process::ExitCode> {
+    if let SessionAction::Rewind { session_id, target } = &action {
+        return cmd_rewind_api(api, session_id, target, json).await;
+    }
+
+    let api = api.clone();
+    tokio::task::spawn_blocking(move || run_with_api_blocking(&api, action, json))
+        .await
+        .map_err(|err| anyhow::anyhow!("session command worker failed: {err}"))?
+}
+
+fn run_with_api_blocking(
     api: &SessionApi,
     action: SessionAction,
     json: bool,
@@ -193,9 +244,7 @@ pub(crate) fn run_with_api(
         SessionAction::Reset { session_id, target } => {
             cmd_reset_api(api, &session_id, &target, json)?
         }
-        SessionAction::Rewind { session_id, target } => {
-            return cmd_rewind_api(api, &session_id, &target, json);
-        }
+        SessionAction::Rewind { .. } => unreachable!("rewind is handled by the async wrapper"),
     }
     Ok(std::process::ExitCode::SUCCESS)
 }
@@ -221,10 +270,12 @@ fn cmd_new_api(
     json: bool,
 ) -> Result<()> {
     let _loaded = load_agent_checked(agent)?;
+    let workspace_root = lattice_api::resolve_local_workspace_root()?;
     let session = api.create_session(CreateSessionRequest {
         label: label.map(str::to_string),
         active_agent: agent.to_string(),
         project_branch: project_branch.to_string(),
+        project_store_key: workspace_root.store_key_hex(),
     })?;
     if json {
         let value = serde_json::json!({
@@ -610,20 +661,30 @@ fn cmd_reset_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -
 /// Exit codes follow the pinned CLI contract: a target that does not exist or
 /// is unreachable is an input error (2); a structured same-path conflict is a
 /// runtime outcome (1), reported in full so the user can resolve it.
-fn cmd_rewind_api(
+async fn cmd_rewind_api(
     api: &SessionApi,
     session_id: &str,
     target: &str,
     json: bool,
 ) -> Result<std::process::ExitCode> {
     let project_root = std::env::current_dir()?;
-    let outcome = match lattice_api::rewind_to_turn(api, session_id, target, &project_root) {
-        Ok(outcome) => outcome,
-        Err(err @ (lattice_api::ApiError::NotFound(_) | lattice_api::ApiError::BadRequest(_))) => {
+    let api = api.clone();
+    let session_id = session_id.to_owned();
+    let target = target.to_owned();
+    let outcome = match tokio::task::spawn_blocking(move || {
+        lattice_api::rewind_to_turn(&api, &session_id, &target, &project_root)
+    })
+    .await
+    {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(
+            err @ (lattice_api::ApiError::NotFound(_) | lattice_api::ApiError::BadRequest(_)),
+        )) => {
             eprintln!("{}: {:#}", "error".red(), err);
             return Ok(std::process::ExitCode::from(2));
         }
-        Err(err) => return Err(err.into()),
+        Ok(Err(err)) => return Err(err.into()),
+        Err(err) => return Err(anyhow::anyhow!("rewind worker failed: {err}")),
     };
 
     match outcome {
@@ -1106,13 +1167,20 @@ mod session_cli {
 #[cfg(test)]
 mod project_branch_tests {
     use lattice_api::SessionApi;
+    use lattice_session::StateLayout;
+
+    fn test_store_key() -> String {
+        lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-cli-tests/project")
+            .to_string()
+    }
 
     fn temp_api(name: &str) -> SessionApi {
         let dir = std::env::temp_dir()
             .join("lattice-cli-project-branch-tests")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
-        SessionApi::git(dir)
+        let layout = StateLayout::in_state_root(&dir.join("state"));
+        SessionApi::git_create_with_layout(dir.join("sessions.git"), &layout).expect("create store")
     }
 
     #[test]
@@ -1123,6 +1191,7 @@ mod project_branch_tests {
                 label: Some("branch test".to_string()),
                 active_agent: "coder".to_string(),
                 project_branch: "develop".to_string(),
+                project_store_key: test_store_key(),
             })
             .expect("create session");
 
@@ -1141,6 +1210,7 @@ mod project_branch_tests {
             label: Some("list test".to_string()),
             active_agent: "coder".to_string(),
             project_branch: "release/v1".to_string(),
+            project_store_key: test_store_key(),
         })
         .expect("create session");
 

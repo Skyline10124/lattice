@@ -16,19 +16,25 @@
 mod models;
 mod profile;
 mod rewind;
+pub mod root;
 mod session;
+pub mod stores;
 pub mod turn;
 
 pub use lattice_session::{
     GraphDiff, GraphHead, GraphRef, GraphSession, ResetResult, SessionGraphSummary, SessionStatus,
     TurnLogEntry,
 };
+/// Private-state addressing, re-exported so `lattice-tui` keeps its single
+/// dependency on this facade (ADR 0005 §3).
+pub use lattice_session::{ProjectStoreKey, StateLayout};
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
 pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
 pub use rewind::{
     RewindConflict, RewindOutcome, RewindPathConflict, RewindPathPreflight, RewindRestoredPath,
     RewindStep, RewindSuccess, SessionHeadMove, rewind_to_turn,
 };
+pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
 pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
 pub use turn::{
     LifecycleFailureKind, RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus,

@@ -30,6 +30,12 @@ lancet-dispatch = { workspace = true }
 # (Layer 2.5 -> Layer 2) and closes no cycle. Do not reimplement policy
 # semantics here.
 lancet-authority = { workspace = true }
+# #143: the private WorkspaceHistory is a project-scoped store in the
+# domain-neutral durability kernel (ADR 0005 §4 layer graph puts
+# lancet-runtime -> lattice-store). Durability primitives — object writing,
+# ref CAS, the repository write lock, retention, fsync barriers — belong to
+# the kernel and must not be reimplemented here.
+lattice-store = { workspace = true }
 gix = { workspace = true }
 libc = { workspace = true }
 # Local Workspace filesystem primitives: `rustix` for the per-segment

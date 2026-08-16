@@ -247,26 +247,50 @@ fn fast_session_project_branch_persists_across_cli_invocations() {
 }
 
 #[test]
-fn fast_session_list_empty_reports_no_sessions() {
+fn fast_session_list_before_any_session_fails_closed() {
+    // #143: the session store is created by `session new`, never by a read.
+    // A missing store is a typed failure with an actionable next step, not an
+    // empty listing over a silently created store.
     let spec = ScenarioSpec::fast("fast-session-list-empty");
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let out = run(&world, &spec, &["session", "list"]);
 
-    let result =
-        assert_exit_success(&out).and_then(|_| assert_stdout_contains(&out, "No sessions found"));
+    let result = assert_exit_failure(&out)
+        .and_then(|_| assert_stderr_contains(&out, "not initialized"))
+        .and_then(|_| assert_stderr_contains(&out, "lattice session new"));
     ok_or_artifacts(&world, &spec.name, "lattice session list", &out, result);
+    assert!(
+        !world.session_store_dir().join("sessions.git").exists(),
+        "a failed read must not create the store"
+    );
 }
 
 #[test]
-fn fast_session_list_empty_json_is_empty_sessions_array() {
-    let spec = ScenarioSpec::fast("fast-session-list-empty-json");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+fn fast_session_list_json_reports_created_sessions() {
+    // #143: `session list` reads an existing store, so the scenario creates
+    // one session first; the empty-store case is covered by
+    // `fast_session_list_before_any_session_fails_closed`.
+    let (world, spec) = project_with_agent("fast-session-list-json");
+    let session_id = create_session(&world, &spec);
     let out = run(&world, &spec, &["session", "list", "--json"]);
 
     let parsed: Value =
         parse_json_or_artifacts(&world, &spec.name, "lattice session list --json", &out)
             .unwrap_or_else(|e| panic!("{e}"));
-    let result = assert_exit_success(&out).and_then(|_| expect_empty_array(&parsed, "sessions"));
+    let result = assert_exit_success(&out).and_then(|_| {
+        match parsed.get("sessions").and_then(Value::as_array) {
+            Some(sessions)
+                if sessions.iter().any(|s| {
+                    s.get("session_id").and_then(Value::as_str) == Some(session_id.as_str())
+                }) =>
+            {
+                Ok(())
+            }
+            other => Err(AssertError::StdoutMissing {
+                expected: format!("sessions containing {session_id}, got {other:?}"),
+            }),
+        }
+    });
     ok_or_artifacts(
         &world,
         &spec.name,
@@ -447,8 +471,10 @@ fn fast_session_branch_json_empty_branches_stable_contract() {
 
 #[test]
 fn fast_session_status_nonexistent_session_errors() {
-    let spec = ScenarioSpec::fast("fast-session-status-missing");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    // A real store with a real session, so the failure under test is the
+    // missing *session*, not a missing store (#143).
+    let (world, spec) = project_with_agent("fast-session-status-missing");
+    let _existing = create_session(&world, &spec);
     let out = run(&world, &spec, &["session", "status", "nope-sid"]);
 
     let result = assert_exit_failure(&out)
@@ -465,8 +491,10 @@ fn fast_session_status_nonexistent_session_errors() {
 
 #[test]
 fn fast_session_log_nonexistent_session_errors() {
-    let spec = ScenarioSpec::fast("fast-session-log-missing");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    // A real store with a real session, so the failure under test is the
+    // missing *session*, not a missing store (#143).
+    let (world, spec) = project_with_agent("fast-session-log-missing");
+    let _existing = create_session(&world, &spec);
     let out = run(&world, &spec, &["session", "log", "nope-sid"]);
 
     let result = assert_exit_failure(&out)
@@ -494,6 +522,8 @@ fn fast_session_send_nonexistent_session_errors() {
     // this lookup-error path from a runtime error (exit 1) that would
     // silently pass `assert_exit_failure`.
     let (world, spec) = project_with_agent("fast-session-send-missing");
+    // The store must exist for the lookup path to be the one under test.
+    let _existing = create_session(&world, &spec);
     let out = run(&world, &spec, &["session", "send", "nope-sid", "hello"]);
 
     let result = assert_exit_code(&out, 2)

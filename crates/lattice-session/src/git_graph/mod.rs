@@ -3,14 +3,26 @@
 
 //! Git-backed session graph store.
 //!
-//! Implements `SessionGraphStore` over the project's Git object database via
-//! gix. Session commits are immutable Git objects under
-//! `refs/lattice/sessions/**`; mutable session metadata lives in sidecar files
-//! under `.lattice/sessions/`. Candidate refs under `refs/lattice/candidates/**`
-//! keep clean-turn commit ranges reachable.
-use std::ops::Deref;
+//! Implements `SessionGraphStore` over the global private `sessions.git`
+//! repository via the `lattice-store` kernel (ADR 0005 §6, GitHub #143).
+//! Session facts are immutable `SessionState` commits under
+//! `refs/lattice/sessions/<id>/state`; conversation branches live under
+//! `refs/lattice/sessions/<id>/heads/<branch>`; candidate refs under
+//! `refs/lattice/candidates/**` keep clean-turn commit ranges reachable.
+//! The mutable `.lattice/sessions/**` sidecars and open-failed-init
+//! auto-initialization were hard-cut: absent stores are `NotInitialized`,
+//! never invitations to init.
+//!
+//! Locking (ADR 0005 §5): every mutation holds the per-session
+//! `SessionExecutionLock` (a `flock` at `locks/sessions/<SessionId>.lock`)
+//! and then the repository write lock; `status` takes a non-blocking shared
+//! hold and reports `SessionBusy` instead of misreporting a live Turn as
+//! corruption. Snapshot reads (`open`/`list`/`log`/`diff`/`head_transcript`)
+//! pin committed refs and take no lock.
+
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+
+use lattice_store::{Blocking, FlockGuard, LockMode, StateLayout, StoreMeta, StoreRepo};
 
 use crate::graph::{
     GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript, PreparedTurnCommit, ResetResult,
@@ -23,168 +35,248 @@ mod commit;
 pub(crate) mod helpers;
 mod refs;
 mod session;
+pub(crate) mod state;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) const DEFAULT_BRANCH: &str = "main";
 
-/// Git-backed session graph store.
+/// Git-backed session graph store over the `lattice-store` kernel.
 ///
-/// Holds the project root path and a lazily opened `gix::Repository`. The
-/// repository is opened on first access and cached under a mutex (`Repository`
-/// is `Send` but not `Sync`).
+/// Holds the validated kernel repository and the directory of per-session
+/// execution lock files. The repository identity (`refs/lattice/meta`) is
+/// validated at construction: kind `session`, schema version 1, global
+/// scope.
+#[derive(Debug)]
 pub struct GitSessionGraphStore {
-    pub(crate) dir: PathBuf,
-    pub(crate) repo: Mutex<Option<gix::Repository>>,
-}
-
-/// RAII handle around the cached repository. Derefs to `gix::Repository`.
-pub(crate) struct RepoHandle<'a> {
-    guard: MutexGuard<'a, Option<gix::Repository>>,
-}
-
-impl<'a> Deref for RepoHandle<'a> {
-    type Target = gix::Repository;
-
-    fn deref(&self) -> &gix::Repository {
-        self.guard
-            .as_ref()
-            .expect("repository initialized by GitSessionGraphStore::repo()")
-    }
+    pub(crate) store: StoreRepo,
+    /// Directory holding `<SessionId>.lock` files.
+    pub(crate) session_locks_dir: PathBuf,
 }
 
 impl GitSessionGraphStore {
-    /// Create a new store rooted at `dir` (the project root containing `.git`).
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        let dir = dir.into();
-        Self {
-            dir,
-            repo: Mutex::new(None),
-        }
-    }
-
-    /// Return the project root path.
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// Acquire a locked handle to the repository, opening it on first access.
+    /// Strictly open the store at `dir`, with session locks beside it at
+    /// `<parent>/locks/sessions` (the ADR topology when `dir` is
+    /// `<state>/lattice/sessions.git`).
     ///
-    /// If open fails (the directory has no Git repository yet), auto-initializes
-    /// a bare repo in-place. This is the fresh-install safety net: a new install
-    /// with no pre-existing repo auto-creates one on first session instead of
-    /// crashing. Existing installs and tests that pre-init a non-bare repo are
-    /// unaffected — open succeeds and auto-init never runs.
-    pub(crate) fn repo(&self) -> Result<RepoHandle<'_>> {
-        let mut guard = self.repo.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.is_none() {
-            let repo = match gix::open_opts(&self.dir, gix::open::Options::isolated()) {
-                Ok(r) => r,
-                Err(open_err) => {
-                    if let Err(e) = std::fs::create_dir_all(&self.dir) {
-                        return Err(SessionError::Git(format!(
-                            "create repository directory: {e} (open failed: {open_err})"
-                        )));
-                    }
-                    // Prefer bare init when the directory is empty — this matches
-                    // the sessions.git store layout (path itself is the git dir).
-                    // Fall back to a worktree init when the directory already has
-                    // non-git content (e.g. a project root with source files).
-                    let is_empty = std::fs::read_dir(&self.dir)
-                        .map(|mut d| d.next().is_none())
-                        .unwrap_or(true);
-                    // Reopening after a CWD-recovered retry: the partially
-                    // created repo is on disk, so plain `open` is the right
-                    // resolution for both layouts.
-                    let reopen = || {
-                        gix::open_opts(&self.dir, gix::open::Options::isolated())
-                            .map_err(|e| format!("{e:?}"))
-                    };
-                    if is_empty {
-                        let init_bare = || gix::init_bare(&self.dir).map_err(|e| format!("{e:?}"));
-                        match init_recovering_cwd(init_bare, reopen) {
-                            Ok(r) => r,
-                            Err(init_err) => {
-                                return Err(SessionError::Git(format!(
-                                    "open repository: {open_err}; init_bare: {init_err}"
-                                )));
+    /// An absent or identity-invalid store fails closed
+    /// (`NotInitialized`/`Corruption`) — never auto-initializes.
+    pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
+        let dir = dir.into();
+        let store = StoreRepo::open(
+            &dir,
+            &lattice_store::ExpectedMeta {
+                store_kind: state::SESSION_STORE_KIND.to_string(),
+                store_schema_version: state::SESSION_STORE_SCHEMA_VERSION,
+                scope: lattice_store::StoreScope::Global,
+            },
+        )?;
+        let this = Self {
+            session_locks_dir: default_locks_dir(&dir),
+            store,
+        };
+        this.validate_domain_invariants()?;
+        Ok(this)
+    }
+
+    /// First-create the store at `dir` (or validate the existing one), with
+    /// session locks beside it. This is the only initialization path; it is
+    /// reserved for the composition entry points ADR 0005 names (`session
+    /// new`) and tests.
+    pub fn create(dir: impl Into<PathBuf>) -> Result<Self> {
+        let dir = dir.into();
+        let store = StoreRepo::create(
+            &dir,
+            StoreMeta {
+                store_kind: state::SESSION_STORE_KIND.to_string(),
+                store_schema_version: state::SESSION_STORE_SCHEMA_VERSION,
+                scope: lattice_store::StoreScope::Global,
+            },
+            |_| Ok(()),
+        )?;
+        let this = Self {
+            session_locks_dir: default_locks_dir(&dir),
+            store,
+        };
+        this.validate_domain_invariants()?;
+        Ok(this)
+    }
+
+    /// Strictly open the global `sessions.git` from the standard XDG state
+    /// layout (production path).
+    pub fn open_layout(layout: &StateLayout) -> Result<Self> {
+        let store = StoreRepo::open_global(
+            layout,
+            SESSIONS_REPO_NAME,
+            state::SESSION_STORE_KIND,
+            state::SESSION_STORE_SCHEMA_VERSION,
+        )?;
+        let this = Self {
+            session_locks_dir: layout.session_locks_dir(),
+            store,
+        };
+        this.validate_domain_invariants()?;
+        Ok(this)
+    }
+
+    /// First-create the global `sessions.git` in the standard XDG state
+    /// layout (or validate the existing one). Reserved for `session new`.
+    pub fn create_layout(layout: &StateLayout) -> Result<Self> {
+        let store = StoreRepo::create_global(
+            layout,
+            SESSIONS_REPO_NAME,
+            StoreMeta {
+                store_kind: state::SESSION_STORE_KIND.to_string(),
+                store_schema_version: state::SESSION_STORE_SCHEMA_VERSION,
+                scope: lattice_store::StoreScope::Global,
+            },
+            |_| Ok(()),
+        )?;
+        let this = Self {
+            session_locks_dir: layout.session_locks_dir(),
+            store,
+        };
+        this.validate_domain_invariants()?;
+        Ok(this)
+    }
+
+    /// Override the session-locks directory (embedders with a custom state
+    /// root construct via [`Self::open`]/[`Self::create`] and adjust here).
+    pub fn with_locks_dir(mut self, locks_dir: impl Into<PathBuf>) -> Self {
+        self.session_locks_dir = locks_dir.into();
+        self
+    }
+
+    /// The repository path (`sessions.git`).
+    pub fn dir(&self) -> &Path {
+        self.store.git_dir()
+    }
+
+    /// The validated kernel repository.
+    pub(crate) fn kernel(&self) -> &StoreRepo {
+        &self.store
+    }
+
+    /// Acquire the per-session execution lock: exclusive for the full live
+    /// Turn, reconciliation, rewind, reset, checkout, branch switch, and
+    /// every Session state/branch mutation (ADR 0005 §5). Independent
+    /// same-process acquisitions conflict; explicit guard passing is the only
+    /// re-entry path. `Blocking::NonBlocking` + `LockMode::Shared` reports
+    /// `SessionBusy` when an exclusive owner exists.
+    pub(crate) fn acquire_execution_lock(
+        &self,
+        session_id: &str,
+        mode: LockMode,
+        blocking: Blocking,
+    ) -> Result<FlockGuard> {
+        state::validate_session_ref_id(session_id)?;
+        let path = self.session_locks_dir.join(format!("{session_id}.lock"));
+        lattice_store::acquire_flock(&path, mode, blocking).map_err(|err| match err {
+            lattice_store::StoreError::Busy { .. } => {
+                SessionError::SessionBusy(session_id.to_string())
+            }
+            other => SessionError::Store(other),
+        })
+    }
+
+    /// Validate the explicit ownership capability supplied to a locked API.
+    ///
+    /// A path-only check is insufficient: a shared guard on the right file is
+    /// still not ownership of the exclusive SessionExecutionLock. The guard
+    /// carries both facts, and this check is the single fail-closed seam used
+    /// by every `*_locked` implementation.
+    pub(crate) fn validate_execution_lock(
+        &self,
+        session_id: &str,
+        guard: &FlockGuard,
+    ) -> Result<()> {
+        state::validate_session_ref_id(session_id)?;
+        let expected_path = self.session_locks_dir.join(format!("{session_id}.lock"));
+        let expected_mode = LockMode::Exclusive;
+        if guard.path() != expected_path.as_path() || guard.mode() != expected_mode {
+            return Err(SessionError::InvalidLockCapability {
+                session_id: session_id.to_string(),
+                expected_path,
+                expected_mode,
+                actual_path: guard.path().to_path_buf(),
+                actual_mode: guard.mode(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Domain invariant validation at open: every
+    /// `refs/lattice/sessions/<id>/state` must parse and name its own
+    /// session. Broken invariants are typed corruption, never repaired.
+    fn validate_domain_invariants(&self) -> Result<()> {
+        for (name, oid) in self.store.enumerate_refs(state::sessions_prefix())? {
+            let Some(rest) = name.strip_prefix(state::sessions_prefix()) else {
+                continue;
+            };
+            let Some((session_id, suffix)) = rest.split_once('/') else {
+                return Err(SessionError::Store(lattice_store::StoreError::Corruption {
+                    detail: format!("illegal session ref '{name}'"),
+                }));
+            };
+            match suffix {
+                "state" => {
+                    let bytes = self
+                        .store
+                        .read_tree_blob(oid, state::STATE_TREE_FILE)
+                        .map_err(|_| {
+                            SessionError::Store(lattice_store::StoreError::Corruption {
+                                detail: format!("session '{session_id}' state unreadable"),
+                            })
+                        })?;
+                    let parsed: state::SessionState =
+                        serde_json::from_slice(&bytes).map_err(|e| {
+                            SessionError::InvalidPersistedValue {
+                                field: "state.json",
+                                value: e.to_string(),
                             }
-                        }
-                    } else {
-                        let init_worktree = || {
-                            gix::ThreadSafeRepository::init(
-                                &self.dir,
-                                gix::create::Kind::WithWorktree,
-                                gix::create::Options {
-                                    destination_must_be_empty: Some(false),
-                                    ..Default::default()
-                                },
-                            )
-                            .map(|r| r.to_thread_local())
-                            .map_err(|e| format!("{e:?}"))
-                        };
-                        match init_recovering_cwd(init_worktree, reopen) {
-                            Ok(r) => r,
-                            Err(init_err) => {
-                                return Err(SessionError::Git(format!(
-                                    "open repository: {open_err}; init: {init_err}"
-                                )));
-                            }
-                        }
+                        })?;
+                    if parsed.session_id != session_id {
+                        return Err(SessionError::Store(lattice_store::StoreError::Corruption {
+                            detail: format!(
+                                "state ref for '{session_id}' names session '{}'",
+                                parsed.session_id
+                            ),
+                        }));
                     }
                 }
-            };
-            *guard = Some(repo);
+                s if s.starts_with("heads/") => {
+                    crate::validate_branch_name(&s["heads/".len()..])?;
+                    // A branch head must point at a commit.
+                    self.store.commit_tree(oid).map_err(|_| {
+                        SessionError::Store(lattice_store::StoreError::Corruption {
+                            detail: format!("branch ref '{name}' does not point at a commit"),
+                        })
+                    })?;
+                }
+                // turns/* and active-turn arrive with #144; tolerate forward
+                // namespacing only for those documented names.
+                s if s.starts_with("turns/") || s == "active-turn" => {}
+                _ => {
+                    return Err(SessionError::Store(lattice_store::StoreError::Corruption {
+                        detail: format!("illegal session ref '{name}'"),
+                    }));
+                }
+            }
         }
-        Ok(RepoHandle { guard })
+        Ok(())
     }
 }
 
-/// Run a `gix` init, retrying once from a known-good directory if it failed
-/// only because the process has no valid current directory.
-///
-/// `gix` reads the process CWD even when the target path is absolute, so an
-/// init into an absolute path fails with `Could not obtain the current
-/// directory` once the CWD has been removed underneath the process — a deleted
-/// checkout, an unmounted volume, or (in tests) a dropped `TempDir` that some
-/// other test had `set_current_dir`'d into. The store's own target directory is
-/// unaffected, so the operation is retryable: point the CWD somewhere that
-/// exists and try again.
-///
-/// Pre-checking `current_dir()` would be a TOCTOU race — the directory can be
-/// removed between the check and gix's own read — so this recovers from the
-/// failure instead of predicting it.
-///
-/// The retry must tolerate an already-created repository: gix creates the `.git`
-/// directory *before* the step that needs the CWD, so the failed first attempt
-/// leaves it behind and a naive retry fails with `Refusing to initialize the
-/// existing '...' directory`. `reopen` is therefore consulted on any
-/// second-attempt failure, and only its own failure is reported.
-///
-/// `lattice-session`'s test fixtures carry the same recovery
-/// (`test_utils::init_empty_repo`); this is the production counterpart.
-fn init_recovering_cwd<T, E: std::fmt::Debug>(
-    mut init: impl FnMut() -> std::result::Result<T, E>,
-    reopen: impl FnOnce() -> std::result::Result<T, E>,
-) -> std::result::Result<T, E> {
-    match init() {
-        Ok(repo) => Ok(repo),
-        // Match on the rendered form: the variant nesting differs between the
-        // bare and worktree init error types, and a gix bump may reshape it.
-        Err(err) if format!("{err:?}").contains("CurrentDir") => {
-            if std::env::set_current_dir(std::env::temp_dir()).is_err() {
-                return Err(err);
-            }
-            match init() {
-                Ok(repo) => Ok(repo),
-                // The partially-created repo from the first attempt is the
-                // expected state here, not an error.
-                Err(_) => reopen(),
-            }
-        }
-        Err(err) => Err(err),
-    }
+/// The global session repository file name (owned by this crate).
+pub const SESSIONS_REPO_NAME: &str = "sessions.git";
+
+fn default_locks_dir(store_dir: &Path) -> PathBuf {
+    store_dir
+        .parent()
+        .unwrap_or(store_dir)
+        .join("locks")
+        .join("sessions")
 }
 
 impl SessionGraphStore for GitSessionGraphStore {
@@ -194,8 +286,15 @@ impl SessionGraphStore for GitSessionGraphStore {
         label: Option<&str>,
         active_agent_name: &str,
         project_target_branch: &str,
+        project_store_key: &lattice_store::ProjectStoreKey,
     ) -> Result<GraphSession> {
-        self.create_session_impl(session_id, label, active_agent_name, project_target_branch)
+        self.create_session_impl(
+            session_id,
+            label,
+            active_agent_name,
+            project_target_branch,
+            project_store_key,
+        )
     }
 
     fn open_session(&self, session_id: &str) -> Result<GraphSession> {
@@ -248,5 +347,63 @@ impl SessionGraphStore for GitSessionGraphStore {
 
     fn get_turn_commit(&self, session_id: &str, commit_id: &str) -> Result<Option<TurnCommit>> {
         self.get_turn_commit_impl(session_id, commit_id)
+    }
+
+    fn lock_execution(
+        &self,
+        session_id: &str,
+        mode: LockMode,
+        blocking: Blocking,
+    ) -> Result<FlockGuard> {
+        GitSessionGraphStore::acquire_execution_lock(self, session_id, mode, blocking)
+    }
+
+    fn commit_turn_locked(
+        &self,
+        input: TurnCommitInput,
+        execution_lock: &FlockGuard,
+    ) -> Result<TurnCommit> {
+        self.validate_execution_lock(&input.session_id, execution_lock)?;
+        self.commit_turn_impl_locked(input)
+    }
+
+    fn status_locked(
+        &self,
+        session_id: &str,
+        execution_lock: &FlockGuard,
+    ) -> Result<SessionStatus> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        self.status_locked_impl(session_id)
+    }
+
+    fn branch_locked(
+        &self,
+        session_id: &str,
+        name: &str,
+        from: Option<&str>,
+        execution_lock: &FlockGuard,
+    ) -> Result<GraphRef> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        self.branch_locked_impl(session_id, name, from)
+    }
+
+    fn checkout_locked(
+        &self,
+        session_id: &str,
+        target: &str,
+        execution_lock: &FlockGuard,
+    ) -> Result<GraphHead> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        self.checkout_locked_impl(session_id, target)
+    }
+
+    fn reset_locked(
+        &self,
+        session_id: &str,
+        target: &str,
+        execution_lock: &FlockGuard,
+    ) -> Result<ResetResult> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        self.reset_locked_impl(session_id, target)
     }
 }

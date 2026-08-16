@@ -68,6 +68,10 @@ async fn run_turn_uses_existing_session_transcript() {
             label: None,
             active_agent: "test".to_string(),
             project_branch: "main".to_string(),
+            project_store_key: super::test_support::test_project_key(std::path::Path::new(
+                &fixture.project_root,
+            ))
+            .to_string(),
         })
         .unwrap();
     let session_id = created.session_id.clone();
@@ -280,7 +284,11 @@ async fn run_turn_commits_parent_from_initial_transcript() {
     let first_commit_id = first.commit_id.clone();
     let session_id = first.session_id.clone();
 
-    let session_api = SessionApi::git(&fixture.sessions_path);
+    let layout = lattice_session::StateLayout::in_state_root(
+        &std::path::Path::new(&fixture.project_root).join(".test-state"),
+    );
+    let session_api = SessionApi::git_open_with_layout(&fixture.sessions_path, &layout)
+        .expect("open session store");
     let llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())

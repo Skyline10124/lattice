@@ -476,6 +476,33 @@ impl WorkspaceObservationHost {
     /// The single funnel all four modes enter through. Returning a
     /// [`WorkspacePath`] is what stops any caller from reaching the filesystem
     /// with a string that skipped a step.
+    /// Take the per-project `WorkspaceOperationLock` shared for one
+    /// observation (ADR 0005 §5).
+    ///
+    /// Observation never mutates, so a shared hold is enough: it excludes a
+    /// concurrent mutation or Rewind while several observations proceed
+    /// together. The guard lives for the calling observation only, and no
+    /// repository write lock is taken under it.
+    fn lock_observation(
+        &self,
+        ctx: &ObservationCallContext<'_>,
+        requested: &str,
+    ) -> Result<Option<lattice_store::FlockGuard>, ObservationError> {
+        self.workspace
+            .lock_operation(
+                lattice_store::LockMode::Shared,
+                lattice_store::Blocking::Block,
+            )
+            .map_err(|err| {
+                let e = ObservationError::Io {
+                    requested: requested.to_string(),
+                    reason: err.to_string(),
+                };
+                self.record_refusal(ctx, requested, &e);
+                e
+            })
+    }
+
     fn open(
         &self,
         ctx: &ObservationCallContext<'_>,
@@ -553,6 +580,7 @@ impl WorkspaceObservationHost {
         limit: Option<u64>,
         line_numbers: Option<bool>,
     ) -> Result<ReadOutcome, ObservationError> {
+        let _operation_guard = self.lock_observation(ctx, requested)?;
         let ws_path = self.open(ctx, requested, PathIntent::Read, PathKind::File)?;
 
         // The read mode's visibility decision: a hidden file is refused as
@@ -629,6 +657,7 @@ impl WorkspaceObservationHost {
         limit: Option<u64>,
     ) -> Result<ListOutcome, ObservationError> {
         let requested = if requested.is_empty() { "." } else { requested };
+        let _operation_guard = self.lock_observation(ctx, requested)?;
         let ws_path = self.open(
             ctx,
             requested,
@@ -692,6 +721,7 @@ impl WorkspaceObservationHost {
             self.record_refusal(ctx, requested, &err);
             return Err(err);
         }
+        let _operation_guard = self.lock_observation(ctx, requested)?;
         let ws_path = self.open(
             ctx,
             requested,
@@ -752,6 +782,7 @@ impl WorkspaceObservationHost {
         limit: Option<u64>,
     ) -> Result<FindOutcome, ObservationError> {
         let requested = default_root(requested);
+        let _operation_guard = self.lock_observation(ctx, requested)?;
         let ws_path = self.open(
             ctx,
             requested,

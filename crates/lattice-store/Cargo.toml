@@ -1,0 +1,23 @@
+[package]
+name = "lattice-store"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Domain-neutral private-Git/Linux durability kernel: XDG topology, ProjectStoreKey, typed create/open, ref CAS, flock, durability barriers, capability probes (ADR 0005 §4)"
+
+[features]
+default = []
+# Test-only fault injection points for first-create crash/durability windows.
+test-fault-injection = []
+
+[dependencies]
+gix = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

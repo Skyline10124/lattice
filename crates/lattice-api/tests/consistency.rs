@@ -19,7 +19,27 @@ use lattice_api::{
 };
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{GitSessionGraphStore, SessionGraphStore, WorkspaceDisposition};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore, StateLayout, WorkspaceDisposition};
+
+fn session_layout(sessions_path: &std::path::Path) -> StateLayout {
+    let state_root = sessions_path
+        .parent()
+        .expect("session path has a parent")
+        .join("state");
+    StateLayout::in_state_root(&state_root)
+}
+
+fn create_session_store(sessions_path: impl AsRef<std::path::Path>) -> SessionApi {
+    let sessions_path = sessions_path.as_ref();
+    let layout = session_layout(sessions_path);
+    SessionApi::git_create_with_layout(sessions_path, &layout).expect("create session store")
+}
+
+fn store_key_hex(root: &std::path::Path) -> String {
+    lattice_api::LocalWorkspaceRoot::from_path(root)
+        .expect("resolve workspace root")
+        .store_key_hex()
+}
 
 #[derive(Debug, PartialEq)]
 struct DurableTurnObservation {
@@ -142,12 +162,16 @@ enabled = {enabled:?}{workspace}
     }
 }
 
-fn create_default_session(sessions_path: &std::path::Path) -> String {
-    SessionApi::git(sessions_path)
+fn create_default_session(
+    sessions_path: &std::path::Path,
+    project_root: &std::path::Path,
+) -> String {
+    create_session_store(sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
             project_branch: "main".to_string(),
+            project_store_key: store_key_hex(project_root),
         })
         .expect("create session")
         .session_id
@@ -203,9 +227,10 @@ async fn assert_run_equals_collector(
 ) {
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::git(&stream_sessions_path);
-    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_store =
+        GitSessionGraphStore::create(&stream_sessions_path).expect("create session store");
+    let stream_session = create_session_store(&stream_sessions_path);
+    let stream_session_id = create_default_session(&stream_sessions_path, &ws.root);
     let stream_request = make_request(
         ws,
         input,
@@ -224,8 +249,8 @@ async fn assert_run_equals_collector(
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::git(&run_sessions_path);
-    let run_session_id = create_default_session(&run_sessions_path);
+    let run_session = create_session_store(&run_sessions_path);
+    let run_session_id = create_default_session(&run_sessions_path, &ws.root);
     let run_request = make_request(ws, input, &run_session_id, llm_with_events(llm_events));
     let run_result = run_turn(run_session, run_request)
         .await
@@ -304,9 +329,10 @@ async fn consistency_error_after_partial_token() {
 
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::git(&stream_sessions_path);
-    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_store =
+        GitSessionGraphStore::create(&stream_sessions_path).expect("create session store");
+    let stream_session = create_session_store(&stream_sessions_path);
+    let stream_session_id = create_default_session(&stream_sessions_path, &ws.root);
     let stream_request = make_request(
         &ws,
         "hello",
@@ -324,8 +350,8 @@ async fn consistency_error_after_partial_token() {
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::git(&run_sessions_path);
-    let run_session_id = create_default_session(&run_sessions_path);
+    let run_session = create_session_store(&run_sessions_path);
+    let run_session_id = create_default_session(&run_sessions_path, &ws.root);
     let run_request = make_request(
         &ws,
         "hello",
@@ -393,9 +419,10 @@ async fn consistency_tool_call_path() {
     let all_events = vec![round1_events.clone(), round2_events.clone()];
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::git(&stream_sessions_path);
-    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_store =
+        GitSessionGraphStore::create(&stream_sessions_path).expect("create session store");
+    let stream_session = create_session_store(&stream_sessions_path);
+    let stream_session_id = create_default_session(&stream_sessions_path, &ws.root);
     let stream_request = make_request(
         &ws,
         "Read src/lib.rs",
@@ -413,8 +440,8 @@ async fn consistency_tool_call_path() {
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::git(&run_sessions_path);
-    let run_session_id = create_default_session(&run_sessions_path);
+    let run_session = create_session_store(&run_sessions_path);
+    let run_session_id = create_default_session(&run_sessions_path, &ws.root);
     let run_request = make_request(
         &ws,
         "Read src/lib.rs",
@@ -451,9 +478,10 @@ async fn consistency_completed_disposition_parity() {
 
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::git(&stream_sessions_path);
-    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_store =
+        GitSessionGraphStore::create(&stream_sessions_path).expect("create session store");
+    let stream_session = create_session_store(&stream_sessions_path);
+    let stream_session_id = create_default_session(&stream_sessions_path, &ws.root);
     let stream_request = make_request(
         &ws,
         "hi",
@@ -488,8 +516,8 @@ async fn consistency_completed_disposition_parity() {
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::git(&run_sessions_path);
-    let run_session_id = create_default_session(&run_sessions_path);
+    let run_session = create_session_store(&run_sessions_path);
+    let run_session_id = create_default_session(&run_sessions_path, &ws.root);
     let run_request = make_request(
         &ws,
         "hi",
@@ -520,9 +548,10 @@ async fn consistency_error_disposition_parity() {
 
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::git(&stream_sessions_path);
-    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_store =
+        GitSessionGraphStore::create(&stream_sessions_path).expect("create session store");
+    let stream_session = create_session_store(&stream_sessions_path);
+    let stream_session_id = create_default_session(&stream_sessions_path, &ws.root);
     let stream_request = make_request(
         &ws,
         "hello",
@@ -542,8 +571,8 @@ async fn consistency_error_disposition_parity() {
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::git(&run_sessions_path);
-    let run_session_id = create_default_session(&run_sessions_path);
+    let run_session = create_session_store(&run_sessions_path);
+    let run_session_id = create_default_session(&run_sessions_path, &ws.root);
     let run_request = make_request(
         &ws,
         "hello",

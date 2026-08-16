@@ -13,13 +13,14 @@
 //! `(status, disposition)` pair.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
-use lattice_session::{GraphHead, TurnCommitStatus};
+use lattice_session::{FlockGuard, GraphHead, ProjectStoreKey, TurnCommitStatus};
 
 use super::cep::{ProductionTurnDeps, map_cep_tool_event};
 use super::execute::{
@@ -58,12 +59,17 @@ pub(crate) struct PreparedTurn {
     pub agent_name: String,
     pub profile_snapshot_hash: String,
     pub profile_snapshot_json: String,
+    pub project_store_key: ProjectStoreKey,
 }
 
-/// Perform all startup validation for a live turn.
-pub(crate) fn prepare_live_turn(
+/// Prepare a live Turn while the caller already holds the full
+/// `SessionExecutionLock`. The lock is acquired before this snapshot so the
+/// parent, branch, and binding cannot race a concurrent Turn or rewind.
+pub(crate) fn prepare_live_turn_locked(
     session: &SessionApi,
     request: &RunTurnRequest,
+    project_root: &std::path::Path,
+    execution_lock: &FlockGuard,
 ) -> Result<PreparedTurn> {
     let (model, system_prompt, provider) = resolve_model_and_prompt(request);
 
@@ -72,11 +78,25 @@ pub(crate) fn prepare_live_turn(
     })?;
     let session_id = s.session_id;
 
+    let workspace = crate::root::LocalWorkspaceRoot::from_path(project_root)?;
+    let expected_key = ProjectStoreKey::parse(&s.project_store_key).map_err(|err| {
+        crate::session::ApiError::Internal(format!(
+            "session '{session_id}' has an invalid ProjectStoreKey binding: {err}"
+        ))
+    })?;
+    if expected_key != workspace.store_key() {
+        return Err(crate::session::ApiError::Conflict(format!(
+            "session '{session_id}' is bound to project key {expected_key}, but the current Local Workspace resolves to {}",
+            workspace.store_key()
+        )));
+    }
+
     let transcript = session.head_transcript(&session_id)?;
     let parent_commit_id = transcript.parent_commit_id.clone();
     let parent_ids = parent_commit_id.clone().into_iter().collect::<Vec<_>>();
 
-    let branch = match session.status(&session_id)?.head {
+    let status = session.status_locked(&session_id, execution_lock)?;
+    let branch = match status.head {
         GraphHead::Branch { name } => Some(name),
         GraphHead::Detached { .. } => None,
     };
@@ -98,6 +118,7 @@ pub(crate) fn prepare_live_turn(
         agent_name: profile_snapshot.agent_name,
         profile_snapshot_hash: profile_snapshot.profile_snapshot_hash,
         profile_snapshot_json: profile_snapshot.profile_snapshot_json,
+        project_store_key: expected_key,
     })
 }
 
@@ -244,6 +265,7 @@ async fn run_live_turn_task(
     request: RunTurnRequest,
     turn_tx: mpsc::Sender<TurnEvent>,
     deps: ProductionTurnDeps,
+    execution_lock: FlockGuard,
 ) {
     let ProductionTurnDeps {
         agent_loop,
@@ -326,7 +348,6 @@ async fn run_live_turn_task(
             }
         }
     };
-
     // 6. Post-loop drain
     while let Ok(Some(event)) = tokio::time::timeout(CEP_EVENT_DRAIN_GRACE, agent_rx.recv()).await {
         ordered_events
@@ -352,19 +373,6 @@ async fn run_live_turn_task(
     // Direct-Local mutations are immediate and are not rolled back by a
     // later Tool/model/audit failure (ADR 0003 decision 8).
 
-    // #63: the workspace-history object id this Turn arrived at, read after
-    // the server has drained so every mutation this Turn installed is already
-    // recorded. A Turn that installed nothing reads back the identity it
-    // inherited; a Turn that failed after installing still reports the
-    // mutation it installed, because the history is never rewound here.
-    let workspace_history_oid = match workspace_history.current() {
-        Ok(oid) => oid,
-        Err(err) => {
-            eprintln!("failed to read workspace history for {turn_id}: {err}");
-            None
-        }
-    };
-
     // 7. Terminal event derived from AgentTurnResult.status.
     if let Some(terminal) = derive_terminal_event(&agent_result) {
         observer.emit(terminal).await;
@@ -373,7 +381,11 @@ async fn run_live_turn_task(
     // 8. Emit TurnCommitting
     observer.emit(TurnEvent::TurnCommitting).await;
 
-    // 9. Build commit context and input with lifecycle-classified disposition.
+    // 9–10. Close the Turn under the lock order
+    // SessionExecutionLock -> shared WorkspaceOperationLock -> SessionStore
+    // publication. The history checkpoint read and Session commit are one
+    // critical section: a mutation cannot be inserted between them, and a
+    // history read error is a commit error rather than `Empty`.
     let ctx = TurnCommitContext {
         session_id: prepared.session_id.clone(),
         parent_ids: prepared.parent_ids,
@@ -384,23 +396,50 @@ async fn run_live_turn_task(
         profile_snapshot_json: prepared.profile_snapshot_json,
     };
 
-    // pass the classified disposition and lifecycle evidence
-    // explicitly so build_commit_input cannot silently default them. The live
-    // path attaches no TurnLifecycleEvidence at this point (it is populated by
-    // the promotion/finalize path); pass None to preserve prior behavior.
-    let commit_input = build_commit_input(
-        &request.input,
-        &ctx,
-        &agent_result,
-        outcome.disposition.clone(),
-        None,
-        workspace_history_oid,
-    );
+    let user_input = request.input.clone();
+    let session_for_commit = session.clone();
+    let history_for_close = Arc::clone(&workspace_history);
+    let agent_status = agent_result.status.clone();
+    let finalization = tokio::task::spawn_blocking(move || {
+        let _workspace_guard = history_for_close
+            .lock_workspace_operation(
+                lattice_session::LockMode::Shared,
+                lattice_session::Blocking::Block,
+            )
+            .map_err(|err| {
+                crate::session::ApiError::Internal(format!(
+                    "acquire workspace checkpoint lock: {err}"
+                ))
+            })?;
+        let workspace_history_oid = history_for_close.current().map_err(|err| {
+            crate::session::ApiError::Internal(format!(
+                "read workspace history checkpoint for {turn_id}: {err}"
+            ))
+        })?;
+        // Pass all lifecycle fields explicitly so this close cannot silently
+        // invent a disposition or lose the project checkpoint.
+        let commit_input = build_commit_input(
+            &user_input,
+            &ctx,
+            &agent_result,
+            outcome.disposition.clone(),
+            None,
+            workspace_history_oid,
+        );
+        session_for_commit.commit_turn_locked(commit_input, &execution_lock)
+    })
+    .await;
 
-    // 10. Commit and emit result.
-    match session.commit_turn(commit_input) {
+    // 11. Commit and emit result.
+    let commit_result = match finalization {
+        Ok(result) => result,
+        Err(err) => Err(crate::session::ApiError::Internal(format!(
+            "Turn close task failed: {err}"
+        ))),
+    };
+    match commit_result {
         Ok(commit) => {
-            let status = map_status(&agent_result.status);
+            let status = map_status(&agent_status);
             observer
                 .emit(TurnEvent::TurnCommitted {
                     session_id: prepared.session_id,
@@ -426,11 +465,14 @@ pub(super) async fn stream_turn_live_prepared(
     prepared: PreparedTurn,
     request: RunTurnRequest,
     deps: ProductionTurnDeps,
+    execution_lock: FlockGuard,
 ) -> Result<TurnEventStream> {
+    // The full live task owns this guard from TurnStarted through checkpoint
+    // publication. The caller acquired it before preparing the snapshot.
     let (tx, rx) = mpsc::channel::<TurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
 
     tokio::spawn(async move {
-        run_live_turn_task(session, prepared, request, tx, deps).await;
+        run_live_turn_task(session, prepared, request, tx, deps, execution_lock).await;
     });
 
     Ok(Box::pin(ReceiverStream::new(rx)))
@@ -443,8 +485,23 @@ pub(super) async fn stream_turn_live(
     request: RunTurnRequest,
     deps: ProductionTurnDeps,
 ) -> Result<TurnEventStream> {
-    let prepared = prepare_live_turn(&session, &request)?;
-    stream_turn_live_prepared(session, prepared, request, deps).await
+    let requested_root = super::mapping::resolve_project_root(&request)?;
+    let workspace_root = crate::root::LocalWorkspaceRoot::from_path(&requested_root)?;
+    let session_for_lock = session.clone();
+    let session_id = request.session_id.clone();
+    let (_, execution_lock) =
+        tokio::task::spawn_blocking(move || session_for_lock.lock_execution(&session_id))
+            .await
+            .map_err(|err| {
+                crate::session::ApiError::Internal(format!("acquire session lock task: {err}"))
+            })??;
+    let prepared = prepare_live_turn_locked(
+        &session,
+        &request,
+        workspace_root.canonical_path(),
+        &execution_lock,
+    )?;
+    stream_turn_live_prepared(session, prepared, request, deps, execution_lock).await
 }
 
 #[cfg(test)]

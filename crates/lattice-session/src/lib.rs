@@ -7,9 +7,14 @@
 //! transcript messages, immutable turn commits, branch refs, HEAD state, and
 //! the git-backed graph store. It intentionally exposes only the graph API
 //! used by the API and CLI facade.
-use std::fs;
-use std::path::{Path, PathBuf};
+//!
+//! Since GitHub #143 the store is built on the `lattice-store` kernel and
+//! lives in the global `$XDG_STATE_HOME/lattice/sessions.git`; the
+//! `ProjectStoreKey` type is re-exported for the composition layer.
 
+use std::path::PathBuf;
+
+pub use lattice_store::{Blocking, FlockGuard, LockMode, ProjectStoreKey, StateLayout, StoreError};
 pub mod graph;
 pub use graph::{
     COMMIT_PAYLOAD_SCHEMA_VERSION_V2, GraphDiff, GraphHead, GraphMessage, GraphRef, GraphSession,
@@ -34,15 +39,12 @@ pub type Result<T> = std::result::Result<T, SessionError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    #[error("io error while {operation} '{path}': {source}")]
-    Io {
-        operation: &'static str,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("invalid branch name: format or length violation")]
     InvalidBranchName,
+    /// A caller violated a session-store input contract (empty/illegal id,
+    /// unserializable value). API misuse, not store damage.
+    #[error("invalid session input: {0}")]
+    InvalidInput(String),
     #[error("session '{0}' not found")]
     NotFound(String),
     #[error("transaction conflict: {0}")]
@@ -53,6 +55,29 @@ pub enum SessionError {
     Git(String),
     #[error("invalid persisted value for field '{field}': '{value}'")]
     InvalidPersistedValue { field: &'static str, value: String },
+    #[error("session '{0}' is busy: an operation holds the execution lock")]
+    SessionBusy(String),
+    /// A locked operation received a guard that does not prove exclusive
+    /// ownership of this session's exact execution-lock path.
+    #[error(
+        "invalid lock capability for session '{session_id}': expected {expected_mode:?} at '{}', got {actual_mode:?} at '{}'",
+        expected_path.display(),
+        actual_path.display()
+    )]
+    InvalidLockCapability {
+        /// Session whose locked operation was requested.
+        session_id: String,
+        /// Exact path the store requires.
+        expected_path: PathBuf,
+        /// Required lock strength.
+        expected_mode: lattice_store::LockMode,
+        /// Path carried by the supplied guard.
+        actual_path: PathBuf,
+        /// Lock strength carried by the supplied guard.
+        actual_mode: lattice_store::LockMode,
+    },
+    #[error("store kernel error: {0}")]
+    Store(#[from] lattice_store::StoreError),
 }
 
 pub(crate) fn validate_branch_name(name: &str) -> Result<()> {
@@ -71,15 +96,6 @@ pub(crate) fn validate_branch_name(name: &str) -> Result<()> {
     } else {
         Err(SessionError::InvalidBranchName)
     }
-}
-
-pub(crate) fn create_dir_all(path: impl AsRef<Path>) -> Result<()> {
-    let path = path.as_ref();
-    fs::create_dir_all(path).map_err(|source| SessionError::Io {
-        operation: "creating directory",
-        path: path.to_path_buf(),
-        source,
-    })
 }
 
 /// Shared test helpers for constructing `GraphMessage` values.

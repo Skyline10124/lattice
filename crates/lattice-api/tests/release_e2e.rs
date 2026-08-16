@@ -21,7 +21,23 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{GitSessionGraphStore, SessionGraphStore};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore, StateLayout};
+
+fn store_key_hex(root: &std::path::Path) -> String {
+    lattice_api::LocalWorkspaceRoot::from_path(root)
+        .expect("resolve workspace root")
+        .store_key_hex()
+}
+
+fn create_session_store(path: &std::path::Path) -> lattice_api::SessionApi {
+    let layout = StateLayout::resolve().expect("resolve scoped test state layout");
+    lattice_api::SessionApi::git_create_with_layout(path, &layout).expect("create session store")
+}
+
+fn open_session_store(path: &std::path::Path) -> lattice_api::SessionApi {
+    let layout = StateLayout::resolve().expect("resolve scoped test state layout");
+    lattice_api::SessionApi::git_open_with_layout(path, &layout).expect("open session store")
+}
 
 // ── Streaming event helpers ──────────────────────────────────────────────────
 
@@ -248,17 +264,18 @@ async fn release_e2e_criterion_8() {
     let target = create_unattached_target_branch(&ws.root, "lattice-target-release");
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-    let session_id = lattice_api::SessionApi::git(&sessions_path)
+    let session_id = create_session_store(&sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
             project_branch: target,
+            project_store_key: store_key_hex(&ws.root),
         })
         .expect("create session")
         .session_id;
 
     let result = lattice_api::run_turn(
-        lattice_api::SessionApi::git(&sessions_path),
+        open_session_store(&sessions_path),
         make_release_e2e_request(
             &ws,
             "Run release criterion-8 sequence",
@@ -286,7 +303,7 @@ async fn release_e2e_criterion_8() {
     // Verified via mutate.edit tool outcomes in section 6 below.
 
     // ── 3. Session has exactly one commit ────────────────────────────────
-    let store = GitSessionGraphStore::new(&sessions_path);
+    let store = GitSessionGraphStore::open(&sessions_path).expect("open session store");
     let log = store
         .log(&result.session_id)
         .expect("session log must be readable");

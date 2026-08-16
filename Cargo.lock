@@ -2802,6 +2802,7 @@ dependencies = [
  "lancet-dispatch",
  "lancet-protocol",
  "lancet-runtime",
+ "lattice-store",
  "libc",
  "regex",
  "rustix",
@@ -2939,12 +2940,26 @@ dependencies = [
  "chrono",
  "gix",
  "lattice-conversation",
+ "lattice-store",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "lattice-store"
+version = "0.1.0"
+dependencies = [
+ "gix",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

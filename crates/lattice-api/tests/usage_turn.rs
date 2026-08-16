@@ -16,7 +16,34 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{GitSessionGraphStore, SessionGraphStore};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore, StateLayout};
+
+fn session_layout(sessions_path: &std::path::Path) -> StateLayout {
+    let state_root = sessions_path
+        .parent()
+        .expect("session path has a parent")
+        .join("state");
+    StateLayout::in_state_root(&state_root)
+}
+
+fn create_session_store(sessions_path: impl AsRef<std::path::Path>) -> lattice_api::SessionApi {
+    let sessions_path = sessions_path.as_ref();
+    let layout = session_layout(sessions_path);
+    lattice_api::SessionApi::git_create_with_layout(sessions_path, &layout)
+        .expect("create session store")
+}
+
+fn open_session_store(sessions_path: &std::path::Path) -> lattice_api::SessionApi {
+    let layout = session_layout(sessions_path);
+    lattice_api::SessionApi::git_open_with_layout(sessions_path, &layout)
+        .expect("open session store")
+}
+
+fn store_key_hex(root: &std::path::Path) -> String {
+    lattice_api::LocalWorkspaceRoot::from_path(root)
+        .expect("resolve workspace root")
+        .store_key_hex()
+}
 
 // ── Streaming event helpers ─────────────────────────────────────────────────
 
@@ -140,12 +167,17 @@ fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String
     name.to_string()
 }
 
-fn create_session_with_branch(sessions_path: &std::path::Path, branch: &str) -> String {
-    lattice_api::SessionApi::git(sessions_path)
+fn create_session_with_branch(
+    sessions_path: &std::path::Path,
+    branch: &str,
+    project_root: &std::path::Path,
+) -> String {
+    create_session_store(sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
             project_branch: branch.to_string(),
+            project_store_key: store_key_hex(project_root),
         })
         .expect("create session")
         .session_id
@@ -201,9 +233,9 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
     let target = create_unattached_target_branch(&ws.root, "lattice-target-edit");
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_session_with_branch(&sessions_path, &target);
+    let session_id = create_session_with_branch(&sessions_path, &target, &ws.root);
     let result = lattice_api::run_turn(
-        lattice_api::SessionApi::git(&sessions_path),
+        open_session_store(&sessions_path),
         make_request(&ws, "Change the answer to 42", &session_id, fake_llm),
     )
     .await
@@ -222,7 +254,7 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
 
     assert_eq!(result.status, RunTurnStatus::Completed);
 
-    let verify_api = lattice_api::SessionApi::git(&sessions_path);
+    let verify_api = open_session_store(&sessions_path);
     let log = verify_api
         .log(&result.session_id)
         .expect("log must succeed");
@@ -253,22 +285,22 @@ async fn usage_resume_session_includes_previous_turn_context() {
     let target = create_unattached_target_branch(&ws.root, "lattice-target-resume");
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_session_with_branch(&sessions_path, &target);
+    let session_id = create_session_with_branch(&sessions_path, &target, &ws.root);
 
     let result1 = lattice_api::run_turn(
-        lattice_api::SessionApi::git(&sessions_path),
+        open_session_store(&sessions_path),
         make_request(&ws, "Hello", &session_id, fake_llm.clone()),
     )
     .await
     .expect("turn 1 must succeed");
     assert_eq!(result1.status, RunTurnStatus::Completed);
     let request2 = make_request(&ws, "Follow up", &session_id, fake_llm);
-    let result2 = lattice_api::run_turn(lattice_api::SessionApi::git(&sessions_path), request2)
+    let result2 = lattice_api::run_turn(open_session_store(&sessions_path), request2)
         .await
         .expect("turn 2 must succeed");
     assert_eq!(result2.status, RunTurnStatus::Completed);
 
-    let store = GitSessionGraphStore::new(&sessions_path);
+    let store = GitSessionGraphStore::open(&sessions_path).expect("open session store");
     let transcript = store
         .head_transcript(&session_id)
         .expect("head_transcript after turn 2");
@@ -287,7 +319,7 @@ async fn usage_resume_session_includes_previous_turn_context() {
         "transcript must include first turn assistant message"
     );
 
-    let verify_api = lattice_api::SessionApi::git(&sessions_path);
+    let verify_api = open_session_store(&sessions_path);
     let log = verify_api.log(&session_id).expect("log must succeed");
     assert_eq!(log.len(), 2, "session log should have 2 commits");
 

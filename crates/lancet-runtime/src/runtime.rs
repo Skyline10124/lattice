@@ -9,7 +9,7 @@
 //! Each call gets a fresh `Store` with per-call limits, fuel, and epoch
 //! deadline. The shared engine's epoch ticker runs in a background task.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use lancet_dispatch::{Cancellation, EventSink};
@@ -85,11 +85,21 @@ pub(crate) struct StoreState {
 /// call via a [`OnceLock`], so an `Arc<ComponentRuntime>` can be shared
 /// across the projection and server dispatch paths (D.2/D.3).
 pub struct ComponentRuntime {
-    engine: Engine,
-    catalog: ClosedCatalog,
-    linker: Linker<StoreState>,
-    limits: std::sync::Mutex<ExecutionLimits>,
+    core: Arc<ComponentCallRuntime>,
     ticker: OnceLock<EpochTicker>,
+}
+
+/// The synchronous Wasmtime/Tool Host half of a Component call.
+///
+/// It is reference-counted so the whole call can run on Tokio's blocking
+/// pool. Host imports use blocking Linux locks while they hold their guards;
+/// keeping this object off a Tokio worker preserves that critical section
+/// without weakening it to a nonblocking best-effort operation.
+struct ComponentCallRuntime {
+    engine: Engine,
+    catalog: Arc<ClosedCatalog>,
+    linker: Arc<Linker<StoreState>>,
+    limits: Arc<Mutex<ExecutionLimits>>,
 }
 
 /// Handle to the epoch ticker task. Stops when dropped.
@@ -134,10 +144,12 @@ impl ComponentRuntime {
         let limits = ExecutionLimits::default();
 
         Ok(Self {
-            engine,
-            catalog,
-            linker,
-            limits: std::sync::Mutex::new(limits),
+            core: Arc::new(ComponentCallRuntime {
+                engine,
+                catalog: Arc::new(catalog),
+                linker: Arc::new(linker),
+                limits: Arc::new(Mutex::new(limits)),
+            }),
             ticker: OnceLock::new(),
         })
     }
@@ -148,33 +160,36 @@ impl ComponentRuntime {
     fn ensure_ticker(&self) {
         if self.ticker.get().is_none() {
             let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-            spawn_epoch_ticker(self.engine.clone(), stop_rx);
+            spawn_epoch_ticker(self.core.engine.clone(), stop_rx);
             let _ = self.ticker.set(EpochTicker { stop: stop_tx });
         }
     }
 
     /// The tool descriptors in the closed catalog.
     pub fn descriptors(&self) -> impl Iterator<Item = &ToolDescriptor> {
-        self.catalog.descriptors()
+        self.core.catalog.descriptors()
     }
 
     /// The shared descriptor for a Component method. The admission step (D1)
     /// runs against it before `call`, so it is handed out by `Arc` rather
     /// than cloned per call.
     pub fn descriptor(&self, name: &str) -> Option<Arc<ToolDescriptor>> {
-        self.catalog.get(name).map(|tool| tool.descriptor.clone())
+        self.core
+            .catalog
+            .get(name)
+            .map(|tool| tool.descriptor.clone())
     }
 
     /// True if `name` is a Component method in the closed catalog.
     /// D.3's dispatch split uses this to branch Component vs native.
     pub fn contains(&self, name: &str) -> bool {
-        self.catalog.get(name).is_some()
+        self.core.catalog.get(name).is_some()
     }
 
     /// Override the per-call execution limits. Used by tests to exercise
     /// fuel/timeout/memory limits without composing a new runtime.
     pub fn set_limits(&mut self, limits: ExecutionLimits) {
-        *self.limits.lock().unwrap() = limits;
+        *self.core.limits.lock().unwrap() = limits;
     }
 
     /// Call a Component Tool by name.
@@ -201,6 +216,34 @@ impl ComponentRuntime {
         // which `call` runs inside; composition does not).
         self.ensure_ticker();
 
+        let name = name.to_owned();
+        let error_name = name.clone();
+        let core = Arc::clone(&self.core);
+        tokio::task::spawn_blocking(move || core.call_blocking(&name, params, ctx))
+            .await
+            .map_err(|err| {
+                let mut cep_error = CepError::tool_execution(
+                    CepErrorCode::ExecutionFailed,
+                    &error_name,
+                    "component_worker_failed",
+                    None,
+                    Retriability::Permanent,
+                );
+                cep_error.message = format!("component worker failed: {err}");
+                cep_error
+            })?
+    }
+}
+
+impl ComponentCallRuntime {
+    /// Synchronous Component execution. The caller runs this on Tokio's
+    /// blocking pool so host-side `flock` waits never park an async worker.
+    fn call_blocking(
+        &self,
+        name: &str,
+        params: serde_json::Value,
+        ctx: ComponentCallContext,
+    ) -> Result<serde_json::Value, CepError> {
         let tool = self
             .catalog
             .get(name)
@@ -293,9 +336,6 @@ impl ComponentRuntime {
         let limits = self.limits.lock().unwrap().clone();
         let deadline = Instant::now() + limits.deadline;
         let fuel = limits.fuel;
-        // Snapshot the count limits before `limits` is consumed into the
-        // `RecordingLimits` wrapper; the mapper needs them to classify a
-        // count-limit instantiation failure.
         let count_limits = ResourceFootprint {
             instances: limits.instances,
             memories: limits.memories,

@@ -14,21 +14,26 @@ use lattice_session::{
 };
 use tempfile::TempDir;
 
-fn init_git_repo(dir: &std::path::Path) {
-    let _ = lattice_session::test_utils::init_empty_repo(dir);
+fn test_store_key() -> lattice_session::ProjectStoreKey {
+    lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-api-tests/project")
 }
 
 #[test]
 fn git_store_candidate_ref_created_for_lifecycle_turn() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path();
-    init_git_repo(dir);
 
-    let store = GitSessionGraphStore::new(dir);
+    let store = GitSessionGraphStore::create(dir.join("sessions.git")).expect("create store");
 
     let session_id = "aabbccddeeff00112233445566778899".to_string();
     store
-        .create_session(&session_id, Some("candidate-ref-test"), "coder", "main")
+        .create_session(
+            &session_id,
+            Some("candidate-ref-test"),
+            "coder",
+            "main",
+            &test_store_key(),
+        )
         .expect("create_session");
 
     // Commit a turn WITH lifecycle evidence and candidate_oid set. This should
@@ -65,7 +70,8 @@ fn git_store_candidate_ref_created_for_lifecycle_turn() {
     // 1. Enumerate all refs under refs/lattice/candidates/<session_id>/** and
     //    confirm exactly one candidate ref exists pointing at the session
     //    commit OID.
-    let repo = gix::open_opts(dir, gix::open::Options::isolated()).expect("open repo");
+    let repo = gix::open_opts(dir.join("sessions.git"), gix::open::Options::isolated())
+        .expect("open repo");
     let candidate_prefix = format!("refs/lattice/candidates/{session_id}/");
     let mut candidate_refs: Vec<(String, gix::ObjectId)> = Vec::new();
     let platform = repo.references().expect("enumerate references");

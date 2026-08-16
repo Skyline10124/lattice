@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lattice_session::WorkspaceDisposition;
+use lattice_session::{StateLayout, WorkspaceDisposition};
 
 // ─── Stream timeout constants ───────────────────────────────────
 
@@ -61,11 +61,17 @@ fn run_validate_agents_dir_resolves_symlink_prefix_before_safety_check() {
     assert!(err.contains("/tmp"));
 }
 
+/// #143: the durable session store is addressed through the XDG *state*
+/// root, never the configuration root.
 #[test]
-fn run_default_session_dir_under_lattice_sessions() {
-    let dir = crate::commands::session::default_session_dir();
-    assert!(dir.to_string_lossy().contains("lattice"));
-    assert!(dir.to_string_lossy().contains("sessions"));
+fn session_store_lives_under_the_xdg_state_root() {
+    let path = crate::commands::session::session_store_path().expect("resolve store path");
+    let shown = path.to_string_lossy().into_owned();
+    assert!(shown.ends_with("lattice/sessions.git"), "{shown}");
+    assert!(
+        !shown.contains("/.config/"),
+        "durable session state must not live under the config root: {shown}"
+    );
 }
 
 struct StubLlmClient;
@@ -133,12 +139,18 @@ async fn run_integration_commits_existing_session() {
         .collect();
     let _ = lattice_session::test_utils::init_fixture_repo(temp.path(), &__refs);
 
-    let session_api = lattice_api::SessionApi::git(temp.path());
+    let layout = StateLayout::in_state_root(&temp.path().join("state"));
+    let session_api =
+        lattice_api::SessionApi::git_create_with_layout(temp.path().join("sessions.git"), &layout)
+            .unwrap();
     let created = session_api
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "test".to_string(),
             project_branch: "main".to_string(),
+            project_store_key: lattice_api::LocalWorkspaceRoot::from_path(temp.path())
+                .unwrap()
+                .store_key_hex(),
         })
         .expect("create session");
     let llm = std::sync::Arc::new(StubLlmClient);

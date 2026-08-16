@@ -35,7 +35,7 @@ use std::path::Path;
 
 use lancet_api::{
     RewindAuditRecord, WorkspaceRewindError, WorkspaceRewindOutcome, plan_workspace_rewind,
-    record_rewind_audit, rewind_workspace, workspace_history_backing,
+    record_rewind_audit, rewind_workspace,
 };
 use lattice_session::GraphHead;
 use serde::{Deserialize, Serialize};
@@ -172,11 +172,15 @@ pub fn rewind_to_turn(
     target_commit_id: &str,
     project_root: &Path,
 ) -> Result<RewindOutcome> {
+    // Rewind is Session-bound for its entire read/restore/ref-publication
+    // saga. Resolve the id before locking, then keep the explicit guard until
+    // the final Session ref operation completes.
+    let (resolved_session_id, execution_lock) = session.lock_execution(session_id)?;
+
     // 1. Target resolution. `get_turn_commit` already refuses a commit that
     //    does not exist and one whose manifest names a different session, so
     //    a foreign or bogus target never reaches the workspace.
-    let status = session.status(session_id)?;
-    let resolved_session_id = status.session_id.clone();
+    let status = session.status_locked(&resolved_session_id, &execution_lock)?;
     let target = session
         .get_turn_commit(&resolved_session_id, target_commit_id)?
         .ok_or_else(|| {
@@ -203,6 +207,21 @@ pub fn rewind_to_turn(
     let history_target =
         effective_history_target(session, &resolved_session_id, &target, &log, target_index)?;
 
+    let workspace_root = crate::root::LocalWorkspaceRoot::from_path(project_root)?;
+    let expected_key =
+        lattice_session::ProjectStoreKey::parse(&status.project_store_key).map_err(|err| {
+            ApiError::Internal(format!(
+                "session '{resolved_session_id}' has an invalid ProjectStoreKey binding: {err}"
+            ))
+        })?;
+    if expected_key != workspace_root.store_key() {
+        return Err(ApiError::Conflict(format!(
+            "session '{resolved_session_id}' is bound to project key {expected_key}, but the current Local Workspace resolves to {}",
+            workspace_root.store_key()
+        )));
+    }
+    let backing = session.workspace_history_backing(expected_key)?;
+
     // An unwind-everything plan is only sound when nothing this session
     // installed at or before the target would be reversed by it. The ancestor
     // scan above proves the identity was never recorded on this branch; this
@@ -210,7 +229,7 @@ pub fn rewind_to_turn(
     // that actually drives the reversal.
     if history_target.is_none() {
         guard_full_unwind(
-            project_root,
+            backing.clone(),
             &resolved_session_id,
             &target,
             &log,
@@ -219,8 +238,6 @@ pub fn rewind_to_turn(
     }
 
     // 3. Workspace half.
-    let backing = workspace_history_backing(project_root)
-        .map_err(|err| ApiError::Internal(format!("resolve private workspace history: {err}")))?;
     let audit = RewindAuditContext {
         project_root,
         session_id: &resolved_session_id,
@@ -326,11 +343,11 @@ pub fn rewind_to_turn(
     let pinned_ref = previous_commit_id
         .as_deref()
         .filter(|head| *head != target.commit_id)
-        .and_then(|head| pin_abandoned_head(session, &resolved_session_id, head));
+        .and_then(|head| pin_abandoned_head(session, &resolved_session_id, head, &execution_lock));
 
     let session_head = match &status.head {
         GraphHead::Branch { name } => {
-            match session.reset(&resolved_session_id, &target.commit_id) {
+            match session.reset_locked(&resolved_session_id, &target.commit_id, &execution_lock) {
                 Ok(result) => SessionHeadMove {
                     branch: Some(result.branch),
                     previous_commit_id: result.old_commit_id,
@@ -355,7 +372,8 @@ pub fn rewind_to_turn(
             }
         }
         GraphHead::Detached { .. } => {
-            match session.checkout(&resolved_session_id, &target.commit_id) {
+            match session.checkout_locked(&resolved_session_id, &target.commit_id, &execution_lock)
+            {
                 Ok(_) => SessionHeadMove {
                     branch: None,
                     previous_commit_id,
@@ -451,15 +469,13 @@ fn effective_history_target(
 /// `<session>:<parent-commit>` turn id that installed it, so the plan can be
 /// checked directly against this session's log.
 fn guard_full_unwind(
-    project_root: &Path,
+    backing: lancet_api::WorkspaceHistoryBacking,
     session_id: &str,
     target: &lattice_session::TurnCommit,
     log: &[lattice_session::TurnLogEntry],
     target_index: usize,
 ) -> Result<()> {
     let target_commit_id = target.commit_id.as_str();
-    let backing = workspace_history_backing(project_root)
-        .map_err(|err| ApiError::Internal(format!("resolve private workspace history: {err}")))?;
     // A planning failure must not skip the guard: a transient repository
     // read error that succeeds on the rewind's own second plan would let an
     // unguarded full unwind through. Refuse instead — a persistent error
@@ -552,9 +568,14 @@ fn parse_rfc3339_seconds(raw: &str) -> Option<i64> {
 /// for the next prune. The ref name is derived from the commit, so re-pinning
 /// the same head is a no-op; a pin that cannot be created is not fatal to the
 /// Rewind, which is why this returns an `Option` rather than an error.
-fn pin_abandoned_head(session: &SessionApi, session_id: &str, head: &str) -> Option<String> {
+fn pin_abandoned_head(
+    session: &SessionApi,
+    session_id: &str,
+    head: &str,
+    execution_lock: &lattice_session::FlockGuard,
+) -> Option<String> {
     let name = format!("rewound/{head}");
-    match session.branch(session_id, &name, Some(head)) {
+    match session.branch_locked(session_id, &name, Some(head), execution_lock) {
         Ok(_) => Some(name),
         // Already pinned by an earlier Rewind to the same head.
         Err(ApiError::Conflict(_)) => Some(name),

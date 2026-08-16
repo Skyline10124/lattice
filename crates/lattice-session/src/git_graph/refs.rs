@@ -1,17 +1,15 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Ref operations for the Git-backed session graph store.
+//! Branch, checkout, reset, and diff over session-scoped refs.
 
 use chrono::Utc;
-use gix::refs::transaction::PreviousValue;
+use lattice_store::{Blocking, LockMode, RefExpectation, RefTxnEdit};
 
 use super::GitSessionGraphStore;
-use super::helpers::{
-    parse_manifest, parse_oid, read_session_meta, read_tree_blob, session_ref_name, try_ref_target,
-    turn_log_entry_from_manifest, validate_session_id, write_session_meta,
-};
+use super::helpers::{parse_manifest, parse_oid, turn_log_entry_from_manifest};
 use super::session::resolve_head_oid;
+use super::state::{self, SessionHead};
 use crate::graph::{GraphDiff, GraphHead, GraphRef, GraphRefKind, ResetResult, TurnLogEntry};
 use crate::{Result, SessionError};
 
@@ -23,113 +21,164 @@ impl GitSessionGraphStore {
         from: Option<&str>,
     ) -> Result<GraphRef> {
         crate::validate_branch_name(name)?;
-        validate_session_id(session_id)?;
-        let meta = read_session_meta(&self.dir, session_id)?;
-        let repo = self.repo()?;
+        state::validate_session_ref_id(session_id)?;
+        let _exec =
+            self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
+        self.branch_locked_impl(session_id, name, from)
+    }
+
+    pub(super) fn branch_locked_impl(
+        &self,
+        session_id: &str,
+        name: &str,
+        from: Option<&str>,
+    ) -> Result<GraphRef> {
+        crate::validate_branch_name(name)?;
+        state::validate_session_ref_id(session_id)?;
+        let _write = self.kernel().write_lock()?;
+        let (_, session_state) = state::read_state(self.kernel(), session_id)?;
 
         let target_oid = match from {
-            Some(target) => resolve_target_to_oid(&repo, session_id, target)?,
-            None => resolve_head_oid(&repo, &meta, session_id)?.ok_or_else(|| {
-                SessionError::Conflict("cannot create branch: no commits on HEAD".to_string())
-            })?,
+            Some(target) => resolve_target_to_oid(self.kernel(), session_id, target)?,
+            None => {
+                resolve_head_oid(self.kernel(), &session_state, session_id)?.ok_or_else(|| {
+                    SessionError::Conflict("cannot create branch: no commits on HEAD".to_string())
+                })?
+            }
         };
 
-        let ref_name = session_ref_name(session_id, name)?;
-        if try_ref_target(&repo, &ref_name)?.is_some() {
+        let ref_name = state::head_ref_name(session_id, name)?;
+        // Branch names are unique even when the target commit coincides with
+        // an existing branch (gix MustNotExist is idempotent on identical
+        // targets), so the duplicate check is explicit.
+        if self.kernel().ref_target(&ref_name)?.is_some() {
             return Err(SessionError::Conflict(format!(
                 "branch '{name}' already exists"
             )));
         }
-        repo.reference(
-            ref_name.as_str(),
-            target_oid,
-            PreviousValue::MustNotExist,
-            "lattice branch",
-        )
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("exist") || msg.contains("MustNotExist") {
-                SessionError::Conflict(format!("branch '{name}' already exists"))
-            } else {
-                SessionError::Git(format!("create branch ref: {e}"))
-            }
-        })?;
+        self.kernel()
+            .cas_ref(
+                &ref_name,
+                target_oid,
+                RefExpectation::MustNotExist,
+                "lattice branch",
+            )
+            .map_err(|err| match err {
+                lattice_store::StoreError::CasConflict { .. } => {
+                    SessionError::Conflict(format!("branch '{name}' already exists"))
+                }
+                other => SessionError::Store(other),
+            })?;
+        self.kernel().fsync_pending(&[ref_name.as_str()])?;
 
-        let updated_at = Utc::now().to_rfc3339();
         Ok(GraphRef {
             session_id: session_id.to_string(),
             name: name.to_string(),
             kind: GraphRefKind::Branch,
             commit_id: Some(target_oid.to_string()),
-            active_agent_name: meta.active_agent_name,
-            updated_at,
+            active_agent_name: session_state.active_agent_name,
+            updated_at: Utc::now().to_rfc3339(),
         })
     }
 
     pub(super) fn checkout_impl(&self, session_id: &str, target: &str) -> Result<GraphHead> {
-        validate_session_id(session_id)?;
-        let mut meta = read_session_meta(&self.dir, session_id)?;
-        let repo = self.repo()?;
+        state::validate_session_ref_id(session_id)?;
+        let _exec =
+            self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
+        self.checkout_locked_impl(session_id, target)
+    }
 
-        // Try as branch first.
-        if let Ok(ref_name) = session_ref_name(session_id, target)
-            && let Some(oid) = try_ref_target(&repo, &ref_name)?
-        {
-            meta.head_branch = Some(target.to_string());
-            meta.head_commit_id = Some(oid.to_string());
-            meta.updated_at = Utc::now().to_rfc3339();
-            write_session_meta(&self.dir, session_id, &meta)?;
-            return Ok(GraphHead::Branch {
-                name: target.to_string(),
-            });
+    pub(super) fn checkout_locked_impl(&self, session_id: &str, target: &str) -> Result<GraphHead> {
+        state::validate_session_ref_id(session_id)?;
+        let _write = self.kernel().write_lock()?;
+        let (previous, mut session_state) = state::read_state(self.kernel(), session_id)?;
+
+        // Try as branch first: attach; HEAD follows the live branch ref.
+        if crate::validate_branch_name(target).is_ok() {
+            let ref_name = state::head_ref_name(session_id, target)?;
+            if self.kernel().ref_target(&ref_name)?.is_some() {
+                session_state.head = SessionHead::Attached {
+                    branch: target.to_string(),
+                };
+                session_state.updated_at = Utc::now().to_rfc3339();
+                state::publish_state(self.kernel(), Some(previous), &session_state)?;
+                return Ok(GraphHead::Branch {
+                    name: target.to_string(),
+                });
+            }
         }
 
-        // Try as commit OID.
+        // Try as commit OID: detach.
         let oid = parse_oid(target).map_err(|_| SessionError::MissingCommit(target.to_string()))?;
-        if repo.find_commit(oid).is_err() {
-            return Err(SessionError::MissingCommit(target.to_string()));
-        }
-        meta.head_branch = None;
-        meta.head_commit_id = Some(target.to_string());
-        meta.updated_at = Utc::now().to_rfc3339();
-        write_session_meta(&self.dir, session_id, &meta)?;
+        self.kernel()
+            .commit_tree(oid)
+            .map_err(|_| SessionError::MissingCommit(target.to_string()))?;
+        session_state.head = SessionHead::Detached {
+            commit_id: target.to_string(),
+        };
+        session_state.updated_at = Utc::now().to_rfc3339();
+        state::publish_state(self.kernel(), Some(previous), &session_state)?;
         Ok(GraphHead::Detached {
             commit_id: target.to_string(),
         })
     }
 
     pub(super) fn reset_impl(&self, session_id: &str, target: &str) -> Result<ResetResult> {
-        validate_session_id(session_id)?;
-        let mut meta = read_session_meta(&self.dir, session_id)?;
-        let branch_name = meta.head_branch.clone().ok_or_else(|| {
-            SessionError::Conflict(
-                "cannot reset while HEAD is detached; checkout a branch first".to_string(),
-            )
-        })?;
-        let repo = self.repo()?;
+        state::validate_session_ref_id(session_id)?;
+        let _exec =
+            self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
+        self.reset_locked_impl(session_id, target)
+    }
+
+    pub(super) fn reset_locked_impl(&self, session_id: &str, target: &str) -> Result<ResetResult> {
+        state::validate_session_ref_id(session_id)?;
+        let _write = self.kernel().write_lock()?;
+        let (previous, mut session_state) = state::read_state(self.kernel(), session_id)?;
+        let branch_name = match &session_state.head {
+            SessionHead::Attached { branch } => branch.clone(),
+            SessionHead::Detached { .. } => {
+                return Err(SessionError::Conflict(
+                    "cannot reset while HEAD is detached; checkout a branch first".to_string(),
+                ));
+            }
+        };
 
         let target_oid =
             parse_oid(target).map_err(|e| SessionError::Git(format!("parse reset target: {e}")))?;
         // Verify the target exists as a commit.
-        let _ = repo
-            .find_commit(target_oid)
+        self.kernel()
+            .commit_tree(target_oid)
             .map_err(|_| SessionError::MissingCommit(target.to_string()))?;
 
-        let ref_name = session_ref_name(session_id, &branch_name)?;
-        let old_oid = try_ref_target(&repo, &ref_name)?
+        let ref_name = state::head_ref_name(session_id, &branch_name)?;
+        let old_oid = self
+            .kernel()
+            .ref_target(&ref_name)?
             .ok_or_else(|| SessionError::Git("branch ref has no target".to_string()))?;
 
-        repo.reference(
+        // One atomic publication: move the branch under CAS and record the
+        // head bump in the same transaction.
+        session_state.updated_at = Utc::now().to_rfc3339();
+        let new_state_oid =
+            state::write_state_commit(self.kernel(), Some(previous), &session_state)?;
+        self.kernel()
+            .ref_transaction(&[
+                RefTxnEdit {
+                    name: ref_name.clone(),
+                    expect: RefExpectation::MustMatch(old_oid),
+                    new: Some(target_oid),
+                },
+                RefTxnEdit {
+                    name: state::state_ref_name(session_id)?,
+                    expect: RefExpectation::MustMatch(previous),
+                    new: Some(new_state_oid),
+                },
+            ])
+            .map_err(state::map_cas_conflict)?;
+        self.kernel().fsync_pending(&[
             ref_name.as_str(),
-            target_oid,
-            PreviousValue::MustExistAndMatch(gix::refs::Target::Object(old_oid)),
-            "lattice reset",
-        )
-        .map_err(|e| SessionError::Git(format!("set branch target: {e}")))?;
-
-        meta.head_commit_id = Some(target.to_string());
-        meta.updated_at = Utc::now().to_rfc3339();
-        write_session_meta(&self.dir, session_id, &meta)?;
+            state::state_ref_name(session_id)?.as_str(),
+        ])?;
 
         Ok(ResetResult {
             session_id: session_id.to_string(),
@@ -140,19 +189,15 @@ impl GitSessionGraphStore {
     }
 
     pub(super) fn diff_impl(&self, session_id: &str, from: &str, to: &str) -> Result<GraphDiff> {
-        validate_session_id(session_id)?;
-        let repo = self.repo()?;
-        let from_oid = resolve_target_to_oid(&repo, session_id, from)?;
-        let to_oid = resolve_target_to_oid(&repo, session_id, to)?;
+        state::validate_session_ref_id(session_id)?;
+        let from_oid = resolve_target_to_oid(self.kernel(), session_id, from)?;
+        let to_oid = resolve_target_to_oid(self.kernel(), session_id, to)?;
 
-        let lca_oid = match repo.merge_base(from_oid, to_oid) {
-            Ok(id) => Some(id.detach()),
-            Err(_) => None,
-        };
+        let lca_oid = self.kernel().merge_base(from_oid, to_oid)?;
         let common_ancestor_id = lca_oid.map(|o| o.to_string());
 
-        let only_in_from = collect_unique_commits(&repo, from_oid, lca_oid)?;
-        let only_in_to = collect_unique_commits(&repo, to_oid, lca_oid)?;
+        let only_in_from = collect_unique_commits(self.kernel(), from_oid, lca_oid)?;
+        let only_in_to = collect_unique_commits(self.kernel(), to_oid, lca_oid)?;
 
         Ok(GraphDiff {
             from_commit_id: from_oid.to_string(),
@@ -165,47 +210,41 @@ impl GitSessionGraphStore {
 }
 
 fn resolve_target_to_oid(
-    repo: &gix::Repository,
+    store: &lattice_store::StoreRepo,
     session_id: &str,
     target: &str,
 ) -> Result<gix::ObjectId> {
     // Try as branch ref first.
-    if let Ok(ref_name) = session_ref_name(session_id, target)
-        && let Some(oid) = try_ref_target(repo, &ref_name)?
-    {
-        return Ok(oid);
+    if crate::validate_branch_name(target).is_ok() {
+        let ref_name = state::head_ref_name(session_id, target)?;
+        if let Some(oid) = store.ref_target(&ref_name)? {
+            return Ok(oid);
+        }
     }
 
     // Try as commit OID.
     let oid = parse_oid(target).map_err(|_| SessionError::MissingCommit(target.to_string()))?;
-    if repo.find_commit(oid).is_err() {
-        return Err(SessionError::MissingCommit(target.to_string()));
-    }
+    store
+        .commit_tree(oid)
+        .map_err(|_| SessionError::MissingCommit(target.to_string()))?;
     Ok(oid)
 }
 
 fn collect_unique_commits(
-    repo: &gix::Repository,
+    store: &lattice_store::StoreRepo,
     tip: gix::ObjectId,
     hide: Option<gix::ObjectId>,
 ) -> Result<Vec<TurnLogEntry>> {
+    let hide_vec: Vec<gix::ObjectId> = hide.into_iter().collect();
     // Newest-first to match historical TOPOLOGICAL (no reverse) order used
     // by the previous implementation of this collector.
-    let mut platform = repo.rev_walk([tip]);
-    if let Some(hidden) = hide {
-        platform = platform.with_hidden(Some(hidden));
-    }
-    let walk = platform
-        .all()
-        .map_err(|e| SessionError::Git(format!("create revwalk: {e}")))?;
+    let walk = store.rev_walk(&[tip], &hide_vec)?;
 
     let mut entries = Vec::new();
-    for item in walk {
-        let info = item.map_err(|e| SessionError::Git(format!("revwalk error: {e}")))?;
-        let oid = info.id;
-        let manifest_bytes = read_tree_blob(repo, oid, "turn/manifest.json")?;
+    for oid in walk {
+        let manifest_bytes = store.read_tree_blob(oid, "turn/manifest.json")?;
         let manifest = parse_manifest(&manifest_bytes)?;
-        let messages_bytes = read_tree_blob(repo, oid, "turn/messages.jsonl")?;
+        let messages_bytes = store.read_tree_blob(oid, "turn/messages.jsonl")?;
         let messages_jsonl = String::from_utf8(messages_bytes)
             .map_err(|e| SessionError::Git(format!("messages.jsonl not utf8: {e}")))?;
         let total = messages_jsonl.lines().filter(|l| !l.is_empty()).count();

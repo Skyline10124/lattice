@@ -14,8 +14,8 @@ use lattice_session::{
 };
 use tempfile::TempDir;
 
-fn init_git_repo(dir: &std::path::Path) {
-    let _ = lattice_session::test_utils::init_empty_repo(dir);
+fn test_store_key() -> lattice_session::ProjectStoreKey {
+    lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-api-tests/project")
 }
 
 fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCommitInput {
@@ -45,13 +45,18 @@ fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCom
 fn git_store_reset_moves_branch_pointer() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path();
-    init_git_repo(dir);
 
-    let store = GitSessionGraphStore::new(dir);
+    let store = GitSessionGraphStore::create(dir.join("sessions.git")).expect("create store");
 
     let session_id = "a1b2c3d4e5f60718293a4b5c6d7e8f90".to_string();
     store
-        .create_session(&session_id, Some("reset-test"), "coder", "main")
+        .create_session(
+            &session_id,
+            Some("reset-test"),
+            "coder",
+            "main",
+            &test_store_key(),
+        )
         .expect("create_session");
 
     // Commit 3 turns linearly on main.
@@ -91,8 +96,9 @@ fn git_store_reset_moves_branch_pointer() {
     assert_eq!(reset_result.new_commit_id, first_oid);
 
     // 1. The branch ref now points to the first commit.
-    let repo = gix::open_opts(dir, gix::open::Options::isolated()).expect("open repo");
-    let ref_name = format!("refs/lattice/sessions/{session_id}/main");
+    let repo = gix::open_opts(dir.join("sessions.git"), gix::open::Options::isolated())
+        .expect("open repo");
+    let ref_name = format!("refs/lattice/sessions/{session_id}/heads/main");
     let branch_ref = repo
         .find_reference(ref_name.as_str())
         .expect("main ref should exist");

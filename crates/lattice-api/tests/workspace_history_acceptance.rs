@@ -33,6 +33,7 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, SessionApi};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
+use lattice_session::StateLayout;
 use tempfile::TempDir;
 
 /// The embedded Component Tools of the default distribution. Literals, not
@@ -61,7 +62,7 @@ impl HistoryRuntime {
     fn build() -> Self {
         let root = TempDir::new().expect("workspace root");
         let state = TempDir::new().expect("state root");
-        let runtime = build_runtime(root.path(), &history_backing(state.path()));
+        let runtime = build_runtime(root.path(), &history_backing(state.path(), root.path()));
         Self {
             runtime,
             root,
@@ -81,8 +82,14 @@ impl HistoryRuntime {
     }
 }
 
-fn history_backing(state_root: &Path) -> WorkspaceHistoryBacking {
-    WorkspaceHistoryBacking::under_project_state_dir(state_root)
+/// The project-scoped history backing for one workspace root, with the store
+/// first-created — #143 strict open requires the store to exist, and
+/// production creates it in `session new`.
+fn history_backing(state_root: &Path, workspace_root: &Path) -> WorkspaceHistoryBacking {
+    let backing = lancet_api::workspace_history_backing_in(state_root, workspace_root)
+        .expect("derive history backing");
+    lancet_api::WorkspaceHistory::create(backing.clone()).expect("create history store");
+    backing
 }
 
 fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntime {
@@ -351,7 +358,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
             enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
             ..Default::default()
         },
-        workspace_history: history_backing(denied_state.path()),
+        workspace_history: history_backing(denied_state.path(), denied_root.path()),
         model_id: "test".into(),
         runtime_version: "test".into(),
     })
@@ -395,7 +402,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
             denied_capabilities: std::iter::once("workspace.mutation".to_string()).collect(),
             max_boundary: lancet_protocol::cell::Trust::In,
         },
-        workspace_history: history_backing(effect_state.path()),
+        workspace_history: history_backing(effect_state.path(), effect_root.path()),
         model_id: "test".into(),
         runtime_version: "test".into(),
     })
@@ -465,8 +472,12 @@ async fn an_installed_mutation_survives_later_failures_without_compensation() {
     );
 }
 
-/// AC8: prior object ids stay reachable through internal refs, with no
-/// time-based expiry, and the user's project refs are untouched.
+/// AC8: prior object ids stay reachable with no time-based expiry, and the
+/// user's project refs are untouched.
+///
+/// #143 narrowed the mechanism: normal recording writes no per-record refs,
+/// because everything it appends is an ancestor of `current`. Only a Rewind,
+/// which moves `current` backwards, needs the kernel's retention pin.
 #[tokio::test]
 async fn prior_object_ids_stay_reachable_through_internal_refs() {
     let env = HistoryRuntime::build();
@@ -480,15 +491,14 @@ async fn prior_object_ids_stay_reachable_through_internal_refs() {
     for oid in [&first, &second] {
         assert!(
             history.is_reachable(oid).expect("reachability"),
-            "prior object id {oid} must stay pinned by an internal ref"
+            "prior object id {oid} must stay reachable"
         );
         assert!(history.resolve(oid).unwrap().is_some());
     }
 
-    // The pins are real refs under the private namespace, not reflog entries.
     let repo = gix::open_opts(history.repo_path().unwrap(), gix::open::Options::isolated())
         .expect("open private history");
-    let pinned: Vec<String> = repo
+    let record_pins: Vec<String> = repo
         .references()
         .expect("refs")
         .prefixed("refs/lattice/workspace-history/records/")
@@ -497,8 +507,32 @@ async fn prior_object_ids_stay_reachable_through_internal_refs() {
         .map(|r| r.name().as_bstr().to_string())
         .collect();
     assert!(
-        pinned.len() >= 3,
-        "each recorded commit must be pinned: {pinned:?}"
+        record_pins.is_empty(),
+        "normal recording must not write per-record refs: {record_pins:?}"
+    );
+
+    // A Rewind abandons the tip, so it retains it first: the object stays
+    // resolvable through a real ref, never a reflog entry.
+    let abandoned = env.current().unwrap();
+    history
+        .rewind_with(Some(&first), |_| Ok::<(), std::convert::Infallible>(()))
+        .expect("rewind runs");
+    assert_eq!(env.current().as_deref(), Some(first.as_str()));
+    assert!(
+        history.is_reachable(&abandoned).expect("reachability"),
+        "the abandoned tip must stay reachable after the rewind"
+    );
+    let retained: Vec<String> = repo
+        .references()
+        .expect("refs")
+        .prefixed("refs/lattice/retained/")
+        .expect("prefix")
+        .filter_map(|r| r.ok())
+        .map(|r| r.name().as_bstr().to_string())
+        .collect();
+    assert!(
+        retained.iter().any(|name| name.ends_with(&abandoned)),
+        "the abandoned tip must carry a retention pin: {retained:?}"
     );
 }
 
@@ -878,15 +912,32 @@ fn turn_request(
     }
 }
 
-fn new_session(sessions: &Path) -> String {
-    SessionApi::git(sessions)
+fn test_state_layout() -> StateLayout {
+    let state_root = std::env::var_os("XDG_STATE_HOME").expect("ScopedState sets XDG_STATE_HOME");
+    StateLayout::in_state_root(Path::new(&state_root))
+}
+
+fn open_session_store(sessions: &Path) -> SessionApi {
+    SessionApi::git_open_with_layout(sessions, &test_state_layout()).expect("open session store")
+}
+
+fn new_session(sessions: &Path, project_root: &Path) -> String {
+    SessionApi::git_create_with_layout(sessions, &test_state_layout())
+        .expect("create session store")
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
             project_branch: "main".to_string(),
+            project_store_key: store_key_hex(project_root),
         })
         .expect("create session")
         .session_id
+}
+
+fn store_key_hex(root: &Path) -> String {
+    lattice_api::LocalWorkspaceRoot::from_path(root)
+        .expect("resolve workspace root")
+        .store_key_hex()
 }
 
 fn history_for(state_root: &Path, project_root: &Path) -> WorkspaceHistory {
@@ -906,7 +957,7 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     // Turn 1 installs one mutation.
     let llm: Arc<dyn LlmClient> = Arc::new(
@@ -924,7 +975,7 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
             .build(),
     );
     let first = lattice_api::run_turn(
-        SessionApi::git(&sessions),
+        open_session_store(&sessions),
         turn_request(&ws, "create it", &session_id, llm),
     )
     .await
@@ -937,7 +988,7 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
         .expect("read history")
         .expect("turn 1 recorded a mutation");
 
-    let api = SessionApi::git(&sessions);
+    let api = open_session_store(&sessions);
     let commit = api
         .get_turn_commit(&session_id, &first.commit_id)
         .expect("get turn commit")
@@ -955,14 +1006,14 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
             .build(),
     );
     let second = lattice_api::run_turn(
-        SessionApi::git(&sessions),
+        open_session_store(&sessions),
         turn_request(&ws, "just talk", &session_id, llm2),
     )
     .await
     .expect("turn 2 runs");
     assert_eq!(second.status, RunTurnStatus::Completed);
 
-    let second_commit = SessionApi::git(&sessions)
+    let second_commit = open_session_store(&sessions)
         .get_turn_commit(&session_id, &second.commit_id)
         .expect("get turn 2 commit")
         .expect("turn 2 commit exists");
@@ -979,14 +1030,14 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
 
     // Branch movement: a new session branch off the first commit, then reopen
     // the store from scratch (process restart) and resolve both Turns again.
-    SessionApi::git(&sessions)
+    open_session_store(&sessions)
         .branch(&session_id, "side", Some(&first.commit_id))
         .expect("create branch");
-    SessionApi::git(&sessions)
+    open_session_store(&sessions)
         .checkout(&session_id, "side")
         .expect("checkout branch");
 
-    let reopened = SessionApi::git(&sessions);
+    let reopened = open_session_store(&sessions);
     for (label, commit_id) in [("first", &first.commit_id), ("second", &second.commit_id)] {
         let found = reopened
             .get_turn_commit(&session_id, commit_id)
@@ -1022,7 +1073,7 @@ async fn turn_whose_mutation_fails_before_install_records_no_history_identity() 
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     let llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
@@ -1042,7 +1093,7 @@ async fn turn_whose_mutation_fails_before_install_records_no_history_identity() 
     );
 
     let result = lattice_api::run_turn(
-        SessionApi::git(&sessions),
+        open_session_store(&sessions),
         turn_request(&ws, "try an impossible edit", &session_id, llm),
     )
     .await
@@ -1067,7 +1118,7 @@ async fn turn_whose_mutation_fails_before_install_records_no_history_identity() 
         "a pre-install failure must not move the current history ref"
     );
 
-    let commit = SessionApi::git(&sessions)
+    let commit = open_session_store(&sessions)
         .get_turn_commit(&session_id, &result.commit_id)
         .expect("get turn commit")
         .expect("turn is committed");
@@ -1085,7 +1136,7 @@ async fn multi_mutation_turn_records_order_and_survives_a_failed_turn() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     let llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
@@ -1122,7 +1173,7 @@ async fn multi_mutation_turn_records_order_and_survives_a_failed_turn() {
     );
 
     let result = lattice_api::run_turn(
-        SessionApi::git(&sessions),
+        open_session_store(&sessions),
         turn_request(&ws, "do three things then fail", &session_id, llm),
     )
     .await
@@ -1156,7 +1207,7 @@ async fn multi_mutation_turn_records_order_and_survives_a_failed_turn() {
     assert_eq!(snapshot.files.get("one.txt").unwrap().as_slice(), b"3\n");
     assert_eq!(snapshot.files.get("two.txt").unwrap().as_slice(), b"2\n");
 
-    let commit = SessionApi::git(&sessions)
+    let commit = open_session_store(&sessions)
         .get_turn_commit(&session_id, &result.commit_id)
         .expect("get turn commit")
         .expect("failed turn is still committed");

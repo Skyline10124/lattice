@@ -139,7 +139,7 @@ fn default_config_path() -> PathBuf {
 }
 
 /// Build a diagnostic report.
-pub fn build_report() -> DoctorReport {
+pub fn build_report() -> Result<DoctorReport> {
     // Config
     let config_path = default_config_path();
     let config_loaded = config_path.exists();
@@ -197,13 +197,14 @@ pub fn build_report() -> DoctorReport {
     }
 
     // Session store availability
-    let session_dir = crate::commands::session::default_session_dir();
+    // #143: the durable session store lives under the XDG *state* root.
+    let session_dir = crate::commands::session::session_store_path()?;
     let session_store_available = session_dir.exists();
 
     // Alias table state
     let alias_count = aliases.len();
 
-    DoctorReport {
+    Ok(DoctorReport {
         config_loaded,
         config_path,
         credentials: credential_entries,
@@ -225,7 +226,7 @@ pub fn build_report() -> DoctorReport {
         session_store_available,
         session_dir: session_dir.display().to_string(),
         alias_count,
-    }
+    })
 }
 
 /// Render report as JSON.
@@ -406,7 +407,7 @@ pub fn render_text(report: &DoctorReport) -> String {
 /// Never prints credential values — only env var names and present/missing status.
 /// Does not reference old Catalog, Runtime::list_models, or inspect_model.
 pub fn run(json: bool) -> Result<()> {
-    let report = build_report();
+    let report = build_report()?;
     if json {
         println!("{}", render_json(&report)?);
     } else {

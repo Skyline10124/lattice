@@ -37,9 +37,15 @@ use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{
     GitSessionGraphStore, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
     PreparedTurnCommit, ResetResult, SessionError, SessionGraphStore, SessionGraphSummary,
-    SessionStatus, TurnCommit, TurnCommitInput, TurnLogEntry,
+    SessionStatus, StateLayout, TurnCommit, TurnCommitInput, TurnLogEntry,
 };
 use tempfile::TempDir;
+
+fn store_key_hex(root: &Path) -> String {
+    lattice_api::LocalWorkspaceRoot::from_path(root)
+        .expect("resolve workspace root")
+        .store_key_hex()
+}
 
 // ─── Runtime-layer harness ──────────────────────────────────────────────────
 
@@ -58,7 +64,7 @@ impl RewindRuntime {
     fn build() -> Self {
         let root = TempDir::new().expect("workspace root");
         let state = TempDir::new().expect("state root");
-        let runtime = build_runtime(root.path(), &backing(state.path()));
+        let runtime = build_runtime(root.path(), &backing(state.path(), root.path()));
         Self {
             runtime,
             root,
@@ -71,7 +77,7 @@ impl RewindRuntime {
     }
 
     fn backing(&self) -> WorkspaceHistoryBacking {
-        backing(self.state.path())
+        backing(self.state.path(), self.root.path())
     }
 
     fn current(&self) -> Option<String> {
@@ -87,8 +93,14 @@ impl RewindRuntime {
     }
 }
 
-fn backing(state_root: &Path) -> WorkspaceHistoryBacking {
-    WorkspaceHistoryBacking::under_project_state_dir(state_root)
+/// The project-scoped history backing for one workspace root, with the store
+/// first-created — #143 strict open requires the store to exist, and
+/// production creates it in `session new`.
+fn backing(state_root: &Path, workspace_root: &Path) -> WorkspaceHistoryBacking {
+    let backing = lancet_api::workspace_history_backing_in(state_root, workspace_root)
+        .expect("derive history backing");
+    lancet_api::WorkspaceHistory::create(backing.clone()).expect("create history store");
+    backing
 }
 
 fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntime {
@@ -613,12 +625,23 @@ fn turn_request(
     }
 }
 
-fn new_session(sessions: &Path) -> String {
-    SessionApi::git(sessions)
+fn test_state_layout() -> StateLayout {
+    let state_root = std::env::var_os("XDG_STATE_HOME").expect("ScopedState sets XDG_STATE_HOME");
+    StateLayout::in_state_root(Path::new(&state_root))
+}
+
+fn open_session_store(sessions: &Path) -> SessionApi {
+    SessionApi::git_open_with_layout(sessions, &test_state_layout()).expect("open session store")
+}
+
+fn new_session(sessions: &Path, project_root: &Path) -> String {
+    SessionApi::git_create_with_layout(sessions, &test_state_layout())
+        .expect("create session store")
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
             project_branch: "main".to_string(),
+            project_store_key: store_key_hex(project_root),
         })
         .expect("create session")
         .session_id
@@ -653,7 +676,7 @@ async fn turn_creating(
             .build(),
     );
     let result = lattice_api::run_turn(
-        SessionApi::git(sessions),
+        open_session_store(sessions),
         turn_request(ws, &format!("create {path}"), session_id, llm),
     )
     .await
@@ -698,7 +721,7 @@ async fn turn_editing(
             .build(),
     );
     let result = lattice_api::run_turn(
-        SessionApi::git(sessions),
+        open_session_store(sessions),
         turn_request(ws, &format!("edit {path}"), session_id, llm),
     )
     .await
@@ -733,7 +756,7 @@ async fn rewind_aligns_the_conversation_target_and_the_local_workspace() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     let first = turn_creating(&ws, &sessions, &session_id, "notes.md", "v1\n").await;
     let second = turn_editing(
@@ -753,7 +776,7 @@ async fn rewind_aligns_the_conversation_target_and_the_local_workspace() {
 
     let history = history_for(scoped.path(), &ws.root);
     let tip_before = history.current().unwrap().expect("mutations recorded");
-    let api = SessionApi::git(&sessions);
+    let api = open_session_store(&sessions);
     let target_oid = api
         .get_turn_commit(&session_id, &first)
         .unwrap()
@@ -871,7 +894,7 @@ async fn a_conflicting_rewind_moves_neither_the_conversation_nor_the_workspace()
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     let first = turn_creating(&ws, &sessions, &session_id, "doc.md", "one\n").await;
     let second = turn_editing(
@@ -890,7 +913,7 @@ async fn a_conflicting_rewind_moves_neither_the_conversation_nor_the_workspace()
 
     let history = history_for(scoped.path(), &ws.root);
     let tip_before = history.current().unwrap().expect("recorded");
-    let api = SessionApi::git(&sessions);
+    let api = open_session_store(&sessions);
     let head_before = api.status(&session_id).unwrap().current_commit_id;
     let workspace_before = tree_snapshot(&ws.root);
 
@@ -943,12 +966,12 @@ async fn rewind_refuses_unresolvable_targets() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
-    let other_session = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
+    let other_session = new_session(&sessions, &ws.root);
 
     let first = turn_creating(&ws, &sessions, &session_id, "a.md", "a\n").await;
     let foreign = turn_creating(&ws, &sessions, &other_session, "b.md", "b\n").await;
-    let api = SessionApi::git(&sessions);
+    let api = open_session_store(&sessions);
     let history = history_for(scoped.path(), &ws.root);
 
     // Nonexistent.
@@ -1001,14 +1024,14 @@ async fn rewind_works_after_reopen_on_a_branch_and_from_a_detached_head() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     // Branch case: work on a non-default branch and rewind there.
     let base = turn_creating(&ws, &sessions, &session_id, "b1.md", "1\n").await;
-    SessionApi::git(&sessions)
+    open_session_store(&sessions)
         .branch(&session_id, "work", Some(&base))
         .expect("branch");
-    SessionApi::git(&sessions)
+    open_session_store(&sessions)
         .checkout(&session_id, "work")
         .expect("checkout");
     let on_branch = turn_creating(&ws, &sessions, &session_id, "b2.md", "2\n").await;
@@ -1017,7 +1040,7 @@ async fn rewind_works_after_reopen_on_a_branch_and_from_a_detached_head() {
     // handle that has never seen this session before, and drive the Rewind
     // through that handle by its *prefix* — nothing may depend on state the
     // turn-running handles held.
-    let reopened = SessionApi::git(&sessions);
+    let reopened = open_session_store(&sessions);
     let opened = reopened
         .open_session(lattice_api::OpenSessionRequest {
             id: session_id.clone(),
@@ -1064,7 +1087,7 @@ async fn rewind_works_after_reopen_on_a_branch_and_from_a_detached_head() {
 
     // Detached HEAD case: add another Turn, detach onto it, then rewind.
     let next = turn_creating(&ws, &sessions, &session_id, "b3.md", "3\n").await;
-    let api = SessionApi::git(&sessions);
+    let api = open_session_store(&sessions);
     api.checkout(&session_id, &next).expect("detach");
     assert!(matches!(
         api.status(&session_id).unwrap().head,
@@ -1105,7 +1128,7 @@ struct FailingResetStore {
 impl FailingResetStore {
     fn new(dir: &Path) -> Self {
         Self {
-            inner: GitSessionGraphStore::new(dir),
+            inner: GitSessionGraphStore::open(dir).expect("open session store"),
             allow_checkout: std::sync::atomic::AtomicBool::new(true),
         }
     }
@@ -1118,15 +1141,36 @@ impl SessionGraphStore for FailingResetStore {
         label: Option<&str>,
         active_agent_name: &str,
         project_target_branch: &str,
+        project_store_key: &lattice_session::ProjectStoreKey,
     ) -> lattice_session::Result<GraphSession> {
-        self.inner
-            .create_session(session_id, label, active_agent_name, project_target_branch)
+        self.inner.create_session(
+            session_id,
+            label,
+            active_agent_name,
+            project_target_branch,
+            project_store_key,
+        )
+    }
+    fn lock_execution(
+        &self,
+        session_id: &str,
+        mode: lattice_session::LockMode,
+        blocking: lattice_session::Blocking,
+    ) -> lattice_session::Result<lattice_session::FlockGuard> {
+        self.inner.lock_execution(session_id, mode, blocking)
     }
     fn open_session(&self, session_id: &str) -> lattice_session::Result<GraphSession> {
         self.inner.open_session(session_id)
     }
     fn status(&self, session_id: &str) -> lattice_session::Result<SessionStatus> {
         self.inner.status(session_id)
+    }
+    fn status_locked(
+        &self,
+        session_id: &str,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> lattice_session::Result<SessionStatus> {
+        self.inner.status_locked(session_id, execution_lock)
     }
     fn list(&self) -> lattice_session::Result<Vec<SessionGraphSummary>> {
         self.inner.list()
@@ -1140,12 +1184,37 @@ impl SessionGraphStore for FailingResetStore {
     fn commit_turn(&self, input: TurnCommitInput) -> lattice_session::Result<TurnCommit> {
         self.inner.commit_turn(input)
     }
+    fn commit_turn_locked(
+        &self,
+        input: TurnCommitInput,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> lattice_session::Result<TurnCommit> {
+        self.inner.commit_turn_locked(input, execution_lock)
+    }
     fn checkout(&self, session_id: &str, target: &str) -> lattice_session::Result<GraphHead> {
         if self
             .allow_checkout
             .load(std::sync::atomic::Ordering::SeqCst)
         {
             self.inner.checkout(session_id, target)
+        } else {
+            Err(SessionError::Git(
+                "injected detached session ref durability failure".to_string(),
+            ))
+        }
+    }
+    fn checkout_locked(
+        &self,
+        session_id: &str,
+        target: &str,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> lattice_session::Result<GraphHead> {
+        if self
+            .allow_checkout
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.inner
+                .checkout_locked(session_id, target, execution_lock)
         } else {
             Err(SessionError::Git(
                 "injected detached session ref durability failure".to_string(),
@@ -1160,6 +1229,16 @@ impl SessionGraphStore for FailingResetStore {
     ) -> lattice_session::Result<GraphRef> {
         self.inner.branch(session_id, name, from)
     }
+    fn branch_locked(
+        &self,
+        session_id: &str,
+        name: &str,
+        from: Option<&str>,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> lattice_session::Result<GraphRef> {
+        self.inner
+            .branch_locked(session_id, name, from, execution_lock)
+    }
     fn set_active_agent(
         &self,
         session_id: &str,
@@ -1171,6 +1250,16 @@ impl SessionGraphStore for FailingResetStore {
         self.inner.diff(session_id, from, to)
     }
     fn reset(&self, _session_id: &str, _target: &str) -> lattice_session::Result<ResetResult> {
+        Err(SessionError::Git(
+            "injected session ref durability failure".to_string(),
+        ))
+    }
+    fn reset_locked(
+        &self,
+        _session_id: &str,
+        _target: &str,
+        _execution_lock: &lattice_session::FlockGuard,
+    ) -> lattice_session::Result<ResetResult> {
         Err(SessionError::Git(
             "injected session ref durability failure".to_string(),
         ))
@@ -1199,12 +1288,13 @@ async fn a_session_ref_failure_is_not_reported_as_success() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     let first = turn_creating(&ws, &sessions, &session_id, "one.md", "1\n").await;
     let second = turn_creating(&ws, &sessions, &session_id, "two.md", "2\n").await;
 
-    let failing = SessionApi::new(Box::new(FailingResetStore::new(&sessions)));
+    let failing = SessionApi::new(Box::new(FailingResetStore::new(&sessions)))
+        .with_state_layout(test_state_layout());
     let err = lattice_api::rewind_to_turn(&failing, &session_id, &first, &ws.root)
         .expect_err("a session ref failure must surface");
     assert!(
@@ -1220,7 +1310,7 @@ async fn a_session_ref_failure_is_not_reported_as_success() {
     // reported as success.
     assert!(!ws.root.join("two.md").exists());
     let history = history_for(scoped.path(), &ws.root);
-    let target_oid = SessionApi::git(&sessions)
+    let target_oid = open_session_store(&sessions)
         .get_turn_commit(&session_id, &first)
         .unwrap()
         .unwrap()
@@ -1228,7 +1318,7 @@ async fn a_session_ref_failure_is_not_reported_as_success() {
     assert_eq!(history.current().unwrap(), target_oid);
 
     // The session head did not move, and the failure is durably recorded.
-    let status = SessionApi::git(&sessions).status(&session_id).unwrap();
+    let status = open_session_store(&sessions).status(&session_id).unwrap();
     assert_eq!(status.current_commit_id.as_deref(), Some(second.as_str()));
     let records = rewind_records(&ws.root, &status.session_id);
     assert_eq!(records.len(), 1);
@@ -1251,13 +1341,13 @@ async fn a_turn_without_a_history_identity_is_refused_when_an_ancestor_has_one()
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     let first = turn_creating(&ws, &sessions, &session_id, "kept.md", "keep\n").await;
     // A Turn stamped without an identity, exactly as the live path does when
     // reading the identity fails.
-    let api = SessionApi::git(&sessions);
-    let store = GitSessionGraphStore::new(&sessions);
+    let api = open_session_store(&sessions);
+    let store = GitSessionGraphStore::open(&sessions).expect("open session store");
     let head = api.status(&session_id).unwrap();
     let anomalous = store
         .commit_turn(TurnCommitInput {
@@ -1313,14 +1403,14 @@ async fn a_rewind_reverses_in_range_mutations_from_every_session() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_a = new_session(&sessions);
-    let session_b = new_session(&sessions);
+    let session_a = new_session(&sessions, &ws.root);
+    let session_b = new_session(&sessions, &ws.root);
 
     let target = turn_creating(&ws, &sessions, &session_a, "a-owned.md", "a\n").await;
     // Another session mutates the same Local Workspace afterwards.
     turn_creating(&ws, &sessions, &session_b, "b-owned.md", "b\n").await;
 
-    let api = SessionApi::git(&sessions);
+    let api = open_session_store(&sessions);
     let outcome =
         lattice_api::rewind_to_turn(&api, &session_a, &target, &ws.root).expect("rewind runs");
     let RewindOutcome::Success(success) = outcome else {
@@ -1360,8 +1450,8 @@ async fn a_full_unwind_is_refused_when_this_session_installed_work_before_the_ta
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
-    let api = SessionApi::git(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
+    let api = open_session_store(&sessions);
     let resolved = api.status(&session_id).unwrap().session_id;
 
     // A mutation this session installed, recorded in the shared private
@@ -1386,7 +1476,7 @@ async fn a_full_unwind_is_refused_when_this_session_installed_work_before_the_ta
     // Two Turns, both stamped with no identity — the shape a swallowed
     // end-of-turn identity read produces. The second is the rewind target,
     // and every one of its ancestors is identity-less.
-    let store = GitSessionGraphStore::new(&sessions);
+    let store = GitSessionGraphStore::open(&sessions).expect("open session store");
     let mut parent: Vec<String> = Vec::new();
     let mut committed = Vec::new();
     for label in ["first", "second"] {
@@ -1448,7 +1538,7 @@ async fn a_detached_session_ref_failure_is_not_reported_as_success() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     let first = turn_creating(&ws, &sessions, &session_id, "d1.md", "1\n").await;
     let second = turn_creating(&ws, &sessions, &session_id, "d2.md", "2\n").await;
@@ -1457,12 +1547,12 @@ async fn a_detached_session_ref_failure_is_not_reported_as_success() {
     let failing = {
         // Detach onto the newest Turn first, then arm the failure so the
         // rewind takes the detached arm and cannot move HEAD back.
-        let api = SessionApi::git(&sessions);
+        let api = open_session_store(&sessions);
         api.checkout(&session_id, &second).expect("detach");
         store
             .allow_checkout
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        SessionApi::new(Box::new(store))
+        SessionApi::new(Box::new(store)).with_state_layout(test_state_layout())
     };
 
     let err = lattice_api::rewind_to_turn(&failing, &session_id, &first, &ws.root)
@@ -1476,14 +1566,14 @@ async fn a_detached_session_ref_failure_is_not_reported_as_success() {
     // The workspace half really happened, which is why this is not a success.
     assert!(!ws.root.join("d2.md").exists());
     let history = history_for(scoped.path(), &ws.root);
-    let target_oid = SessionApi::git(&sessions)
+    let target_oid = open_session_store(&sessions)
         .get_turn_commit(&session_id, &first)
         .unwrap()
         .unwrap()
         .workspace_history_oid;
     assert_eq!(history.current().unwrap(), target_oid);
 
-    let status = SessionApi::git(&sessions).status(&session_id).unwrap();
+    let status = open_session_store(&sessions).status(&session_id).unwrap();
     assert!(matches!(status.head, GraphHead::Detached { ref commit_id } if commit_id == &second));
     let records = rewind_records(&ws.root, &status.session_id);
     assert_eq!(records.len(), 1);
@@ -1501,10 +1591,10 @@ async fn a_restore_failure_is_recorded_and_never_reported_as_success() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
 
     let target = turn_creating(&ws, &sessions, &session_id, "kept.md", "keep\n").await;
-    let api = SessionApi::git(&sessions);
+    let api = open_session_store(&sessions);
     let resolved = api.status(&session_id).unwrap().session_id;
 
     // A mutation the restore executor must refuse to reverse.
@@ -1554,9 +1644,9 @@ async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
-    let other_session = new_session(&sessions);
-    let api = SessionApi::git(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
+    let other_session = new_session(&sessions, &ws.root);
+    let api = open_session_store(&sessions);
     let resolved_other = api.status(&other_session).unwrap().session_id;
 
     // Another session installs a mutation, recorded well before our target
@@ -1581,7 +1671,7 @@ async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the
 
     // Our session's target Turn records no identity — the shape a swallowed
     // end-of-turn read produces — and has no same-session ancestor to catch.
-    let store = GitSessionGraphStore::new(&sessions);
+    let store = GitSessionGraphStore::open(&sessions).expect("open session store");
     let resolved = api.status(&session_id).unwrap().session_id;
     let target = store
         .commit_turn(TurnCommitInput {
@@ -1634,13 +1724,13 @@ async fn a_legitimate_full_unwind_still_succeeds() {
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions);
-    let api = SessionApi::git(&sessions);
+    let session_id = new_session(&sessions, &ws.root);
+    let api = open_session_store(&sessions);
     let resolved = api.status(&session_id).unwrap().session_id;
 
     // A first Turn that installs nothing: the history is still empty, so it
     // legitimately records no identity.
-    let store = GitSessionGraphStore::new(&sessions);
+    let store = GitSessionGraphStore::open(&sessions).expect("open session store");
     let target = store
         .commit_turn(TurnCommitInput {
             workspace_history_oid: None,

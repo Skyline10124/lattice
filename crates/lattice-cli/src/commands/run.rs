@@ -405,10 +405,10 @@ async fn run_inner(
         );
     }
 
-    // Build SessionApi backed by Git session graph.
-    let session_dir = crate::commands::session::default_session_dir();
-    let git_repo_path = session_dir.join("sessions.git");
-    let session_api = lattice_api::SessionApi::git(git_repo_path);
+    // Build SessionApi over the global session store. `run` operates on an
+    // existing session, so it strictly opens (#143).
+    let session_api =
+        lattice_api::SessionApi::git_open_layout(&crate::commands::session::state_layout()?)?;
 
     // Cooperative cancellation: install a scoped SIGINT listener that flips
     // a shared flag. The agent loop races stalled stream.next() against it
@@ -449,6 +449,14 @@ async fn run_inner(
             return Ok(std::process::ExitCode::from(2));
         }
         Err(lattice_api::ApiError::Conflict(msg)) => {
+            eprintln!("{}: {}", "error".red(), msg);
+            return Ok(std::process::ExitCode::from(1));
+        }
+        Err(lattice_api::ApiError::Busy(msg)) => {
+            eprintln!("{}: {}", "error".red(), msg);
+            return Ok(std::process::ExitCode::from(1));
+        }
+        Err(lattice_api::ApiError::StoreUnavailable(msg)) => {
             eprintln!("{}: {}", "error".red(), msg);
             return Ok(std::process::ExitCode::from(1));
         }

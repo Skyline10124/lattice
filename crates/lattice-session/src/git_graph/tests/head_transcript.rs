@@ -9,8 +9,8 @@ use crate::git_graph::GitSessionGraphStore;
 #[test]
 fn test_head_transcript_linear() {
     let dir = temp_dir("transcript_linear");
-    setup_git_repo(dir.path());
-    let store = GitSessionGraphStore::new(dir.path());
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
     let commit_ids = setup_session_with_commits(&store, "sess-transcript", 2, None);
 
     let transcript = store
@@ -28,10 +28,16 @@ fn test_head_transcript_linear() {
 #[test]
 fn test_head_transcript_empty_session() {
     let dir = temp_dir("transcript_empty");
-    setup_git_repo(dir.path());
-    let store = GitSessionGraphStore::new(dir.path());
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
     store
-        .create_session("sess-empty-transcript", None, "coder", "main")
+        .create_session(
+            "sess-empty-transcript",
+            None,
+            "coder",
+            "main",
+            &test_project_key(),
+        )
         .expect("create");
 
     let transcript = store

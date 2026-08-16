@@ -4,16 +4,16 @@
 //! Turn commit tests for the Git graph store.
 
 use super::*;
-use crate::git_graph::GitSessionGraphStore;
+use crate::git_graph::{GitSessionGraphStore, state};
 use crate::graph::TurnCommitStatus;
 
 #[test]
 fn test_commit_turn_tree_structure() {
     let dir = temp_dir("tree_structure");
-    setup_git_repo(dir.path());
-    let store = GitSessionGraphStore::new(dir.path());
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
     store
-        .create_session("sess-tree", None, "coder", "main")
+        .create_session("sess-tree", None, "coder", "main", &test_project_key())
         .expect("create");
 
     let messages = vec![user_msg("Hello")];
@@ -21,7 +21,11 @@ fn test_commit_turn_tree_structure() {
     let commit = store.commit_turn(input).expect("commit");
     assert_eq!(commit.commit_id.len(), 40);
 
-    let repo = gix::open_opts(dir.path(), gix::open::Options::isolated()).expect("open repo");
+    let repo = gix::open_opts(
+        dir.path().join("sessions.git"),
+        gix::open::Options::isolated(),
+    )
+    .expect("open repo");
     let oid = gix::ObjectId::from_hex(commit.commit_id.as_bytes()).expect("parse oid");
     let git_commit = repo.find_commit(oid).expect("find commit");
     let tree = git_commit.tree().expect("tree");
@@ -51,10 +55,10 @@ fn test_commit_turn_tree_structure() {
 #[test]
 fn test_commit_turn_linear() {
     let dir = temp_dir("commit_linear");
-    setup_git_repo(dir.path());
-    let store = GitSessionGraphStore::new(dir.path());
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
     store
-        .create_session("sess-linear", None, "coder", "main")
+        .create_session("sess-linear", None, "coder", "main", &test_project_key())
         .expect("create");
 
     let messages = vec![user_msg("Hello")];
@@ -69,8 +73,8 @@ fn test_commit_turn_linear() {
 #[test]
 fn test_commit_turn_with_parent() {
     let dir = temp_dir("commit_with_parent");
-    setup_git_repo(dir.path());
-    let store = GitSessionGraphStore::new(dir.path());
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
     let commit_ids = setup_session_with_commits(&store, "sess-parent", 1, None);
     let first_id = commit_ids[0].clone();
 
@@ -86,10 +90,46 @@ fn test_commit_turn_with_parent() {
 }
 
 #[test]
+fn commit_turn_rejects_detached_head_instead_of_advancing_main() {
+    let dir = temp_dir("commit_detached");
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
+    let ids = setup_session_with_commits(&store, "sess-detached-commit", 2, None);
+    let detached = ids[0].clone();
+    let main_before = ids[1].clone();
+    store
+        .checkout("sess-detached-commit", &detached)
+        .expect("detach HEAD");
+
+    let err = store
+        .commit_turn(commit_input(
+            "sess-detached-commit",
+            vec![detached.clone()],
+            vec![user_msg("must fail")],
+            TurnCommitStatus::Completed,
+        ))
+        .expect_err("a detached HEAD is read-only for Turn commits");
+    assert!(
+        matches!(err, crate::SessionError::Conflict(_)),
+        "got {err:?}"
+    );
+    let main_ref = state::head_ref_name("sess-detached-commit", "main").unwrap();
+    assert_eq!(
+        store
+            .kernel()
+            .ref_target(&main_ref)
+            .unwrap()
+            .unwrap()
+            .to_string(),
+        main_before
+    );
+}
+
+#[test]
 fn test_get_turn_commit() {
     let dir = temp_dir("get_turn_commit");
-    setup_git_repo(dir.path());
-    let store = GitSessionGraphStore::new(dir.path());
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
     let commit_ids = setup_session_with_commits(&store, "sess-get", 1, None);
     let first_id = commit_ids[0].clone();
 
@@ -104,10 +144,10 @@ fn test_get_turn_commit() {
 #[test]
 fn test_get_turn_commit_not_found() {
     let dir = temp_dir("get_not_found");
-    setup_git_repo(dir.path());
-    let store = GitSessionGraphStore::new(dir.path());
+    let store =
+        GitSessionGraphStore::create(dir.path().join("sessions.git")).expect("create store");
     store
-        .create_session("sess-not-found", None, "coder", "main")
+        .create_session("sess-not-found", None, "coder", "main", &test_project_key())
         .expect("create");
 
     let found = store

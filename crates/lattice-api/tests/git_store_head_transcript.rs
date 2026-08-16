@@ -14,8 +14,8 @@ use lattice_session::{
 };
 use tempfile::TempDir;
 
-fn init_git_repo(dir: &std::path::Path) {
-    let _ = lattice_session::test_utils::init_empty_repo(dir);
+fn test_store_key() -> lattice_session::ProjectStoreKey {
+    lattice_session::ProjectStoreKey::from_canonical_path_bytes(b"/lattice-api-tests/project")
 }
 
 fn turn_input(
@@ -47,13 +47,18 @@ fn turn_input(
 fn git_store_head_transcript_reads_ordered_messages() {
     let tmp = TempDir::new().expect("temp dir");
     let dir = tmp.path();
-    init_git_repo(dir);
 
-    let store = GitSessionGraphStore::new(dir);
+    let store = GitSessionGraphStore::create(dir.join("sessions.git")).expect("create store");
 
     let session_id = "fedcba9876543210fedcba9876543210".to_string();
     store
-        .create_session(&session_id, Some("transcript-order"), "coder", "main")
+        .create_session(
+            &session_id,
+            Some("transcript-order"),
+            "coder",
+            "main",
+            &test_store_key(),
+        )
         .expect("create_session");
 
     // Commit 3 turns linearly on the default branch, each with 2 messages.

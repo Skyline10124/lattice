@@ -47,10 +47,18 @@ pub(super) async fn build_test_production_deps(
         std::fs::write(root.join("README.md"), "init\n").expect("write README");
         init_test_git_repo(root);
     }
+    if !in_memory_audit {
+        // A durable-audit fixture takes the production path, which strictly
+        // opens the project's stores; create them first, as `session new`
+        // does.
+        ensure_project_stores(root);
+    }
     let request = make_test_run_turn_request(llm.clone(), in_memory_audit, enabled_tools);
     super::cep::build_production_turn_deps(super::cep::ProductionTurnDepsInput {
         request: &request,
         project_root,
+        project_store_key: None,
+        state_layout: None,
         enabled_tools,
         llm,
         lancet,
@@ -62,6 +70,23 @@ pub(super) async fn build_test_production_deps(
 }
 
 pub(super) const TEST_SESSION_ID: &str = "test-session";
+
+/// The store key binding test sessions to the fixture's project root.
+pub(super) fn test_project_key(root: &std::path::Path) -> lattice_session::ProjectStoreKey {
+    crate::root::LocalWorkspaceRoot::from_path(root)
+        .expect("resolve fixture workspace root")
+        .store_key()
+}
+
+/// First-create the project's durable stores for `project_root`, the way
+/// `session new` does in production (#143 — a Turn never creates them).
+///
+/// Callers must already have `XDG_STATE_HOME` pointed at a test-owned root.
+pub(super) fn ensure_project_stores(project_root: &std::path::Path) {
+    let layout = lattice_session::StateLayout::resolve().expect("resolve state layout");
+    crate::stores::create_project_stores(&layout, test_project_key(project_root))
+        .expect("create fixture project stores");
+}
 
 pub(super) struct TestFixture {
     pub(super) _dir: tempfile::TempDir,
@@ -97,12 +122,20 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     init_test_git_repo(&root);
 
     let sessions_path = root.join("sessions.git");
-    std::fs::create_dir_all(&sessions_path).unwrap();
-    let session_api = SessionApi::git(&sessions_path);
-    let store: Box<dyn SessionGraphStore> =
-        Box::new(lattice_session::GitSessionGraphStore::new(&sessions_path));
+    let layout = lattice_session::StateLayout::in_state_root(&root.join(".test-state"));
+    let session_api =
+        SessionApi::git_create_with_layout(&sessions_path, &layout).expect("create session store");
+    let store: Box<dyn SessionGraphStore> = Box::new(
+        lattice_session::GitSessionGraphStore::open(&sessions_path).expect("open session store"),
+    );
     store
-        .create_session(TEST_SESSION_ID, None, "test", "main")
+        .create_session(
+            TEST_SESSION_ID,
+            None,
+            "test",
+            "main",
+            &test_project_key(&root),
+        )
         .expect("create default test session");
 
     TestFixture {
