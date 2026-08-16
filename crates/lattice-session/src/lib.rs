@@ -28,6 +28,10 @@ pub use graph::{
 pub mod git_graph;
 pub use git_graph::GitSessionGraphStore;
 
+/// Durable PendingTurn journal contract and pure reconciliation decision
+/// function (ADR 0005 §9/§14, GitHub #144).
+pub mod pending;
+
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 #[cfg(feature = "test-utils")]
@@ -57,6 +61,15 @@ pub enum SessionError {
     InvalidPersistedValue { field: &'static str, value: String },
     #[error("session '{0}' is busy: an operation holds the execution lock")]
     SessionBusy(String),
+    /// A PendingTurn journal object or chain violates the stage contract:
+    /// broken payload invariants, identity mismatch, illegal predecessor
+    /// shape, or facts inconsistent with the durable plan. Typed damage,
+    /// never repaired in place (ADR 0005 §9).
+    #[error("pending-turn journal corruption: {detail}")]
+    JournalCorruption {
+        /// What invariant was violated.
+        detail: String,
+    },
     /// A locked operation received a guard that does not prove exclusive
     /// ownership of this session's exact execution-lock path.
     #[error(

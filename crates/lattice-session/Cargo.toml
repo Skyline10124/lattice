@@ -8,6 +8,7 @@ description = "LATTICE session graph and git-style conversation refs"
 
 [dependencies]
 chrono = { workspace = true }
+lancet-protocol = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-store = { workspace = true }
 gix = { workspace = true }
