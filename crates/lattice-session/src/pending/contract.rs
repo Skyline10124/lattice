@@ -19,7 +19,7 @@ use lattice_conversation::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::binding::BindingPlan;
+use super::binding::{BindingPlan, PlannedBinding};
 use super::config::{MAX_MODEL_STEPS, TurnStartedFacts};
 use super::outcome::{ClosureOrigin, TurnOutcome, TurnUsageAggregate};
 use super::step::{StepClosedKind, StepClosingState};
@@ -170,6 +170,45 @@ fn validate_attempt_key(key: &ModelAttemptKey) -> Result<()> {
     Ok(())
 }
 
+/// Every structural Tool-call address in a journal snapshot must name the
+/// session that owns the journal. A binding digest is self-consistent over
+/// its own tuple (including the session), so the binding cannot detect a
+/// foreign session by itself; the snapshot is the nearest contract layer
+/// that knows the expected `SessionId` (ADR 0005 §9/§11).
+fn validate_binding_sessions<'a>(
+    bindings: impl IntoIterator<Item = &'a PlannedBinding>,
+    session_id: &SessionId,
+) -> Result<()> {
+    for binding in bindings {
+        if binding.address.message.session_id != *session_id {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "binding {} addresses session {} in the journal of {session_id}",
+                    binding.invocation_id, binding.address.message.session_id
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The pinned candidate is the final publication input; it must name the
+/// journal's own session (ADR 0005 §6/§9).
+fn validate_candidate_session(
+    candidate: &TurnCommitCandidate,
+    session_id: &SessionId,
+) -> Result<()> {
+    if candidate.session_id != session_id.as_str() {
+        return Err(SessionError::JournalCorruption {
+            detail: format!(
+                "pinned candidate names session '{}' in the journal of {session_id}",
+                candidate.session_id
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn validate_step_closed(kind: &StepClosedKind) -> Result<()> {
     use lattice_conversation::MessageSemantic;
     match kind {
@@ -189,11 +228,39 @@ fn validate_step_closed(kind: &StepClosedKind) -> Result<()> {
             Ok(())
         }
         StepClosedKind::ContinueModel {
+            model_step_ordinal,
             ordered_tool_results,
             ..
         } => {
+            if *model_step_ordinal >= MAX_MODEL_STEPS {
+                return Err(SessionError::JournalCorruption {
+                    detail: format!(
+                        "closed model step {model_step_ordinal} reaches the code-defined \
+                         limit {MAX_MODEL_STEPS}"
+                    ),
+                });
+            }
+            // A ContinueModel closes a binding plan, and a plan carries at
+            // least one binding, so the closure set is never empty. Its
+            // binding addresses are the durable witness that the recorded
+            // step ordinal is not a caller's assertion (ADR 0005 §9).
+            if ordered_tool_results.is_empty() {
+                return Err(SessionError::JournalCorruption {
+                    detail: "ContinueModel closes a binding plan and must carry its closures"
+                        .to_string(),
+                });
+            }
             for closure in ordered_tool_results {
                 closure.binding.validate()?;
+                if closure.binding.address.message.model_step_ordinal != *model_step_ordinal {
+                    return Err(SessionError::JournalCorruption {
+                        detail: format!(
+                            "ContinueModel names step {model_step_ordinal} but closes a \
+                             binding of step {}",
+                            closure.binding.address.message.model_step_ordinal
+                        ),
+                    });
+                }
             }
             Ok(())
         }
@@ -395,6 +462,7 @@ impl PendingSnapshot {
                         detail: "plan key does not match the snapshot Turn".to_string(),
                     });
                 }
+                validate_binding_sessions(&plan.bindings, &self.session_id)?;
             }
             PendingStage::StepClosing(state) => {
                 if state.plan_key.turn_id != self.turn_id {
@@ -402,14 +470,37 @@ impl PendingSnapshot {
                         detail: "step closing plan does not match the snapshot Turn".to_string(),
                     });
                 }
+                validate_binding_sessions(&state.bindings, &self.session_id)?;
+                if let Some(candidate) = &state.current_candidate
+                    && candidate.message.session_id != self.session_id
+                {
+                    return Err(SessionError::JournalCorruption {
+                        detail: format!(
+                            "pinned draft candidate addresses session {} in the journal of {}",
+                            candidate.message.session_id, self.session_id
+                        ),
+                    });
+                }
             }
-            PendingStage::StepClosed { .. } => {}
+            PendingStage::StepClosed { kind } => {
+                if let StepClosedKind::ContinueModel {
+                    ordered_tool_results,
+                    ..
+                } = kind
+                {
+                    validate_binding_sessions(
+                        ordered_tool_results.iter().map(|closure| &closure.binding),
+                        &self.session_id,
+                    )?;
+                }
+            }
             PendingStage::TurnClosing(facts) => {
                 if facts.turn_id != self.turn_id {
                     return Err(SessionError::JournalCorruption {
                         detail: "TurnClosing facts do not match the snapshot Turn".to_string(),
                     });
                 }
+                validate_candidate_session(&facts.candidate, &self.session_id)?;
             }
             PendingStage::Committed(facts) => {
                 if facts.turn_id != self.turn_id {
@@ -417,6 +508,7 @@ impl PendingSnapshot {
                         detail: "Committed facts do not match the snapshot Turn".to_string(),
                     });
                 }
+                validate_candidate_session(&facts.candidate, &self.session_id)?;
             }
         }
         Ok(())
@@ -482,13 +574,29 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                 ))
             }
         }
-        // The next model step after a ContinueModel step closure.
+        // The next model step after a ContinueModel step closure: the closed
+        // step names itself, so continuity is decided from the two snapshots
+        // alone — the next ordinal, first attempt (ADR 0005 §9/§10).
         (
             StepClosed {
-                kind: StepClosedKind::ContinueModel { .. },
+                kind:
+                    StepClosedKind::ContinueModel {
+                        model_step_ordinal, ..
+                    },
             },
             ModelAttemptStarted { key },
-        ) => validate_attempt_key(key),
+        ) => {
+            validate_attempt_key(key)?;
+            if key.model_step_ordinal == model_step_ordinal + 1 && key.attempt_ordinal == 0 {
+                Ok(())
+            } else {
+                mismatch(format!(
+                    "the step after closing step {model_step_ordinal} must be step {} \
+                     attempt 0, got {key:?}",
+                    model_step_ordinal + 1
+                ))
+            }
+        }
         // The first model step starts from TurnStarted.
         (TurnStarted(_), ModelAttemptStarted { key }) => {
             if key.model_step_ordinal == 0 && key.attempt_ordinal == 0 {
@@ -627,13 +735,24 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                 ),
             }
         }
-        // StepClosed after every binding is closed.
-        (StepClosing(state), StepClosed { .. }) => {
-            if state.all_closed() {
-                Ok(())
-            } else {
-                mismatch("StepClosed requires every binding closed".to_string())
+        // StepClosed after every binding is closed. A ContinueModel closure
+        // must name the step whose plan it just finished closing, so the
+        // ordinal the next attempt is validated against is durable fact.
+        (StepClosing(state), StepClosed { kind }) => {
+            if !state.all_closed() {
+                return mismatch("StepClosed requires every binding closed".to_string());
             }
+            if let StepClosedKind::ContinueModel {
+                model_step_ordinal, ..
+            } = kind
+                && *model_step_ordinal != state.plan_key.model_step_ordinal
+            {
+                return mismatch(format!(
+                    "ContinueModel names step {model_step_ordinal} but closes plan step {}",
+                    state.plan_key.model_step_ordinal
+                ));
+            }
+            Ok(())
         }
         // Reopen closure paths close the step directly from pre-execution
         // stages; a live coordinator also closes failed/cancelled/interrupted
@@ -1075,5 +1194,223 @@ mod tests {
         let back: PendingSnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(back, snapshot);
         back.validate().expect("round-tripped");
+    }
+
+    // ─── Review-round contract depth (F3/F4) ────────────────────────────
+
+    fn snapshot_of(stage: PendingStage) -> PendingSnapshot {
+        PendingSnapshot {
+            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
+            session_id: session_id(),
+            turn_id: turn_id(),
+            predecessor: Some("0".repeat(40)),
+            stage,
+            recorded_at: None,
+            root: None,
+        }
+    }
+
+    fn continue_model(step: u32) -> StepClosedKind {
+        let plan = one_call_plan();
+        StepClosedKind::ContinueModel {
+            model_step_ordinal: step,
+            ordered_tool_results: vec![super::super::step::ClosedBinding {
+                binding: plan.bindings[0].clone(),
+                outcome: lattice_conversation::ToolResultOutcome::NotExecuted,
+                material: super::super::step::MaterialAvailability::Unavailable {
+                    reason: super::super::facts::UnavailableMaterialReason::NotExecuted,
+                    digest: None,
+                    byte_length: None,
+                },
+            }],
+            conversation_digest: [0u8; 32],
+        }
+    }
+
+    #[test]
+    fn continue_model_names_the_step_it_closed() {
+        // F3: the closed-step contract must carry the step ordinal, and it
+        // must agree with the durable binding addresses it closes.
+        let ok = PendingStage::StepClosed {
+            kind: continue_model(0),
+        };
+        ok.validate().expect("ordinal agrees with the closures");
+
+        let StepClosedKind::ContinueModel {
+            ordered_tool_results,
+            conversation_digest,
+            ..
+        } = continue_model(0)
+        else {
+            unreachable!()
+        };
+        let lying = PendingStage::StepClosed {
+            kind: StepClosedKind::ContinueModel {
+                model_step_ordinal: 3,
+                ordered_tool_results: ordered_tool_results.clone(),
+                conversation_digest,
+            },
+        };
+        assert!(
+            matches!(
+                lying.validate(),
+                Err(SessionError::JournalCorruption { .. })
+            ),
+            "a ContinueModel ordinal must not contradict its closures"
+        );
+
+        let empty = PendingStage::StepClosed {
+            kind: StepClosedKind::ContinueModel {
+                model_step_ordinal: 0,
+                ordered_tool_results: vec![],
+                conversation_digest,
+            },
+        };
+        assert!(
+            matches!(
+                empty.validate(),
+                Err(SessionError::JournalCorruption { .. })
+            ),
+            "ContinueModel closes a plan, so it always carries closures"
+        );
+    }
+
+    #[test]
+    fn the_step_after_continue_model_is_contiguous_and_starts_at_attempt_zero() {
+        // F3: `StepClosed(ContinueModel) -> ModelAttemptStarted` must pin the
+        // next ordinal and a fresh attempt, not merely a legal attempt key.
+        let closed = PendingStage::StepClosed {
+            kind: continue_model(0),
+        };
+        validate_transition(
+            &closed,
+            &PendingStage::ModelAttemptStarted {
+                key: attempt_key(1, 0),
+            },
+        )
+        .expect("step 0 continues into step 1 attempt 0");
+
+        for illegal in [attempt_key(0, 0), attempt_key(2, 0), attempt_key(1, 1)] {
+            assert!(
+                validate_transition(&closed, &PendingStage::ModelAttemptStarted { key: illegal })
+                    .is_err(),
+                "non-contiguous step or non-zero first attempt must be rejected: {illegal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn continue_model_must_name_the_plan_step_it_closes() {
+        // F3: the recorded ordinal is tied to the closing loop it ends.
+        let plan = one_call_plan();
+        let mut closing = step_closing_cursor_0(&plan);
+        closing.closure_cursor = 1;
+        closing.closures = vec![super::super::step::ClosedBinding {
+            binding: plan.bindings[0].clone(),
+            outcome: lattice_conversation::ToolResultOutcome::NotExecuted,
+            material: super::super::step::MaterialAvailability::Unavailable {
+                reason: super::super::facts::UnavailableMaterialReason::NotExecuted,
+                digest: None,
+                byte_length: None,
+            },
+        }];
+        validate_transition(
+            &PendingStage::StepClosing(closing.clone()),
+            &PendingStage::StepClosed {
+                kind: continue_model(0),
+            },
+        )
+        .expect("the plan's own step");
+        assert!(
+            validate_transition(
+                &PendingStage::StepClosing(closing),
+                &PendingStage::StepClosed {
+                    kind: continue_model(1),
+                },
+            )
+            .is_err(),
+            "a ContinueModel must close the step it names"
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_addresses_from_another_session() {
+        // F4: a binding digest is self-consistent over its own tuple, so a
+        // cross-session address survives `BindingPlan::validate`. The
+        // aggregate contract — the snapshot that knows the expected
+        // SessionId — must fail closed on it.
+        let other = SessionId::parse("00000000000000000000000000000001").unwrap();
+        let mut plan = one_call_plan();
+        plan.bindings[0].address.message.session_id = other;
+        plan.bindings[0].binding_digest =
+            super::super::binding::PlannedBinding::compute_binding_digest(
+                &plan.bindings[0].invocation_id,
+                &plan.bindings[0].address,
+                &plan.bindings[0].method,
+                &plan.bindings[0].descriptor_identity,
+                &plan.bindings[0].arguments_digest,
+            );
+        plan.validate().expect("the tuple is internally consistent");
+
+        for stage in [
+            PendingStage::BindingPlanned {
+                plan: plan.clone(),
+                usage: None,
+            },
+            PendingStage::Bound { plan: plan.clone() },
+            PendingStage::StepClosing(step_closing_cursor_0(&plan)),
+        ] {
+            let snapshot = snapshot_of(stage);
+            assert!(
+                matches!(
+                    snapshot.validate(),
+                    Err(SessionError::JournalCorruption { .. })
+                ),
+                "a cross-session binding address must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_rejects_a_candidate_naming_another_session() {
+        // F4: the pinned candidate is the final publication input; its
+        // session must be this journal's session.
+        let candidate = TurnCommitCandidate {
+            session_id: "00000000000000000000000000000001".to_string(),
+            turn_id: turn_id(),
+            side_parent_ids: vec![],
+            messages: vec![crate::graph::GraphMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            agent_name: "coder".to_string(),
+            profile_snapshot_hash: "h".to_string(),
+            profile_snapshot_json: "{}".to_string(),
+            model: "m".to_string(),
+            provider: "p".to_string(),
+            outcome: TurnOutcome::Completed {
+                finish_reason: super::super::outcome::TurnFinishReason::Stop,
+            },
+            origin: ClosureOrigin::Reconciled,
+            commit_message: "hi".to_string(),
+            usage_aggregate: None,
+            workspace_history_oid: None,
+            created_at: "2026-08-16T00:00:00Z".to_string(),
+        };
+        let snapshot = snapshot_of(PendingStage::TurnClosing(TurnClosingFacts {
+            turn_id: turn_id(),
+            candidate,
+        }));
+        assert!(
+            matches!(
+                snapshot.validate(),
+                Err(SessionError::JournalCorruption { .. })
+            ),
+            "a candidate from another session must fail closed"
+        );
     }
 }

@@ -150,6 +150,12 @@ pub enum StepClosedKind {
     /// The step's Tool results ask for another model step. At reopen this
     /// never continues: the Turn closes interrupted.
     ContinueModel {
+        /// Which model step this closure ended. Carried explicitly so the
+        /// journal's transition contract can pin the next step's ordinal
+        /// without scanning mutable state outside the two snapshots
+        /// (ADR 0005 §9/§10); it must equal the closed plan's step and the
+        /// step ordinal every closure's binding address records.
+        model_step_ordinal: u32,
         /// Ordered closures of the step's bindings.
         ordered_tool_results: Vec<ClosedBinding>,
         /// Semantic digest of the step's conversation extension.

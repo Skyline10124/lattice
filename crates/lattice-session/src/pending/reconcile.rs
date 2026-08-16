@@ -220,7 +220,7 @@ pub fn reconcile(
             .unwrap_or_default();
         let messages = candidate_messages(snapshot, root, &closures);
         actions.push(ReconciliationAction::PublishTurnClosing {
-            candidate: build_candidate(snapshot, root, outcome.clone(), messages),
+            candidate: build_candidate(snapshot, root, outcome.clone(), messages)?,
         });
         actions.push(ReconciliationAction::FinalizeTurn);
     }
@@ -660,16 +660,26 @@ fn build_candidate(
     root: &TurnStartedFacts,
     outcome: TurnOutcome,
     messages: Vec<GraphMessage>,
-) -> TurnCommitCandidate {
+) -> Result<TurnCommitCandidate> {
     // The durable journal tip's own committer time: recovery introduces no
-    // new clock. A manually built snapshot without one fails closed.
-    let created_at = snapshot
+    // new clock, and it never substitutes another durable field for the one
+    // it is missing. `recorded_at` is filled by the store on read, so a
+    // snapshot without one did not come from the journal — fail closed
+    // rather than pin a timestamp this tip cannot prove (ADR 0005 §6/§9).
+    let recorded_at = snapshot
         .recorded_at
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
-        .map(|time| time.to_rfc3339())
-        .unwrap_or_else(|| root.accepted_at.clone());
+        .ok_or_else(|| SessionError::JournalCorruption {
+            detail: "snapshot carries no journal committer time; a closure candidate cannot \
+                     pin a durable created_at"
+                .to_string(),
+        })?;
+    let created_at = chrono::DateTime::from_timestamp(recorded_at, 0)
+        .ok_or_else(|| SessionError::JournalCorruption {
+            detail: format!("journal committer time {recorded_at} is not a representable instant"),
+        })?
+        .to_rfc3339();
     let commit_message = crate::graph::derive_commit_message(&messages);
-    TurnCommitCandidate {
+    Ok(TurnCommitCandidate {
         session_id: snapshot.session_id.to_string(),
         turn_id: snapshot.turn_id,
         side_parent_ids: Vec::new(),
@@ -685,7 +695,7 @@ fn build_candidate(
         usage_aggregate: tip_usage(snapshot).map(|usage| TurnUsageAggregate::Partial { usage }),
         workspace_history_oid: None,
         created_at,
-    }
+    })
 }
 
 /// The frozen user message in transcript shape.
@@ -1533,9 +1543,19 @@ mod tests {
         );
 
         // ContinueModel -> interrupted, never a next provider request.
+        let closed_plan = plan(1);
         let snap = snapshot(PendingStage::StepClosed {
             kind: StepClosedKind::ContinueModel {
-                ordered_tool_results: vec![],
+                model_step_ordinal: closed_plan.plan_key.model_step_ordinal,
+                ordered_tool_results: vec![ClosedBinding {
+                    binding: closed_plan.bindings[0].clone(),
+                    outcome: ToolResultOutcome::NotExecuted,
+                    material: MaterialAvailability::Unavailable {
+                        reason: UnavailableMaterialReason::NotExecuted,
+                        digest: None,
+                        byte_length: None,
+                    },
+                }],
                 conversation_digest: [0u8; 32],
             },
         });
@@ -1594,5 +1614,106 @@ mod tests {
         ));
         let result = reconcile(&snap, &empty_facts()).expect("plan");
         assert_eq!(result.actions, vec![ReconciliationAction::FinalizeTurn]);
+    }
+
+    // ─── Review-round reducer depth (F9/F11) ────────────────────────────
+
+    #[test]
+    fn a_snapshot_without_a_journal_commit_time_fails_closed() {
+        // F9: `created_at` is the durable journal tip's own committer time.
+        // A snapshot that carries none did not come from the store, so the
+        // reducer cannot pin a durable candidate timestamp — and it must not
+        // substitute another field. Fail closed instead of guessing.
+        let mut snap = snapshot(PendingStage::MessageComplete {
+            key: key(0, 0),
+            message: text_message("done"),
+            usage: None,
+        });
+        snap.recorded_at = None;
+        let err = reconcile(&snap, &empty_facts()).expect_err("no durable commit time");
+        assert!(
+            matches!(err, SessionError::JournalCorruption { .. }),
+            "got {err:?}"
+        );
+
+        // With the store-filled time the same snapshot closes normally, and
+        // the candidate pins exactly that time (no new clock).
+        snap.recorded_at = Some(STEP_TIME);
+        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let pinned = plan
+            .actions
+            .iter()
+            .find_map(|action| match action {
+                ReconciliationAction::PublishTurnClosing { candidate } => Some(candidate),
+                _ => None,
+            })
+            .expect("closure candidate");
+        assert_eq!(
+            pinned.created_at,
+            chrono::DateTime::from_timestamp(STEP_TIME, 0)
+                .expect("representable")
+                .to_rfc3339()
+        );
+    }
+
+    #[test]
+    fn a_different_durable_reservation_stays_fail_closed() {
+        // F11: ADR 0005 §9 allows a *clean* UUID collision to CAS-publish a
+        // new candidate revision only after the InvocationStore proves the
+        // prior exact plan absent. The synthetic facts vocabulary records no
+        // plan ownership per invocation, so it cannot distinguish a clean
+        // collision from a damaged reservation. Until #139-A supplies real
+        // InvocationStore facts, both stay typed corruption — this test pins
+        // that boundary so the deferral is explicit rather than accidental.
+        let plan = plan(1);
+        let mut facts = InvocationFactsSnapshot::empty();
+        let mut different = plan.bindings.clone();
+        different[0].descriptor_identity = "another-descriptor".to_string();
+        different[0].binding_digest = PlannedBinding::compute_binding_digest(
+            &different[0].invocation_id,
+            &different[0].address,
+            &different[0].method,
+            &different[0].descriptor_identity,
+            &different[0].arguments_digest,
+        );
+        facts.plan = Some(super::super::facts::PlanFacts {
+            plan_key: plan.plan_key,
+            bindings: different,
+        });
+        for binding in &plan.bindings {
+            facts
+                .invocations
+                .insert(binding.invocation_id, InvocationFact::Reserved);
+        }
+        let snap = snapshot(PendingStage::BindingPlanned {
+            plan: plan.clone(),
+            usage: None,
+        });
+        let err = reconcile(&snap, &facts).expect_err("different reservation");
+        assert!(
+            matches!(err, SessionError::JournalCorruption { .. }),
+            "got {err:?}"
+        );
+
+        // The exact durable reservation still reuses the same candidates and
+        // never mints new ones.
+        let mut exact = InvocationFactsSnapshot::empty();
+        exact.plan = Some(super::super::facts::PlanFacts {
+            plan_key: plan.plan_key,
+            bindings: plan.bindings.clone(),
+        });
+        for binding in &plan.bindings {
+            exact
+                .invocations
+                .insert(binding.invocation_id, InvocationFact::Reserved);
+        }
+        let plan_out = reconcile(&snap, &exact).expect("exact reservation closes");
+        assert!(
+            !plan_out
+                .actions
+                .iter()
+                .any(|a| matches!(a, ReconciliationAction::ReserveExactPlan { .. })),
+            "an already-durable exact plan is never reserved again"
+        );
     }
 }

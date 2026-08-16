@@ -154,7 +154,50 @@ impl GitSessionGraphStore {
             ..snapshot
         };
         snapshot.validate()?;
+        self.validate_journal_lineage(oid, &snapshot)?;
         Ok(PendingTurnTip { oid, snapshot })
+    }
+
+    /// The payload's `predecessor` and the commit's git parent are two
+    /// recordings of the same lineage fact; a chain where they disagree is
+    /// typed corruption, never a readable journal. The chain root has no
+    /// payload predecessor: its single git parent is the frozen parent
+    /// conversation tip it grafts onto (ADR 0005 §9), and a root frozen on
+    /// an empty branch has no parent at all.
+    fn validate_journal_lineage(
+        &self,
+        oid: gix::ObjectId,
+        snapshot: &PendingSnapshot,
+    ) -> Result<()> {
+        let parents = self.kernel().commit_parents(oid)?;
+        let first = parents.first().map(|parent| parent.to_string());
+        let expected = match (&snapshot.predecessor, &snapshot.stage) {
+            (Some(predecessor), _) => Some(predecessor.clone()),
+            // `PendingSnapshot::validate` already rejects a non-`TurnStarted`
+            // stage without a predecessor, so this is the chain root.
+            (None, PendingStage::TurnStarted(facts)) => facts.parent_conversation_tip.clone(),
+            (None, other) => {
+                return Err(SessionError::JournalCorruption {
+                    detail: format!(
+                        "journal commit {oid} records stage {} with no predecessor",
+                        other.stage_name()
+                    ),
+                });
+            }
+        };
+        if first != expected || parents.len() > 1 {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "journal commit {oid} records predecessor {expected:?} but its git \
+                     parents are {:?}",
+                    parents
+                        .iter()
+                        .map(|parent| parent.to_string())
+                        .collect::<Vec<_>>()
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Walk the predecessor chain back to the `TurnStarted` snapshot of the
@@ -318,6 +361,40 @@ impl GitSessionGraphStore {
                 tip.snapshot.turn_id
             )));
         }
+
+        // Idempotent exact retry. The CAS is the publication authority and
+        // the ref durability barrier runs after it, so a barrier failure
+        // returns `Durability` on an already-published snapshot. The
+        // byte-identical retry of that exact transition must recognize its
+        // own snapshot instead of failing as an illegal edge, and must then
+        // re-attempt the barrier. Confirmation is exact — the tip has to be
+        // the very commit this call would write, computed from the tip's own
+        // recorded predecessor — so a different candidate or a CAS race is
+        // never mistaken for success.
+        if tip.snapshot.stage == next_stage
+            && tip.snapshot.recorded_at == Some(recorded_at_unix)
+            && let Some(predecessor) = tip.snapshot.predecessor.clone()
+        {
+            let candidate = PendingSnapshot {
+                schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
+                session_id: tip.snapshot.session_id,
+                turn_id,
+                predecessor: Some(predecessor.clone()),
+                stage: next_stage.clone(),
+                recorded_at: None,
+                root: None,
+            };
+            let candidate_oid = self.write_pending_commit(
+                &candidate,
+                Some(parse_oid(&predecessor)?),
+                recorded_at_unix,
+            )?;
+            if candidate_oid == tip.oid {
+                self.kernel().fsync_pending(&[ref_name.as_str()])?;
+                return Ok(tip);
+            }
+        }
+
         validate_transition(&tip.snapshot.stage, &next_stage)
             .map_err(|e| SessionError::Conflict(e.to_string()))?;
 

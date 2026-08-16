@@ -817,3 +817,321 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
     // A further command has nothing to reconcile.
     assert!(reopened.read_active_turn(&session).expect("read").is_none());
 }
+
+#[test]
+fn advance_after_a_published_but_undurable_ref_is_an_exact_idempotent_retry() {
+    // F7: the CAS moved `active-turn` and the ref barrier then failed. The
+    // caller sees `Durability`, but the snapshot IS published. After a
+    // strict reopen the byte-identical retry of that exact transition must
+    // confirm its own published snapshot and re-attempt the barrier, rather
+    // than fail as an illegal `ModelAttemptStarted -> ModelAttemptStarted`
+    // edge. Confirmation is exact: a different candidate at the same
+    // position still conflicts.
+    let fixture = temp_dir("pending-crash-advance-published");
+    let store = GitSessionGraphStore::create(fixture.path().join("sessions.git")).expect("store");
+    let session = SESSION.to_string();
+    let driver = JournalDriver::new(&store, &session);
+    let begun = driver.begin();
+    drop(driver);
+
+    let stage = PendingStage::ModelAttemptStarted {
+        key: attempt_key(0, 0),
+    };
+    {
+        let lock = store
+            .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+            .expect("lock");
+        lattice_store::fault::fail_ref_fsync(true);
+        let err = store.advance_pending_turn(&session, stage.clone(), 100, &lock);
+        assert!(
+            matches!(
+                err,
+                Err(SessionError::Store(
+                    lattice_store::StoreError::Durability { .. }
+                ))
+            ),
+            "got {err:?}"
+        );
+    }
+
+    // The ref did move: published, durability unproven.
+    let published = store
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("tip");
+    assert_ne!(
+        published.oid, begun.oid,
+        "the CAS completed before the barrier failed"
+    );
+
+    let reopened = reopen(&fixture);
+    let lock = reopened
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    let again = reopened
+        .advance_pending_turn(&session, stage, 100, &lock)
+        .expect("the exact retry confirms its own published snapshot");
+    assert_eq!(again.oid, published.oid, "no second snapshot is published");
+
+    // Same stage, different pinned commit time: a different candidate, so
+    // the illegal-transition conflict stands.
+    let other = reopened.advance_pending_turn(
+        &session,
+        PendingStage::ModelAttemptStarted {
+            key: attempt_key(0, 0),
+        },
+        101,
+        &lock,
+    );
+    assert!(
+        matches!(other, Err(SessionError::Conflict(_))),
+        "a different candidate must not be confirmed: got {other:?}"
+    );
+    assert_eq!(
+        reopened
+            .read_active_turn(&session)
+            .expect("read")
+            .expect("tip")
+            .oid,
+        published.oid
+    );
+}
+
+#[test]
+fn advance_before_publication_leaves_the_previous_tip_and_writes_no_ref() {
+    // F7 counterpart: an object-barrier failure happens *before* the CAS, so
+    // nothing is published and the exact retry is a normal first publication.
+    let fixture = temp_dir("pending-crash-advance-unpublished");
+    let store = GitSessionGraphStore::create(fixture.path().join("sessions.git")).expect("store");
+    let session = SESSION.to_string();
+    let driver = JournalDriver::new(&store, &session);
+    let begun = driver.begin();
+    drop(driver);
+
+    let stage = PendingStage::ModelAttemptStarted {
+        key: attempt_key(0, 0),
+    };
+    {
+        let lock = store
+            .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+            .expect("lock");
+        lattice_store::fault::fail_object_fsync(true);
+        let err = store.advance_pending_turn(&session, stage.clone(), 100, &lock);
+        assert!(
+            matches!(
+                err,
+                Err(SessionError::Store(
+                    lattice_store::StoreError::Durability { .. }
+                ))
+            ),
+            "got {err:?}"
+        );
+    }
+    assert_eq!(
+        store
+            .read_active_turn(&session)
+            .expect("read")
+            .expect("tip")
+            .oid,
+        begun.oid,
+        "an unpublished failure never moves active-turn"
+    );
+
+    let reopened = reopen(&fixture);
+    let lock = reopened
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    let advanced = reopened
+        .advance_pending_turn(&session, stage, 100, &lock)
+        .expect("retry publishes for the first time");
+    assert_eq!(
+        advanced.snapshot.predecessor.as_deref(),
+        Some(begun.oid.to_string().as_str())
+    );
+}
+
+// ─── Real process-crash coverage (F2, AC#12) ────────────────────────────
+//
+// Fault injection above demonstrates call ordering and classification. This
+// fixture demonstrates *process-crash* consistency the way ADR 0005 §18
+// names it and #143 already gates first-create: a child process is SIGKILLed
+// mid-journal, and a strict reopen may only observe the old tip or a
+// complete new one. It is not a claim of hardware power-loss consistency.
+
+const CRASH_CHILD_ENV: &str = "LATTICE_PENDING_CRASH_CHILD";
+const CRASH_TEST_NAME: &str =
+    "git_graph::tests::pending_crash::sigkill_leaves_only_the_old_tip_or_a_complete_new_one";
+const CRASH_TURNS: u32 = 200;
+
+fn crash_turn_id(index: u32) -> lancet_protocol::TurnId {
+    lancet_protocol::TurnId::parse(&format!("00000000-0000-4000-8000-{index:012x}"))
+        .expect("turn id")
+}
+
+fn crash_head(store: &GitSessionGraphStore) -> Option<String> {
+    store
+        .kernel()
+        .ref_target(&format!("refs/lattice/sessions/{SESSION}/heads/main"))
+        .expect("head")
+        .map(|oid| oid.to_string())
+}
+
+/// Child mode: drive complete Turn lifecycles in a tight loop so the parent's
+/// SIGKILL lands at an arbitrary point inside a snapshot advance or the final
+/// ref transaction.
+fn sigkill_child_loop(root: &std::path::Path) {
+    let store = GitSessionGraphStore::create(root.join("sessions.git")).expect("create store");
+    store
+        .create_session(SESSION, None, "coder", "main", &super::test_project_key())
+        .expect("session");
+
+    let lock = store
+        .lock_execution(SESSION, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    for index in 0..CRASH_TURNS {
+        let turn = crash_turn_id(index);
+        let mut facts = turn_started_facts(crash_head(&store));
+        facts.turn_id = turn;
+        store.begin_pending_turn(facts, &lock).expect("begin");
+        if index == 0 {
+            // Signal readiness only once a Turn is genuinely pending, so
+            // even a zero-delay kill lands inside the journal rather than
+            // before it and the parent's progress assertion is exact.
+            std::fs::write(root.join("ready"), b"ready").expect("ready marker");
+        }
+        store
+            .advance_pending_turn(
+                SESSION,
+                PendingStage::ModelAttemptStarted {
+                    key: lancet_protocol::ModelAttemptKey {
+                        turn_id: turn,
+                        model_step_ordinal: 0,
+                        attempt_ordinal: 0,
+                    },
+                },
+                100,
+                &lock,
+            )
+            .expect("attempt");
+        store
+            .advance_pending_turn(
+                SESSION,
+                PendingStage::StepClosed {
+                    kind: crate::pending::StepClosedKind::FinishTurn {
+                        final_message: assistant_text("done"),
+                    },
+                },
+                101,
+                &lock,
+            )
+            .expect("closed");
+        let mut candidate = completed_candidate(None);
+        candidate.turn_id = turn;
+        store
+            .advance_pending_turn(
+                SESSION,
+                PendingStage::TurnClosing(TurnClosingFacts {
+                    turn_id: turn,
+                    candidate,
+                }),
+                102,
+                &lock,
+            )
+            .expect("closing");
+        store
+            .finalize_turn(SESSION, &turn, &lock)
+            .expect("finalize");
+    }
+}
+
+/// Parent assertions after one kill: the published Turn pins are a contiguous
+/// prefix, the branch head is the last of them, any surviving `active-turn`
+/// is exactly the next Turn and reconciles to one deterministic closure, and
+/// nothing half-published is observable.
+fn assert_crash_consistency(root: &std::path::Path) {
+    // Strict reopen: session-ref invariants, journal-object validation, and
+    // turn-pin identity all run before the handle exists.
+    let store = GitSessionGraphStore::open(root.join("sessions.git")).expect("strict reopen");
+    let session = SESSION.to_string();
+
+    let mut published = 0u32;
+    let mut last_pin: Option<String> = None;
+    for index in 0..CRASH_TURNS {
+        let turn = crash_turn_id(index).to_string();
+        match store.read_turn_pin(&session, &turn).expect("pin") {
+            Some(pin) => {
+                assert_eq!(published, index, "turn pins must be a contiguous prefix");
+                let commit = store
+                    .get_turn_commit(&session, &pin)
+                    .expect("commit")
+                    .expect("a pin always resolves to its conversation commit");
+                // Pin/manifest identity itself was already enforced by the
+                // strict reopen above.
+                assert_eq!(commit.session_id, session);
+                published += 1;
+                last_pin = Some(pin);
+            }
+            None => break,
+        }
+    }
+
+    let active = store.read_active_turn(&session).expect("read active turn");
+    if let Some(tip) = &active {
+        assert_eq!(
+            tip.snapshot.turn_id,
+            crash_turn_id(published),
+            "the pending Turn is exactly the first unpublished one"
+        );
+        // A survivor is always closable from durable facts alone.
+        let plan = reconcile(&tip.snapshot, &InvocationFactsSnapshot::empty()).expect("one plan");
+        assert_eq!(plan.turn_id, tip.snapshot.turn_id);
+    }
+    assert!(
+        published > 0 || active.is_some(),
+        "the child made no observable progress before the kill"
+    );
+    assert_eq!(
+        crash_head(&store),
+        last_pin,
+        "the branch head is the last fully published Turn: the final transaction \
+         never lands partially"
+    );
+}
+
+#[test]
+fn sigkill_leaves_only_the_old_tip_or_a_complete_new_one() {
+    if let Ok(dir) = std::env::var(CRASH_CHILD_ENV) {
+        sigkill_child_loop(std::path::Path::new(&dir));
+        return;
+    }
+
+    // Several kill points so the window is not always the same stage.
+    for delay_ms in [0u64, 25, 90] {
+        let dir = temp_dir("pending-sigkill");
+        let exe = std::env::current_exe().expect("test binary");
+        let mut child = std::process::Command::new(exe)
+            .args([CRASH_TEST_NAME, "--exact", "--nocapture"])
+            .env(CRASH_CHILD_ENV, dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn crash child");
+
+        // Wait until the child is inside the Turn loop, then kill it there.
+        let ready = dir.path().join("ready");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !ready.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready.exists(), "child never reached the Turn loop");
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        child.kill().expect("SIGKILL the child");
+        let status = child.wait().expect("wait for child");
+        assert!(
+            !status.success(),
+            "the child must be killed, not finish {CRASH_TURNS} turns"
+        );
+
+        assert_crash_consistency(dir.path());
+    }
+}

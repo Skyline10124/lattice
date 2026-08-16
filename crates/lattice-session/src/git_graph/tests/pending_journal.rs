@@ -497,3 +497,353 @@ fn finalize_conflict_publishes_nothing() {
         Some(moved)
     );
 }
+
+// ─── Review-round depth coverage (F5/F6/F1) ─────────────────────────────
+
+/// Write one journal-shaped commit with an arbitrary payload and parent set,
+/// bypassing every publication contract. Corruption fixtures only.
+fn forge_journal_commit(
+    store: &GitSessionGraphStore,
+    payload: &serde_json::Value,
+    parents: &[gix::ObjectId],
+) -> gix::ObjectId {
+    let bytes = crate::graph::canonical_json_bytes(payload);
+    let blob = store.kernel().write_blob(&bytes).expect("blob");
+    let tree = store
+        .kernel()
+        .write_tree(lattice_store::TreeSpec::new().upsert(
+            "pending.json",
+            gix::objs::tree::EntryKind::Blob,
+            blob,
+        ))
+        .expect("tree");
+    store
+        .kernel()
+        .write_commit_at(tree, parents, "forged journal commit", 200)
+        .expect("commit")
+}
+
+fn force_active_turn(store: &GitSessionGraphStore, session: &str, oid: gix::ObjectId) {
+    let ref_name = format!("refs/lattice/sessions/{session}/active-turn");
+    let current = store.kernel().ref_target(&ref_name).expect("ref");
+    let expect = match current {
+        Some(existing) => RefExpectation::MustMatch(existing),
+        None => RefExpectation::MustNotExist,
+    };
+    store
+        .kernel()
+        .cas_ref(&ref_name, oid, expect, "test forge active-turn")
+        .expect("forced");
+}
+
+#[test]
+fn strict_open_validates_the_active_turn_snapshot_in_depth() {
+    // F5.1: strict open must run the full domain invariants of the
+    // `active-turn` object, not just parse it and compare the session.
+    let (fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    let started = store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    drop(lock);
+
+    // A payload that parses and names the right session but violates the
+    // snapshot contract: a `TurnStarted` stage carrying a predecessor.
+    let mut payload = serde_json::to_value(&started.snapshot).expect("payload");
+    payload["predecessor"] = serde_json::Value::String("0".repeat(40));
+    let forged = forge_journal_commit(&store, &payload, &[]);
+    force_active_turn(&store, &session, forged);
+    drop(store);
+
+    let err = GitSessionGraphStore::open(fixture.path().join("sessions.git"))
+        .expect_err("strict open must reject the invalid journal object");
+    assert!(
+        matches!(err, SessionError::JournalCorruption { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn strict_open_validates_the_turn_pin_identity() {
+    // F5.2: a `turns/<TurnId>` pin must point at the conversation commit of
+    // *that* Turn of *this* session, not merely at some commit carrying a
+    // manifest.
+    let (fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::StepClosed {
+                kind: crate::pending::StepClosedKind::FinishTurn {
+                    final_message: assistant_text("done"),
+                },
+            },
+            99,
+            &lock,
+        )
+        .expect("closed");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::TurnClosing(turn_closing(completed_candidate(None))),
+            100,
+            &lock,
+        )
+        .expect("closing");
+    let committed = store
+        .finalize_turn(&session, &turn_id(), &lock)
+        .expect("finalize");
+    drop(lock);
+
+    // A second pin under a different TurnId aimed at the same commit.
+    let other = "00000000-0000-4000-8000-0000000000ff";
+    let pin = format!("refs/lattice/sessions/{session}/turns/{other}");
+    store
+        .kernel()
+        .cas_ref(
+            &pin,
+            crate::git_graph::helpers::parse_oid(&committed.commit_id).expect("oid"),
+            RefExpectation::MustNotExist,
+            "test forge turn pin",
+        )
+        .expect("forged pin");
+    drop(store);
+
+    let err = GitSessionGraphStore::open(fixture.path().join("sessions.git"))
+        .expect_err("strict open must reject a mislabelled turn pin");
+    assert!(
+        matches!(err, SessionError::JournalCorruption { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn journal_read_rejects_a_predecessor_that_diverges_from_the_git_parent() {
+    // F6: `pending.json`'s `predecessor` and the commit's git parent are two
+    // recordings of the same fact. A chain where they disagree is typed
+    // corruption, not a readable journal.
+    let (_f, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    let started = store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    let attempt = store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(0, 0),
+            },
+            100,
+            &lock,
+        )
+        .expect("attempt");
+    drop(lock);
+
+    // Same payload (predecessor = the attempt snapshot), but the git parent
+    // is grafted back onto the chain root.
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "session_id": SESSION,
+        "turn_id": TURN,
+        "predecessor": attempt.oid.to_string(),
+        "stage": {
+            "stage": "message_complete",
+            "key": {
+                "turn_id": TURN,
+                "model_step_ordinal": 0,
+                "attempt_ordinal": 0,
+            },
+            "message": serde_json::to_value(assistant_text("done")).expect("message"),
+            "usage": serde_json::Value::Null,
+        },
+    });
+    let forged = forge_journal_commit(&store, &payload, &[started.oid]);
+    force_active_turn(&store, &session, forged);
+
+    let err = store
+        .read_active_turn(&session)
+        .expect_err("divergent predecessor must fail closed");
+    assert!(
+        matches!(err, SessionError::JournalCorruption { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn turn_started_root_rejects_a_graft_onto_a_foreign_parent() {
+    // F6, root case: the chain root's git parent is the frozen conversation
+    // tip. A root grafted onto anything else is corruption, and a root with
+    // no frozen tip must have no parent at all.
+    let (_f, store, session) = setup();
+    let first = store
+        .commit_turn(super::commit_input(
+            &session,
+            vec![],
+            vec![
+                crate::test_helpers::user_msg("first"),
+                crate::test_helpers::assistant_msg("reply"),
+            ],
+            TurnCommitStatus::Completed,
+        ))
+        .expect("first turn");
+
+    // Facts freeze the real tip, but the commit is grafted onto nothing.
+    let payload = serde_json::to_value(crate::pending::contract::PendingSnapshot {
+        schema_version: 1,
+        session_id: session_id(),
+        turn_id: turn_id(),
+        predecessor: None,
+        stage: PendingStage::TurnStarted(turn_started_facts(Some(first.commit_id.clone()))),
+        recorded_at: None,
+        root: None,
+    })
+    .expect("payload");
+    let forged = forge_journal_commit(&store, &payload, &[]);
+    force_active_turn(&store, &session, forged);
+
+    let err = store
+        .read_active_turn(&session)
+        .expect_err("ungrafted root must fail closed");
+    assert!(
+        matches!(err, SessionError::JournalCorruption { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn journal_finalized_turns_keep_no_legacy_outcome_authority() {
+    // F1 / AC#8 migration contract: the typed `TurnOutcome` is the only
+    // outcome authority a journal-finalized Turn records. The conversation
+    // manifest's `disposition`, lifecycle evidence, and `terminal_reason`
+    // carry nothing #139-B could lose by deleting them:
+    //
+    // - `disposition` is always `not_applicable` (worktree/promotion
+    //   lifecycle was removed by #62);
+    // - `turn/audit.json` records no lifecycle evidence;
+    // - `terminal_reason` is always absent (free text is never logic
+    //   authority, ADR 0005 §15);
+    // - `execution_status` is exactly `TurnOutcome::legacy_status()`.
+    use crate::pending::outcome::{
+        TurnCancellation, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
+    };
+
+    let outcomes = [
+        TurnOutcome::Completed {
+            finish_reason: TurnFinishReason::Stop,
+        },
+        TurnOutcome::Failed {
+            reason: TurnFailure::ModelRequestFailed,
+        },
+        TurnOutcome::Cancelled {
+            reason: TurnCancellation::UserCancelled,
+        },
+        TurnOutcome::Interrupted {
+            reason: TurnInterruption::ProcessInterruptedBeforeModelAttempt,
+        },
+    ];
+
+    for outcome in outcomes {
+        let (_f, store, session) = setup();
+        let lock = store
+            .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+            .expect("lock");
+        store
+            .begin_pending_turn(turn_started_facts(None), &lock)
+            .expect("begin");
+        let mut candidate = completed_candidate(None);
+        candidate.outcome = outcome.clone();
+        store
+            .advance_pending_turn(
+                &session,
+                PendingStage::StepClosed {
+                    kind: crate::pending::StepClosedKind::FinishTurn {
+                        final_message: assistant_text("done"),
+                    },
+                },
+                99,
+                &lock,
+            )
+            .expect("closed");
+        store
+            .advance_pending_turn(
+                &session,
+                PendingStage::TurnClosing(turn_closing(candidate)),
+                100,
+                &lock,
+            )
+            .expect("closing");
+        let committed = store
+            .finalize_turn(&session, &turn_id(), &lock)
+            .expect("finalize");
+
+        // The typed outcome is durable in the journal `Committed` object.
+        let commit_oid = crate::git_graph::helpers::parse_oid(&committed.commit_id).expect("oid");
+        let journal_oid = store.kernel().commit_parents(commit_oid).expect("parents")[0];
+        let journal = store
+            .read_pending_snapshot_at(journal_oid)
+            .expect("committed journal object");
+        match journal.snapshot.stage {
+            PendingStage::Committed(ref facts) => {
+                assert_eq!(facts.candidate.outcome, outcome, "typed authority");
+            }
+            ref other => panic!("expected Committed, got {}", other.stage_name()),
+        }
+
+        // The legacy manifest fields are a total projection of it.
+        let manifest_bytes = store
+            .kernel()
+            .read_tree_blob(commit_oid, "turn/manifest.json")
+            .expect("manifest");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&manifest_bytes).expect("manifest json");
+        assert_eq!(
+            manifest["disposition"], "not_applicable",
+            "no workspace disposition survives the journal path"
+        );
+        assert!(
+            manifest.get("terminal_reason").is_none() || manifest["terminal_reason"].is_null(),
+            "no logic-bearing terminal string: {manifest:#}"
+        );
+        assert_eq!(
+            manifest["execution_status"],
+            serde_json::Value::String(outcome.legacy_status().as_str().to_string()),
+            "legacy status is derived from the typed outcome"
+        );
+        let audit_bytes = store
+            .kernel()
+            .read_tree_blob(commit_oid, "turn/audit.json")
+            .expect("audit");
+        let audit: serde_json::Value = serde_json::from_slice(&audit_bytes).expect("audit json");
+        assert!(
+            audit.get("target_project_ref").is_none(),
+            "no TurnLifecycleEvidence survives the journal path: {audit:#}"
+        );
+    }
+}
+
+#[test]
+fn the_journal_outcome_contract_never_grows_legacy_outcome_fields() {
+    // F1 compile/shape guard: the pinned candidate — the journal's outcome
+    // authority — must never carry the fields #139-B deletes. A future
+    // change that reintroduces one fails here instead of silently creating a
+    // second outcome authority.
+    let candidate = completed_candidate(None);
+    let value = serde_json::to_value(&candidate).expect("candidate json");
+    let object = value.as_object().expect("object");
+    for forbidden in ["disposition", "lifecycle", "terminal_reason", "status"] {
+        assert!(
+            !object.contains_key(forbidden),
+            "TurnCommitCandidate must not carry '{forbidden}': {value:#}"
+        );
+    }
+    assert!(object.contains_key("outcome") && object.contains_key("origin"));
+}

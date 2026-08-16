@@ -256,54 +256,73 @@ impl GitSessionGraphStore {
                     })?;
                 }
                 // turns/<TurnId>: create-once permanent pin for one
-                // committed Turn (#144). Must point at a conversation
-                // commit (turn/manifest.json in its tree).
+                // committed Turn (#144). Must point at the conversation
+                // commit of *that* Turn of *this* session, so a mislabelled
+                // pin is typed journal corruption before the handle is
+                // returned, not a surprise at the first journal read.
                 s if s.starts_with("turns/") => {
-                    state::validate_turn_ref_id(&s["turns/".len()..])?;
+                    let pinned_turn = &s["turns/".len()..];
+                    state::validate_turn_ref_id(pinned_turn)?;
                     let tree = self.store.commit_tree(oid).map_err(|_| {
                         SessionError::Store(lattice_store::StoreError::Corruption {
                             detail: format!("turn pin '{name}' does not point at a commit"),
                         })
                     })?;
-                    if self
-                        .store
-                        .read_tree_path(tree, "turn/manifest.json")?
-                        .is_none()
-                    {
-                        return Err(SessionError::Store(lattice_store::StoreError::Corruption {
+                    let Some(manifest_bytes) =
+                        self.store.read_tree_path(tree, "turn/manifest.json")?
+                    else {
+                        return Err(SessionError::JournalCorruption {
                             detail: format!(
                                 "turn pin '{name}' does not point at a conversation commit"
                             ),
-                        }));
+                        });
+                    };
+                    let manifest = helpers::parse_manifest(&manifest_bytes)?;
+                    if manifest.session_id != session_id {
+                        return Err(SessionError::JournalCorruption {
+                            detail: format!(
+                                "turn pin '{name}' points at a commit of session '{}'",
+                                manifest.session_id
+                            ),
+                        });
+                    }
+                    if manifest.turn_id != pinned_turn {
+                        return Err(SessionError::JournalCorruption {
+                            detail: format!(
+                                "turn pin '{name}' points at turn '{}'",
+                                manifest.turn_id
+                            ),
+                        });
                     }
                 }
-                // active-turn: the direct PendingTurn authority (#144).
-                // Must point at a journal snapshot naming this session.
+                // active-turn: the direct PendingTurn authority (#144). Must
+                // point at a journal snapshot naming this session, and that
+                // snapshot must satisfy the full domain contract — strict
+                // open is where journal damage surfaces, and it is never
+                // repaired in place.
                 "active-turn" => {
                     let bytes = self
                         .store
                         .read_tree_blob(oid, pending::PENDING_TREE_FILE)
-                        .map_err(|_| {
-                            SessionError::Store(lattice_store::StoreError::Corruption {
-                                detail: format!(
-                                    "active-turn ref '{name}' has no {}",
-                                    pending::PENDING_TREE_FILE
-                                ),
-                            })
+                        .map_err(|_| SessionError::JournalCorruption {
+                            detail: format!(
+                                "active-turn ref '{name}' has no {}",
+                                pending::PENDING_TREE_FILE
+                            ),
                         })?;
                     let snapshot: crate::pending::PendingSnapshot = serde_json::from_slice(&bytes)
-                        .map_err(|e| SessionError::InvalidPersistedValue {
-                            field: "pending.json",
-                            value: e.to_string(),
+                        .map_err(|e| SessionError::JournalCorruption {
+                            detail: format!("parse pending.json at active-turn '{name}': {e}"),
                         })?;
                     if snapshot.session_id.as_str() != session_id {
-                        return Err(SessionError::Store(lattice_store::StoreError::Corruption {
+                        return Err(SessionError::JournalCorruption {
                             detail: format!(
                                 "active-turn of '{session_id}' names session '{}'",
                                 snapshot.session_id
                             ),
-                        }));
+                        });
                     }
+                    snapshot.validate()?;
                 }
                 _ => {
                     return Err(SessionError::Store(lattice_store::StoreError::Corruption {
