@@ -2,6 +2,90 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #144：durable PendingTurn journal 与确定性 reconciliation — 2026-08-16
+
+Scope: feature implementation (ADR 0005 §9/§12/§14, ordered #141 → #142 →
+#143 → #144 → #139). Session-side only and validated with synthetic
+Invocation facts: no production InvocationStore, Tool dispatch,
+FinalizeBudget approval, or production JSON-RPC/numeric-ID/SQLite/operator/
+dispatch path was touched.
+
+**What landed:**
+
+- `lattice-session::pending` (new module): the versioned `PendingSnapshot`
+  envelope and the twelve durable `PendingStage` states with pure
+  `validate_transition` (retry only after a pre-stream retryable failure of
+  the next ordinal; `Bound` requires the byte-equal exact plan; the
+  `StepClosing` cursor advances one ordinal at a time, pin-then-close or a
+  not-executed closure without a candidate; `Committed` is never publishable
+  through `active-turn`). `TurnStarted` freezes parent tip/user message/
+  TurnId/profile+policy/model/system/catalog/limits with a 1 MiB
+  exact-boundary catalog snapshot, a deterministic credential-key denylist,
+  and the code-defined `MAX_MODEL_STEPS = 32`. `BindingPlanned` carries the
+  exact ordered bindings with per-binding digests (no `PlanId`, no batch
+  digest, no provider metadata in binding tuples); there is no Tool-bearing
+  `MessageComplete` gap. `ResultDraft` is material-only (65,536-byte canonical
+  ToolContent; plus-one rejected, never truncated) with the
+  `Durable | CleanAbsent | Uncertain` classification. `StepClosed` is the
+  closed `FinishTurn | ContinueModel | FailTurn | CancelTurn | InterruptTurn`
+  sum; `TurnOutcome`/`ClosureOrigin` are the typed outcome authority with a
+  legacy-manifest projection for today's readers.
+- `git_graph/pending.rs`: journal persistence over the `lattice-store`
+  kernel. `refs/lattice/sessions/<id>/active-turn` points directly at the
+  current snapshot commit; the chain root grafts onto the frozen conversation
+  tip. Draft publication is a content-addressed blob with a durable barrier;
+  reopen classification is a read-only lookup (`lattice-store` gained
+  `blob_id`/`has_object` read primitives). `finalize_turn` is the one
+  all-or-nothing kernel `ref_transaction` (branch/detached advance +
+  `turns/<TurnId>` pin + `state` update + `active-turn` delete), building the
+  `Committed` journal object and the conversation TurnCommit (git parents
+  `[Committed] ++ side parents`, explicit TurnId in the manifest) from the
+  pinned candidate only, so retries are byte-identical and idempotent.
+  Transcript walks skip journal snapshots; strict open validates the new
+  refs.
+- `pending::reconcile`: `reconcile(PendingSnapshot, InvocationFactsSnapshot)`
+  decides the one closure of every durable stage from durable facts only.
+  `BindingPlanned`+absent closure-only reserves the exact candidates and
+  marks them `NotExecuted(BeforeDispatch)`; `DispatchStarted` without a
+  terminal is conservatively `Indeterminate(MayHaveOccurred)` with the
+  remaining bindings `NotExecuted(PrecedingInvocationIndeterminate)`;
+  `StepClosing` resumes at its exact lowest unclosed ordinal (available
+  material must match the pinned candidate); `StepClosed(ContinueModel)`
+  closes interrupted — reopen never continues model/Tool execution.
+  Reconciled candidates pin the durable tip committer time (no new clock)
+  and a conservatively `Partial` usage aggregate; the synthetic facts
+  vocabulary lives in `lattice-session` (production InvocationStore maps
+  into it, #139-A/#139-B).
+- Dependency delta (ADR 0005 §19): `lattice-session -> lancet-protocol`.
+  `SessionError::JournalCorruption` is the typed journal-damage error.
+- Crash fixtures: stage matrix × fresh strict reopen × determinism; injected
+  faults keep the previous tip on an advance crash, keep `StepClosing +
+  active-turn` while the store is unwritable (the FinalizeBudget-exhaustion
+  shape) with the next command's plan exactly one idempotent `FinalizeTurn`,
+  and demonstrate post-publication ref-fsync failure with an idempotent
+  retry; draft windows close from classified material; executing a plan
+  end-to-end commits the recovered Turn with the typed journal chain
+  reachable from its permanent pin.
+
+**Verification:**
+
+- `cargo test -p lattice-session` — 132 passed (journal, reducer, crash
+  fixtures, and the pre-existing graph/store suites).
+- `cargo test -p lattice-store` — 50 passed (incl. the new
+  `blob_id`/`has_object` primitive test).
+- `cargo clippy -p lattice-session -p lattice-store --all-targets` — clean.
+- `cargo test --workspace` / `cargo xtask ci` — run before push (see
+  branch).
+
+**Changed files:** `crates/lattice-session/src/pending/**` (new),
+`crates/lattice-session/src/git_graph/pending.rs` (new),
+`crates/lattice-session/src/git_graph/{mod,commit}.rs`,
+`crates/lattice-session/src/git_graph/tests/{pending_fixtures,pending_journal,pending_crash}.rs`
+(new), `crates/lattice-session/src/{lib.rs,Cargo.toml}`,
+`crates/lattice-store/src/repo.rs`, `AGENTS.md`,
+`crates/lattice-session/AGENTS.md`,
+`docs/plans/2026-08-16-issue144-pending-turn.md` (new).
+
 ## GitHub #142：建立 InvocationId 与 lattice-conversation 纯数据 contract — 2026-08-13
 
 Scope: feature implementation (ADR 0005 §1/§7 prerequisite, ordered #141 → #142

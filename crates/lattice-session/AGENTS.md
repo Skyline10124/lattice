@@ -32,9 +32,16 @@ payload compatibility.
   reconstruction via Revwalk, and manifest serialization.
 - `src/git_graph/refs.rs` owns branch, checkout, reset, and diff over
   session-scoped refs and `lattice-store`'s `merge_base`.
+- `src/git_graph/pending.rs` owns the PendingTurn journal (#144): the
+  `active-turn`/`turns/<TurnId>` refs, CAS snapshot publication over the
+  `lattice-store` kernel, ResultDraft publication/classification, and the
+  one final ref transaction (head advance + turn pin + state update +
+  active-turn delete, all-or-nothing).
 - `src/git_graph/helpers.rs` owns shared manifest/tree/JSONL helpers.
 - `src/git_graph/tests/` owns Git-backed persistence and topology regression
-  coverage.
+  coverage; `pending_journal.rs` covers the journal/finalization mechanics,
+  `pending_crash.rs` the crash-window fixtures, and `pending_fixtures.rs`
+  the shared deterministic builders.
 - `src/test_utils.rs` (feature `test-utils`) owns shared gix fixture helpers
   for downstream crate tests.
 - #62 (Codeberg #40) removed `src/promotion.rs` (promoted-commit builder) and
@@ -51,9 +58,10 @@ payload compatibility.
 - Treat commit IDs and canonical JSON hashing as durable graph contracts.
 - Session refs live in the global `$XDG_STATE_HOME/lattice/sessions.git`:
   `refs/lattice/sessions/<id>/state`, `refs/lattice/sessions/<id>/heads/<branch>`,
-  candidates under `refs/lattice/candidates/<id>/<turn>`. `turns/<id>` and
-  `active-turn` are reserved for #144. Do not add remote push refspecs for
-  `refs/lattice/**`.
+  candidates under `refs/lattice/candidates/<id>/<turn>`, the direct
+  `active-turn` PendingTurn authority, and the create-once
+  `turns/<TurnId>` permanent pins (#144). Do not add remote push refspecs
+  for `refs/lattice/**`.
 - Since #143 every session fact is an immutable `SessionState` commit; mutable
   `.lattice/sessions/**` sidecars are gone, with no reader, importer, or second
   authority. A Session is permanently bound to one path-derived
@@ -70,14 +78,29 @@ payload compatibility.
   conversation head, session state, and any candidate pin advance together or
   not at all.
 - ADR 0005 keeps Session graph and PendingTurn semantics in this crate while
-  #143 moved shared Git durability mechanics into `lattice-store`. #144 adds
-  one durable active Turn per session, immutable CAS stages, ResultDraft
-  publication classification, and the pure reconciliation reducer. Do not put
-  InvocationStore/evidence semantics here, or redispatch model/Tool work while
-  reopening a PendingTurn.
+  #143 moved shared Git durability mechanics into `lattice-store`. #144 added
+  one durable active Turn per session (`src/pending/` contract + reducer,
+  `git_graph/pending.rs` store), immutable CAS stages, ResultDraft
+  publication classification, and the pure reconciliation reducer against
+  synthetic Invocation facts. Do not put InvocationStore/evidence semantics
+  here (that is #139-A/#139-B), wire the journal into the production turn
+  loop, or redispatch model/Tool work while reopening a PendingTurn. The
+  journal's typed `TurnOutcome`/`ClosureOrigin` is the outcome authority;
+  the conversation manifest's status/disposition/terminal_reason are a
+  legacy projection until #139-B deletes them.
 
 ## Recent Issues
 
+- ADDED #144: `src/pending/` (contract + reducer) and
+  `src/git_graph/pending.rs` (journal store) implement the durable
+  PendingTurn CAS journal, ResultDraft classification, the final ref
+  transaction, and `reconcile()` against synthetic Invocation facts.
+  Added the `lattice-session -> lancet-protocol` edge (ADR 0005 §19);
+  `SessionError::JournalCorruption` is the typed damage error. Journal
+  topology: `turns/<TurnId> -> TurnCommit -> Committed -> predecessor`,
+  with the chain root grafted onto the frozen conversation tip.
+  Acceptance lives in `pending*` tests under `src/git_graph/tests/` and
+  inline reducer tests.
 - ADDED #143: the store is built on the `lattice-store` kernel. Sessions live
   in the global `sessions.git`; `SessionState` commits replaced sidecars;
   `create_session` takes a `ProjectStoreKey`; `SessionGraphStore` gained
