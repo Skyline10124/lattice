@@ -82,7 +82,9 @@ dispatch path was touched.
 `crates/lattice-session/src/git_graph/{mod,commit}.rs`,
 `crates/lattice-session/src/git_graph/tests/{pending_fixtures,pending_journal,pending_crash}.rs`
 (new), `crates/lattice-session/src/{lib.rs,Cargo.toml}`,
-`crates/lattice-store/src/repo.rs`, `AGENTS.md`,
+`crates/lattice-store/src/repo.rs`,
+`crates/lattice-api/src/session.rs` (exhaustive-match mapping of the new
+`JournalCorruption` variant), `AGENTS.md`,
 `crates/lattice-session/AGENTS.md`,
 `docs/plans/2026-08-16-issue144-pending-turn.md` (new).
 
