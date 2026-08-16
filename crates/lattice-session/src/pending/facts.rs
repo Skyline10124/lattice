@@ -135,6 +135,9 @@ pub enum UnavailableMaterialReason {
     /// Canonical content exceeded the ToolContent limit; the full digest
     /// and length stay honest without storing the bytes.
     OutputTooLarge,
+    /// The invocation never dispatched, so there is no material to make
+    /// model-visible (closure-only paths).
+    NotExecuted,
 }
 
 /// A pinned snapshot of the invocation facts for one pending Turn's plan.

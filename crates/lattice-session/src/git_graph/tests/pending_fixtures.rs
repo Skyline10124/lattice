@@ -12,7 +12,6 @@ use lattice_conversation::{
     arguments_digest,
 };
 
-use crate::graph::GraphMessage;
 use crate::pending::config::TurnStartedFacts;
 use crate::pending::outcome::{ClosureOrigin, TurnFinishReason};
 use crate::pending::{TurnCommitCandidate, TurnClosingFacts, TurnOutcome};
@@ -155,7 +154,7 @@ pub(crate) fn completed_candidate(parent: Option<String>) -> TurnCommitCandidate
     TurnCommitCandidate {
         session_id: SESSION.to_string(),
         turn_id: turn_id(),
-        parent_ids: parent.into_iter().collect(),
+        side_parent_ids: parent.into_iter().collect(),
         messages: vec![
             user_msg("please continue"),
             crate::test_helpers::assistant_msg("done"),

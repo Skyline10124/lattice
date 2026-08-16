@@ -27,8 +27,8 @@
 //!   the derived per-Turn usage aggregate;
 //! - [`facts`]: the synthetic Invocation facts snapshot reconciliation runs
 //!   against (the production InvocationStore arrives with #139-A/#139-B);
-//!   the pure `reconcile` decision function over a Pending snapshot and a
-//!   facts snapshot joins with GitHub #144's reducer step.
+//! - [`reconcile`]: `reconcile(PendingSnapshot, InvocationFactsSnapshot)`
+//!   producing the closure-only [`ReconciliationPlan`].
 //!
 //! Persistence lives in [`crate::git_graph`]; nothing in this module performs
 //! I/O. `Committed` is an immutable final journal object constructed with the
@@ -43,6 +43,7 @@ pub mod contract;
 pub mod draft;
 pub mod facts;
 pub mod outcome;
+pub mod reconcile;
 pub mod step;
 
 pub use binding::{BindingPlan, PlannedBinding, binding_digest};
@@ -65,6 +66,7 @@ pub use outcome::{
     ClosureOrigin, TurnCancellation, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
     TurnUsageAggregate,
 };
+pub use reconcile::{ReconciliationAction, ReconciliationPlan, reconcile};
 pub use step::{ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState};
 
 /// SHA-256 hex serde for fixed 32-byte digests in journal payloads. Same
@@ -136,3 +138,76 @@ pub(crate) fn decode_hex(raw: &str) -> Option<[u8; 32]> {
     }
     Some(digest)
 }
+/// Pure builders for in-module tests (no store, no I/O).
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::config::{FrozenTurnConfig, ToolCatalogEntry, ToolCatalogSnapshot,
+        TurnExecutionLimits, TurnStartedFacts};
+    use super::contract::TurnCommitCandidate;
+    use super::outcome::{ClosureOrigin, TurnFinishReason};
+    use super::TurnOutcome;
+    use lancet_protocol::{SessionId, TurnId};
+    use lattice_conversation::{MessagePart, MessageRole, MessageSemantic, NativeMessage};
+
+    pub(crate) fn turn_started_facts() -> TurnStartedFacts {
+        TurnStartedFacts {
+            turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
+            session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+            parent_conversation_tip: None,
+            user_message: NativeMessage::new(
+                MessageRole::User,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: "please continue".to_string(),
+                })],
+            ),
+            config: FrozenTurnConfig {
+                agent_name: "coder".to_string(),
+                model: "test-model".to_string(),
+                provider: "test-provider".to_string(),
+                system_prompt: None,
+                profile_snapshot_json: "{\"model\":\"test-model\"}".to_string(),
+                policy_snapshot_json: "{}".to_string(),
+                catalog: ToolCatalogSnapshot::new(
+                    "test-build".to_string(),
+                    vec![ToolCatalogEntry {
+                        name: "observe.workspace".to_string(),
+                        descriptor_identity: "d".repeat(64),
+                        description: "observe".to_string(),
+                        input_schema: serde_json::json!({"type": "object"}),
+                    }],
+                )
+                .unwrap(),
+                limits: TurnExecutionLimits {
+                    timeout_secs: 60,
+                    max_model_steps: super::MAX_MODEL_STEPS,
+                    max_model_attempts: 2,
+                },
+            },
+            accepted_at: "2026-08-16T12:00:00Z".to_string(),
+        }
+    }
+
+    pub(crate) fn completed_candidate() -> TurnCommitCandidate {
+        TurnCommitCandidate {
+            session_id: "3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c".to_string(),
+            turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
+            side_parent_ids: Vec::new(),
+            messages: vec![crate::test_helpers::user_msg("please continue")],
+            agent_name: "coder".to_string(),
+            profile_snapshot_hash: "test-profile".to_string(),
+            profile_snapshot_json: "{}".to_string(),
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            outcome: TurnOutcome::Completed {
+                finish_reason: TurnFinishReason::Stop,
+            },
+            origin: ClosureOrigin::Live,
+            commit_message: "please continue".to_string(),
+            usage_aggregate: None,
+            workspace_history_oid: None,
+            created_at: "2026-08-16T12:00:00Z".to_string(),
+        }
+    }
+}
+

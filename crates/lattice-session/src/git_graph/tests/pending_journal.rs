@@ -321,7 +321,8 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
     let closing_tip = store
         .advance_pending_turn(
             &session,
-            PendingStage::TurnClosing(turn_closing(completed_candidate(head.clone()))),
+            // The frozen tip is journal authority; the candidate carries only side parents.
+            PendingStage::TurnClosing(turn_closing(completed_candidate(None))),
             103,
             &lock,
         )

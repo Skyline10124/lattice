@@ -100,6 +100,10 @@ pub enum TurnInterruption {
     /// A recorded attempt interruption is the controlling cause; the durable
     /// typed reason is carried verbatim.
     ModelAttempt(AttemptInterruption),
+    /// The journal tip was `BindingPlanned` or `Bound`: the model produced
+    /// Tool calls and the process died inside the binding window before
+    /// any dispatch the facts can prove.
+    ProcessInterruptedDuringToolBinding,
     /// The journal tip was `StepClosed(ContinueModel)`: reopen never
     /// continues the provider, so the Turn closes interrupted.
     WhileAwaitingModelContinuation,

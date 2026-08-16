@@ -213,9 +213,11 @@ pub struct TurnCommitCandidate {
     pub session_id: String,
     /// The Turn's explicit identity.
     pub turn_id: TurnId,
-    /// Logical conversation parents; `parent_ids[0]` is the frozen parent
-    /// conversation tip of `TurnStarted`.
-    pub parent_ids: Vec<String>,
+    /// Logical conversation side-parents beyond the frozen tip (merge
+    /// topologies). The frozen parent tip itself is journal authority — the
+    /// chain root's `parent_conversation_tip` — and never a candidate
+    /// input, so recovery cannot misstate lineage from mutable input.
+    pub side_parent_ids: Vec<String>,
     /// Transcript content in order (user message, closures, final message).
     pub messages: Vec<GraphMessage>,
     /// Agent name for the commit projection.
@@ -316,8 +318,9 @@ impl CommittedFacts {
 }
 
 /// One immutable PendingTurn journal snapshot. `recorded_at` carries the
-/// journal commit's own committer time (durable); it is metadata filled by
-/// the store on read, never part of the canonical payload bytes.
+/// journal commit's own committer time and `root` the chain's `TurnStarted`
+/// facts; both are durable metadata filled by the store on read, never part
+/// of the canonical payload bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSnapshot {
     /// Payload schema version; must equal
@@ -335,11 +338,18 @@ pub struct PendingSnapshot {
     /// (unix seconds); filled by the store, skipped on the wire.
     #[serde(skip)]
     pub recorded_at: Option<i64>,
+    /// The chain root's `TurnStarted` facts (user message, frozen parent
+    /// tip, frozen limits), filled by the store for every non-`TurnStarted`
+    /// tip; a `TurnStarted` tip is its own root. Reconciliation needs the
+    /// frozen facts and the journal chain is the only authority for them.
+    #[serde(skip)]
+    pub root: Option<TurnStartedFacts>,
 }
 
 impl PendingSnapshot {
     /// Validate the envelope: schema version, identity presence, the
-    /// stage's own payload, and stage/turn consistency.
+    /// stage's own payload, stage/turn consistency, and root consistency
+    /// when the store filled it.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != PENDING_SNAPSHOT_SCHEMA_VERSION {
             return Err(SessionError::JournalCorruption {
@@ -347,6 +357,13 @@ impl PendingSnapshot {
                     "pending snapshot schema version {} is not {}",
                     self.schema_version, PENDING_SNAPSHOT_SCHEMA_VERSION
                 ),
+            });
+        }
+        if let Some(root) = &self.root
+            && (root.turn_id != self.turn_id || root.session_id != self.session_id)
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: "chain root facts do not match the snapshot identity".to_string(),
             });
         }
         self.stage.validate()?;
@@ -550,13 +567,50 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                         mismatch("pinning a candidate must not move the cursor".to_string())
                     }
                 }
-                (Some(_), None) => {
+                (Some(candidate), None) => {
+                    if next_state.closure_cursor != prev_state.closure_cursor + 1
+                        || next_state.closures.len() != prev_state.closures.len() + 1
+                        || next_state.closures[..prev_state.closures.len()]
+                            != prev_state.closures[..]
+                    {
+                        return mismatch(
+                            "only the lowest unclosed ordinal may advance, by exactly one"
+                                .to_string(),
+                        );
+                    }
+                    // Closing the pinned binding: available material must be
+                    // the pinned candidate's exact content.
+                    let closure = next_state.closures.last().expect("extended by one");
+                    if let super::step::MaterialAvailability::Available { digest, byte_length } =
+                        &closure.material
+                        && (*digest != candidate.content_digest
+                            || *byte_length != candidate.byte_length)
+                    {
+                        return mismatch(
+                            "closure material does not match the pinned candidate".to_string(),
+                        );
+                    }
+                    Ok(())
+                }
+                (None, None) => {
+                    // Closure without a pinned candidate: the binding never
+                    // dispatched, so its material is typed not-executed.
                     if next_state.closure_cursor == prev_state.closure_cursor + 1
                         && next_state.closures.len() == prev_state.closures.len() + 1
                         && next_state.closures[..prev_state.closures.len()]
                             == prev_state.closures[..]
                     {
-                        Ok(())
+                        let closure = next_state.closures.last().expect("extended by one");
+                        match &closure.material {
+                            super::step::MaterialAvailability::Unavailable {
+                                reason: super::facts::UnavailableMaterialReason::NotExecuted,
+                                ..
+                            } => Ok(()),
+                            _ => mismatch(
+                                "closing without a pinned candidate requires not-executed material"
+                                    .to_string(),
+                            ),
+                        }
                     } else {
                         mismatch(
                             "only the lowest unclosed ordinal may advance, by exactly one"
@@ -564,9 +618,6 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                         )
                     }
                 }
-                (None, None) => mismatch(
-                    "StepClosing must pin a candidate or advance the cursor".to_string(),
-                ),
                 (Some(_), Some(_)) => mismatch(
                     "cursor advance must publish the pinned candidate's closure and clear it"
                         .to_string(),
@@ -870,6 +921,7 @@ mod tests {
                 usage: None,
             },
             recorded_at: None,
+            root: None,
         };
         assert!(snapshot.validate().is_err());
         snapshot.stage = PendingStage::MessageComplete {
@@ -889,6 +941,7 @@ mod tests {
             predecessor: None,
             stage: PendingStage::ModelAttemptStarted { key: attempt_key(MAX_MODEL_STEPS, 0) },
             recorded_at: None,
+            root: None,
         };
         assert!(
             snapshot.validate().is_err(),
@@ -902,7 +955,7 @@ mod tests {
         TurnCommitCandidate {
             session_id: SESSION.to_string(),
             turn_id: turn_id(),
-            parent_ids: vec![],
+            side_parent_ids: vec![],
             messages: vec![crate::test_helpers::user_msg("hello")],
             agent_name: "coder".to_string(),
             profile_snapshot_hash: "h".to_string(),
@@ -949,6 +1002,7 @@ mod tests {
             predecessor: None,
             stage: turn_started(),
             recorded_at: None,
+            root: None,
         };
         let value = serde_json::to_value(&snapshot).unwrap();
         assert!(value.get("recorded_at").is_none(), "recorded_at stays off the wire");

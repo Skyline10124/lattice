@@ -114,6 +114,26 @@ impl GitSessionGraphStore {
     }
 
     pub(crate) fn read_pending_snapshot_at(&self, oid: gix::ObjectId) -> Result<PendingTurnTip> {
+        let recorded_at = self.kernel().commit_time(oid)?;
+        let mut tip = self.read_snapshot_raw(oid, recorded_at)?;
+        // Fill the chain-root facts for every non-root tip: reconciliation
+        // needs the frozen user message, parent tip, and limits, and the
+        // journal chain is their only authority.
+        if !matches!(tip.snapshot.stage, PendingStage::TurnStarted { .. }) {
+            let root = self.resolve_turn_started(&tip)?;
+            if let PendingStage::TurnStarted(facts) = root.snapshot.stage {
+                tip.snapshot.root = Some(facts);
+            }
+        }
+        tip.snapshot.validate()?;
+        Ok(tip)
+    }
+
+    fn read_snapshot_raw(
+        &self,
+        oid: gix::ObjectId,
+        recorded_at: Option<i64>,
+    ) -> Result<PendingTurnTip> {
         let bytes = self.kernel().read_tree_blob(oid, PENDING_TREE_FILE).map_err(|_| {
             SessionError::JournalCorruption {
                 detail: format!("journal commit {oid} has no {PENDING_TREE_FILE}"),
@@ -124,7 +144,6 @@ impl GitSessionGraphStore {
                 detail: format!("parse pending.json at {oid}: {e}"),
             }
         })?;
-        let recorded_at = self.kernel().commit_time(oid)?;
         let snapshot = PendingSnapshot {
             recorded_at,
             ..snapshot
@@ -151,7 +170,8 @@ impl GitSessionGraphStore {
                 });
             };
             let oid = parse_oid(predecessor)?;
-            cursor = self.read_pending_snapshot_at(oid)?;
+            let recorded_at = self.kernel().commit_time(oid)?;
+            cursor = self.read_snapshot_raw(oid, recorded_at)?;
         }
     }
 
@@ -223,6 +243,7 @@ impl GitSessionGraphStore {
             predecessor: None,
             stage: PendingStage::TurnStarted(facts),
             recorded_at: None,
+            root: None,
         };
         snapshot.validate()?;
         let timestamp = parse_rfc3339_to_unix(
@@ -294,6 +315,7 @@ impl GitSessionGraphStore {
             predecessor: Some(tip.oid.to_string()),
             stage: next_stage,
             recorded_at: None,
+            root: None,
         };
         snapshot.validate()?;
         let oid = self.write_pending_commit(&snapshot, Some(tip_oid), recorded_at_unix)?;
@@ -411,8 +433,9 @@ impl GitSessionGraphStore {
         }
 
         // Build the conversation TurnCommit from the pinned candidate: the
-        // deterministic identity machinery runs over pinned inputs only.
-        let input = candidate_turn_commit_input(session_id, &candidate)?;
+        // deterministic identity machinery runs over pinned inputs plus the
+        // durable frozen tip (journal authority), never mutable input.
+        let input = candidate_turn_commit_input(session_id, &candidate, &frozen_tip)?;
         let prepared = prepare_turn_commit(&input, &candidate.created_at);
         let manifest_bytes = serialize_manifest(&candidate_manifest(&prepared, &candidate))?;
         let messages_jsonl = messages_to_jsonl(&prepared.messages)?;
@@ -437,6 +460,7 @@ impl GitSessionGraphStore {
                 candidate: candidate.clone(),
             }),
             recorded_at: None,
+            root: None,
         };
         let committed_bytes = canonical_snapshot_bytes(&committed_payload)?;
         let committed_blob = self.kernel().write_blob(&committed_bytes)?;
@@ -454,7 +478,7 @@ impl GitSessionGraphStore {
         // Conversation parents: the frozen tip stays reachable through the
         // journal chain root; merge side-parents keep their place.
         let mut parent_oids = vec![committed_oid];
-        for extra in candidate.parent_ids.iter().skip(1) {
+        for extra in &candidate.side_parent_ids {
             parent_oids.push(parse_oid(extra)?);
         }
         let turn_commit_oid =
@@ -604,11 +628,19 @@ fn parse_rfc3339_to_unix(value: &str, field: &str) -> Result<i64> {
 fn candidate_turn_commit_input(
     session_id: &str,
     candidate: &TurnCommitCandidate,
+    frozen_tip: &Option<String>,
 ) -> Result<crate::graph::TurnCommitInput> {
     use crate::graph::{TurnCommitInput, WorkspaceDisposition};
+    // Logical lineage: the frozen tip (journal authority) plus the
+    // candidate's durable side-parents.
+    let mut parent_ids = Vec::with_capacity(candidate.side_parent_ids.len() + 1);
+    if let Some(tip) = frozen_tip {
+        parent_ids.push(tip.clone());
+    }
+    parent_ids.extend(candidate.side_parent_ids.iter().cloned());
     Ok(TurnCommitInput {
         session_id: session_id.to_string(),
-        parent_ids: candidate.parent_ids.clone(),
+        parent_ids,
         messages: candidate.messages.clone(),
         agent_name: candidate.agent_name.clone(),
         profile_snapshot_hash: candidate.profile_snapshot_hash.clone(),
