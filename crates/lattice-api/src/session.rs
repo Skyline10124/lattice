@@ -432,6 +432,11 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
         lattice_session::SessionError::SessionBusy(id) => ApiError::Busy(format!(
             "session '{id}' is busy: another operation holds its execution lock"
         )),
+        // Journal damage is typed corruption: never repaired, never
+        // presented as a retryable conflict (ADR 0005 §9).
+        lattice_session::SessionError::JournalCorruption { detail } => {
+            ApiError::Internal(format!("pending-turn journal corruption: {detail}"))
+        }
         lattice_session::SessionError::Store(store_err) => match store_err {
             lattice_session::StoreError::NotInitialized { path } => ApiError::StoreUnavailable(
                 format!("session store not initialized at {}", path.display()),
