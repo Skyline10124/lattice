@@ -270,3 +270,91 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let text = format!("{}  {}  {phase}  {nl}{ctrl}{follow}", app.ctx.session_id, app.ctx.active_agent);
     frame.render_widget(Paragraph::new(Line::from(Span::styled(text, role_style(Role::DimMeta)))), area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{App, Block, StatusKind};
+    use crate::session::SessionContext;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn test_app() -> App {
+        App::new(
+            SessionContext {
+                session_id: "sess".into(),
+                active_agent: "agent".into(),
+                project_branch: "main".into(),
+            },
+            false,
+        )
+    }
+
+    #[test]
+    fn follow_pins_to_bottom_on_growth() {
+        let mut v = Viewport::new();
+        v.on_content_changed(5, 10);
+        assert_eq!(v.scroll(), 0);
+        v.on_content_changed(20, 10);
+        assert_eq!(v.scroll(), 10);
+        assert!(v.following());
+    }
+
+    #[test]
+    fn page_up_breaks_follow_and_growth_does_not_move_viewport() {
+        let mut v = Viewport::new();
+        v.on_content_changed(30, 10);
+        v.page_up(10);
+        assert!(!v.following());
+        let pinned = v.scroll();
+        v.on_content_changed(50, 10);
+        assert_eq!(v.scroll(), pinned);
+        assert!(!v.following());
+    }
+
+    #[test]
+    fn page_down_to_bottom_restores_follow() {
+        let mut v = Viewport::new();
+        v.on_content_changed(30, 10);
+        v.page_up(10);
+        assert!(!v.following());
+        v.page_down(30, 10);
+        assert!(v.following());
+        assert_eq!(v.scroll(), 20);
+    }
+
+    #[test]
+    fn clear_resets_scroll_and_follow() {
+        let mut v = Viewport::new();
+        v.on_content_changed(40, 8);
+        v.page_up(8);
+        assert!(!v.following());
+        v = Viewport::new();
+        assert_eq!(v.scroll(), 0);
+        assert!(v.following());
+    }
+
+    #[test]
+    fn symbol_falls_back_to_ascii_without_utf8_locale() {
+        assert_eq!(symbol(SymbolKind::Ok, true), "✓");
+        assert_eq!(symbol(SymbolKind::Ok, false), "+");
+        assert_eq!(symbol(SymbolKind::Failed, false), "x");
+        assert_eq!(symbol(SymbolKind::Running, false), ".");
+    }
+
+    #[test]
+    fn three_regions_draw_on_test_backend_without_panic() {
+        let mut app = test_app();
+        app.blocks
+            .push(Block::Status(StatusKind::Notice(vec!["hello".into()])));
+        app.input.set_text("typed");
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| draw(f, &app)).expect("draw");
+        let buf = terminal.backend().buffer();
+        let row_has = |y: u16| (0..80u16).any(|x| buf[(x, y)].symbol() != " ");
+        assert!(row_has(0), "transcript region should be drawn");
+        assert!(row_has(22), "input region should be drawn");
+        assert!(row_has(23), "status region should be drawn");
+    }
+}

@@ -89,3 +89,36 @@ fn required_project_branch(project_branch: Option<&str>) -> Result<&str> {
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_session_project_branch_is_required() {
+        let error = required_project_branch(None).expect_err("missing branch must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("--project-branch is required when creating a new TUI session")
+        );
+    }
+
+    #[test]
+    fn new_session_project_branch_rejects_blank_values() {
+        let error = required_project_branch(Some("  ")).expect_err("blank branch must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("--project-branch is required when creating a new TUI session")
+        );
+    }
+
+    #[test]
+    fn new_session_project_branch_preserves_explicit_value() {
+        assert_eq!(
+            required_project_branch(Some("feature/x")).expect("valid branch"),
+            "feature/x"
+        );
+    }
+}

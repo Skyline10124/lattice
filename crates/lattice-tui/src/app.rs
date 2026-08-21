@@ -525,3 +525,148 @@ impl Drop for TerminalCleanup {
         ratatui::restore();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::resolve_key;
+    use lattice_api::TurnEvent;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    fn test_app() -> App {
+        App::new(
+            SessionContext {
+                session_id: "sess".into(),
+                active_agent: "agent".into(),
+                project_branch: "main".into(),
+            },
+            false,
+        )
+    }
+
+    #[test]
+    fn token_deltas_coalesce_into_one_assistant_block() {
+        let mut app = test_app();
+        app.apply_turn_event(TurnEvent::TokenDelta {
+            content: "a".into(),
+        });
+        app.apply_turn_event(TurnEvent::TokenDelta {
+            content: "b".into(),
+        });
+        assert_eq!(app.blocks, vec![Block::Assistant("ab".into())]);
+    }
+
+    #[test]
+    fn tool_finished_updates_the_block_with_matching_id() {
+        let mut app = test_app();
+        app.apply_turn_event(TurnEvent::ToolCallStarted {
+            id: "call-1".into(),
+            name: "observe.workspace".into(),
+        });
+        app.apply_turn_event(TurnEvent::ToolCallFinished {
+            id: "call-1".into(),
+            name: "observe.workspace".into(),
+            ok: false,
+            output_len: 0,
+            error_summary: Some("precondition failed".into()),
+        });
+        match &app.blocks[0] {
+            Block::Tool {
+                id,
+                state: ToolState::Failed { output_len, error },
+                ..
+            } => {
+                assert_eq!(id, "call-1");
+                assert_eq!(*output_len, 0);
+                assert_eq!(error.as_deref(), Some("precondition failed"));
+            }
+            other => panic!("expected failed tool block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_during_turn_sets_cancel_flag_and_does_not_end_phase() {
+        let mut app = test_app();
+        app.phase = TurnPhase::Streaming;
+        let flag = Arc::new(AtomicBool::new(false));
+        app.cancel_flag = Some(flag.clone());
+        app.apply_action(KeyAction::CancelOrClear);
+        assert!(flag.load(Ordering::Relaxed));
+        assert_eq!(app.phase, TurnPhase::Cancelling);
+        assert!(app.cancel_flag.is_some());
+    }
+
+    #[test]
+    fn esc_when_idle_clears_input() {
+        let mut app = test_app();
+        app.input.set_text("hello");
+        app.apply_action(KeyAction::CancelOrClear);
+        assert!(app.input.is_empty());
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+
+    #[test]
+    fn double_ctrl_c_within_window_quits_single_does_not() {
+        let mut app = test_app();
+        assert!(!matches!(ctrl_c_action(&mut app), KeyAction::Quit));
+        app.apply_action(KeyAction::CancelOrClear);
+        assert!(!app.should_quit);
+        assert!(matches!(ctrl_c_action(&mut app), KeyAction::Quit));
+        app.apply_action(KeyAction::Quit);
+        assert!(app.should_quit);
+
+        let mut app = test_app();
+        ctrl_c_action(&mut app);
+        app.last_ctrl_c = Some(Instant::now() - Duration::from_secs(3));
+        assert!(!matches!(ctrl_c_action(&mut app), KeyAction::Quit));
+        app.apply_action(KeyAction::CancelOrClear);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_d_quits_only_on_empty_buffer() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let empty = resolve_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            false,
+            true,
+        );
+        let full = resolve_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            false,
+            false,
+        );
+        assert!(matches!(empty, KeyAction::Quit));
+        assert!(matches!(full, KeyAction::Ignored));
+    }
+
+    #[test]
+    fn builtin_clear_empties_blocks_and_resets_viewport() {
+        let mut app = test_app();
+        app.blocks.push(Block::User("x".into()));
+        app.viewport.on_content_changed(20, 5);
+        app.viewport.page_up(5);
+        assert!(!app.viewport.following());
+        assert!(app.apply_builtin("/clear"));
+        assert!(app.blocks.is_empty());
+        assert!(app.viewport.following());
+        assert_eq!(app.viewport.scroll(), 0);
+    }
+
+    #[test]
+    fn idle_stream_times_out_and_returns_to_idle() {
+        let mut app = test_app();
+        app.phase = TurnPhase::Streaming;
+        app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+        app.apply_stream_idle_timeout();
+        assert_eq!(app.phase, TurnPhase::Idle);
+        assert!(app.cancel_flag.is_none());
+        match app.blocks.last() {
+            Some(Block::Status(StatusKind::TurnFailed { reason })) => {
+                assert!(reason.contains(&lattice_api::STREAM_IDLE_TIMEOUT_SECS.to_string()));
+            }
+            other => panic!("expected TurnFailed, got {other:?}"),
+        }
+    }
+}

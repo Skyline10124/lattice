@@ -258,3 +258,71 @@ fn split_at_char(s: &str, idx: usize) -> (&str, &str) {
         None => (s, ""),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn paste_with_newlines_never_submits() {
+        let mut buf = InputBuffer::new();
+        buf.insert_paste("a\nb\nc");
+        assert_eq!(buf.rows(), 3);
+        assert_eq!(buf.text(), "a\nb\nc");
+        assert!(!matches!(
+            resolve_key(key(KeyCode::Char('x'), KeyModifiers::NONE), false, false),
+            KeyAction::Submit
+        ));
+    }
+
+    #[test]
+    fn enter_submits_alt_enter_newlines() {
+        assert!(matches!(
+            resolve_key(key(KeyCode::Enter, KeyModifiers::NONE), false, true),
+            KeyAction::Submit
+        ));
+        assert!(matches!(
+            resolve_key(key(KeyCode::Enter, KeyModifiers::ALT), false, true),
+            KeyAction::Newline
+        ));
+    }
+
+    #[test]
+    fn shift_enter_newlines_only_with_kitty() {
+        assert!(matches!(
+            resolve_key(key(KeyCode::Enter, KeyModifiers::SHIFT), false, true),
+            KeyAction::Submit
+        ));
+        assert!(matches!(
+            resolve_key(key(KeyCode::Enter, KeyModifiers::SHIFT), true, true),
+            KeyAction::Newline
+        ));
+    }
+
+    #[test]
+    fn up_at_line_zero_browses_history_else_moves_cursor() {
+        let mut buf = InputBuffer::new();
+        buf.set_text("line0\nline1");
+        assert!(buf.move_up(), "from last line, up moves the cursor");
+        assert_eq!(buf.cursor.0, 0);
+        assert!(!buf.move_up(), "at line 0, up is for history");
+    }
+
+    #[test]
+    fn history_roundtrip_persists_to_repl_history_txt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut history = History::load(dir.path());
+        history.push("hello");
+        drop(history);
+        let mut loaded = History::load(dir.path());
+        assert_eq!(loaded.prev(), Some("hello"));
+        let path = dir.path().join("repl_history.txt");
+        let body = std::fs::read_to_string(path).expect("history file");
+        assert!(body.contains("hello"));
+    }
+}
