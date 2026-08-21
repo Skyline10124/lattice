@@ -6,6 +6,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Block, StatusKind, ToolState, TurnPhase};
 use crate::input::CTRL_C_WINDOW;
@@ -193,7 +194,8 @@ fn wrap_text(text: &str, w: u16) -> Vec<String> {
         }
         let mut cur = String::new();
         for ch in paragraph.chars() {
-            if cur.chars().count() >= w {
+            let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if !cur.is_empty() && UnicodeWidthStr::width(cur.as_str()).saturating_add(ch_w) > w {
                 out.push(std::mem::take(&mut cur));
             }
             cur.push(ch);
@@ -206,10 +208,25 @@ fn wrap_text(text: &str, w: u16) -> Vec<String> {
     out
 }
 
+fn visual_cursor(line: &str, char_index: usize, width: u16) -> (usize, usize) {
+    let w = width.max(1) as usize;
+    let prefix: String = line.chars().take(char_index).collect();
+    let lines = wrap_text(&prefix, width);
+    let last_w = lines
+        .last()
+        .map(|s| UnicodeWidthStr::width(s.as_str()))
+        .unwrap_or(0);
+    let row = lines.len().saturating_sub(1);
+    if last_w >= w && !prefix.is_empty() {
+        (row + 1, 0)
+    } else {
+        (row, last_w)
+    }
+}
+
 #[rustfmt::skip]
 fn input_visual_height(app: &App, width: u16) -> u16 {
-    let w = width.max(1) as usize;
-    let rows: usize = app.input.lines.iter().map(|l| l.chars().count().div_ceil(w).max(1)).sum();
+    let rows: usize = app.input.lines.iter().map(|l| wrap_text(l, width).len().max(1)).sum();
     rows.clamp(1, 6) as u16
 }
 
@@ -223,24 +240,19 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
 
 #[rustfmt::skip]
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
-    let w = area.width.max(1) as usize;
     let mut visual = Vec::new();
     let mut cursor_row = 0usize;
     let mut cursor_col = 0usize;
     for (i, line) in app.input.lines.iter().enumerate() {
-        let chars: Vec<char> = line.chars().collect();
-        let wrapped = chars.len().max(1).div_ceil(w).max(1);
+        let wrapped = wrap_text(line, area.width);
         if i < app.input.cursor.0 {
-            cursor_row += wrapped;
+            cursor_row += wrapped.len().max(1);
         } else if i == app.input.cursor.0 {
-            cursor_row += app.input.cursor.1 / w;
-            cursor_col = app.input.cursor.1 % w;
+            let (row, col) = visual_cursor(line, app.input.cursor.1, area.width);
+            cursor_row += row;
+            cursor_col = col;
         }
-        if chars.is_empty() {
-            visual.push(String::new());
-        } else {
-            visual.extend(chars.chunks(w).map(|c| c.iter().collect::<String>()));
-        }
+        visual.extend(wrapped);
     }
     let h = area.height as usize;
     let scroll = cursor_row.saturating_sub(h.saturating_sub(1));
@@ -332,6 +344,16 @@ mod tests {
         v = Viewport::new();
         assert_eq!(v.scroll(), 0);
         assert!(v.following());
+    }
+
+    #[test]
+    fn wrap_text_splits_cjk_by_display_width() {
+        assert_eq!(
+            wrap_text("中文中文", 4),
+            vec!["中文".to_string(), "中文".to_string()]
+        );
+        assert_eq!(wrap_text("中文中文", 8), vec!["中文中文".to_string()]);
+        assert_eq!(wrap_text("abcd", 4), vec!["abcd".to_string()]);
     }
 
     #[test]

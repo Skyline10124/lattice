@@ -3239,6 +3239,7 @@ dependencies = [
  "ratatui",
  "tempfile",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]
