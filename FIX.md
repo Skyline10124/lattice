@@ -5846,3 +5846,30 @@ was performed.
 `crates/lattice-store/**`, `crates/lattice-session/**`,
 `crates/lancet-runtime/**`, `crates/lattice-api/**`, `crates/lattice-cli/**`,
 `crates/lattice-system-harness/**`, `Cargo.lock`, and `FIX.md`.
+
+## GitHub #118: lattice-tui full-screen shell — 2026-08-22
+
+| ID | Severity | Problem | Fix |
+| --- | --- | --- | --- |
+| #118 | MAJOR | `lattice-tui` was an inline rustyline REPL (no alternate screen, no ratatui) with three known defects from #101 A9: no turn-stream idle timeout (a pending `stream.next()` hung forever), `error_summary` never displayed for failed tools, and a Ctrl-C bare window between watcher spawn and poll. | Rewrote `lattice-tui` as a full-screen ratatui/crossterm shell per `docs/plans/2026-08-22-issue118-tui-shell-design.md`: three regions (transcript / input / status), exhaustive `TurnEvent` match with no wildcard, generic tool status lines only (zero per-tool-name dispatch), pinned-follow viewport that never drags a scrolled-up reader, bracketed-paste never submits, Esc = cooperative cancel / clear-input, double-Ctrl-C exit. Idle-timeout constant sunk to `lattice_api::STREAM_IDLE_TIMEOUT_SECS` with a one-line re-export in `run.rs`; `error_summary` carried by `ToolState::Failed`; Ctrl-C is a raw-mode KeyEvent from the first frame (no watcher, no bare window). Deleted `runtime.rs`; `crates/lattice-cli/src/main.rs` unchanged. |
+| #118-CJK | MINOR | Transcript wrap and input-height math used `chars().count()` as display width; CJK glyphs occupy two terminal cells, so Chinese text overflowed the viewport and the input cursor landed wrong. | Switched all display-width math in `view.rs` to `unicode_width` (already pinned in the workspace; new consumer, not a new dependency). Buffer char indexing in `input.rs` intentionally unchanged. Added a narrow-width CJK wrap test. |
+| #118-PTY | BLOCKER (CI) | `pty_tui_smoke` runs in the normal CI lane; `wait_for_prompt` matched `>` in ANSI-stripped text (full-screen apps print no prompt) and `READ_BUDGET = 256 KiB` is exhausted in seconds by a frame-redrawing app. | Added `wait_for_raw` (raw-byte predicate), renamed `wait_for_prompt` → `wait_for_ready` matching the alternate-screen entry sequence `\x1b[?1049h`, raised `READ_BUDGET` to 4 MiB, updated the smoke call site. |
+
+### Verification
+
+- `cargo fmt --all --check` — clean.
+- `cargo test -p lattice-tui` — all unit tests pass (state machines only; one
+  `TestBackend` smoke asserts the three regions render without panic).
+- `LATTICE_BIN="$PWD/target/debug/lattice" cargo test -p lattice-system-harness` —
+  `pty_tui_smoke` and `direct_failures` pass.
+- `env -u LATTICE_BIN cargo xtask ci` — passed.
+
+### Changed files
+
+`crates/lattice-tui/**` (rewritten; `runtime.rs` deleted),
+`crates/lattice-api/src/turn/execute.rs` (`STREAM_IDLE_TIMEOUT_SECS`),
+`crates/lattice-cli/src/commands/run.rs` (one-line re-export),
+`crates/lattice-system-harness/src/pty_tui.rs`,
+`crates/lattice-system-harness/tests/pty_tui_smoke.rs`,
+root `AGENTS.md`, `crates/lattice-tui/AGENTS.md`, `Cargo.toml`, `Cargo.lock`,
+`docs/plans/2026-08-22-issue118-tui-shell-design.md`, `FIX.md`.
