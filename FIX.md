@@ -2,6 +2,59 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #98（部分）：符号链接拒绝不再回吐宿主路径；字面量 `..` 文件名不再拖垮整次搜索 — 2026-08-22
+
+**Severity:** 两项均 LOW
+
+本票三条互不相关，本轮只修第 1、2 项。**第 3 项（`net-guard` 在 async 栈上同步
+`getaddrinfo`）未修**，#98 保持 open，残留已记入 `FINDINGS.md` 的 `L-GH98-03`。
+
+**1. `SymlinkRejected` 回吐宿主绝对路径**
+
+`LocalWorkspaceError::SymlinkRejected { component }` 持有的是从 canonical root
+一路 push 出来的**绝对**路径，Display 为 `symlink rejected at component: {component}`。
+观察侧不受影响——`host_workspace::observation_io_error` 早就把这一支折叠成固定
+reason；泄漏点在 `host_mutate`，它把 `err.to_string()` 直接放进 guest 可见的
+`MutateError::PathRejected { reason }`，于是 Tool（以及经对话上送 provider 的内容）
+拿到项目在磁盘上的真实位置。修法：两个构造点都改成 root-relative——
+`open_parent_dir_secure` 的 `cur` 本就"仅用于错误报告、从不触碰文件系统"，直接从
+`PathBuf::new()` 起步；`resolve_secure` 的 `cur` 要用于 `symlink_metadata` 不能改，
+故经新 helper `walk_component_for_error` 剥掉 root 前缀（strip 失败时回落到叶名而
+不是 `cur`，保证任何分支都不会把绝对路径放进消息）。`host_workspace` 那一支保持
+固定字符串不变——隐藏路径的存在本身就是要瞒住的东西；两处过时注释（称该 variant
+"carries an ABSOLUTE host path"）已同步更正。
+
+**2. `WorkspacePath::parse` 用 `raw.contains("..")` 子串拒绝**
+
+同函数末尾的 `normalize_relative` 已经逐分量拒绝 `Component::ParentDir`，所以子串
+检查对真实穿越是冗余的，对合法文件名却过严：`foo..bar.rs` / `..gitignore` 这类名字
+会让 parse 失败。因为 grep/find 对走到的每个条目都 parse，一个这样的文件会让**整次**
+搜索报错，而不是把它当成一条普通结果。修法：删掉子串检查，穿越判定完全交给分量检查。
+
+**Verification:**
+
+- 新增 `workspace::types::tests::literal_dot_dot_in_a_filename_is_not_traversal`
+  （5 个合法名，并断言 normalization 未改写）与
+  `parent_dir_components_are_still_rejected`（6 个真实穿越，含 `./../x`、
+  `a/b/../../..`）。
+- 新增 `workspace::local::tests::symlink_rejection_reports_a_relative_component_not_the_host_path`，
+  同时覆盖两个构造点（`resolve_secure` 走查与 `open_parent_dir_secure` 的
+  pinned-dirfd 走查），断言 component 恰为 `nested/link` / `swap`，且 Display 不含
+  workspace root 与 `/tmp`。
+- 反向验证：把两处构造点改回绝对 `cur` → 该测试 FAILED，
+  `left: "/tmp/.tmp4523G6/nested/link", right: "nested/link"`；把子串检查加回 →
+  `legal filename foo..bar.rs rejected`。两者恢复后全绿。
+- `cargo test -p lancet-runtime` — 177 + 10 + 12 + 15 + 11 passed。
+- `cargo clippy -p lancet-runtime --all-targets -- -D warnings` — clean。
+- `cargo fmt --all --check` — clean。
+- 注：本轮撞上 `FINDINGS.md` 的 `ENV-DISK-01`（/tmp tmpfs 有用户配额，多 worktree
+  共享 cargo target 时链接阶段报 `Disk quota exceeded`）。处理方式是给本 worktree
+  单独设 `CARGO_TARGET_DIR` 与 `TMPDIR` 指向 `/` 上的 `target/`，未删除共享缓存。
+
+**Changed files:** `crates/lancet-runtime/src/workspace/local.rs`,
+`crates/lancet-runtime/src/workspace/types.rs`,
+`crates/lancet-runtime/src/host_workspace.rs`（两处过时注释）, `FINDINGS.md`, `FIX.md`.
+
 ## GitHub #100（部分）：tracing 改写 stderr、Anthropic 输出上限脱离 4096 — 2026-08-22
 
 **Severity:** A = MEDIUM（破坏 `--json` 机器契约）、C = MEDIUM（用户可见截断）

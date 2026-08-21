@@ -48,6 +48,12 @@
 > operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
 > `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
 
+### L-GH98-03: `net-guard` 在 async 调用栈上同步 `to_socket_addrs`（阻塞 `getaddrinfo`）— `robustness` / `net-guard` / GitHub #98
+- **位置**: `crates/net-guard/src/lib.rs:140`（`resolve_public_socket_addrs`）、`:229`（rebinding 检查）；由 `lattice-llm` 的 `build_http_client_for_url` 内联调用，位于 LLM/fetch 的 async 栈上。
+- **问题**: `to_socket_addrs()` 是阻塞的 `getaddrinfo`，直接跑在 reactor 线程上。DNS 慢或超时时会占住一个 tokio worker；单线程 runtime 上会停掉整个 turn。
+- **当前状态**: OPEN。GitHub #98 的第 1、2 项（`SymlinkRejected` 回吐宿主绝对路径、`WorkspacePath::parse` 的 `..` 子串拒绝）已于 2026-08-22 修复并记入 `FIX.md`；第 3 项未动，本票因此保持 open。
+- **计划**: 把解析放进 `spawn_blocking`，或换异步 DNS。注意 `net-guard` 目前只依赖 `url` 与 `std`（根 `AGENTS.md` 的 crate 表把这一点写成契约），所以引入 tokio 会改变该 leaf 的依赖形状——要么由调用方负责 `spawn_blocking`（推荐，保住 leaf 的中立性），要么先记一条 ADR 说明为什么 leaf 可以依赖运行时。
+
 ### L-GH144-01: clean UUID-collision revision is unmodellable with synthetic Invocation facts — `robustness` / `lattice-session` / GitHub #144 → #139-A
 - **Location**: `crates/lattice-session/src/pending/facts.rs` (`InvocationFactsSnapshot`, `validate_against_plan`); `crates/lattice-session/src/pending/reconcile.rs` (`binding_window_closure`); ADR 0005 §9.
 - **Problem**: ADR 0005 §9 has two halves. The second — "any uncertain publication or partial/different reservation reuses the exact durable candidates and fails closed on mismatch" — is implemented. The first — "a clean UUID collision before any reservation may CAS-publish a new candidate revision only after InvocationStore proves the prior exact plan absent" — is not, and cannot be with #144's inputs: `InvocationFactsSnapshot.invocations` is a flat `InvocationId -> InvocationFact` map with no record of which plan owns a recorded invocation, so a colliding candidate ID that belongs to *another* plan is indistinguishable from a damaged reservation of *this* plan. Issue #144's AC#3 names "candidate collision/uncertain recovery", so this is a real acceptance gap, not an invented one.

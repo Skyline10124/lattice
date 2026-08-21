@@ -923,11 +923,13 @@ fn clamp_limit(requested: Option<u64>, ceiling: usize) -> usize {
 /// string, and every absence into `NotFound`. The workspace's own error text is
 /// deliberately discarded for these cases, and the match is exhaustive rather
 /// than ending in a catch-all so a new variant cannot join the leaking path by
-/// default: `SymlinkRejected` carries the offending component as an **absolute
-/// host path**, and `Path`/`RootEscape` describe host structure. Forwarding any
-/// of them would hand the guest the project's real location on disk — the thing
-/// the visibility rules exist to keep out of its reach — through an error message
-/// instead of through a read.
+/// default: `SymlinkRejected` names the offending component and
+/// `Path`/`RootEscape` describe host structure. Forwarding any of them would
+/// describe the project's real layout — the thing the visibility rules exist to
+/// keep out of the guest's reach — through an error message instead of through a
+/// read. #98 made `SymlinkRejected`'s component root-relative rather than
+/// absolute; this arm stays fixed-string regardless, because a hidden path's
+/// existence is itself the thing being withheld.
 ///
 /// The `Io` arm forwards `std::io::Error` text only, which describes the
 /// operation ("is a directory", "permission denied") and not the layout.
@@ -1451,10 +1453,9 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(err.audit_label(), "path_guard");
-        // The message describes the boundary and nothing else. The workspace's own
-        // `SymlinkRejected` carries the offending component as an ABSOLUTE host
-        // path, so forwarding its text would hand the guest the project's real
-        // location on disk through an error instead of through a read.
+        // The message describes the boundary and nothing else: this arm discards
+        // the workspace's own text rather than forwarding it, so the guest learns
+        // that the path was refused and nothing about the layout behind it.
         let message = err.guest_message();
         for leak in [
             outside.path().to_str().expect("utf-8 temp path"),

@@ -281,7 +281,7 @@ impl LocalWorkspace {
                     match fs::symlink_metadata(&cur) {
                         Ok(meta) if meta.file_type().is_symlink() => {
                             return Err(LocalWorkspaceError::SymlinkRejected {
-                                component: cur.clone(),
+                                component: walk_component_for_error(&self.root, &cur),
                             });
                         }
                         Ok(meta) => {
@@ -425,8 +425,9 @@ impl LocalWorkspace {
         let mut fd = rustix::fs::open(&self.root, dir_open_flags(), Mode::empty())
             .map_err(|e| LocalWorkspaceError::Io(e.into()))?;
         // `cur` mirrors the walk for error reporting only — it is never
-        // used to touch the filesystem.
-        let mut cur = self.root.clone();
+        // used to touch the filesystem, and it stays root-relative so a
+        // reported component cannot carry the host path (#98).
+        let mut cur = PathBuf::new();
         for comp in parent_rel.components() {
             match comp {
                 Component::Normal(part) => {
@@ -1179,9 +1180,26 @@ fn open_dir_component(
     }
 }
 
+/// Render a walk position for an error message with the workspace root
+/// removed.
+///
+/// `SymlinkRejected` is not purely internal: `host_mutate` forwards its
+/// `Display` text into the guest-visible `MutateError::PathRejected` reason,
+/// so an absolute component would hand a Tool the project's real location on
+/// disk through an error message (#98).
+fn walk_component_for_error(root: &Path, cur: &Path) -> PathBuf {
+    match cur.strip_prefix(root) {
+        Ok(relative) => relative.to_path_buf(),
+        // Unreachable — every walk starts at the root. Fall back to the leaf
+        // name rather than `cur`, because the whole point is that the host
+        // path must not reach the message.
+        Err(_) => PathBuf::from(cur.file_name().unwrap_or_default()),
+    }
+}
+
 /// Map a dirfd-walk errno: symlink-shaped failures — `ELOOP` from
 /// `O_NOFOLLOW` and `ENOTDIR` from a non-directory swap — become
-/// `SymlinkRejected`; the rest stay plain I/O.
+/// `SymlinkRejected`; the rest stay plain I/O. `cur` is already root-relative.
 fn map_walk_errno(e: Errno, cur: &Path) -> LocalWorkspaceError {
     if e == Errno::LOOP || e == Errno::NOTDIR {
         LocalWorkspaceError::SymlinkRejected {
@@ -1883,6 +1901,56 @@ mod tests {
             0,
             "nothing may reach the outside directory"
         );
+    }
+
+    /// #98: `host_mutate` forwards this error's `Display` into the
+    /// guest-visible `PathRejected` reason, so the reported component must be
+    /// root-relative. Covers both construction sites — the `resolve_secure`
+    /// walk and the pinned-dirfd walk in `open_parent_dir_secure`.
+    #[test]
+    fn symlink_rejection_reports_a_relative_component_not_the_host_path() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        symlink(outside.path(), dir.path().join("nested/link")).unwrap();
+        let ws = ws_at(&dir);
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root_str = root.to_str().expect("utf-8 temp path");
+
+        let resolve_err = ws
+            .resolve_secure(
+                &WorkspacePath::parse("nested/link/x").unwrap(),
+                PathIntent::Read,
+            )
+            .unwrap_err();
+        let LocalWorkspaceError::SymlinkRejected { component } = &resolve_err else {
+            panic!("expected SymlinkRejected, got {resolve_err:?}");
+        };
+        assert_eq!(component, Path::new("nested/link"));
+
+        std::fs::create_dir(dir.path().join("swap")).unwrap();
+        let swapped = ws_at(&dir);
+        std::fs::remove_dir(dir.path().join("swap")).unwrap();
+        symlink(outside.path(), dir.path().join("swap")).unwrap();
+        let walk_err = swapped
+            .open_parent_dir_secure(Path::new("swap"), false)
+            .unwrap_err();
+        let LocalWorkspaceError::SymlinkRejected { component } = &walk_err else {
+            panic!("expected SymlinkRejected, got {walk_err:?}");
+        };
+        assert_eq!(component, Path::new("swap"));
+
+        for err in [&resolve_err, &walk_err] {
+            let message = err.to_string();
+            assert!(
+                !message.contains(root_str),
+                "refusal leaked the workspace root: {message}"
+            );
+            assert!(
+                !message.contains("/tmp"),
+                "refusal leaked a host path: {message}"
+            );
+        }
     }
 
     // create_missing must not mkdir THROUGH a symlink component either: the
