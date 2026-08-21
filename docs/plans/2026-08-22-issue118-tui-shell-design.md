@@ -597,7 +597,16 @@ mode，但**不**关闭 bracketed paste、不 pop keyboard flags——panic 后�
    scenario 不断言显示细节」的原意，且比 `contains('>')` 更严格。
 2. `READ_BUDGET` 由 `256 * 1024` 提升至 `4 * 1024 * 1024`。全屏应用按帧重绘，
    字节数不再正比于内容量。注释同步更新，说明预算含义已变。
-3. `send_line` 追加 `\n` → 在新 TUI 中即 `Enter` → 提交。**无需改动。**
+3. **`send_line` 必须改发 `\r`（本设计初稿写错了这条）。** 初稿写「`\n` 即 Enter，
+   无需改动」——错。全屏 TUI 跑在 raw mode，而 crossterm 只在 raw mode **关闭**时才把
+   `\n` 映射成 `KeyCode::Enter`（crossterm issue #371：关掉行规程后 `\n` 是 Ctrl+J）。
+   以 `\n` 结尾的输入只会落进输入缓冲区、永不提交，turn 静默不启动。旧 REPL 能容忍
+   `\n` 是因为 readline 跑在 cooked mode。真实终端按 Enter 发的就是 `\r`。
+4. **`drain_until` 必须按 deadline 读。** 原实现在**读返回之后**才检查超时，而
+   portable-pty 的 reader 是阻塞的：全屏 TUI 在无变化时完全静默，于是 scenario 的
+   30s / 60s 上限永不触发，crate 直接撞 CI 级超时且没有任何诊断信息。把唯一的阻塞读移进
+   reader 线程，驱动侧只 `recv_timeout` 等 channel；超时错误携带 ANSI 剥离后的输出尾巴。
+   （这两条是同一个教训的两半：一个一行的 bug，因为第二条而变成 15 分钟的盲查。）
 4. scenario 侧的文本断言经 `strip_ansi` 后落在 24×80 的帧里，短文本仍在一行内。
    若 fake LLM 响应长到会被折行，在 driver 的匹配前把连续空白归一为单个空格
    （归一逻辑留在 driver 内，scenario 不感知）。
