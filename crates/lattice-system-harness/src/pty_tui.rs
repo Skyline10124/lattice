@@ -7,8 +7,9 @@
 //! scenarios that prove the TUI entrypoint still wires into the same
 //! `stream_turn` chain. It does **not** assert on colors, prompt shape, or
 //! layout — those are prototype presentation details that must not become
-//! long-term contract. Prompt recognition and ANSI cleanup live **inside this
-//! driver** only; scenario-level assertions never touch display details.
+//! long-term contract. Ready recognition (alternate-screen enter) and ANSI
+//! cleanup live **inside this driver** only; scenario-level assertions never
+//! touch display details.
 //!
 //! Linux-only. The driver is built on `portable-pty`, a general test library
 //! that satisfies the harness boundary (no product crate deps).
@@ -22,11 +23,16 @@ use thiserror::Error;
 use crate::driver::{LatticeDriver, kill_process_group};
 use crate::world::ScenarioWorld;
 
-/// Max bytes drained from the PTY before we stop reading. The TUI prints a
-/// banner + token stream + status lines; a plain-text turn is well under
-/// 64 KiB. Anything larger is either a runaway or a display bug, neither of
-/// which a smoke scenario should swallow silently.
-const READ_BUDGET: usize = 256 * 1024;
+/// Max bytes drained from the PTY before we stop reading. A full-screen TUI
+/// redraws whole frames, so byte count is no longer proportional to visible
+/// content. 4 MiB bounds a runaway painter without treating a normal session
+/// as a display bug.
+const READ_BUDGET: usize = 4 * 1024 * 1024;
+
+/// CSI enter-alternate-screen (`ESC [ ? 1049 h`). Terminal protocol, not a
+/// presentation detail — this is how the driver knows the full-screen TUI
+/// has taken over the PTY and is ready for input.
+const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 
 #[derive(Debug, Error)]
 pub enum PtyError {
@@ -137,17 +143,59 @@ impl PtyTuiDriver {
     }
 
     /// Drain PTY output until `predicate` returns `true` on the accumulated
-    /// output (with ANSI escapes stripped for matching only), or until
-    /// `timeout` elapses. Returns the raw accumulated bytes on success.
+    /// output (with ANSI escapes stripped and consecutive whitespace collapsed
+    /// for matching only), or until `timeout` elapses. Returns the raw
+    /// accumulated bytes on success.
     ///
-    /// The predicate matches against ANSI-stripped text so a smoke scenario
-    /// can wait for a semantic marker (e.g. a token, a status word) without
-    /// depending on colors or cursor moves — keeping presentation details
-    /// out of the long-term contract (RFC #41 decision five).
+    /// The predicate matches against ANSI-stripped, whitespace-collapsed text
+    /// so a smoke scenario can wait for a semantic marker (e.g. a token, a
+    /// status word) without depending on colors, cursor moves, or 24×80 wrap
+    /// — keeping presentation details out of the long-term contract (RFC #41
+    /// decision three / five).
     pub fn wait_for(
         &mut self,
         timeout: Duration,
         predicate: impl Fn(&str) -> bool,
+    ) -> Result<Vec<u8>, PtyError> {
+        self.drain_until(timeout, |raw| {
+            let stripped = strip_ansi(&String::from_utf8_lossy(raw));
+            predicate(&collapse_ws(&stripped))
+        })
+    }
+
+    /// Drain PTY output until `predicate` returns `true` on the accumulated
+    /// **raw** bytes (ANSI preserved). Used for terminal-protocol facts such
+    /// as alternate-screen enter, which `strip_ansi` would remove.
+    pub fn wait_for_raw(
+        &mut self,
+        timeout: Duration,
+        predicate: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>, PtyError> {
+        self.drain_until(timeout, predicate)
+    }
+
+    /// Wait until the TUI has entered the alternate screen. This is the
+    /// **ready-recognition seam**: the sequence `\x1b[?1049h` lives inside
+    /// the driver, never in a scenario (RFC #41 decision three — "prompt
+    /// recognition and ANSI cleanup only exist inside the driver; scenarios
+    /// assert no display details"). A scenario that needs to know the TUI is
+    /// ready for input calls this, not `wait_for(..., |s| s.contains('>'))`.
+    ///
+    /// Alternate-screen enter is a terminal protocol fact, not a presentation
+    /// detail, and is stricter than matching a prompt character the
+    /// full-screen shell never prints.
+    pub fn wait_for_ready(&mut self, timeout: Duration) -> Result<Vec<u8>, PtyError> {
+        self.wait_for_raw(timeout, |bytes| {
+            bytes
+                .windows(ENTER_ALTERNATE_SCREEN.len())
+                .any(|window| window == ENTER_ALTERNATE_SCREEN)
+        })
+    }
+
+    fn drain_until(
+        &mut self,
+        timeout: Duration,
+        mut predicate: impl FnMut(&[u8]) -> bool,
     ) -> Result<Vec<u8>, PtyError> {
         let start = Instant::now();
         let mut buf = [0u8; 4096];
@@ -168,8 +216,7 @@ impl PtyTuiDriver {
                         "PTY output exceeded {READ_BUDGET} byte budget"
                     )));
                 }
-                let stripped = strip_ansi(&String::from_utf8_lossy(&self.output));
-                if predicate(&stripped) {
+                if predicate(&self.output) {
                     return Ok(self.output.clone());
                 }
             }
@@ -178,20 +225,6 @@ impl PtyTuiDriver {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-    }
-
-    /// Wait for the TUI prompt to appear. This is the **prompt-recognition
-    /// seam**: the prompt shape (`>`) lives inside the driver, never in a
-    /// scenario (RFC #41 decision three — "prompt recognition and ANSI
-    /// cleanup only exist inside the driver; scenarios assert no display
-    /// details"). A scenario that needs to know the TUI is ready for input
-    /// calls this, not `wait_for(..., |s| s.contains('>'))`.
-    ///
-    /// The match is intentionally loose: a smoke scenario only needs to know
-    /// the TUI produced a prompt-like marker and is accepting input, not the
-    /// prompt's exact bytes. ANSI is stripped before matching.
-    pub fn wait_for_prompt(&mut self, timeout: Duration) -> Result<Vec<u8>, PtyError> {
-        self.wait_for(timeout, |s| s.contains('>'))
     }
 
     /// The accumulated raw PTY output so far.
@@ -290,6 +323,12 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
+/// Collapse consecutive whitespace (including wrap-induced newlines) to a
+/// single space so scenario predicates match semantic text, not 24×80 layout.
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +354,20 @@ mod tests {
     #[test]
     fn strip_ansi_passes_plain_text_through() {
         assert_eq!(strip_ansi("plain text"), "plain text");
+    }
+
+    #[test]
+    fn collapse_ws_flattens_wrapped_frames() {
+        assert_eq!(collapse_ws("hello\n  world"), "hello world");
+        assert_eq!(collapse_ws("pong"), "pong");
+    }
+
+    #[test]
+    fn enter_alternate_screen_is_csi_1049h() {
+        assert_eq!(
+            ENTER_ALTERNATE_SCREEN,
+            &[0x1b, 0x5b, 0x3f, 0x31, 0x30, 0x34, 0x39, 0x68]
+        );
     }
 
     /// Tracer bullet: spawn `cat` in a PTY, send a line, wait for it to be

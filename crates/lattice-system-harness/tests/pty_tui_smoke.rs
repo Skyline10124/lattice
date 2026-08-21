@@ -11,15 +11,15 @@
 //! in the ordinary lane (not `#[ignore]`-gated): a broken Direct-Local
 //! environment is a real product failure, never something to skip. RFC #41
 //! decision three: the smoke does **not** assert on prompt shape, colors, or
-//! layout. Prompt recognition and ANSI cleanup live inside `PtyTuiDriver`; the
+//! layout. Ready recognition and ANSI cleanup live inside `PtyTuiDriver`; the
 //! scenario asserts only semantic markers (a turn produced visible assistant
 //! text and the TUI exited cleanly).
 //!
 //! What it proves (issue #43 (Codeberg #21) acceptance point: at least one
 //! PTY smoke):
 //!
-//! - `lattice tui --agent <name> --project-branch <branch>` starts, prints
-//!   a banner, and accepts a prompt.
+//! - `lattice tui --agent <name> --project-branch <branch>` starts, enters
+//!   the alternate screen, and accepts a prompt.
 //! - Sending a prompt produces assistant token text through the real turn
 //!   chain (the fake LLM receives the request).
 //! - `/quit` exits the TUI cleanly (exit within the timeout, no hang).
@@ -84,11 +84,11 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     budget.check(&spec.name);
     let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke", "main").expect("spawn tui");
 
-    // Wait for the TUI to be ready for input. Prompt recognition lives
-    // inside the driver (`wait_for_prompt`); the scenario never matches the
-    // prompt shape itself (RFC #41 decision three).
-    tui.wait_for_prompt(Duration::from_secs(30))
-        .expect("tui banner/prompt appeared");
+    // Wait for the TUI to enter the alternate screen. Ready recognition
+    // lives inside the driver (`wait_for_ready`); the scenario never matches
+    // display bytes itself (RFC #41 decision three).
+    tui.wait_for_ready(Duration::from_secs(30))
+        .expect("tui entered alternate screen");
 
     // Send a prompt and wait for the assistant token text. The fake LLM
     // returns "pong", so the TUI's token rendering must surface it.
