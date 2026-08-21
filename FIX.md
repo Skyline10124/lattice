@@ -2,6 +2,56 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #100（部分）：tracing 改写 stderr、Anthropic 输出上限脱离 4096 — 2026-08-22
+
+**Severity:** A = MEDIUM（破坏 `--json` 机器契约）、C = MEDIUM（用户可见截断）
+
+本票三条互不相关，本轮只修 A 与 C。**B（`turn_id` 不唯一）未修**，#100 保持 open，
+残留已记入 `FINDINGS.md` 的 `M-GH100-01`。
+
+**A. tracing 日志写 stdout，污染 `--json` 的 JSONL 契约**
+
+`crates/lattice-llm/src/logging.rs` 两个分支都没设 writer，而
+`tracing_subscriber::fmt()` 的默认写者是 **stdout**；非 verbose 的默认级别又是
+`error` 而不是关闭，所以只要有一条 error 级日志，`lattice --json` 的 stdout 里就
+会混进非 JSON 行，下游 `jq` / 解析器直接失败。修法：两个分支都加
+`.with_writer(io::stderr)`；`with_ansi` 从硬编码（verbose 恒 `true`、非 verbose
+恒 `false`）改为 `ansi_enabled(stderr.is_terminal(), NO_COLOR)`，重定向的 stderr
+不再收到转义序列。
+
+**C. Anthropic 输出被硬顶在 4096 token**
+
+`providers/anthropic.rs` 的 `request.max_tokens.unwrap_or(4096)` 是生产路径上的
+唯一取值——`lattice-agent` 构造 `ChatRequest` 时 `max_tokens` 恒为 `None`。长回复
+因此被无条件截断为 `finish_reason: "length"`，而 agent loop 对该终局没有续写处理。
+修法：提为具名常量 `DEFAULT_MAX_OUTPUT_TOKENS = 32_768`。可以用平坦常量而不需要
+能力表，是因为 `ModelRouter` 只把三个封闭别名（`opus`/`sonnet`/`haiku`，均为
+Claude 4.x）映射到该 provider，其余一律 `UnknownModel`，任意模型串只能走
+OpenAI-compatible。按 issue 要求未引入 ModelSpec 能力表。
+
+**Verification:**
+
+- 新增 `logging::tests::default_level_diagnostics_go_to_stderr_not_stdout`：
+  因为 `init_logging` 装的是进程级 subscriber，测试用 `--exact` 过滤重新 exec
+  测试二进制（沿用 #144 的自 re-exec 模式），在子进程里发一条 ERROR，断言哨兵
+  出现在 stderr 且**不**出现在 stdout。
+- 新增 `logging::tests::ansi_requires_a_terminal_and_respects_no_color` 覆盖四
+  种输入组合。
+- 新增 `providers::anthropic::tests::default_max_tokens_is_not_the_legacy_4096_cap`，
+  并先断言 `req.max_tokens.is_none()`，确保它测的是生产走的那条默认路径；既有
+  `build_request_includes_model_and_max_tokens` 改为对常量断言。
+- 反向验证：移除非 verbose 分支的 `.with_writer(io::stderr)` → stderr 测试
+  FAILED（哨兵泄漏到 stdout）；把常量改回 `4096` → 上限测试 FAILED
+  （`default output ceiling regressed to the truncating 4096`）；两者恢复后 ok。
+- `cargo test -p lattice-llm` — 138 + 23 passed。
+- `cargo clippy -p lattice-llm --all-targets -- -D warnings` — clean。
+- `cargo fmt --all --check` — clean。
+
+**Changed files:** `crates/lattice-llm/src/logging.rs`,
+`crates/lattice-llm/src/providers/anthropic.rs`, `crates/lattice-llm/Cargo.toml`
+（`tracing` 加入 dev-dependencies，仅供该测试发日志）, `Cargo.lock`,
+`crates/lattice-llm/AGENTS.md`, `FINDINGS.md`, `FIX.md`.
+
 ## GitHub #88：test-utils 不再从 lattice-cli 生产依赖段进入发布二进制 — 2026-08-22
 
 **Severity:** LOW（发布面 / 坏范式）

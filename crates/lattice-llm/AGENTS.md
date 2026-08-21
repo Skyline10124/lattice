@@ -49,6 +49,11 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 
 - PARTIAL M-04: `validate_base_url` DNS checks are best-effort; authoritative
   protection is request-time resolved IP pinning in `client.rs`.
+- FIXED #100-A/C: `logging.rs` writes to stderr (`fmt()` defaults to stdout,
+  which is the `--json` JSONL contract) and derives ANSI from an interactive
+  stderr plus `NO_COLOR`; the Anthropic default output ceiling moved off 4096
+  to `DEFAULT_MAX_OUTPUT_TOKENS`. #100-B (`turn_id` uniqueness) is not this
+  crate's and stays open — see `FINDINGS.md` M-GH100-01.
 - FIXED #90: `http_client_builder` sets `redirect::Policy::none()`. Pinning and
   URL validation bind the first hop only, so a followed redirect reached an
   unvalidated host and replayed the body plus `x-api-key`/`x-goog-api-key`.

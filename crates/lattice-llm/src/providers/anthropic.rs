@@ -13,6 +13,21 @@ use std::collections::HashMap;
 use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent, Role, TokenUsage};
 
+/// Output ceiling applied when the caller names none.
+///
+/// Anthropic requires `max_tokens`, so some default is unavoidable, and the
+/// production `ChatRequest` never carries one (`lattice-agent` leaves it
+/// `None`) — this value alone decides where every Claude reply is cut. The
+/// previous 4096 silently truncated long replies into `finish_reason:
+/// "length"`, which the agent loop does not continue from.
+///
+/// Safe as a flat constant because `ModelRouter` maps exactly three closed
+/// aliases to this provider (`opus`/`sonnet`/`haiku`, all Claude 4.x); any
+/// other name is `UnknownModel` and an arbitrary model string can only reach
+/// the OpenAI-compatible provider. Per-model ceilings need a capability table
+/// that tracks provider releases, which is deliberately out of scope (#100).
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 32_768;
+
 /// Maps Anthropic stop reasons to OpenAI-style finish reasons.
 const STOP_REASON_MAP: &[(&str, &str)] = &[
     ("end_turn", "stop"),
@@ -99,7 +114,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
         }
     }
 
-    let max_tokens = request.max_tokens.unwrap_or(4096);
+    let max_tokens = request.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
 
     let mut body = serde_json::json!({
         "model": resolved.provider_model,
@@ -305,7 +320,24 @@ mod tests {
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
         assert_eq!(json["model"], "claude-sonnet-4-6");
-        assert_eq!(json["max_tokens"], 4096);
+        assert_eq!(json["max_tokens"], DEFAULT_MAX_OUTPUT_TOKENS);
+    }
+
+    /// #100-C: the production `ChatRequest` never sets `max_tokens`, so the
+    /// default is the only thing standing between a long reply and a
+    /// `finish_reason: "length"` cut. Pin it well above the old 4096.
+    #[test]
+    fn default_max_tokens_is_not_the_legacy_4096_cap() {
+        let req = ChatRequest::new(vec![Message::user("hello")], ModelTarget::new("sonnet"));
+        assert!(
+            req.max_tokens.is_none(),
+            "production requests must keep exercising the default"
+        );
+        let json = build_request_json(&req, &make_resolved());
+        assert!(
+            json["max_tokens"].as_u64().unwrap() > 4096,
+            "default output ceiling regressed to the truncating 4096"
+        );
     }
 
     #[test]

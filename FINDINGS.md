@@ -36,6 +36,12 @@
 
 
 
+### M-GH100-01: `turn_id` 由 `(session_id, 父 commit)` 决定，同父回合在审计里串成一条 — `correctness` / `lattice-api` / GitHub #100
+- **位置**: `crates/lattice-api/src/turn/live.rs`（`turn_id = format!("{session_id}:{parent_commit_id}")`）；消费侧 `cep_audit_entries` 与 `store_turn_attestation`。
+- **问题**: `turn_id` 不含任何回合维度，所以任何两个从同一父 commit 出发的回合都拿到相同 id：`session branch` 后从同父再发一轮、上一轮失败/取消未提交后重发、空会话（`parent = "root"`）首轮重试。后果是两个不同回合的调用行在同一 `turn_id` 下累加，operator 审计读取无法区分，attestation 也写到同一标识下。不需要崩溃或并发即可复现。
+- **当前状态**: OPEN。GitHub #100 的 A（tracing 写 stdout）与 C（Anthropic 4096 硬顶）已于 2026-08-22 修复并记入 `FIX.md`；B 未动，本票因此保持 open。
+- **计划**: 改为回合唯一标识（ULID，或在现格式上追加单调计数/`turn_seed`）。不要在本轮之外顺手改：ADR 0005 的 `TurnCoordinator`（#139-B）会重写这条 Turn 身份链路，而 #139-B 同时删除 SQLite audit 后端——两者应共用同一个 id 决定，避免先定一个马上被替换的格式。验收按 issue 原文：harness 断言 `session branch` 后同父两回合的 `turn_id` 不同且调用行不混。
+
 ## LOW
 
 > 下列 `L-39-*` / `ENV-WASM-01` / `T-39-01` 中的 `#39` 一律指 **GitHub #39**(= Codeberg #17,
