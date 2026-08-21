@@ -15,6 +15,8 @@
 //! that satisfies the harness boundary (no product crate deps).
 
 use std::io::{Read, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -40,15 +42,24 @@ pub enum PtyError {
     Io(#[from] std::io::Error),
     #[error("pty: {0}")]
     Pty(String),
-    #[error("tui did not produce output within {0:?}")]
-    Timeout(Duration),
+    /// Timed out waiting for output. Carries a bounded, ANSI-stripped tail of
+    /// what the TUI *did* emit: without it a quiet TUI is indistinguishable
+    /// from a dead one, which turns a one-line bug into a blind CI timeout.
+    #[error("tui did not produce matching output within {0:?}; last output: {1:?}")]
+    Timeout(Duration, String),
 }
 
 /// A live PTY-backed TUI session. Drop kills and reaps the child so no TUI
 /// process survives the scenario (PRD user story 20: process-group cleanup).
 pub struct PtyTuiDriver {
+    /// Kept alive so the PTY stays open; the reader thread owns a clone.
+    #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
     master_writer: Box<dyn Write + Send>,
+    /// Chunks drained by a background reader thread. The thread owns the only
+    /// blocking read, so `drain_until` can honour its deadline instead of
+    /// parking forever on a quiet PTY.
+    rx: Receiver<Vec<u8>>,
     /// Used to kill the child directly (best-effort) on drop/timeout.
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     /// The child itself, kept so `kill_and_reap` can `try_wait` to reap the
@@ -122,9 +133,33 @@ impl PtyTuiDriver {
         // Drop the slave so EOF propagates to the child when the master closes.
         drop(pair.slave);
 
+        // One blocking read lives in this thread; the driver only ever waits on
+        // the channel. A full-screen TUI is silent whenever nothing changes, so
+        // a deadline that is only checked *after* a read returns is no deadline
+        // at all — it parks until the process dies.
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| PtyError::Pty(e.to_string()))?;
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(Self {
             master: pair.master,
             master_writer: writer,
+            rx,
             killer,
             child: Some(child),
             pgid,
@@ -132,12 +167,19 @@ impl PtyTuiDriver {
         })
     }
 
-    /// Send a line to the TUI's stdin (the prompt input). Appends `\n` so
-    /// rustyline's readline treats it as Enter.
+    /// Send a line to the TUI's prompt input, terminated by `\r` (carriage
+    /// return) — what a real terminal sends when the user presses Enter.
+    ///
+    /// `\r`, not `\n`, is load-bearing. The full-screen TUI runs in raw mode,
+    /// and crossterm only maps `\n` to `KeyCode::Enter` when raw mode is
+    /// *disabled* (crossterm issue #371: with the line discipline off, `\n`
+    /// is Ctrl+J, not Enter). A line terminated by `\n` therefore lands in the
+    /// input buffer and is never submitted — the turn silently never starts.
+    /// The inline REPL tolerated `\n` because readline ran in cooked mode.
     pub fn send_line(&mut self, line: &str) -> Result<(), PtyError> {
         self.master_writer
             .write_all(line.as_bytes())
-            .and_then(|_| self.master_writer.write_all(b"\n"))?;
+            .and_then(|_| self.master_writer.write_all(b"\r"))?;
         self.master_writer.flush()?;
         Ok(())
     }
@@ -198,33 +240,55 @@ impl PtyTuiDriver {
         mut predicate: impl FnMut(&[u8]) -> bool,
     ) -> Result<Vec<u8>, PtyError> {
         let start = Instant::now();
-        let mut buf = [0u8; 4096];
-        let mut reader = self
-            .master
-            .try_clone_reader()
-            .map_err(|e| PtyError::Pty(e.to_string()))?;
-        loop {
-            // portable-pty's reader is blocking; one best-effort `read` per
-            // iteration, bounded by `timeout`. A quiet PTY is a real failure
-            // surfaced by the timeout (the scenario always sends input that
-            // produces output).
-            let n = reader.read(&mut buf)?;
-            if n > 0 {
-                self.output.extend_from_slice(&buf[..n]);
-                if self.output.len() > READ_BUDGET {
-                    return Err(PtyError::Pty(format!(
-                        "PTY output exceeded {READ_BUDGET} byte budget"
-                    )));
-                }
-                if predicate(&self.output) {
-                    return Ok(self.output.clone());
-                }
-            }
-            if start.elapsed() >= timeout {
-                return Err(PtyError::Timeout(timeout));
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        // The predicate may already hold (bytes drained by an earlier wait).
+        if predicate(&self.output) {
+            return Ok(self.output.clone());
         }
+        loop {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return Err(PtyError::Timeout(timeout, self.tail_for_diagnostics()));
+            }
+            match self
+                .rx
+                .recv_timeout(remaining.min(Duration::from_millis(200)))
+            {
+                Ok(chunk) => {
+                    self.output.extend_from_slice(&chunk);
+                    if self.output.len() > READ_BUDGET {
+                        return Err(PtyError::Pty(format!(
+                            "PTY output exceeded {READ_BUDGET} byte budget"
+                        )));
+                    }
+                    if predicate(&self.output) {
+                        return Ok(self.output.clone());
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                // Reader thread ended: the child closed the PTY. Nothing more
+                // can arrive, so fail now rather than burning the deadline.
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(PtyError::Timeout(
+                        start.elapsed(),
+                        format!("pty closed; {}", self.tail_for_diagnostics()),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Bounded, ANSI-stripped tail of the drained output, for error messages.
+    fn tail_for_diagnostics(&self) -> String {
+        let text = collapse_ws(&strip_ansi(&String::from_utf8_lossy(&self.output)));
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(300)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        tail
     }
 
     /// The accumulated raw PTY output so far.
