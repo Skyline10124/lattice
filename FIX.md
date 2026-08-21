@@ -2,6 +2,40 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #90：provider HTTP 客户端禁用重定向 — 2026-08-22
+
+**Severity:** HIGH (`safety`)
+
+**Problem:** `crates/lattice-llm/src/client.rs` 的 `http_client_builder()` 只设三个
+超时，从不调用 `.redirect(..)`，而 reqwest 0.13 的默认策略是 `Policy::limited(10)`。
+本 crate 的全部网络防护——`validate_base_url`、`host_is_dns_rebinding_domain`、
+以及 `build_http_client_for_url` 里的 `resolve_to_addrs` 钉扎——都只绑定**首跳**，
+所以一次 3xx 就能把请求送到未校验的主机：私网/回环/云 metadata 端点全部可达，
+307/308 还会重放整个请求体（system prompt + 对话历史 + agent 刚从工作区读出的
+文件内容）。跨 host 时 reqwest 只剥离 `Authorization`/`Cookie` 等五个头，
+Anthropic 的 `x-api-key` 与 Gemini 的 `x-goog-api-key` 会被原样转发。
+同仓库另外两个出网客户端（`lancet-native` 的 `executor/web.rs:191`、
+`handlers/external.rs:29`）早已是 `Policy::none()`，LLM 通道是唯一漏项。
+
+**Fix:** `http_client_builder()` 增加 `.redirect(reqwest::redirect::Policy::none())`，
+与 `fetch.web` 两个客户端对齐，并在函数上记录这条约束的理由。未额外加
+`https_only`：`net_guard::validate_base_url` 已对非 localhost 主机拒绝明文 HTTP，
+关掉重定向后不存在可降级的第二跳。
+
+**Verification:**
+
+- 新增 `client::tests::provider_client_does_not_follow_redirects`：两台本地
+  `TcpListener`，第一台回 `307` 并把 `Location` 指向第二台，断言调用方看到的是
+  307 且第二台从未被连接。
+- 反向验证：移除 `.redirect(..)` 后该测试 FAILED（`left: 200, right: 307`，即
+  重定向目标真被访问到）；恢复后 ok。
+- `cargo test -p lattice-llm` — 134 + 23 passed。
+- `cargo clippy -p lattice-llm --all-targets -- -D warnings` — clean。
+- `cargo fmt --all --check` — clean。
+
+**Changed files:** `crates/lattice-llm/src/client.rs`,
+`crates/lattice-llm/AGENTS.md`, `FINDINGS.md`, `FIX.md`.
+
 ## GitHub #144 review round 2: journal contract depth + real process-crash gate — 2026-08-17
 
 Independent review of the #144 branch raised eleven findings (F1–F11). Each was

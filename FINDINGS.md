@@ -391,6 +391,7 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 
 ### M-04: `validate_base_url` DNS 检查与 HTTP 请求之间存在 TOCTOU — `security`
 - **已做**: 请求前通过 `net-guard::resolve_public_socket_addrs` 解析公网地址，`ClientBuilder::resolve_to_addrs` 钉住结果（`lattice-llm/src/client.rs`）。
+- **已做**: request-time pinning 只绑定首跳，此前重定向可绕过它；#90 已给 provider 客户端设 `redirect::Policy::none()`，与 `fetch.web` 两个客户端一致，不再有第二跳。
 - **残留**: `validate_base_url` 阶段的 DNS 仍为 best-effort（离线 CI 可能不解析）；权威防护在 request-time pinning，配置时校验不能单独当作闭环。
 
 ### M-05: `web_fetch` DNS rebinding / 黑名单 — `security`

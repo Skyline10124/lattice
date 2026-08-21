@@ -49,6 +49,10 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 
 - PARTIAL M-04: `validate_base_url` DNS checks are best-effort; authoritative
   protection is request-time resolved IP pinning in `client.rs`.
+- FIXED #90: `http_client_builder` sets `redirect::Policy::none()`. Pinning and
+  URL validation bind the first hop only, so a followed redirect reached an
+  unvalidated host and replayed the body plus `x-api-key`/`x-goog-api-key`.
+  Do not re-enable redirects without re-running the net-guard checks per hop.
 - PARTIAL M-05: `web_fetch`/external fetch rebinding defense relies on pinned IP
   plus the maintained `net-guard` denylist shared with native web behavior.
 - FIXED L-02: provider JSON parsing no longer uses a sentinel error value for
