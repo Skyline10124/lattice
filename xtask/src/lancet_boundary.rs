@@ -53,6 +53,10 @@ pub fn run() -> anyhow::Result<()> {
                 "lattice-cli production legacy executor bypass",
                 check::cli_production_bypass_hits(&root)?,
             ),
+            (
+                "test-only features enabled from production [dependencies]",
+                check::production_test_feature_hits(&root)?,
+            ),
         ],
     )
 }

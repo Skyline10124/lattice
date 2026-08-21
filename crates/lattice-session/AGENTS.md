@@ -136,7 +136,11 @@ payload compatibility.
 
 - Keep Git store topology tests for linear, merge, diamond, branch reset, and
   detached HEAD paths when changing transcript or ref logic.
-- Keep test helpers hidden and clearly non-production.
+- Keep test helpers hidden and clearly non-production. A consumer reaches
+  `test-utils` from its `[dev-dependencies]` entry only — enabling it from
+  `[dependencies]` cancels the `#[cfg]` gate and ships `init_fixture_repo` in
+  the release binary. `cargo xtask lancet-boundary` fails on any workspace
+  crate that does so (#88).
 - Do not reintroduce sidecar metadata, a sidecar importer, SQLite session
   storage, or a git2 dependency; durability primitives belong to
   `lattice-store`, and this crate must not hand-roll them.

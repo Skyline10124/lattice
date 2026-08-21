@@ -2,6 +2,49 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #88：test-utils 不再从 lattice-cli 生产依赖段进入发布二进制 — 2026-08-22
+
+**Severity:** LOW（发布面 / 坏范式）
+
+**Problem:** `crates/lattice-cli/Cargo.toml` 的生产 `[dependencies]` 段写着
+`lattice-session = { workspace = true, features = ["test-utils"] }`，直接抵消了
+`lattice-session/src/lib.rs:26-29` 的 `#[cfg(any(test, feature = "test-utils"))]`
+门禁——会创建 git 仓库的 `init_fixture_repo` / `init_empty_repo` 因此进入发布
+二进制 `lattice` 的依赖图。该 crate 对这些 helper 的全部使用点都在 `#[cfg(test)]`
+里，而 `#[cfg(test)]` 单测本来就能看到 `[dev-dependencies]`，生产段从来不是到达
+它们的必要路径。issue 正文提到的 `lattice-agent` 那条此前已修，本次只剩这一条。
+
+**Fix:**
+
+- `crates/lattice-cli/Cargo.toml`：生产段 `lattice-session` 去掉 `features`，
+  dev 段那条改为 `features = ["test-utils"]`。
+- 新增门禁 `check::production_test_feature_hits`，接进 `cargo xtask
+  lancet-boundary` 的分组列表（该命令已在 `cargo xtask ci` 第 6 步与
+  `ci.yml` / `full-gate.yml` 两条 lane 里，无需新增 CI 接线）。它读
+  `cargo metadata --no-deps`，对**任意** workspace 成员的 `Normal` kind 依赖，
+  只要启用了以 `test-` 开头的 feature 就报错。按前缀而非枚举清单判定，所以将来
+  新增的 `test-*` feature 自动被覆盖。
+
+**Verification:**
+
+- `cargo metadata` 全量扫描：工作区内 Normal kind 依赖启用 test 类 feature 的
+  条目为 0（修复前 1 条）。
+- `cargo tree -p lattice-cli -e features --no-dev-dependencies | rg test-utils`
+  — 无输出（修复前命中 `lattice-session feature "test-utils"`）。
+- 反向验证：把 `features = ["test-utils"]` 加回生产段后
+  `cargo xtask lancet-boundary` 退出码 1 并报
+  `lattice-cli: [dependencies] lattice-session enables test-only feature(s)
+  test-utils`；移除后退出码 0。
+- 新增单测 `production_test_feature_flagged_only_in_dependencies_section`
+  （同一 crate 两个 section 都启用，只有生产段计为 1 条 finding）与
+  `dev_only_test_feature_is_clean`。
+- `cargo test -p xtask lancet_boundary` — 16 passed。
+- `cargo test -p lattice-cli` — 132 + 4 passed；`cargo build -p lattice-cli` 通过。
+
+**Changed files:** `crates/lattice-cli/Cargo.toml`,
+`xtask/src/lancet_boundary.rs`, `xtask/src/lancet_boundary/check.rs`,
+`crates/lattice-session/AGENTS.md`, `FIX.md`.
+
 ## GitHub #90：provider HTTP 客户端禁用重定向 — 2026-08-22
 
 **Severity:** HIGH (`safety`)
