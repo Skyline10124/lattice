@@ -8,11 +8,11 @@ description = "LATTICE inline CLI chat"
 
 [dependencies]
 lattice-api = { workspace = true }
-anyhow = { workspace = true }
-futures = { workspace = true }
-tokio = { workspace = true }
-colored = { workspace = true }
-rustyline = { workspace = true }
+anyhow      = { workspace = true }
+futures     = { workspace = true }
+tokio       = { workspace = true }
+ratatui     = { workspace = true }
+crossterm   = { workspace = true, features = ["event-stream"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
