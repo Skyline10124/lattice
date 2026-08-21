@@ -48,6 +48,12 @@
 > operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
 > `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
 
+### T-GH143-01: `sigkill_mid_create_leaves_only_absent_or_fully_valid_stores` 的 120ms 窗口隐含假设 TMPDIR 在 tmpfs 上 — `verification` / test-hygiene / `lattice-store`
+- **位置**: `crates/lattice-store/tests/integration.rs`（父进程 `sleep(120ms)` 后 SIGKILL 子进程，随后断言 `published > 0`）。
+- **问题**: 子进程要先完成进程启动，才开始建仓循环；而建仓是 fsync 密集的。`tempfile::tempdir()` 用 `TMPDIR`，在 tmpfs 上这些 fsync 近乎免费，在真实块设备上则慢一个量级。把 `TMPDIR` 指向 nvme 后子进程在 120ms 内一个仓都发布不出来，断言以 `child should have published some stores` 失败——看上去像持久性缺陷，实际是计时假设。测的不变量（"每个目标要么不存在，要么是完整有效的仓"）本身没问题，脆的是"窗口内一定发布过东西"这个前提。
+- **当前状态**: OPEN，不影响 CI。GitHub CI runner 的 `/tmp` 是 tmpfs，该测试在那里稳定通过（本地同样条件下 0.16s 全绿）。2026-08-22 在本机为绕开 `ENV-DISK-01` 的 tmpfs 配额而改用磁盘 `TMPDIR` 时首次撞到。
+- **计划**: 把"发布过至少一个仓"改成由子进程自己汇报的事实（例如子进程每建一个就写一行到管道，父进程读到第一行后再 SIGKILL），而不是靠固定 sleep 猜。或者在断言前先确认子进程确实进入了循环，`published == 0` 时跳过而非失败。不要单纯调大 sleep——那只是把同一个假设推远一点。
+
 ### L-GH98-03: `net-guard` 在 async 调用栈上同步 `to_socket_addrs`（阻塞 `getaddrinfo`）— `robustness` / `net-guard` / GitHub #98
 - **位置**: `crates/net-guard/src/lib.rs:140`（`resolve_public_socket_addrs`）、`:229`（rebinding 检查）；由 `lattice-llm` 的 `build_http_client_for_url` 内联调用，位于 LLM/fetch 的 async 栈上。
 - **问题**: `to_socket_addrs()` 是阻塞的 `getaddrinfo`，直接跑在 reactor 线程上。DNS 慢或超时时会占住一个 tokio worker；单线程 runtime 上会停掉整个 turn。
