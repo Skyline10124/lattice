@@ -31,8 +31,7 @@ use tokio::time;
 
 use lattice_api::{LoadedAgentProfile, RunTurnRequest, RunTurnStatus, TurnEvent, TurnUsageSummary};
 
-/// Stream idle timeout in seconds.
-pub(crate) const STREAM_TIMEOUT_SECS: u64 = 300;
+pub(crate) use lattice_api::STREAM_IDLE_TIMEOUT_SECS as STREAM_TIMEOUT_SECS;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TerminalSignal {
     Failed { reason: String },

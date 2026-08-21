@@ -38,9 +38,9 @@ pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
 pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
 pub use turn::{
     LifecycleFailureKind, RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus,
-    ToolResultSummary, TurnEvent, TurnEventStream, TurnLifecycleOutcome, TurnUsageSummary,
-    UnfinalizedTurn, collect_turn_result_from_events, finalize_turn, outcome_workspace_less,
-    run_turn, stream_turn,
+    STREAM_IDLE_TIMEOUT_SECS, ToolResultSummary, TurnEvent, TurnEventStream, TurnLifecycleOutcome,
+    TurnUsageSummary, UnfinalizedTurn, collect_turn_result_from_events, finalize_turn,
+    outcome_workspace_less, run_turn, stream_turn,
 };
 
 #[doc(hidden)]
