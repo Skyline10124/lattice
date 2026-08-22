@@ -1,6 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -82,12 +83,12 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub(crate) fn new(ctx: SessionContext, kitty_keyboard: bool) -> Self {
+    pub(crate) fn new(ctx: SessionContext, kitty_keyboard: bool, session_dir: &Path) -> Self {
         Self {
             ctx,
             blocks: Vec::new(),
             input: InputBuffer::new(),
-            history: History::load(std::path::Path::new("")),
+            history: History::load(session_dir),
             viewport: Viewport::new(),
             phase: TurnPhase::Idle,
             cancel_flag: None,
@@ -294,8 +295,13 @@ impl App {
         }
     }
 
+    /// Rows the transcript region occupies. This must use the **same wrapped**
+    /// input height the draw path reserves (`view::input_visual_height`): a
+    /// long single logical line can wrap to six visual rows, and counting it as
+    /// one row here makes follow-to-bottom and page size disagree with the
+    /// screen, hiding the last transcript rows.
     fn transcript_height(&self) -> usize {
-        let input_h = self.input.rows().clamp(1, 6) as u16;
+        let input_h = crate::view::input_visual_height(self, self.term_width);
         self.term_height.saturating_sub(input_h + 1).max(1) as usize
     }
 }
@@ -314,12 +320,17 @@ pub(crate) async fn run_app(options: TuiOptions, ctx: SessionContext) -> anyhow:
     install_cleanup_panic_hook(kitty);
     let _cleanup = TerminalCleanup { kitty };
 
-    let mut app = App::new(ctx, kitty);
-    app.history = History::load(&options.session_dir);
+    let mut app = App::new(ctx, kitty, &options.session_dir);
     app.push_status(StatusKind::Notice(startup_notice(&app.ctx)));
 
     let mut events = EventStream::new();
     let mut turn_stream: Option<lattice_api::TurnEventStream> = None;
+    // Absolute idle deadline, not a per-iteration `timeout(...)`. The 33 ms
+    // ticker completes `select!` constantly, so a relative timeout future is
+    // dropped and rebuilt with a fresh deadline ~30x a second and can never
+    // elapse. The deadline is set when a turn starts and pushed forward by
+    // every event that actually arrives.
+    let mut turn_deadline: Option<tokio::time::Instant> = None;
     let mut ticker = tokio::time::interval(FRAME);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dirty = true;
@@ -333,20 +344,26 @@ pub(crate) async fn run_app(options: TuiOptions, ctx: SessionContext) -> anyhow:
                 if let Some(Ok(ev)) = event {
                     if let Some(prompt) = handle_input_event(&mut app, ev) {
                         begin_turn(&options, &mut app, &mut turn_stream, prompt).await;
+                        turn_deadline = turn_stream.as_ref().map(|_| idle_deadline());
                     }
                     dirty = true;
                 }
             }
-            wait = poll_turn(&mut turn_stream) => {
+            wait = poll_turn(&mut turn_stream, turn_deadline) => {
                 match wait {
-                    TurnWait::Event(ev) => app.apply_turn_event(ev),
+                    TurnWait::Event(ev) => {
+                        app.apply_turn_event(ev);
+                        turn_deadline = Some(idle_deadline());
+                    }
                     TurnWait::Ended => {
                         turn_stream = None;
+                        turn_deadline = None;
                         app.phase = TurnPhase::Idle;
                         app.cancel_flag = None;
                     }
                     TurnWait::TimedOut => {
                         turn_stream = None;
+                        turn_deadline = None;
                         app.apply_stream_idle_timeout();
                     }
                 }
@@ -376,19 +393,34 @@ enum TurnWait {
     TimedOut,
 }
 
-async fn poll_turn(stream: &mut Option<lattice_api::TurnEventStream>) -> TurnWait {
-    match stream.as_mut() {
-        Some(s) => match tokio::time::timeout(
-            Duration::from_secs(lattice_api::STREAM_IDLE_TIMEOUT_SECS),
-            s.next(),
-        )
-        .await
-        {
+/// One idle window from now. A turn that produces no event for this long is
+/// declared stuck (#101 A9 defect 1).
+fn idle_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + Duration::from_secs(lattice_api::STREAM_IDLE_TIMEOUT_SECS)
+}
+
+/// Wait for the next turn event, bounded by an **absolute** deadline supplied
+/// by the caller. `timeout_at` is used rather than `timeout` because this
+/// future is rebuilt on every `select!` iteration: a relative timeout would
+/// restart its countdown each time the frame ticker wins the race, so the
+/// idle bound would never elapse.
+async fn poll_turn(
+    stream: &mut Option<lattice_api::TurnEventStream>,
+    deadline: Option<tokio::time::Instant>,
+) -> TurnWait {
+    match (stream.as_mut(), deadline) {
+        (Some(s), Some(deadline)) => match tokio::time::timeout_at(deadline, s.next()).await {
             Ok(Some(ev)) => TurnWait::Event(ev),
             Ok(None) => TurnWait::Ended,
             Err(_) => TurnWait::TimedOut,
         },
-        None => std::future::pending().await,
+        // A live stream with no deadline cannot happen (both are set together);
+        // wait for the stream rather than silently disabling the bound.
+        (Some(s), None) => match s.next().await {
+            Some(ev) => TurnWait::Event(ev),
+            None => TurnWait::Ended,
+        },
+        (None, _) => std::future::pending().await,
     }
 }
 
@@ -542,6 +574,8 @@ mod tests {
                 project_branch: "main".into(),
             },
             false,
+            // History is not under test here; an empty dir keeps it inert.
+            Path::new("/nonexistent-tui-test-history"),
         )
     }
 
@@ -560,28 +594,49 @@ mod tests {
     #[test]
     fn tool_finished_updates_the_block_with_matching_id() {
         let mut app = test_app();
-        app.apply_turn_event(TurnEvent::ToolCallStarted {
-            id: "call-1".into(),
-            name: "observe.workspace".into(),
-        });
+        // Three concurrent tools: with only one in flight, "updates the block
+        // with the matching id" would pass even if the code updated any block.
+        for (id, name) in [
+            ("call-1", "observe.workspace"),
+            ("call-2", "mutate.edit"),
+            ("call-3", "fetch.web"),
+        ] {
+            app.apply_turn_event(TurnEvent::ToolCallStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+        }
         app.apply_turn_event(TurnEvent::ToolCallFinished {
-            id: "call-1".into(),
-            name: "observe.workspace".into(),
+            id: "call-2".into(),
+            name: "mutate.edit".into(),
             ok: false,
             output_len: 0,
             error_summary: Some("precondition failed".into()),
         });
-        match &app.blocks[0] {
-            Block::Tool {
-                id,
-                state: ToolState::Failed { output_len, error },
-                ..
-            } => {
-                assert_eq!(id, "call-1");
-                assert_eq!(*output_len, 0);
-                assert_eq!(error.as_deref(), Some("precondition failed"));
+
+        let states: Vec<(&str, &ToolState)> = app
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Tool { id, state, .. } => Some((id.as_str(), state)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states.len(), 3, "every started tool keeps its own block");
+        for (id, state) in states {
+            match (id, state) {
+                ("call-2", ToolState::Failed { output_len, error }) => {
+                    assert_eq!(*output_len, 0);
+                    assert_eq!(error.as_deref(), Some("precondition failed"));
+                }
+                ("call-2", other) => panic!("call-2 should be Failed, got {other:?}"),
+                (other_id, ToolState::Running) => {
+                    assert!(matches!(other_id, "call-1" | "call-3"));
+                }
+                (other_id, other) => {
+                    panic!("{other_id} must stay Running, got {other:?}")
+                }
             }
-            other => panic!("expected failed tool block, got {other:?}"),
         }
     }
 
@@ -668,5 +723,53 @@ mod tests {
             }
             other => panic!("expected TurnFailed, got {other:?}"),
         }
+    }
+
+    /// The regression guard for the idle bound itself: `poll_turn` is rebuilt
+    /// on every `select!` iteration (the 33 ms frame ticker wins constantly),
+    /// so a *relative* `timeout(...)` restarts its countdown ~30x a second and
+    /// can never elapse. Rebuild the future repeatedly against a stream that
+    /// never yields and require the absolute deadline to still fire.
+    #[tokio::test(start_paused = true)]
+    async fn idle_deadline_survives_repeated_poll_rebuilds() {
+        let mut stream: Option<lattice_api::TurnEventStream> =
+            Some(Box::pin(futures::stream::pending::<TurnEvent>()));
+        let deadline = idle_deadline();
+
+        // Two thirds of the window, consumed as many short frame-tick races.
+        let ticks = (lattice_api::STREAM_IDLE_TIMEOUT_SECS * 2 / 3).max(1);
+        for _ in 0..ticks {
+            tokio::select! {
+                wait = poll_turn(&mut stream, Some(deadline)) => {
+                    assert!(
+                        !matches!(wait, TurnWait::TimedOut),
+                        "idle bound fired before the deadline"
+                    );
+                }
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+
+        // Still inside the window: rebuilding must not have reset it.
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "test consumed the whole window before asserting"
+        );
+        assert!(
+            matches!(
+                poll_turn(&mut stream, Some(deadline)).await,
+                TurnWait::TimedOut
+            ),
+            "absolute deadline must elapse despite repeated rebuilds"
+        );
+        // The load-bearing assertion: it fired *at* the original deadline. A
+        // relative `timeout(...)` also eventually fires, but only after a
+        // fresh full window from the last rebuild — which is exactly the bug.
+        let fired_at = tokio::time::Instant::now();
+        assert!(
+            fired_at.duration_since(deadline) < Duration::from_secs(1),
+            "deadline was reset by rebuilding: fired {:?} late",
+            fired_at.duration_since(deadline)
+        );
     }
 }

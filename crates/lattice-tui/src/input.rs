@@ -40,7 +40,10 @@ impl InputBuffer {
     /// Bracketed-paste payload. Inserts verbatim, newlines included, and
     /// **never** submits.
     pub(crate) fn insert_paste(&mut self, text: &str) {
-        let text = text.replace('\r', "");
+        // Normalise line endings instead of deleting carriage returns: a
+        // terminal may deliver pasted newlines as CRLF or as a bare CR, and
+        // stripping CR outright collapses such a paste into a single line.
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut parts = text.split('\n');
         if let Some(first) = parts.next() { for c in first.chars() { self.insert_char(c); } }
         for part in parts { self.newline(); for c in part.chars() { self.insert_char(c); } }
@@ -95,6 +98,10 @@ impl InputBuffer {
     }
     pub(crate) fn home(&mut self) { self.cursor.1 = 0; }
     pub(crate) fn end(&mut self) { self.cursor.1 = char_len(&self.lines[self.cursor.0]); }
+    /// Logical line count. The draw path deliberately does **not** use this:
+    /// it reserves *wrapped* rows via `view::input_visual_height`, so a long
+    /// single line still gets the height it actually occupies.
+    #[cfg(test)]
     pub(crate) fn rows(&self) -> usize { self.lines.len().max(1) }
     fn clamp_col(&mut self) { self.cursor.1 = self.cursor.1.min(char_len(&self.lines[self.cursor.0])); }
 }
@@ -270,14 +277,27 @@ mod tests {
 
     #[test]
     fn paste_with_newlines_never_submits() {
-        let mut buf = InputBuffer::new();
-        buf.insert_paste("a\nb\nc");
-        assert_eq!(buf.rows(), 3);
-        assert_eq!(buf.text(), "a\nb\nc");
-        assert!(!matches!(
-            resolve_key(key(KeyCode::Char('x'), KeyModifiers::NONE), false, false),
-            KeyAction::Submit
-        ));
+        // Drive the real paste path: a bracketed-paste payload must reach the
+        // buffer as `KeyAction::Paste`, never as `Submit`, however many line
+        // separators it carries and whichever convention they use.
+        for payload in ["a\nb\nc", "a\r\nb\r\nc", "a\rb\rc"] {
+            let mut buf = InputBuffer::new();
+            buf.insert_paste(payload);
+            assert_eq!(buf.rows(), 3, "paste {payload:?} must stay three lines");
+            assert_eq!(buf.text(), "a\nb\nc", "paste {payload:?} normalises to LF");
+        }
+
+        // The newline characters inside a paste are payload, not keystrokes:
+        // no key event derived from them may resolve to Submit.
+        for code in [KeyCode::Char('\n'), KeyCode::Char('\r')] {
+            assert!(
+                !matches!(
+                    resolve_key(key(code, KeyModifiers::NONE), false, false),
+                    KeyAction::Submit
+                ),
+                "{code:?} inside a paste must not submit"
+            );
+        }
     }
 
     #[test]
@@ -311,6 +331,18 @@ mod tests {
         assert!(buf.move_up(), "from last line, up moves the cursor");
         assert_eq!(buf.cursor.0, 0);
         assert!(!buf.move_up(), "at line 0, up is for history");
+
+        // `false` is the signal the caller turns into a history step, so drive
+        // that step too: the buffer must end up holding the history entry.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut history = History::load(dir.path());
+        history.push("first");
+        history.push("second");
+        assert_eq!(history.prev(), Some("second"), "newest entry first");
+        assert_eq!(history.prev(), Some("first"));
+        buf.set_text("first");
+        assert_eq!(buf.text(), "first");
+        assert_eq!(history.next(), Some("second"), "down walks back forward");
     }
 
     #[test]

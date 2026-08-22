@@ -222,11 +222,12 @@ A single turn, from user keystroke to committed session graph:
 
 1. **User invokes the runtime.**
    - `lattice-cli` parses arguments and, for an interactive session, calls
-     `lattice_tui::run`; the TUI is a `rustyline` inline REPL (no alternate
-     screen) that reads lines and executes turns through
-     `lattice_api::stream_turn`.
-     - The TUI spawns a Ctrl-C watcher for the duration of each turn and sets
-       `RunTurnRequest::cancel_flag` to cooperatively cancel.
+     `lattice_tui::run`; the TUI is a full-screen `ratatui`/`crossterm`
+     application (alternate screen, raw mode) that reads keys and executes
+     turns through `lattice_api::stream_turn`.
+     - Ctrl-C and Esc arrive as raw-mode key events and set
+       `RunTurnRequest::cancel_flag` to cooperatively cancel; a cancelled
+       Turn still commits.
    - Non-interactive paths call `lattice_api::stream_turn` (or `run_turn`)
      directly.
 
@@ -457,9 +458,9 @@ One sentence per crate:
 - **`lattice-api`** — Thin public facade for session creation/opening and turn
   execution; translates profile `[lancet]` policy into LANCET-native config
   and wires the agent loop over `lancet-api`'s CEP runtime.
-- **`lattice-tui`** — `rustyline` inline REPL over `lattice-api` sessions and
-  `stream_turn`; owns line editing, history, and inline rendering (no
-  alternate screen, no ratatui).
+- **`lattice-tui`** — Full-screen `ratatui`/`crossterm` TUI over
+  `lattice-api` sessions and `stream_turn`; owns the terminal lifecycle,
+  multi-line input, history, viewport, and transcript rendering.
 - **`lattice-cli`** — Binary entry point and argument dispatch over
   API/session/model/audit commands, plus the `lattice-tui` presentation crate.
 

@@ -104,16 +104,18 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         "fake LLM did not receive the expected request; captures: {caps:?}"
     );
 
-    // Quit, then Drop kills+reaps the process group. We assert "no live
-    // process-group members" rather than a graceful exit window, to avoid
-    // coupling to prototype timing (PRD user story 20).
+    // `/quit` must exit the TUI **by itself**. Observe the child's own exit
+    // before `Drop` runs: Drop kills the process group, so a survivor check
+    // alone would pass even if `/quit` did nothing at all — it would only
+    // prove SIGKILL works.
     tui.send_line("/quit").expect("send /quit");
-    std::thread::sleep(Duration::from_millis(500));
+    tui.wait_for_exit(Duration::from_secs(15))
+        .expect("/quit must exit the TUI without being killed");
 
     let pgid = tui.pgid();
     drop(tui);
 
-    // Give the OS a moment to reap, then verify no survivors.
+    // Then verify the whole group is gone (no orphaned lattice/fake-LLM children).
     std::thread::sleep(Duration::from_millis(400));
     if let Some(pgid) = pgid {
         let survivors = processes_in_pgid(pgid);

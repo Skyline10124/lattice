@@ -225,7 +225,7 @@ fn visual_cursor(line: &str, char_index: usize, width: u16) -> (usize, usize) {
 }
 
 #[rustfmt::skip]
-fn input_visual_height(app: &App, width: u16) -> u16 {
+pub(crate) fn input_visual_height(app: &App, width: u16) -> u16 {
     let rows: usize = app.input.lines.iter().map(|l| wrap_text(l, width).len().max(1)).sum();
     rows.clamp(1, 6) as u16
 }
@@ -299,6 +299,7 @@ mod tests {
                 project_branch: "main".into(),
             },
             false,
+            std::path::Path::new("/nonexistent-tui-test-history"),
         )
     }
 
@@ -362,6 +363,32 @@ mod tests {
         assert_eq!(symbol(SymbolKind::Ok, false), "+");
         assert_eq!(symbol(SymbolKind::Failed, false), "x");
         assert_eq!(symbol(SymbolKind::Running, false), ".");
+
+        // Also drive the locale decision itself, not just the branch it feeds:
+        // the caller's `unicode` flag comes from `locale_utf8()`, so passing
+        // `false` by hand never proves a non-UTF-8 locale reaches ASCII.
+        // SAFETY: single-threaded test; both vars are restored before return.
+        let saved = ["LC_ALL", "LANG"].map(|k| (k, std::env::var(k).ok()));
+        unsafe {
+            std::env::set_var("LC_ALL", "C");
+            std::env::set_var("LANG", "C");
+        }
+        assert!(!locale_utf8(), "C locale is not UTF-8");
+        assert_eq!(symbol(SymbolKind::Ok, locale_utf8()), "+");
+        unsafe {
+            std::env::remove_var("LC_ALL");
+            std::env::set_var("LANG", "en_US.UTF-8");
+        }
+        assert!(locale_utf8(), "UTF-8 locale is detected");
+        assert_eq!(symbol(SymbolKind::Ok, locale_utf8()), "✓");
+        for (key, value) in saved {
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]

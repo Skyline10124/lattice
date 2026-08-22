@@ -334,6 +334,31 @@ impl PtyTuiDriver {
             // bounded window.
         }
     }
+
+    /// Wait for the child to exit **on its own**, without killing it.
+    ///
+    /// A scenario that asserts "`/quit` exits cleanly" must observe the exit
+    /// before `Drop` runs: `kill_and_reap` would make a completely broken
+    /// `/quit` indistinguishable from a working one, since the survivor check
+    /// then only proves that SIGKILL works.
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> Result<(), PtyError> {
+        let child = match self.child.as_mut() {
+            Some(child) => child,
+            None => return Ok(()),
+        };
+        let start = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {}
+                Err(e) => return Err(PtyError::Pty(e.to_string())),
+            }
+            if start.elapsed() >= timeout {
+                return Err(PtyError::Timeout(timeout, self.tail_for_diagnostics()));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
 }
 
 impl Drop for PtyTuiDriver {

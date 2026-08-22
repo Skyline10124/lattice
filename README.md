@@ -80,7 +80,7 @@ lattice-system-harness (black-box tests; must not depend on product crates).
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, LANCET `[lancet]` policy sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly. |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution (`stream_turn`). |
-| `lattice-tui` | Inline CLI chat REPL over `lattice-api` via `rustyline` (no alternate screen). |
+| `lattice-tui` | Full-screen chat TUI over `lattice-api` via `ratatui`/`crossterm`: alternate screen, transcript / input / status regions. |
 | `lattice-cli` | The `lattice` binary: clap command surface and dispatch. |
 | `lattice-tool-prelude` | ADR 0004 guest SDK for Source Tools: generated WIT bindings, descriptor helpers. |
 | `lattice-system-harness` | Black-box test harness driving the built binary via `LATTICE_BIN`; takes no product-crate dependency. |
@@ -131,7 +131,7 @@ cargo run -p lattice-cli -- session new --agent default --project-branch main
 # 3. Send a prompt; the turn streams to the terminal and commits to the graph
 cargo run -p lattice-cli -- session send <session_id> "Summarize this repo in one line."
 
-# 4. Open an interactive inline REPL over that session
+# 4. Open the interactive full-screen TUI over that session
 cargo run -p lattice-cli -- tui <session_id>
 ```
 
