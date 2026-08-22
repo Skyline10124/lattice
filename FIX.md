@@ -7107,3 +7107,22 @@ removed `benchmarks/invocation-store/results/**`, and updated
   `cargo clippy -p lattice-store --all-targets -- -D warnings` passed;
   `env -u LATTICE_BIN cargo xtask ci` passed all gates.
 - **Changed files:** `crates/lattice-store/tests/integration.rs`, `FIX.md`.
+
+## PR #154 follow-up: synchronize InvocationStore witness and read-path docs — 2026-08-22
+
+- **ID/severity:** PR #154 follow-up / documentation.
+- **Problem:** ADR 0005 named only the authoritative InvocationStore ledger ref and
+  omitted the non-authoritative high-water witness. The #139-A decision record
+  also described every public read as replaying the full ancestry from genesis,
+  which no longer matched the authenticated checkpoint plus bounded suffix fast
+  path used by tip reads.
+- **Fix:** ADR 0005 now names both refs and records their ordered durability, crash
+  repair, and fail-closed topology semantics. The decision record now distinguishes
+  historical full-lineage reads from authenticated tip-checkpoint replay while
+  preserving ledger events as the sole authority.
+- **Verification:** `git diff --check`; reviewed against
+  `crates/lancet-audit/src/invocation_store.rs` and the synchronized architecture
+  guidance.
+- **Changed files:**
+  `docs/adr/0005-durable-turn-invocation-and-private-git-stores.md`,
+  `docs/plans/2026-08-17-issue139a-decision-record.md`, `FIX.md`.

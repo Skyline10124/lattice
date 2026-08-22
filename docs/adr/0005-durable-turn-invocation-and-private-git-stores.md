@@ -492,16 +492,23 @@ source of truth remains the attempt facts.
 
 ### 11. InvocationStore is one append-only ledger
 
-`lancet-audit` owns `invocations.git` and one authoritative ref:
+`lancet-audit` owns `invocations.git` with one authoritative data ref and one
+non-authoritative high-water witness:
 
 ```text
-refs/lattice/invocations/ledger
+refs/lattice/invocations/ledger      # authoritative append-only event ledger
+refs/lattice/invocations/high-water  # non-data monotonic witness
 ```
 
 The first-created repository contains a domain genesis commit. Every
 reservation, `DispatchStarted`, and terminal update is a direct child of the
-prior tip, published by CAS. The ledger cannot be rebased, merged, truncated,
-rewritten, or deleted; all cursors remain ancestors of its tip.
+prior ledger tip, published by CAS. Publication durably advances the ledger
+before the witness. A crash may therefore leave the witness at a ledger
+ancestor; reads accept that ordered state and a later write repairs it. A
+missing or divergent witness, or a ledger behind the witness, fails closed, so
+moving the ledger to an otherwise valid ancestor remains detectable. The
+ledger cannot be rebased, merged, truncated, rewritten, or deleted; all cursors
+remain ancestors of its tip.
 
 `reserve_batch(PlanKey, exact_ordered_bindings)` is all-or-nothing. The exact
 tuple includes `InvocationId`, Session/Turn/message/part addresses, method,

@@ -109,10 +109,15 @@ reserved-to-terminal `NotExecuted` exception. Terminal records carry typed
 `TerminalOutcome`, typed material availability, and versioned structured
 admission/effects/denials evidence; no JSON string fields are domain authority.
 
-Every public read pins an immutable ledger commit, validates a linear ancestry
-to the versioned genesis event, rejects merge/truncated/deleted/rewound or
-unreachable cursors, and replays query, tail, and PendingTurn facts from that
-same pinned event sequence.
+Every public read pins an immutable ledger commit and rejects merged, truncated,
+deleted, rewound, divergent, or unreachable topology. Historical pinned reads
+validate and replay the linear ancestry to the versioned genesis event. Tip
+reads may instead start from the newest authenticated `state_digest` checkpoint
+reachable from the pinned tip, then validate and replay the bounded immutable
+suffix; if the checkpoint or suffix cannot be authenticated, they fall back to
+the authoritative ledger history. Query, tail, and PendingTurn facts are always
+derived from that same pinned event sequence, never from the checkpoint as a
+second authority.
 
 A write takes the repository flock before reading and CAS-publishing the next
 event. An exact idempotent retry repeats the pending durability barrier; it does
