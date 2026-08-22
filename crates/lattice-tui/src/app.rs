@@ -295,11 +295,9 @@ impl App {
         }
     }
 
-    /// Rows the transcript region occupies. This must use the **same wrapped**
-    /// input height the draw path reserves (`view::input_visual_height`): a
-    /// long single logical line can wrap to six visual rows, and counting it as
-    /// one row here makes follow-to-bottom and page size disagree with the
-    /// screen, hiding the last transcript rows.
+    /// Must use the same **wrapped** input height the draw path reserves: a
+    /// long line wraps to up to six rows, and counting it as one here makes
+    /// follow and page size disagree with the screen.
     fn transcript_height(&self) -> usize {
         let input_h = crate::view::input_visual_height(self, self.term_width);
         self.term_height.saturating_sub(input_h + 1).max(1) as usize
@@ -325,11 +323,8 @@ pub(crate) async fn run_app(options: TuiOptions, ctx: SessionContext) -> anyhow:
 
     let mut events = EventStream::new();
     let mut turn_stream: Option<lattice_api::TurnEventStream> = None;
-    // Absolute idle deadline, not a per-iteration `timeout(...)`. The 33 ms
-    // ticker completes `select!` constantly, so a relative timeout future is
-    // dropped and rebuilt with a fresh deadline ~30x a second and can never
-    // elapse. The deadline is set when a turn starts and pushed forward by
-    // every event that actually arrives.
+    // Absolute deadline, set when a turn starts and pushed forward by every
+    // event that arrives. See `poll_turn` for why it cannot be relative.
     let mut turn_deadline: Option<tokio::time::Instant> = None;
     let mut ticker = tokio::time::interval(FRAME);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

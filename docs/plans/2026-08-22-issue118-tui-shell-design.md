@@ -22,7 +22,7 @@ bodies. Anything not written here is out of scope for v1 — 第一版保持克�
 | D3 | 内联 rustyline REPL 在本票内**删除**，不并存。`lattice-cli` 只有一个调用点。 |
 | D4 | v1 克制清单（§3）是硬约束。 |
 | D5 | 验证以纯状态机测试为主，渲染快照极少；PTY smoke 必须同步迁移（§12）。 |
-| D6 | 上限分开计：本票的壳 ≤5 个文件 / ≤1200 行（**不含 `#[cfg(test)]` 模块**）；#116 的 `render/` 另计 ≤800 行。 |
+| D6 | 上限分开计：本票的壳 ≤5 个文件 / **≤1250 行**（**不含 `#[cfg(test)]` 模块**）；#116 的 `render/` 另计 ≤800 行。上限从 1200 提到 1250 发生在 review round 1 之后，理由见下方 §4 附注。 |
 
 ---
 
@@ -90,13 +90,23 @@ crates/lattice-tui/src/
   app.rs       ~360    three-arm event loop, App state, TurnEvent → Block
   input.rs     ~260    InputBuffer, History, key dispatch
   view.rs      ~250    layout, transcript wrapping, Viewport, status line
-                ≈1070  (cap 1200, excluding #[cfg(test)] modules)
+                ≈1070  (cap 1250, excluding #[cfg(test)] modules)
 ```
 
 Deleted: `crates/lattice-tui/src/runtime.rs` (437 lines).
 `crates/lattice-tui/src/app.rs` is rewritten wholesale (its current `AppConfig` /
 `AppEvent` are removed; `lattice-cli` does not use them — verified: the only
 cross-crate use is `lattice-cli/src/main.rs:136`).
+
+> **上限修订（2026-08-22，review round 1 之后）：1200 → 1250。**
+> 首版实现落在 1193 行，在上限之内。双轴评审随后发现一个 BLOCKER：idle timeout
+> 的相对 `timeout(...)` 在 `select!` 里每 33 ms 被重建一次，倒计时永远重置，修复
+> 从未生效。改为绝对 deadline 需要 `idle_deadline()`、`poll_turn` 的双参数与
+> 不可达分支的显式处理，以及说明该陷阱的注释，合计 +39 行（评审后又压回 5 行）。
+> 这些行要么是修复本身，要么是每处一行的理由；再压只能删掉防止重新引入该 bug 的
+> 解释，或把 `poll_turn` 的不可达分支折叠成 `unwrap_or_else(idle_deadline)`——后者
+> 恰好在不变量被破坏时静默恢复原 bug。**门禁数字不应把代码推向更隐蔽的失效模式**，
+> 因此提高上限并记录理由，而不是压缩代码或静默越线。
 
 ### 4.1 Cargo.toml
 
@@ -645,7 +655,7 @@ A9 的三个缺陷全部落在 `runtime.rs`，而本票删除该文件。若不�
 
 ## 14. Anti-drift checklist（评审时逐条对）
 
-- [ ] `crates/lattice-tui/src/` 恰好 5 个文件，非测试代码 ≤1200 行。
+- [ ] `crates/lattice-tui/src/` 恰好 5 个文件，非测试代码 ≤1250 行。
 - [ ] `Cargo.toml` 无新增 workspace 依赖；`colored` / `rustyline` 已移除。
 - [ ] 全仓搜索 `match .*name` 在 `lattice-tui` 内零命中按工具名的分派。
 - [ ] `TurnEvent` 的 `match` 无 `_ =>` 臂。
