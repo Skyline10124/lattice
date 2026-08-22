@@ -343,8 +343,21 @@ fn is_localhost_request_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
+/// Build the shared provider client configuration.
+///
+/// Redirects are disabled because every network safety check this crate
+/// applies — `validate_base_url`, `host_is_dns_rebinding_domain`, and the
+/// `resolve_to_addrs` pinning in [`build_http_client_for_url`] — binds the
+/// *first* hop only. reqwest's default policy follows up to 10 hops, so a
+/// redirect would reach an unvalidated host with none of those checks, and on
+/// 307/308 would replay the request body (the whole conversation, including
+/// workspace file contents the agent just read). Provider-specific auth
+/// headers make it worse: reqwest strips `Authorization` across hosts but not
+/// `x-api-key` (Anthropic) or `x-goog-api-key` (Gemini). `fetch.web` disables
+/// redirects for the same reason.
 fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(HTTP_REQUEST_TIMEOUT)
         .connect_timeout(HTTP_IO_TIMEOUT)
         .read_timeout(HTTP_IO_TIMEOUT)
@@ -622,6 +635,72 @@ mod tests {
         };
         let result = validate_and_read_key(&resolved);
         assert!(result.is_err(), "private IP base URL should be rejected");
+    }
+
+    /// #90: URL validation and DNS pinning bind the first hop only, so a
+    /// followed redirect reaches an unvalidated host with none of them — and
+    /// on 307 replays the request body and the `x-api-key` header reqwest
+    /// does not strip across hosts. The redirect must surface to the caller.
+    #[tokio::test]
+    async fn provider_client_does_not_follow_redirects() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let target = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect target");
+        let target_port = target.local_addr().expect("target addr").port();
+        let reached = Arc::new(AtomicBool::new(false));
+        let reached_in_server = Arc::clone(&reached);
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = target.accept().await {
+                reached_in_server.store(true, Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+            }
+        });
+
+        let redirector = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirector");
+        let redirector_addr = redirector.local_addr().expect("redirector addr");
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = redirector.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{target_port}/collect\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let url = format!("http://{redirector_addr}/v1/chat/completions");
+        let client = build_http_client_for_url(&url).expect("build client");
+        let response = client
+            .post(&url)
+            .header("x-api-key", "sk-ant-secret")
+            .json(&serde_json::json!({ "messages": [] }))
+            .send()
+            .await
+            .expect("request completes");
+
+        assert_eq!(
+            response.status().as_u16(),
+            307,
+            "redirect must reach the caller instead of being followed"
+        );
+        assert!(
+            !reached.load(Ordering::SeqCst),
+            "redirect target must never be contacted"
+        );
     }
 
     #[test]

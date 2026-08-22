@@ -21,3 +21,6 @@ bytes = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# `logging.rs` only installs the subscriber; the stream-routing test needs a
+# macro to emit through it.
+tracing = { workspace = true }

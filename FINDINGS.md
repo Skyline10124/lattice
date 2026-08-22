@@ -67,16 +67,34 @@
 
 
 
+### M-GH100-01: `turn_id` 由 `(session_id, 父 commit)` 决定，同父回合在审计里串成一条 — `correctness` / `lattice-api` / GitHub #100
+- **位置**: `crates/lattice-api/src/turn/live.rs`（`turn_id = format!("{session_id}:{parent_commit_id}")`）；消费侧 `cep_audit_entries` 与 `store_turn_attestation`。
+- **问题**: `turn_id` 不含任何回合维度，所以任何两个从同一父 commit 出发的回合都拿到相同 id：`session branch` 后从同父再发一轮、上一轮失败/取消未提交后重发、空会话（`parent = "root"`）首轮重试。后果是两个不同回合的调用行在同一 `turn_id` 下累加，operator 审计读取无法区分，attestation 也写到同一标识下。不需要崩溃或并发即可复现。
+- **当前状态**: OPEN。GitHub #100 的 A（tracing 写 stdout）与 C（Anthropic 4096 硬顶）已于 2026-08-22 修复并记入 `FIX.md`；B 未动，本票因此保持 open。
+- **计划**: 改为回合唯一标识（ULID，或在现格式上追加单调计数/`turn_seed`）。不要在本轮之外顺手改：ADR 0005 的 `TurnCoordinator`（#139-B）会重写这条 Turn 身份链路，而 #139-B 同时删除 SQLite audit 后端——两者应共用同一个 id 决定，避免先定一个马上被替换的格式。验收按 issue 原文：harness 断言 `session branch` 后同父两回合的 `turn_id` 不同且调用行不混。
+
 ## LOW
 
 > 下列 `L-39-*` / `ENV-WASM-01` / `T-39-01` 中的 `#39` 一律指 **GitHub #39**(= Codeberg #17,
 > operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
 > `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
 
+### T-GH143-01: `sigkill_mid_create_leaves_only_absent_or_fully_valid_stores` 的 120ms 窗口隐含假设 TMPDIR 在 tmpfs 上 — `verification` / test-hygiene / `lattice-store`
+- **位置**: `crates/lattice-store/tests/integration.rs`（父进程 `sleep(120ms)` 后 SIGKILL 子进程，随后断言 `published > 0`）。
+- **问题**: 子进程要先完成进程启动，才开始建仓循环；而建仓是 fsync 密集的。`tempfile::tempdir()` 用 `TMPDIR`，在 tmpfs 上这些 fsync 近乎免费，在真实块设备上则慢一个量级。把 `TMPDIR` 指向 nvme 后子进程在 120ms 内一个仓都发布不出来，断言以 `child should have published some stores` 失败——看上去像持久性缺陷，实际是计时假设。测的不变量（"每个目标要么不存在，要么是完整有效的仓"）本身没问题，脆的是"窗口内一定发布过东西"这个前提。
+- **当前状态**: OPEN，不影响 CI。GitHub CI runner 的 `/tmp` 是 tmpfs，该测试在那里稳定通过（本地同样条件下 0.16s 全绿）。2026-08-22 在本机为绕开 `ENV-DISK-01` 的 tmpfs 配额而改用磁盘 `TMPDIR` 时首次撞到。
+- **计划**: 把"发布过至少一个仓"改成由子进程自己汇报的事实（例如子进程每建一个就写一行到管道，父进程读到第一行后再 SIGKILL），而不是靠固定 sleep 猜。或者在断言前先确认子进程确实进入了循环，`published == 0` 时跳过而非失败。不要单纯调大 sleep——那只是把同一个假设推远一点。
+
+### L-GH98-03: `net-guard` 在 async 调用栈上同步 `to_socket_addrs`（阻塞 `getaddrinfo`）— `robustness` / `net-guard` / GitHub #98
+- **位置**: `crates/net-guard/src/lib.rs:140`（`resolve_public_socket_addrs`）、`:229`（rebinding 检查）；由 `lattice-llm` 的 `build_http_client_for_url` 内联调用，位于 LLM/fetch 的 async 栈上。
+- **问题**: `to_socket_addrs()` 是阻塞的 `getaddrinfo`，直接跑在 reactor 线程上。DNS 慢或超时时会占住一个 tokio worker；单线程 runtime 上会停掉整个 turn。
+- **当前状态**: OPEN。GitHub #98 的第 1、2 项（`SymlinkRejected` 回吐宿主绝对路径、`WorkspacePath::parse` 的 `..` 子串拒绝）已于 2026-08-22 修复并记入 `FIX.md`；第 3 项未动，本票因此保持 open。
+- **计划**: 把解析放进 `spawn_blocking`，或换异步 DNS。注意 `net-guard` 目前只依赖 `url` 与 `std`（根 `AGENTS.md` 的 crate 表把这一点写成契约），所以引入 tokio 会改变该 leaf 的依赖形状——要么由调用方负责 `spawn_blocking`（推荐，保住 leaf 的中立性），要么先记一条 ADR 说明为什么 leaf 可以依赖运行时。
+
 ### L-GH144-01: ~~clean UUID-collision revision is unmodellable with synthetic Invocation facts~~ — CLOSED by #139-A
 - **Location**: `crates/lattice-session/src/pending/facts.rs`, `crates/lattice-session/src/pending/reconcile.rs`, `crates/lancet-audit/src/invocation_store.rs`.
 - **Problem**: (original) `InvocationFactsSnapshot.invocations` was a flat `InvocationId -> InvocationFact` map with no plan ownership, so clean collisions were indistinguishable from corruption.
-- **Resolution**: #139-A (PR pending) adds `InvocationRecordFact { owner: PlanKey, lifecycle }` with mandatory owner and exact candidate key-set validation, `PlanValidation::Collision`, and a typed `ReconciliationDecision` whose `ReviseCandidates(CandidateRevisionRequest)` variant carries no `TurnOutcome`, plus a non-production `InvocationStore` on the `lattice-store` kernel and `GitSessionGraphStore::execute_candidate_revision`. The boundary test `a_different_durable_reservation_stays_fail_closed` is replaced by truth-table tests (`collision_at_binding_planned_requests_candidate_revision`, `collision_at_bound_is_corruption_not_a_revision`, `different_durable_reservation_is_corruption`, `exact_durable_reservation_does_not_re_reserve`) **and** by a real store-backed end-to-end test, `lancet-audit`'s `clean_collision_revises_candidates_end_to_end_over_real_stores`: foreign owner in a real `InvocationStore` → pinned facts → projection → pure reconcile → fresh UUIDs → real SessionStore CAS → reopen → complete revised plan → re-projection/reconcile, including CAS mismatch and post-CAS durability retry. Decision record: `docs/plans/2026-08-17-issue139a-decision-record.md`.
+- **Resolution**: #139-A adds `InvocationRecordFact { owner: PlanKey, lifecycle }` with mandatory owner and exact candidate key-set validation, `PlanValidation::Collision`, and a typed `ReconciliationDecision` whose `ReviseCandidates(CandidateRevisionRequest)` variant carries no `TurnOutcome`, plus a non-production `InvocationStore` on the `lattice-store` kernel and `GitSessionGraphStore::execute_candidate_revision`. The boundary test `a_different_durable_reservation_stays_fail_closed` is replaced by truth-table tests (`collision_at_binding_planned_requests_candidate_revision`, `collision_at_bound_is_corruption_not_a_revision`, `different_durable_reservation_is_corruption`, `exact_durable_reservation_does_not_re_reserve`) **and** by a real store-backed end-to-end test, `lancet-audit`'s `clean_collision_revises_candidates_end_to_end_over_real_stores`: foreign owner in a real `InvocationStore` → pinned facts → projection → pure reconcile → fresh UUIDs → real SessionStore CAS → reopen → complete revised plan → re-projection/reconcile, including CAS mismatch and post-CAS durability retry. Decision record: `docs/plans/2026-08-17-issue139a-decision-record.md`.
 
 ### L-GH144-02: legacy outcome projection is still shipped and only test-guarded — `architecture` / `lattice-session` / GitHub #144 → #139-B
 - **Location**: `crates/lattice-session/src/graph.rs` (`WorkspaceDisposition`, `TurnLifecycleEvidence`, `TurnCommit::terminal_reason`); `crates/lattice-session/src/git_graph/pending.rs` (`candidate_turn_commit_input`); ADR 0005 §15/§20.
@@ -428,6 +446,7 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 
 ### M-04: `validate_base_url` DNS 检查与 HTTP 请求之间存在 TOCTOU — `security`
 - **已做**: 请求前通过 `net-guard::resolve_public_socket_addrs` 解析公网地址，`ClientBuilder::resolve_to_addrs` 钉住结果（`lattice-llm/src/client.rs`）。
+- **已做**: request-time pinning 只绑定首跳，此前重定向可绕过它；#90 已给 provider 客户端设 `redirect::Policy::none()`，与 `fetch.web` 两个客户端一致，不再有第二跳。
 - **残留**: `validate_base_url` 阶段的 DNS 仍为 best-effort（离线 CI 可能不解析）；权威防护在 request-time pinning，配置时校验不能单独当作闭环。
 
 ### M-05: `web_fetch` DNS rebinding / 黑名单 — `security`

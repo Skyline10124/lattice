@@ -2,6 +2,185 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #98（部分）：符号链接拒绝不再回吐宿主路径；字面量 `..` 文件名不再拖垮整次搜索 — 2026-08-22
+
+**Severity:** 两项均 LOW
+
+本票三条互不相关，本轮只修第 1、2 项。**第 3 项（`net-guard` 在 async 栈上同步
+`getaddrinfo`）未修**，#98 保持 open，残留已记入 `FINDINGS.md` 的 `L-GH98-03`。
+
+**1. `SymlinkRejected` 回吐宿主绝对路径**
+
+`LocalWorkspaceError::SymlinkRejected { component }` 持有的是从 canonical root
+一路 push 出来的**绝对**路径，Display 为 `symlink rejected at component: {component}`。
+观察侧不受影响——`host_workspace::observation_io_error` 早就把这一支折叠成固定
+reason；泄漏点在 `host_mutate`，它把 `err.to_string()` 直接放进 guest 可见的
+`MutateError::PathRejected { reason }`，于是 Tool（以及经对话上送 provider 的内容）
+拿到项目在磁盘上的真实位置。修法：两个构造点都改成 root-relative——
+`open_parent_dir_secure` 的 `cur` 本就"仅用于错误报告、从不触碰文件系统"，直接从
+`PathBuf::new()` 起步；`resolve_secure` 的 `cur` 要用于 `symlink_metadata` 不能改，
+故经新 helper `walk_component_for_error` 剥掉 root 前缀（strip 失败时回落到叶名而
+不是 `cur`，保证任何分支都不会把绝对路径放进消息）。`host_workspace` 那一支保持
+固定字符串不变——隐藏路径的存在本身就是要瞒住的东西；两处过时注释（称该 variant
+"carries an ABSOLUTE host path"）已同步更正。
+
+**2. `WorkspacePath::parse` 用 `raw.contains("..")` 子串拒绝**
+
+同函数末尾的 `normalize_relative` 已经逐分量拒绝 `Component::ParentDir`，所以子串
+检查对真实穿越是冗余的，对合法文件名却过严：`foo..bar.rs` / `..gitignore` 这类名字
+会让 parse 失败。因为 grep/find 对走到的每个条目都 parse，一个这样的文件会让**整次**
+搜索报错，而不是把它当成一条普通结果。修法：删掉子串检查，穿越判定完全交给分量检查。
+
+**Verification:**
+
+- 新增 `workspace::types::tests::literal_dot_dot_in_a_filename_is_not_traversal`
+  （5 个合法名，并断言 normalization 未改写）与
+  `parent_dir_components_are_still_rejected`（6 个真实穿越，含 `./../x`、
+  `a/b/../../..`）。
+- 新增 `workspace::local::tests::symlink_rejection_reports_a_relative_component_not_the_host_path`，
+  同时覆盖两个构造点（`resolve_secure` 走查与 `open_parent_dir_secure` 的
+  pinned-dirfd 走查），断言 component 恰为 `nested/link` / `swap`，且 Display 不含
+  workspace root 与 `/tmp`。
+- 反向验证：把两处构造点改回绝对 `cur` → 该测试 FAILED，
+  `left: "/tmp/.tmp4523G6/nested/link", right: "nested/link"`；把子串检查加回 →
+  `legal filename foo..bar.rs rejected`。两者恢复后全绿。
+- `cargo test -p lancet-runtime` — 177 + 10 + 12 + 15 + 11 passed。
+- `cargo clippy -p lancet-runtime --all-targets -- -D warnings` — clean。
+- `cargo fmt --all --check` — clean。
+- 注：本轮撞上 `FINDINGS.md` 的 `ENV-DISK-01`（/tmp tmpfs 有用户配额，多 worktree
+  共享 cargo target 时链接阶段报 `Disk quota exceeded`）。处理方式是给本 worktree
+  单独设 `CARGO_TARGET_DIR` 与 `TMPDIR` 指向 `/` 上的 `target/`，未删除共享缓存。
+
+**Changed files:** `crates/lancet-runtime/src/workspace/local.rs`,
+`crates/lancet-runtime/src/workspace/types.rs`,
+`crates/lancet-runtime/src/host_workspace.rs`（两处过时注释）, `FINDINGS.md`, `FIX.md`.
+
+## GitHub #100（部分）：tracing 改写 stderr、Anthropic 输出上限脱离 4096 — 2026-08-22
+
+**Severity:** A = MEDIUM（破坏 `--json` 机器契约）、C = MEDIUM（用户可见截断）
+
+本票三条互不相关，本轮只修 A 与 C。**B（`turn_id` 不唯一）未修**，#100 保持 open，
+残留已记入 `FINDINGS.md` 的 `M-GH100-01`。
+
+**A. tracing 日志写 stdout，污染 `--json` 的 JSONL 契约**
+
+`crates/lattice-llm/src/logging.rs` 两个分支都没设 writer，而
+`tracing_subscriber::fmt()` 的默认写者是 **stdout**；非 verbose 的默认级别又是
+`error` 而不是关闭，所以只要有一条 error 级日志，`lattice --json` 的 stdout 里就
+会混进非 JSON 行，下游 `jq` / 解析器直接失败。修法：两个分支都加
+`.with_writer(io::stderr)`；`with_ansi` 从硬编码（verbose 恒 `true`、非 verbose
+恒 `false`）改为 `ansi_enabled(stderr.is_terminal(), NO_COLOR)`，重定向的 stderr
+不再收到转义序列。
+
+**C. Anthropic 输出被硬顶在 4096 token**
+
+`providers/anthropic.rs` 的 `request.max_tokens.unwrap_or(4096)` 是生产路径上的
+唯一取值——`lattice-agent` 构造 `ChatRequest` 时 `max_tokens` 恒为 `None`。长回复
+因此被无条件截断为 `finish_reason: "length"`，而 agent loop 对该终局没有续写处理。
+修法：提为具名常量 `DEFAULT_MAX_OUTPUT_TOKENS = 32_768`。可以用平坦常量而不需要
+能力表，是因为 `ModelRouter` 只把三个封闭别名（`opus`/`sonnet`/`haiku`，均为
+Claude 4.x）映射到该 provider，其余一律 `UnknownModel`，任意模型串只能走
+OpenAI-compatible。按 issue 要求未引入 ModelSpec 能力表。
+
+**Verification:**
+
+- 新增 `logging::tests::default_level_diagnostics_go_to_stderr_not_stdout`：
+  因为 `init_logging` 装的是进程级 subscriber，测试用 `--exact` 过滤重新 exec
+  测试二进制（沿用 #144 的自 re-exec 模式），在子进程里发一条 ERROR，断言哨兵
+  出现在 stderr 且**不**出现在 stdout。
+- 新增 `logging::tests::ansi_requires_a_terminal_and_respects_no_color` 覆盖四
+  种输入组合。
+- 新增 `providers::anthropic::tests::default_max_tokens_is_not_the_legacy_4096_cap`，
+  并先断言 `req.max_tokens.is_none()`，确保它测的是生产走的那条默认路径；既有
+  `build_request_includes_model_and_max_tokens` 改为对常量断言。
+- 反向验证：移除非 verbose 分支的 `.with_writer(io::stderr)` → stderr 测试
+  FAILED（哨兵泄漏到 stdout）；把常量改回 `4096` → 上限测试 FAILED
+  （`default output ceiling regressed to the truncating 4096`）；两者恢复后 ok。
+- `cargo test -p lattice-llm` — 138 + 23 passed。
+- `cargo clippy -p lattice-llm --all-targets -- -D warnings` — clean。
+- `cargo fmt --all --check` — clean。
+
+**Changed files:** `crates/lattice-llm/src/logging.rs`,
+`crates/lattice-llm/src/providers/anthropic.rs`, `crates/lattice-llm/Cargo.toml`
+（`tracing` 加入 dev-dependencies，仅供该测试发日志）, `Cargo.lock`,
+`crates/lattice-llm/AGENTS.md`, `FINDINGS.md`, `FIX.md`.
+
+## GitHub #88：test-utils 不再从 lattice-cli 生产依赖段进入发布二进制 — 2026-08-22
+
+**Severity:** LOW（发布面 / 坏范式）
+
+**Problem:** `crates/lattice-cli/Cargo.toml` 的生产 `[dependencies]` 段写着
+`lattice-session = { workspace = true, features = ["test-utils"] }`，直接抵消了
+`lattice-session/src/lib.rs:26-29` 的 `#[cfg(any(test, feature = "test-utils"))]`
+门禁——会创建 git 仓库的 `init_fixture_repo` / `init_empty_repo` 因此进入发布
+二进制 `lattice` 的依赖图。该 crate 对这些 helper 的全部使用点都在 `#[cfg(test)]`
+里，而 `#[cfg(test)]` 单测本来就能看到 `[dev-dependencies]`，生产段从来不是到达
+它们的必要路径。issue 正文提到的 `lattice-agent` 那条此前已修，本次只剩这一条。
+
+**Fix:**
+
+- `crates/lattice-cli/Cargo.toml`：生产段 `lattice-session` 去掉 `features`，
+  dev 段那条改为 `features = ["test-utils"]`。
+- 新增门禁 `check::production_test_feature_hits`，接进 `cargo xtask
+  lancet-boundary` 的分组列表（该命令已在 `cargo xtask ci` 第 6 步与
+  `ci.yml` / `full-gate.yml` 两条 lane 里，无需新增 CI 接线）。它读
+  `cargo metadata --no-deps`，对**任意** workspace 成员的 `Normal` kind 依赖，
+  只要启用了以 `test-` 开头的 feature 就报错。按前缀而非枚举清单判定，所以将来
+  新增的 `test-*` feature 自动被覆盖。
+
+**Verification:**
+
+- `cargo metadata` 全量扫描：工作区内 Normal kind 依赖启用 test 类 feature 的
+  条目为 0（修复前 1 条）。
+- `cargo tree -p lattice-cli -e features --no-dev-dependencies | rg test-utils`
+  — 无输出（修复前命中 `lattice-session feature "test-utils"`）。
+- 反向验证：把 `features = ["test-utils"]` 加回生产段后
+  `cargo xtask lancet-boundary` 退出码 1 并报
+  `lattice-cli: [dependencies] lattice-session enables test-only feature(s)
+  test-utils`；移除后退出码 0。
+- 新增单测 `production_test_feature_flagged_only_in_dependencies_section`
+  （同一 crate 两个 section 都启用，只有生产段计为 1 条 finding）与
+  `dev_only_test_feature_is_clean`。
+- `cargo test -p xtask lancet_boundary` — 16 passed。
+- `cargo test -p lattice-cli` — 132 + 4 passed；`cargo build -p lattice-cli` 通过。
+
+**Changed files:** `crates/lattice-cli/Cargo.toml`,
+`xtask/src/lancet_boundary.rs`, `xtask/src/lancet_boundary/check.rs`,
+`crates/lattice-session/AGENTS.md`, `FIX.md`.
+
+## GitHub #90：provider HTTP 客户端禁用重定向 — 2026-08-22
+
+**Severity:** HIGH (`safety`)
+
+**Problem:** `crates/lattice-llm/src/client.rs` 的 `http_client_builder()` 只设三个
+超时，从不调用 `.redirect(..)`，而 reqwest 0.13 的默认策略是 `Policy::limited(10)`。
+本 crate 的全部网络防护——`validate_base_url`、`host_is_dns_rebinding_domain`、
+以及 `build_http_client_for_url` 里的 `resolve_to_addrs` 钉扎——都只绑定**首跳**，
+所以一次 3xx 就能把请求送到未校验的主机：私网/回环/云 metadata 端点全部可达，
+307/308 还会重放整个请求体（system prompt + 对话历史 + agent 刚从工作区读出的
+文件内容）。跨 host 时 reqwest 只剥离 `Authorization`/`Cookie` 等五个头，
+Anthropic 的 `x-api-key` 与 Gemini 的 `x-goog-api-key` 会被原样转发。
+同仓库另外两个出网客户端（`lancet-native` 的 `executor/web.rs:191`、
+`handlers/external.rs:29`）早已是 `Policy::none()`，LLM 通道是唯一漏项。
+
+**Fix:** `http_client_builder()` 增加 `.redirect(reqwest::redirect::Policy::none())`，
+与 `fetch.web` 两个客户端对齐，并在函数上记录这条约束的理由。未额外加
+`https_only`：`net_guard::validate_base_url` 已对非 localhost 主机拒绝明文 HTTP，
+关掉重定向后不存在可降级的第二跳。
+
+**Verification:**
+
+- 新增 `client::tests::provider_client_does_not_follow_redirects`：两台本地
+  `TcpListener`，第一台回 `307` 并把 `Location` 指向第二台，断言调用方看到的是
+  307 且第二台从未被连接。
+- 反向验证：移除 `.redirect(..)` 后该测试 FAILED（`left: 200, right: 307`，即
+  重定向目标真被访问到）；恢复后 ok。
+- `cargo test -p lattice-llm` — 134 + 23 passed。
+- `cargo clippy -p lattice-llm --all-targets -- -D warnings` — clean。
+- `cargo fmt --all --check` — clean。
+
+**Changed files:** `crates/lattice-llm/src/client.rs`,
+`crates/lattice-llm/AGENTS.md`, `FINDINGS.md`, `FIX.md`.
 ## GitHub #139-A: non-production InvocationStore + collision-aware facts contract — 2026-08-17
 
 #139-A implements the non-production InvocationStore on the `lattice-store`
