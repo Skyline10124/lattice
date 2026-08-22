@@ -34,8 +34,9 @@ impl WorkspacePath {
 
     /// Parse and normalize a project-relative path.
     ///
-    /// Rejects absolute paths, empty strings, NUL bytes, `..` traversal,
-    /// foreign drive prefixes, and the literal `/workspace` root alias.
+    /// Rejects absolute paths, empty strings, NUL bytes, `..` *components*,
+    /// foreign drive prefixes, and the literal `/workspace` root alias. A
+    /// literal `..` inside a single filename is not traversal and is kept.
     pub fn parse(raw: &str) -> Result<Self, WorkspacePathError> {
         if raw.is_empty() {
             return Err(WorkspacePathError::Empty);
@@ -43,9 +44,11 @@ impl WorkspacePath {
         if raw.contains('\0') {
             return Err(WorkspacePathError::NulByte);
         }
-        if raw.contains("..") {
-            return Err(WorkspacePathError::ParentTraversal);
-        }
+        // Traversal is rejected per component by `normalize_relative` below.
+        // A substring test also caught legal names that merely contain the
+        // two characters (`foo..bar.rs`, `..gitignore`), and because parse
+        // failure aborts the whole call, one such file made an entire
+        // grep/find return an error instead of skipping nothing (#98).
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Err(WorkspacePathError::Empty);
@@ -347,6 +350,36 @@ mod tests {
         assert_eq!(display_path, "src/main.rs");
         assert!(!display_path.contains("/home"));
         assert!(!display_path.contains("/workspace"));
+    }
+
+    /// #98: a literal `..` inside a filename is not traversal. It used to fail
+    /// the whole parse, and since grep/find parse every entry they walk over,
+    /// one such file turned an entire search into an error instead of a
+    /// result set that simply includes it.
+    #[test]
+    fn literal_dot_dot_in_a_filename_is_not_traversal() {
+        for raw in [
+            "foo..bar.rs",
+            "..gitignore",
+            "src/a..b/c.rs",
+            "release..2026",
+            "x..",
+        ] {
+            let parsed = WorkspacePath::parse(raw)
+                .unwrap_or_else(|err| panic!("legal filename {raw} rejected: {err}"));
+            assert_eq!(parsed.as_str(), raw, "normalization altered {raw}");
+        }
+    }
+
+    #[test]
+    fn parent_dir_components_are_still_rejected() {
+        for raw in ["..", "../x", "a/../b", "a/..", "./../x", "a/b/../../.."] {
+            assert_eq!(
+                WorkspacePath::parse(raw),
+                Err(WorkspacePathError::ParentTraversal),
+                "traversal accepted for {raw}"
+            );
+        }
     }
 
     #[test]
