@@ -137,16 +137,18 @@ fn create_lock_and_repo_lock_are_distinct_files() {
     drop(guard);
 }
 
-/// Child mode: create stores in a loop so the parent can SIGKILL us at an
-/// arbitrary point mid-create.
+/// Child mode: publish one store, then stop inside a second store's init callback
+/// so the parent can SIGKILL us at a known pre-publication point.
 fn crash_child_loop(dir: &Path) {
     let layout = StateLayout::in_state_root(dir);
-    for i in 0..200 {
-        let name = format!("store-{i}.git");
-        let _ = StoreRepo::create_global(&layout, &name, meta(), |_| Ok(())).unwrap();
-    }
-    // Signal completion by exiting 0 (parent checks output/status only for
-    // the child mode; being killed exits with SIGKILL instead).
+    StoreRepo::create_global(&layout, "store-0.git", meta(), |_| Ok(())).unwrap();
+    StoreRepo::create_global(&layout, "store-1.git", meta(), |_| {
+        std::fs::write(dir.join("crash-child-ready"), b"ready").unwrap();
+        loop {
+            std::thread::park();
+        }
+    })
+    .unwrap();
 }
 
 #[test]
@@ -170,40 +172,43 @@ fn sigkill_mid_create_leaves_only_absent_or_fully_valid_stores() {
         .spawn()
         .expect("spawn crash child");
 
-    // Let the child get mid-flight, then SIGKILL it.
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+    // Wait until the child has published one complete store and is blocked
+    // inside a second store's pre-publication init callback, then SIGKILL it.
+    let ready = dir.path().join("crash-child-ready");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let kill_result = loop {
+        if ready.exists() {
+            break unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+        }
+        if let Some(status) = child.try_wait().expect("poll crash child") {
+            panic!("crash child exited before reaching the kill point: {status}");
+        }
+        if std::time::Instant::now() >= deadline {
+            unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+            child.wait().expect("reap timed-out crash child");
+            panic!("crash child did not reach the kill point");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
+    assert_eq!(kill_result, 0, "SIGKILL must reach the crash child");
     let status = child.wait().expect("wait for child");
     assert!(!status.success(), "child should have been killed");
 
     // Every target is either absent or a fully valid store; a stale sibling
     // temp never blocks recreation.
     let layout = StateLayout::in_state_root(dir.path());
-    let mut published = 0;
-    for i in 0..200 {
-        let name = format!("store-{i}.git");
-        let path = layout.lattice_root().join(&name);
-        if path.exists() {
-            StoreRepo::open_global(&layout, &name, "session", 1)
-                .unwrap_or_else(|e| panic!("{name} published but invalid: {e}"));
-            published += 1;
-        }
-    }
-    assert!(published > 0, "child should have published some stores");
+    StoreRepo::open_global(&layout, "store-0.git", "session", 1).unwrap();
+    assert!(
+        !layout.lattice_root().join("store-1.git").exists(),
+        "the store interrupted before publication must remain absent"
+    );
 
     // A fresh create at the same state root still works (stale temps and
     // lock files from the dead child are reclaimed/harmless).
     StoreRepo::create_global(&layout, "after-crash.git", meta(), |_| Ok(())).unwrap();
     StoreRepo::open_global(&layout, "after-crash.git", "session", 1).unwrap();
 
-    // And re-creating a partially-created target the child died in the
-    // middle of works too: pick the first absent index and create it.
-    for i in 0..200 {
-        let name = format!("store-{i}.git");
-        if !layout.lattice_root().join(&name).exists() {
-            StoreRepo::create_global(&layout, &name, meta(), |_| Ok(())).unwrap();
-            StoreRepo::open_global(&layout, &name, "session", 1).unwrap();
-            break;
-        }
-    }
+    // And re-creating the target interrupted before publication works too.
+    StoreRepo::create_global(&layout, "store-1.git", meta(), |_| Ok(())).unwrap();
+    StoreRepo::open_global(&layout, "store-1.git", "session", 1).unwrap();
 }

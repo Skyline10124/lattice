@@ -7090,3 +7090,20 @@ Changed files:
 `benchmarks/invocation-store/{qualification-contract-v2.json,run-qualification.sh,summarize_qualification.py,test_summarize_qualification.py}`,
 removed `benchmarks/invocation-store/results/**`, and updated
 `{AGENTS.md,FINDINGS.md,FIX.md,crates/lancet-audit/AGENTS.md,crates/lattice-session/AGENTS.md,docs/adr/0005-durable-turn-invocation-and-private-git-stores.md,docs/plans/2026-08-21-issue139a-qualification-contract-v2.md}`.
+
+## PR #154 CI: deterministic lattice-store SIGKILL fixture — 2026-08-22
+
+- **ID/severity:** PR #154 CI / test-hygiene.
+- **Problem:** `sigkill_mid_create_leaves_only_absent_or_fully_valid_stores` slept
+  for a fixed 120 ms before SIGKILL and then required at least one published store.
+  Under CI scheduling pressure the child had not reached publication, so PR #154
+  failed with `child should have published some stores` despite no store damage.
+- **Fix:** the child now publishes one complete store, enters a second store's
+  pre-publication init callback, writes a ready marker, and parks. The parent waits
+  for that exact kill point before SIGKILL, then proves the first store opens, the
+  interrupted target is absent, and stale-temp reclamation permits recreation.
+- **Verification:** focused test passed; the previous single-CPU contention repro
+  passed 10/10; `cargo test -p lattice-store` passed 65 tests;
+  `cargo clippy -p lattice-store --all-targets -- -D warnings` passed;
+  `env -u LATTICE_BIN cargo xtask ci` passed all gates.
+- **Changed files:** `crates/lattice-store/tests/integration.rs`, `FIX.md`.
