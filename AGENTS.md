@@ -62,10 +62,20 @@ private-Git `lattice-store` kernel, durable PendingTurn reconciliation, and a
 workspace-history semantics remain three separate domains in
 `lattice-session`, `lancet-audit`, and `lancet-runtime`; sharing Git mechanics
 does not merge their repositories, locks, state machines, or failure domains.
-Implementation is ordered by GitHub #141–#144 and #139-A/#139-B. Do not connect
-the production Tool path to InvocationStore before #139-A's correctness and
-performance gates pass, and do not add compatibility dual writes or legacy
-read/import paths.
+Implementation is ordered by GitHub #141–#144 and #139-A/#139-B. #139-A was
+approved on 2026-08-22 and #139-B may proceed with the production hard cut. Do
+not add compatibility dual writes or legacy read/import paths. The correctness,
+strict-reopen, bounded-read, and cold-read structural regressions remain
+required.
+
+The performance campaign is temporarily diagnostic-only. Its metric definitions
+remain in `benchmarks/invocation-store/qualification-contract-v2.json`, and the
+current decision record is
+`docs/plans/2026-08-21-issue139a-qualification-contract-v2.md`. The official
+runner writes ignored local bundles below `target/invocation-store-bundles` and
+uses `benchmark`; strict `qualify` is retained for the redesign tracked by
+GitHub #153. Historical PASS/FAIL summaries remain evidence, not a prerequisite
+for #139-B, and must not be rewritten or presented as a fresh approval campaign.
 
 The workspace dependency graph is layered. Keep dependencies pointing from
 higher layers to lower layers; do not introduce reverse dependencies. The graph
@@ -89,7 +99,7 @@ Layer 1:         lancet-catalog(->protocol)
                                lattice-store)
                  lattice-agent(->llm,conversation)
 Layer 2:         lancet-dispatch(->protocol,catalog)
-                 lancet-audit(->protocol,catalog)
+                 lancet-audit(->protocol,catalog,lattice-store)
                  lancet-authority(->protocol,catalog,net-guard)
 Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
                  lancet-runtime(->protocol,dispatch,authority,lattice-store)
@@ -112,19 +122,32 @@ only reach the product through the built binary (`cargo xtask
 harness-boundary` enforces this, transitively).
 ```
 
-ADR 0005 adds the following dependency deltas in prerequisite order; they are
-not claims about `Cargo.toml` until the named issue lands. All unchanged edges
-remain exactly as listed in the current graph above:
+ADR 0005 dependency deltas land in prerequisite order. The graph above records
+the current `Cargo.toml` state; the list below separates the landed #139-A edge
+from the remaining #139-B delta:
 
 ```text
 # lattice-store landed in #143 with no workspace deps and appears in the graph above
 # lattice-session -> lattice-store and lancet-runtime -> lattice-store landed
 # in #143, and lattice-session -> lancet-protocol landed in #144; all are
 # already in the graph above
-ADD lancet-audit -> lattice-store                          # #139-A
+# lancet-audit -> lattice-store landed in #139-A
 ADD lattice-api -> lancet-audit,lattice-conversation      # #139-B
 # lattice-api -> lancet-native remains through #139-B and is deleted by #34
 ```
+
+There is no `lancet-audit -> lattice-session` edge, and none may be added.
+`lancet-audit` owns the invocation ledger and returns audit-domain types only;
+projecting a pinned ledger view into
+`lattice_session::pending::InvocationFactsSnapshot` is cross-domain composition
+and lives in the #139-A non-production integration seam
+(`crates/lancet-audit/tests/invocation_qualification.rs`, backed by a
+dev-dependency). Putting that projection in the production surface would make
+`lancet-api -> lancet-audit -> lattice-session` real and break LANCET's
+independent embeddability. `lattice-session` must not depend on `lancet-audit`
+either; applying a candidate revision is session-domain I/O
+(`GitSessionGraphStore::execute_candidate_revision`) over a session-domain
+request. Verify with `cargo tree -p lancet-api -e normal`.
 
 `lattice-store` owns only repository creation/opening, canonical bytes, object
 and ref CAS, Linux flock/fsync/rename durability, retention, and typed store
@@ -168,7 +191,7 @@ accumulating.
 | `lancet-catalog` | Legacy central Tool-contract authority scheduled for removal by ADR 0004 after source manifests and generated descriptors take over. |
 | `lancet-dispatch` | Current generic registry/transport surface scheduled for absorption into `lancet-runtime`. |
 | `lancet-cep` | Current CEP/catalog projection facade scheduled for absorption or retirement after descriptor-generated projection lands. |
-| `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, typed operator query/tail/replay DTOs, and (since #112) the versioned Cell evidence tables that are the durable home of `AdmissionEvidence` / `ObservedEffectsRecord` / `DeniedOperationsRecord`. |
+| `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, typed operator query/tail/replay DTOs, versioned Cell evidence, and the #139-A non-production Git `InvocationStore` on the `lattice-store` kernel. Its public surface is audit-domain only: projecting a pinned ledger view into `lattice-session` reconciliation facts happens in the non-production integration seam, not here. The production operator path remains SQLite until #139-B. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger, and effect-region checks. |
 | `lancet-native` | Current native handler/server surface for the method still native (`fetch.web`), plus the CEP server lifecycle and the Component/native dispatch split. ADR 0004 moves the remaining built-ins to Components and absorbs the rest into `lancet-runtime`. |
 | `lancet-runtime` | Component engine, generated descriptor inventory, Tool Host enforcement, the concrete Local Workspace and its Policy-Visible visibility engine (moved down here in #30), audit/effect integration, and private gix history. The production Component path since #29; #31/#32 finish absorbing dispatch/transport. |

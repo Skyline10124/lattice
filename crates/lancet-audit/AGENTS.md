@@ -32,6 +32,32 @@ the versioned Cell evidence tables. The evidence tables are the durable home of
   `ScopedXdgStateHome` test guard.
 - `src/audit_tests.rs` and `src/evidence_tests.rs` cover store persistence and
   evidence schema behavior.
+- `src/invocation_store.rs` owns the non-production Git `InvocationStore`
+  (#139-A): one topology-validated append-only data ledger plus an ordered
+  high-water witness advanced only after the data ref, on the `lattice-store`
+  kernel, exact ordered batch reservation, typed lifecycle/evidence publication,
+  and pinned query views. Uses a derived on-disk snapshot cache
+  (`derived-checkpoint.json`) bound to an exact authoritative ledger commit OID
+  so cold reads and first writers do not replay project history from genesis.
+  It is a rebuildable projection, not a second authority. It does not connect to
+  production Tool dispatch, JSON-RPC, or SQLite audit paths. Adds
+  `lancet-audit -> lattice-store,gix` edges only.
+- The module's public surface is audit-domain: `PinnedLedgerView` returns
+  `InvocationRecord`/`PlanReservation`, never session types. Projecting a
+  pinned view into `lattice_session::pending::InvocationFactsSnapshot`,
+  calling the pure `reconcile` reducer, and applying the resulting candidate
+  revision are cross-domain composition and live in
+  `tests/invocation_qualification.rs` behind a `lattice-session`
+  dev-dependency. That is the only place both domains are visible, and it is
+  also where the three ignored qualification harnesses live
+  (`local_ledger_stress`, `result_finalize_stress`, `cold_reopen_benchmark`).
+  The diagnostic summarizer is
+  `benchmarks/invocation-store/summarize_qualification.py`; `cargo test -p
+  lancet-audit` runs its contract through `tests/qualification_summary.rs`.
+  Do not move any of it
+  into `src/`: ADR 0005 §19's graph has no `lancet-audit -> lattice-session`
+  edge, and adding one would make `lancet-api -> lancet-audit ->
+  lattice-session` real.
 
 ## Boundaries
 
@@ -68,6 +94,20 @@ the versioned Cell evidence tables. The evidence tables are the durable home of
 
 ## Recent Issues
 
+- APPROVED #139-A: the non-production `InvocationStore` on the `lattice-store`
+  kernel provides exact ordered reservation, typed terminal facts,
+  topology-validated pinned queries, bounded restart reads, and qualification
+  instrumentation. Its correctness and structural regression tests remain
+  required; #139-B may now perform the production hard cut.
+- FOLLOW-UP #153: InvocationStore performance qualification is diagnostic-only
+  while durability cost and host-I/O attribution are redesigned. The manifest
+  remains the sole authority for metrics and sample shape.
+  `summarize_qualification.py benchmark` writes diagnostics but does not block;
+  strict `qualify` remains available for #153. The official runner writes
+  ignored bundles under `target/invocation-store-bundles`; no benchmark bundle
+  is tracked in Git. Historical summaries retain their original verdicts.
+  `cargo test -p lancet-audit --test qualification_summary` runs the Python
+  contract suite.
 - ADDED #30/#31: evidence tables gained visibility and mutation facts through
   additive, versioned schema upgrades.
 - ADDED #112: versioned Cell evidence became the durable record for Component

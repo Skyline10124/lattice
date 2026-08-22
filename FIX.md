@@ -2,6 +2,36 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #139-A: non-production InvocationStore + collision-aware facts contract — 2026-08-17
+
+#139-A implements the non-production InvocationStore on the `lattice-store`
+kernel and closes L-GH144-01 (clean UUID collision unmodellable with synthetic
+facts). Does not connect to the production Tool dispatch, JSON-RPC, SQLite, or
+operator Adapter paths — those remain in #139-B.
+
+| Component | Change |
+|---|---|
+| Facts contract | `InvocationFact` → `InvocationLifecycleFact`; new `InvocationRecordFact { owner: PlanKey, lifecycle }` with mandatory owner (D-A1). `InvocationFactsSnapshot.invocations` now `BTreeMap<InvocationId, InvocationRecordFact>`. `state_of` → `lifecycle_of`. |
+| Collision detection | `validate_against_plan` returns `Result<PlanValidation>` with `AbsentPlan / Collision / ExactMatch`. Truth table D-A2 (7 rows) fully covered. |
+| Reconcile | `binding_window_closure` handles `Collision` → `ReviseBindingCandidates`. `reconcile()` short-circuits on collision (no TurnClosing). `step_closing_closure` requires `ExactMatch`. |
+| InvocationStore | Single append-only ledger (`refs/lattice/invocations/ledger`) on `StoreRepo`. `reserve_batch` (all-or-nothing, idempotent), `dispatch_started`, `publish_terminal`, `query_invocations`. CAS publication with fsync barriers. |
+| Boundary tests | `a_different_durable_reservation_stays_fail_closed` replaced by `collision_at_binding_planned_outputs_revise_candidates` (D-A2 #2), `different_durable_reservation_is_corruption` (#7), `exact_durable_reservation_does_not_re_reserve` (#4). |
+| Dependencies | `lancet-audit -> lattice-store`, `lancet-audit -> gix` (workspace). |
+
+**Verification:**
+
+- `cargo test -p lattice-session` — 155 passed.
+- `cargo test -p lancet-audit` — 94 passed (11 new invocation_store tests).
+- `cargo check -p lattice-api -p lattice-cli` — clean.
+
+**Changed files:** `crates/lattice-session/src/pending/{facts,reconcile,mod}.rs`,
+`crates/lattice-session/src/git_graph/tests/pending_crash.rs`,
+`crates/lancet-audit/src/{invocation_store,lib}.rs`,
+`crates/lancet-audit/Cargo.toml`,
+`crates/lancet-audit/AGENTS.md`,
+`docs/plans/2026-08-17-issue139a-decision-record.md`,
+`FINDINGS.md`, `FIX.md`.
+
 ## GitHub #144 review round 2: journal contract depth + real process-crash gate — 2026-08-17
 
 Independent review of the #144 branch raised eleven findings (F1–F11). Each was
@@ -5846,3 +5876,1217 @@ was performed.
 `crates/lattice-store/**`, `crates/lattice-session/**`,
 `crates/lancet-runtime/**`, `crates/lattice-api/**`, `crates/lattice-cli/**`,
 `crates/lattice-system-harness/**`, `Cargo.lock`, and `FIX.md`.
+
+## GitHub #139-A: InvocationStore qualification and review repairs — 2026-08-17
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| #139-A-R1..R15 | BLOCKER/MAJOR | The initial non-production adapter did not preserve exact ordered plan authority, used open terminal strings and detached evidence, treated a published-but-undurable ref as ordinary failure, trusted a moved/truncated ledger ref, omitted clean-collision I/O closure, and measured simulated rather than real store paths. Re-reviews also found missing SessionStore CAS lineage, missing-session batch validation, permissive durable decoding, a publish sample on a classify-only path, stale dependency/docs statements, a torn multi-ref publication assumption, non-idempotent candidate revision durability retries, old UUID reuse, timing contamination, weak wire-shape assertions, and a qualification bundle without immutable source history. | Added exact `PlanReservation` authority and order-sensitive idempotence; closed terminal reason/material/error sums with atomic Cell evidence; ordered ledger-before-witness publication with lag recovery and linear-topology validation; retried post-publication durability barriers including same-stage candidate revision; prohibited any old UUID reuse; added pinned views, PendingTurn projection, and one SessionStore revision executor; rejected mixed-session batches and unknown durable fields; replaced qualification loops with real operations and corrected timing/fairness samples; added exact wire-shape tests and an immutable Git history bundle; aligned docs and dependency records. |
+
+### Verification
+
+- `cargo test -p lancet-audit -p lattice-session` — 270 passed, 2 qualification harnesses intentionally ignored.
+- `LOCAL_LEDGER_STRESS=1 ... --ignored --exact` and `RESULT_FINALIZE_STRESS=1 ... --ignored --exact` — both real-operation harnesses passed; these diagnostic runs did not approve or populate `FinalizeBudget`.
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo check --benches -p lancet-audit`, `bash -n benchmarks/invocation-store/run-qualification.sh`, and `git diff --check` — passed.
+- `cargo xtask ci` — passed every gate, including all 27 crate suites and the system harness.
+- `cargo test --workspace` — all tests passed except the known environment-sensitive `direct_failure_session_lock_serializes_same_session_turns`, which also fails on clean `main` at `62100b1b` on this host (project memory CONSTRAINTS #66); the same test passed under `cargo xtask ci`.
+- Two independent final re-reviews returned PASS with no remaining blocker or major finding.
+
+### Changed files
+
+`AGENTS.md`, `Cargo.lock`, `FINDINGS.md`, `crates/lancet-audit/**`,
+`crates/lattice-session/**`, `benchmarks/invocation-store/**`,
+`docs/plans/2026-08-17-issue139a-decision-record.md`, and `FIX.md`.
+
+## L-GH139A-01 / GitHub #139-A: bounded event ledger and measured finalization budget — 2026-08-18
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| L-GH139A-01 | MAJOR | The qualification implementation wrote the complete accumulated Invocation snapshot on every lifecycle transition, causing quadratic persistent bytes and a 90.55 s local-ledger wall p50. | Replaced snapshot commits with strict versioned append-only events, deterministic replay, incremental cooperating-write suffix validation, and a regression test that bounds every stored event independently of ledger length. The rejected 20+20 bundle remains immutable and annotated. |
+| #139-A-R16 | MAJOR | The first proposed 10 s `FinalizeBudget` used the uncontended result-finalize maximum and ignored the accepted 50.31 s contended repository-lock wait. | Approved a 60 s monotonic budget covering lock acquisition, revalidation, publication, and retry delay; synchronized ADR 0005; and fixed Btrfs regression limits from the retained distributions. |
+| L-GH139A-02 | MAJOR residual | Append-only events bound writes but cold pinned reads replay full project history. | Recorded an explicit non-production #139-B wiring gate in `AGENTS.md`, `FINDINGS.md`, and the approval record: add a bounded read strategy and cold-reopen/repeated-facts Btrfs measurements before production cutover. |
+
+### Verification
+
+- `cargo test -p lancet-audit -p lattice-session` — 271 passed; only the two explicit qualification harnesses were ignored.
+- `cargo xtask ci` with `LATTICE_BIN` unset — passed fmt, Clippy, build, boundaries, codegen, all 27 crate suites, system harnesses, and Component checks.
+- `benchmarks/invocation-store/run-qualification.sh` — retained 20 local-ledger plus 20 result-finalize Arch Linux/Btrfs release runs in `results/20260817T214110Z-7c64a4f3ec34/`; all correctness assertions passed.
+- Accepted measurements: local-ledger wall p50/p95/max 52.82/101.77/112.37 s; maximum single lock wait 50.31 s; full-finalize p50/p95/p99/max 21.47/24.40/34.29/2041.60 ms; uncertain revalidation p99/max 0.145/0.212 ms; CAS retries zero by exclusive-flock structure.
+- `git merge-base --is-ancestor 7c64a4f3ec34 HEAD`, `git bundle verify .../source-history.bundle`, and `git bundle list-heads .../source-history.bundle` — passed; the bundle contains exact source HEAD `7c64a4f3ec34944d944ce2c16565e9e5656ade5e`.
+- Independent final spec and adversarial risk rereviews returned PASS with no blocker or major finding after the 60 s budget and read-scaling gate remediation.
+
+### Changed files
+
+`crates/lancet-audit/src/invocation_store.rs`, retained
+`benchmarks/invocation-store/results/**` bundles, `AGENTS.md`, `FINDINGS.md`,
+ADR 0005, both #139-A plan/approval records, and `FIX.md`.
+
+## 2026-08-18 — GitHub #139-A second-review remediation (corrections and supersessions)
+
+A second independent review of the unpushed #139-A branch returned
+`REQUEST CHANGES`. This entry is append-only: the 2026-08-18 entries above are
+retained verbatim, and the list below records exactly which of their claims
+this round overturns.
+
+### Claims overturned by this round
+
+| Superseded claim | Where it was recorded | Why it is wrong now |
+|---|---|---|
+| `lancet-audit -> lattice-session` is a legitimate landed #139-A edge. | `AGENTS.md` graph + delta list + crate table, `crates/lancet-audit/AGENTS.md`, decision record "Ownership and dependency decisions". | ADR 0005 §19's exact post-#139-B graph has no such edge. As a normal dependency it made `lancet-api -> lancet-audit -> lattice-session` real, so an operator read pulled the LATTICE session layer into LANCET. Documentation was changed to match an implementation instead of the implementation matching the ADR. |
+| `RESULT_FINALIZE_STRESS` qualified the finalize path; its 20-run distribution is accepted evidence. | `docs/plans/2026-08-18-issue139a-qualification-approval.md`, FIX.md 2026-08-18 "Verification", decision record. | The harness published Invocation terminals while the PendingTurn was still `Bound` and asserted `Bound` at the end of every step — a durable order the pure reducer classifies as corruption. It never measured ADR 0005 §12's real order. |
+| The 60 s `FinalizeBudget` and the result-finalize regression thresholds are approved. | `#139-A-R16` row above, ADR 0005 §12, approval record. | Derived in part from the withdrawn group's 2.042 s maximum full-finalize latency. Withdrawn pending a corrected rerun; ADR 0005 §12 again states no approved number. |
+| `L-GH144-01` is closed by unit-level truth-table tests. | FINDINGS.md, `crates/lancet-audit/AGENTS.md`. | The closure is real but the evidence was insufficient: there was no store-backed CAS/reopen closed loop. It now has one; the finding stays CLOSED on that stronger basis. |
+
+### Fixes applied
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| R2-01 | BLOCKER | `lancet-audit` depended on `lattice-session` as a normal dependency, violating ADR 0005 §19 and LANCET's independent embeddability. | Removed the edge. `PinnedLedgerView::project_facts`, the record/plan/binding projections, and `execute_collision_revision` left the production module; `lattice-session` is now a dev-dependency only. Cross-domain projection and the reconcile call live in the non-production seam `crates/lancet-audit/tests/invocation_qualification.rs`; applying a revision is session-domain I/O (`GitSessionGraphStore::execute_candidate_revision`). `cargo tree -p lancet-api -e normal` contains no `lattice-session`. |
+| R2-02 | BLOCKER | A clean collision returned a `ReconciliationPlan` carrying a provisional `Interrupted(ProcessInterruptedDuringToolBinding)` outcome plus a single `ReviseBindingCandidates` action, so a non-final decision was shaped like a closed Turn. | `reconcile` now returns `ReconciliationDecision::{Closure, ReviseCandidates}`. `ReconciliationAction::ReviseBindingCandidates` was deleted. `CandidateRevisionRequest` carries the exact session, Turn, byte-exact durable `BindingPlan`, and observed colliding candidates, and carries no outcome. `execute_candidate_revision` verifies the request against the pinned `active-turn` tip and CAS-pins that tip. A collision at `Bound` is now typed corruption, because `Bound` is published only after the exact plan is durably reserved. |
+| R2-03 | BLOCKER | The collision path had only scattered unit tests: no real store-backed CAS/reopen closed loop. | Added `clean_collision_revises_candidates_end_to_end_over_real_stores`: foreign owner in a real `InvocationStore` → pinned facts → projection → pure reconcile → fresh UUIDs → real SessionStore CAS → reopen → complete revised plan → re-projection/reconcile. It asserts every candidate replaced with no reuse, unchanged order/address/method/descriptor/arguments digests, recomputed binding digests, post-CAS durability retry, CAS mismatch leaving the durable tip untouched, and no `StepClosed`/`TurnClosing`/TurnCommit before the revision. |
+| R2-04 | MAJOR | `InvocationFactsSnapshot::validate_against_plan`'s exact branch checked per-binding presence but not key-set equality, so extra records could pass as an exact match. | The snapshot now fails closed unless `invocations.keys()` is a subset of the plan's candidate set, and duplicate candidates in the plan are corruption; combined with the per-binding presence check, `ExactMatch` requires exact key-set equality. Added extra-own, extra-foreign, extra-without-plan, and duplicate-candidate tests. |
+| R2-05 | BLOCKER | `RESULT_FINALIZE_STRESS` published terminals in the `Bound` window and asserted `Bound` at the end. | Rewritten to the real durable order per binding: `BindingPlanned → exact reservation → Bound → StepClosing(cursor 0, no closures, no candidate)`, then per binding `i`: `DispatchStarted → StepClosing(cursor i + exact ResultDraft candidate) → CleanAbsent \| Durable \| Uncertain-then-revalidated → typed terminal + evidence → StepClosing(cursor i+1, closure appended, candidate cleared)`, ending at `StepClosed(ContinueModel)` and verified by reopen + `reconcile` producing one legal closure rather than corruption. The uncertain path revalidates through a fresh strict `GitSessionGraphStore::open` (reopen-equivalent). Every store write is preceded by a strict non-blocking probe proving the other repository's write lock is free, so the two repository write locks are never held together. Full-finalize timing now spans the real finalize scope (candidate pin through terminal evidence). |
+| R2-06 | MAJOR | Missing regression coverage: no zero-Indeterminate assertion, no post-CAS fault matrix for `reserve_batch`/terminal. | `local_ledger_stress` now asserts every terminal is exactly `Succeeded` and that zero terminals are `Indeterminate`. Added `reserve_batch_published_but_undurable_retries_exactly_and_rejects_a_different_batch`, `terminal_published_but_undurable_retries_exactly_and_rejects_a_different_terminal`, and `dispatch_started_published_but_undurable_rejects_a_foreign_invocation_retry`, each covering published-but-undurable exact retry and mismatch fail-closed. The 1,280 exact IDs, 2,720 unique commits, linear ancestry, query/tail/reopen consistency, and writer completion/fairness assertions are unchanged. |
+| R2-07 | MINOR | `environment.json` recorded no distribution, backing device, mount options, scheduler, CPU governor, free space, or load average. | `benchmarks/invocation-store/run-qualification.sh` emits environment schema v2 with `distribution` (`/etc/os-release` ID/VERSION_ID/PRETTY_NAME), `store_device` (source, node, parent kname, model, rotational, scheduler, mount and FS options), `store_free_bytes_at_start`, `store_total_bytes`, `load_average_at_start`, and `cpu_governors`, all degrading to `null` rather than failing the run. Existing bundles keep schema v1 and were not backfilled or rewritten. |
+
+### Verification
+
+- `cargo test -p lattice-session` — 163 passed.
+- `cargo test -p lancet-audit` — 114 lib + 1 contract-shape + 2 integration passed; the two qualification harnesses ignored.
+- `cargo test --release -p lancet-audit result_finalize_stress -- --ignored` — one functional run passed at its new location.
+- `cargo test --release -p lancet-audit local_ledger_stress -- --ignored` — one functional run passed at its new location.
+- `cargo tree -p lancet-api -e normal` — zero `lattice-session` occurrences.
+- `bash -n benchmarks/invocation-store/run-qualification.sh` and a direct execution of its environment block — passed.
+
+### Retained evidence
+
+Both qualification bundles under `benchmarks/invocation-store/results/` are
+unchanged byte-for-byte. No sample, outlier, or summary was deleted or
+rewritten. The local-ledger group of
+`20260817T214110Z-7c64a4f3ec34/` remains valid historical evidence; its
+result-finalize group and the numbers derived from it are withdrawn.
+
+### Changed files
+
+`crates/lancet-audit/Cargo.toml`, `crates/lancet-audit/src/invocation_store.rs`,
+`crates/lancet-audit/tests/invocation_qualification.rs` (new),
+`crates/lattice-session/src/pending/facts.rs`,
+`crates/lattice-session/src/pending/reconcile.rs`,
+`crates/lattice-session/src/pending/mod.rs`,
+`crates/lattice-session/src/git_graph/pending.rs`,
+`crates/lattice-session/src/git_graph/tests/pending_crash.rs`,
+`crates/lattice-session/src/git_graph/tests/pending_journal.rs`,
+`benchmarks/invocation-store/run-qualification.sh`, `AGENTS.md`,
+`crates/lancet-audit/AGENTS.md`, `crates/lattice-session/AGENTS.md`,
+`docs/ARCHITECTURE.md`, ADR 0005, both #139-A plan records, `FINDINGS.md`, and
+`FIX.md`.
+
+## 2026-08-18 — GitHub #139-A third review pass (P2/P3 follow-ups)
+
+A third independent review confirmed the second-review blockers are closed and
+raised documentation-sync and adversarial-robustness follow-ups. Nothing above
+is deleted; this section records what changed after it.
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| R3-01 | P2 | `docs/ARCHITECTURE.md`'s workspace dependency diagram omitted `SESSION --> STORE`, `SESSION --> PROTOCOL`, `AUDIT --> STORE`, and `RUNTIME --> STORE`; the layer table's `lattice-session` row was incomplete and `lancet-runtime` had no row at all. | Added the four missing edges, corrected the `lattice-session` row to `lancet-protocol, lattice-conversation, lattice-store`, and added the missing `lancet-runtime` row. Each row now matches that crate's `[dependencies]`. |
+| R3-02 | P2 | `docs/ARCHITECTURE.md`'s `lancet-audit` crate description did not mention the #139-A `InvocationStore`. | Documented the non-production Git `InvocationStore`: `invocations.git`, the append-only ledger ref plus ordered high-water witness, exact ordered `reserve_batch`, atomic typed terminal + evidence, pinned linear-ancestry reads, the audit-domain-only public surface, and the standing prohibition on a normal `lattice-session` dependency. |
+| R3-03 | P2 | `FINDINGS.md` L-GH139A-02 still claimed #139-A had proven "write/finalize distributions", and the decision record still pointed at "approved numbers". | Both now state that only the local-ledger group survives, that the result-finalize group and the 60 s budget are withdrawn, and that #139-A has no approved finalize distribution or threshold today. |
+| R3-04 | P2 | `execute_candidate_revision` minted UUIDs internally; a CAS-published-but-undurable revision could only be recovered by a caller able to replay the exact same UUIDs, which a real random source cannot do. The old test only passed because it replayed a deterministic sequence. | The executor now performs strict-reopen-and-continue: it re-reads the durable `active-turn` first and, if a candidate revision of exactly `request.plan` is already grafted on the expected tip, repeats that publication's durability barrier and returns it **without generating anything**. Recognition uses one shared predicate, `is_candidate_revision_of`, which is also the admission rule inside `revise_binding_candidates`, so publication and recovery can never disagree. New tests assert recovery with a deliberately different generator (session-level and in the store-backed E2E) and that a genuine CAS mismatch — the journal moved past `BindingPlanned` — still fails closed with the durable tip untouched. |
+| R3-05 | P2 | `RESULT_FINALIZE_STRESS` only called `reconcile` at the final `StepClosed`, a stage that does not validate the projected invocation facts. | The harness now reduces over the projected facts mid-loop at `StepClosing` — the stage that *does* validate them — on every binding of the first step (covering all three draft classifications) and on the last binding of every step, asserting the closure resumes at the exact lowest unclosed ordinal without skipping and closes every remaining binding. It also asserts every terminal is a deterministic `Succeeded` with zero `Indeterminate`, and reports `unexpected_indeterminate_count` in the qualification record. |
+| R3-06 | P3 | The harness comment, decision record, and FINDINGS wrote the order as `Bound → DispatchStarted → StepClosing`, omitting the mandatory empty `StepClosing(cursor 0)` baseline. | All three now spell out `Bound → StepClosing(cursor 0, no closures, no candidate)` followed by the per-binding loop, and state that pinning a candidate and advancing the cursor are always separate transitions. |
+| R3-07 | P3 | Several documents were dated `2026-08-19` while the host date is `2026-08-18`. | Corrected to `2026-08-18` across `AGENTS.md`, `FIX.md`, `FINDINGS.md`, `docs/ARCHITECTURE.md`, ADR 0005, and both plan records. |
+
+### Verification
+
+- `cargo test -p lattice-session` — 164 passed.
+- `cargo test -p lancet-audit` — 114 lib + 1 contract-shape + 2 integration passed.
+- `cargo test --release -p lancet-audit result_finalize_stress -- --ignored` — one functional run passed; 160 invocations, CleanAbsent 60 / Uncertain 60 / Durable 40, `unexpected_indeterminate_count` 0.
+- `cargo test --release -p lancet-audit local_ledger_stress -- --ignored` — one functional run passed.
+- `cargo fmt --all --check`, `git diff --check`, targeted Clippy, `cargo xtask lancet-boundary`, `cargo tree -p lancet-api -e normal`, and `env -u LATTICE_BIN cargo xtask ci` — all clean.
+
+The qualification status is unchanged: the corrected harnesses have been run only
+as functional checks, and the 20+20 Arch Linux/Btrfs requalification plus a
+separate approval commit remain required before any `FinalizeBudget` or
+result-finalize threshold is approved again.
+
+## 2026-08-18 — GitHub #139-A requalification and re-approval
+
+Maintainer-authorized rerun of the full qualification with the corrected
+harnesses, and re-derivation of the numbers withdrawn earlier today.
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| L-GH139A-03 | BLOCKER (withdrawn approval) | The `RESULT_FINALIZE_STRESS` group, the 60 s `FinalizeBudget`, and every result-finalize threshold were withdrawn because the harness that produced them published Invocation terminals while the PendingTurn was still `Bound`. | Ran a fresh 20+20 Arch Linux/Btrfs release qualification with the corrected harness and the schema-v2 runner, retained it immutably as `benchmarks/invocation-store/results/20260818T115511Z-4a51b5d42484/`, and re-derived the budget and every threshold from it in a Requalification section of `docs/plans/2026-08-18-issue139a-qualification-approval.md`. ADR 0005 §12 again states an approved 60 s budget, now sourced from the corrected run. Finding closed. |
+
+### Evidence
+
+- Bundle `20260818T115511Z-4a51b5d42484`, source SHA `4a51b5d42484154c7580efd15941e1e6a60c97cb`, bundle SHA-256 `02176e82219c6028070d45a4de34c2b3035fc83284b5c67c7da38a0cefa0512e`; `git bundle verify` reports a complete history and `git bundle list-heads` resolves that exact HEAD.
+- Environment schema v2 on real Btrfs: Arch Linux rolling, kernel `7.1.8-1-cachyos-bore`, `/dev/nvme0n1p2` (`rw,ssd,discard=async,space_cache=v2`), KINGSTON OM8PGP41024N-A0, non-rotational, `mq-deadline`, `performance` governor, 167.4 GB free, load 2.07/1.69/2.55.
+- All 20 local-ledger runs: 1,280 invocations, 2,720 linear commits, 340 writes per writer across 8 writers, zero unexpected `Indeterminate`, zero CAS retries.
+- All 20 result-finalize runs: 160 invocations through the full durable order, exactly 60 `CleanAbsent` / 60 `Uncertain` / 40 durable-first drafts, mid-loop `StepClosing` reduction resuming at the exact lowest unclosed ordinal, legal `StepClosed(ContinueModel)` closure at reopen, zero unexpected `Indeterminate`, zero CAS retries.
+- Measured: full terminal finalize p50/p95/p99/max 41.26 / 49.70 / 66.21 ms / 4.827 s; terminal+evidence publish p99 32.89 ms; uncertain draft revalidation p99/max 0.605 / 0.639 ms; result-finalize wall p95 25.67 s; local-ledger wall p50/p95/max 60.94 / 111.15 / 160.99 s; maximum single repository-lock wait 42.69 s; maximum writer-wall ratio 1.414; maximum consecutive waits 313.
+- Approved: 60 s monotonic `FinalizeBudget` (42.69 s worst contended acquisition + 4.827 s complete publication + 1 s capped backoff + a second publication = 53.4 s), deterministic 25 ms → 1 s exponential backoff, and the eleven regression gates in the approval record.
+
+The two earlier bundles remain retained and byte-identical; nothing was deleted
+or rewritten. FINDINGS L-GH139A-02's bounded production-read gate stays open and
+still blocks #139-B's production wiring.
+
+## 2026-08-18 — GitHub #139-A strict repository lock made FIFO, and requalified
+
+Follow-up to the requalification above. The bundle it approved measured a
+barging lock, so its local-ledger contention numbers described starvation
+rather than queueing.
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| R4-01 | MAJOR (tail latency) | `acquire_flock_strict` woke every waiter with one `Condvar::notify_all()`, and whichever thread first won the registry mutex proceeded. A writer that had just released was already running and routinely re-acquired ahead of peers queued far longer. Under 8 concurrent writers this produced 313 consecutive losses for a single writer, a 42.69 s worst single acquisition, and a 1.414 writer-wall ratio, while aggregate throughput looked acceptable. | Blocking strict acquisitions now take a ticket from a per-repository FIFO queue and are granted in arrival order. The registry entry is retained while waiters are queued so the ticket counters survive the gap between release and the next acquisition; a failed re-acquisition advances `serving` so the queue is never stranded; and a non-blocking acquire never joins the queue, reporting `Busy` whenever the lock is held or anyone is waiting. `StoreRepo::write_lock`'s interface is unchanged, cross-process exclusion is still the kernel `flock`, and operation locks keep their shared-nesting semantics. |
+
+### Measured effect
+
+Requalified as bundle
+`benchmarks/invocation-store/results/20260818T131229Z-da1d2ac15ce5/` (source SHA
+`da1d2ac15ce5`, bundle SHA-256 `8468e352…`), same Arch Linux/Btrfs host,
+one-minute load average 4.22 at start against 2.07 for the bundle it improves
+on.
+
+| Local-ledger metric | Barging | FIFO | Change |
+|---|---:|---:|---:|
+| Maximum consecutive waits | 313 | 7 | -97.8% |
+| Maximum single repository-lock wait | 42.69 s | 12.47 s | -70.8% |
+| Single repository-lock wait p95 | 41.41 s | 8.79 s | -78.8% |
+| Maximum writer-wall ratio | 1.414 | 1.032 | -27.0% |
+| `reserve_batch` / `DispatchStarted` / terminal max | 22.34 / 42.71 / 27.69 s | 8.38 / 13.05 / 12.28 s | -62.5% / -69.5% / -55.6% |
+| Harness wall p50 / p95 | 60.94 / 111.15 s | 64.20 / 105.86 s | +5.4% / -4.8% |
+
+`max_consecutive_wait` is exactly 7 in all 20 runs — `N-1` for 8 writers, the
+structural floor for a fair queue — and the writer-wall ratio is 1.000-1.002 in
+19 of 20. Per-operation p50 rose to a shared ~133 ms because the hot writer's
+barging fast path is gone; that is the honest serialized cost, and throughput is
+unchanged by design. The single-writer result-finalize group moved less than 2%
+on every metric except terminal publish p99/max, which improved 10.8% / 26.3%,
+confirming the queue does not tax the uncontended path.
+
+All 40 runs kept every correctness assertion: 1,280 invocations and 340 writes
+per writer per local-ledger run, 160 invocations with 60/60/40 draft
+classifications per result-finalize run, zero unexpected `Indeterminate`, zero
+CAS retries.
+
+### Approval consequences
+
+The 60 s `FinalizeBudget` is unchanged; only its margin improves, from 1.12x to
+2.59x (worst case now 12.47 + 4.889 + 1 + 4.889 = 23.2 s). The three fairness
+regression gates were calibrated against barging and are tightened to detect a
+reintroduced barging lock: maximum single repository-lock wait 55 s -> 20 s,
+maximum consecutive waits 750 -> 16, maximum writer-wall ratio 4.0 -> 1.5. Every
+result-finalize gate is unchanged and still passes. Full record: the FIFO
+requalification section of
+`docs/plans/2026-08-18-issue139a-qualification-approval.md`.
+
+### Verification
+
+- `cargo test -p lattice-store` — 46 lib (including the new `strict_lock_serves_waiters_in_arrival_order` and `strict_nonblocking_does_not_jump_a_queued_waiter`) + 5 integration passed.
+- `cargo test -p lattice-session -p lancet-audit -p lancet-runtime` — passed.
+- `cargo clippy -p lattice-store --all-targets -- -D warnings` — clean.
+- `env -u LATTICE_BIN cargo xtask ci` — All checks passed.
+
+### Not done here
+
+Step one of the agreed optimization sequence only. Still open, in order: a
+shorter critical section (event construction, canonical JSON, and
+state-independent validation outside the lock), a verified derived checkpoint
+bound to an exact ledger OID so cold replay does not happen under the lock
+(shared with L-GH139A-02), and `ProjectStoreKey` admission control in #139-B
+with its queueing charged to the `FinalizeBudget`. Rejected without a new ADR:
+removing fsync, batching terminals, merging lifecycle transitions, multiple
+ledger refs, and sharding `invocations.git`.
+
+## 2026-08-18 — GitHub #139-A ledger events prepared outside the repository write lock
+
+Step two of the agreed optimization sequence, after the FIFO lock above.
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| R5-01 | MAJOR (tail latency) | Event construction, canonical JSON serialization, and the commit message all ran inside the repository write lock, which serializes every writer of one project's ledger. Terminal evidence is the largest payload the ledger carries, so every peer waited through its serialization. | Admission split into `validate_event_shape` (everything decidable without the ledger: empty batches, cross-session batches, duplicate candidates within one batch, addresses not belonging to the plan key, non-ascending part ordinals, malformed terminal evidence or material) and `validate_event_against_snapshot` (an already-reserved plan key, a candidate already owned, the legal-successor matrix). `validate_ledger_event` remains both halves for replay. `PreparedEvent` runs the shape half plus canonical serialization before the lock. Object publication, ref CAS, witness advance, and the durability barrier deliberately stay inside. |
+| R5-02 | MINOR (provenance) | `environment.json` sampled the host once at bundle start, so a distribution outlier could not be attributed and the "annotate outliers in place" rule was not executable. | `run-conditions.jsonl` records load average, free store bytes, and running-process count immediately before and after every run; environment schema v3 names it. Earlier bundles keep their schema and were not backfilled. |
+| R5-03 | MINOR (gate calibration) | The `uncertain_draft_revalidation` maximum gate was set at 2 ms from one bundle's 0.639 ms baseline, but that statistic is a single sample of a sub-millisecond filesystem open and read. | Raised to 10 ms with the p99 gate unchanged at 1 ms, on the evidence of four retained bundles where p99 stays within 0.08 ms while the maximum ranges 0.63-3.94 ms. Recorded that the maximum-latency gates and the `FinalizeBudget` are one system: `lock_wait_gate + 2 x full_finalize_gate + backoff_cap <= FinalizeBudget`, so `full_terminal_finalize` max stays at 10 s despite only 1.18x headroom. |
+
+### Measured effect
+
+Requalified as `benchmarks/invocation-store/results/20260818T153043Z-3ee216ba4f5f/`
+(source SHA `3ee216ba`, bundle SHA-256 `33bf18b6`, environment schema v3).
+
+| Local-ledger metric | FIFO only | FIFO + prepared | Change |
+|---|---:|---:|---:|
+| `reserve_batch` / `DispatchStarted` / terminal publish p95 | 177.49 / 181.34 / 182.00 ms | 154.76 / 158.48 / 159.18 ms | -12.8% / -12.6% / -12.5% |
+| `reserve_batch` max | 8.376 s | 5.953 s | -28.9% |
+| Maximum single repository-lock wait | 12.47 s | 10.94 s | -12.2% |
+| Maximum writer-wall ratio | 1.032 | 1.002 | -2.9% |
+| `DispatchStarted` / terminal publish p50 | 133.16 / 133.14 ms | 132.51 / 132.48 ms | -0.5% |
+
+p50 is flat and p95 improves about 12.5% on all three write paths, which is the
+expected shape: each writer waits through seven peers' critical sections per
+turn, so a fixed cost removed from one section is repaid sevenfold in the
+contended tail. The retained invalid bundle measured the same effect
+independently (-11.4% / -11.2%). The single-writer result-finalize group is the
+control and is unchanged (wall p95 +2.1%). `max_consecutive_wait` is 7 in all 20
+runs again, and all 40 runs kept every correctness assertion with zero
+unexpected `Indeterminate` and zero CAS retries.
+
+### Retained invalid bundle
+
+`20260818T144803Z-ca768c80d80e` is retained unmodified and approves nothing: two
+of its twenty result-finalize runs took 65.6 s and 66.9 s against 17-26 s for
+the other eighteen, breaching two gates on two samples. The change under test
+only removes work from the critical section and that harness is single-writer,
+so it cannot have caused a 2.6x wall regression there — but the environment was
+not provably valid, so the whole qualification was rerun with the old bundle
+retained rather than an outlier dropped. That bundle's numbers must not be cited.
+
+### Verification
+
+- `cargo test -p lancet-audit` — 116 lib (2 new) + 1 contract-shape + 2 integration passed.
+- `cargo clippy -p lancet-audit --all-targets -- -D warnings` — clean.
+- `env -u LATTICE_BIN cargo xtask ci` — All checks passed.
+
+Two existing tests were strengthened rather than relaxed, because shape
+rejection is now earlier: `duplicate_id_in_another_plan_fails` rebases its
+binding onto the second plan key so the duplicate ID is the only remaining
+fault, and `same_ids_in_different_order_is_not_idempotent` swaps IDs between
+shape-legal ascending addresses so it still reaches the order-sensitive
+durable-plan comparison. `a_descending_part_order_is_rejected_as_shape` covers
+the earlier rejection, and
+`shape_rejection_does_not_wait_for_the_repository_write_lock` proves the shape
+half runs outside the lock by rejecting while another guard holds it.
+
+### Not done here
+
+Still open, in order: a verified derived checkpoint bound to an exact ledger OID
+so a cold writer does not replay project history under the lock (also
+L-GH139A-02's bounded-read gate), and `ProjectStoreKey` admission control in
+#139-B with its queueing charged to the `FinalizeBudget`. The
+rejected-without-an-ADR list is unchanged.
+
+## 2026-08-18 — GitHub #139-A verified derived on-disk checkpoint cache (L-GH139A-02)
+
+Step three of the agreed optimization sequence, closing FINDINGS L-GH139A-02.
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| R6-01 | MAJOR (cold replay scaling) | The append-only event ledger bounds per-transition write amplification, but cold pinned reads and the first writer in a process replayed the entire project history from genesis. Under large project histories, cold read/write latency grew with all historical project invocations. | Added `DerivedCheckpoint` (`derived-checkpoint.json`) in the store directory, bound to an exact authoritative ledger commit OID and verified with `validate_snapshot_shape` and `is_first_parent_ancestor`. It is a derived, rebuildable projection, never a second authority: if missing, corrupted, or mismatched with authoritative tip ancestry, it is discarded and reconstructed from genesis. On cold read (`open -> snapshot/pinned_view`) and cold write (`open -> write_lock -> write_state`), the verified checkpoint is loaded in O(1) time without replaying genesis; incremental writes only apply delta events since the checkpoint. Unit tests cover cold reopen, deletion rebuild, corruption discard/rebuild, tip mismatch discard, lagging ancestor delta replay, and cold first-writer under write lock. |
+
+### Verification
+
+- `cargo test -p lancet-audit` — 121 lib (5 new tests) + 1 contract-shape + 2 integration passed.
+- `cargo clippy -p lancet-audit --all-targets -- -D warnings` — clean.
+- `env -u LATTICE_BIN cargo xtask ci` — All checks passed.
+- `L-GH139A-02` moved to CLOSED in `FINDINGS.md`.
+
+## 2026-08-18 — GitHub #139-A authenticated checkpoint & cold-reopen qualification
+
+Resolves re-review findings P1-1, P1-2, P1-3, P1-4, and P3, and requalifies the complete suite.
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| R7-01 | BLOCKER (cryptographic authentication) | `derived-checkpoint.json` was an unauthenticated external file: a shape-valid forged empty snapshot naming the current tip was accepted without ledger verification, causing existing invocations to vanish and creating a second unauthenticated authority (P1-1). | Every commit tree now embeds a 32-byte `state_digest` blob (SHA-256 of canonical snapshot JSON). `load_derived_checkpoint` cryptographically verifies the snapshot against the commit tree in O(1); any tampered, forged, or mismatched snapshot is rejected and rebuilt from genesis. Added `forged_empty_checkpoint_for_populated_ledger_is_rejected` proving a forged empty snapshot is rejected and the true state reconstructed. |
+| R7-02 | BLOCKER (write amplification) | Every reserve/dispatch/terminal serialized and wrote the full `LedgerSnapshot` inside the write lock, causing $O(\text{history}^2)$ write amplification (P1-2). | Transitions under lock write only `event.json` and `state_digest` (~250 bytes) into git objects. `derived-checkpoint.json` is written periodically every `CHECKPOINT_INTERVAL` (32) commits, eliminating write amplification under the lock. |
+| R7-03 | BLOCKER (cold writer fix) | `write_state()` in a fresh handle called `validated_snapshot_at(tip, tip)` from genesis under the write lock, bypassing the checkpoint cache (P1-3). | `write_state()` now uses `resolve_snapshot_for_write`, loading verified checkpoints and replaying only bounded delta events ($\le 32$) without replaying genesis under the lock. |
+| R7-04 | BLOCKER (qualification evidence) | Previous qualification bundle did not cover the checkpoint implementation and lacked cold-read / projection benchmark distributions (P1-4). | Added `cold_reopen_benchmark` (20 runs over 2,561-commit ledger) into `run-qualification.sh`. Requalified complete 20×LOCAL + 20×RESULT + 20×COLD suite in bundle `20260818T184822Z-e5c23481be0d`. |
+| R7-05 | MINOR (provenance) | `run_group` in `run-qualification.sh` skipped `sample_conditions "after"` on failed runs (P3). | Guaranteed `sample_conditions "after"` executes unconditionally on both success and failure. |
+
+### Measured effect & Requalification
+
+Requalified as `benchmarks/invocation-store/results/20260818T184822Z-e5c23481be0d/`
+(source SHA `e5c23481`, bundle SHA-256 `9b3fbe4b`, environment schema v3 with 120 run-condition samples).
+
+- **Cold read with checkpoint (2,561 commits)**: p50 **11.34 ms**, p95 **13.59 ms**, max **16.51 ms** vs genesis replay p50 **75.45 ms** (**6.7× speedup**).
+- **Repeated `project_facts` projection**: p50 **5 µs**, p95 **13 µs**.
+- **LOCAL**: wall p95 130.08 s ($\le 170$ s), max lock wait 8.53 s ($\le 20$ s, −22%), writer ratio 1.091 ($\le 1.5$), `max_consecutive_wait` 7 in 20/20 runs.
+- **RESULT**: wall p95 26.68 s ($\le 40$ s), full finalize p99 63.03 ms / max 4.690 s ($\le 10$ s, −44.8%), terminal publish p99 32.10 ms, revalidation p99 0.55 ms / max 0.66 ms.
+- **FinalizeBudget**: 60 s ceiling provides **3.17× headroom** over worst-case chain (8.53 + 4.690 + 1.0 + 4.690 = 18.91 s).
+- All 60 runs passed every correctness assertion with zero unexpected `Indeterminate` and zero CAS retries.
+
+
+## 2026-08-18 — GitHub #139-A P1-2 actually closed: O(event) critical section
+
+A further review round established that the previous entry's P1-2 claim did not
+match the shipped code, and that its `remove in-lock clone` commit message
+described a change that had been reverted during that same round. This entry
+records the real fix and supersedes the P1-2 and complexity claims above.
+
+### Claims overturned by this round
+
+| Superseded claim | Where it was recorded | Why it was wrong |
+|---|---|---|
+| Transitions "write only ~250 bytes" and O(history²) amplification is "eliminated". | R7-02 row above, approval record, `FINDINGS.md`, ADR 0005. | Every transition still cloned the full `LedgerSnapshot`, canonicalized it, and SHA-256'd it inside the repository write lock, so the critical section was O(state). A *fixed* 32-commit checkpoint interval also leaves cumulative checkpoint bytes at `32 + 64 + … + N` = O(N²). |
+| `fix(audit): … remove in-lock clone` (commit `cdf21ef2`) removed the clone. | That commit's message. | The in-place edit was reverted inside that round after it broke a post-CAS durability test; only the schema bump, the regression test, and doc sync actually landed. The message was not corrected. |
+| Checkpoint verification and cold start are "O(1)". | ADR 0005, approval record, `FINDINGS.md`, R6-01/R7-01 rows above. | Verification must parse, canonicalize, and hash the full snapshot. The correct statement is **O(state bytes), decoupled from history depth**. |
+
+### Fixes applied
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| R8-01 | BLOCKER | Every transition cloned, canonicalized, and hashed the whole snapshot under the repository write lock. | `state_digest` is now written only on *anchor* commits. An ordinary transition writes one event blob and nothing else. The cached snapshot advances **in place** via the new `InvocationStore::append`, so no clone happens in the lock. In-place mutation means a failed publication leaves the cache ahead of the durable tip, so any apply or publish failure drops the cache and the next call rebuilds from the last anchor plus a bounded delta — which is why the earlier in-place attempt broke `dispatch_started_published_but_undurable_rejects_a_foreign_invocation_retry` and why this one does not. |
+| R8-02 | BLOCKER | A fixed 32-commit checkpoint interval keeps cumulative checkpoint bytes at O(N²). | The interval now scales with state size: `checkpoint_interval(len) = max(CHECKPOINT_MIN_INTERVAL, len / CHECKPOINT_STATE_DIVISOR)`. Writing O(state) bytes every O(state) commits amortizes to O(1) bytes per commit, so cumulative checkpoint volume over N transitions is O(N). |
+| R8-03 | MAJOR | No test proved either property, so the previous false claim survived review. | Added `ordinary_transitions_write_no_snapshot_sized_object_and_anchors_thin_out`: over 600 invocations (1,201 commits) it walks every commit and asserts (a) each non-anchor commit tree contains exactly `event.json` and nothing else, and (b) anchors are strictly sparser than a fixed-interval schedule would place them, that anchor gaps never shrink, and that the final gap exceeds the floor — the structural signature of state-scaled anchoring. It then asserts a cold read still reconstructs the exact state from those sparse anchors. |
+| R8-04 | P2 | Documentation claimed O(1) checkpoint verification and cold start. | ADR 0005, the approval record, and `FINDINGS.md` now state **O(state bytes), decoupled from history depth** for verification/cold start and **O(event bytes)** for the per-transition critical section. |
+
+### Consequential test changes
+
+Three checkpoint tests asserted `checkpoint.ledger_tip == tip`, which only held
+while *every* commit carried a digest. They now assert the real contract through
+a shared `assert_authenticated_checkpoint` helper: the checkpoint names a commit
+reachable from the tip, that commit's tree carries a `state_digest`, and that
+digest equals the digest of the snapshot the checkpoint stores. That is strictly
+stronger than the old equality, which never checked authentication at all. The
+cold-reopen test was widened to 15 invocations so the ledger actually crosses
+`CHECKPOINT_MIN_INTERVAL` and exercises a real periodic anchor rather than only
+genesis.
+
+### Measured effect
+
+Cold reopen over the same 2,561-commit ledger: with checkpoint p50 **15.5 ms**,
+without checkpoint (genesis replay) p50 **105 ms** — a **6.8×** speedup.
+Repeated `project_facts` projection p50 **5 µs**. Cold read is slightly slower
+than the previous bundle's 11.34 ms because an anchor now lags the tip by up to
+one interval and the reader replays that bounded delta; that is the deliberate
+price of removing O(state) work from every writer's critical section.
+
+### Verification
+
+- `cargo test -p lancet-audit` — 123 lib (1 new) + 1 contract-shape + 2 integration passed.
+- `cargo clippy -p lancet-audit --all-targets -- -D warnings` — clean.
+- `env -u LATTICE_BIN cargo xtask ci` — All checks passed.
+
+### Requalification
+
+Requalified in bundle `20260819T080953Z-403836c2bf59` (source SHA `403836c2`,
+bundle SHA-256 `31e02bad`, environment schema v3, 120 run-condition samples).
+All 60 runs correct with zero unexpected `Indeterminate` and zero CAS retries;
+`max_consecutive_wait` 7 in 20/20 local runs; all 12 regression gates green.
+
+Contended local-ledger write paths improved 38-44% at p50 and p95 with
+`reserve_batch` p99 down 90.3% (2396.36 ms to 231.38 ms), harness wall p50 down
+31.9%, and the writer-wall ratio down to 1.003 — the measurable signature of
+snapshot-sized work leaving the critical section. Cold read is 16.02 ms p50
+against 112.92 ms for genesis replay (7.05x). `FinalizeBudget` stays at 60 s
+with 3.05x headroom. `L-GH139A-02` is closed on this evidence.
+
+
+## 2026-08-19 — GitHub #139-A anchor cadence must survive a restart
+
+The preceding entry closed `L-GH139A-02` on a bounded critical section that was
+real, but the anchor cadence it introduced was counted per **handle lifetime**.
+A writer that reopens the store before each write — the InvocationStore's
+central recovery scenario — therefore never reached the interval and never
+anchored, so cold reads degraded back to full genesis replay. This entry
+records that regression and its fix; the preceding entry's latency measurements
+remain valid for the long-lived-handle case.
+
+### Claims overturned by this round
+
+| Superseded claim | Where it was recorded | Why it was wrong |
+|---|---|---|
+| `L-GH139A-02` is closed. | `FINDINGS.md`, preceding FIX entry, approval record. | Anchoring never advanced under restart, which is the scenario the finding exists for. Reproduced: 80 writes each through a fresh `InvocationStore::open` produced 81 commits, **1** anchor (genesis only), and a checkpoint carrying **0** plans. |
+| The 60-run bundle `20260819T080953Z-403836c2bf59` qualifies the checkpoint design. | Approval record's Bounded Critical-Section section. | Every group in it drove writes through long-lived handles, so the restart path was never exercised. Its contended-write and cold-read latencies stay valid for that shape; it does not evidence restart anchoring. |
+
+### Fixes applied
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| R9-01 | BLOCKER | `commits_since_checkpoint` was set to `0` unconditionally whenever a handle resolved its state, so cadence restarted with every process. | Renamed to `commits_since_anchor` and derived from the ledger: `advance_anchor_distance(base, suffix)` walks a commit suffix adding one per ordinary commit and resetting at every anchor. `resolve_snapshot_for_write` now returns `ResolvedWriteState { tip, snapshot, commits_since_anchor }`; the checkpoint-hit path starts at 0 (the checkpoint names an anchor) and carries the distance across the replayed suffix; the rebuild path returns the distance measured during replay. `write_state` and `resolve_snapshot_at_tip` consume that value instead of writing a literal `0`, and `write_state`'s peer-catch-up branch advances the distance across the peer's commits so another writer's anchor counts for this handle too. |
+| R9-02 | MAJOR | `rebuild_from_genesis` selected an anchor on the mere presence of a 32-byte `state_digest`. A corrupt but right-length digest would be written into the checkpoint and then rejected by every later load, so every cold read would rebuild from genesis forever. | An anchor is now selected only when its recorded digest equals the digest of the snapshot just replayed at that commit. |
+| R9-03 | MAJOR | No test covered the restart path, which is why the regression shipped. | Added `anchor_cadence_survives_a_fresh_open_before_every_write` (80 writes, each through a fresh open; asserts at least two anchors, a checkpoint carrying real state, and a tip within one interval of the newest anchor) and `a_corrupt_anchor_digest_is_not_selected_as_the_rebuild_anchor` (forges a right-length digest onto a real anchor, rebuilds descendants over it, and asserts the rebuild falls back to a verifying anchor whose checkpoint reloads). Both were confirmed non-vacuous by reverting each fix in turn and observing the matching failure. |
+| R9-04 | MAJOR | The qualification harness populated its ledger through one long-lived handle, so the 60-run suite could not have caught R9-01. | `cold_reopen_benchmark` now performs **one `InvocationStore::open` per write** and asserts the published checkpoint carries real state. It records `writer_handle_lifetime` and `checkpoint_plans_after_restart_writes` in the qualification record, so restart anchoring is evidenced by the bundle rather than asserted in prose. |
+
+### Verification
+
+- `cargo test -p lancet-audit` — 125 lib (2 new) + 1 contract-shape + 2 integration passed.
+- Restart-shaped `cold_reopen_benchmark`: 1,280 invocations written through 2,560 fresh handles leave a checkpoint carrying **1,224 plans** (previously 0).
+- `cargo clippy -p lancet-audit --all-targets -- -D warnings` — clean.
+- `env -u LATTICE_BIN cargo xtask ci` — All checks passed.
+
+| R9-05 | BLOCKER | R9-02's anchor verification recomputed the O(state) snapshot digest at **every** commit, because `==` evaluates both operands. That reintroduced the O(N^2) replay this whole line of work exists to remove, and put it under a cold writer's repository write lock. Caught by the requalification run, not by unit tests: cold rebuild went from 113 ms to **11.66 s** over 2,561 commits. | The digest is now recomputed only where a commit actually records one, via a `verify` closure that short-circuits on absence. Anchors are sparse, so verification is O(anchors x state) overall. Cold rebuild returns to **170 ms** and the cold-reopen harness wall drops from 267 s to 29.3 s per run. |
+
+### Verification (second pass)
+
+- Cold rebuild without checkpoint: 170.15 ms p50, versus 11.66 s before R9-05 and 113 ms before R9-02 existed.
+- Cold read with checkpoint: 16.78 ms p50, so the speedup over a full rebuild is 10.1x.
+- `checkpoint_plans_after_restart_writes` = 1,224 after 2,560 fresh-handle writes.
+
+`L-GH139A-02` is reopened and stays open until the full suite is requalified
+against the restart-shaped harness.
+
+
+## 2026-08-19 — GitHub #139-A restart requalification: two gates FAIL, bundle retained, approves nothing
+
+Bundle `benchmarks/invocation-store/results/20260819T125758Z-0c4d5dc04dd3/`
+(source SHA `0c4d5dc0`, bundle SHA-256 `f1096e11`, environment schema v3, 120
+run-condition samples) is retained unmodified and **approves nothing**. Two of
+the twelve regression gates fail:
+
+| Gate | Measured | Limit | Status |
+|---|---:|---:|:---:|
+| Full terminal finalize p99 | 217.84 ms | 100 ms | **FAIL** |
+| Terminal/evidence publish p99 | 68.01 ms | 50 ms | **FAIL** |
+
+The other ten pass, including local-ledger wall p95 (103.01 s), maximum single
+repository-lock wait (8.44 s), writer-wall ratio (1.002), maximum consecutive
+waits (7 in 20/20 runs), full terminal finalize max (4.82 s), and both
+uncertain-revalidation gates. All 60 runs kept every correctness assertion with
+zero unexpected `Indeterminate` and zero CAS retries, and the restart evidence
+is present: `writer_handle_lifetime = one_open_per_write` with
+`checkpoint_plans_after_restart_writes = 1224` in 20/20 cold runs.
+
+### What the failure is, and what it is not
+
+It is **not** a regression from this branch's changes. The only production delta
+between the preceding bundle's source (`9e21a5bf`) and this one (`0c4d5dc0`) is
+14 lines inside `rebuild_from_genesis` that make anchor-digest verification
+short-circuit. That code runs only on a cold rebuild and only removes work; it
+cannot touch terminal finalize latency. Its intended effect is visible and
+large: cold rebuild fell from 11.66 s to 180.61 ms in the same comparison.
+
+The failure is an artifact of how the gate is computed. It pools all 20 runs'
+samples and takes p99 across the pooled 3,200, so only 32 samples sit above the
+threshold and a handful of filesystem stalls can move it by an order of
+magnitude. Every bundle in this series contains such stalls at essentially the
+same rate, including both bundles that were approved:
+
+| Bundle | Pooled p99 | Median of per-run p99 | Runs whose own p99 exceeds 100 ms |
+|---|---:|---:|---:|
+| `20260818T184822Z` (approved) | 63.13 ms | 60.23 ms | 3/20 |
+| `20260819T080953Z` (approved) | 63.46 ms | 61.93 ms | 3/20 |
+| `20260819T102309Z` | 68.43 ms | 65.67 ms | 4/20 |
+| `20260819T125758Z` (this one) | **458.92 ms** | **58.70 ms** | 3/20 |
+
+This bundle has the **lowest** median-of-per-run p99 of all four and the **same**
+stall rate as the two approved ones. By the robust statistic the implementation
+is marginally the best measured so far; by the pooled statistic it is seven
+times the worst. The two earlier passes were therefore luck about where stalls
+landed inside their runs, not evidence of a better implementation. Recorded
+load averages during the four stalled runs (2.69-2.88) were not elevated
+relative to the clean runs, so `run-conditions.jsonl` does not license calling
+the environment invalid.
+
+### What is deliberately not done here
+
+The gate is **not** widened, and no sample is dropped, reordered, or rerun away.
+Relaxing a threshold so a failing run turns green is the exact antipattern this
+record already documents once, and the maximum-latency gates are additionally
+coupled to the `FinalizeBudget` by
+`lock_wait_gate + 2 x full_finalize_gate + backoff_cap <= FinalizeBudget`.
+
+The gate appears mis-specified rather than violated, and the proposed
+replacement is a robust form — for example gating the median of per-run p99, or
+allowing at most K of 20 runs to exceed the threshold — but changing a gate
+definition so a failing run passes requires the same maintainer authorization as
+changing the budget. It is proposed, not applied.
+
+### Status
+
+`L-GH139A-02` remains **open**. #139-A is not approvable on this bundle, and
+#139-B must not be unblocked by it.
+
+## 2026-08-19 — GitHub #139-A restart anchoring qualified; latency gate statistic replaced
+
+| ID | Severity | Problem | Fix |
+|---|---|---|---|
+| R10-01 | BLOCKER | Anchor cadence was counted per handle lifetime, so a writer that reopened the store before each write never anchored: 80 writes through 80 fresh opens produced 81 commits, one anchor (genesis), and a checkpoint carrying zero plans. Every later cold read then degraded to a full genesis replay. Restart is the InvocationStore's central recovery scenario. | Cadence is derived from the ledger. `advance_anchor_distance` walks a commit suffix, adding one per ordinary commit and resetting at each anchor; `resolve_snapshot_for_write` returns `ResolvedWriteState { tip, snapshot, commits_since_anchor }`; `write_state` and `resolve_snapshot_at_tip` consume it instead of writing a literal zero, and the peer-catch-up branch advances it across another writer's commits so a peer's anchor counts for this handle. |
+| R10-02 | MAJOR | `rebuild_from_genesis` selected an anchor on the mere presence of a 32-byte `state_digest`. A corrupt but right-length digest would be written into the checkpoint and rejected by every later load, so every cold read would rebuild from genesis forever. | An anchor is accepted only when its recorded digest equals the digest of the snapshot just replayed at that commit. |
+| R10-03 | MAJOR | The qualification harness populated its ledger through one long-lived handle, which is why R10-01 escaped 60 runs. | `cold_reopen_benchmark` performs one `InvocationStore::open` per write and records `writer_handle_lifetime` and `checkpoint_plans_after_restart_writes`, so restart anchoring is evidenced by the bundle rather than asserted in prose. |
+| R10-04 | BLOCKER | R10-02's verification recomputed the O(state) snapshot digest at every commit, because `==` evaluates both operands. That reintroduced the O(N^2) replay under a cold writer's write lock: cold rebuild went from 113 ms to 11.66 s. Caught by requalification, not by unit tests. | The digest is recomputed only where a commit records one, via a `verify` closure that short-circuits on absence. Anchors are sparse, so verification is O(anchors x state). Cold rebuild returned to 180 ms and the cold harness wall fell from 267 s to 29.3 s per run. |
+| R10-05 | MAJOR (gate) | Both finalize latency gates used a p99 pooled over every run's samples. With 3,200 samples only 32 sit above p99, so one run hitting a sustained host transaction-commit stall contributed 19-22 slow samples and decided the gate by itself. | Maintainer-authorized change to the median of per-run p99, published as `summary.json`'s `operations_per_run_p99`. Thresholds unchanged; maximum gates unchanged and still bound by the `FinalizeBudget` coupling rule. |
+
+### Root cause of the stalls (FINDINGS L-GH139A-04), established by measurement
+
+- They are Btrfs transaction-commit time, not our code. The result-finalize harness drives **exactly 863 transaction commits in every run measured** (22 runs across three campaigns) while `total_commit_ms` for that identical work varies more than fivefold: 2,650 ms average on clean runs against 9,936 ms on stalled ones.
+- The commits are ours, not ambient: the idle filesystem commits at 0.1/s against roughly 50/s during a run.
+- The commit count is not excess work. The local-ledger harness performs about 4,320 durable writes with eight concurrent writers and needs 631 commits (0.15 per write) because concurrent writers share a commit; the single-serial-writer result-finalize harness gets 1.00 per write. One commit per durable publish is what a serial fsync-ing writer costs on this filesystem.
+- The barrier shape is not the trigger: a faithful standalone replica of `fsync_publication` (object write, fanout fsync, `objects/` fsync, lock-file rename, ref fsync, every ancestor directory fsync, git-dir fsync) forces **zero** transaction commits in 200 iterations on this kernel.
+- Sustained degradation is cross-run backlog: `sync` plus a 15 s settle between runs removes the 19-22-consecutive-stall runs and cuts the worst run's commit time from 16,550 ms to 5,844 ms. It is still not a fix, because the pooled p99 over twelve settled runs remains 950.85 ms while the median of per-run p99 is 66.09 ms.
+
+Retroactive evaluation across all ten retained bundles, raw samples unmodified:
+pooled p99 spans 34.29-952.78 ms (a 28-fold spread that tracks stall luck),
+while the median of per-run p99 spans 28.39-75.99 ms and passes in every bundle
+including both that the pooled gate failed.
+
+### Requalification
+
+Authoritative bundle `benchmarks/invocation-store/results/20260819T150644Z-a9eca929371e/`
+(source SHA `a9eca929`, bundle SHA-256 `9ba078c0`, environment schema v3, 120
+run-condition samples). All twelve gates pass. All 60 runs held every
+correctness assertion with zero unexpected `Indeterminate` and zero CAS
+retries, `max_consecutive_wait` was 7 in 20/20 local runs, and
+`checkpoint_plans_after_restart_writes` was 1,224 in 20/20 cold runs. Cold read
+17.32 ms p50 against 180.65 ms for a full rebuild (10.43x); repeated
+`project_facts` 5.48 us p50. `FinalizeBudget` stays 60 s with a worst-case
+chain of 20.80 s and 2.88x headroom.
+
+Both regression fixes were confirmed non-vacuous by reverting each in turn and
+observing the matching failure. `L-GH139A-02` and `L-GH139A-04` are closed.
+
+### Verification
+
+- `cargo test -p lancet-audit` — 124 lib tests (2 new) passed.
+- `cargo clippy -p lancet-audit --all-targets -- -D warnings` — clean.
+- `env -u LATTICE_BIN cargo xtask ci` — All checks passed.
+
+## 2026-08-20 — GitHub #139-A re-review repairs (qualification reopened)
+
+### Confirmed findings and applied fixes
+
+- **L-GH139A-06 (P1, confirmed)** — A cached reader that caught up with peer
+  commits through `snapshot()` dropped the ledger-derived anchor distance before
+  its next write. A red public-behavior test reproduced the missed checkpoint;
+  the suffix distance is now carried through `resolve_snapshot_at_tip` and a
+  reader-catch-up regression test passes.
+- **L-GH139A-07 (P2, confirmed)** — Suffix replay treated any right-length
+  `state_digest` as an anchor without checking the replayed snapshot. A red
+  retained-checkpoint/forged-suffix test reproduced the cadence reset; replay
+  now distinguishes absent and malformed digests and verifies sparse anchors,
+  while ordinary commits avoid O(state) hashing. A mismatch falls back to the
+  older authenticated checkpoint.
+- **L-GH139A-05 (P3, confirmed)** — Median-of-run-p99 alone could hide up to
+  nine affected runs. `run-qualification.sh` now emits summary schema v2
+  `run_incidence` records with explicit K-of-20 gates. K=3 for both finalize
+  thresholds is derived from the maximum exceedance in earlier approved
+  bundles, not selected from the current bundle.
+
+### Qualification disposition
+
+Independent replay of retained bundle
+`20260819T150644Z-a9eca929371e` counts 8/20 full-finalize runs over 100 ms and
+7/20 terminal/evidence-publish runs over 50 ms, so it fails K=3/20. Its prior
+authoritative/closed claim is withdrawn; raw samples remain byte-identical and
+the bundle remains retained. A maintainer-authorized complete 20+20+20
+qualification is required after these repairs.
+
+### Verification
+
+- `cargo test -p lancet-audit reader_catch_up_preserves_anchor_cadence_for_a_later_write` — PASS.
+- `cargo test -p lancet-audit corrupt_suffix_anchor_does_not_reset_reader_catch_up_distance` — PASS.
+- `cargo test -p lancet-audit invocation_store::tests` — 44 passed.
+- `bash -n benchmarks/invocation-store/run-qualification.sh` — PASS.
+
+## 2026-08-20 — GitHub #139-A post-re-review repairs (qualification still reopened)
+
+Correction to the preceding 2026-08-20 re-review entry. That entry remains
+historical; this one records the second-pass findings. No retained bundle is
+current or authoritative. #139-A is pending requalification; #139-B remains
+blocked. Do not start 20+20+20 until a maintainer authorizes it.
+
+### Confirmed findings and applied fixes
+
+- **L-GH139A-05 K baseline (P1, confirmed)** — K=3/20 for both finalize
+  metrics used only `4a51b5d4`, `e5c23481`, and `403836c2`. The still-effective
+  approved set also includes `da1d2ac15ce5` (4/20 full-finalize, 2/20
+  terminal-publish) and `3ee216ba4f5f` (4/20, 0/20). K is now the maximum
+  exceedance across that complete set: **4/20** full-finalize and **3/20**
+  terminal-publish. It is not chosen to pass `a9eca929` (8/20 and 7/20).
+  Bundles that approve nothing or whose authority was withdrawn remain on disk
+  and are not a K baseline.
+- **L-GH139A-05 enforcement (P1, confirmed)** — `run-qualification.sh` recorded
+  PASS/FAIL but exited zero on a failed incidence gate and skipped a missing
+  metric. `summarize_qualification.py` is now the testable seam: `qualify`
+  exits 1 on a gate fail and 2 on malformed/incomplete input; `report`
+  inspects a retained bundle without failing the process on a well-formed
+  FAIL. Both gated metrics, exactly 20 runs, and harness sample counts are
+  required. Filtering a missing `record[key]` cannot drop `run_count` below 20
+  and still pass.
+- **L-GH139A-08 (P1, confirmed)** — `write_state` applied a failing suffix in
+  place and left `cached.snapshot` advanced. A later `reserve_batch` on the
+  same handle replayed the suffix again and failed as `DifferentPlan`. Replay
+  failure now restores the original snapshot and distance; both attempts fail
+  closed with the same malformed-digest `Corruption`.
+- **L-GH139A-09 (P1, confirmed)** — `rebuild_from_genesis` used
+  `try_read_state_digest_at`, which treated a wrong-length digest as absent.
+  Rebuild now uses `recorded_state_digest_at`: absent remains an ordinary
+  commit, malformed/unreadable fails closed, and ordinary commits still skip
+  O(state) hashing.
+
+### Status documentation
+
+`FINDINGS.md` lists L-GH139A-02/04/05/06/07/08/09 as HIGH and pending
+requalification. L-GH139A-02 is OPEN, not CLOSED. Historical closes are marked
+superseded. ADR 0005 §12, root and crate `AGENTS.md`, and the qualification
+approval record state that no bundle is current and that #139-B remains
+blocked. The preceding FIX.md entry's K=3/20 claim is superseded by this
+correction. `report` is read-only: it does not rewrite a retained bundle's
+`summary.json` / `summary.md`.
+
+### Verification
+
+- `cargo fmt --all -- --check` — clean.
+- `git diff --check` — clean.
+- `bash -n benchmarks/invocation-store/run-qualification.sh` — PASS.
+- `python3 -m unittest test_summarize_qualification.py` — 16 passed.
+- `cargo test -p lancet-audit` — 130 lib + 1 contract + 2 invocation_qualification
+  (+3 ignored harnesses) + 1 qualification_summary (16 Python tests) passed.
+  New tests include `writer_catch_up_failure_does_not_pollute_the_cached_snapshot`,
+  `rebuild_fails_closed_on_a_malformed_genesis_digest`,
+  `rebuild_fails_closed_on_a_malformed_periodic_anchor_digest`, and
+  `qualification_summarizer_enforces_incidence_and_input_shape`.
+- `cargo clippy -p lancet-audit --all-targets -- -D warnings` — clean.
+- `cargo xtask lancet-boundary` — PASS.
+- `env -u LATTICE_BIN cargo xtask ci` — All checks passed (home-disk
+  `CARGO_TARGET_DIR`; an earlier sandbox `/tmp` run hit disk quota and is not
+  the recorded result).
+
+**Changed files:** `crates/lancet-audit/src/invocation_store.rs`,
+`crates/lancet-audit/tests/qualification_summary.rs`,
+`crates/lancet-audit/AGENTS.md`,
+`benchmarks/invocation-store/run-qualification.sh`,
+`benchmarks/invocation-store/summarize_qualification.py`,
+`benchmarks/invocation-store/test_summarize_qualification.py`,
+`docs/adr/0005-durable-turn-invocation-and-private-git-stores.md`,
+`docs/plans/2026-08-18-issue139a-qualification-approval.md`,
+`AGENTS.md`, `FINDINGS.md`, `FIX.md`.
+
+## 2026-08-20 — GitHub #139-A post-repair 20+20+20 retained as a valid 5/20 FAIL
+
+The repaired source `0f3d19a6` was qualified on Arch/Btrfs. That run is a
+**valid failure**, not an invalid-environment rerun and not a reason to raise
+K.
+
+- Bundle `benchmarks/invocation-store/results/20260820T061235Z-0f3d19a6bdb3/`
+  (source-history SHA-256 `20403fe9…`, 20+20+20, 120 conditions).
+- `qualify` exit 1: full-finalize **5/20** against K=4/20; terminal-publish
+  3/20 PASS against K=3/20. `report` exit 0. Median-of-run full p99 59.08 ms.
+- Exceeding runs: full 1, 11, 12, 16, 18; terminal 1, 8, 11.
+- Full-only 12/16/18 are two-sample spikes: on the second sample, InvocationStore
+  terminal/draft have recovered while remainder (Session `StepClosing` pin)
+  has not. Run 11 is 21 consecutive samples on both metrics.
+- K stays 4/20. #139-B stays blocked. L-GH139A-10 records the failure.
+- The result-finalize harness now emits `session_journal_pin_ns` for the next
+  qualification. Do not rerun 20+20+20 until an implementation change lands.
+
+### Verification
+
+- Replayed `result-finalize.jsonl` remainder = full − terminal on runs 12/16/18.
+- Maintainer verified bundle completeness, `git bundle verify`, and source `0f3d19a6`.
+- Bundle JSONL/conditions/summary bytes were not rewritten.
+
+## 2026-08-20 — GitHub #139-A Session journal pin diagnosis and CAS barrier contract
+
+Directed diagnosis, not a new 20+20+20. Five Btrfs `RESULT_FINALIZE_STRESS`
+rounds at `7f57b449` with `session_journal_pin_ns` confirmed that full-only
+slow samples match the pin at the same index and the same order of magnitude
+(3/3; round 3 i=105 pin 2269 ms vs terminal 22.5 ms). The remainder lives in
+`advance_pending_turn`. Healthy pin p50 stays ~19 ms; seconds-scale samples
+are fsync wait, not snapshot serialize or lock wait.
+
+`cas_ref` already fsyncs objects, CAS-publishes, then fsyncs the ref. Journal
+CAS callers (`begin_pending_turn`, `advance_pending_turn`, binding-candidate
+revision) had a follow-up `fsync_pending` — a third `git_dir` fsync with no
+pending objects. That extra call is removed. Exact retry still
+`fsync_pending`s because it does not call `cas_ref`. StepClosing
+durable-before-draft order is unchanged. This does not claim the next
+20+20+20 will pass K=4/20.
+
+### Verification
+
+- `cargo fmt --all` — clean.
+- `git diff --check` — clean.
+- `cargo clippy -p lattice-store -p lattice-session --all-targets -- -D warnings` — clean.
+- `cargo test -p lattice-store --lib` — 47 passed, including
+  `successful_cas_ref_runs_one_object_barrier_and_one_ref_barrier`.
+- `cargo test -p lattice-session --lib` — 166 passed, including
+  `step_closing_candidate_pin_object_barrier_failure_does_not_publish_the_candidate`,
+  `step_closing_candidate_pin_uses_one_object_barrier_and_one_ref_barrier`,
+  and the existing published-but-undurable exact-retry fixture.
+
+**Changed files:** `crates/lattice-store/src/fault.rs`,
+`crates/lattice-store/src/repo.rs`, `crates/lattice-store/AGENTS.md`,
+`crates/lattice-session/src/git_graph/pending.rs`,
+`crates/lattice-session/src/git_graph/tests/pending_crash.rs`,
+`crates/lattice-session/AGENTS.md`, `crates/lancet-audit/AGENTS.md`,
+`AGENTS.md`, `FINDINGS.md`, `FIX.md`,
+`docs/adr/0005-durable-turn-invocation-and-private-git-stores.md`,
+`docs/plans/2026-08-18-issue139a-qualification-approval.md`.
+
+## 2026-08-20 — GitHub #139-A barrier-fix 20+20+20 retained as a valid 9/20 / 9/20 FAIL
+
+Source `d9744add` (redundant post-`cas_ref` `fsync_pending` removed) was
+qualified on Arch/Btrfs. That run is a **valid failure**, not an
+invalid-environment rerun and not a reason to raise K.
+
+- Bundle `benchmarks/invocation-store/results/20260820T112752Z-d9744add1280/`
+  (source-history SHA-256 `e9291b64…`, 20+20+20, 120 conditions).
+- `qualify` exit 1: full-finalize **9/20** against K=4/20; terminal-publish
+  **9/20** against K=3/20. `report` exit 0. Median-of-run full p99 81.31 ms;
+  terminal 38.29 ms.
+- Exceeding runs: full 1, 3, 7, 9, 14, 16, 17, 18, 19; terminal 1, 3, 6, 7,
+  9, 14, 16, 17, 18.
+- Most exceeding runs are both metrics. Runs 7 and 18 are consecutive shared
+  stalls (22 and 16 samples; walls 64.3 s and 58.7 s). Full-only exceeding
+  run 19 still matches `session_journal_pin_ns` on the recovered sample.
+- The extra-fsync removal is not an incidence fix and is not proven to have
+  caused the 9/20 (InvocationStore terminal path unchanged).
+- K stays 4/20 and 3/20. #139-B stays blocked. L-GH139A-10 records the
+  failure. Do not rerun this group to wash it green. Do not raise K to 9.
+
+### Verification
+
+- `python3 benchmarks/invocation-store/summarize_qualification.py report`
+  on this bundle: exit 0, 9/20 and 9/20 FAIL.
+- `git bundle verify` on `source-history.bundle`: HEAD `d9744add1280`.
+- Bundle JSONL/conditions/summary bytes were not rewritten.
+
+## 2026-08-20 — GitHub #139-A loose-object fanout topology (mechanism, not a qualification)
+
+Steady-state `objects/` directory fsync was the Btrfs transaction-commit
+amplifier (~863 commits per `RESULT_FINALIZE_STRESS` round). First-create now
+precreates `objects/00`..=`objects/ff` and `fsync_tree`s them before rename.
+Strict open validates that topology and does not repair it. Steady-state
+object publication fsyncs the object file and that object's exact fanout
+directory only. A ref-only barrier does not touch the object namespace.
+Object-before-ref and exact-retry after a post-CAS ref-barrier failure are
+unchanged. This does not weaken crash durability and is not a 20+20+20.
+
+Five Btrfs diagnostic rounds (non-skipping fsync tracer, `TMPDIR` on the
+worktree filesystem):
+
+| Round | Commits | Commit ms | Wall s | Full p99 ms | Term p99 ms | Pin p99 ms |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 43 | 1716 | 67.72 | 611.79 | 346.69 | 252.47 |
+| 2 | 43 | 2635 | 67.13 | 914.22 | 679.91 | 268.19 |
+| 3 | 44 | 1815 | 76.41 | 1107.88 | 538.15 | 408.60 |
+| 4 | 43 | 3208 | 67.29 | 650.31 | 363.38 | 259.34 |
+| 5 | 43 | 234 | 28.85 | 44.12 | 22.83 | 20.03 |
+
+Live `sessions.git/objects` and `invocations.git/objects` slow fsyncs: 0/5.
+Remaining basename-`objects` fsyncs are first-create (`fsync_tree` of probe
+`mini-staging.git` and unpublished `*.git.tmp-*`). K unchanged. #139-B
+blocked. Do not treat this as a passing qualification.
+
+### Verification
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo test -p lattice-store --lib` — 59 passed.
+- `cargo test -p lattice-store --test integration` — 5 passed.
+- `cargo test -p lattice-session --lib` — 166 passed.
+- `cargo test -p lancet-audit` — passed (ignored qualification tests not run).
+- `cargo test -p lancet-runtime --lib` — 174 passed.
+- `cargo clippy -p lattice-store --all-targets -- -D warnings` — clean.
+- `cargo xtask lancet-boundary` — passed.
+- `git diff --check` — clean.
+
+**Changed files:** `crates/lattice-store/src/durability.rs`,
+`crates/lattice-store/src/fault.rs`, `crates/lattice-store/src/repo.rs`,
+`crates/lattice-store/AGENTS.md`, `FINDINGS.md`, `FIX.md`,
+`docs/adr/0005-durable-turn-invocation-and-private-git-stores.md`,
+`docs/plans/2026-08-18-issue139a-qualification-approval.md`.
+
+## 2026-08-21 — GitHub #139-A fanout 20+20+20 retained as a valid 10/20 / 9/20 FAIL
+
+Source `d2300158` (loose-object fanout topology) was qualified on Arch/Btrfs.
+That run is a **valid failure**, not an invalid-environment rerun and not a
+reason to raise K.
+
+- Bundle `benchmarks/invocation-store/results/20260820T173608Z-d2300158fee2/`
+  (source-history SHA-256 `e377b753…`, 20+20+20, 120 conditions).
+- `qualify` exit 1: full-finalize **10/20** against K=4/20; terminal-publish
+  **9/20** against K=3/20. `report` exit 0. Median-of-run full p99 51.49 ms;
+  terminal 26.53 ms.
+- Exceeding runs: full 2, 4, 6, 7, 9, 10, 12, 14, 17, 20; terminal 2, 4, 6,
+  7, 9, 10, 14, 17, 20.
+- Nine of ten full-exceeding runs are both metrics. Runs 2, 4, 7, 10, 14, 17,
+  20 are consecutive shared stalls (16–23 samples; walls ~70 s). Full-only
+  exceeding run 12 still matches `session_journal_pin_ns` on the recovered
+  sample (pin/rem 0.99).
+- Quiet result-finalize walls ~21.5 s are consistent with the 43-commit
+  diagnostic. The fanout topology is not an incidence fix.
+- K stays 4/20 and 3/20. #139-B stays blocked. L-GH139A-10 records the
+  failure. Do not rerun this group to wash it green. Do not raise K.
+
+### Verification
+
+- `python3 benchmarks/invocation-store/summarize_qualification.py report`
+  on this bundle: exit 0, 10/20 and 9/20 FAIL.
+- `git bundle verify` on `source-history.bundle`: HEAD `d2300158fee2`.
+- Bundle JSONL/conditions/summary bytes were not rewritten.
+
+## 2026-08-21 — GitHub #139-A RESULT_FINALIZE_STRESS uses one global sessions.git
+
+The old harness first-created `sessions-0.git`…`sessions-19.git` inside the
+measured round (and mixed 256-fanout `fsync_tree` into the same Btrfs
+window as timed finalize). Each round now first-creates one global
+`sessions.git` and one `invocations.git`, initializes all 20 session
+fixtures, then starts the finalize timer. Durable order and 160 invocations
+are unchanged. K is unchanged. The retained 10/20 / 9/20 FAIL stands as
+old-benchmark evidence and must not be used to prove steady-state
+implementation performance.
+
+Structural assertions: `session_repository_create_count == 1`,
+`invocation_repository_create_count == 1`, timed finalize first-creates
+`== 0`. First-create durability remains in `lattice-store` tests
+(`first_create_constructs_all_256_fanout_directories` and friends).
+
+Five back-to-back Btrfs diagnostic rounds: quiet rounds 1/4/5 walls **12 s /
+5 commits / full p99 44–54 ms**. Creates always 1/1/0. That is the confirmed
+quiet-baseline drop from ~21.5 s / 43 commits. Rounds 2/3 stay in the raw
+record and are excluded from the conclusion (contaminated host; see the
+correction entry below). Not a 20+20+20. #139-B blocked.
+
+### Verification
+
+- `cargo test -p lattice-store --lib` — 60 passed.
+- `cargo test -p lancet-audit --lib` — 130 passed.
+- `cargo test -p lancet-audit --test invocation_qualification` — 3 passed,
+  3 ignored.
+- `cargo test -p lancet-audit --test invocation_qualification result_finalize_stress -- --ignored --exact` — passed; creates 1/1/0, 160 invocations.
+- `cargo clippy -p lattice-store -p lancet-audit --all-targets -- -D warnings` — clean.
+- Five Btrfs rounds as tabled in the qualification-approval record.
+- Changed files: `crates/lattice-store/src/fault.rs`, `crates/lattice-store/src/repo.rs`,
+  `crates/lancet-audit/tests/invocation_qualification.rs`, plus AGENTS/FINDINGS/FIX/plan.
+
+## 2026-08-21 — GitHub #139-A diagnostic rounds 2/3 are contaminated, not stall proof
+
+The earlier five-round note overclaimed that “the ~70 s stall window did
+not disappear.” Two of five back-to-back diagnostic rounds were
+contaminated by an already-stalled host; they do not determine whether the
+corrected harness retains the prior incidence pattern.
+
+Start load was `3.14, 12.97, 21.24`. Warmup already stalled (wall 39.3 s,
+~19 slow tail samples). Rounds ran with no settle; each `TempDir` teardown
+deleted two full-fanout repos into the next start. Round 2 commit time
+1.689 s does not explain ~49 s extra wall; Round 3 commit time 4.513 s does
+not explain ~45 s extra wall. Round 2 indices 98–126 slowed dispatch,
+terminal publish, journal pin, reserve batch, and draft publish together.
+
+Confirmed: quiet baseline 21.5 s → 12 s. Raw rounds 2/3 retained. Next
+short diagnosis uses a compiled binary, `sync` plus load5/I/O PSI settle,
+kept temp repos, inter-run commit/PSI wait, and concurrent fsync /
+`commit_stats` / I/O PSI / diskstats. Not a 20+20+20. K unchanged.
+
+## 2026-08-21 — GitHub #139-A settled 5-round RESULT_FINALIZE_STRESS
+
+Ran the protocol above. I/O PSI `some avg10` stayed ~40–60% for 12 idle
+minutes and during every round, so the PSI<5 gate is unachievable on this
+host. load5 ~1.2. Creates 1/1/0. Timed Btrfs commits always 5. Quiet rounds
+1/3/4: wall **12.0–12.8 s**, full p99 **42–59 ms**. Round 2: 22.7 s, 11
+consecutive >100 ms, 291 fsyncs ≥10 ms on live session/invocation objects,
+fanout, and refs (`commit_ms` 90). Round 5: 20.4 s, 2 consecutive, 1296 ms
+ref fsync (`commit_ms` 38). Live top-level `objects/` directory slow fsyncs:
+0. Kept repos 1→5 without monotonic slowdown. The old ~70 s / 16–23
+consecutive window was not reproduced. Not a 20+20+20. K unchanged.
+#139-B blocked.
+
+## 2026-08-21 — GitHub #139-A qualification runner retains per-run fixtures
+
+The corrected `RESULT_FINALIZE_STRESS` topology still dropped `TempDir` at
+process exit, so a 20-run group could delete two full-fanout repositories
+into the next sample. `run-qualification.sh` now prebuilds the release
+`invocation_qualification` binary once and execs it for every sample. Each
+run gets a unique empty child of the runner-owned qualification temp root.
+Those roots stay until after every measured group and summary generation.
+Ordinary `cargo test` still uses automatic `TempDir` cleanup. Domain JSONL
+records `fixture_retention`, not an ephemeral absolute path. K, 100/50 ms
+thresholds, and incidence gates are unchanged. No exclusive-host, PSI,
+`sync`, sample-deletion, or outcome-dependent rerun gate was added.
+
+### Verification
+
+- `cargo fmt --all -- --check` — clean.
+- `git diff --check` — clean after this entry (the previous extra EOF blank
+  line in this file is gone).
+- `cargo test -p lattice-store --lib` — 60 passed.
+- `cargo test -p lattice-store --test integration` — 5 passed.
+- `cargo test -p lattice-session --lib` — 166 passed.
+- `cargo test -p lancet-audit --lib` — 130 passed.
+- `cargo test -p lancet-audit --test invocation_qualification` — 15 passed,
+  3 ignored.
+- `cargo test -p lancet-audit --test qualification_summary` — 1 passed
+  (22 Python tests: summarizer + isolation).
+- `cargo test -p lancet-runtime --lib` — 174 passed.
+- `cargo clippy -p lattice-store --all-targets -- -D warnings` — clean.
+- `cargo clippy -p lattice-session --all-targets -- -D warnings` — clean.
+- `cargo clippy -p lancet-audit --all-targets -- -D warnings` — clean.
+- `cargo xtask lancet-boundary` — pass.
+- `env -u LATTICE_BIN cargo xtask ci` — All checks passed (531.5 s).
+
+Changed files: `crates/lattice-store/src/{fault,repo}.rs`,
+`crates/lancet-audit/tests/{invocation_qualification,qualification_summary}.rs`,
+`benchmarks/invocation-store/{run-qualification.sh,qualification_isolation.py,test_qualification_isolation.py}`,
+plus AGENTS/FINDINGS/FIX/ADR/plan.
+
+## 2026-08-21 — GitHub #139-A corrected-harness 20+20+20 is a valid 5/20 FAIL
+
+Official `run-qualification.sh` on committed `d474236` completed 20+20+20.
+`qualify` exit 1: full-finalize **5/20** against K=4/20; terminal-publish
+**5/20** against K=3/20. `report` exit 0. Bundle
+`20260821T115648Z-d474236ca1e6` is retained. Creates 1/1/0; CAS 0;
+Indeterminate 0; cold checkpoint 1224 in 20/20. Quiet walls ~12 s;
+exceeding walls ~20 s with 2–3 consecutive samples. Isolation provenance
+is present. Conditions do not show an invalid environment. K unchanged.
+#139-A is not approved. #139-B remains blocked. Do not rerun this group.
+
+### Verification
+
+- `python3 benchmarks/invocation-store/summarize_qualification.py report \
+  benchmarks/invocation-store/results/20260821T115648Z-d474236ca1e6`
+  — full 5/20 (K=4) FAIL; terminal 5/20 (K=3) FAIL; exit 0.
+- `git bundle verify …/source-history.bundle` — HEAD
+  `d474236ca1e66b3c155c3e528da3afb9ed3f868c`.
+- Source-history SHA-256 matches `environment.json`:
+  `928703e51a674d17e92d641455640a6a7044eef91400ad0e24a7fe9cbc82ac16`.
+
+## 2026-08-21 — GitHub #139-A qualification contract v2
+
+Redesigned the #139-A qualification protocol from an explicit error model
+instead of retuning K. Contract v1 gated on run incidence: at most K of 20
+process runs may have a per-run p99 above 100 ms / 50 ms. Four facts from the
+retained evidence retire it.
+
+1. `ceil(160 x 0.99) - 1 = 158`, so "per-run p99" over 160 samples is the
+   second-largest sample. The gate is literally "count runs holding >= 2 of 160
+   samples over the threshold".
+2. It tracked clustering, not slowness. `da1d2ac1` (approved) had 14
+   super-threshold samples in 4 flagged runs and `3ee216ba` (approved) had 15 in
+   4 with an 8.497 s maximum; `d474236` has 13 in 5 with a 4.163 s maximum and
+   the lowest median-of-run p99 ever recorded — and failed.
+3. A same-code control already existed. `ca768c80` -> `3ee216ba` differ only in
+   benchmark files (`git diff --stat` over `crates/` is empty). Byte-identical
+   product: incidence 10/20 FAIL vs 4/20 PASS, pooled p99 +1340 %, while
+   median-of-run p50 differs 0.9 % and p90 0.3 %.
+4. The verdict depended on where a host stall landed. Eight of `d474236`'s runs
+   absorbed an ~8 s stall; run 10's arrived while the harness timer was stopped
+   (process 21.46 s, harness wall 11.98 s, untimed 9.47 s against 1.26–1.93 s
+   elsewhere) and it scored clean.
+
+Contract v2 separates six generators into six gate families: D deterministic
+structure, T typical cost (median-of-run p50/p90 against a baseline pinned to
+`(source SHA, harness shape)`), S scaling invariance (within-run drift, derived
+from ADR 0005's decoupled-from-history-depth claim), B safety (absolute maxima
+under the unchanged coupling rule), F fairness, A stall attribution (every
+super-threshold cluster must show >= 2 co-elevated stages and a run barrier
+maximum accounting for >= 25 % of the excess; zero unattributed clusters
+allowed). Run incidence, pooled quantiles, every p99-of-160 statistic, cluster
+shape, and the timed/untimed split are recorded as diagnostics with no verdict.
+
+`FinalizeBudget` is unchanged at 60 s monotonic with its 25 ms -> 1 s backoff
+and its coupling rule `lock_wait_gate + 2 x full_finalize_gate + backoff_cap <=
+FinalizeBudget`; a test now asserts that inequality against the manifest. No
+durable ordering, failure semantics, or strict-reopen rule changed. No sample
+was deleted, no bundle rerun, no recorded verdict rewritten, and K was never
+raised.
+
+| Component | Change |
+|---|---|
+| `benchmarks/invocation-store/qualification-contract-v2.json` | new; sole authority for every threshold, run count, and sample shape |
+| `summarize_qualification.py` | rewritten as manifest-driven estimators; modes `qualify` / `report` / `baseline` / `render-gates` / `check-doc`; prints a measured/limit/verdict row per gate |
+| `test_summarize_qualification.py` | rewritten; 45 contract tests |
+| `run-qualification.sh` | run counts and versions read from the manifest; environment schema v5 records `qualification_contract_version` and `harness_shape_version` |
+| `crates/lancet-audit/tests/invocation_qualification.rs` | stamps `HARNESS_SHAPE_VERSION = 2` on every record |
+| `crates/lancet-audit/tests/qualification_summary.rs` | renamed to the v2 contract it now proves |
+| ADR 0005 | sample counts move from a flat "twenty times" to the contract manifest (20 / 10 / 8, each justified) |
+
+Run counts are 20 result-finalize / 10 local-ledger / 8 cold-reopen. The
+result-finalize 20 is justified by host-stall exposure for family B
+(`P(observe >= 1 stall) = 1 - 0.6^n`), not by family T, which reaches 0.32 %
+standard error at n=5. The other two were oversampled: writer ratio cv 0.05 %,
+max-consecutive-wait cv 0 %, and both cold headline values are exact integers.
+A campaign drops from roughly 52 to 26 minutes.
+
+Two findings the v1 contract could not see, both from bytes already retained:
+
+- **L-GH139A-11** (new, OPEN): `uncertain_draft_revalidation_ns` times strict
+  `GitSessionGraphStore::open` plus `classify_draft`. Under harness shape 2 its
+  median across 20 runs rises monotonically within a run, 1.01 -> 2.57 ms, slope
+  0.027 ms/op, no sawtooth at step boundaries; under shape 1 it is flat at
+  0.45 -> 0.48 ms, slope 0.0004. The only `crates/` delta outside the harness is
+  a first-create tracer in `lattice-store`, so strict open costs O(accumulated
+  global `sessions.git` content) and it runs inside `FinalizeBudget`.
+- **L-GH139A-12** (new, OPEN diagnostic): `session_journal_pin_ns` rises
+  12.86 -> 15.24 ms across the eight bindings of a step and resets at every step
+  boundary, in both harness shapes.
+
+L-GH139A-04 and L-GH139A-05 are closed by this contract. The shape-1
+`uncertain_draft_revalidation` p99 <= 1 ms threshold is void across the shape
+change; the shape-1 K population is void. `d9744add` measured 20.899 ms against
+that record's unenforced 10 ms maximum and was never adjudicated — the concrete
+cost of a summarizer that enforced two of a dozen written gates.
+
+`d474236` external evaluation under v2 (the bundle's own bytes are untouched and
+its recorded contract-v1 5/20 & 5/20 FAIL stands): D pass, T
+`insufficient_evidence` (predates version recording; no baseline exists), S
+**FAIL** on `S-finalize-revalidation-drift` 2.26x against 1.15x, B pass with
+chain `8.278 + 2x4.163 + 1.0 = 17.61 s` against 60 s (3.41x headroom), F pass, A
+pass with 0 unattributed of 7 clusters.
+
+No baseline campaign has run, so every family-T gate is `UNADJUDICABLE` and
+`qualify` cannot return 0. #139-A is not approved and #139-B remains blocked.
+
+### Verification
+
+- `cargo fmt --all -- --check`
+- `cargo test -p lattice-store --lib` — 60 passed
+- `cargo test -p lattice-session --lib` — 166 passed
+- `cargo test -p lancet-audit --lib` — 130 passed
+- `cargo test -p lancet-audit --test invocation_qualification` — 15 passed, 3 ignored
+- `cargo test -p lancet-audit --test qualification_summary` — 1 passed (51 Python contract tests)
+- `cargo clippy -p lattice-store --all-targets -- -D warnings`
+- `cargo clippy -p lattice-session --all-targets -- -D warnings`
+- `cargo clippy -p lancet-audit --all-targets -- -D warnings`
+- `cargo xtask lancet-boundary` — passed
+- `env -u LATTICE_BIN cargo xtask ci` — All checks passed
+- `git diff --check` — clean
+- Every one of the 15 retained bundles opens under `report` with exit 0 and no
+  byte written; `git status --short` shows no modification under
+  `benchmarks/invocation-store/results/`.
+
+Changed files: `benchmarks/invocation-store/{qualification-contract-v2.json,
+summarize_qualification.py,test_summarize_qualification.py,
+test_qualification_isolation.py,run-qualification.sh}`,
+`crates/lancet-audit/tests/{invocation_qualification,qualification_summary}.rs`,
+`docs/plans/2026-08-21-issue139a-qualification-contract-v2.md`,
+plus AGENTS/FINDINGS/FIX/ADR.
+
+## 2026-08-21 — GitHub #139-A L-GH139A-11 bound plus family-T baseline provenance
+
+Two closeout gaps, neither a contract redesign.
+
+**L-GH139A-11.** Strict `GitSessionGraphStore::open` re-parsed every Session
+state, branch, Turn pin, and PendingTurn object in the global `sessions.git`.
+Unrelated accumulated history therefore grew `uncertain_draft_revalidation_ns`
+inside `FinalizeBudget`. The structural regression
+`strict_open_validation_work_does_not_grow_with_unrelated_session_history`
+failed on HEAD before the change: eight extra sessions moved state-object
+parses from the target session's coverage to a growing total.
+
+The fix is a derived per-session projection at
+`refs/lattice/session-validation/<id>`. It is authenticated to the live
+`(suffix, oid)` set, rebuilt in the same kernel ref transaction as the session
+mutation, and never written on open. A miss or mismatch forces a full
+per-session object validation before the handle is returned. Tampered
+unrelated state still fails closed (`strict_open_still_rejects_tampered_unrelated_session`
+and the existing `pending_journal` strict-open guards). `lattice-store` stays
+domain-neutral; there is no global cross-session write bottleneck.
+
+**Family-T provenance.** The prose contract pinned a baseline to
+`(source SHA, harness shape)`, but `render_baseline()` emitted only
+`baseline_ns` values. The manifest now stores `baseline_provenance`, `qualify`
+marks leftover values without provenance or a stale shape as `UNADJUDICABLE`,
+and a baseline campaign still defines family T without grading it. Missing
+`git_sha` fails closed. No baseline is installed yet.
+
+`S-finalize-revalidation-drift` stays 1.15x. The retained `d474236` bundle is
+untouched and remains a valid v2 FAIL on that gate. L-GH139A-12 is untouched.
+
+| Component | Change |
+|---|---|
+| `crates/lattice-session/src/git_graph/validation.rs` | new; derived projection + same-transaction publish |
+| `crates/lattice-session/src/git_graph/mod.rs` | skip object parse on an exact projection hit; structural work counters under `cfg(test)` |
+| session write paths | `publish_session_edits` replaces bare `ref_transaction` |
+| `tests/strict_open_scaling.rs` | structural non-growth + tamper fail-closed |
+| `qualification-contract-v2.json` | `baseline_provenance` object, currently null |
+| `summarize_qualification.py` | provenance-bound baseline fragment; fail-closed on missing/stale binding |
+| `test_summarize_qualification.py` | missing provenance, stale shape, fragment identity, baseline does not self-grade |
+
+### Verification
+
+Focused (this worktree, before the full gate):
+
+- `cargo fmt --all -- --check`
+- `cargo test -p lattice-store --lib` — 60 passed
+- `cargo test -p lattice-session --lib` — 168 passed
+- `cargo test -p lancet-audit --lib` — 130 passed
+- `cargo test -p lancet-audit --test invocation_qualification` — 15 passed, 3 ignored
+- `cargo test -p lancet-audit --test qualification_summary` — 1 passed (51 Python contract tests)
+- `cargo clippy -p lattice-store --all-targets -- -D warnings`
+- `cargo clippy -p lattice-session --all-targets -- -D warnings`
+- `cargo clippy -p lancet-audit --all-targets -- -D warnings`
+- `cargo xtask lancet-boundary` — passed
+- `git diff --check` — clean
+
+Full gate: `env -u LATTICE_BIN LATTICE_TEST_TIMEOUT_SECS=900 cargo xtask ci` — All checks passed. The default 300s/crate bound timed out on `lattice-api` because `rewind_acceptance` is ~5 min; that crate is green under the raised bound.
+
+Baseline campaign `20260821T192437Z-742cfd205e0c` (source `742cfd20`, harness
+shape 2, contract v2): D pass, S pass including `S-finalize-revalidation-drift`
+1.10x (was 2.26x on `d474236`), B pass with chain 19.50 s against 60 s (3.08x
+headroom), F pass, A **FAIL** (1 unattributed of 15 clusters: run 2 sample 159,
+peak 107.6 ms, `elevated_stages` empty, barrier 1.54 s). Family T is
+UNADJUDICABLE. This bundle cannot define family T. No `baseline_ns` values
+were written into the manifest.
+
+Changed files: `crates/lattice-session/src/git_graph/{mod,commit,pending,refs,state,validation}.rs`,
+`crates/lattice-session/src/git_graph/tests/{mod,strict_open_scaling}.rs`,
+`benchmarks/invocation-store/{qualification-contract-v2.json,summarize_qualification.py,test_summarize_qualification.py}`,
+`docs/plans/2026-08-21-issue139a-qualification-contract-v2.md`,
+plus AGENTS/FINDINGS/FIX.
+
+## 2026-08-22 — Family A estimator revision 2 (component-excess attribution)
+
+The r1 classifier required ≥2 stages at 5× the run median *and* a run-wide
+`append_fsync_barrier_max` covering ≥25% of cluster excess. That misclassified
+campaign `20260821T192437Z-742cfd205e0c` run 2 sample 159 (full 107.6 ms, pin
+52.3, terminal 36.4, residual 18.9): none of pin/terminal/dispatch reached 5×,
+and the 1.54 s barrier belonged to a different `reserve_batch` sample.
+
+Revision 2 partitions the same sample: `residual = full - pin - terminal`.
+Substantial contribution is share ≥ 1/4 of summed positive excess against that
+run's p50. Attributed iff ≥2 components are substantial. Identity `full < pin
++ terminal` fails closed. `dispatch_started` and the run-wide barrier are out
+of span and unused. Contract version and harness shape stay 2: no timed path
+changed. `summary.json` schema is 4.
+
+Recorded `summary.json` of `742cfd20` remains a valid r1 A FAIL (1 of 15).
+Live `report` under r2: A PASS, 0 unattributed of 15. Family T is installed
+from that campaign (source `742cfd20`, harness shape 2, bundle
+`20260821T192437Z-742cfd205e0c`). `d474236` live r2 A is 1 unattributed of 7 (run 20 pin share 0.76);
+that is an external evaluation, not a rewrite of its recorded bytes.
+
+Independent campaign `20260821T221243Z-f9377b0dbf80` (source `f9377b0d`) is a
+valid contract-v2 FAIL: T p90 193.770 ms vs 120 ms absolute, B full-max 37.422 s
+vs 10 s, B revalidation-max 165.903 ms vs 25 ms, A 4 unattributed of 36 (all
+pin-only substantial). D/S/F and the T p50s passed, including S-revalidation
+drift 1.06×. Budget chain 84.09 s vs 60 s does not fit. Retained. No wash-green
+rerun. Do not loosen A, B, T p90, or FinalizeBudget.
+
+## 2026-08-22 — GitHub #139-A approved; performance qualification moved to #153
+
+**Severity:** process blocker / benchmark maturity. The non-production
+InvocationStore correctness and structural work is accepted for #139-A, while
+the current durability-performance campaign is not stable enough to remain a
+prerequisite for the #139-B hard cut.
+
+Maintainer disposition approves #139-A and unblocks #139-B without rewriting a
+historical campaign verdict or changing any durability ordering, failure
+semantics, threshold, sample shape, or `FinalizeBudget`. GitHub #153 owns a
+replacement performance contract and the remaining `session_journal_pin` growth
+work.
+
+Applied changes:
+
+- diagnostic `benchmark` mode preserves strict input and sample-shape
+  validation, writes the same summaries, and reports gate verdicts without
+  turning them into a blocking exit. Strict `qualify` remains available for
+  #153; generated baseline provenance uses the ignored local artifact path;
+- `run-qualification.sh` writes new local artifacts under the ignored
+  `target/invocation-store-bundles` path instead of source control;
+- all 17 existing bundle directories (272 tracked files) were relocated to that
+  local path and removed from the current Git tree. Every relocated file's Git
+  object hash was checked against the pre-removal `HEAD` blob before commit;
+- the manifest records `diagnostic_only` enforcement and points its installed
+  baseline provenance at the local bundle path;
+- ADR 0005, the contract-v2 decision record, crate guidance, and open findings
+  now record #139-A approval, #139-B readiness, and #153 ownership. Historical
+  summaries remain available in Git history and byte-identical local copies.
+
+Verification:
+
+- red first: benchmark-mode regression returned the unknown-mode input error;
+- green: `python3 -m unittest test_summarize_qualification.py` — 54 passed;
+- `cargo test -p lancet-audit --test qualification_summary` — 1 passed (Python
+  contract and isolation suites passed);
+- `cargo test -p lancet-audit --test invocation_qualification` — 15 passed,
+  3 ignored benchmarks;
+- `bash -n benchmarks/invocation-store/run-qualification.sh`;
+- relocated bundle hash audit — 272/272 matched;
+- `git diff --check`.
+
+Changed files:
+`benchmarks/invocation-store/{qualification-contract-v2.json,run-qualification.sh,summarize_qualification.py,test_summarize_qualification.py}`,
+removed `benchmarks/invocation-store/results/**`, and updated
+`{AGENTS.md,FINDINGS.md,FIX.md,crates/lancet-audit/AGENTS.md,crates/lattice-session/AGENTS.md,docs/adr/0005-durable-turn-invocation-and-private-git-stores.md,docs/plans/2026-08-21-issue139a-qualification-contract-v2.md}`.
