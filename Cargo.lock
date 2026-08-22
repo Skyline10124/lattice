@@ -2930,8 +2930,12 @@ name = "lancet-audit"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "gix",
  "lancet-catalog",
  "lancet-protocol",
+ "lattice-conversation",
+ "lattice-session",
+ "lattice-store",
  "rusqlite",
  "serde",
  "serde_json",

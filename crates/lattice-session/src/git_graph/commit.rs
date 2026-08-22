@@ -14,6 +14,7 @@ use super::helpers::{
 };
 use super::session::resolve_head_oid;
 use super::state::{self, SessionHead};
+use super::validation;
 use crate::graph::{
     HeadTranscript, PreparedTurnCommit, TurnCommit, TurnCommitInput, TurnCommitStatus,
     TurnLifecycleEvidence, TurnLogEntry, WorkspaceDisposition,
@@ -184,14 +185,14 @@ impl GitSessionGraphStore {
             }
         }
 
-        self.kernel()
-            .ref_transaction(&edits)
-            .map_err(|err| match err {
+        validation::publish_session_edits(self.kernel(), session_id, edits).map_err(
+            |err| match err {
                 lattice_store::StoreError::CasConflict { .. } => {
                     SessionError::Conflict("session branch ref moved during commit".to_string())
                 }
                 other => SessionError::Store(other),
-            })?;
+            },
+        )?;
 
         let state_ref_string = state::state_ref_name(session_id)?;
         let mut published_refs: Vec<&str> = vec![head_ref.as_str(), state_ref_string.as_str()];

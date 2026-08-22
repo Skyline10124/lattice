@@ -9,6 +9,8 @@
 //! `refs/lattice/sessions/<id>/state`; conversation branches live under
 //! `refs/lattice/sessions/<id>/heads/<branch>`; candidate refs under
 //! `refs/lattice/candidates/**` keep clean-turn commit ranges reachable.
+//! Derived strict-open projections live under
+//! `refs/lattice/session-validation/<id>` and are never a second authority.
 //! The mutable `.lattice/sessions/**` sidecars and open-failed-init
 //! auto-initialization were hard-cut: absent stores are `NotInitialized`,
 //! never invitations to init.
@@ -20,6 +22,8 @@
 //! corruption. Snapshot reads (`open`/`list`/`log`/`diff`/`head_transcript`)
 //! pin committed refs and take no lock.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use lattice_store::{Blocking, FlockGuard, LockMode, StateLayout, StoreMeta, StoreRepo};
@@ -37,11 +41,38 @@ pub(crate) mod pending;
 mod refs;
 mod session;
 pub(crate) mod state;
-
 #[cfg(test)]
 mod tests;
+mod validation;
 
 pub(crate) const DEFAULT_BRANCH: &str = "main";
+
+/// Structural work performed by the last [`GitSessionGraphStore::open`]
+/// domain-invariant sweep. Tests assert that object parsing does not grow
+/// with unrelated Session history; production never reads this.
+#[cfg(test)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct StrictOpenWork {
+    pub refs_enumerated: usize,
+    pub sessions_seen: usize,
+    pub sessions_fully_validated: usize,
+    pub sessions_projection_hits: usize,
+    pub state_objects_parsed: usize,
+    pub branch_commits_checked: usize,
+    pub turn_pins_parsed: usize,
+    pub active_turns_parsed: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_STRICT_OPEN_WORK: RefCell<StrictOpenWork> =
+        RefCell::new(StrictOpenWork::default());
+}
+
+#[cfg(test)]
+pub(crate) fn last_strict_open_work() -> StrictOpenWork {
+    LAST_STRICT_OPEN_WORK.with(|cell| cell.borrow().clone())
+}
 
 /// Git-backed session graph store over the `lattice-store` kernel.
 ///
@@ -210,8 +241,18 @@ impl GitSessionGraphStore {
     /// Domain invariant validation at open: every
     /// `refs/lattice/sessions/<id>/state` must parse and name its own
     /// session. Broken invariants are typed corruption, never repaired.
+    ///
+    /// Object parsing is skipped for a session only when its derived
+    /// validation projection names exactly the live `(suffix, oid)` set.
+    /// Enumeration still sees every session ref; a mismatch forces a full
+    /// per-session sweep before the handle is returned.
     fn validate_domain_invariants(&self) -> Result<()> {
-        for (name, oid) in self.store.enumerate_refs(state::sessions_prefix())? {
+        let enumerated = self.store.enumerate_refs(state::sessions_prefix())?;
+        let mut by_session: std::collections::BTreeMap<
+            String,
+            Vec<(String, String, gix::ObjectId)>,
+        > = std::collections::BTreeMap::new();
+        for (name, oid) in enumerated {
             let Some(rest) = name.strip_prefix(state::sessions_prefix()) else {
                 continue;
             };
@@ -220,117 +261,163 @@ impl GitSessionGraphStore {
                     detail: format!("illegal session ref '{name}'"),
                 }));
             };
-            match suffix {
-                "state" => {
-                    let bytes = self
-                        .store
-                        .read_tree_blob(oid, state::STATE_TREE_FILE)
-                        .map_err(|_| {
+            let session_key = session_id.to_string();
+            let suffix = suffix.to_string();
+            by_session
+                .entry(session_key)
+                .or_default()
+                .push((name, suffix, oid));
+        }
+
+        #[cfg(test)]
+        let mut work = StrictOpenWork {
+            refs_enumerated: by_session.values().map(Vec::len).sum(),
+            sessions_seen: by_session.len(),
+            ..StrictOpenWork::default()
+        };
+
+        for (session_id, refs) in &by_session {
+            let live: Vec<(String, gix::ObjectId)> = refs
+                .iter()
+                .map(|(_, suffix, oid)| (suffix.clone(), *oid))
+                .collect();
+            if validation::projection_matches(&self.store, session_id, &live)? {
+                #[cfg(test)]
+                {
+                    work.sessions_projection_hits += 1;
+                }
+                continue;
+            }
+            #[cfg(test)]
+            {
+                work.sessions_fully_validated += 1;
+            }
+            for (name, suffix, oid) in refs {
+                match suffix.as_str() {
+                    "state" => {
+                        let bytes = self
+                            .store
+                            .read_tree_blob(*oid, state::STATE_TREE_FILE)
+                            .map_err(|_| {
+                                SessionError::Store(lattice_store::StoreError::Corruption {
+                                    detail: format!("session '{session_id}' state unreadable"),
+                                })
+                            })?;
+                        let parsed: state::SessionState =
+                            serde_json::from_slice(&bytes).map_err(|e| {
+                                SessionError::InvalidPersistedValue {
+                                    field: "state.json",
+                                    value: e.to_string(),
+                                }
+                            })?;
+                        if parsed.session_id != *session_id {
+                            return Err(SessionError::Store(
+                                lattice_store::StoreError::Corruption {
+                                    detail: format!(
+                                        "state ref for '{session_id}' names session '{}'",
+                                        parsed.session_id
+                                    ),
+                                },
+                            ));
+                        }
+                        #[cfg(test)]
+                        {
+                            work.state_objects_parsed += 1;
+                        }
+                    }
+                    s if s.starts_with("heads/") => {
+                        crate::validate_branch_name(&s["heads/".len()..])?;
+                        self.store.commit_tree(*oid).map_err(|_| {
                             SessionError::Store(lattice_store::StoreError::Corruption {
-                                detail: format!("session '{session_id}' state unreadable"),
+                                detail: format!("branch ref '{name}' does not point at a commit"),
                             })
                         })?;
-                    let parsed: state::SessionState =
-                        serde_json::from_slice(&bytes).map_err(|e| {
-                            SessionError::InvalidPersistedValue {
-                                field: "state.json",
-                                value: e.to_string(),
-                            }
+                        #[cfg(test)]
+                        {
+                            work.branch_commits_checked += 1;
+                        }
+                    }
+                    s if s.starts_with("turns/") => {
+                        let pinned_turn = &s["turns/".len()..];
+                        state::validate_turn_ref_id(pinned_turn)?;
+                        let tree = self.store.commit_tree(*oid).map_err(|_| {
+                            SessionError::Store(lattice_store::StoreError::Corruption {
+                                detail: format!("turn pin '{name}' does not point at a commit"),
+                            })
                         })?;
-                    if parsed.session_id != session_id {
+                        let Some(manifest_bytes) =
+                            self.store.read_tree_path(tree, "turn/manifest.json")?
+                        else {
+                            return Err(SessionError::JournalCorruption {
+                                detail: format!(
+                                    "turn pin '{name}' does not point at a conversation commit"
+                                ),
+                            });
+                        };
+                        let manifest = helpers::parse_manifest(&manifest_bytes)?;
+                        if manifest.session_id != *session_id {
+                            return Err(SessionError::JournalCorruption {
+                                detail: format!(
+                                    "turn pin '{name}' points at a commit of session '{}'",
+                                    manifest.session_id
+                                ),
+                            });
+                        }
+                        if manifest.turn_id != pinned_turn {
+                            return Err(SessionError::JournalCorruption {
+                                detail: format!(
+                                    "turn pin '{name}' points at turn '{}'",
+                                    manifest.turn_id
+                                ),
+                            });
+                        }
+                        #[cfg(test)]
+                        {
+                            work.turn_pins_parsed += 1;
+                        }
+                    }
+                    "active-turn" => {
+                        let bytes = self
+                            .store
+                            .read_tree_blob(*oid, pending::PENDING_TREE_FILE)
+                            .map_err(|_| SessionError::JournalCorruption {
+                                detail: format!(
+                                    "active-turn ref '{name}' has no {}",
+                                    pending::PENDING_TREE_FILE
+                                ),
+                            })?;
+                        let snapshot: crate::pending::PendingSnapshot =
+                            serde_json::from_slice(&bytes).map_err(|e| {
+                                SessionError::JournalCorruption {
+                                    detail: format!(
+                                        "parse pending.json at active-turn '{name}': {e}"
+                                    ),
+                                }
+                            })?;
+                        if snapshot.session_id.as_str() != session_id.as_str() {
+                            return Err(SessionError::JournalCorruption {
+                                detail: format!(
+                                    "active-turn of '{session_id}' names session '{}'",
+                                    snapshot.session_id
+                                ),
+                            });
+                        }
+                        snapshot.validate()?;
+                        #[cfg(test)]
+                        {
+                            work.active_turns_parsed += 1;
+                        }
+                    }
+                    _ => {
                         return Err(SessionError::Store(lattice_store::StoreError::Corruption {
-                            detail: format!(
-                                "state ref for '{session_id}' names session '{}'",
-                                parsed.session_id
-                            ),
+                            detail: format!("illegal session ref '{name}'"),
                         }));
                     }
                 }
-                s if s.starts_with("heads/") => {
-                    crate::validate_branch_name(&s["heads/".len()..])?;
-                    // A branch head must point at a commit.
-                    self.store.commit_tree(oid).map_err(|_| {
-                        SessionError::Store(lattice_store::StoreError::Corruption {
-                            detail: format!("branch ref '{name}' does not point at a commit"),
-                        })
-                    })?;
-                }
-                // turns/<TurnId>: create-once permanent pin for one
-                // committed Turn (#144). Must point at the conversation
-                // commit of *that* Turn of *this* session, so a mislabelled
-                // pin is typed journal corruption before the handle is
-                // returned, not a surprise at the first journal read.
-                s if s.starts_with("turns/") => {
-                    let pinned_turn = &s["turns/".len()..];
-                    state::validate_turn_ref_id(pinned_turn)?;
-                    let tree = self.store.commit_tree(oid).map_err(|_| {
-                        SessionError::Store(lattice_store::StoreError::Corruption {
-                            detail: format!("turn pin '{name}' does not point at a commit"),
-                        })
-                    })?;
-                    let Some(manifest_bytes) =
-                        self.store.read_tree_path(tree, "turn/manifest.json")?
-                    else {
-                        return Err(SessionError::JournalCorruption {
-                            detail: format!(
-                                "turn pin '{name}' does not point at a conversation commit"
-                            ),
-                        });
-                    };
-                    let manifest = helpers::parse_manifest(&manifest_bytes)?;
-                    if manifest.session_id != session_id {
-                        return Err(SessionError::JournalCorruption {
-                            detail: format!(
-                                "turn pin '{name}' points at a commit of session '{}'",
-                                manifest.session_id
-                            ),
-                        });
-                    }
-                    if manifest.turn_id != pinned_turn {
-                        return Err(SessionError::JournalCorruption {
-                            detail: format!(
-                                "turn pin '{name}' points at turn '{}'",
-                                manifest.turn_id
-                            ),
-                        });
-                    }
-                }
-                // active-turn: the direct PendingTurn authority (#144). Must
-                // point at a journal snapshot naming this session, and that
-                // snapshot must satisfy the full domain contract — strict
-                // open is where journal damage surfaces, and it is never
-                // repaired in place.
-                "active-turn" => {
-                    let bytes = self
-                        .store
-                        .read_tree_blob(oid, pending::PENDING_TREE_FILE)
-                        .map_err(|_| SessionError::JournalCorruption {
-                            detail: format!(
-                                "active-turn ref '{name}' has no {}",
-                                pending::PENDING_TREE_FILE
-                            ),
-                        })?;
-                    let snapshot: crate::pending::PendingSnapshot = serde_json::from_slice(&bytes)
-                        .map_err(|e| SessionError::JournalCorruption {
-                            detail: format!("parse pending.json at active-turn '{name}': {e}"),
-                        })?;
-                    if snapshot.session_id.as_str() != session_id {
-                        return Err(SessionError::JournalCorruption {
-                            detail: format!(
-                                "active-turn of '{session_id}' names session '{}'",
-                                snapshot.session_id
-                            ),
-                        });
-                    }
-                    snapshot.validate()?;
-                }
-                _ => {
-                    return Err(SessionError::Store(lattice_store::StoreError::Corruption {
-                        detail: format!("illegal session ref '{name}'"),
-                    }));
-                }
             }
         }
+        #[cfg(test)]
+        LAST_STRICT_OPEN_WORK.with(|cell| *cell.borrow_mut() = work);
         Ok(())
     }
 }

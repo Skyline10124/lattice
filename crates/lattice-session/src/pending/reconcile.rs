@@ -30,8 +30,8 @@ use super::config::TurnStartedFacts;
 use super::contract::{PendingSnapshot, PendingStage, TurnCommitCandidate};
 use super::encode_hex;
 use super::facts::{
-    ExecutionOutcome, IndeterminateReason, InvocationFact, InvocationFactsSnapshot,
-    NotExecutedReason, ResultMaterial, UnavailableMaterialReason,
+    ExecutionOutcome, IndeterminateReason, InvocationFactsSnapshot, InvocationLifecycleFact,
+    NotExecutedReason, PlanValidation, ResultMaterial, UnavailableMaterialReason,
 };
 use super::outcome::{
     ClosureOrigin, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome, TurnUsageAggregate,
@@ -108,6 +108,74 @@ pub struct ReconciliationPlan {
     pub actions: Vec<ReconciliationAction>,
 }
 
+/// A same-stage `BindingPlanned` candidate revision (ADR 0005 §9).
+///
+/// This is **not** a closure: the Turn is still open, no `TurnOutcome`
+/// exists, and nothing caller-visible may be produced until the revision is
+/// durable. It carries the exact identities the executor needs — session,
+/// Turn, and the byte-exact durable plan whose candidates collided — so the
+/// executor can verify the request against the pinned `active-turn` tip
+/// before CAS-publishing the replacement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandidateRevisionRequest {
+    /// Owning session.
+    pub session_id: lancet_protocol::SessionId,
+    /// The Turn whose binding plan must be revised.
+    pub turn_id: lancet_protocol::TurnId,
+    /// The exact durable `BindingPlanned` plan the revision replaces. The
+    /// executor must find this byte-equal at the expected `active-turn`
+    /// tip; only candidate IDs and their derived binding digests change.
+    pub plan: BindingPlan,
+    /// The candidate IDs the ledger records as owned by another plan, in
+    /// binding order. Evidence of the observation, not an executor input.
+    pub colliding_candidates: Vec<InvocationId>,
+}
+
+/// The one decision the reducer produces for a durable Pending stage.
+///
+/// Closing a Turn and revising colliding candidates are different kinds of
+/// answer, so they are different types: a revision carries no `TurnOutcome`
+/// and can never be mistaken for a closed Turn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationDecision {
+    /// The Turn closes; execute this exact plan.
+    Closure(ReconciliationPlan),
+    /// The candidate IDs are held by another plan. The I/O executor
+    /// generates fresh UUIDs and CAS-publishes a complete replacement
+    /// `BindingPlanned` revision; only then does a closure decision exist
+    /// (#139-A decision D-A2, truth table #2).
+    ReviseCandidates(CandidateRevisionRequest),
+}
+
+impl ReconciliationDecision {
+    /// The closure plan, or `None` when a candidate revision must happen
+    /// first.
+    #[must_use]
+    pub fn closure(&self) -> Option<&ReconciliationPlan> {
+        match self {
+            Self::Closure(plan) => Some(plan),
+            Self::ReviseCandidates(_) => None,
+        }
+    }
+
+    /// The candidate revision request, or `None` when the Turn closes.
+    #[must_use]
+    pub fn revision(&self) -> Option<&CandidateRevisionRequest> {
+        match self {
+            Self::ReviseCandidates(request) => Some(request),
+            Self::Closure(_) => None,
+        }
+    }
+}
+
+/// One stage's decision before the Turn-level candidate/finalize framing is
+/// appended. Only the binding window can ask for a candidate revision.
+enum StageDecision {
+    Close(TurnOutcome, Vec<ReconciliationAction>),
+    ReviseCandidates(Vec<InvocationId>),
+}
+
 /// The pure decision function. `Err` is typed corruption: facts that
 /// cannot describe the durable stage (partial or different reservations,
 /// impossible orderings, digest mismatches) fail closed instead of being
@@ -115,7 +183,7 @@ pub struct ReconciliationPlan {
 pub fn reconcile(
     snapshot: &PendingSnapshot,
     facts: &InvocationFactsSnapshot,
-) -> Result<ReconciliationPlan> {
+) -> Result<ReconciliationDecision> {
     snapshot.validate()?;
     let (outcome, mut actions) = match &snapshot.stage {
         PendingStage::TurnStarted { .. } => {
@@ -185,9 +253,37 @@ pub fn reconcile(
             }],
         ),
         PendingStage::BindingPlanned { plan, .. } => {
-            binding_window_closure(snapshot, plan, facts, true)?
+            match binding_window_closure(snapshot, plan, facts, true)? {
+                StageDecision::Close(outcome, actions) => (outcome, actions),
+                StageDecision::ReviseCandidates(colliding) => {
+                    // Not a closure: the Turn stays open until the revised
+                    // candidates are durable.
+                    return Ok(ReconciliationDecision::ReviseCandidates(
+                        CandidateRevisionRequest {
+                            session_id: snapshot.session_id,
+                            turn_id: snapshot.turn_id,
+                            plan: plan.clone(),
+                            colliding_candidates: colliding,
+                        },
+                    ));
+                }
+            }
         }
-        PendingStage::Bound { plan } => binding_window_closure(snapshot, plan, facts, false)?,
+        PendingStage::Bound { plan } => {
+            match binding_window_closure(snapshot, plan, facts, false)? {
+                StageDecision::Close(outcome, actions) => (outcome, actions),
+                // `Bound` is published only after `reserve_batch` confirms
+                // the entire exact plan durable (ADR 0005 §9). A foreign
+                // owner here means the reservation was lost, not that fresh
+                // candidates may be minted.
+                StageDecision::ReviseCandidates(_) => {
+                    return Err(SessionError::JournalCorruption {
+                        detail: "Bound without the exact durable reservation it requires"
+                            .to_string(),
+                    });
+                }
+            }
+        }
         PendingStage::StepClosing(state) => step_closing_closure(state, facts)?,
         PendingStage::StepClosed { kind } => step_closed_closure(kind)?,
         PendingStage::TurnClosing(closing) => (
@@ -225,13 +321,13 @@ pub fn reconcile(
         actions.push(ReconciliationAction::FinalizeTurn);
     }
 
-    Ok(ReconciliationPlan {
+    Ok(ReconciliationDecision::Closure(ReconciliationPlan {
         session_id: snapshot.session_id,
         turn_id: snapshot.turn_id,
         outcome,
         origin: ClosureOrigin::Reconciled,
         actions,
-    })
+    }))
 }
 
 // ─── Stage closures ─────────────────────────────────────────────────────
@@ -247,14 +343,31 @@ fn binding_window_closure(
     plan: &BindingPlan,
     facts: &InvocationFactsSnapshot,
     publish_bound: bool,
-) -> Result<(TurnOutcome, Vec<ReconciliationAction>)> {
-    facts.validate_against_plan(&plan.plan_key, &plan.bindings)?;
+) -> Result<StageDecision> {
     let mut actions = Vec::new();
-    if facts.plan.is_none() {
-        actions.push(ReconciliationAction::ReserveExactPlan {
-            plan_key: plan.plan_key,
-            bindings: plan.bindings.clone(),
-        });
+    match facts.validate_against_plan(&plan.plan_key, &plan.bindings)? {
+        PlanValidation::Collision => {
+            // Truth table #2: candidate IDs owned by another plan. No
+            // outcome exists yet — the caller must revise candidates first.
+            let colliding = plan
+                .bindings
+                .iter()
+                .filter(|binding| {
+                    facts
+                        .record_of(&binding.invocation_id)
+                        .is_some_and(|record| record.owner != plan.plan_key)
+                })
+                .map(|binding| binding.invocation_id)
+                .collect();
+            return Ok(StageDecision::ReviseCandidates(colliding));
+        }
+        PlanValidation::AbsentPlan => {
+            actions.push(ReconciliationAction::ReserveExactPlan {
+                plan_key: plan.plan_key,
+                bindings: plan.bindings.clone(),
+            });
+        }
+        PlanValidation::ExactMatch => {} // idempotent: already reserved
     }
     if publish_bound {
         actions.push(ReconciliationAction::PublishBound { plan: plan.clone() });
@@ -265,8 +378,8 @@ fn binding_window_closure(
     // the pin lives in a StepClosing snapshot.
     if plan.bindings.iter().any(|b| {
         matches!(
-            facts.state_of(&b.invocation_id),
-            Some(InvocationFact::Terminal { .. })
+            facts.lifecycle_of(&b.invocation_id),
+            Some(InvocationLifecycleFact::Terminal { .. })
         )
     }) {
         return Err(SessionError::JournalCorruption {
@@ -276,8 +389,8 @@ fn binding_window_closure(
 
     let dispatch_at = plan.bindings.iter().position(|b| {
         matches!(
-            facts.state_of(&b.invocation_id),
-            Some(InvocationFact::DispatchStarted)
+            facts.lifecycle_of(&b.invocation_id),
+            Some(InvocationLifecycleFact::DispatchStarted)
         )
     });
 
@@ -285,7 +398,9 @@ fn binding_window_closure(
         Some(index) => {
             // The batch is ordered: later bindings cannot have been reached.
             for binding in plan.bindings.iter().skip(index + 1) {
-                if facts.state_of(&binding.invocation_id) != Some(&InvocationFact::Reserved) {
+                if facts.lifecycle_of(&binding.invocation_id)
+                    != Some(&InvocationLifecycleFact::Reserved)
+                {
                     return Err(SessionError::JournalCorruption {
                         detail: format!(
                             "binding {} dispatched past the indeterminate ordinal",
@@ -305,7 +420,7 @@ fn binding_window_closure(
                 &classifications,
             ));
             actions.push(step_closed_interrupt(reason.clone()));
-            Ok((interrupted(reason), actions))
+            Ok(StageDecision::Close(interrupted(reason), actions))
         }
         None => {
             let reason = TurnInterruption::ProcessInterruptedDuringToolBinding;
@@ -317,7 +432,7 @@ fn binding_window_closure(
                 &classifications,
             ));
             actions.push(step_closed_interrupt(reason.clone()));
-            Ok((interrupted(reason), actions))
+            Ok(StageDecision::Close(interrupted(reason), actions))
         }
     }
 }
@@ -330,13 +445,20 @@ fn step_closing_closure(
     state: &StepClosingState,
     facts: &InvocationFactsSnapshot,
 ) -> Result<(TurnOutcome, Vec<ReconciliationAction>)> {
-    facts.validate_against_plan(&state.plan_key, &state.bindings)?;
+    match facts.validate_against_plan(&state.plan_key, &state.bindings)? {
+        PlanValidation::ExactMatch => {}
+        _ => {
+            return Err(SessionError::JournalCorruption {
+                detail: "step closing requires an exact reservation".to_string(),
+            });
+        }
+    }
     let cursor = state.closure_cursor as usize;
 
     // Bindings beyond the cursor must still be reserved: the batch is
     // strictly ordered and reopen never dispatches.
     for binding in state.bindings.iter().skip(cursor + 1) {
-        if facts.state_of(&binding.invocation_id) != Some(&InvocationFact::Reserved) {
+        if facts.lifecycle_of(&binding.invocation_id) != Some(&InvocationLifecycleFact::Reserved) {
             return Err(SessionError::JournalCorruption {
                 detail: format!(
                     "binding {} moved past the closure cursor without closing first",
@@ -347,14 +469,14 @@ fn step_closing_closure(
     }
 
     let current = state.bindings.get(cursor);
-    let current_fact: Option<&InvocationFact> =
-        current.and_then(|binding| facts.state_of(&binding.invocation_id));
+    let current_fact: Option<&InvocationLifecycleFact> =
+        current.and_then(|binding| facts.lifecycle_of(&binding.invocation_id));
     let candidate = state.current_candidate.as_ref();
 
     // (indeterminate ordinal, resume classification for the cursor binding)
     let (indeterminate_at, resume) = match (current, current_fact, candidate) {
         (None, _, _) => (None, None),
-        (Some(_), Some(InvocationFact::Terminal { outcome, material }), Some(draft)) => {
+        (Some(_), Some(InvocationLifecycleFact::Terminal { outcome, material }), Some(draft)) => {
             // Available material must be the pinned candidate's exact
             // content; a mismatch is corruption (ADR 0005 §12).
             if let ResultMaterial::Available {
@@ -370,18 +492,18 @@ fn step_closing_closure(
             }
             (None, Some((outcome.clone(), material.clone())))
         }
-        (Some(_), Some(InvocationFact::Terminal { .. }), None) => {
+        (Some(_), Some(InvocationLifecycleFact::Terminal { .. }), None) => {
             return Err(SessionError::JournalCorruption {
                 detail: "terminal invocation fact without a pinned draft candidate".to_string(),
             });
         }
-        (Some(_), Some(InvocationFact::DispatchStarted), _) => (Some(cursor), None),
-        (Some(_), Some(InvocationFact::Reserved), Some(_)) => {
+        (Some(_), Some(InvocationLifecycleFact::DispatchStarted), _) => (Some(cursor), None),
+        (Some(_), Some(InvocationLifecycleFact::Reserved), Some(_)) => {
             return Err(SessionError::JournalCorruption {
                 detail: "pinned draft candidate for a binding that never dispatched".to_string(),
             });
         }
-        (Some(_), Some(InvocationFact::Reserved), None) => (None, None),
+        (Some(_), Some(InvocationLifecycleFact::Reserved), None) => (None, None),
         (Some(_), None, _) => {
             return Err(SessionError::JournalCorruption {
                 detail: "closure-cursor binding has no reservation record".to_string(),
@@ -896,20 +1018,42 @@ mod tests {
         }
     }
 
-    fn facts_with_plan(plan: &BindingPlan, states: Vec<InvocationFact>) -> InvocationFactsSnapshot {
+    fn facts_with_plan(
+        plan: &BindingPlan,
+        states: Vec<InvocationLifecycleFact>,
+    ) -> InvocationFactsSnapshot {
         let mut facts = InvocationFactsSnapshot::empty();
         facts.plan = Some(super::super::facts::PlanFacts {
             plan_key: plan.plan_key,
             bindings: plan.bindings.clone(),
         });
-        for (binding, state) in plan.bindings.iter().zip(states) {
-            facts.invocations.insert(binding.invocation_id, state);
+        for (binding, lifecycle) in plan.bindings.iter().zip(states) {
+            facts.invocations.insert(
+                binding.invocation_id,
+                super::super::facts::InvocationRecordFact {
+                    owner: plan.plan_key,
+                    lifecycle,
+                },
+            );
         }
         facts
     }
 
     fn empty_facts() -> InvocationFactsSnapshot {
         InvocationFactsSnapshot::empty()
+    }
+
+    /// Reconcile and require a closure decision.
+    fn closure(
+        snapshot: &PendingSnapshot,
+        facts: &InvocationFactsSnapshot,
+        what: &str,
+    ) -> ReconciliationPlan {
+        reconcile(snapshot, facts)
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"))
+            .closure()
+            .unwrap_or_else(|| panic!("{what}: expected a closure, got a candidate revision"))
+            .clone()
     }
 
     fn interrupted_reason(plan: &ReconciliationPlan) -> &TurnInterruption {
@@ -975,7 +1119,7 @@ mod tests {
             stage: PendingStage::TurnStarted(root()),
             ..snapshot(PendingStage::TurnStarted(root()))
         };
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             interrupted_reason(&plan),
             TurnInterruption::ProcessInterruptedBeforeModelAttempt
@@ -987,7 +1131,7 @@ mod tests {
     #[test]
     fn incomplete_model_attempt_started_closes_interrupted() {
         let snap = snapshot(PendingStage::ModelAttemptStarted { key: key(0, 0) });
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             interrupted_reason(&plan),
             TurnInterruption::ProcessInterruptedDuringModelAttempt
@@ -1003,7 +1147,7 @@ mod tests {
             retryable: true,
             usage: None,
         });
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             interrupted_reason(&plan),
             TurnInterruption::ProcessInterruptedDuringModelRetry
@@ -1015,7 +1159,7 @@ mod tests {
             retryable: true,
             usage: None,
         });
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             plan.outcome,
             TurnOutcome::Failed {
@@ -1030,7 +1174,7 @@ mod tests {
             retryable: false,
             usage: None,
         });
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             plan.outcome,
             TurnOutcome::Failed {
@@ -1046,7 +1190,7 @@ mod tests {
             reason: AttemptInterruption::StreamError,
             usage: None,
         });
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             interrupted_reason(&plan),
             TurnInterruption::ModelAttempt(AttemptInterruption::StreamError)
@@ -1062,7 +1206,7 @@ mod tests {
             },
             usage: None,
         });
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             plan.outcome,
             TurnOutcome::Failed {
@@ -1078,7 +1222,7 @@ mod tests {
             message: text_message("done"),
             usage: None,
         });
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             plan.outcome,
             TurnOutcome::Completed {
@@ -1118,7 +1262,7 @@ mod tests {
                 total_tokens: 10,
             }),
         });
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         let candidate = plan
             .actions
             .iter()
@@ -1146,7 +1290,7 @@ mod tests {
             plan: plan_two.clone(),
             usage: None,
         });
-        let result = reconcile(&snap, &empty_facts()).expect("plan");
+        let result = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             interrupted_reason(&result),
             TurnInterruption::ProcessInterruptedDuringToolBinding
@@ -1212,8 +1356,8 @@ mod tests {
             plan: plan_one.clone(),
             usage: None,
         });
-        let facts = facts_with_plan(&plan_one, vec![InvocationFact::Reserved]);
-        let result = reconcile(&snap, &facts).expect("plan");
+        let facts = facts_with_plan(&plan_one, vec![InvocationLifecycleFact::Reserved]);
+        let result = closure(&snap, &facts, "plan");
         assert!(
             result
                 .actions
@@ -1241,9 +1385,13 @@ mod tests {
             plan_key: plan_two.plan_key,
             bindings: plan_two.bindings.clone(),
         });
-        partial
-            .invocations
-            .insert(plan_two.bindings[0].invocation_id, InvocationFact::Reserved);
+        partial.invocations.insert(
+            plan_two.bindings[0].invocation_id,
+            super::super::facts::InvocationRecordFact {
+                owner: plan_two.plan_key,
+                lifecycle: InvocationLifecycleFact::Reserved,
+            },
+        );
         assert!(matches!(
             reconcile(&snap, &partial),
             Err(SessionError::JournalCorruption { .. })
@@ -1258,9 +1406,13 @@ mod tests {
             bindings: different.bindings.clone(),
         });
         for binding in &different.bindings {
-            wrong
-                .invocations
-                .insert(binding.invocation_id, InvocationFact::Reserved);
+            wrong.invocations.insert(
+                binding.invocation_id,
+                super::super::facts::InvocationRecordFact {
+                    owner: different.plan_key,
+                    lifecycle: InvocationLifecycleFact::Reserved,
+                },
+            );
         }
         assert!(matches!(
             reconcile(&snap, &wrong),
@@ -1276,9 +1428,12 @@ mod tests {
         });
         let facts = facts_with_plan(
             &plan_two,
-            vec![InvocationFact::Reserved, InvocationFact::Reserved],
+            vec![
+                InvocationLifecycleFact::Reserved,
+                InvocationLifecycleFact::Reserved,
+            ],
         );
-        let result = reconcile(&snap, &facts).expect("plan");
+        let result = closure(&snap, &facts, "plan");
         assert!(matches!(
             interrupted_reason(&result),
             TurnInterruption::ProcessInterruptedDuringToolBinding
@@ -1309,9 +1464,12 @@ mod tests {
         });
         let facts = facts_with_plan(
             &plan_two,
-            vec![InvocationFact::DispatchStarted, InvocationFact::Reserved],
+            vec![
+                InvocationLifecycleFact::DispatchStarted,
+                InvocationLifecycleFact::Reserved,
+            ],
         );
-        let result = reconcile(&snap, &facts).expect("plan");
+        let result = closure(&snap, &facts, "plan");
         assert!(matches!(
             interrupted_reason(&result),
             TurnInterruption::InvocationMayHaveOccurred { invocation }
@@ -1349,7 +1507,7 @@ mod tests {
         });
         let facts = facts_with_plan(
             &plan_one,
-            vec![InvocationFact::Terminal {
+            vec![InvocationLifecycleFact::Terminal {
                 outcome: ExecutionOutcome::Succeeded,
                 material: ResultMaterial::Unavailable {
                     reason: UnavailableMaterialReason::DraftPublicationFailed,
@@ -1400,17 +1558,17 @@ mod tests {
         let facts = facts_with_plan(
             &plan_two,
             vec![
-                InvocationFact::Terminal {
+                InvocationLifecycleFact::Terminal {
                     outcome: ExecutionOutcome::Succeeded,
                     material: ResultMaterial::Available {
                         digest: draft.content_digest,
                         byte_length: draft.byte_length,
                     },
                 },
-                InvocationFact::Reserved,
+                InvocationLifecycleFact::Reserved,
             ],
         );
-        let result = reconcile(&snap, &facts).expect("plan");
+        let result = closure(&snap, &facts, "plan");
         assert!(matches!(
             interrupted_reason(&result),
             TurnInterruption::ProcessInterruptedDuringStepClosing
@@ -1464,7 +1622,7 @@ mod tests {
         let snap = snapshot(PendingStage::StepClosing(state));
         let facts = facts_with_plan(
             &plan_one,
-            vec![InvocationFact::Terminal {
+            vec![InvocationLifecycleFact::Terminal {
                 outcome: ExecutionOutcome::Succeeded,
                 material: ResultMaterial::Available {
                     digest: wrong.content_digest,
@@ -1489,8 +1647,8 @@ mod tests {
             current_candidate: Some(draft_for(&plan_one.bindings[0], "{}")),
         };
         let snap = snapshot(PendingStage::StepClosing(state));
-        let facts = facts_with_plan(&plan_one, vec![InvocationFact::DispatchStarted]);
-        let result = reconcile(&snap, &facts).expect("plan");
+        let facts = facts_with_plan(&plan_one, vec![InvocationLifecycleFact::DispatchStarted]);
+        let result = closure(&snap, &facts, "plan");
         assert!(matches!(
             interrupted_reason(&result),
             TurnInterruption::InvocationMayHaveOccurred { .. }
@@ -1511,7 +1669,10 @@ mod tests {
         // Binding 1 dispatched while binding 0 is still unclosed.
         let facts = facts_with_plan(
             &plan_two,
-            vec![InvocationFact::Reserved, InvocationFact::DispatchStarted],
+            vec![
+                InvocationLifecycleFact::Reserved,
+                InvocationLifecycleFact::DispatchStarted,
+            ],
         );
         assert!(matches!(
             reconcile(&snap, &facts),
@@ -1527,7 +1688,7 @@ mod tests {
                 final_message: text_message("done"),
             },
         });
-        let result = reconcile(&snap, &empty_facts()).expect("plan");
+        let result = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             result.outcome,
             TurnOutcome::Completed {
@@ -1559,7 +1720,7 @@ mod tests {
                 conversation_digest: [0u8; 32],
             },
         });
-        let result = reconcile(&snap, &empty_facts()).expect("plan");
+        let result = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             interrupted_reason(&result),
             TurnInterruption::WhileAwaitingModelContinuation
@@ -1571,7 +1732,7 @@ mod tests {
                 reason: TurnFailure::ModelStepLimitExceeded,
             },
         });
-        let result = reconcile(&snap, &empty_facts()).expect("plan");
+        let result = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             result.outcome,
             TurnOutcome::Failed {
@@ -1584,7 +1745,7 @@ mod tests {
                 reason: super::super::outcome::TurnCancellation::UserCancelled,
             },
         });
-        let result = reconcile(&snap, &empty_facts()).expect("plan");
+        let result = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
             result.outcome,
             TurnOutcome::Cancelled {
@@ -1602,7 +1763,7 @@ mod tests {
                 candidate: candidate.clone(),
             },
         ));
-        let result = reconcile(&snap, &empty_facts()).expect("plan");
+        let result = closure(&snap, &empty_facts(), "plan");
         assert_eq!(result.actions, vec![ReconciliationAction::FinalizeTurn]);
         assert_eq!(result.outcome, candidate.outcome);
 
@@ -1612,7 +1773,7 @@ mod tests {
                 candidate: candidate.clone(),
             },
         ));
-        let result = reconcile(&snap, &empty_facts()).expect("plan");
+        let result = closure(&snap, &empty_facts(), "plan");
         assert_eq!(result.actions, vec![ReconciliationAction::FinalizeTurn]);
     }
 
@@ -1639,7 +1800,7 @@ mod tests {
         // With the store-filled time the same snapshot closes normally, and
         // the candidate pins exactly that time (no new clock).
         snap.recorded_at = Some(STEP_TIME);
-        let plan = reconcile(&snap, &empty_facts()).expect("plan");
+        let plan = closure(&snap, &empty_facts(), "plan");
         let pinned = plan
             .actions
             .iter()
@@ -1657,14 +1818,74 @@ mod tests {
     }
 
     #[test]
-    fn a_different_durable_reservation_stays_fail_closed() {
-        // F11: ADR 0005 §9 allows a *clean* UUID collision to CAS-publish a
-        // new candidate revision only after the InvocationStore proves the
-        // prior exact plan absent. The synthetic facts vocabulary records no
-        // plan ownership per invocation, so it cannot distinguish a clean
-        // collision from a damaged reservation. Until #139-A supplies real
-        // InvocationStore facts, both stay typed corruption — this test pins
-        // that boundary so the deferral is explicit rather than accidental.
+    fn collision_at_binding_planned_requests_candidate_revision() {
+        // Truth table #2 (D-A2): a candidate ID is owned by another plan,
+        // no reservation exists for the current PlanKey. The reducer
+        // returns a candidate-revision request — not a closure, and not a
+        // provisional TurnOutcome that could be mistaken for one.
+        let plan = plan(1);
+        let other_key = PlanKey {
+            turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+                .unwrap(),
+            model_step_ordinal: 0,
+        };
+        let mut facts = InvocationFactsSnapshot::empty();
+        // The candidate ID is owned by another plan.
+        facts.invocations.insert(
+            plan.bindings[0].invocation_id,
+            super::super::facts::InvocationRecordFact {
+                owner: other_key,
+                lifecycle: InvocationLifecycleFact::Reserved,
+            },
+        );
+        let snap = snapshot(PendingStage::BindingPlanned {
+            plan: plan.clone(),
+            usage: None,
+        });
+        let decision = reconcile(&snap, &facts).expect("collision decision");
+        assert!(
+            decision.closure().is_none(),
+            "a collision is not a Turn closure: {decision:?}"
+        );
+        let request = decision.revision().expect("candidate revision request");
+        assert_eq!(request.session_id, snap.session_id);
+        assert_eq!(request.turn_id, snap.turn_id);
+        assert_eq!(request.plan, plan);
+        assert_eq!(
+            request.colliding_candidates,
+            vec![plan.bindings[0].invocation_id]
+        );
+    }
+
+    #[test]
+    fn collision_at_bound_is_corruption_not_a_revision() {
+        // `Bound` is published only after the exact plan is durably
+        // reserved (ADR 0005 §9). A foreign owner there means the
+        // reservation was lost; minting fresh candidates would invent one.
+        let plan = plan(1);
+        let other_key = PlanKey {
+            turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+                .unwrap(),
+            model_step_ordinal: 0,
+        };
+        let mut facts = InvocationFactsSnapshot::empty();
+        facts.invocations.insert(
+            plan.bindings[0].invocation_id,
+            super::super::facts::InvocationRecordFact {
+                owner: other_key,
+                lifecycle: InvocationLifecycleFact::Reserved,
+            },
+        );
+        let snap = snapshot(PendingStage::Bound { plan: plan.clone() });
+        assert!(matches!(
+            reconcile(&snap, &facts),
+            Err(SessionError::JournalCorruption { .. })
+        ));
+    }
+
+    #[test]
+    fn different_durable_reservation_is_corruption() {
+        // Truth table #7: same PlanKey, different bindings → corruption.
         let plan = plan(1);
         let mut facts = InvocationFactsSnapshot::empty();
         let mut different = plan.bindings.clone();
@@ -1681,9 +1902,13 @@ mod tests {
             bindings: different,
         });
         for binding in &plan.bindings {
-            facts
-                .invocations
-                .insert(binding.invocation_id, InvocationFact::Reserved);
+            facts.invocations.insert(
+                binding.invocation_id,
+                super::super::facts::InvocationRecordFact {
+                    owner: plan.plan_key,
+                    lifecycle: InvocationLifecycleFact::Reserved,
+                },
+            );
         }
         let snap = snapshot(PendingStage::BindingPlanned {
             plan: plan.clone(),
@@ -1694,20 +1919,31 @@ mod tests {
             matches!(err, SessionError::JournalCorruption { .. }),
             "got {err:?}"
         );
+    }
 
-        // The exact durable reservation still reuses the same candidates and
-        // never mints new ones.
+    #[test]
+    fn exact_durable_reservation_does_not_re_reserve() {
+        // Truth table #4: exact match → continue without reserving.
+        let plan = plan(1);
         let mut exact = InvocationFactsSnapshot::empty();
         exact.plan = Some(super::super::facts::PlanFacts {
             plan_key: plan.plan_key,
             bindings: plan.bindings.clone(),
         });
         for binding in &plan.bindings {
-            exact
-                .invocations
-                .insert(binding.invocation_id, InvocationFact::Reserved);
+            exact.invocations.insert(
+                binding.invocation_id,
+                super::super::facts::InvocationRecordFact {
+                    owner: plan.plan_key,
+                    lifecycle: InvocationLifecycleFact::Reserved,
+                },
+            );
         }
-        let plan_out = reconcile(&snap, &exact).expect("exact reservation closes");
+        let snap = snapshot(PendingStage::BindingPlanned {
+            plan: plan.clone(),
+            usage: None,
+        });
+        let plan_out = closure(&snap, &exact, "exact reservation closes");
         assert!(
             !plan_out
                 .actions

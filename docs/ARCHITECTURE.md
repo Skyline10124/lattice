@@ -173,11 +173,13 @@ graph TD
     RUNTIME --> DISPATCH
     RUNTIME --> AUTHORITY
     RUNTIME --> PROTOCOL
+    RUNTIME --> STORE
     %% Layer 2 -> 1 + 0
     DISPATCH --> CATALOG
     DISPATCH --> PROTOCOL
     AUDIT --> CATALOG
     AUDIT --> PROTOCOL
+    AUDIT --> STORE
     AUTHORITY --> CATALOG
     AUTHORITY --> PROTOCOL
     AUTHORITY --> NETGUARD
@@ -189,7 +191,9 @@ graph TD
     AGENT --> CONVERSATION
     LLM --> NETGUARD
     LLM --> CONVERSATION
+    SESSION --> PROTOCOL
     SESSION --> CONVERSATION
+    SESSION --> STORE
     CONVERSATION --> PROTOCOL
 ```
 
@@ -204,12 +208,13 @@ Layer model (verified against each crate's `Cargo.toml` `[dependencies]`):
 | 0.5 | `lattice-llm` | `net-guard`, `lattice-conversation` |
 | 1 | `lancet-catalog` | `lancet-protocol` |
 | 1 | `lattice-profile` | `lancet-protocol` |
-| 1 | `lattice-session` | `lattice-conversation` |
+| 1 | `lattice-session` | `lancet-protocol`, `lattice-conversation`, `lattice-store` |
 | 1 | `lattice-agent` | `lattice-llm`, `lattice-conversation` |
 | 2 | `lancet-dispatch` | `lancet-protocol`, `lancet-catalog` |
-| 2 | `lancet-audit` | `lancet-protocol`, `lancet-catalog` |
+| 2 | `lancet-audit` | `lancet-protocol`, `lancet-catalog`, `lattice-store` |
 | 2 | `lancet-authority` | `lancet-protocol`, `lancet-catalog`, `net-guard` |
 | 2.5 | `lancet-cep` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch` |
+| 2.5 | `lancet-runtime` | `lancet-protocol`, `lancet-dispatch`, `lancet-authority`, `lattice-store` |
 | 3 | `lancet-native` | `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `net-guard`, `lancet-runtime` |
 | 3.5 | `lancet-api` | `lancet-cep`, `lancet-protocol`, `lancet-catalog`, `lancet-dispatch`, `lancet-audit`, `lancet-authority`, `lancet-native`, `lancet-runtime` |
 | 4 | `lattice-api` | `lancet-api` + `lattice-agent`, `lattice-profile`, `lattice-session`, `lattice-llm` |
@@ -425,8 +430,21 @@ One sentence per crate:
   GitHub #39 — the whole operator read path: `query_audit` / `tail_audit` /
   `replay_audit` with typed DTOs, project-keyed store-path resolution, and the
   workspace-wide `ScopedXdgStateHome` test helper behind the `test-support`
-  feature. It must never depend on `lancet-native`, `lancet-dispatch`,
-  `lancet-cep`, or `lancet-runtime`.
+  feature. Since #139-A it also owns `src/invocation_store.rs`: the
+  **non-production** Git `InvocationStore` on the `lattice-store` kernel —
+  project-keyed `invocations.git`, one topology-validated append-only event
+  ledger (`refs/lattice/invocations/ledger`) plus an ordered high-water
+  witness advanced only after the data ref, all-or-nothing exact ordered
+  `reserve_batch`, `DispatchStarted`, atomic typed terminal + Cell evidence,
+  and pinned linear-ancestry query/tail views. It is not wired to production
+  Tool dispatch, JSON-RPC, or the SQLite audit path; #139-B performs that
+  hard cut. Its public surface is audit-domain only — projecting a pinned
+  view into `lattice-session` reconciliation facts lives in the
+  non-production integration seam
+  (`crates/lancet-audit/tests/invocation_qualification.rs`) behind a
+  dev-dependency. It must never depend on `lancet-native`, `lancet-dispatch`,
+  `lancet-cep`, `lancet-runtime`, or (as a normal dependency)
+  `lattice-session`.
 - **`lancet-authority`** — Policy semantics, capability matching, Guard L1
   path/scope checks, effect ledger, and effect-region checks.
 - **`lancet-cep`** — Public CEP facade over protocol/catalog/dispatch, plus
@@ -480,4 +498,8 @@ One sentence per crate:
   durability, retention, and typed store errors. Session,
   invocation/evidence/operator, and workspace-history domain semantics stay in
   their owning crates. `lattice-session` and `lancet-runtime` were migrated
-  onto it in the same issue; `lancet-audit` follows in #139-A.
+  onto it in the same issue; `lancet-audit` followed in #139-A with the
+  non-production `InvocationStore`. That edge is `lancet-audit ->
+  lattice-store` only: `lancet-audit` still depends on no LATTICE session,
+  agent, or profile crate, so an operator read never pulls the LATTICE session
+  layer into LANCET (`cargo tree -p lancet-api -e normal`).

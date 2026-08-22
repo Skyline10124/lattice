@@ -28,7 +28,9 @@
 //! - [`facts`]: the synthetic Invocation facts snapshot reconciliation runs
 //!   against (the production InvocationStore arrives with #139-A/#139-B);
 //! - [`reconcile`]: `reconcile(PendingSnapshot, InvocationFactsSnapshot)`
-//!   producing the closure-only [`ReconciliationPlan`].
+//!   producing one [`ReconciliationDecision`]: either the closure-only
+//!   [`ReconciliationPlan`] or a [`CandidateRevisionRequest`] that must be
+//!   satisfied before any closure exists.
 //!
 //! Persistence lives in [`crate::git_graph`]; nothing in this module performs
 //! I/O. `Committed` is an immutable final journal object constructed with the
@@ -59,14 +61,18 @@ pub use draft::{
     DraftClassification, DraftPublication, MAX_TOOL_CONTENT_BYTES, ResultDraft, ToolContentError,
 };
 pub use facts::{
-    ExecutionOutcome, IndeterminateReason, InvocationFact, InvocationFactsSnapshot,
-    NotExecutedReason, PlanFacts, ResultMaterial, UnavailableMaterialReason,
+    ExecutionOutcome, IndeterminateReason, InvocationFactsSnapshot, InvocationLifecycleFact,
+    InvocationRecordFact, NotExecutedReason, PlanFacts, PlanValidation, ResultMaterial,
+    UnavailableMaterialReason,
 };
 pub use outcome::{
     ClosureOrigin, TurnCancellation, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
     TurnUsageAggregate,
 };
-pub use reconcile::{ReconciliationAction, ReconciliationPlan, reconcile};
+pub use reconcile::{
+    CandidateRevisionRequest, ReconciliationAction, ReconciliationDecision, ReconciliationPlan,
+    reconcile,
+};
 pub use step::{ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState};
 
 /// SHA-256 hex serde for fixed 32-byte digests in journal payloads. Same

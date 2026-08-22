@@ -23,10 +23,13 @@
 //! then the repository write lock, in that order (ADR 0005 §5). Reads pin
 //! the `active-turn` OID and read immutable objects without a lock.
 
+use std::collections::BTreeSet;
+
 use chrono::Utc;
 use lattice_store::{RefExpectation, RefTxnEdit, TreeSpec};
 
 use gix::objs::tree::EntryKind;
+use lancet_protocol::InvocationId;
 
 use super::GitSessionGraphStore;
 use super::commit::turn_commit_from_manifest_and_oid;
@@ -36,13 +39,14 @@ use super::helpers::{
 };
 use super::session::resolve_head_oid;
 use super::state::{self, SessionHead};
+use super::validation;
 use crate::graph::prepare_turn_commit;
-use crate::pending::TurnStartedFacts;
 use crate::pending::contract::{
     CommittedFacts, PENDING_SNAPSHOT_SCHEMA_VERSION, PendingSnapshot, PendingStage,
     TurnClosingFacts, TurnCommitCandidate, validate_transition,
 };
 use crate::pending::draft::{DraftClassification, DraftPublication, ResultDraft};
+use crate::pending::{BindingPlan, CandidateRevisionRequest, TurnStartedFacts};
 use crate::{Result, SessionError};
 
 /// File inside a journal snapshot commit's tree carrying the payload.
@@ -93,6 +97,40 @@ fn stage_turn_id(stage: &PendingStage) -> Option<lancet_protocol::TurnId> {
         PendingStage::TurnClosing(facts) => Some(facts.turn_id),
         PendingStage::Committed(facts) => Some(facts.turn_id),
     }
+}
+
+/// Whether `revised` is exactly a candidate revision of `original`.
+///
+/// One definition serves both directions: `revise_binding_candidates` admits a
+/// publication only when this holds, and `published_candidate_revision`
+/// recognizes an already-published revision by the same rule. Everything but
+/// the candidate ids and their derived binding digests must be byte-equal, and
+/// every candidate must be new and distinct.
+fn is_candidate_revision_of(original: &BindingPlan, revised: &BindingPlan) -> bool {
+    if original.plan_key != revised.plan_key
+        || original.message != revised.message
+        || original.bindings.len() != revised.bindings.len()
+    {
+        return false;
+    }
+    let original_ids: BTreeSet<_> = original
+        .bindings
+        .iter()
+        .map(|binding| binding.invocation_id)
+        .collect();
+    let mut revised_ids = BTreeSet::new();
+    for (before, after) in original.bindings.iter().zip(&revised.bindings) {
+        if original_ids.contains(&after.invocation_id)
+            || before.address != after.address
+            || before.method != after.method
+            || before.descriptor_identity != after.descriptor_identity
+            || before.arguments_digest != after.arguments_digest
+            || !revised_ids.insert(after.invocation_id)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 impl GitSessionGraphStore {
@@ -307,15 +345,16 @@ impl GitSessionGraphStore {
         )?;
         let oid = self.write_pending_commit(&snapshot, head_oid, timestamp)?;
         let ref_name = active_turn_ref_name(&session_id)?;
-        self.kernel()
-            .cas_ref(
-                &ref_name,
-                oid,
-                RefExpectation::MustNotExist,
-                "lattice pending turn start",
-            )
-            .map_err(state::map_cas_conflict)?;
-        self.kernel().fsync_pending(&[ref_name.as_str()])?;
+        validation::publish_session_edits(
+            self.kernel(),
+            &session_id,
+            vec![RefTxnEdit {
+                name: ref_name,
+                expect: RefExpectation::MustNotExist,
+                new: Some(oid),
+            }],
+        )
+        .map_err(state::map_cas_conflict)?;
         self.read_pending_snapshot_at(oid)
     }
 
@@ -362,15 +401,16 @@ impl GitSessionGraphStore {
             )));
         }
 
-        // Idempotent exact retry. The CAS is the publication authority and
-        // the ref durability barrier runs after it, so a barrier failure
-        // returns `Durability` on an already-published snapshot. The
-        // byte-identical retry of that exact transition must recognize its
-        // own snapshot instead of failing as an illegal edge, and must then
-        // re-attempt the barrier. Confirmation is exact — the tip has to be
-        // the very commit this call would write, computed from the tip's own
-        // recorded predecessor — so a different candidate or a CAS race is
-        // never mistaken for success.
+        // Idempotent exact retry. `cas_ref` is the publication authority and
+        // already runs the post-publication ref barrier, so a barrier
+        // failure returns `Durability` on an already-published snapshot.
+        // The byte-identical retry of that exact transition must recognize
+        // its own snapshot instead of failing as an illegal edge, and must
+        // then re-attempt the barrier via `fsync_pending` (it does not call
+        // `cas_ref`). Confirmation is exact — the tip has to be the very
+        // commit this call would write, computed from the tip's own recorded
+        // predecessor — so a different candidate or a CAS race is never
+        // mistaken for success.
         if tip.snapshot.stage == next_stage
             && tip.snapshot.recorded_at == Some(recorded_at_unix)
             && let Some(predecessor) = tip.snapshot.predecessor.clone()
@@ -409,15 +449,234 @@ impl GitSessionGraphStore {
         };
         snapshot.validate()?;
         let oid = self.write_pending_commit(&snapshot, Some(tip_oid), recorded_at_unix)?;
-        self.kernel()
-            .cas_ref(
-                &ref_name,
-                oid,
-                RefExpectation::MustMatch(tip_oid),
-                "lattice pending turn advance",
-            )
-            .map_err(state::map_cas_conflict)?;
-        self.kernel().fsync_pending(&[ref_name.as_str()])?;
+        validation::publish_session_edits(
+            self.kernel(),
+            session_id,
+            vec![RefTxnEdit {
+                name: ref_name,
+                expect: RefExpectation::MustMatch(tip_oid),
+                new: Some(oid),
+            }],
+        )
+        .map_err(state::map_cas_conflict)?;
+        self.read_pending_snapshot_at(oid)
+    }
+
+    /// Execute one [`CandidateRevisionRequest`] against the exact tip the
+    /// reducer's facts were pinned to (ADR 0005 §9, #139-A decision D-A2).
+    ///
+    /// The reducer performs no I/O, clock, store, or UUID work, so UUID
+    /// generation is injected here. The request is verified against the
+    /// pinned tip before any write: same session, same Turn, same durable
+    /// `BindingPlanned` plan. The CAS then pins `tip.oid`, so a concurrent
+    /// advance leaves the original `BindingPlanned` untouched.
+    ///
+    /// **Post-CAS recovery.** A revision may be CAS-published and then fail
+    /// its durability barrier. The generator is not required to be
+    /// reproducible, so recovery never depends on re-minting the same UUIDs:
+    /// this call first re-reads the durable `active-turn` and, if it already
+    /// holds a candidate revision of exactly `request.plan` grafted on
+    /// `tip.oid`, repeats that publication's durability barrier and returns
+    /// it without generating anything. Only a genuinely absent revision mints
+    /// fresh candidates.
+    pub fn execute_candidate_revision(
+        &self,
+        request: &CandidateRevisionRequest,
+        tip: &PendingTurnTip,
+        recorded_at_unix: i64,
+        execution_lock: &lattice_store::FlockGuard,
+        mut next_invocation_id: impl FnMut() -> InvocationId,
+    ) -> Result<PendingTurnTip> {
+        if tip.snapshot.session_id != request.session_id || tip.snapshot.turn_id != request.turn_id
+        {
+            return Err(SessionError::Conflict(
+                "candidate revision request does not describe the pinned active Turn".to_string(),
+            ));
+        }
+        let PendingStage::BindingPlanned { plan, .. } = &tip.snapshot.stage else {
+            return Err(SessionError::Conflict(
+                "candidate revision requires BindingPlanned".to_string(),
+            ));
+        };
+        if plan != &request.plan {
+            return Err(SessionError::Conflict(
+                "candidate revision request does not describe the durable binding plan".to_string(),
+            ));
+        }
+
+        // Recover a published-but-undurable revision before minting anything.
+        if let Some(published) = self.published_candidate_revision(request, tip.oid)? {
+            self.validate_execution_lock(&request.session_id.to_string(), execution_lock)?;
+            let ref_name = active_turn_ref_name(&request.session_id.to_string())?;
+            self.kernel().fsync_pending(&[ref_name.as_str()])?;
+            return Ok(published);
+        }
+
+        let mut revised = request.plan.clone();
+        let original: BTreeSet<_> = revised
+            .bindings
+            .iter()
+            .map(|binding| binding.invocation_id)
+            .collect();
+        let mut generated = BTreeSet::new();
+        for binding in &mut revised.bindings {
+            let invocation_id = next_invocation_id();
+            if original.contains(&invocation_id) || !generated.insert(invocation_id) {
+                return Err(SessionError::Conflict(
+                    "candidate revision generated a reused InvocationId".to_string(),
+                ));
+            }
+            binding.invocation_id = invocation_id;
+            binding.binding_digest = crate::pending::binding_digest(
+                &invocation_id,
+                &binding.address,
+                &binding.method,
+                &binding.descriptor_identity,
+                &binding.arguments_digest,
+            );
+        }
+
+        self.revise_binding_candidates(
+            &request.session_id.to_string(),
+            tip.oid,
+            revised,
+            recorded_at_unix,
+            execution_lock,
+        )
+    }
+
+    /// The already-published candidate revision of `request.plan` grafted
+    /// directly on `expected_tip_oid`, if one exists.
+    ///
+    /// Recognition is structural, not by candidate value: the durable tip
+    /// must be `BindingPlanned`, name `expected_tip_oid` as its predecessor,
+    /// and carry exactly the revision shape `revise_binding_candidates`
+    /// admits — same plan key, same message, same binding count and order,
+    /// same address/method/descriptor/arguments per binding, every candidate
+    /// replaced by a distinct new id, and every binding digest recomputed.
+    /// Nothing else can be mistaken for this Turn's revision.
+    fn published_candidate_revision(
+        &self,
+        request: &CandidateRevisionRequest,
+        expected_tip_oid: gix::ObjectId,
+    ) -> Result<Option<PendingTurnTip>> {
+        let session_id = request.session_id.to_string();
+        let Some(current) = self.read_active_turn(&session_id)? else {
+            return Ok(None);
+        };
+        if current.oid == expected_tip_oid
+            || current.snapshot.predecessor.as_deref()
+                != Some(expected_tip_oid.to_string().as_str())
+            || current.snapshot.session_id != request.session_id
+            || current.snapshot.turn_id != request.turn_id
+        {
+            return Ok(None);
+        }
+        let PendingStage::BindingPlanned { plan, .. } = &current.snapshot.stage else {
+            return Ok(None);
+        };
+        if is_candidate_revision_of(&request.plan, plan) {
+            Ok(Some(current))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Replace every candidate UUID in the current `BindingPlanned` stage.
+    ///
+    /// This is the only legal same-stage journal revision. It preserves the
+    /// complete message, structural plan, binding order, Tool identities, and
+    /// arguments while CAS-publishing one full replacement plan.
+    pub fn revise_binding_candidates(
+        &self,
+        session_id: &str,
+        expected_tip_oid: gix::ObjectId,
+        revised_plan: BindingPlan,
+        recorded_at_unix: i64,
+        execution_lock: &lattice_store::FlockGuard,
+    ) -> Result<PendingTurnTip> {
+        self.validate_execution_lock(session_id, execution_lock)?;
+        revised_plan.validate()?;
+        let _write = self.kernel().write_lock()?;
+        let ref_name = active_turn_ref_name(session_id)?;
+        let tip_oid = self.kernel().ref_target(&ref_name)?.ok_or_else(|| {
+            SessionError::Conflict(format!(
+                "session '{session_id}' has no active Turn to revise"
+            ))
+        })?;
+        let tip = self.read_pending_snapshot_at(tip_oid)?;
+
+        if tip_oid != expected_tip_oid {
+            if tip.snapshot.recorded_at == Some(recorded_at_unix)
+                && tip.snapshot.predecessor.as_deref()
+                    == Some(expected_tip_oid.to_string().as_str())
+                && let PendingStage::BindingPlanned { plan, usage } = &tip.snapshot.stage
+                && plan == &revised_plan
+            {
+                let candidate = PendingSnapshot {
+                    schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
+                    session_id: tip.snapshot.session_id,
+                    turn_id: tip.snapshot.turn_id,
+                    predecessor: Some(expected_tip_oid.to_string()),
+                    stage: PendingStage::BindingPlanned {
+                        plan: revised_plan.clone(),
+                        usage: *usage,
+                    },
+                    recorded_at: None,
+                    root: None,
+                };
+                let candidate_oid = self.write_pending_commit(
+                    &candidate,
+                    Some(expected_tip_oid),
+                    recorded_at_unix,
+                )?;
+                if candidate_oid == tip.oid {
+                    self.kernel().fsync_pending(&[ref_name.as_str()])?;
+                    return Ok(tip);
+                }
+            }
+            return Err(SessionError::Conflict(format!(
+                "active Turn tip changed from expected {expected_tip_oid} to {tip_oid}"
+            )));
+        }
+
+        let PendingStage::BindingPlanned { plan, usage } = &tip.snapshot.stage else {
+            return Err(SessionError::Conflict(
+                "candidate revision requires BindingPlanned".to_string(),
+            ));
+        };
+        if !is_candidate_revision_of(plan, &revised_plan) {
+            return Err(SessionError::Conflict(
+                "candidate revision must replace only every invocation UUID and binding digest"
+                    .to_string(),
+            ));
+        }
+
+        let next_stage = PendingStage::BindingPlanned {
+            plan: revised_plan,
+            usage: *usage,
+        };
+        let snapshot = PendingSnapshot {
+            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
+            session_id: tip.snapshot.session_id,
+            turn_id: tip.snapshot.turn_id,
+            predecessor: Some(tip_oid.to_string()),
+            stage: next_stage,
+            recorded_at: None,
+            root: None,
+        };
+        snapshot.validate()?;
+        let oid = self.write_pending_commit(&snapshot, Some(tip_oid), recorded_at_unix)?;
+        validation::publish_session_edits(
+            self.kernel(),
+            session_id,
+            vec![RefTxnEdit {
+                name: ref_name,
+                expect: RefExpectation::MustMatch(expected_tip_oid),
+                new: Some(oid),
+            }],
+        )
+        .map_err(state::map_cas_conflict)?;
         self.read_pending_snapshot_at(oid)
     }
 
@@ -617,14 +876,14 @@ impl GitSessionGraphStore {
         });
 
         // Any CAS failure leaves the whole transaction unpublished.
-        self.kernel()
-            .ref_transaction(&edits)
-            .map_err(|err| match err {
+        validation::publish_session_edits(self.kernel(), session_id, edits).map_err(
+            |err| match err {
                 lattice_store::StoreError::CasConflict { detail, .. } => {
                     SessionError::Conflict(format!("final turn publication conflict: {detail}"))
                 }
                 other => SessionError::Store(other),
-            })?;
+            },
+        )?;
 
         let mut published: Vec<String> = vec![pin_ref.clone(), ref_name.clone()];
         if let SessionHead::Attached { branch } = &session_state.head {

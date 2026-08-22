@@ -1,0 +1,464 @@
+{
+  "$comment": [
+    "Diagnostic manifest for the suspended #139-A InvocationStore qualification.",
+    "Thresholds, run counts, and sample shapes remain centralized here so later",
+    "redesign work can compare evidence without treating a verdict as a blocker.",
+    "The strict adjudicator is retained for follow-up GitHub #153.",
+    "Record: docs/plans/2026-08-21-issue139a-qualification-contract-v2.md"
+  ],
+  "enforcement_status": "diagnostic_only",
+  "follow_up_issue": 153,
+  "qualification_contract_version": 2,
+  "required_harness_shape_version": 2,
+  "attribution_estimator_revision": 2,
+  "baseline_provenance": {
+    "source_sha": "742cfd205e0c21608d27d1fcde073d1a7e4c0b3e",
+    "harness_shape_version": 2,
+    "qualification_contract_version": 2,
+    "bundle_identity": "20260821T192437Z-742cfd205e0c",
+    "bundle_path": "target/invocation-store-bundles/20260821T192437Z-742cfd205e0c"
+  },
+  "finalize_budget_ns": 60000000000,
+  "backoff_cap_ns": 1000000000,
+  "cas_retry_mode": "structural_zero_under_exclusive_repository_flock",
+  "groups": {
+    "local-ledger": {
+      "file": "local-ledger.jsonl",
+      "runs": 10,
+      "required": true,
+      "required_in_report": true,
+      "runs_basis": "writer ratio cv 0.05 %, max-consecutive-wait cv 0 %, lock-wait upper values within 0.9 %: three of four gates are structurally deterministic and the fourth keeps a 1.7x margin",
+      "sample_counts": {
+        "reserve_batch_ns": 160,
+        "dispatch_started_ns": 1280,
+        "terminal_evidence_publish_ns": 1280
+      }
+    },
+    "result-finalize": {
+      "file": "result-finalize.jsonl",
+      "runs": 20,
+      "required": true,
+      "required_in_report": true,
+      "runs_basis": "family B needs stall exposure: P(observe >=1 host stall window) = 1 - 0.6^n, 0.92 at n=5 and ~1.00 at n=20, for ~5.4 min of campaign time",
+      "sample_counts": {
+        "full_terminal_finalize_ns": 160,
+        "terminal_evidence_publish_ns": 160,
+        "dispatch_started_ns": 160,
+        "session_journal_pin_ns": 160,
+        "reserve_batch_ns": 20,
+        "result_draft_publish_ns": 40,
+        "uncertain_draft_revalidation_ns": 60
+      }
+    },
+    "cold-reopen": {
+      "file": "cold-reopen.jsonl",
+      "runs": 8,
+      "required": true,
+      "required_in_report": false,
+      "runs_basis": "commits and checkpoint_plans are exact integers; each run carries 20 samples, so n=8 yields 160 samples per distribution",
+      "sample_counts": {
+        "cold_read_with_checkpoint_ns": 20,
+        "cold_read_without_checkpoint_ns": 20,
+        "repeated_project_facts_ns": 20
+      }
+    }
+  },
+  "gates": [
+    {
+      "id": "D-local-invocations",
+      "family": "D",
+      "group": "local-ledger",
+      "estimator": "exact_every_run",
+      "field": "invocations",
+      "equals": 1280,
+      "basis": "LOCAL_LEDGER_STRESS is 8 sessions x 20 steps x 8 invocations"
+    },
+    {
+      "id": "D-local-per-writer-completed",
+      "family": "D",
+      "group": "local-ledger",
+      "estimator": "exact_every_run",
+      "field": "per_writer_completed",
+      "equals": [340, 340, 340, 340, 340, 340, 340, 340],
+      "basis": "every one of the eight writers completes the same number of writes"
+    },
+    {
+      "id": "D-local-indeterminate",
+      "family": "D",
+      "group": "local-ledger",
+      "estimator": "sum_over_runs",
+      "field": "unexpected_indeterminate_count",
+      "equals": 0,
+      "basis": "ADR 0005: an unexpected Indeterminate terminal is corruption"
+    },
+    {
+      "id": "D-local-cas-retries",
+      "family": "D",
+      "group": "local-ledger",
+      "estimator": "sum_over_runs",
+      "field": "cas_retry_count",
+      "equals": 0,
+      "basis": "structural zero: the exclusive repository flock admits no competing cooperating CAS writer"
+    },
+    {
+      "id": "D-finalize-invocations",
+      "family": "D",
+      "group": "result-finalize",
+      "estimator": "exact_every_run",
+      "field": "invocations",
+      "equals": 160,
+      "basis": "RESULT_FINALIZE_STRESS is 20 steps x 8 invocations"
+    },
+    {
+      "id": "D-finalize-draft-classes",
+      "family": "D",
+      "group": "result-finalize",
+      "estimator": "exact_every_run_tuple",
+      "fields": ["clean_absent_count", "uncertain_count", "durable_count"],
+      "equals": [60, 60, 40],
+      "basis": "draft classes rotate index % 3 over 160 bindings"
+    },
+    {
+      "id": "D-finalize-repository-creates",
+      "family": "D",
+      "group": "result-finalize",
+      "estimator": "exact_every_run_tuple",
+      "fields": [
+        "session_repository_create_count",
+        "invocation_repository_create_count",
+        "timed_finalize_repository_create_count"
+      ],
+      "equals": [1, 1, 0],
+      "basis": "harness shape 2: one global sessions.git and one invocations.git, both first-created before the timer"
+    },
+    {
+      "id": "D-finalize-indeterminate",
+      "family": "D",
+      "group": "result-finalize",
+      "estimator": "sum_over_runs",
+      "field": "unexpected_indeterminate_count",
+      "equals": 0,
+      "basis": "ADR 0005: an unexpected Indeterminate terminal is corruption"
+    },
+    {
+      "id": "D-finalize-cas-retries",
+      "family": "D",
+      "group": "result-finalize",
+      "estimator": "sum_over_runs",
+      "field": "cas_retry_count",
+      "equals": 0,
+      "basis": "structural zero under the exclusive repository flock"
+    },
+    {
+      "id": "D-cold-commits",
+      "family": "D",
+      "group": "cold-reopen",
+      "estimator": "exact_every_run",
+      "field": "commits",
+      "equals": 2561,
+      "basis": "the cold-reopen ledger depth is deterministic for this harness shape"
+    },
+    {
+      "id": "D-cold-checkpoint-plans",
+      "family": "D",
+      "group": "cold-reopen",
+      "estimator": "exact_every_run",
+      "field": "checkpoint_plans_after_restart_writes",
+      "equals": 1224,
+      "basis": "restart-anchoring evidence: a writer that reopens before each write still anchors"
+    },
+    {
+      "id": "D-cold-writer-handle-lifetime",
+      "family": "D",
+      "group": "cold-reopen",
+      "estimator": "exact_every_run",
+      "field": "writer_handle_lifetime",
+      "equals": "one_open_per_write",
+      "basis": "the cold benchmark must not amortize opens across writes"
+    },
+
+    {
+      "id": "T-finalize-full-p50",
+      "family": "T",
+      "group": "result-finalize",
+      "estimator": "median_of_run_quantile",
+      "metric": "full_terminal_finalize_ns",
+      "quantile": 0.5,
+      "baseline_ns": 50550579,
+      "tolerance_pct": 10,
+      "absolute_max_ns": 100000000,
+      "basis": "run-to-run sd 0.56 %; same-code control ca768c80 vs 3ee216ba differs 0.9 %"
+    },
+    {
+      "id": "T-finalize-full-p90",
+      "family": "T",
+      "group": "result-finalize",
+      "estimator": "median_of_run_quantile",
+      "metric": "full_terminal_finalize_ns",
+      "quantile": 0.9,
+      "baseline_ns": 59740248,
+      "tolerance_pct": 10,
+      "absolute_max_ns": 120000000,
+      "basis": "run-to-run sd 1.63 %; same-code control differs 0.3 %"
+    },
+    {
+      "id": "T-finalize-terminal-p50",
+      "family": "T",
+      "group": "result-finalize",
+      "estimator": "median_of_run_quantile",
+      "metric": "terminal_evidence_publish_ns",
+      "quantile": 0.5,
+      "baseline_ns": 17213426,
+      "tolerance_pct": 10,
+      "absolute_max_ns": 50000000,
+      "basis": "replaces the v1 p99 <= 50 ms gate with an estimator that can be estimated"
+    },
+    {
+      "id": "T-finalize-journal-pin-p50",
+      "family": "T",
+      "group": "result-finalize",
+      "estimator": "median_of_run_quantile",
+      "metric": "session_journal_pin_ns",
+      "quantile": 0.5,
+      "baseline_ns": 26582688,
+      "tolerance_pct": 10,
+      "absolute_max_ns": 50000000,
+      "basis": "the StepClosing candidate pin is on the FinalizeBudget critical path"
+    },
+    {
+      "id": "T-finalize-dispatch-p50",
+      "family": "T",
+      "group": "result-finalize",
+      "estimator": "median_of_run_quantile",
+      "metric": "dispatch_started_ns",
+      "quantile": 0.5,
+      "baseline_ns": 17256762,
+      "tolerance_pct": 10,
+      "absolute_max_ns": 50000000,
+      "basis": "durable DispatchStarted publication"
+    },
+    {
+      "id": "T-finalize-reserve-batch-p50",
+      "family": "T",
+      "group": "result-finalize",
+      "estimator": "median_of_run_quantile",
+      "metric": "reserve_batch_ns",
+      "quantile": 0.5,
+      "baseline_ns": 17723811,
+      "tolerance_pct": 10,
+      "absolute_max_ns": 50000000,
+      "basis": "exact ordered batch reservation"
+    },
+    {
+      "id": "T-finalize-draft-publish-p50",
+      "family": "T",
+      "group": "result-finalize",
+      "estimator": "median_of_run_quantile",
+      "metric": "result_draft_publish_ns",
+      "quantile": 0.5,
+      "baseline_ns": 3577259,
+      "tolerance_pct": 10,
+      "absolute_max_ns": 25000000,
+      "basis": "durable-first draft publication"
+    },
+    {
+      "id": "T-finalize-revalidation-p50",
+      "family": "T",
+      "group": "result-finalize",
+      "estimator": "median_of_run_quantile",
+      "metric": "uncertain_draft_revalidation_ns",
+      "quantile": 0.5,
+      "baseline_ns": 2212066,
+      "tolerance_pct": 10,
+      "absolute_max_ns": 25000000,
+      "basis": "the shape-1 1 ms p99 threshold is VOID: it measured a strict open of a per-step sessions-N.git, not of the global sessions.git this shape uses"
+    },
+    {
+      "id": "T-cold-read-with-checkpoint-p50",
+      "family": "T",
+      "group": "cold-reopen",
+      "estimator": "median_of_run_quantile",
+      "metric": "cold_read_with_checkpoint_ns",
+      "quantile": 0.5,
+      "baseline_ns": 43061319,
+      "tolerance_pct": 15,
+      "absolute_max_ns": 60000000,
+      "basis": "authenticated checkpoint cold read is O(state bytes) plus a bounded delta replay"
+    },
+    {
+      "id": "T-cold-checkpoint-speedup",
+      "family": "T",
+      "group": "cold-reopen",
+      "estimator": "ratio_of_median_of_run_quantile",
+      "numerator": "cold_read_without_checkpoint_ns",
+      "denominator": "cold_read_with_checkpoint_ns",
+      "quantile": 0.5,
+      "minimum_ratio": 5.0,
+      "basis": "L-GH139A-02: the checkpoint must keep cold reopen off the genesis-replay path"
+    },
+
+    {
+      "id": "S-finalize-revalidation-drift",
+      "family": "S",
+      "group": "result-finalize",
+      "estimator": "within_run_drift",
+      "metric": "uncertain_draft_revalidation_ns",
+      "buckets": 8,
+      "maximum_ratio": 1.15,
+      "basis": "ADR 0005 requires per-operation cost decoupled from history depth; a monotone within-run rise falsifies that claim directly"
+    },
+    {
+      "id": "S-finalize-full-drift",
+      "family": "S",
+      "group": "result-finalize",
+      "estimator": "within_run_drift",
+      "metric": "full_terminal_finalize_ns",
+      "buckets": 8,
+      "maximum_ratio": 1.15,
+      "basis": "same invariant applied to the whole finalize span"
+    },
+    {
+      "id": "S-finalize-journal-pin-drift",
+      "family": "S",
+      "group": "result-finalize",
+      "estimator": "within_run_drift",
+      "metric": "session_journal_pin_ns",
+      "buckets": 8,
+      "maximum_ratio": 1.15,
+      "basis": "campaign-scale drift of the StepClosing pin"
+    },
+    {
+      "id": "S-finalize-dispatch-drift",
+      "family": "S",
+      "group": "result-finalize",
+      "estimator": "within_run_drift",
+      "metric": "dispatch_started_ns",
+      "buckets": 8,
+      "maximum_ratio": 1.15,
+      "basis": "the invocation ledger must not slow its own appends as it deepens"
+    },
+
+    {
+      "id": "B-finalize-full-max",
+      "family": "B",
+      "group": "result-finalize",
+      "estimator": "max_over_samples",
+      "metric": "full_terminal_finalize_ns",
+      "maximum_ns": 10000000000,
+      "basis": "coupled to FinalizeBudget: lock_wait_gate + 2 x full_finalize_gate + backoff_cap <= FinalizeBudget"
+    },
+    {
+      "id": "B-finalize-revalidation-max",
+      "family": "B",
+      "group": "result-finalize",
+      "estimator": "max_over_samples",
+      "metric": "uncertain_draft_revalidation_ns",
+      "maximum_ns": 25000000,
+      "basis": "exact uncertain-draft revalidation runs inside the FinalizeBudget"
+    },
+    {
+      "id": "B-local-lock-wait-max",
+      "family": "B",
+      "group": "local-ledger",
+      "estimator": "max_of_run_field",
+      "field": "repository.repository_lock_wait_max_ns",
+      "maximum_ns": 20000000000,
+      "basis": "one worst contended acquisition must fit inside the budget chain"
+    },
+
+    {
+      "id": "F-local-writer-ratio",
+      "family": "F",
+      "group": "local-ledger",
+      "estimator": "max_of_run_field",
+      "field": "writer_wall_max_to_min_ratio_milli",
+      "maximum": 1500,
+      "scale": 1000,
+      "basis": "FIFO ticket queue fairness; a reintroduced barging lock measured 1.414"
+    },
+    {
+      "id": "F-local-max-consecutive-wait",
+      "family": "F",
+      "group": "local-ledger",
+      "estimator": "max_of_run_field",
+      "field": "max_consecutive_wait",
+      "maximum": 16,
+      "basis": "twice the writer count; a fair queue cannot structurally exceed N-1 = 7"
+    },
+    {
+      "id": "F-local-wall-median",
+      "family": "F",
+      "group": "local-ledger",
+      "estimator": "median_of_run_field",
+      "field": "wall_ns",
+      "maximum_ns": 120000000000,
+      "basis": "replaces the v1 wall p95, which is ill-defined at n=10"
+    },
+    {
+      "id": "F-local-wall-max",
+      "family": "F",
+      "group": "local-ledger",
+      "estimator": "max_of_run_field",
+      "field": "wall_ns",
+      "maximum_ns": 170000000000,
+      "basis": "unchanged upper bound from the v1 record"
+    },
+
+    {
+      "id": "A-finalize-stall-attribution",
+      "family": "A",
+      "group": "result-finalize",
+      "estimator": "stall_attribution",
+      "metric": "full_terminal_finalize_ns",
+      "stall_threshold_ns": 100000000,
+      "attribution_estimator_revision": 2,
+      "in_span_components": [
+        "session_journal_pin_ns",
+        "terminal_evidence_publish_ns"
+      ],
+      "residual_component": "residual_ns",
+      "substantial_share": 0.25,
+      "min_contributing_components": 2,
+      "max_unattributed_clusters": 0,
+      "basis": "full_terminal_finalize is partitioned into pin, terminal, and residual on the same sample; a cluster is attributed iff at least two components each hold >= 1/4 of the summed positive excess against that run's own p50. 1/4 is the largest dyadic fraction that lets two components both be substantial without either needing a majority (unusable on a two-way pin/terminal split). dispatch_started and the run-wide append barrier are out of span and unused. A single substantial component, including residual, is implementation-side. An unattributed cluster fails at count >= 1."
+    }
+  ],
+  "diagnostics": [
+    {
+      "id": "diag-run-incidence-full",
+      "group": "result-finalize",
+      "metric": "full_terminal_finalize_ns",
+      "estimator": "run_incidence",
+      "threshold_ns": 100000000,
+      "note": "v1's enforcing gate, retained as a comparable series only. per-run p99 of 160 samples is the 2nd-order statistic; its run-to-run sd is 1728 % of its own value and it flipped verdict on byte-identical code (ca768c80 10/20 vs 3ee216ba 4/20). K is VOID."
+    },
+    {
+      "id": "diag-run-incidence-terminal",
+      "group": "result-finalize",
+      "metric": "terminal_evidence_publish_ns",
+      "estimator": "run_incidence",
+      "threshold_ns": 50000000,
+      "note": "as above"
+    },
+    {
+      "id": "diag-pooled-quantiles",
+      "group": "result-finalize",
+      "estimator": "pooled_distribution",
+      "note": "pooled p50/p95/p99/max over every sample, for continuity with the historical record. Never a verdict."
+    },
+    {
+      "id": "diag-stall-clusters",
+      "group": "result-finalize",
+      "estimator": "stall_clusters",
+      "metric": "full_terminal_finalize_ns",
+      "threshold_ns": 100000000,
+      "note": "cluster count, lengths, and per-cluster stage attribution detail"
+    },
+    {
+      "id": "diag-timed-untimed-split",
+      "group": "result-finalize",
+      "estimator": "timed_untimed_split",
+      "note": "process duration from run-conditions.jsonl minus the harness wall. A host stall landing outside the timer must be visible, not a free pass."
+    }
+  ]
+}
