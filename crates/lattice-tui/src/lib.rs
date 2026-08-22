@@ -1,10 +1,27 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Inline CLI chat for LATTICE — REPL over stdin/stdout, no alternate screen.
+//! Full-screen TUI shell for LATTICE.
 
 mod app;
-mod runtime;
+mod input;
+mod session;
+mod view;
 
-pub use app::{AppConfig, AppEvent};
-pub use runtime::{TuiOptions, run};
+use std::path::PathBuf;
+
+#[derive(Clone, Debug)]
+pub struct TuiOptions {
+    pub session_id: Option<String>,
+    pub agent: String,
+    pub project_branch: Option<String>,
+    pub session_dir: PathBuf,
+    pub agents_dir: PathBuf,
+    pub project_root: PathBuf,
+}
+
+pub async fn run(options: TuiOptions) -> anyhow::Result<std::process::ExitCode> {
+    let ctx = session::open_or_create(&options)?;
+    app::run_app(options, ctx).await?;
+    Ok(std::process::ExitCode::SUCCESS)
+}

@@ -7,13 +7,16 @@
 //! scenarios that prove the TUI entrypoint still wires into the same
 //! `stream_turn` chain. It does **not** assert on colors, prompt shape, or
 //! layout — those are prototype presentation details that must not become
-//! long-term contract. Prompt recognition and ANSI cleanup live **inside this
-//! driver** only; scenario-level assertions never touch display details.
+//! long-term contract. Ready recognition (alternate-screen enter) and ANSI
+//! cleanup live **inside this driver** only; scenario-level assertions never
+//! touch display details.
 //!
 //! Linux-only. The driver is built on `portable-pty`, a general test library
 //! that satisfies the harness boundary (no product crate deps).
 
 use std::io::{Read, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -22,11 +25,16 @@ use thiserror::Error;
 use crate::driver::{LatticeDriver, kill_process_group};
 use crate::world::ScenarioWorld;
 
-/// Max bytes drained from the PTY before we stop reading. The TUI prints a
-/// banner + token stream + status lines; a plain-text turn is well under
-/// 64 KiB. Anything larger is either a runaway or a display bug, neither of
-/// which a smoke scenario should swallow silently.
-const READ_BUDGET: usize = 256 * 1024;
+/// Max bytes drained from the PTY before we stop reading. A full-screen TUI
+/// redraws whole frames, so byte count is no longer proportional to visible
+/// content. 4 MiB bounds a runaway painter without treating a normal session
+/// as a display bug.
+const READ_BUDGET: usize = 4 * 1024 * 1024;
+
+/// CSI enter-alternate-screen (`ESC [ ? 1049 h`). Terminal protocol, not a
+/// presentation detail — this is how the driver knows the full-screen TUI
+/// has taken over the PTY and is ready for input.
+const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 
 #[derive(Debug, Error)]
 pub enum PtyError {
@@ -34,15 +42,24 @@ pub enum PtyError {
     Io(#[from] std::io::Error),
     #[error("pty: {0}")]
     Pty(String),
-    #[error("tui did not produce output within {0:?}")]
-    Timeout(Duration),
+    /// Timed out waiting for output. Carries a bounded, ANSI-stripped tail of
+    /// what the TUI *did* emit: without it a quiet TUI is indistinguishable
+    /// from a dead one, which turns a one-line bug into a blind CI timeout.
+    #[error("tui did not produce matching output within {0:?}; last output: {1:?}")]
+    Timeout(Duration, String),
 }
 
 /// A live PTY-backed TUI session. Drop kills and reaps the child so no TUI
 /// process survives the scenario (PRD user story 20: process-group cleanup).
 pub struct PtyTuiDriver {
+    /// Kept alive so the PTY stays open; the reader thread owns a clone.
+    #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
     master_writer: Box<dyn Write + Send>,
+    /// Chunks drained by a background reader thread. The thread owns the only
+    /// blocking read, so `drain_until` can honour its deadline instead of
+    /// parking forever on a quiet PTY.
+    rx: Receiver<Vec<u8>>,
     /// Used to kill the child directly (best-effort) on drop/timeout.
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     /// The child itself, kept so `kill_and_reap` can `try_wait` to reap the
@@ -116,9 +133,33 @@ impl PtyTuiDriver {
         // Drop the slave so EOF propagates to the child when the master closes.
         drop(pair.slave);
 
+        // One blocking read lives in this thread; the driver only ever waits on
+        // the channel. A full-screen TUI is silent whenever nothing changes, so
+        // a deadline that is only checked *after* a read returns is no deadline
+        // at all — it parks until the process dies.
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| PtyError::Pty(e.to_string()))?;
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(Self {
             master: pair.master,
             master_writer: writer,
+            rx,
             killer,
             child: Some(child),
             pgid,
@@ -126,72 +167,128 @@ impl PtyTuiDriver {
         })
     }
 
-    /// Send a line to the TUI's stdin (the prompt input). Appends `\n` so
-    /// rustyline's readline treats it as Enter.
+    /// Send a line to the TUI's prompt input, terminated by `\r` (carriage
+    /// return) — what a real terminal sends when the user presses Enter.
+    ///
+    /// `\r`, not `\n`, is load-bearing. The full-screen TUI runs in raw mode,
+    /// and crossterm only maps `\n` to `KeyCode::Enter` when raw mode is
+    /// *disabled* (crossterm issue #371: with the line discipline off, `\n`
+    /// is Ctrl+J, not Enter). A line terminated by `\n` therefore lands in the
+    /// input buffer and is never submitted — the turn silently never starts.
+    /// The inline REPL tolerated `\n` because readline ran in cooked mode.
     pub fn send_line(&mut self, line: &str) -> Result<(), PtyError> {
         self.master_writer
             .write_all(line.as_bytes())
-            .and_then(|_| self.master_writer.write_all(b"\n"))?;
+            .and_then(|_| self.master_writer.write_all(b"\r"))?;
         self.master_writer.flush()?;
         Ok(())
     }
 
     /// Drain PTY output until `predicate` returns `true` on the accumulated
-    /// output (with ANSI escapes stripped for matching only), or until
-    /// `timeout` elapses. Returns the raw accumulated bytes on success.
+    /// output (with ANSI escapes stripped and consecutive whitespace collapsed
+    /// for matching only), or until `timeout` elapses. Returns the raw
+    /// accumulated bytes on success.
     ///
-    /// The predicate matches against ANSI-stripped text so a smoke scenario
-    /// can wait for a semantic marker (e.g. a token, a status word) without
-    /// depending on colors or cursor moves — keeping presentation details
-    /// out of the long-term contract (RFC #41 decision five).
+    /// The predicate matches against ANSI-stripped, whitespace-collapsed text
+    /// so a smoke scenario can wait for a semantic marker (e.g. a token, a
+    /// status word) without depending on colors, cursor moves, or 24×80 wrap
+    /// — keeping presentation details out of the long-term contract (RFC #41
+    /// decision three / five).
     pub fn wait_for(
         &mut self,
         timeout: Duration,
         predicate: impl Fn(&str) -> bool,
     ) -> Result<Vec<u8>, PtyError> {
+        self.drain_until(timeout, |raw| {
+            let stripped = strip_ansi(&String::from_utf8_lossy(raw));
+            predicate(&collapse_ws(&stripped))
+        })
+    }
+
+    /// Drain PTY output until `predicate` returns `true` on the accumulated
+    /// **raw** bytes (ANSI preserved). Used for terminal-protocol facts such
+    /// as alternate-screen enter, which `strip_ansi` would remove.
+    pub fn wait_for_raw(
+        &mut self,
+        timeout: Duration,
+        predicate: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>, PtyError> {
+        self.drain_until(timeout, predicate)
+    }
+
+    /// Wait until the TUI has entered the alternate screen. This is the
+    /// **ready-recognition seam**: the sequence `\x1b[?1049h` lives inside
+    /// the driver, never in a scenario (RFC #41 decision three — "prompt
+    /// recognition and ANSI cleanup only exist inside the driver; scenarios
+    /// assert no display details"). A scenario that needs to know the TUI is
+    /// ready for input calls this, not `wait_for(..., |s| s.contains('>'))`.
+    ///
+    /// Alternate-screen enter is a terminal protocol fact, not a presentation
+    /// detail, and is stricter than matching a prompt character the
+    /// full-screen shell never prints.
+    pub fn wait_for_ready(&mut self, timeout: Duration) -> Result<Vec<u8>, PtyError> {
+        self.wait_for_raw(timeout, |bytes| {
+            bytes
+                .windows(ENTER_ALTERNATE_SCREEN.len())
+                .any(|window| window == ENTER_ALTERNATE_SCREEN)
+        })
+    }
+
+    fn drain_until(
+        &mut self,
+        timeout: Duration,
+        mut predicate: impl FnMut(&[u8]) -> bool,
+    ) -> Result<Vec<u8>, PtyError> {
         let start = Instant::now();
-        let mut buf = [0u8; 4096];
-        let mut reader = self
-            .master
-            .try_clone_reader()
-            .map_err(|e| PtyError::Pty(e.to_string()))?;
+        // The predicate may already hold (bytes drained by an earlier wait).
+        if predicate(&self.output) {
+            return Ok(self.output.clone());
+        }
         loop {
-            // portable-pty's reader is blocking; one best-effort `read` per
-            // iteration, bounded by `timeout`. A quiet PTY is a real failure
-            // surfaced by the timeout (the scenario always sends input that
-            // produces output).
-            let n = reader.read(&mut buf)?;
-            if n > 0 {
-                self.output.extend_from_slice(&buf[..n]);
-                if self.output.len() > READ_BUDGET {
-                    return Err(PtyError::Pty(format!(
-                        "PTY output exceeded {READ_BUDGET} byte budget"
-                    )));
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return Err(PtyError::Timeout(timeout, self.tail_for_diagnostics()));
+            }
+            match self
+                .rx
+                .recv_timeout(remaining.min(Duration::from_millis(200)))
+            {
+                Ok(chunk) => {
+                    self.output.extend_from_slice(&chunk);
+                    if self.output.len() > READ_BUDGET {
+                        return Err(PtyError::Pty(format!(
+                            "PTY output exceeded {READ_BUDGET} byte budget"
+                        )));
+                    }
+                    if predicate(&self.output) {
+                        return Ok(self.output.clone());
+                    }
                 }
-                let stripped = strip_ansi(&String::from_utf8_lossy(&self.output));
-                if predicate(&stripped) {
-                    return Ok(self.output.clone());
+                Err(RecvTimeoutError::Timeout) => {}
+                // Reader thread ended: the child closed the PTY. Nothing more
+                // can arrive, so fail now rather than burning the deadline.
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(PtyError::Timeout(
+                        start.elapsed(),
+                        format!("pty closed; {}", self.tail_for_diagnostics()),
+                    ));
                 }
             }
-            if start.elapsed() >= timeout {
-                return Err(PtyError::Timeout(timeout));
-            }
-            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
-    /// Wait for the TUI prompt to appear. This is the **prompt-recognition
-    /// seam**: the prompt shape (`>`) lives inside the driver, never in a
-    /// scenario (RFC #41 decision three — "prompt recognition and ANSI
-    /// cleanup only exist inside the driver; scenarios assert no display
-    /// details"). A scenario that needs to know the TUI is ready for input
-    /// calls this, not `wait_for(..., |s| s.contains('>'))`.
-    ///
-    /// The match is intentionally loose: a smoke scenario only needs to know
-    /// the TUI produced a prompt-like marker and is accepting input, not the
-    /// prompt's exact bytes. ANSI is stripped before matching.
-    pub fn wait_for_prompt(&mut self, timeout: Duration) -> Result<Vec<u8>, PtyError> {
-        self.wait_for(timeout, |s| s.contains('>'))
+    /// Bounded, ANSI-stripped tail of the drained output, for error messages.
+    fn tail_for_diagnostics(&self) -> String {
+        let text = collapse_ws(&strip_ansi(&String::from_utf8_lossy(&self.output)));
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(300)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        tail
     }
 
     /// The accumulated raw PTY output so far.
@@ -235,6 +332,31 @@ impl PtyTuiDriver {
             // portable-pty's Child drop on Linux forgets (no kill/wait), so
             // the zombie may linger, but we have done our best within a
             // bounded window.
+        }
+    }
+
+    /// Wait for the child to exit **on its own**, without killing it.
+    ///
+    /// A scenario that asserts "`/quit` exits cleanly" must observe the exit
+    /// before `Drop` runs: `kill_and_reap` would make a completely broken
+    /// `/quit` indistinguishable from a working one, since the survivor check
+    /// then only proves that SIGKILL works.
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> Result<(), PtyError> {
+        let child = match self.child.as_mut() {
+            Some(child) => child,
+            None => return Ok(()),
+        };
+        let start = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {}
+                Err(e) => return Err(PtyError::Pty(e.to_string())),
+            }
+            if start.elapsed() >= timeout {
+                return Err(PtyError::Timeout(timeout, self.tail_for_diagnostics()));
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 }
@@ -290,6 +412,12 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
+/// Collapse consecutive whitespace (including wrap-induced newlines) to a
+/// single space so scenario predicates match semantic text, not 24×80 layout.
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +443,20 @@ mod tests {
     #[test]
     fn strip_ansi_passes_plain_text_through() {
         assert_eq!(strip_ansi("plain text"), "plain text");
+    }
+
+    #[test]
+    fn collapse_ws_flattens_wrapped_frames() {
+        assert_eq!(collapse_ws("hello\n  world"), "hello world");
+        assert_eq!(collapse_ws("pong"), "pong");
+    }
+
+    #[test]
+    fn enter_alternate_screen_is_csi_1049h() {
+        assert_eq!(
+            ENTER_ALTERNATE_SCREEN,
+            &[0x1b, 0x5b, 0x3f, 0x31, 0x30, 0x34, 0x39, 0x68]
+        );
     }
 
     /// Tracer bullet: spawn `cat` in a PTY, send a line, wait for it to be

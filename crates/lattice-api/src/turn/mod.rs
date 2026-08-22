@@ -37,7 +37,7 @@ mod cep_tests;
 mod live_tests;
 
 pub use collector::collect_turn_result_from_events;
-pub use execute::{run_turn, stream_turn};
+pub use execute::{STREAM_IDLE_TIMEOUT_SECS, run_turn, stream_turn};
 pub use lifecycle::{
     LifecycleFailureKind, ResourceAction, TurnLifecycleOutcome, UnfinalizedTurn,
     classify_lifecycle_failure, finalize_turn, outcome_workspace_less,

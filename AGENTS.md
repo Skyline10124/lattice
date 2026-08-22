@@ -205,7 +205,7 @@ accumulating.
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
-| `lattice-tui` | Inline CLI chat REPL over `lattice-api` sessions and `stream_turn` via `rustyline` (no alternate screen, no ratatui/crossterm). Owns readline state, turn execution, and token/status rendering to stdout/stderr. |
+| `lattice-tui` | Full-screen TUI shell over `lattice-api` sessions and `stream_turn` (ratatui/crossterm, alternate screen). Owns terminal lifecycle, input state, transcript/status rendering, and the forthcoming transcript card renderer (#116) as this crate's `render/` module; `lattice-cli` consumes it through the existing `lattice-cli -> lattice-tui` edge. |
 | `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
 
 `lattice-store` landed in #143 and appears in the graph and table above; its
@@ -438,6 +438,10 @@ notification cannot create an invocation.
   profile→policy translation and the agent-loop wiring over `lancet-api`. Keep
   TUI terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
   output, non-interactive rendering, and argument parsing in `lattice-cli`.
+  Exception: shared transcript rendering sinks into `lattice-tui` (as the
+  `render/` module, #116), because `lattice-tui` cannot depend on `lattice-cli`
+  and shared presentation can only move downward. This also closes the #116
+  acceptance / #101 C5 boundary-drift note.
 - `lattice-workspace` was deleted in GitHub #62. Do not reintroduce an Upper/MSB
   workspace boundary, snapshot lifecycle, or a pluggable execution-backend
   seam in any crate.

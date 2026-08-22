@@ -6056,6 +6056,46 @@ was performed.
 `crates/lancet-runtime/**`, `crates/lattice-api/**`, `crates/lattice-cli/**`,
 `crates/lattice-system-harness/**`, `Cargo.lock`, and `FIX.md`.
 
+## GitHub #118: lattice-tui full-screen shell — 2026-08-22
+
+| ID | Severity | Problem | Fix |
+| --- | --- | --- | --- |
+| #118 | MAJOR | `lattice-tui` was an inline rustyline REPL (no alternate screen, no ratatui) with three known defects from #101 A9: no turn-stream idle timeout (a pending `stream.next()` hung forever), `error_summary` never displayed for failed tools, and a Ctrl-C bare window between watcher spawn and poll. | Rewrote `lattice-tui` as a full-screen ratatui/crossterm shell per `docs/plans/2026-08-22-issue118-tui-shell-design.md`: three regions (transcript / input / status), exhaustive `TurnEvent` match with no wildcard, generic tool status lines only (zero per-tool-name dispatch), pinned-follow viewport that never drags a scrolled-up reader, bracketed-paste never submits, Esc = cooperative cancel / clear-input, double-Ctrl-C exit. Idle-timeout constant sunk to `lattice_api::STREAM_IDLE_TIMEOUT_SECS` with a one-line re-export in `run.rs`; `error_summary` carried by `ToolState::Failed`; Ctrl-C is a raw-mode KeyEvent from the first frame (no watcher, no bare window). Deleted `runtime.rs`; `crates/lattice-cli/src/main.rs` unchanged. |
+| #118-CJK | MINOR | Transcript wrap and input-height math used `chars().count()` as display width; CJK glyphs occupy two terminal cells, so Chinese text overflowed the viewport and the input cursor landed wrong. | Switched all display-width math in `view.rs` to `unicode_width` (already pinned in the workspace; new consumer, not a new dependency). Buffer char indexing in `input.rs` intentionally unchanged. Added a narrow-width CJK wrap test. |
+| #118-PTY | BLOCKER (CI) | `pty_tui_smoke` runs in the normal CI lane; `wait_for_prompt` matched `>` in ANSI-stripped text (full-screen apps print no prompt) and `READ_BUDGET = 256 KiB` is exhausted in seconds by a frame-redrawing app. | Added `wait_for_raw` (raw-byte predicate), renamed `wait_for_prompt` → `wait_for_ready` matching the alternate-screen entry sequence `\x1b[?1049h`, raised `READ_BUDGET` to 4 MiB, updated the smoke call site. |
+| #118-PTY-CR | BLOCKER (CI) | `send_line` terminated input with `\n`. The full-screen TUI runs in raw mode, where crossterm maps `\n` to Ctrl+J rather than `KeyCode::Enter` (crossterm #371); the prompt landed in the input buffer and no turn ever started, so the smoke hung until the CI-level timeout. The inline REPL tolerated `\n` because readline ran in cooked mode. | `send_line` now writes `\r`, what a real terminal sends for Enter in raw mode. |
+| #118-PTY-DEADLINE | MAJOR | `drain_until` checked its deadline only *after* a blocking read returned. A full-screen TUI is silent whenever nothing changes, so the scenario's 30s/60s bounds never fired: the crate hit the CI timeout with no diagnostic, turning a one-line bug into a blind hunt. | Moved the single blocking read into a reader thread feeding an mpsc channel; `drain_until` waits with `recv_timeout`, fails fast when the PTY closes, and the timeout error now carries an ANSI-stripped tail of what the TUI did emit. |
+
+### Review round 1 (double-axis: standards + spec), all applied
+
+| ID | Severity | Problem | Fix |
+| --- | --- | --- | --- |
+| #118-R1 | BLOCKER | The stream idle timeout could never fire. `poll_turn` built a *relative* `tokio::time::timeout(300s, ...)` inside `tokio::select!`, and the 33 ms frame ticker wins that race ~30x a second, so the future was dropped and rebuilt with a fresh deadline before it could ever elapse — the #101 A9 defect 1 fix was functionally inert. | Hoisted an **absolute** `tokio::time::Instant` deadline into the loop, set when a turn starts and pushed forward only by events that actually arrive; `poll_turn` now uses `timeout_at`. Added `idle_deadline_survives_repeated_poll_rebuilds`, which drives a never-yielding stream through repeated rebuilds and asserts the bound fires *at* the original deadline. Verified by injection: the test fails against the old code with "deadline was reset by rebuilding: fired 200s late". |
+| #118-R2 | MAJOR | Viewport math reserved the wrong input height: the draw path reserved *wrapped* rows (`input_visual_height`, 1–6) while `transcript_height` counted *logical* lines, so a long single line wrapping to six rows left follow-to-bottom and page size disagreeing with the screen and hid the last transcript rows. | `transcript_height` now calls the same `view::input_visual_height` the draw path uses. |
+| #118-R3 | MAJOR | `pty_tui_smoke` could not fail on a broken `/quit`: it slept 500 ms and then dropped the driver, whose `Drop` kills the process group — so the survivor assertion only ever proved SIGKILL works. | Added `PtyTuiDriver::wait_for_exit`, which polls `try_wait` without killing; the scenario now requires the TUI to exit on its own before `Drop`. Verified by injection: with `/quit` made a no-op the test fails with the driver's diagnostic tail instead of passing. |
+| #118-R4 | MINOR | `insert_paste` stripped every `\r`, so a paste whose newlines arrive as bare CR (a real terminal convention) collapsed into one line. | Normalise `\r\n` and lone `\r` to `\n` before splitting; the paste test now covers all three conventions. |
+| #118-R5 | MINOR | Six places still described the deleted rustyline inline REPL: `README.md` (crate table + quick start), `docs/GETTING-STARTED.md`, `docs/ARCHITECTURE.md` (turn walkthrough + crate list), and the `lattice-tui` crate description. | All six updated to the full-screen ratatui shell, matching the new AGENTS.md Crate Roles row. |
+| #118-R6 | MINOR | Four acceptance tests did not prove their names: the paste test resolved an unrelated printable key, the history test only moved the cursor, the tool-completion test had a single tool in flight (so "matching id" was unfalsifiable), and the locale test passed `false` by hand instead of exercising `locale_utf8()`. | Each strengthened to drive the named path: three paste conventions, real `History` prev/next, three concurrent tools with the other two required to stay `Running`, and a real `LC_ALL`/`LANG` swap with restoration. |
+| #118-R7 | NIT | `App::new` built its history from `Path::new("")`, immediately overwritten by `run_app`. | `App::new` takes `session_dir`; the double construction is gone. |
+
+### Verification
+
+- `cargo fmt --all --check` — clean.
+- `cargo test -p lattice-tui` — 24 unit tests pass (state machines only; one
+  `TestBackend` smoke asserts the three regions render without panic).
+- `LATTICE_BIN="$PWD/target/debug/lattice" cargo test -p lattice-system-harness` —
+  `pty_tui_smoke` and `direct_failures` pass.
+- `env -u LATTICE_BIN cargo xtask ci` — passed.
+
+### Changed files
+
+`crates/lattice-tui/**` (rewritten; `runtime.rs` deleted),
+`crates/lattice-api/src/turn/execute.rs` (`STREAM_IDLE_TIMEOUT_SECS`),
+`crates/lattice-cli/src/commands/run.rs` (one-line re-export),
+`crates/lattice-system-harness/src/pty_tui.rs`,
+`crates/lattice-system-harness/tests/pty_tui_smoke.rs`,
+root `AGENTS.md`, `crates/lattice-tui/AGENTS.md`, `Cargo.toml`, `Cargo.lock`,
+`docs/plans/2026-08-22-issue118-tui-shell-design.md`, `FIX.md`.
 ## GitHub #139-A: InvocationStore qualification and review repairs — 2026-08-17
 
 | ID | Severity | Problem | Fix |

@@ -249,6 +249,9 @@ fn production_llm(request: &RunTurnRequest) -> Arc<dyn lattice_agent::LlmClient>
     Arc::new(RealLlmClient)
 }
 
+/// Idle timeout shared by every `stream_turn` consumer (CLI `run` and the TUI).
+pub const STREAM_IDLE_TIMEOUT_SECS: u64 = 300;
+
 /// Execute a turn and return its events as a live stream.
 pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result<TurnEventStream> {
     if request.loaded_profile.is_none() {

@@ -112,7 +112,7 @@ bound to an agent profile and project branch, then send a prompt.
    error exits with code `2` (verified in
    `crates/lattice-cli/src/commands/run.rs`, exit-code section).
 
-4. (Optional) Open an interactive inline REPL over the session:
+4. (Optional) Open the interactive full-screen TUI over the session:
 
    ```bash
    cargo run -p lattice-cli -- tui <session_id>

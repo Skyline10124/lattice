@@ -4,15 +4,19 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LATTICE inline CLI chat"
+description = "LATTICE full-screen chat TUI"
 
 [dependencies]
-lattice-api = { workspace = true }
-anyhow = { workspace = true }
-futures = { workspace = true }
-tokio = { workspace = true }
-colored = { workspace = true }
-rustyline = { workspace = true }
+lattice-api    = { workspace = true }
+anyhow         = { workspace = true }
+futures        = { workspace = true }
+tokio          = { workspace = true }
+ratatui        = { workspace = true }
+crossterm      = { workspace = true, features = ["event-stream"] }
+unicode-width  = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `test-util` (paused clock) is not part of tokio's `full`; it is what lets the
+# idle-deadline regression test advance 300 s without sleeping.
+tokio = { workspace = true, features = ["test-util"] }
