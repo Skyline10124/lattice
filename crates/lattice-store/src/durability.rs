@@ -16,6 +16,7 @@ use crate::StoreError;
 
 /// fsync one file's data and metadata.
 pub fn fsync_file(path: &Path) -> Result<(), StoreError> {
+    crate::fault::on_fsync(path)?;
     let file = File::open(path).map_err(|source| StoreError::Io {
         operation: "open for fsync",
         path: path.to_path_buf(),
@@ -31,6 +32,7 @@ pub fn fsync_file(path: &Path) -> Result<(), StoreError> {
 /// fsync one directory entry point (Linux allows opening directories
 /// read-only for exactly this purpose).
 pub fn fsync_dir(path: &Path) -> Result<(), StoreError> {
+    crate::fault::on_fsync(path)?;
     let dir = File::open(path).map_err(|source| StoreError::Io {
         operation: "open directory for fsync",
         path: path.to_path_buf(),
@@ -49,17 +51,94 @@ pub fn loose_object_path(git_dir: &Path, oid: gix::ObjectId) -> PathBuf {
     git_dir.join("objects").join(&hex[..2]).join(&hex[2..])
 }
 
+/// Two-digit lowercase hex prefix for a loose-object fanout directory.
+pub fn loose_object_fanout_hex(prefix: u8) -> String {
+    format!("{prefix:02x}")
+}
+
+fn objects_dir(git_dir: &Path) -> PathBuf {
+    git_dir.join("objects")
+}
+
+fn require_real_directory(path: &Path, operation: &'static str) -> Result<(), StoreError> {
+    let meta = fs::symlink_metadata(path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            StoreError::Corruption {
+                detail: format!("'{path}' is missing", path = path.display()),
+            }
+        } else {
+            StoreError::Io {
+                operation,
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(StoreError::Corruption {
+            detail: format!("'{path}' is not a directory", path = path.display()),
+        });
+    }
+    Ok(())
+}
+
+/// Create `objects/00`..=`objects/ff` in a not-yet-published repository.
+///
+/// First-create calls this before writing objects so steady-state publication
+/// never adds a fanout directory entry and therefore never needs to fsync
+/// top-level `objects/`.
+pub fn precreate_loose_object_fanout(git_dir: &Path) -> Result<(), StoreError> {
+    let objects = objects_dir(git_dir);
+    require_real_directory(&objects, "inspecting objects directory")?;
+    for prefix in 0u8..=255 {
+        let dir = objects.join(loose_object_fanout_hex(prefix));
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                require_real_directory(&dir, "inspecting existing loose-object fanout")?;
+            }
+            Err(source) => {
+                return Err(StoreError::Io {
+                    operation: "creating loose-object fanout",
+                    path: dir,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Strict-open check: every fanout directory exists and is a real directory.
+/// Missing or malformed topology is [`StoreError::Corruption`]. This never
+/// creates or repairs a directory.
+pub fn validate_loose_object_fanout(git_dir: &Path) -> Result<(), StoreError> {
+    let objects = objects_dir(git_dir);
+    require_real_directory(&objects, "inspecting objects directory")?;
+    for prefix in 0u8..=255 {
+        let dir = objects.join(loose_object_fanout_hex(prefix));
+        require_real_directory(&dir, "inspecting loose-object fanout")?;
+    }
+    Ok(())
+}
+
 /// The on-disk path of a loose ref inside a git directory.
 pub fn loose_ref_path(git_dir: &Path, ref_name: &str) -> PathBuf {
     git_dir.join(ref_name)
 }
 
-/// Durability barrier for a loose-object + loose-ref publication: fsync each
-/// written object file, each written ref file, and every directory on the
-/// path from the deepest fanout up to the git directory itself.
+/// Durability barrier for a loose-object + loose-ref publication.
+///
+/// First-create publishes a complete `objects/00`..=`objects/ff` fanout.
+/// Steady-state object barriers therefore fsync only each newly installed
+/// object file and that object's exact fanout directory. They do not fsync
+/// top-level `objects/` or the git directory: no fanout directory entry is
+/// being added or removed. A ref-only barrier fsyncs the ref file and every
+/// ancestor directory whose entries may have changed, including the git
+/// directory, and does not touch the object namespace.
 ///
 /// Missing object/ref files are tolerated (an object that already existed is
-/// not rewritten); directories are always synced.
+/// not rewritten).
 pub fn fsync_publication(
     git_dir: &Path,
     written_oids: &[gix::ObjectId],
@@ -75,16 +154,19 @@ pub fn fsync_publication(
         }
     };
 
+    let objects = objects_dir(git_dir);
     for oid in written_oids {
         let path = loose_object_path(git_dir, *oid);
         if path.exists() {
             fsync_file(&path)?;
         }
-        if let Some(fanout) = path.parent() {
+        if let Some(fanout) = path.parent()
+            && fanout != git_dir
+            && fanout != objects.as_path()
+        {
             push_dir(fanout.to_path_buf());
         }
     }
-    push_dir(git_dir.join("objects"));
 
     for ref_name in written_refs {
         let path = loose_ref_path(git_dir, ref_name);
@@ -98,13 +180,14 @@ pub fn fsync_publication(
             if d == git_dir {
                 break;
             }
-            push_dir(d.to_path_buf());
+            if d != objects.as_path() && !d.starts_with(&objects) {
+                push_dir(d.to_path_buf());
+            }
             dir = d.parent();
         }
     }
-    push_dir(git_dir.to_path_buf());
-
     if !written_refs.is_empty() {
+        push_dir(git_dir.to_path_buf());
         // The ref edit has already been accepted by the caller at this point;
         // a failure here is therefore a published-but-not-durable result.
         crate::fault::ref_fsync(git_dir)?;
@@ -151,6 +234,7 @@ pub fn fsync_tree(root: &Path) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fault;
 
     #[test]
     fn loose_paths_match_git_layout() {
@@ -167,10 +251,105 @@ mod tests {
     }
 
     #[test]
-    fn fsync_publication_on_empty_is_just_dir_syncs() {
+    fn fsync_publication_on_empty_syncs_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let git = dir.path().join("r.git");
         fs::create_dir_all(git.join("objects")).unwrap();
+        fault::reset_fsync_trace();
         fsync_publication(&git, &[], &[]).unwrap();
+        assert!(
+            fault::synced_paths().is_empty(),
+            "an empty barrier has no files or directory entries to persist: {:?}",
+            fault::synced_paths()
+        );
+    }
+
+    #[test]
+    fn object_publication_syncs_file_and_fanout_not_objects_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join("r.git");
+        let oid = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
+        let object = loose_object_path(&git, oid);
+        let fanout = object.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&fanout).unwrap();
+        fs::write(&object, b"blob").unwrap();
+        fault::reset_fsync_trace();
+        fsync_publication(&git, &[oid], &[]).unwrap();
+        let synced = fault::synced_paths();
+        assert!(
+            synced.iter().any(|p| p == &object),
+            "object file must be synced: {synced:?}"
+        );
+        assert!(
+            synced.iter().any(|p| p == &fanout),
+            "exact fanout directory must be synced: {synced:?}"
+        );
+        assert!(
+            !synced.iter().any(|p| p == &git.join("objects")),
+            "steady-state object publication must not fsync objects/: {synced:?}"
+        );
+        assert!(
+            !synced.iter().any(|p| p == &git),
+            "object-only publication must not fsync the git directory: {synced:?}"
+        );
+    }
+
+    #[test]
+    fn ref_only_publication_does_not_sync_object_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join("r.git");
+        fs::create_dir_all(git.join("objects/01")).unwrap();
+        fs::create_dir_all(git.join("refs/lattice")).unwrap();
+        let ref_path = git.join("refs/lattice/meta");
+        fs::write(&ref_path, b"0123456789abcdef0123456789abcdef01234567\n").unwrap();
+        fault::reset_fsync_trace();
+        fsync_publication(&git, &[], &["refs/lattice/meta"]).unwrap();
+        let synced = fault::synced_paths();
+        assert!(
+            synced.iter().any(|p| p == &ref_path),
+            "ref file must be synced: {synced:?}"
+        );
+        let objects = git.join("objects");
+        assert!(
+            !synced
+                .iter()
+                .any(|p| p == &objects || p.starts_with(&objects)),
+            "ref-only barrier must not touch the object namespace: {synced:?}"
+        );
+    }
+
+    #[test]
+    fn object_file_fsync_failure_is_the_object_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join("r.git");
+        let oid = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
+        let object = loose_object_path(&git, oid);
+        fs::create_dir_all(object.parent().unwrap()).unwrap();
+        fs::write(&object, b"blob").unwrap();
+        fault::reset_fsync_trace();
+        fault::fail_fsync_path(&object);
+        let err = fsync_publication(&git, &[oid], &[]).unwrap_err();
+        match err {
+            StoreError::Durability { path, .. } => assert_eq!(path, object),
+            other => panic!("expected Durability on the object file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fanout_directory_fsync_failure_is_the_fanout_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join("r.git");
+        let oid = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
+        let object = loose_object_path(&git, oid);
+        let fanout = object.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&fanout).unwrap();
+        fs::write(&object, b"blob").unwrap();
+        fault::reset_fsync_trace();
+        fault::fail_fsync_path(&fanout);
+        let err = fsync_publication(&git, &[oid], &[]).unwrap_err();
+        match err {
+            StoreError::Durability { path, .. } => assert_eq!(path, fanout),
+            other => panic!("expected Durability on the fanout directory, got {other:?}"),
+        }
     }
 }

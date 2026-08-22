@@ -17,6 +17,8 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+lattice-store = { workspace = true }
+gix = { workspace = true }
 # Optional: only compiled into non-test builds when `test-support` is enabled.
 tempfile = { workspace = true, optional = true }
 
@@ -29,6 +31,14 @@ test-support = ["dep:tempfile"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+lattice-store = { workspace = true, features = ["test-fault-injection"] }
+lattice-conversation = { workspace = true }
+# Non-production only. ADR 0005 §19's graph has no `lancet-audit ->
+# lattice-session` edge: the cross-domain facts projection and the collision
+# executor live in `tests/invocation_qualification.rs`, never in this crate's
+# production surface, so `lancet-api` cannot reach LATTICE session types
+# through audit.
+lattice-session = { workspace = true }
 # `test-method` provides the synthetic `TestEcho` typed method the audit tests
 # use as a stand-in method name. Dev-only.
 lancet-catalog = { workspace = true, features = ["test-method"] }

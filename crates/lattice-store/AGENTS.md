@@ -29,13 +29,32 @@ semantics — sessions, invocations/evidence, workspace history — stay in
   `check_expected`.
 - `src/repo.rs` owns `StoreRepo`: strict `open*`, atomic `create*`, reads,
   writes, `cas_ref`/`ref_transaction`, retention, and the fsync barriers
-  (`fsync_publication`, `fsync_pending`).
+  (`fsync_publication`, `fsync_pending`). `cas_ref` fsyncs pending objects,
+  publishes, then fsyncs the ref. A successful `cas_ref` leaves no pending
+  objects; a follow-up `fsync_pending` is a redundant ref/dir barrier.
+  Exact retries that skip CAS still call `fsync_pending` themselves.
+  First-create precreates `objects/00`..=`objects/ff` and `fsync_tree`s them
+  before rename visibility. Strict open validates that topology and never
+  repairs it. Steady-state object publication fsyncs the object file and its
+  exact fanout directory only — not top-level `objects/`, because no fanout
+  directory entry is being added or removed. A ref-only barrier does not
+  touch the object namespace.
 - `src/lock.rs` owns the two `flock` semantics: re-entrant `acquire_flock` for
   operation locks and strict `acquire_flock_strict` for create/repository write
   locks, mediated by one process-wide registry.
+- Blocking strict waiters are served **FIFO by ticket**, and a non-blocking
+  strict acquire reports `Busy` rather than jumping the queue. This is
+  load-bearing, not a detail: the previous condvar broadcast let a writer that
+  had just released barge back in ahead of long-queued peers, which #139-A
+  measured as 313 consecutive losses and a 42.69 s worst acquisition under 8
+  writers (7 and 12.47 s with the queue). The queue orders this process's
+  contenders only; cross-process exclusion is still the kernel `flock`. Do not
+  replace it with a plain broadcast, and keep `max_consecutive_wait` at or
+  below `N-1` in the #139-A local-ledger qualification.
 - `src/durability.rs` owns fsync/rename primitives; `src/canon.rs` canonical
   JSON bytes; `src/probe.rs` per-location capability probes; `src/fault.rs`
-  test-only fault seams; `src/bin/lattice-store-probe.rs` the probe binary.
+  test-only fault seams (including first-create publication recording);
+  `src/bin/lattice-store-probe.rs` the probe binary.
 
 ## Boundaries
 
@@ -44,9 +63,12 @@ semantics — sessions, invocations/evidence, workspace history — stay in
 - No central schema authority, generic `put`/`get`, raw repository accessor,
   all-stores registry, or pluggable backend trait. Each domain wraps the kernel
   with its own typed handle.
-- Strict open only: a missing store is `NotInitialized`, a wrong
-  kind/version/scope is `Corruption`. Never open-failed-init, repair,
-  quarantine, legacy path, or empty replacement.
+- Strict open only: a missing store is `NotInitialized`; a wrong
+  kind/version/scope or a missing/malformed loose-object fanout is
+  `Corruption`. Never open-failed-init, repair, quarantine, legacy path, or
+  empty replacement. Do not create fanout directories on open. Stores created
+  before this topology fail strict open as `Corruption`; recreate them
+  through `create*`.
 - `create*` is the sole initialization path and is reserved for the composition
   entry points ADR 0005 names. It builds in a sibling temp, publishes with
   `renameat2(RENAME_NOREPLACE)`, and fsyncs the parent; the create lock and the

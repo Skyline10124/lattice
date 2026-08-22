@@ -492,16 +492,23 @@ source of truth remains the attempt facts.
 
 ### 11. InvocationStore is one append-only ledger
 
-`lancet-audit` owns `invocations.git` and one authoritative ref:
+`lancet-audit` owns `invocations.git` with one authoritative data ref and one
+non-authoritative high-water witness:
 
 ```text
-refs/lattice/invocations/ledger
+refs/lattice/invocations/ledger      # authoritative append-only event ledger
+refs/lattice/invocations/high-water  # non-data monotonic witness
 ```
 
 The first-created repository contains a domain genesis commit. Every
 reservation, `DispatchStarted`, and terminal update is a direct child of the
-prior tip, published by CAS. The ledger cannot be rebased, merged, truncated,
-rewritten, or deleted; all cursors remain ancestors of its tip.
+prior ledger tip, published by CAS. Publication durably advances the ledger
+before the witness. A crash may therefore leave the witness at a ledger
+ancestor; reads accept that ordered state and a later write repairs it. A
+missing or divergent witness, or a ledger behind the witness, fails closed, so
+moving the ledger to an otherwise valid ancestor remains detectable. The
+ledger cannot be rebased, merged, truncated, rewritten, or deleted; all cursors
+remain ancestors of its tip.
 
 `reserve_batch(PlanKey, exact_ordered_bindings)` is all-or-nothing. The exact
 tuple includes `InvocationId`, Session/Turn/message/part addresses, method,
@@ -591,10 +598,70 @@ the real execution outcome plus
 need large output must define pagination, cursors, or summaries in their own
 contract.
 
-`FinalizeBudget` begins after the executor returns and covers uncertain draft
-revalidation and terminal publication retries. The Turn deadline does not govern
-it. Its duration/backoff/performance thresholds are approved only from #139-A's
-repeated real Btrfs measurements; the ADR does not invent a number.
+`FinalizeBudget` begins after the executor returns and covers repository-lock
+acquisition, uncertain draft revalidation, terminal publication attempts, and
+retry delays. The Turn deadline does not govern it. Its shape is fixed here:
+the first attempt is immediate, retriable durability failures back off
+deterministically, no new attempt starts after the deadline, and corruption or
+identity/digest mismatch is never retried.
+
+#139-A's retained 20+20 Arch Linux/Btrfs qualification previously approved a
+**60-second monotonic budget**: the first attempt is immediate, retriable
+durability failures use deterministic exponential delays from 25 milliseconds
+capped at 1 second, and no new attempt starts after the deadline. It is the
+finite envelope above one worst-contention repository-lock acquisition, one
+complete publication, and one retry. Bundle `20260819T150644Z-a9eca929371e`
+predates the post-re-review repairs (8/20 and 7/20). The post-repair bundle
+`20260820T061235Z-0f3d19a6bdb3` (source `0f3d19a6`) is a historical
+**valid 5/20 full-finalize FAIL**. The barrier-fix bundle
+`20260820T112752Z-d9744add1280` (source `d9744add`) is a historical
+**valid 9/20 full-finalize FAIL** and **9/20 terminal-publish FAIL**. The
+fanout bundle `20260820T173608Z-d2300158fee2` (source `d2300158`) is a
+historical **valid 10/20 full-finalize FAIL** and **9/20 terminal-publish
+FAIL** against K=4/20 and K=3/20 **under the old per-step `sessions-N.git`
+benchmark**. The corrected-harness bundle
+`20260821T115648Z-d474236ca1e6` (source `d474236`) is a **valid 5/20
+full-finalize FAIL** and **5/20 terminal-publish FAIL**. K is not raised.
+The `FinalizeBudget` remains an architecture and failure-semantics constraint.
+On 2026-08-22, #139-A was approved on its correctness and structural evidence;
+#139-B may proceed. The performance qualification is diagnostic-only pending
+GitHub #153, and historical campaign verdicts remain unchanged evidence rather
+than a production-wiring prerequisite. Journal CAS callers must not add a second
+`fsync_pending` after successful `cas_ref`; that contract change is not an
+incidence fix. First-create precreates the complete loose-object fanout
+and steady-state object publication does not fsync top-level `objects/`.
+Five Btrfs diagnostic rounds of the old per-step harness measured **43–44**
+transaction commits per result-finalize run versus the previous **862–863**.
+The authorized 20+20+20 on that old benchmark still fails incidence. The
+later 20+20+20 on the corrected harness also fails incidence (5/20 / 5/20).
+
+Run incidence is a contract-v1 gate and is retired to a diagnostic by
+qualification contract v2
+(`docs/plans/2026-08-21-issue139a-qualification-contract-v2.md`): a per-run p99
+over 160 samples is the second-order statistic, and it flipped verdict between
+two campaigns whose measured product was byte-identical. Contract v2 keeps the
+60-second budget, its backoff schedule, and its coupling rule unchanged, gates
+the worst single finalize absolutely, and requires every super-threshold stall
+cluster to be attributable to a shared kernel durability wait. Under v2 the
+`d474236` evidence fails one gate: strict `GitSessionGraphStore::open` cost
+rises monotonically within a run (FINDINGS L-GH139A-11), which the retired
+per-step harness structurally hid. Its remaining performance implications are
+tracked by #153 and do not block #139-B.
+
+Cold reads and first writers cost O(state bytes) plus a bounded delta replay,
+decoupled from accumulated history depth, via periodically anchored
+authenticated `state_digest` checkpoints; an ordinary transition's critical
+section is O(event bytes). The maximum-latency regression gates are coupled to
+this ceiling and cannot be widened independently of it.
+
+An earlier 60-second figure recorded on 2026-08-18 from the first 20+20 run was
+withdrawn, because the `RESULT_FINALIZE_STRESS` harness it came from published
+Invocation terminals while the PendingTurn was still `Bound` and so never
+measured the real durable order. The 60-second envelope above was later
+re-derived from the corrected harness; that later derivation is itself
+historical pending post-repair requalification. The measured baselines and
+regression gates are recorded in
+`docs/plans/2026-08-18-issue139a-qualification-approval.md`.
 
 If the budget expires before terminal/evidence publication, the Invocation stays
 `DispatchStarted` and the caller receives
@@ -888,8 +955,26 @@ PendingTurn state machine, and pure reducer against synthetic Invocation facts.
 `LOCAL_LEDGER_STRESS` retains the accepted 8 sessions × 20 steps × 8 invocations
 = 1,280 invocations and 2,720 ledger commits. `RESULT_FINALIZE_STRESS` combines
 the real SessionStore and InvocationStore with synthetic result/effect facts.
-Both run twenty times on maintained Btrfs before FinalizeBudget and performance
-thresholds are accepted.
+Campaign sample counts are set by the qualification contract, not by this ADR:
+contract v2 runs `LOCAL_LEDGER_STRESS` ten times, `RESULT_FINALIZE_STRESS`
+twenty times, and `cold_reopen_benchmark` eight times on maintained Btrfs, each
+count justified by estimator precision or by host-stall exposure in
+`benchmarks/invocation-store/qualification-contract-v2.json`. The earlier flat
+"twenty times" requirement is superseded; it supported contract v1's run
+incidence, which contract v2 retires to a diagnostic. Contract v2 adjudicates a
+campaign through deterministic-structure, typical-cost, scaling-invariance,
+safety-budget, fairness, and stall-attribution gate families. `FinalizeBudget`
+and its coupling rule are unchanged.
+
+The corrected-harness 20+20+20 on `d474236` is a valid contract-v1 5/20 / 5/20
+FAIL against K=4/20 and K=3/20, and under contract v2 an external evaluation
+fails only the revalidation scaling gate (FINDINGS L-GH139A-11). The fanout
+20+20+20 on `d2300158` remains a historical 10/20 / 9/20 FAIL of the old
+per-step `sessions-N.git` benchmark; the prior 9/20 on `d9744add` and 5/20 on
+`0f3d19a6` remain historical. K is void for contract v2 and was never raised
+for contract v1. #139-A is approved and #139-B may proceed; the qualification
+redesign is tracked by #153.
+Record: `docs/plans/2026-08-21-issue139a-qualification-contract-v2.md`.
 
 #139-B performs one production hard cut: canonical JSON-RPC InvocationId,
 TurnCoordinator, dispatch, ResultDraft, terminal evidence, operator Adapter,
