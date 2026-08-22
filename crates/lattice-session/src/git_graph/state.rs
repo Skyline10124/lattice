@@ -11,20 +11,21 @@
 //! refs/lattice/sessions/<SessionId>/state            -> SessionState commit
 //! refs/lattice/sessions/<SessionId>/heads/<Branch>   -> conversation branch
 //! refs/lattice/candidates/<SessionId>/<TurnId>       -> clean-turn reachability
+//! refs/lattice/session-validation/<SessionId>        -> derived open projection
 //! ```
 //!
 //! (`turns/<TurnId>` pins and the `active-turn` journal arrive with #144.)
-//!
+//! The validation projection is derived, never a second authority; see
+//! `validation.rs`.
 //! A state mutation writes a new immutable commit whose parent is the
 //! previous state commit and CASes the `state` ref; the SessionState payload
 //! is canonical JSON at `state.json` in the commit tree.
 
 use serde::{Deserialize, Serialize};
 
-use lattice_store::{RefExpectation, StoreRepo, TreeSpec};
-
 use crate::graph::{GraphHead, GraphSession};
 use crate::{Result, SessionError};
+use lattice_store::{RefExpectation, RefTxnEdit, StoreRepo, TreeSpec};
 
 /// Domain store kind recorded in `refs/lattice/meta`.
 pub(crate) const SESSION_STORE_KIND: &str = "session";
@@ -238,10 +239,16 @@ pub(crate) fn publish_state(
         Some(old) => RefExpectation::MustMatch(old),
         None => RefExpectation::MustNotExist,
     };
-    store
-        .cas_ref(&ref_name, oid, expect, "lattice session state")
-        .map_err(map_cas_conflict)?;
-    store.fsync_pending(&[ref_name.as_str()])?;
+    super::validation::publish_session_edits(
+        store,
+        &state.session_id,
+        vec![RefTxnEdit {
+            name: ref_name.clone(),
+            expect,
+            new: Some(oid),
+        }],
+    )
+    .map_err(map_cas_conflict)?;
     Ok(oid)
 }
 

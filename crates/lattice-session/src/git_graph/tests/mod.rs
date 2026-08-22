@@ -12,6 +12,7 @@ mod pending_journal;
 mod pointer_ops;
 mod session_meta;
 mod state_and_locks;
+mod strict_open_scaling;
 
 use std::path::Path;
 

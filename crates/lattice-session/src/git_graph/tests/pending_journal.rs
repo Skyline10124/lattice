@@ -831,6 +831,316 @@ fn journal_finalized_turns_keep_no_legacy_outcome_authority() {
 }
 
 #[test]
+fn binding_candidate_revision_cas_publishes_a_full_replacement_plan() {
+    let (_fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(0, 0),
+            },
+            100,
+            &lock,
+        )
+        .expect("attempt");
+    let original = one_binding_plan();
+    let planned = store
+        .advance_pending_turn(
+            &session,
+            PendingStage::BindingPlanned {
+                plan: original.clone(),
+                usage: None,
+            },
+            101,
+            &lock,
+        )
+        .expect("planned");
+
+    let mut revised = original.clone();
+    let binding = &mut revised.bindings[0];
+    binding.invocation_id = invocation_id(2);
+    binding.binding_digest = crate::pending::binding_digest(
+        &binding.invocation_id,
+        &binding.address,
+        &binding.method,
+        &binding.descriptor_identity,
+        &binding.arguments_digest,
+    );
+    lattice_store::fault::fail_ref_fsync(true);
+    let err = store.revise_binding_candidates(&session, planned.oid, revised.clone(), 102, &lock);
+    assert!(matches!(
+        err,
+        Err(SessionError::Store(
+            lattice_store::StoreError::Durability { .. }
+        ))
+    ));
+    let revised_tip = store
+        .revise_binding_candidates(&session, planned.oid, revised.clone(), 102, &lock)
+        .expect("exact retry confirms the published revision");
+
+    assert_eq!(
+        revised_tip.snapshot.predecessor.as_deref(),
+        Some(planned.oid.to_string().as_str())
+    );
+    assert_eq!(
+        revised_tip.snapshot.stage,
+        PendingStage::BindingPlanned {
+            plan: revised,
+            usage: None,
+        }
+    );
+    assert!(matches!(
+        store.revise_binding_candidates(&session, planned.oid, original, 103, &lock),
+        Err(SessionError::Conflict(_))
+    ));
+}
+
+#[test]
+fn binding_candidate_revision_rejects_any_old_uuid_reuse() {
+    let (_fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(0, 0),
+            },
+            100,
+            &lock,
+        )
+        .expect("attempt");
+
+    let mut original = one_binding_plan();
+    let arguments = serde_json::json!({"path": "second"});
+    let address = lancet_protocol::ToolCallAddress {
+        message: lancet_protocol::ModelMessageAddress {
+            session_id: session_id(),
+            turn_id: turn_id(),
+            model_step_ordinal: 0,
+        },
+        part_ordinal: 1,
+    };
+    let arguments_digest = lattice_conversation::arguments_digest(&arguments);
+    original
+        .message
+        .parts
+        .push(tool_call_part("observe.workspace", arguments));
+    original.bindings.push(crate::pending::PlannedBinding {
+        invocation_id: invocation_id(2),
+        binding_digest: crate::pending::binding_digest(
+            &invocation_id(2),
+            &address,
+            "observe.workspace",
+            &"d".repeat(64),
+            &arguments_digest,
+        ),
+        address,
+        method: "observe.workspace".to_string(),
+        descriptor_identity: "d".repeat(64),
+        arguments_digest,
+    });
+    original.validate().expect("two-binding plan");
+    let planned = store
+        .advance_pending_turn(
+            &session,
+            PendingStage::BindingPlanned {
+                plan: original.clone(),
+                usage: None,
+            },
+            101,
+            &lock,
+        )
+        .expect("planned");
+
+    let mut permuted = original.clone();
+    let old_ids = [
+        permuted.bindings[0].invocation_id,
+        permuted.bindings[1].invocation_id,
+    ];
+    permuted.bindings[0].invocation_id = old_ids[1];
+    permuted.bindings[1].invocation_id = old_ids[0];
+    for binding in &mut permuted.bindings {
+        binding.binding_digest = crate::pending::binding_digest(
+            &binding.invocation_id,
+            &binding.address,
+            &binding.method,
+            &binding.descriptor_identity,
+            &binding.arguments_digest,
+        );
+    }
+    assert!(matches!(
+        store.revise_binding_candidates(&session, planned.oid, permuted, 102, &lock),
+        Err(SessionError::Conflict(_))
+    ));
+}
+
+#[test]
+fn candidate_revision_executor_verifies_the_request_against_the_pinned_tip() {
+    let (_fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(0, 0),
+            },
+            100,
+            &lock,
+        )
+        .expect("attempt");
+    let original = one_binding_plan();
+    let planned = store
+        .advance_pending_turn(
+            &session,
+            PendingStage::BindingPlanned {
+                plan: original.clone(),
+                usage: None,
+            },
+            101,
+            &lock,
+        )
+        .expect("planned");
+
+    let request = crate::pending::CandidateRevisionRequest {
+        session_id: session_id(),
+        turn_id: turn_id(),
+        plan: original.clone(),
+        colliding_candidates: vec![original.bindings[0].invocation_id],
+    };
+
+    // A request describing a different durable plan never writes.
+    let mut foreign = request.clone();
+    foreign.plan.bindings[0].descriptor_identity = "e".repeat(64);
+    assert!(matches!(
+        store.execute_candidate_revision(&foreign, &planned, 102, &lock, || invocation_id(9)),
+        Err(SessionError::Conflict(_))
+    ));
+
+    // A generator that returns an existing candidate never writes.
+    assert!(matches!(
+        store.execute_candidate_revision(&request, &planned, 102, &lock, || original.bindings[0]
+            .invocation_id),
+        Err(SessionError::Conflict(_))
+    ));
+    assert_eq!(
+        store
+            .read_active_turn(&session)
+            .expect("read")
+            .expect("active")
+            .oid,
+        planned.oid,
+        "a rejected revision leaves the durable BindingPlanned untouched"
+    );
+
+    // The accepted revision replaces the candidate and its derived digest
+    // while every structural field stays byte-identical.
+    let revised = store
+        .execute_candidate_revision(&request, &planned, 102, &lock, || invocation_id(9))
+        .expect("revision");
+    let PendingStage::BindingPlanned { plan, .. } = &revised.snapshot.stage else {
+        panic!("still BindingPlanned");
+    };
+    assert_eq!(plan.bindings[0].invocation_id, invocation_id(9));
+    assert_eq!(plan.bindings[0].address, original.bindings[0].address);
+    assert_eq!(plan.bindings[0].method, original.bindings[0].method);
+    assert_eq!(
+        plan.bindings[0].arguments_digest,
+        original.bindings[0].arguments_digest
+    );
+    assert_ne!(
+        plan.bindings[0].binding_digest,
+        original.bindings[0].binding_digest
+    );
+    assert_eq!(plan.message, original.message);
+}
+
+#[test]
+fn candidate_revision_recovers_a_published_but_undurable_revision_without_reusing_uuids() {
+    // A CAS-published revision whose durability barrier failed must be
+    // recoverable by a caller whose UUID source is a normal random generator:
+    // recovery recognizes the published revision structurally, so it never
+    // depends on re-minting the same candidates.
+    let (_fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(0, 0),
+            },
+            100,
+            &lock,
+        )
+        .expect("attempt");
+    let original = one_binding_plan();
+    let planned = store
+        .advance_pending_turn(
+            &session,
+            PendingStage::BindingPlanned {
+                plan: original.clone(),
+                usage: None,
+            },
+            101,
+            &lock,
+        )
+        .expect("planned");
+
+    let request = crate::pending::CandidateRevisionRequest {
+        session_id: session_id(),
+        turn_id: turn_id(),
+        plan: original.clone(),
+        colliding_candidates: vec![original.bindings[0].invocation_id],
+    };
+
+    lattice_store::fault::fail_ref_fsync(true);
+    assert!(matches!(
+        store.execute_candidate_revision(&request, &planned, 102, &lock, || invocation_id(2)),
+        Err(SessionError::Store(
+            lattice_store::StoreError::Durability { .. }
+        ))
+    ));
+
+    // A different generator: recovery must still return the published revision.
+    let mut never_used = 0;
+    let recovered = store
+        .execute_candidate_revision(&request, &planned, 102, &lock, || {
+            never_used += 1;
+            invocation_id(7)
+        })
+        .expect("recovered the published revision");
+    assert_eq!(never_used, 0, "recovery minted no candidate");
+    let PendingStage::BindingPlanned { plan, .. } = &recovered.snapshot.stage else {
+        panic!("still BindingPlanned");
+    };
+    assert_eq!(plan.bindings[0].invocation_id, invocation_id(2));
+    assert_eq!(
+        recovered.snapshot.predecessor.as_deref(),
+        Some(planned.oid.to_string().as_str())
+    );
+}
+
+#[test]
 fn the_journal_outcome_contract_never_grows_legacy_outcome_fields() {
     // F1 compile/shape guard: the pinned candidate — the journal's outcome
     // authority — must never carry the fields #139-B deletes. A future

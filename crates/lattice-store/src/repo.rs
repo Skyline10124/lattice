@@ -20,7 +20,8 @@
 //! 3. run capability probes against the actual parent location — a missing
 //!    primitive fails closed;
 //! 4. initialize the bare repository in a same-parent sibling temporary
-//!    directory, write the `refs/lattice/meta` identity commit plus the
+//!    directory, precreate the complete `objects/00`..=`objects/ff` fanout,
+//!    write the `refs/lattice/meta` identity commit plus the
 //!    domain's initial refs, and fsync the whole tree;
 //! 5. publish with `renameat2(RENAME_NOREPLACE)`, fsync the parent, and
 //!    reopen and validate the published identity (winner path).
@@ -38,7 +39,10 @@ use std::sync::{Mutex, MutexGuard};
 use gix::objs::tree::EntryKind;
 use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
 
-use crate::durability::{fsync_dir, fsync_publication, fsync_tree};
+use crate::durability::{
+    fsync_dir, fsync_publication, fsync_tree, precreate_loose_object_fanout,
+    validate_loose_object_fanout,
+};
 use crate::lock::{Blocking, FlockGuard, acquire_flock_strict};
 use crate::meta::{
     self, ExpectedMeta, META_REF, META_TREE_FILE, REPOSITORY_FORMAT_VERSION, StoreMeta, StoreScope,
@@ -194,6 +198,7 @@ impl StoreRepo {
                 detail: format!("'{}' is not a bare repository", path.display()),
             });
         }
+        validate_loose_object_fanout(path)?;
         let meta = read_meta(&repo, path)?;
         meta::check_expected(&meta, expected)?;
         Ok(Self {
@@ -321,6 +326,7 @@ impl StoreRepo {
 
         let create_result: Result<()> = (|| {
             let temp_repo = init_bare(&temp)?;
+            precreate_loose_object_fanout(&temp)?;
             let meta_commit = write_meta_commit(&temp_repo, &meta)?;
             let this = StoreRepo {
                 git_dir: temp.clone(),
@@ -339,6 +345,7 @@ impl StoreRepo {
             crate::fault::before_rename(path)?;
             rename_noreplace(&temp, path)?;
             crate::fault::parent_fsync(parent)?;
+            crate::fault::on_repo_first_create(path);
             Ok(())
         })();
 
@@ -690,6 +697,9 @@ impl StoreRepo {
         // Objects and their fanout directories must be durable before a ref
         // can publish an oid that names them. The post-publication barrier is
         // deliberately separate: CAS remains the publication authority.
+        // Callers must not add a second `fsync_pending` after success; this
+        // method already fsyncs `ref_name`. Exact retries that skip CAS still
+        // call `fsync_pending` themselves to re-attempt a failed ref barrier.
         self.fsync_pending(&[])?;
         self.repo()
             .reference(ref_name, new, expect.into(), log_message)
@@ -810,9 +820,10 @@ impl StoreRepo {
 
     // ─── Durability ────────────────────────────────────────────────────
 
-    /// Publication barrier after a write sequence: fsync the given loose
-    /// objects and refs plus their directories. Writers call this while still
-    /// holding the write lock.
+    /// Publication barrier after a write sequence. Object publication fsyncs
+    /// each new loose object and its exact fanout directory. Ref publication
+    /// fsyncs the ref file and ancestor directories whose entries changed.
+    /// Neither fsyncs top-level `objects/` in steady state.
     pub fn fsync_publication(&self, oids: &[gix::ObjectId], refs: &[&str]) -> Result<()> {
         fsync_publication(&self.git_dir, oids, refs)
     }
@@ -1290,6 +1301,46 @@ mod tests {
     }
 
     #[test]
+    fn successful_cas_ref_runs_one_object_barrier_and_one_ref_barrier() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"barrier-counts").unwrap();
+        fault::reset_barrier_counts();
+        repo.cas_ref(
+            "refs/lattice/barrier/counts",
+            blob,
+            RefExpectation::MustNotExist,
+            "barrier count",
+        )
+        .unwrap();
+        assert_eq!(
+            fault::object_barrier_count(),
+            1,
+            "cas_ref fsyncs pending objects before the ref edit"
+        );
+        assert_eq!(
+            fault::ref_barrier_count(),
+            1,
+            "cas_ref fsyncs the published ref; callers must not add a second ref barrier"
+        );
+
+        fault::reset_barrier_counts();
+        repo.fsync_pending(&["refs/lattice/barrier/counts"])
+            .unwrap();
+        assert_eq!(
+            fault::object_barrier_count(),
+            0,
+            "a follow-up fsync_pending after successful cas_ref has no pending objects"
+        );
+        assert_eq!(
+            fault::ref_barrier_count(),
+            1,
+            "a follow-up fsync_pending is a redundant ref/dir barrier"
+        );
+    }
+
+    #[test]
     fn ref_cas_reports_post_publication_barrier_failure() {
         let (_state, layout) = temp_layout();
         let repo =
@@ -1490,10 +1541,15 @@ mod tests {
     #[test]
     fn fault_at_parent_fsync_reports_durability_but_published() {
         let (_state, layout) = temp_layout();
+        crate::fault::reset_repo_create_trace();
         crate::fault::fail_parent_fsync(true);
         let err = StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(()))
             .unwrap_err();
         assert!(matches!(err, StoreError::Durability { .. }));
+        assert!(
+            crate::fault::created_repo_paths().is_empty(),
+            "first-create tracing must not run before the parent fsync"
+        );
         // The rename already published the repository; a later open validates
         // it. This is exactly why failure classification matters: the caller
         // must not retry blindly, but the store is not half-initialized.
@@ -1550,5 +1606,245 @@ mod tests {
         // Exactly c2 and its parent c1; the meta commit is not an ancestor.
         assert_eq!(walk.len(), 2);
         assert!(walk.contains(&c2) && walk.contains(&c1));
+    }
+
+    fn assert_complete_loose_object_fanout(git_dir: &Path) {
+        let objects = git_dir.join("objects");
+        for prefix in 0u8..=255 {
+            let dir = objects.join(format!("{prefix:02x}"));
+            let meta = std::fs::symlink_metadata(&dir).unwrap_or_else(|e| {
+                panic!(
+                    "loose-object fanout {} missing or unreadable: {e}",
+                    dir.display()
+                )
+            });
+            assert!(
+                meta.is_dir() && !meta.file_type().is_symlink(),
+                "loose-object fanout {} must be a directory",
+                dir.display()
+            );
+        }
+    }
+
+    #[test]
+    fn first_create_constructs_all_256_fanout_directories() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        assert_complete_loose_object_fanout(repo.git_dir());
+    }
+
+    #[test]
+    fn first_create_records_publication_and_reuse_does_not() {
+        crate::fault::reset_repo_create_trace();
+        let (_state, layout) = temp_layout();
+        let path = layout.lattice_root().join("sessions.git");
+        StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let created = crate::fault::created_repo_paths();
+        assert_eq!(created, vec![path.clone()]);
+        StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| {
+            panic!("init must not run on an existing store")
+        })
+        .unwrap();
+        assert_eq!(
+            crate::fault::created_repo_paths(),
+            vec![path],
+            "reusing an existing store is not a first-create"
+        );
+        StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap();
+        assert_eq!(crate::fault::created_repo_paths().len(), 1);
+    }
+
+    #[test]
+    fn strict_open_rejects_missing_fanout_and_does_not_repair() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let missing = repo.git_dir().join("objects").join("ff");
+        if missing.exists() {
+            std::fs::remove_dir_all(&missing).unwrap();
+        }
+        assert!(!missing.exists());
+        drop(repo);
+
+        let err = StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Corruption { ref detail } if detail.contains("objects/ff")),
+            "missing fanout is corruption, not a repair invitation: {err:?}"
+        );
+        assert!(
+            !missing.exists(),
+            "strict open must not create a missing fanout directory"
+        );
+    }
+
+    #[test]
+    fn strict_open_rejects_malformed_fanout_and_does_not_repair() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let fanout = repo.git_dir().join("objects").join("aa");
+        if fanout.is_dir() {
+            std::fs::remove_dir_all(&fanout).unwrap();
+        }
+        std::fs::write(&fanout, b"not a directory").unwrap();
+        drop(repo);
+
+        let err = StoreRepo::open_global(&layout, "sessions.git", "session", 1).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Corruption { .. }),
+            "a fanout file is corruption: {err:?}"
+        );
+        let meta = std::fs::symlink_metadata(&fanout).unwrap();
+        assert!(
+            meta.is_file(),
+            "strict open must not replace a malformed fanout"
+        );
+    }
+
+    #[test]
+    fn object_file_barrier_failure_prevents_ref_cas() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"object-file-barrier").unwrap();
+        let object = crate::durability::loose_object_path(repo.git_dir(), blob);
+        fault::reset_fsync_trace();
+        fault::fail_fsync_path(&object);
+
+        let err = repo
+            .cas_ref(
+                "refs/lattice/barrier/object-file",
+                blob,
+                RefExpectation::MustNotExist,
+                "object file barrier",
+            )
+            .unwrap_err();
+        match err {
+            StoreError::Durability { path, .. } => assert_eq!(path, object),
+            other => panic!("expected Durability on the object file, got {other:?}"),
+        }
+        assert_eq!(
+            repo.ref_target("refs/lattice/barrier/object-file").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn fanout_directory_barrier_failure_prevents_ref_cas() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"fanout-dir-barrier").unwrap();
+        let fanout = crate::durability::loose_object_path(repo.git_dir(), blob)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fault::reset_fsync_trace();
+        fault::fail_fsync_path(&fanout);
+
+        let err = repo
+            .cas_ref(
+                "refs/lattice/barrier/fanout-dir",
+                blob,
+                RefExpectation::MustNotExist,
+                "fanout dir barrier",
+            )
+            .unwrap_err();
+        match err {
+            StoreError::Durability { path, .. } => assert_eq!(path, fanout),
+            other => panic!("expected Durability on the fanout directory, got {other:?}"),
+        }
+        assert_eq!(
+            repo.ref_target("refs/lattice/barrier/fanout-dir").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn cas_ref_does_not_sync_top_level_objects_directory() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"no-objects-dir-fsync").unwrap();
+        let object = crate::durability::loose_object_path(repo.git_dir(), blob);
+        let fanout = object.parent().unwrap().to_path_buf();
+        let objects = repo.git_dir().join("objects");
+        fault::reset_fsync_trace();
+        repo.cas_ref(
+            "refs/lattice/barrier/no-objects",
+            blob,
+            RefExpectation::MustNotExist,
+            "no objects dir",
+        )
+        .unwrap();
+        let synced = fault::synced_paths();
+        assert!(
+            synced.iter().any(|p| p == &object),
+            "object file must be synced: {synced:?}"
+        );
+        assert!(
+            synced.iter().any(|p| p == &fanout),
+            "exact fanout directory must be synced: {synced:?}"
+        );
+        assert!(
+            !synced.iter().any(|p| p == &objects),
+            "steady-state cas_ref must not fsync objects/: {synced:?}"
+        );
+    }
+
+    #[test]
+    fn ref_only_fsync_pending_does_not_sync_object_namespace() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"ref-only-barrier").unwrap();
+        repo.cas_ref(
+            "refs/lattice/barrier/ref-only",
+            blob,
+            RefExpectation::MustNotExist,
+            "publish",
+        )
+        .unwrap();
+        let objects = repo.git_dir().join("objects");
+        fault::reset_fsync_trace();
+        repo.fsync_pending(&["refs/lattice/barrier/ref-only"])
+            .unwrap();
+        let synced = fault::synced_paths();
+        assert!(
+            !synced
+                .iter()
+                .any(|p| p == &objects || p.starts_with(&objects)),
+            "ref-only fsync_pending must not touch the object namespace: {synced:?}"
+        );
+    }
+
+    #[test]
+    fn exact_retry_after_post_cas_ref_barrier_failure() {
+        let (_state, layout) = temp_layout();
+        let repo =
+            StoreRepo::create_global(&layout, "sessions.git", global_meta(), |_| Ok(())).unwrap();
+        let blob = repo.write_blob(b"exact-retry-bytes").unwrap();
+        fault::fail_ref_fsync(true);
+        let err = repo
+            .cas_ref(
+                "refs/lattice/barrier/exact-retry",
+                blob,
+                RefExpectation::MustNotExist,
+                "exact retry",
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Durability { .. }), "got {err:?}");
+        assert_eq!(
+            repo.ref_target("refs/lattice/barrier/exact-retry").unwrap(),
+            Some(blob)
+        );
+        repo.fsync_pending(&["refs/lattice/barrier/exact-retry"])
+            .unwrap();
+        assert_eq!(
+            repo.ref_target("refs/lattice/barrier/exact-retry").unwrap(),
+            Some(blob)
+        );
+        assert_eq!(repo.read_blob(blob).unwrap(), b"exact-retry-bytes");
     }
 }
