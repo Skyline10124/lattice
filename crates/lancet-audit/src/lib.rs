@@ -5,6 +5,7 @@
 
 pub mod audit;
 pub mod evidence;
+pub mod invocation_store;
 pub mod operator;
 pub mod store_path;
 #[cfg(any(test, feature = "test-support"))]

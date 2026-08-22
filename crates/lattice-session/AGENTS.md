@@ -36,8 +36,16 @@ payload compatibility.
   `active-turn`/`turns/<TurnId>` refs, CAS snapshot publication over the
   `lattice-store` kernel, ResultDraft publication/classification, and the
   one final ref transaction (head advance + turn pin + state update +
-  active-turn delete, all-or-nothing).
+  active-turn delete, all-or-nothing). #139-A also adds the constrained
+  same-stage `revise_binding_candidates` CAS used only for clean UUID
+  collisions: candidate IDs and binding digests may change; structural binding
+  fields may not.
 - `src/git_graph/helpers.rs` owns shared manifest/tree/JSONL helpers.
+- `src/git_graph/validation.rs` owns the derived per-session strict-open
+  projection (`refs/lattice/session-validation/<id>`). It is authenticated
+  to the live session ref set, rebuilt on each session mutation in the same
+  kernel ref transaction, and never written on open. A miss or mismatch
+  forces a full per-session object validation before the handle is returned.
 - `src/git_graph/tests/` owns Git-backed persistence and topology regression
   coverage; `pending_journal.rs` covers the journal/finalization mechanics
   plus the strict-open, lineage, and legacy-projection migration guards,
@@ -62,8 +70,10 @@ payload compatibility.
   `refs/lattice/sessions/<id>/state`, `refs/lattice/sessions/<id>/heads/<branch>`,
   candidates under `refs/lattice/candidates/<id>/<turn>`, the direct
   `active-turn` PendingTurn authority, and the create-once
-  `turns/<TurnId>` permanent pins (#144). Do not add remote push refspecs
-  for `refs/lattice/**`.
+  `turns/<TurnId>` permanent pins (#144), and a derived
+  `refs/lattice/session-validation/<id>` projection used only to skip
+  already-authenticated object parsing on strict open. Do not add remote
+  push refspecs for `refs/lattice/**`.
 - Since #143 every session fact is an immutable `SessionState` commit; mutable
   `.lattice/sessions/**` sidecars are gone, with no reader, importer, or second
   authority. A Session is permanently bound to one path-derived
@@ -84,7 +94,11 @@ payload compatibility.
   one durable active Turn per session (`src/pending/` contract + reducer,
   `git_graph/pending.rs` store), immutable CAS stages, ResultDraft
   publication classification, and the pure reconciliation reducer against
-  synthetic Invocation facts. Do not put InvocationStore/evidence semantics
+  synthetic Invocation facts. Journal CAS publication relies on `cas_ref`'s
+  object-then-CAS-then-ref barriers; callers must not add a second
+  `fsync_pending` after success. Exact retry of a published-but-undurable
+  snapshot still calls `fsync_pending` because it does not call `cas_ref`.
+  Do not put InvocationStore/evidence semantics
   here (that is #139-A/#139-B), wire the journal into the production turn
   loop, or redispatch model/Tool work while reopening a PendingTurn. The
   journal's typed `TurnOutcome`/`ClosureOrigin` is the outcome authority;
@@ -92,6 +106,24 @@ payload compatibility.
   legacy projection until #139-B deletes them.
 
 ## Recent Issues
+
+- APPROVED #139-A: the non-production InvocationStore integration contract is
+  accepted and #139-B may wire the production `TurnCoordinator`. The existing
+  PendingTurn correctness and structural regression tests remain mandatory.
+  `session_journal_pin_ns` growth and durability performance qualification move
+  to non-blocking follow-up #153; do not move invocation-ledger I/O into this
+  crate while investigating it.
+- ADDED #139-A: Invocation facts now carry mandatory `PlanKey` ownership and an
+  exact candidate key-set contract, and `reconcile` returns a
+  `ReconciliationDecision`: either a closure `ReconciliationPlan` or a
+  `CandidateRevisionRequest`. A clean foreign-owned collision produces the
+  request and no `TurnOutcome` at all, so a revision can never be mistaken for
+  a closed Turn; the same collision at `Bound` stays typed corruption.
+  `execute_candidate_revision` verifies the request against the pinned
+  `active-turn` tip and CAS-publishes only fresh IDs plus their derived binding
+  digests through `revise_binding_candidates`. Invocation ledger I/O remains in
+  `lancet-audit`; this crate stays data/reducer/session-journal only and must
+  not depend on `lancet-audit`.
 
 - ADDED #144: `src/pending/` (contract + reducer) and
   `src/git_graph/pending.rs` (journal store) implement the durable

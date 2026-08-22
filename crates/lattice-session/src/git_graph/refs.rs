@@ -10,6 +10,7 @@ use super::GitSessionGraphStore;
 use super::helpers::{parse_manifest, parse_oid, turn_log_entry_from_manifest};
 use super::session::resolve_head_oid;
 use super::state::{self, SessionHead};
+use super::validation;
 use crate::graph::{GraphDiff, GraphHead, GraphRef, GraphRefKind, ResetResult, TurnLogEntry};
 use crate::{Result, SessionError};
 
@@ -56,19 +57,21 @@ impl GitSessionGraphStore {
                 "branch '{name}' already exists"
             )));
         }
-        self.kernel()
-            .cas_ref(
-                &ref_name,
-                target_oid,
-                RefExpectation::MustNotExist,
-                "lattice branch",
-            )
-            .map_err(|err| match err {
-                lattice_store::StoreError::CasConflict { .. } => {
-                    SessionError::Conflict(format!("branch '{name}' already exists"))
-                }
-                other => SessionError::Store(other),
-            })?;
+        validation::publish_session_edits(
+            self.kernel(),
+            session_id,
+            vec![RefTxnEdit {
+                name: ref_name.clone(),
+                expect: RefExpectation::MustNotExist,
+                new: Some(target_oid),
+            }],
+        )
+        .map_err(|err| match err {
+            lattice_store::StoreError::CasConflict { .. } => {
+                SessionError::Conflict(format!("branch '{name}' already exists"))
+            }
+            other => SessionError::Store(other),
+        })?;
         self.kernel().fsync_pending(&[ref_name.as_str()])?;
 
         Ok(GraphRef {
@@ -161,8 +164,10 @@ impl GitSessionGraphStore {
         session_state.updated_at = Utc::now().to_rfc3339();
         let new_state_oid =
             state::write_state_commit(self.kernel(), Some(previous), &session_state)?;
-        self.kernel()
-            .ref_transaction(&[
+        validation::publish_session_edits(
+            self.kernel(),
+            session_id,
+            vec![
                 RefTxnEdit {
                     name: ref_name.clone(),
                     expect: RefExpectation::MustMatch(old_oid),
@@ -173,8 +178,9 @@ impl GitSessionGraphStore {
                     expect: RefExpectation::MustMatch(previous),
                     new: Some(new_state_oid),
                 },
-            ])
-            .map_err(state::map_cas_conflict)?;
+            ],
+        )
+        .map_err(state::map_cas_conflict)?;
         self.kernel().fsync_pending(&[
             ref_name.as_str(),
             state::state_ref_name(session_id)?.as_str(),

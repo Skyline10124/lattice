@@ -18,14 +18,15 @@ use crate::SessionError;
 use crate::git_graph::GitSessionGraphStore;
 use crate::git_graph::tests::{Fixture, temp_dir};
 use crate::graph::{SessionGraphStore, TurnCommitStatus};
+use crate::pending::PendingSnapshot;
 use crate::pending::ResultDraft;
 use crate::pending::contract::{PendingStage, TurnClosingFacts};
 use crate::pending::facts::{
-    ExecutionOutcome, InvocationFact, InvocationFactsSnapshot, PlanFacts, ResultMaterial,
-    UnavailableMaterialReason,
+    ExecutionOutcome, InvocationFactsSnapshot, InvocationLifecycleFact, InvocationRecordFact,
+    PlanFacts, ResultMaterial, UnavailableMaterialReason,
 };
 use crate::pending::outcome::{ClosureOrigin, TurnInterruption, TurnOutcome};
-use crate::pending::reconcile::{ReconciliationAction, reconcile};
+use crate::pending::reconcile::{ReconciliationAction, ReconciliationPlan, reconcile};
 use crate::pending::step::{MaterialAvailability, StepClosingState};
 
 use super::pending_fixtures::*;
@@ -72,10 +73,63 @@ impl<'a> JournalDriver<'a> {
     }
 }
 
+fn drive_to_empty_step_closing(
+    store: &GitSessionGraphStore,
+    session: &str,
+) -> (lattice_store::FlockGuard, crate::pending::BindingPlan) {
+    let driver = JournalDriver::new(store, session);
+    driver.begin();
+    let plan = one_binding_plan();
+    driver.advance(PendingStage::ModelAttemptStarted {
+        key: attempt_key(0, 0),
+    });
+    driver.advance(PendingStage::BindingPlanned {
+        plan: plan.clone(),
+        usage: None,
+    });
+    driver.advance(PendingStage::Bound { plan: plan.clone() });
+    driver.advance(PendingStage::StepClosing(StepClosingState {
+        plan_key: plan.plan_key,
+        bindings: plan.bindings.clone(),
+        closure_cursor: 0,
+        closures: Vec::new(),
+        current_candidate: None,
+    }));
+    (driver.lock, plan)
+}
+
+fn candidate_draft(plan: &crate::pending::BindingPlan) -> ResultDraft {
+    let binding = &plan.bindings[0];
+    ResultDraft::new(
+        binding.invocation_id,
+        binding.binding_digest,
+        turn_id(),
+        binding.address.message,
+        0,
+        "{\"rows\":[]}".to_string(),
+    )
+    .expect("draft")
+}
+
 /// Reopen semantics: a fresh handle validates the same repository strict,
 /// with no cached refs.
 fn reopen(fixture: &Fixture) -> GitSessionGraphStore {
     GitSessionGraphStore::open(fixture.path().join("sessions.git")).expect("strict reopen")
+}
+
+/// Reconcile and require a closure decision. A crash fixture that reduced
+/// to a candidate revision would mean the Turn is not closing at all,
+/// which no fixture here describes.
+fn reconcile_closure(
+    snapshot: &PendingSnapshot,
+    facts: &InvocationFactsSnapshot,
+    what: &str,
+) -> ReconciliationPlan {
+    reconcile(snapshot, facts)
+        .unwrap_or_else(|e| panic!("{what}: {e:?}"))
+        .closure()
+        .unwrap_or_else(|| panic!("{what}: expected a closure, got a candidate revision"))
+        .clone()
 }
 
 /// Execute a plan's journal actions against the store; facts-port actions
@@ -99,10 +153,12 @@ fn execute_plan(
                     bindings: bindings.clone(),
                 });
                 for binding in bindings {
-                    facts
-                        .invocations
-                        .entry(binding.invocation_id)
-                        .or_insert(InvocationFact::Reserved);
+                    facts.invocations.entry(binding.invocation_id).or_insert(
+                        InvocationRecordFact {
+                            owner: *plan_key,
+                            lifecycle: InvocationLifecycleFact::Reserved,
+                        },
+                    );
                 }
             }
             ReconciliationAction::TerminalizeInvocation {
@@ -110,11 +166,15 @@ fn execute_plan(
                 outcome,
                 material,
             } => {
+                let owner = facts.plan.as_ref().expect("plan set").plan_key;
                 facts.invocations.insert(
                     *invocation,
-                    InvocationFact::Terminal {
-                        outcome: outcome.clone(),
-                        material: material.clone(),
+                    InvocationRecordFact {
+                        owner,
+                        lifecycle: InvocationLifecycleFact::Terminal {
+                            outcome: outcome.clone(),
+                            material: material.clone(),
+                        },
                     },
                 );
             }
@@ -182,11 +242,11 @@ fn every_stage_crash_window_recovers_one_deterministic_closure() {
             .read_active_turn(&session)
             .expect("read")
             .expect("active turn");
-        let plan = reconcile(&tip.snapshot, &case.facts).expect("one closure");
+        let plan = reconcile_closure(&tip.snapshot, &case.facts, "one closure");
         assert_eq!(plan.outcome, case.expected_outcome, "stage {}", case.name);
         assert_eq!(plan.origin, ClosureOrigin::Reconciled);
         // Deterministic: the same inputs produce the same plan.
-        let again = reconcile(&tip.snapshot, &case.facts).expect("repeat");
+        let again = reconcile_closure(&tip.snapshot, &case.facts, "repeat");
         assert_eq!(plan, again);
     }
 }
@@ -373,9 +433,13 @@ fn reserved_facts(plan: &crate::pending::BindingPlan) -> InvocationFactsSnapshot
         bindings: plan.bindings.clone(),
     });
     for binding in &plan.bindings {
-        facts
-            .invocations
-            .insert(binding.invocation_id, InvocationFact::Reserved);
+        facts.invocations.insert(
+            binding.invocation_id,
+            InvocationRecordFact {
+                owner: plan.plan_key,
+                lifecycle: InvocationLifecycleFact::Reserved,
+            },
+        );
     }
     facts
 }
@@ -384,7 +448,10 @@ fn dispatch_started_facts(plan: &crate::pending::BindingPlan) -> InvocationFacts
     let mut facts = reserved_facts(plan);
     facts.invocations.insert(
         plan.bindings[0].invocation_id,
-        InvocationFact::DispatchStarted,
+        InvocationRecordFact {
+            owner: plan.plan_key,
+            lifecycle: InvocationLifecycleFact::DispatchStarted,
+        },
     );
     facts
 }
@@ -433,13 +500,128 @@ fn crash_during_advance_keeps_the_previous_tip_and_retry_is_finite() {
         .read_active_turn(&session)
         .expect("read")
         .expect("tip");
-    let plan = reconcile(&tip.snapshot, &InvocationFactsSnapshot::empty()).expect("plan");
+    let plan = reconcile_closure(&tip.snapshot, &InvocationFactsSnapshot::empty(), "plan");
     assert!(matches!(
         plan.outcome,
         TurnOutcome::Interrupted {
             reason: TurnInterruption::ProcessInterruptedBeforeModelAttempt
         }
     ));
+}
+
+#[test]
+fn step_closing_candidate_pin_object_barrier_failure_does_not_publish_the_candidate() {
+    // ADR 0005 §12: the exact ResultDraft candidate is pinned in a durable
+    // StepClosing snapshot before any draft write. An object-barrier failure
+    // during that pin must not publish the candidate; the previous empty
+    // StepClosing tip remains, and classify_draft stays CleanAbsent.
+    let fixture = temp_dir("pending-crash-pin-object");
+    let store = GitSessionGraphStore::create(fixture.path().join("sessions.git")).expect("store");
+    let session = SESSION.to_string();
+    let (lock, plan) = drive_to_empty_step_closing(&store, &session);
+    let before = store
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("tip");
+    let draft = candidate_draft(&plan);
+
+    lattice_store::fault::fail_object_fsync(true);
+    let err = store.advance_pending_turn(
+        &session,
+        PendingStage::StepClosing(StepClosingState {
+            plan_key: plan.plan_key,
+            bindings: plan.bindings.clone(),
+            closure_cursor: 0,
+            closures: Vec::new(),
+            current_candidate: Some(draft.clone()),
+        }),
+        104,
+        &lock,
+    );
+    assert!(
+        matches!(
+            err,
+            Err(SessionError::Store(
+                lattice_store::StoreError::Durability { .. }
+            ))
+        ),
+        "got {err:?}"
+    );
+
+    let tip = store
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("tip");
+    assert_eq!(tip.oid, before.oid, "the pin CAS must not have run");
+    let PendingStage::StepClosing(state) = &tip.snapshot.stage else {
+        panic!("expected StepClosing, got {:?}", tip.snapshot.stage);
+    };
+    assert!(
+        state.current_candidate.is_none(),
+        "a failed pin must not leave a candidate on the previous tip"
+    );
+
+    drop(lock);
+    let reopened = reopen(&fixture);
+    assert_eq!(
+        reopened.classify_draft(&draft).expect("classify"),
+        crate::pending::DraftClassification::CleanAbsent
+    );
+}
+
+#[test]
+fn step_closing_candidate_pin_uses_one_object_barrier_and_one_ref_barrier() {
+    // `cas_ref` already fsyncs pending objects, then CAS, then the ref.
+    // A second caller `fsync_pending` after success is a redundant git_dir
+    // fsync and must not be part of the pin. The pin remains durable before
+    // any draft write: classify_draft is CleanAbsent until publish_draft.
+    let fixture = temp_dir("pending-crash-pin-barriers");
+    let store = GitSessionGraphStore::create(fixture.path().join("sessions.git")).expect("store");
+    let session = SESSION.to_string();
+    let (lock, plan) = drive_to_empty_step_closing(&store, &session);
+    let draft = candidate_draft(&plan);
+
+    lattice_store::fault::reset_barrier_counts();
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::StepClosing(StepClosingState {
+                plan_key: plan.plan_key,
+                bindings: plan.bindings.clone(),
+                closure_cursor: 0,
+                closures: Vec::new(),
+                current_candidate: Some(draft.clone()),
+            }),
+            104,
+            &lock,
+        )
+        .expect("pin candidate");
+    assert_eq!(
+        lattice_store::fault::object_barrier_count(),
+        1,
+        "the pin must fsync snapshot objects once, before CAS"
+    );
+    assert_eq!(
+        lattice_store::fault::ref_barrier_count(),
+        1,
+        "cas_ref already fsyncs the published ref; the pin must not add a second ref barrier"
+    );
+
+    assert_eq!(
+        store.classify_draft(&draft).expect("classify"),
+        crate::pending::DraftClassification::CleanAbsent
+    );
+    let tip = store
+        .read_active_turn(&session)
+        .expect("read")
+        .expect("tip");
+    let PendingStage::StepClosing(state) = &tip.snapshot.stage else {
+        panic!("expected StepClosing, got {:?}", tip.snapshot.stage);
+    };
+    assert_eq!(
+        state.current_candidate.as_ref().map(|c| c.invocation_id),
+        Some(plan.bindings[0].invocation_id)
+    );
 }
 
 #[test]
@@ -492,7 +674,7 @@ fn unwritable_finalization_keeps_step_closing_and_active_turn() {
         .read_active_turn(&session)
         .expect("read")
         .expect("tip");
-    let plan = reconcile(&tip.snapshot, &InvocationFactsSnapshot::empty()).expect("plan");
+    let plan = reconcile_closure(&tip.snapshot, &InvocationFactsSnapshot::empty(), "plan");
     assert_eq!(plan.actions, vec![ReconciliationAction::FinalizeTurn]);
 
     // Once the store is writable again, the exact retry completes.
@@ -637,12 +819,15 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
     let mut facts = reserved_facts(&plan_one);
     facts.invocations.insert(
         binding.invocation_id,
-        InvocationFact::Terminal {
-            outcome: ExecutionOutcome::Succeeded,
-            material: ResultMaterial::Unavailable {
-                reason: UnavailableMaterialReason::DraftPublicationFailed,
-                digest: None,
-                byte_length: None,
+        InvocationRecordFact {
+            owner: plan_one.plan_key,
+            lifecycle: InvocationLifecycleFact::Terminal {
+                outcome: ExecutionOutcome::Succeeded,
+                material: ResultMaterial::Unavailable {
+                    reason: UnavailableMaterialReason::DraftPublicationFailed,
+                    digest: None,
+                    byte_length: None,
+                },
             },
         },
     );
@@ -650,7 +835,7 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
         .read_active_turn(&session)
         .expect("read")
         .expect("tip");
-    let plan = reconcile(&tip.snapshot, &facts).expect("plan");
+    let plan = reconcile_closure(&tip.snapshot, &facts, "plan");
     let closure_material = plan
         .actions
         .iter()
@@ -685,11 +870,14 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
     let mut facts = reserved_facts(&plan_one);
     facts.invocations.insert(
         binding.invocation_id,
-        InvocationFact::Terminal {
-            outcome: ExecutionOutcome::Succeeded,
-            material: ResultMaterial::Available {
-                digest: draft.content_digest,
-                byte_length: draft.byte_length,
+        InvocationRecordFact {
+            owner: plan_one.plan_key,
+            lifecycle: InvocationLifecycleFact::Terminal {
+                outcome: ExecutionOutcome::Succeeded,
+                material: ResultMaterial::Available {
+                    digest: draft.content_digest,
+                    byte_length: draft.byte_length,
+                },
             },
         },
     );
@@ -697,7 +885,7 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
         .read_active_turn(&session)
         .expect("read")
         .expect("tip");
-    let plan = reconcile(&tip.snapshot, &facts).expect("plan");
+    let plan = reconcile_closure(&tip.snapshot, &facts, "plan");
     let closure = plan
         .actions
         .iter()
@@ -746,7 +934,7 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
         .expect("read")
         .expect("tip");
     let mut facts = InvocationFactsSnapshot::empty();
-    let plan = reconcile(&tip.snapshot, &facts).expect("plan");
+    let plan = reconcile_closure(&tip.snapshot, &facts, "plan");
     assert_eq!(
         plan.outcome,
         TurnOutcome::Interrupted {
@@ -1083,7 +1271,7 @@ fn assert_crash_consistency(root: &std::path::Path) {
             "the pending Turn is exactly the first unpublished one"
         );
         // A survivor is always closable from durable facts alone.
-        let plan = reconcile(&tip.snapshot, &InvocationFactsSnapshot::empty()).expect("one plan");
+        let plan = reconcile_closure(&tip.snapshot, &InvocationFactsSnapshot::empty(), "one plan");
         assert_eq!(plan.turn_id, tip.snapshot.turn_id);
     }
     assert!(

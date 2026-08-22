@@ -7,7 +7,38 @@
 
 ## HIGH
 
-(None)
+### L-GH139A-12: `session_journal_pin` grows with closures already in the Turn — OPEN, non-blocking follow-up — `performance` / `lattice-session` / GitHub #153
+
+- **Location**: `crates/lattice-session/src/git_graph/pending.rs`
+  (`StepClosing` candidate pin);
+  `crates/lancet-audit/tests/invocation_qualification.rs`
+  (`session_journal_pin_ns`).
+- **Problem**: focused series show pin cost increasing across bindings inside a
+  step and resetting at the step boundary. The current harness bounds the Turn,
+  but the implementation still repeats closure-list work.
+- **Current status**: OPEN under #153, not a #139-A/#139-B blocker. A focused
+  syscall profile also found durability waits, rather than repository flock
+  acquisition, dominating stalled runs; this must be separated from the
+  deterministic closure-list growth before choosing a repair.
+- **Plan**: add a local table-driven growth regression, remove repeated
+  validation/traversal without changing durable order, and redesign performance
+  evidence around in-span syscall and host-I/O attribution.
+
+### L-GH139A-10: InvocationStore durability qualification needs a stable measurement model — DEFERRED — `qualification` / `lancet-audit` / GitHub #153
+
+- **Location**: `benchmarks/invocation-store/`;
+  `docs/plans/2026-08-21-issue139a-qualification-contract-v2.md`.
+- **Problem**: retained campaigns produced valid but host-stall-sensitive verdicts
+  that did not provide a stable decision boundary for the production hard cut.
+  The latest recorded FAIL remains evidence; it is not reclassified as a pass.
+- **Current status**: the qualification is diagnostic-only. #139-A is approved
+  on correctness and structural evidence, and #139-B may proceed. The official
+  runner uses `benchmark`; strict `qualify` remains for follow-up development.
+  Benchmark bundles are local ignored artifacts below
+  `target/invocation-store-bundles` and are not tracked in Git.
+- **Plan**: #153 owns the replacement contract, including fsync amplification,
+  host-I/O attribution, representative workload shape, and a repeatability
+  requirement before any performance result becomes blocking again.
 
 ---
 
@@ -42,17 +73,23 @@
 > operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
 > `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
 
-### L-GH144-01: clean UUID-collision revision is unmodellable with synthetic Invocation facts — `robustness` / `lattice-session` / GitHub #144 → #139-A
-- **Location**: `crates/lattice-session/src/pending/facts.rs` (`InvocationFactsSnapshot`, `validate_against_plan`); `crates/lattice-session/src/pending/reconcile.rs` (`binding_window_closure`); ADR 0005 §9.
-- **Problem**: ADR 0005 §9 has two halves. The second — "any uncertain publication or partial/different reservation reuses the exact durable candidates and fails closed on mismatch" — is implemented. The first — "a clean UUID collision before any reservation may CAS-publish a new candidate revision only after InvocationStore proves the prior exact plan absent" — is not, and cannot be with #144's inputs: `InvocationFactsSnapshot.invocations` is a flat `InvocationId -> InvocationFact` map with no record of which plan owns a recorded invocation, so a colliding candidate ID that belongs to *another* plan is indistinguishable from a damaged reservation of *this* plan. Issue #144's AC#3 names "candidate collision/uncertain recovery", so this is a real acceptance gap, not an invented one.
-- **Current status**: DEFERRED, fail-closed. Both cases return typed `SessionError::JournalCorruption`; nothing is guessed, no candidate is ever re-minted, and no collision facts are fabricated. `pending::reconcile::tests::a_different_durable_reservation_stays_fail_closed` pins the boundary explicitly so the deferral cannot silently become an accident.
-- **Plan**: #139-A introduces the real InvocationStore ledger. When its facts can answer "is the prior exact plan absent for this PlanKey while this InvocationId is taken by another plan", model the clean-collision revision path (new candidate revision published by CAS) and replace the boundary test. Do not widen the synthetic vocabulary in the meantime — a session-side guess about ledger ownership is exactly the authority ADR 0005 §19 places in `lancet-audit`.
+### L-GH144-01: ~~clean UUID-collision revision is unmodellable with synthetic Invocation facts~~ — CLOSED by #139-A
+- **Location**: `crates/lattice-session/src/pending/facts.rs`, `crates/lattice-session/src/pending/reconcile.rs`, `crates/lancet-audit/src/invocation_store.rs`.
+- **Problem**: (original) `InvocationFactsSnapshot.invocations` was a flat `InvocationId -> InvocationFact` map with no plan ownership, so clean collisions were indistinguishable from corruption.
+- **Resolution**: #139-A (PR pending) adds `InvocationRecordFact { owner: PlanKey, lifecycle }` with mandatory owner and exact candidate key-set validation, `PlanValidation::Collision`, and a typed `ReconciliationDecision` whose `ReviseCandidates(CandidateRevisionRequest)` variant carries no `TurnOutcome`, plus a non-production `InvocationStore` on the `lattice-store` kernel and `GitSessionGraphStore::execute_candidate_revision`. The boundary test `a_different_durable_reservation_stays_fail_closed` is replaced by truth-table tests (`collision_at_binding_planned_requests_candidate_revision`, `collision_at_bound_is_corruption_not_a_revision`, `different_durable_reservation_is_corruption`, `exact_durable_reservation_does_not_re_reserve`) **and** by a real store-backed end-to-end test, `lancet-audit`'s `clean_collision_revises_candidates_end_to_end_over_real_stores`: foreign owner in a real `InvocationStore` → pinned facts → projection → pure reconcile → fresh UUIDs → real SessionStore CAS → reopen → complete revised plan → re-projection/reconcile, including CAS mismatch and post-CAS durability retry. Decision record: `docs/plans/2026-08-17-issue139a-decision-record.md`.
 
 ### L-GH144-02: legacy outcome projection is still shipped and only test-guarded — `architecture` / `lattice-session` / GitHub #144 → #139-B
 - **Location**: `crates/lattice-session/src/graph.rs` (`WorkspaceDisposition`, `TurnLifecycleEvidence`, `TurnCommit::terminal_reason`); `crates/lattice-session/src/git_graph/pending.rs` (`candidate_turn_commit_input`); ADR 0005 §15/§20.
 - **Problem**: ADR 0005 §15 deletes `WorkspaceDisposition` and `TurnLifecycleEvidence`; #144's AC#8 asks for the *target migration tests*, and the deletion itself belongs to #139-B's production hard cut. Until then a journal-finalized Turn still writes a legacy manifest projection, so a reader could mistake those fields for authority.
 - **Current status**: PARTIAL, contract-guarded. The typed `TurnOutcome`/`ClosureOrigin` on the pinned candidate is the authority; `git_graph::tests::pending_journal::journal_finalized_turns_keep_no_legacy_outcome_authority` asserts across all four outcome variants that `disposition` is always `not_applicable`, `turn/audit.json` carries no lifecycle evidence, `terminal_reason` is always absent, and `execution_status` is exactly `TurnOutcome::legacy_status()`; `the_journal_outcome_contract_never_grows_legacy_outcome_fields` prevents the journal contract from re-growing them.
 - **Plan**: #139-B deletes the legacy fields, `TurnOutcome::legacy_status()`, and the projection in `candidate_turn_commit_input` in the same hard cut. Do not delete them earlier — the pre-#144 conversation manifest readers still depend on them, and a partial deletion would create a second outcome authority instead of removing one.
+
+### L-GH139A-03: ~~the RESULT_FINALIZE_STRESS qualification and the FinalizeBudget it fixed are withdrawn~~ — CLOSED by the 2026-08-18 requalification
+- **Location**: `crates/lancet-audit/tests/invocation_qualification.rs` (`result_finalize_stress`); `docs/plans/2026-08-18-issue139a-qualification-approval.md`; ADR 0005 §12; `target/invocation-store-bundles/20260817T214110Z-7c64a4f3ec34/result-finalize.jsonl` (local ignored historical artifact).
+- **Problem**: the harness that produced the accepted result-finalize distribution published Invocation terminals while the PendingTurn journal was still `Bound`, and asserted `Bound` at the end of every step. ADR 0005 §12 requires the exact `ResultDraft` candidate to be pinned in a durable `StepClosing` snapshot before the draft write, and the pure reducer classifies a terminal fact in the binding window as corruption. The recorded finalize latencies therefore never measured the real durable order, and the 60-second `FinalizeBudget` derived in part from that group's 2.042 s maximum is not supported by evidence.
+- **Resolution**: CLOSED for the Bound-vs-StepClosing harness defect only. The corrected harness was requalified on 2026-08-18 in bundle `20260818T115511Z-4a51b5d42484` (20 local-ledger + 20 result-finalize Arch Linux/Btrfs release runs, environment schema v2). That campaign remains historical evidence; the 2026-08-22 maintainer disposition separately approves #139-A and unblocks #139-B while moving performance qualification to #153. The withdrawn result-finalize group and its numbers remain retracted; its byte-identical bundle is retained locally below `target/invocation-store-bundles`.
+- **Original status**: WITHDRAWN, blocking. The harness has been rewritten to drive `BindingPlanned -> exact reservation -> Bound -> StepClosing(cursor 0, no candidate)` and then, per binding, `DispatchStarted -> StepClosing(cursor i + exact candidate) -> draft path -> terminal + evidence -> StepClosing(cursor i+1, closure appended)`, ending at `StepClosed(ContinueModel)` and to prove by reopen/reduce that the durable state closes legally; it also asserts the two repository write locks are never held together. It has been run **once** as a functional check. The raw bundles were not rewritten and are retained byte-for-byte in the local ignored artifact directory; the current Git tree no longer tracks them. The local-ledger group remains valid historical evidence.
+- **Original plan (executed)**: a maintainer authorized the fresh 20+20 run, the new immutable bundle was retained, and this approval commit re-derives the `FinalizeBudget` and the result-finalize regression thresholds from it.
 
 ### L-GH112-01: evidence 写入失败只记日志，且形状检查按列名不按列类型 — `robustness` / `lancet-audit` / GitHub #112
 - **位置**: `crates/lancet-native/src/server/transport.rs`（`record_call_evidence` 失败处理）；`crates/lancet-audit/src/audit.rs`（`missing_evidence_columns` 按列名判定）。
