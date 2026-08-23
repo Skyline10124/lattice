@@ -22,6 +22,15 @@ agent loop over `lancet-api`'s CEP runtime.
   mapping, and `build_production_turn_deps` (delegates composition to
   `lancet_api::LancetRuntime::build`). Runtime assembly itself is in `lancet-api`.
 - `src/turn/mapping.rs` and `src/turn/types.rs` own public event/result mapping.
+- `src/turn/coordinator.rs` is the private #139-B `TurnCoordinator` shell:
+  the blocking store adapters (`spawn_blocking` over `GitSessionGraphStore`
+  and the Git `InvocationStore`), the injectable `IdSource`, and the
+  dependency bundle. It is dead to the production path until the single
+  #139-B hard cut; nothing may route `stream_turn` through it early.
+- `src/turn/invocation_facts.rs` is the #139-B cross-domain projection
+  (`lancet_audit::PinnedLedgerView` ->
+  `lattice_session::pending::InvocationFactsSnapshot`). This crate owns that
+  composition because `lancet-audit -> lattice-session` must not exist.
 - Integration tests cover CEP round trips, typed operator audit reads, release flows, and
   consistency.
 - Audit-path tests serialise `XDG_STATE_HOME` through

@@ -108,9 +108,9 @@ Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
 Layer 3.5:       lancet-api(->protocol,catalog,dispatch,cep,audit,
                             authority,native,runtime)
 Layer 4:         lattice-api(->lancet-api,lancet-protocol,lancet-catalog,
-                             lancet-authority,lancet-native,
-                             lattice-agent,lattice-llm,lattice-profile,
-                             lattice-session)
+                             lancet-audit,lancet-authority,lancet-native,
+                             lattice-agent,lattice-conversation,lattice-llm,
+                             lattice-profile,lattice-session)
 Layer 5:         lattice-tui(->lattice-api + presentation dependencies)
                  lattice-cli(->lattice-api,lattice-session,lattice-tui,
                               lancet-api + presentation dependencies)
@@ -132,7 +132,8 @@ from the remaining #139-B delta:
 # in #143, and lattice-session -> lancet-protocol landed in #144; all are
 # already in the graph above
 # lancet-audit -> lattice-store landed in #139-A
-ADD lattice-api -> lancet-audit,lattice-conversation      # #139-B
+# lattice-api -> lancet-audit,lattice-conversation landed with the #139-B
+# program (Commit 1); both edges are already in the graph above
 # lattice-api -> lancet-native remains through #139-B and is deleted by #34
 ```
 

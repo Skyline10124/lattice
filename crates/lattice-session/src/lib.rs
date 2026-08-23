@@ -26,7 +26,7 @@ pub use graph::{
 };
 
 pub mod git_graph;
-pub use git_graph::GitSessionGraphStore;
+pub use git_graph::{GitSessionGraphStore, PendingTurnTip};
 
 /// Durable PendingTurn journal contract and pure reconciliation decision
 /// function (ADR 0005 §9/§14, GitHub #144).

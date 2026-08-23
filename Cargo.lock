@@ -3096,6 +3096,7 @@ dependencies = [
  "lancet-protocol",
  "lancet-runtime",
  "lattice-agent",
+ "lattice-conversation",
  "lattice-llm",
  "lattice-profile",
  "lattice-session",

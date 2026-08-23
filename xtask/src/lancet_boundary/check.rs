@@ -167,6 +167,143 @@ pub fn scan_with_allowlist(
     Ok(filter_allowlist(&hits, allowlist))
 }
 
+/// Symbols the #139-B hard cut deletes (plan §5 Commit 1 / §5 Commit 9).
+///
+/// The needles deliberately include comments and doc text: after the cut,
+/// even a mention of the retired vocabulary in production code is residue,
+/// because a reader cannot tell a stale comment from a live path without
+/// opening every hit.
+pub const ISSUE139B_LEGACY_NEEDLES: &[&str] = &[
+    "AgentLoop",
+    "CepAuditStore",
+    "AuditBacking",
+    "ProvisionalCompletionHook",
+    "ToolCallExecutor",
+    "legacy_status",
+    "call_id: u64",
+    "evidence_id",
+    // The numeric JSON-RPC request-id allocator in `lancet-dispatch`
+    // transport, replaced by caller-allocated `InvocationId`.
+    "next_id",
+];
+
+/// Temporary allowlist: every pre-#139-B file that still carries a legacy
+/// needle (plan §5 Commit 1).
+///
+/// This list is the machine-tracked residue ledger of the hard cut:
+///
+/// - every entry must name an existing file or directory, so deleting a
+///   legacy file forces its entry out (stale entries fail the gate);
+/// - Commit 7 must empty the list; from then on any hit anywhere under
+///   `crates/**/{src,tests}` fails CI.
+pub const ISSUE139B_LEGACY_ALLOWLIST: &[&str] = &[
+    "crates/lancet-api/src/audit.rs",
+    "crates/lancet-api/src/config.rs",
+    "crates/lancet-api/src/lib.rs",
+    "crates/lancet-api/src/rewind.rs",
+    "crates/lancet-api/src/runtime.rs",
+    "crates/lancet-api/src/status.rs",
+    "crates/lancet-audit/src/audit.rs",
+    "crates/lancet-audit/src/audit_tests.rs",
+    "crates/lancet-audit/src/evidence.rs",
+    "crates/lancet-audit/src/evidence_tests.rs",
+    "crates/lancet-audit/src/operator.rs",
+    "crates/lancet-audit/src/operator_tests.rs",
+    "crates/lancet-audit/src/store_path.rs",
+    "crates/lancet-authority/tests/guard_decide_fuzz.rs",
+    "crates/lancet-dispatch/src/registry.rs",
+    "crates/lancet-dispatch/src/transport.rs",
+    "crates/lancet-native/src/effect_contract_tests/support.rs",
+    "crates/lancet-native/src/enforcement/guard_l1.rs",
+    "crates/lancet-native/src/handlers/external.rs",
+    "crates/lancet-native/src/handlers/scaffold.rs",
+    "crates/lancet-native/src/lib.rs",
+    "crates/lancet-native/src/server/registry.rs",
+    "crates/lancet-native/src/server/transport.rs",
+    "crates/lancet-native/tests/cep_component_round_trip.rs",
+    "crates/lancet-native/tests/cep_warn_harness.rs",
+    "crates/lancet-runtime/src/history.rs",
+    "crates/lancet-runtime/src/host_mutate.rs",
+    "crates/lancet-runtime/src/runtime.rs",
+    "crates/lattice-agent/src/agent_loop/",
+    "crates/lattice-agent/src/lib.rs",
+    "crates/lattice-agent/tests/agent_loop.rs",
+    "crates/lattice-agent/tests/live_sink_and_cancel.rs",
+    "crates/lattice-agent/tests/provisional_completion.rs",
+    "crates/lattice-agent/tests/streaming_delta.rs",
+    "crates/lattice-api/src/turn/cep.rs",
+    "crates/lattice-api/src/turn/cep_tests.rs",
+    "crates/lattice-api/src/turn/live.rs",
+    "crates/lattice-api/src/turn/live_tests.rs",
+    "crates/lattice-api/src/turn/types.rs",
+    "crates/lattice-api/tests/cep_round_trip.rs",
+    "crates/lattice-api/tests/direct_local_acceptance.rs",
+    "crates/lattice-api/tests/dogfood_impact_matrix.rs",
+    "crates/lattice-api/tests/release_e2e.rs",
+    "crates/lattice-api/tests/rewind_acceptance.rs",
+    "crates/lattice-api/tests/usage_turn.rs",
+    "crates/lattice-api/tests/workspace_history_acceptance.rs",
+    "crates/lattice-session/src/git_graph/pending.rs",
+    "crates/lattice-session/src/git_graph/tests/pending_journal.rs",
+    "crates/lattice-session/src/pending/contract.rs",
+    "crates/lattice-session/src/pending/outcome.rs",
+];
+
+/// Forbidden normal/dev dependency edges of the #139-B composition (plan
+/// §2.1). `lancet-audit -> lattice-session` as a *dev*-dependency is the
+/// documented #139-A qualification seam and stays legal until that harness
+/// is deleted; a normal edge would make LATTICE session types nameable from
+/// the audit production surface and break LANCET's independent
+/// embeddability.
+pub fn issue139b_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<Vec<String>> {
+    let metadata = MetadataCommand::new()
+        .current_dir(repo_root)
+        .no_deps()
+        .exec()
+        .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))?;
+
+    let mut parts = Vec::new();
+    for pkg in &metadata.packages {
+        for dep in &pkg.dependencies {
+            let forbidden = match (pkg.name.as_str(), dep.name.as_str()) {
+                ("lancet-audit", "lattice-session") => dep.kind == DependencyKind::Normal,
+                ("lattice-session", "lancet-audit") => true,
+                _ => false,
+            };
+            if forbidden {
+                parts.push(format!(
+                    "{} -> {} ({:?}) is a forbidden #139-B edge",
+                    pkg.name, dep.name, dep.kind
+                ));
+            }
+        }
+    }
+    Ok(parts)
+}
+
+/// Every legacy-symbol hit outside [`ISSUE139B_LEGACY_ALLOWLIST`] fails, and
+/// every allowlist entry must still name an existing path so the ledger
+/// cannot silently outlive its files (plan §5 Commit 1).
+pub fn issue139b_legacy_residue_hits(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
+    let mut hits = Vec::new();
+    for needle in ISSUE139B_LEGACY_NEEDLES {
+        hits.extend(scan_crates_source_and_tests(repo_root, needle)?);
+    }
+    hits.sort();
+    hits.dedup();
+
+    let mut failures = filter_allowlist(&hits, ISSUE139B_LEGACY_ALLOWLIST);
+
+    for entry in ISSUE139B_LEGACY_ALLOWLIST {
+        if !repo_root.join(entry).exists() {
+            failures.push(format!(
+                "stale allowlist entry: {entry} names no existing path"
+            ));
+        }
+    }
+    Ok(failures)
+}
+
 pub fn tool_executor_reexport_hits(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
     let re = Regex::new(r"pub use .*ToolExecutor|lattice_tooling::ToolExecutor")?;
     let agent_root = repo_root.join("crates/lattice-agent");
@@ -269,6 +406,67 @@ mod tests {
         let text = joined(&out);
         assert!(text.contains("lattice-api"));
         assert!(!text.contains("lancet-native/src/lib.rs"));
+    }
+
+    #[test]
+    fn issue139b_needles_cover_the_plan_residue_set() {
+        for required in [
+            "AgentLoop",
+            "CepAuditStore",
+            "AuditBacking",
+            "ProvisionalCompletionHook",
+            "ToolCallExecutor",
+            "legacy_status",
+            "call_id: u64",
+            "evidence_id",
+        ] {
+            assert!(
+                ISSUE139B_LEGACY_NEEDLES.contains(&required),
+                "missing plan §5 Commit 9 needle: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue139b_allowlist_entries_live_under_crates() {
+        for entry in ISSUE139B_LEGACY_ALLOWLIST {
+            assert!(
+                entry.starts_with("crates/"),
+                "allowlist entries must live under crates/: {entry}"
+            );
+            assert!(
+                entry.ends_with(".rs") || entry.ends_with('/'),
+                "allowlist entries must name crate files or directories: {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue139b_residue_scan_reports_unallowlisted_hits() {
+        let dir = TempDir::new().unwrap();
+        // Seed every allowlist entry as an empty existing path so the
+        // stale-entry check stays quiet, then plant one real hit inside an
+        // allowlisted file and one outside.
+        for entry in ISSUE139B_LEGACY_ALLOWLIST {
+            let path = dir.path().join(entry);
+            if path.extension().is_some() {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                if !path.exists() {
+                    fs::write(&path, "").unwrap();
+                }
+            } else {
+                fs::create_dir_all(&path).unwrap();
+            }
+        }
+        let allowlisted = dir.path().join("crates/lattice-agent/src/lib.rs");
+        let fresh = dir.path().join("crates/lattice-api/src/turn/fresh.rs");
+        fs::create_dir_all(fresh.parent().unwrap()).unwrap();
+        fs::write(&allowlisted, "fn x() { let _ = AgentLoop; }\n").unwrap();
+        fs::write(&fresh, "fn x() { let _ = AgentLoop; }\n").unwrap();
+        let hits = issue139b_legacy_residue_hits(dir.path()).unwrap();
+        let text = joined(&hits);
+        assert!(text.contains("fresh.rs"), "unallowlisted hit is reported");
+        assert!(!text.contains("lattice-agent/src/lib.rs"));
     }
 
     #[test]

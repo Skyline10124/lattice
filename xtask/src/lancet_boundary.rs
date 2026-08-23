@@ -22,6 +22,14 @@ pub fn run() -> anyhow::Result<()> {
                 check::lancet_audit_forbidden_dependency_graph(&root)?,
             ),
             (
+                "#139-B forbidden composition edges",
+                check::issue139b_forbidden_dependency_graph(&root)?,
+            ),
+            (
+                "#139-B legacy hard-cut residue outside the temporary allowlist",
+                check::issue139b_legacy_residue_hits(&root)?,
+            ),
+            (
                 "DefaultToolExecutor outside allowlisted internals",
                 check::scan_with_allowlist(
                     &root,

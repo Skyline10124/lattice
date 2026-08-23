@@ -38,6 +38,10 @@ use crate::{Result, SessionError};
 mod commit;
 pub(crate) mod helpers;
 pub(crate) mod pending;
+// The journal tip is the handle every PendingTurn reader holds; the #139-B
+// coordinator in `lattice-api` names it, so the persistence module stays
+// private while this one type is public.
+pub use pending::PendingTurnTip;
 mod refs;
 mod session;
 pub(crate) mod state;
