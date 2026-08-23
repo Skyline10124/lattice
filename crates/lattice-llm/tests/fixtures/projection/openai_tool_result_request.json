@@ -1,0 +1,12 @@
+[
+  {
+    "role": "tool",
+    "tool_call_id": "call_9f8e7d6c5b",
+    "content": "{\"city\":\"Tokyo\",\"temperature\":21}"
+  },
+  {
+    "role": "tool",
+    "tool_call_id": "call_1a2b3c4d5e",
+    "content": "{\"outcome\":\"not_executed\"}"
+  }
+]

@@ -1,0 +1,16 @@
+{
+  "role": "user",
+  "content": [
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_01AbCdEfGh",
+      "content": "permission denied by policy",
+      "is_error": true
+    },
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_02BcDeFgHi",
+      "content": "{\"outcome\":\"not_executed\"}"
+    }
+  ]
+}

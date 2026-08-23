@@ -48,6 +48,10 @@ impl ToolCallState for UnboundToolCall {
     fn provider_call_id(&self) -> Option<&str> {
         self.provider_call_id.as_deref()
     }
+
+    fn clear_provider_call_id(&mut self) {
+        self.provider_call_id = None;
+    }
 }
 /// A Tool call bound to its canonical `InvocationId` and structural address.
 ///
@@ -126,6 +130,10 @@ impl ToolCallState for BoundToolCall {
 
     fn provider_call_id(&self) -> Option<&str> {
         self.provider_call_id.as_deref()
+    }
+
+    fn clear_provider_call_id(&mut self) {
+        self.provider_call_id = None;
     }
 }
 

@@ -669,3 +669,409 @@ fn tool_arguments_limit_is_enforced_for_anthropic_and_gemini() {
         LimitKind::ToolCallArguments
     );
 }
+
+// ─── #139-B Commit 2: bound closures, ToolResult encoding, usage ──────────
+
+use lattice_conversation::{
+    BoundToolCall, InvocationId, MessagePart, MessageRole, ModelMessageAddress, SessionId,
+    ToolCallAddress, ToolResultOutcome, TurnId,
+};
+use lattice_llm::provider_projection::{tool_results_to_wire, wire_usage};
+
+fn invocation(index: usize) -> InvocationId {
+    InvocationId::parse(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap()
+}
+
+fn bind_message(message: &NativeMessage<UnboundToolCall>) -> NativeMessage<BoundToolCall> {
+    let mut bound_parts = Vec::new();
+    let mut next_invocation = 0usize;
+    for part in &message.parts {
+        let semantic = match &part.semantic {
+            MessageSemantic::ToolCall { call } => {
+                let invocation_id = invocation(next_invocation);
+                next_invocation += 1;
+                let call = call.clone();
+                let address = ToolCallAddress {
+                    message: ModelMessageAddress {
+                        session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+                        turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
+                        model_step_ordinal: 0,
+                    },
+                    part_ordinal: 0,
+                };
+                MessageSemantic::ToolCall {
+                    call: call.bind(invocation_id, address),
+                }
+            }
+            MessageSemantic::Text { text } => MessageSemantic::Text { text: text.clone() },
+            MessageSemantic::Reasoning { text } => {
+                MessageSemantic::Reasoning { text: text.clone() }
+            }
+            MessageSemantic::ToolResult {
+                invocation_id,
+                name,
+                outcome,
+                content,
+            } => MessageSemantic::ToolResult {
+                invocation_id: *invocation_id,
+                name: name.clone(),
+                outcome: *outcome,
+                content: content.clone(),
+            },
+        };
+        bound_parts.push(MessagePart {
+            semantic,
+            replay_state: part.replay_state.clone(),
+        });
+    }
+    NativeMessage::new(message.role, message.provider_origin, bound_parts)
+}
+
+#[test]
+fn bound_closure_vocabulary_replays_identically_to_unbound() {
+    // The persisted closure vocabulary is `NativeMessage<BoundToolCall>`;
+    // same-provider replay must be byte-identical to the unbound replay
+    // because the provider-visible fields are the same typestate accessors.
+    let cases = [
+        (
+            ProviderOrigin::OpenAiCompatible,
+            fixture("openai_assistant_tool_calls.json"),
+        ),
+        (
+            ProviderOrigin::Anthropic,
+            anthropic_message(&fixture("anthropic_thinking_tool_use.json")),
+        ),
+        (
+            ProviderOrigin::Gemini,
+            fixture("gemini_thought_signature.json"),
+        ),
+    ];
+    for (origin, wire_message) in cases {
+        let unbound = wire_to_native(origin, &wire_message).expect("projection");
+        let bound = bind_message(&unbound);
+        let unbound_wire = native_to_wire(origin, &unbound).expect("unbound replay");
+        let bound_wire = native_to_wire(origin, &bound).expect("bound replay");
+        assert_eq!(unbound_wire, bound_wire);
+    }
+}
+
+#[test]
+fn cross_provider_projection_drops_bound_provider_ids_and_replay_state() {
+    let native = wire_to_native(
+        ProviderOrigin::Anthropic,
+        &anthropic_message(&fixture("anthropic_thinking_tool_use.json")),
+    )
+    .expect("projection");
+    let bound = bind_message(&native);
+    let projected = project_cross_provider(&bound, ProviderOrigin::OpenAiCompatible);
+    assert_eq!(
+        projected.provider_origin,
+        Some(ProviderOrigin::OpenAiCompatible)
+    );
+    for part in &projected.parts {
+        assert!(part.replay_state.is_none(), "replay state must not cross");
+        if let MessageSemantic::ToolCall { call } = &part.semantic {
+            assert_eq!(call.provider_call_id, None, "provider id must not cross");
+        }
+        assert!(
+            !matches!(part.semantic, MessageSemantic::Reasoning { .. }),
+            "reasoning must not cross"
+        );
+    }
+    // The bound identity survives: this is still a BoundToolCall message.
+    let tool_calls: Vec<_> = projected.tool_calls().collect();
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0].1.invocation_id, invocation(0));
+}
+
+fn tool_closure(
+    invocation_id: InvocationId,
+    name: &str,
+    outcome: ToolResultOutcome,
+    content: Option<&str>,
+) -> MessagePart<BoundToolCall> {
+    MessagePart::semantic_only(MessageSemantic::ToolResult {
+        invocation_id,
+        name: name.to_string(),
+        outcome,
+        content: content.map(str::to_string),
+    })
+}
+
+#[test]
+fn openai_tool_results_encode_against_the_official_fixture() {
+    let native = wire_to_native(
+        ProviderOrigin::OpenAiCompatible,
+        &fixture("openai_assistant_tool_calls.json"),
+    )
+    .expect("projection");
+    let bound = bind_message(&native);
+    let tool = NativeMessage::new(
+        MessageRole::Tool,
+        Some(ProviderOrigin::OpenAiCompatible),
+        vec![
+            tool_closure(
+                invocation(0),
+                "get_weather",
+                ToolResultOutcome::Succeeded,
+                Some(r#"{"city":"Tokyo","temperature":21}"#),
+            ),
+            tool_closure(
+                invocation(1),
+                "get_time",
+                ToolResultOutcome::NotExecuted,
+                None,
+            ),
+        ],
+    );
+    let encoded =
+        tool_results_to_wire(ProviderOrigin::OpenAiCompatible, &bound, &tool).expect("encoding");
+    let expected = fixture("openai_tool_result_request.json");
+    assert_eq!(serde_json::Value::Array(encoded), expected);
+}
+
+#[test]
+fn anthropic_tool_results_merge_into_one_user_turn_with_is_error() {
+    let native = wire_to_native(
+        ProviderOrigin::Anthropic,
+        &anthropic_message(&fixture("anthropic_thinking_tool_use.json")),
+    )
+    .expect("projection");
+    let bound = bind_message(&native);
+    let tool = NativeMessage::new(
+        MessageRole::Tool,
+        Some(ProviderOrigin::Anthropic),
+        vec![
+            tool_closure(
+                invocation(0),
+                "get_weather",
+                ToolResultOutcome::Failed,
+                Some("permission denied by policy"),
+            ),
+            tool_closure(
+                invocation(1),
+                "get_time",
+                ToolResultOutcome::NotExecuted,
+                None,
+            ),
+        ],
+    );
+    let encoded = tool_results_to_wire(ProviderOrigin::Anthropic, &bound, &tool).expect("encoding");
+    assert_eq!(encoded.len(), 1);
+    assert_eq!(encoded[0], fixture("anthropic_tool_result_request.json"));
+}
+
+#[test]
+fn gemini_tool_results_encode_without_any_provider_id() {
+    let native = wire_to_native(
+        ProviderOrigin::Gemini,
+        &fixture("gemini_function_call_no_id.json"),
+    )
+    .expect("projection");
+    let bound = bind_message(&native);
+    assert!(
+        bound
+            .tool_calls()
+            .next()
+            .unwrap()
+            .1
+            .provider_call_id
+            .is_none()
+    );
+    let tool = NativeMessage::new(
+        MessageRole::Tool,
+        Some(ProviderOrigin::Gemini),
+        vec![tool_closure(
+            invocation(0),
+            "get_weather",
+            ToolResultOutcome::Succeeded,
+            Some(r#"{"city":"Paris","temperature":18}"#),
+        )],
+    );
+    let encoded = tool_results_to_wire(ProviderOrigin::Gemini, &bound, &tool).expect("encoding");
+    assert_eq!(encoded.len(), 1);
+    assert_eq!(encoded[0], fixture("gemini_tool_result_request.json"));
+}
+
+#[test]
+fn id_bearing_wires_fail_typed_when_the_call_had_no_provider_id() {
+    // A missing provider call ID is a valid conversation fact; OpenAI and
+    // Anthropic result shapes cannot encode it, so the next request fails
+    // with a typed error instead of a synthesized ID.
+    let native = wire_to_native(
+        ProviderOrigin::Gemini,
+        &fixture("gemini_function_call_no_id.json"),
+    )
+    .expect("projection");
+    let bound = bind_message(&native);
+    let tool = NativeMessage::new(
+        MessageRole::Tool,
+        Some(ProviderOrigin::Gemini),
+        vec![tool_closure(
+            invocation(0),
+            "get_weather",
+            ToolResultOutcome::Succeeded,
+            Some("{}"),
+        )],
+    );
+    for origin in [ProviderOrigin::OpenAiCompatible, ProviderOrigin::Anthropic] {
+        assert!(matches!(
+            tool_results_to_wire(origin, &bound, &tool),
+            Err(ProjectionError::ToolResultWithoutProviderCallId { invocation_id, .. })
+                if invocation_id == invocation(0)
+        ));
+    }
+}
+
+#[test]
+fn unmatched_tool_result_closure_fails_closed() {
+    let native = wire_to_native(
+        ProviderOrigin::OpenAiCompatible,
+        &fixture("openai_assistant_tool_calls.json"),
+    )
+    .expect("projection");
+    let bound = bind_message(&native);
+    let stranger = NativeMessage::new(
+        MessageRole::Tool,
+        Some(ProviderOrigin::OpenAiCompatible),
+        vec![tool_closure(
+            invocation(9),
+            "get_weather",
+            ToolResultOutcome::Succeeded,
+            Some("{}"),
+        )],
+    );
+    assert!(matches!(
+        tool_results_to_wire(ProviderOrigin::OpenAiCompatible, &bound, &stranger),
+        Err(ProjectionError::UnmatchedToolResult { .. })
+    ));
+}
+
+#[test]
+fn wire_usage_extracts_official_blocks() {
+    let openai = wire_usage(
+        ProviderOrigin::OpenAiCompatible,
+        &fixture("openai_usage.json"),
+    )
+    .expect("usage")
+    .expect("present");
+    assert_eq!(
+        (
+            openai.prompt_tokens,
+            openai.completion_tokens,
+            openai.total_tokens
+        ),
+        (1201, 34, 1235)
+    );
+
+    let anthropic = wire_usage(ProviderOrigin::Anthropic, &fixture("anthropic_usage.json"))
+        .expect("usage")
+        .expect("present");
+    assert_eq!(
+        (
+            anthropic.prompt_tokens,
+            anthropic.completion_tokens,
+            anthropic.total_tokens
+        ),
+        (517, 62, 579)
+    );
+
+    let gemini = wire_usage(ProviderOrigin::Gemini, &fixture("gemini_usage.json"))
+        .expect("usage")
+        .expect("present");
+    assert_eq!(
+        (
+            gemini.prompt_tokens,
+            gemini.completion_tokens,
+            gemini.total_tokens
+        ),
+        (811, 27, 838)
+    );
+}
+
+#[test]
+fn missing_usage_is_unknown_not_zero() {
+    // The tool-call fixtures carry no usage blocks at all.
+    for (origin, wire) in [
+        (
+            ProviderOrigin::OpenAiCompatible,
+            openai_message(&fixture("openai_assistant_tool_calls.json")),
+        ),
+        (
+            ProviderOrigin::Anthropic,
+            anthropic_message(&fixture("anthropic_thinking_tool_use.json")),
+        ),
+        (
+            ProviderOrigin::Gemini,
+            gemini_content(&fixture("gemini_function_call_no_id.json")),
+        ),
+    ] {
+        assert_eq!(wire_usage(origin, &wire), Ok(None), "usage must be unknown");
+    }
+}
+
+#[test]
+fn malformed_usage_fails_typed() {
+    let openai = serde_json::json!({"usage": {"prompt_tokens": "many"}});
+    assert!(matches!(
+        wire_usage(ProviderOrigin::OpenAiCompatible, &openai),
+        Err(ProjectionError::MalformedUsage { .. })
+    ));
+    let anthropic = serde_json::json!({"usage": {"input_tokens": 1.5, "output_tokens": 2}});
+    assert!(matches!(
+        wire_usage(ProviderOrigin::Anthropic, &anthropic),
+        Err(ProjectionError::MalformedUsage { .. })
+    ));
+    let gemini = serde_json::json!({"usageMetadata": {"promptTokenCount": null}});
+    assert!(matches!(
+        wire_usage(ProviderOrigin::Gemini, &gemini),
+        Err(ProjectionError::MalformedUsage { .. })
+    ));
+}
+
+#[test]
+fn tool_arguments_exact_boundary_is_accepted_for_every_provider() {
+    // 8 MiB of textual arguments lands exactly on the per-call limit; every
+    // projector must accept it. Plus-one interruption for Anthropic/Gemini is
+    // covered above; here OpenAI joins the family.
+    let overhead = r#"{"a":""}"#.len();
+    let filler = MAX_TOOL_CALL_ARGUMENTS_BYTES - overhead;
+
+    let openai = serde_json::json!({"choices": [{"message": {
+        "role": "assistant",
+        "content": Value::Null,
+        "tool_calls": [{"id": "call_1", "type": "function", "function": {
+            "name": "t",
+            "arguments": format!("{{\"a\":\"{}\"}}", "z".repeat(filler)),
+        }}]
+    }}]});
+    wire_to_native(ProviderOrigin::OpenAiCompatible, &openai).expect("exact boundary");
+
+    let openai_over = serde_json::json!({"choices": [{"message": {
+        "role": "assistant",
+        "content": Value::Null,
+        "tool_calls": [{"id": "call_1", "type": "function", "function": {
+            "name": "t",
+            "arguments": format!("{{\"a\":\"{}\"}}", "z".repeat(filler + 1)),
+        }}]
+    }}]});
+    assert_eq!(
+        limit_kind(wire_to_native(
+            ProviderOrigin::OpenAiCompatible,
+            &openai_over
+        )),
+        LimitKind::ToolCallArguments
+    );
+
+    let anthropic_input = serde_json::json!({"a": "z".repeat(filler)});
+    let anthropic = serde_json::json!({"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_1", "name": "t", "input": anthropic_input}
+    ]});
+    wire_to_native(ProviderOrigin::Anthropic, &anthropic).expect("exact boundary");
+
+    let gemini_args = serde_json::json!({"a": "z".repeat(filler)});
+    let gemini = serde_json::json!({"candidates": [{"content": {"role": "model", "parts": [
+        {"functionCall": {"name": "t", "args": gemini_args}}
+    ]}}]});
+    wire_to_native(ProviderOrigin::Gemini, &gemini).expect("exact boundary");
+}

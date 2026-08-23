@@ -130,6 +130,9 @@ pub trait ToolCallState:
     fn arguments(&self) -> &serde_json::Value;
     /// The provider-native call ID, when the provider supplied one.
     fn provider_call_id(&self) -> Option<&str>;
+    /// Drop the provider-native call ID (cross-provider projection only;
+    /// ADR 0005 §7). Every other field is untouched.
+    fn clear_provider_call_id(&mut self);
 }
 
 pub(crate) mod sealed {

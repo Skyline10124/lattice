@@ -28,11 +28,12 @@
 
 use lattice_conversation::{
     AttemptAssembly, MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState,
-    ProviderOrigin, RawToolCall, UnboundToolCall, validate_tool_call_batch,
+    ProviderOrigin, RawToolCall, TokenUsage, ToolCallState, UnboundToolCall,
+    validate_tool_call_batch,
 };
 use serde_json::{Value, json};
 
-use super::ProjectionError;
+use super::{ProjectionError, ToolResultClosure, closure_content};
 
 fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
     ProjectionError::OutputLimitExceeded {
@@ -158,7 +159,9 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
     ))
 }
 
-pub fn native_to_wire(message: &NativeMessage<UnboundToolCall>) -> Result<Value, ProjectionError> {
+pub fn native_to_wire<S: ToolCallState>(
+    message: &NativeMessage<S>,
+) -> Result<Value, ProjectionError> {
     let mut blocks: Vec<Value> = Vec::new();
     for (ordinal, part) in message.parts.iter().enumerate() {
         match &part.semantic {
@@ -191,10 +194,10 @@ pub fn native_to_wire(message: &NativeMessage<UnboundToolCall>) -> Result<Value,
             MessageSemantic::ToolCall { call } => {
                 let mut block = json!({
                     "type": "tool_use",
-                    "name": call.name,
-                    "input": call.arguments,
+                    "name": call.name(),
+                    "input": call.arguments(),
                 });
-                if let Some(id) = &call.provider_call_id {
+                if let Some(id) = call.provider_call_id() {
                     block["id"] = json!(id);
                 }
                 blocks.push(block);
@@ -210,5 +213,69 @@ pub fn native_to_wire(message: &NativeMessage<UnboundToolCall>) -> Result<Value,
     Ok(json!({
         "role": "assistant",
         "content": blocks,
+    }))
+}
+
+/// One user turn whose content carries every `tool_result` block, in closure
+/// order. Blocks correlate to their `tool_use` through `tool_use_id`, so a
+/// closing call with no provider ID cannot be encoded. `Failed`/`Rejected`
+/// closures set the official `is_error` flag.
+pub(crate) fn tool_result_messages(
+    closures: &[ToolResultClosure],
+) -> Result<Vec<Value>, ProjectionError> {
+    let mut blocks: Vec<Value> = Vec::with_capacity(closures.len());
+    for closure in closures {
+        let Some(tool_use_id) = closure.provider_call_id.as_deref() else {
+            return Err(ProjectionError::ToolResultWithoutProviderCallId {
+                provider: ProviderOrigin::Anthropic,
+                invocation_id: closure.invocation_id,
+            });
+        };
+        let mut block = json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": closure_content(closure.outcome, &closure.content),
+        });
+        if matches!(
+            closure.outcome,
+            lattice_conversation::ToolResultOutcome::Failed
+                | lattice_conversation::ToolResultOutcome::Rejected
+        ) {
+            block["is_error"] = json!(true);
+        }
+        blocks.push(block);
+    }
+    Ok(vec![json!({
+        "role": "user",
+        "content": blocks,
+    })])
+}
+
+/// `usage: {input_tokens, output_tokens}`; the neutral total is the sum
+/// (official bodies may add cache fields, which the neutral contract does not
+/// carry).
+pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {
+    let Some(usage) = wire.get("usage") else {
+        return Ok(None);
+    };
+    if usage.is_null() {
+        return Ok(None);
+    }
+    let malformed = |detail: String| ProjectionError::MalformedUsage {
+        provider: ProviderOrigin::Anthropic,
+        detail,
+    };
+    let field = |name: &str| -> Result<u64, ProjectionError> {
+        usage
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| malformed(format!("usage.{name} is not an integer")))
+    };
+    let prompt_tokens = field("input_tokens")?;
+    let completion_tokens = field("output_tokens")?;
+    Ok(Some(TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens.saturating_add(completion_tokens),
     }))
 }

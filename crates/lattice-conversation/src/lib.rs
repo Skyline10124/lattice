@@ -30,6 +30,11 @@ pub mod tool_call;
 pub mod usage;
 
 pub use lancet_protocol::canonical_json;
+// The conversation contract is phrased over the canonical identity and
+// structural-address types (`BoundToolCall::invocation_id`,
+// `BoundToolCall::address`), so consumers of the crate can name them without
+// reaching for `lancet-protocol` themselves.
+pub use lancet_protocol::{InvocationId, ModelMessageAddress, SessionId, ToolCallAddress, TurnId};
 
 pub use attempt::{AttemptInterruption, AttemptOutcome, AttemptRejection, ModelAttemptRecord};
 pub use digest::{arguments_digest, replay_state_digest, semantic_digest};

@@ -1,0 +1,14 @@
+{
+  "role": "user",
+  "parts": [
+    {
+      "functionResponse": {
+        "name": "get_weather",
+        "response": {
+          "city": "Paris",
+          "temperature": 18
+        }
+      }
+    }
+  ]
+}
