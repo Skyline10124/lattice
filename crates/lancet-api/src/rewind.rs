@@ -19,7 +19,6 @@
 use std::cell::RefCell;
 use std::path::Path;
 
-use lancet_audit::{CepAuditStore, RewindAuditRecord};
 use lancet_native::rewind::{
     RestoredPath, RewindPathConflict, RewindPathPreflight, RewindRestoreError,
     RewindRestoreOutcome, preflight_and_restore,
@@ -28,8 +27,35 @@ use lancet_runtime::{
     RewindError, RewindStep, WorkspaceHistory, WorkspaceHistoryBacking, WorkspaceHistoryError,
 };
 
-use crate::config::audit_db_path_for_project;
+pub use lancet_runtime::rewind_audit::{RewindAuditLog, RewindAuditRecord};
+
 use crate::error::{LancetError, LancetResult};
+
+/// The exclusive `WorkspaceOperationLock` a product-level `RewindCoordinator`
+/// holds across the whole workflow (#139-B Commit 3).
+///
+/// Lower workspace/history operations accept this guard and never reacquire
+/// the lock: ownership lives exactly once, in the coordinator.
+pub enum HeldWorkspaceOperation {
+    /// No project binding to serialize against (disabled backing).
+    None,
+    /// The held exclusive guard.
+    Exclusive(lancet_runtime::FlockGuard),
+}
+
+impl HeldWorkspaceOperation {
+    /// Acquire the exclusive project operation lock for `backing`.
+    pub fn acquire(backing: &WorkspaceHistoryBacking) -> Result<Self, WorkspaceHistoryError> {
+        let history = WorkspaceHistory::open(backing.clone())?;
+        match history.lock_workspace_operation(
+            lancet_runtime::LockMode::Exclusive,
+            lancet_runtime::Blocking::Block,
+        )? {
+            Some(guard) => Ok(Self::Exclusive(guard)),
+            None => Ok(Self::None),
+        }
+    }
+}
 
 /// A successfully applied workspace rewind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +154,11 @@ pub enum WorkspaceRewindError {
         /// Boxed so the success path is not paying for the failure payload.
         report: Box<WorkspaceRewindReport>,
     },
+    /// The caller did not hold the project operation lock for a project
+    /// backing. The coordinator owns that lock; lower layers never acquire
+    /// it themselves (#139-B Commit 3).
+    #[error("rewind against a project workspace requires the held WorkspaceOperationLock")]
+    MissingOperationLock,
 }
 
 /// Plan — without applying — the reversal back to `target_history_oid`.
@@ -174,13 +205,18 @@ pub fn plan_workspace_rewind(
 /// Rewind the Local Workspace to `target_history_oid`.
 ///
 /// `project_root` is the canonical Local Workspace root; `backing` locates
-/// the private history repository. A `None` target unwinds every recorded
-/// mutation and deletes the `current` ref. Record pins are never touched, so
-/// every reversed commit stays reachable afterwards.
+/// the private history repository; `held` is the exclusive
+/// `WorkspaceOperationLock` the product-level `RewindCoordinator` acquired
+/// and holds across preflight, restore, the history ref move, the Session
+/// ref move, and the audit append — lower layers never reacquire it
+/// (#139-B Commit 3). A `None` target unwinds every recorded mutation and
+/// deletes the `current` ref. Record pins are never touched, so every
+/// reversed commit stays reachable afterwards.
 pub fn rewind_workspace(
     project_root: &Path,
     backing: WorkspaceHistoryBacking,
     target_history_oid: Option<&str>,
+    held: &HeldWorkspaceOperation,
 ) -> Result<WorkspaceRewindOutcome, WorkspaceRewindError> {
     let history = WorkspaceHistory::open(backing)?;
     if !history.is_enabled() {
@@ -199,21 +235,18 @@ pub fn rewind_workspace(
             }),
         };
     }
+    // The guard is held by the caller for a project backing; accepting a
+    // rewind without it would silently run unserialized against live
+    // mutations.
+    if matches!(held, HeldWorkspaceOperation::None) {
+        return Err(WorkspaceRewindError::MissingOperationLock);
+    }
 
     /// Why the apply closure aborted.
     enum Abort {
         Conflict,
         Restore(RewindRestoreError),
     }
-
-    // ADR 0005 §5: a Rewind is a workspace mutation, so it holds the
-    // per-project `WorkspaceOperationLock` exclusively across preflight,
-    // restore, and the history ref move. The history's repository write lock
-    // is taken underneath it inside `rewind_with`, never the reverse.
-    let _operation_guard = history.lock_workspace_operation(
-        lancet_runtime::LockMode::Exclusive,
-        lancet_runtime::Blocking::Block,
-    )?;
 
     // Steps are captured before the restore runs so every failure mode —
     // conflict, restore error, ref-move failure — can still surface what the
@@ -318,31 +351,32 @@ pub fn rewind_workspace(
     }
 }
 
-/// Append one durable Rewind audit record to the project's audit database.
+/// Append one durable Rewind audit record to the project's independent
+/// append-only chain in `workspace-history.git` (#139-B Commit 3).
 ///
-/// Same direct-store shape as `query_audit`: the
-/// path is resolved and the store opened inside this crate. The record holds
-/// hashes, paths, and object ids only — never file content.
-pub fn record_rewind_audit(project_root: &Path, record: &RewindAuditRecord) -> LancetResult<()> {
-    let db = audit_db_path_for_project(project_root)
-        .map_err(|err| LancetError::Config(format!("resolve audit db path: {err}")))?;
-    let store = CepAuditStore::open(&db)
-        .map_err(|err| LancetError::Internal(format!("open audit store for rewind: {err}")))?;
-    store
-        .insert_rewind_record(record)
+/// The record holds hashes, paths, and object ids only — never file content.
+/// The caller still holds the project `WorkspaceOperationLock`; this is the
+/// separate short repository transaction after the Session ref attempt.
+pub fn record_rewind_audit(
+    backing: &WorkspaceHistoryBacking,
+    record: &RewindAuditRecord,
+) -> LancetResult<()> {
+    let log = RewindAuditLog::open(backing)
+        .map_err(|err| LancetError::Internal(format!("open rewind audit chain: {err}")))?;
+    log.append(record)
         .map_err(|err| LancetError::Internal(format!("persist rewind audit record: {err}")))
 }
 
-/// All durable Rewind records for a session, oldest first.
+/// Bounded read of the newest Rewind audit records for one session.
 pub fn rewind_audit_records(
-    project_root: &Path,
+    backing: &WorkspaceHistoryBacking,
     session_id: &str,
 ) -> LancetResult<Vec<RewindAuditRecord>> {
-    let db = audit_db_path_for_project(project_root)
-        .map_err(|err| LancetError::Config(format!("resolve audit db path: {err}")))?;
-    let store = CepAuditStore::open(&db)
-        .map_err(|err| LancetError::Internal(format!("open audit store for rewind: {err}")))?;
-    store
-        .rewind_records_for_session(session_id)
-        .map_err(|err| LancetError::Internal(format!("read rewind audit records: {err}")))
+    let log = RewindAuditLog::open(backing)
+        .map_err(|err| LancetError::Internal(format!("open rewind audit chain: {err}")))?;
+    log.records_for_session(
+        session_id,
+        lancet_runtime::rewind_audit::MAX_REWIND_AUDIT_READ,
+    )
+    .map_err(|err| LancetError::Internal(format!("read rewind audit records: {err}")))
 }

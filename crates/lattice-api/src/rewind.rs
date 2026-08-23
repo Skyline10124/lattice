@@ -1,7 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Explicit Rewind (GitHub #64).
+//! Explicit Rewind (GitHub #64; `RewindCoordinator` shape from #139-B
+//! Commit 3).
 //!
 //! The product-level entry point: the user selects an earlier Turn of the
 //! current session and LATTICE reverses only the Atomic Local Mutations it
@@ -18,14 +19,21 @@
 //! 2. Resolve the Turn's workspace-history identity, refusing a Turn whose
 //!    identity is unavailable rather than guessing (see
 //!    [`effective_history_target`]).
-//! 3. Hand the workspace half to `lancet_api::rewind_workspace`: plan the
+//! 3. Acquire the exclusive per-project `WorkspaceOperationLock` exactly
+//!    once, here in the coordinator (#139-B Commit 3), and hold it across
+//!    the workspace preflight/restore, the private history ref movement, the
+//!    Session History ref movement, and the audit append. Lower layers
+//!    accept the held guard and never reacquire it.
+//! 4. Hand the workspace half to `lancet_api::rewind_workspace`: plan the
 //!    reversal, verify every affected path against its recorded post-state,
-//!    restore parent-tree content, then move the private history ref — all
-//!    under the history's recording lock.
-//! 4. Only then move the Session History ref, after pinning the abandoned
-//!    head so the rewound-away Turns keep an internal ref.
-//! 5. Write the durable audit record — for success, conflict, and every
-//!    failure mode that touched the Local Workspace.
+//!    restore parent-tree content, then move the private history ref.
+//! 5. Move the Session History ref, after pinning the abandoned head so the
+//!    rewound-away Turns keep an internal ref.
+//! 6. Append one durable record to the independent
+//!    `refs/lattice/rewind-audit/log` chain — for success, conflict, and
+//!    every failure mode that touched the Local Workspace — while the
+//!    operation lock is still held. A failed append returns the typed
+//!    [`RewindError::AuditPublicationFailed`] partial state, never success.
 //!
 //! This is a free function rather than a [`SessionApi`] method: the session
 //! facade stays pointer-movement only, and Rewind needs the Local Workspace
@@ -34,8 +42,9 @@
 use std::path::Path;
 
 use lancet_api::{
-    RewindAuditRecord, WorkspaceRewindError, WorkspaceRewindOutcome, plan_workspace_rewind,
-    record_rewind_audit, rewind_workspace,
+    HeldWorkspaceOperation, REWIND_AUDIT_SCHEMA_VERSION, RewindAuditRecord,
+    WorkspaceHistoryBacking, WorkspaceRewindError, WorkspaceRewindOutcome, plan_workspace_rewind,
+    record_rewind_audit, rewind_audit_records, rewind_workspace,
 };
 use lattice_session::GraphHead;
 use serde::{Deserialize, Serialize};
@@ -161,20 +170,121 @@ pub enum RewindOutcome {
     Conflict(RewindConflict),
 }
 
+/// The durable state a Rewind had reached when its audit record could not be
+/// published (#139-B Commit 3). Everything here already happened; the caller
+/// must not retry the Rewind blindly, because the actions are not
+/// transactional across stores.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindPartialState {
+    /// Resolved session id.
+    pub session_id: String,
+    /// The selected target Turn.
+    pub target_commit_id: String,
+    /// The outcome label whose record failed to publish.
+    pub outcome: String,
+    /// Workspace-history identity the workflow started from.
+    pub from_history_oid: Option<String>,
+    /// Workspace-history identity the workflow moved to.
+    pub to_history_oid: Option<String>,
+    /// Reversed (or planned) mutation commits, newest first.
+    pub steps: Vec<RewindStep>,
+    /// Preflight observations, one per affected path.
+    pub preflight: Vec<RewindPathPreflight>,
+    /// Restored paths.
+    pub restored: Vec<RewindRestoredPath>,
+    /// Divergent paths, when the outcome is a conflict.
+    pub conflicts: Vec<RewindPathConflict>,
+    /// Whether the Session History ref had already moved.
+    pub session_head_moved: bool,
+}
+
+/// Error of the product-level Rewind workflow.
+#[derive(Debug, thiserror::Error)]
+pub enum RewindError {
+    /// A refused or failed workflow, before or during its actions.
+    #[error(transparent)]
+    Api(#[from] ApiError),
+    /// The Rewind's durable actions completed but its audit record could not
+    /// be appended to the independent chain. Never reported as success: the
+    /// partial state is returned so the operator can reconcile.
+    #[error("rewind actions completed but the audit record could not be published: {detail}")]
+    AuditPublicationFailed {
+        /// Why the append failed.
+        detail: String,
+        /// What had already happened when it failed.
+        partial: Box<RewindPartialState>,
+    },
+}
+
+/// Durable facts a [`RewindBarriers`] observer sees at one phase boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindBarrierFacts {
+    /// Resolved session id.
+    pub session_id: String,
+    /// The selected target Turn.
+    pub target_commit_id: String,
+    /// The workflow outcome label reached so far.
+    pub outcome: String,
+    /// Records currently on the independent audit chain (`0` when the
+    /// backing is disabled). Read live from the chain, so a barrier can
+    /// assert the exact durable state it observes.
+    pub audit_records_on_chain: usize,
+}
+
+/// Deterministic phase barriers for tests (#139-B Commit 3).
+///
+/// Production passes [`RewindBarriers::none`]. Each observer runs at a
+/// specific action → audit window, after the named action is durably
+/// complete and before the workflow continues.
+#[derive(Default)]
+pub struct RewindBarriers<'a> {
+    /// After the workspace half (restore + history ref movement).
+    pub after_workspace_half: Option<&'a dyn Fn(&RewindBarrierFacts)>,
+    /// After the Session History ref movement.
+    pub after_session_ref_move: Option<&'a dyn Fn(&RewindBarrierFacts)>,
+    /// After the audit append, before the workflow returns.
+    pub after_audit_append: Option<&'a dyn Fn(&RewindBarrierFacts)>,
+}
+
+impl RewindBarriers<'_> {
+    /// No barriers: the production configuration.
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
 /// Reverse every LATTICE mutation installed after `target_commit_id`.
 ///
 /// `project_root` is the Local Workspace the session's Turns mutated — the
 /// same canonical root a live Turn runs against; it selects the private
-/// history and the audit database.
+/// history and the audit chain.
 pub fn rewind_to_turn(
     session: &SessionApi,
     session_id: &str,
     target_commit_id: &str,
     project_root: &Path,
-) -> Result<RewindOutcome> {
+) -> std::result::Result<RewindOutcome, RewindError> {
+    rewind_to_turn_with_barriers(
+        session,
+        session_id,
+        target_commit_id,
+        project_root,
+        &RewindBarriers::none(),
+    )
+}
+
+/// [`rewind_to_turn`] with deterministic phase barriers for tests.
+#[allow(clippy::too_many_lines)]
+pub fn rewind_to_turn_with_barriers(
+    session: &SessionApi,
+    session_id: &str,
+    target_commit_id: &str,
+    project_root: &Path,
+    barriers: &RewindBarriers<'_>,
+) -> std::result::Result<RewindOutcome, RewindError> {
     // Rewind is Session-bound for its entire read/restore/ref-publication
     // saga. Resolve the id before locking, then keep the explicit guard until
-    // the final Session ref operation completes.
+    // the final audit append completes.
     let (resolved_session_id, execution_lock) = session.lock_execution(session_id)?;
 
     // 1. Target resolution. `get_turn_commit` already refuses a commit that
@@ -218,7 +328,8 @@ pub fn rewind_to_turn(
         return Err(ApiError::Conflict(format!(
             "session '{resolved_session_id}' is bound to project key {expected_key}, but the current Local Workspace resolves to {}",
             workspace_root.store_key()
-        )));
+        ))
+        .into());
     }
     let backing = session.workspace_history_backing(expected_key)?;
 
@@ -237,13 +348,37 @@ pub fn rewind_to_turn(
         )?;
     }
 
-    // 3. Workspace half.
+    // 3. Acquire the exclusive project `WorkspaceOperationLock` exactly once
+    //    (#139-B Commit 3) and hold it across the workspace half, the Session
+    //    ref movement, and the audit append. Lower layers accept the guard
+    //    and never reacquire it.
+    let held = HeldWorkspaceOperation::acquire(&backing).map_err(|err| {
+        ApiError::Internal(format!("acquire the workspace operation lock: {err}"))
+    })?;
+
+    // 4. Workspace half.
     let audit = RewindAuditContext {
-        project_root,
+        backing: &backing,
         session_id: &resolved_session_id,
         target_commit_id: &target.commit_id,
+        barriers,
     };
-    let workspace = match rewind_workspace(project_root, backing, history_target.as_deref()) {
+    let barrier_facts = |outcome: &str| -> RewindBarrierFacts {
+        RewindBarrierFacts {
+            session_id: resolved_session_id.clone(),
+            target_commit_id: target.commit_id.clone(),
+            outcome: outcome.to_string(),
+            audit_records_on_chain: rewind_audit_records(&backing, &resolved_session_id)
+                .map(|records| records.len())
+                .unwrap_or(0),
+        }
+    };
+    let workspace = match rewind_workspace(
+        project_root,
+        backing.clone(),
+        history_target.as_deref(),
+        &held,
+    ) {
         Ok(outcome) => outcome,
         Err(WorkspaceRewindError::RefMove { detail, report }) => {
             // The Local Workspace was restored but `current` did not move.
@@ -258,11 +393,13 @@ pub fn rewind_to_turn(
                 &preflight,
                 Some(&restored_of(&report.restored)),
                 None,
+                false,
             )?;
             return Err(ApiError::Internal(format!(
                 "rewind restored {} path(s) but the private history ref did not move: {detail}",
                 report.restored.len()
-            )));
+            ))
+            .into());
         }
         Err(WorkspaceRewindError::Restore {
             source,
@@ -281,11 +418,13 @@ pub fn rewind_to_turn(
                 &[],
                 Some(&restored),
                 None,
+                false,
             )?;
             return Err(ApiError::Internal(format!(
                 "rewind restore failed after restoring {} path(s): {source}",
                 restored.len()
-            )));
+            ))
+            .into());
         }
         Err(WorkspaceRewindError::PlanIncomplete { paths }) => {
             // Nothing moved; the history could not be read as a complete
@@ -295,16 +434,18 @@ pub fn rewind_to_turn(
                  {paths:?}",
                 paths.len(),
                 target_commit_id
-            )));
+            ))
+            .into());
         }
         Err(WorkspaceRewindError::TargetUnreachable { target }) => {
             return Err(ApiError::BadRequest(format!(
                 "the workspace history recorded for turn '{}' is no longer on the current chain \
                  ({target})",
                 target_commit_id
-            )));
+            ))
+            .into());
         }
-        Err(err) => return Err(ApiError::Internal(err.to_string())),
+        Err(err) => return Err(ApiError::Internal(err.to_string()).into()),
     };
 
     let report = match workspace {
@@ -312,6 +453,9 @@ pub fn rewind_to_turn(
             let steps = steps_of(&conflict.steps);
             let preflight = preflight_of(&conflict.preflight);
             let conflicts = conflicts_of(&conflict.conflicts);
+            if let Some(barrier) = barriers.after_workspace_half {
+                barrier(&barrier_facts("conflict"));
+            }
             audit.write(
                 "conflict",
                 conflict.from_history_oid.as_deref(),
@@ -320,6 +464,7 @@ pub fn rewind_to_turn(
                 &preflight,
                 None,
                 Some(&conflicts),
+                false,
             )?;
             return Ok(RewindOutcome::Conflict(RewindConflict {
                 session_id: resolved_session_id,
@@ -334,7 +479,7 @@ pub fn rewind_to_turn(
         WorkspaceRewindOutcome::Applied(report) => report,
     };
 
-    // 4. Session History ref, last. The abandoned head is pinned first so the
+    // 5. Session History ref, last. The abandoned head is pinned first so the
     //    Turns this Rewind leaves behind keep an internal ref of their own.
     let steps = steps_of(&report.steps);
     let preflight = preflight_of(&report.preflight);
@@ -363,11 +508,13 @@ pub fn rewind_to_turn(
                         &preflight,
                         Some(&restored),
                         None,
+                        false,
                     )?;
                     return Err(ApiError::Internal(format!(
                         "rewind restored the Local Workspace and moved the private history ref, \
                          but branch '{name}' did not move: {err}"
-                    )));
+                    ))
+                    .into());
                 }
             }
         }
@@ -389,17 +536,26 @@ pub fn rewind_to_turn(
                         &preflight,
                         Some(&restored),
                         None,
+                        false,
                     )?;
                     return Err(ApiError::Internal(format!(
                         "rewind restored the Local Workspace and moved the private history ref, \
                          but the detached session HEAD did not move: {err}"
-                    )));
+                    ))
+                    .into());
                 }
             }
         }
     };
 
-    // 5. Durable record of the completed Rewind.
+    if let Some(barrier) = barriers.after_workspace_half {
+        barrier(&barrier_facts("workspace_applied"));
+    }
+    if let Some(barrier) = barriers.after_session_ref_move {
+        barrier(&barrier_facts("session_moved"));
+    }
+
+    // 6. Durable record of the completed Rewind.
     audit.write(
         "success",
         report.from_history_oid.as_deref(),
@@ -408,6 +564,7 @@ pub fn rewind_to_turn(
         &preflight,
         Some(&restored),
         None,
+        true,
     )?;
 
     Ok(RewindOutcome::Success(RewindSuccess {
@@ -583,13 +740,18 @@ fn pin_abandoned_head(
     }
 }
 
-/// Writes one durable Rewind audit record per outcome.
+/// Writes one durable Rewind audit record per outcome, onto the independent
+/// append-only chain in `workspace-history.git`.
 ///
 /// Records paths, Local Revisions, and object ids only — never file content.
+/// An append failure is returned as the typed partial-state
+/// [`RewindError::AuditPublicationFailed`]: the actions already happened and
+/// must not be reported as success.
 struct RewindAuditContext<'a> {
-    project_root: &'a Path,
+    backing: &'a WorkspaceHistoryBacking,
     session_id: &'a str,
     target_commit_id: &'a str,
+    barriers: &'a RewindBarriers<'a>,
 }
 
 impl RewindAuditContext<'_> {
@@ -603,8 +765,10 @@ impl RewindAuditContext<'_> {
         preflight: &[RewindPathPreflight],
         restored: Option<&[RewindRestoredPath]>,
         conflicts: Option<&[RewindPathConflict]>,
-    ) -> Result<()> {
+        session_head_moved: bool,
+    ) -> std::result::Result<(), RewindError> {
         let record = RewindAuditRecord {
+            schema_version: REWIND_AUDIT_SCHEMA_VERSION,
             session_id: self.session_id.to_string(),
             target_turn_id: self.target_commit_id.to_string(),
             target_history_oid: to_history_oid.map(str::to_string),
@@ -616,8 +780,40 @@ impl RewindAuditContext<'_> {
             conflicts_json: conflicts.map(|c| json!(c).to_string()),
             recorded_at: chrono::Utc::now().to_rfc3339(),
         };
-        record_rewind_audit(self.project_root, &record)
-            .map_err(|err| ApiError::Internal(format!("persist rewind audit record: {err}")))
+        let partial = || RewindPartialState {
+            session_id: self.session_id.to_string(),
+            target_commit_id: self.target_commit_id.to_string(),
+            outcome: outcome.to_string(),
+            from_history_oid: from_history_oid.map(str::to_string),
+            to_history_oid: to_history_oid.map(str::to_string),
+            steps: steps.to_vec(),
+            preflight: preflight.to_vec(),
+            restored: restored
+                .map(<[RewindRestoredPath]>::to_vec)
+                .unwrap_or_default(),
+            conflicts: conflicts
+                .map(<[RewindPathConflict]>::to_vec)
+                .unwrap_or_default(),
+            session_head_moved,
+        };
+        record_rewind_audit(self.backing, &record).map_err(|err| {
+            let detail = format!("persist rewind audit record: {err}");
+            RewindError::AuditPublicationFailed {
+                detail,
+                partial: Box::new(partial()),
+            }
+        })?;
+        if let Some(barrier) = self.barriers.after_audit_append {
+            barrier(&RewindBarrierFacts {
+                session_id: self.session_id.to_string(),
+                target_commit_id: self.target_commit_id.to_string(),
+                outcome: outcome.to_string(),
+                audit_records_on_chain: rewind_audit_records(self.backing, self.session_id)
+                    .map(|records| records.len())
+                    .unwrap_or(0),
+            });
+        }
+        Ok(())
     }
 }
 

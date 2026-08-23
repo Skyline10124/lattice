@@ -334,6 +334,15 @@ store migrations. `lattice-conversation` landed in #142.
   History ref move. A same-path divergence is a structured conflict with nothing
   moved; a ref durability failure is never reported as success. The user-facing
   surface is exactly one command, `lattice session rewind`.
+- Since #139-B Commit 3 the Rewind audit record is an append-only Git chain,
+  not a SQLite row: `lancet_runtime::rewind_audit` owns `RewindAuditRecord`,
+  the `refs/lattice/rewind-audit/log` fast-forward chain inside
+  `workspace-history.git`, and the bounded reads. The exclusive
+  `WorkspaceOperationLock` is acquired exactly once by
+  `lattice_api::rewind_to_turn_with_barriers` (the RewindCoordinator) and passed
+  down as `HeldWorkspaceOperation`; lower layers never reacquire it. A failed
+  audit append returns the typed `RewindError::AuditPublicationFailed` partial
+  state and is never reported as success.
 
 ## Turn Execution
 

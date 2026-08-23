@@ -56,8 +56,9 @@ pub use config::{
 pub use doctor::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 pub use error::{LancetError, LancetResult};
 pub use rewind::{
-    WorkspaceRewindConflict, WorkspaceRewindError, WorkspaceRewindOutcome, WorkspaceRewindReport,
-    plan_workspace_rewind, record_rewind_audit, rewind_audit_records, rewind_workspace,
+    HeldWorkspaceOperation, WorkspaceRewindConflict, WorkspaceRewindError, WorkspaceRewindOutcome,
+    WorkspaceRewindReport, plan_workspace_rewind, record_rewind_audit, rewind_audit_records,
+    rewind_workspace,
 };
 pub use runtime::{
     DEFAULT_CHANNEL_CAPACITY, LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle,
@@ -68,7 +69,6 @@ pub use status::{LancetRecentCallEntry, LancetStatusOutput, collect_status};
 // so consumers can name them without taking direct dependencies on the
 // individual LANCET runtime crates. ---
 
-pub use lancet_audit::RewindAuditRecord;
 pub use lancet_authority::policy::default::PolicyConfig;
 pub use lancet_authority::{CepPolicyConfig, CepTurnContext};
 pub use lancet_cep::ToolDefinition;
@@ -81,6 +81,9 @@ pub use lancet_native::{
     register_production_method_registry,
 };
 pub use lancet_protocol::{CapabilityAdmissionPolicy, CepError};
+pub use lancet_runtime::rewind_audit::{
+    MAX_REWIND_AUDIT_READ, REWIND_AUDIT_SCHEMA_VERSION, RewindAuditLog, RewindAuditRecord,
+};
 pub use lancet_runtime::{
     HistorySnapshot, RewindPlan, RewindStep, WorkspaceHistory, WorkspaceHistoryBacking,
     WorkspaceHistoryError,

@@ -677,13 +677,30 @@ async fn cmd_rewind_api(
     .await
     {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(
+        Ok(Err(lattice_api::RewindError::Api(
             err @ (lattice_api::ApiError::NotFound(_) | lattice_api::ApiError::BadRequest(_)),
-        )) => {
+        ))) => {
             eprintln!("{}: {:#}", "error".red(), err);
             return Ok(std::process::ExitCode::from(2));
         }
-        Ok(Err(err)) => return Err(err.into()),
+        Ok(Err(lattice_api::RewindError::AuditPublicationFailed { detail, partial })) => {
+            // The rewind's durable actions completed but its audit record
+            // could not be published; never report success. The partial
+            // state is printed so the operator can reconcile by hand.
+            eprintln!(
+                "{}: rewind actions completed but the audit record could not be published: {detail}",
+                "error".red()
+            );
+            eprintln!(
+                "partial state: session {} target {} outcome {} (session head moved: {})",
+                display_id(&partial.session_id).cyan(),
+                display_id(&partial.target_commit_id).bold(),
+                partial.outcome,
+                partial.session_head_moved,
+            );
+            return Ok(std::process::ExitCode::from(1));
+        }
+        Ok(Err(lattice_api::RewindError::Api(err))) => return Err(err.into()),
         Err(err) => return Err(anyhow::anyhow!("rewind worker failed: {err}")),
     };
 

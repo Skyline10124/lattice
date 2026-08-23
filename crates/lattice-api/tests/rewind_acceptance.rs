@@ -23,8 +23,8 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use lancet_api::{
-    AuditBacking, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory, WorkspaceHistoryBacking,
-    WorkspaceRewindError, WorkspaceRewindOutcome, rewind_workspace,
+    AuditBacking, HeldWorkspaceOperation, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory,
+    WorkspaceHistoryBacking, WorkspaceRewindError, WorkspaceRewindOutcome, rewind_workspace,
 };
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
 use lancet_catalog::catalog;
@@ -87,9 +87,12 @@ impl RewindRuntime {
             .expect("read history current")
     }
 
-    /// Rewind the Local Workspace back to `target`.
+    /// Rewind the Local Workspace back to `target`, holding the project
+    /// operation lock the way the coordinator does.
     fn rewind(&self, target: Option<&str>) -> WorkspaceRewindOutcome {
-        rewind_workspace(self.path(), self.backing(), target).expect("rewind runs")
+        let backing = self.backing();
+        let held = HeldWorkspaceOperation::acquire(&backing).expect("operation lock");
+        rewind_workspace(self.path(), backing, target, &held).expect("rewind runs")
     }
 }
 
@@ -456,7 +459,9 @@ async fn an_off_chain_target_is_refused() {
     create_file(&env.runtime, "a.txt", "a\n")
         .await
         .expect("create");
-    let err = rewind_workspace(env.path(), env.backing(), Some(&"c".repeat(40)))
+    let backing = env.backing();
+    let held = HeldWorkspaceOperation::acquire(&backing).expect("operation lock");
+    let err = rewind_workspace(env.path(), backing, Some(&"c".repeat(40)), &held)
         .expect_err("an unknown target must be refused");
     assert!(
         matches!(err, WorkspaceRewindError::TargetUnreachable { .. }),
@@ -742,7 +747,10 @@ async fn turn_editing(
 }
 
 fn rewind_records(project_root: &Path, session_id: &str) -> Vec<lancet_api::RewindAuditRecord> {
-    lancet_api::rewind_audit_records(project_root, session_id).expect("read rewind audit records")
+    let state_root = std::env::var_os("XDG_STATE_HOME").expect("ScopedState sets XDG_STATE_HOME");
+    let backing = lancet_api::workspace_history_backing_in(Path::new(&state_root), project_root)
+        .expect("project backing");
+    lancet_api::rewind_audit_records(&backing, session_id).expect("read rewind audit records")
 }
 
 // ─── Turn layer ─────────────────────────────────────────────────────────────
@@ -978,7 +986,10 @@ async fn rewind_refuses_unresolvable_targets() {
     let err = lattice_api::rewind_to_turn(&api, &session_id, &"0".repeat(40), &ws.root)
         .expect_err("a nonexistent target must be refused");
     assert!(
-        matches!(err, lattice_api::ApiError::NotFound(_)),
+        matches!(
+            err,
+            lattice_api::RewindError::Api(lattice_api::ApiError::NotFound(_))
+        ),
         "got {err:?}"
     );
 
@@ -986,7 +997,10 @@ async fn rewind_refuses_unresolvable_targets() {
     let err = lattice_api::rewind_to_turn(&api, &session_id, &foreign, &ws.root)
         .expect_err("another session's turn must be refused");
     assert!(
-        matches!(err, lattice_api::ApiError::NotFound(_)),
+        matches!(
+            err,
+            lattice_api::RewindError::Api(lattice_api::ApiError::NotFound(_))
+        ),
         "got {err:?}"
     );
 
@@ -1001,7 +1015,10 @@ async fn rewind_refuses_unresolvable_targets() {
     let err = lattice_api::rewind_to_turn(&api, &session_id, &second, &ws.root)
         .expect_err("a target off the current HEAD must be refused");
     assert!(
-        matches!(err, lattice_api::ApiError::BadRequest(_)),
+        matches!(
+            err,
+            lattice_api::RewindError::Api(lattice_api::ApiError::BadRequest(_))
+        ),
         "got {err:?}"
     );
 
@@ -1298,7 +1315,10 @@ async fn a_session_ref_failure_is_not_reported_as_success() {
     let err = lattice_api::rewind_to_turn(&failing, &session_id, &first, &ws.root)
         .expect_err("a session ref failure must surface");
     assert!(
-        matches!(err, lattice_api::ApiError::Internal(_)),
+        matches!(
+            err,
+            lattice_api::RewindError::Api(lattice_api::ApiError::Internal(_))
+        ),
         "got {err:?}"
     );
     assert!(
@@ -1377,7 +1397,10 @@ async fn a_turn_without_a_history_identity_is_refused_when_an_ancestor_has_one()
     let err = lattice_api::rewind_to_turn(&api, &session_id, &anomalous.commit_id, &ws.root)
         .expect_err("an unavailable identity must be refused");
     assert!(
-        matches!(err, lattice_api::ApiError::Conflict(_)),
+        matches!(
+            err,
+            lattice_api::RewindError::Api(lattice_api::ApiError::Conflict(_))
+        ),
         "got {err:?}"
     );
     assert_eq!(
@@ -1510,7 +1533,10 @@ async fn a_full_unwind_is_refused_when_this_session_installed_work_before_the_ta
     let err = lattice_api::rewind_to_turn(&api, &session_id, &target, &ws.root)
         .expect_err("a full unwind over this session's own earlier work must be refused");
     assert!(
-        matches!(err, lattice_api::ApiError::Conflict(_)),
+        matches!(
+            err,
+            lattice_api::RewindError::Api(lattice_api::ApiError::Conflict(_))
+        ),
         "got {err:?}"
     );
     assert!(
@@ -1617,7 +1643,10 @@ async fn a_restore_failure_is_recorded_and_never_reported_as_success() {
     let err = lattice_api::rewind_to_turn(&api, &session_id, &target, &ws.root)
         .expect_err("a restore that cannot run must surface");
     assert!(
-        matches!(err, lattice_api::ApiError::Internal(_)),
+        matches!(
+            err,
+            lattice_api::RewindError::Api(lattice_api::ApiError::Internal(_))
+        ),
         "got {err:?}"
     );
 
@@ -1699,7 +1728,10 @@ async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the
     let err = lattice_api::rewind_to_turn(&api, &session_id, &target.commit_id, &ws.root)
         .expect_err("a full unwind over another session's earlier work must be refused");
     assert!(
-        matches!(err, lattice_api::ApiError::Conflict(_)),
+        matches!(
+            err,
+            lattice_api::RewindError::Api(lattice_api::ApiError::Conflict(_))
+        ),
         "got {err:?}"
     );
     assert!(
@@ -1785,4 +1817,88 @@ async fn a_legitimate_full_unwind_still_succeeds() {
         "the private history ref is deleted for an empty target"
     );
     assert_eq!(api.log(&session_id).unwrap().len(), 1);
+}
+
+// ─── #139-B Commit 3: coordinator lock ownership, barriers, Git audit ──────
+
+/// The deterministic barriers observe exactly the durable audit state at
+/// every action → audit window, and the audit chain survives a later
+/// mutation rewind (#139-B Commit 3).
+#[tokio::test]
+async fn barriers_observe_each_action_to_audit_window_and_the_chain_survives_later_rewinds() {
+    let ws = setup_turn_workspace(&COMPONENT_TOOLS);
+    let scoped = ScopedState::new(&ws.root);
+    let sessions_dir = TempDir::new().unwrap();
+    let sessions = sessions_dir.path().join("sessions");
+    let session_id = new_session(&sessions, &ws.root);
+    let base = turn_creating(&ws, &sessions, &session_id, "base.md", "base\n").await;
+    turn_creating(&ws, &sessions, &session_id, "later.md", "later\n").await;
+    let api = open_session_store(&sessions);
+
+    let observed: std::sync::Arc<std::sync::Mutex<Vec<(String, usize)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorder = |label: &'static str, session_id: String| {
+        let observed = std::sync::Arc::clone(&observed);
+        move |facts: &lattice_api::RewindBarrierFacts| {
+            assert_eq!(facts.session_id, session_id);
+            observed.lock().unwrap().push((
+                format!("{label}:{}", facts.outcome),
+                facts.audit_records_on_chain,
+            ));
+        }
+    };
+    let workspace_barrier = recorder("workspace", session_id.clone());
+    let session_barrier = recorder("session", session_id.clone());
+    let audit_barrier = recorder("audit", session_id.clone());
+    let barriers = lattice_api::RewindBarriers {
+        after_workspace_half: Some(&workspace_barrier),
+        after_session_ref_move: Some(&session_barrier),
+        after_audit_append: Some(&audit_barrier),
+    };
+
+    let outcome =
+        lattice_api::rewind_to_turn_with_barriers(&api, &session_id, &base, &ws.root, &barriers)
+            .expect("rewind runs");
+    assert!(matches!(outcome, lattice_api::RewindOutcome::Success(_)));
+
+    let events = observed.lock().unwrap().clone();
+    assert_eq!(
+        events,
+        vec![
+            ("workspace:workspace_applied".to_string(), 0),
+            ("session:session_moved".to_string(), 0),
+            ("audit:success".to_string(), 1),
+        ],
+        "each barrier must observe the exact durable state at its window"
+    );
+
+    // A second rewind moves the mutation chain further back; every earlier
+    // audit record stays reachable on the independent chain.
+    lattice_api::rewind_to_turn(&api, &session_id, &base, &ws.root).expect("second rewind runs");
+    let records = rewind_records(&ws.root, &session_id);
+    assert_eq!(records.len(), 2, "audit records survive mutation rewinds");
+    assert_eq!(records[0].outcome, "success");
+    assert_eq!(records[1].outcome, "success");
+}
+
+/// A rewind against a project backing without the held operation lock is
+/// refused by the lower layer, never silently unserialized.
+#[tokio::test]
+async fn rewind_workspace_requires_the_held_operation_lock() {
+    let env = RewindRuntime::build();
+    create_file(&env.runtime, "a.txt", "a\n")
+        .await
+        .expect("create");
+    let backing = env.backing();
+    let err = rewind_workspace(
+        env.path(),
+        backing.clone(),
+        None,
+        &HeldWorkspaceOperation::None,
+    )
+    .expect_err("a project rewind without the held lock must be refused");
+    assert!(
+        matches!(err, WorkspaceRewindError::MissingOperationLock),
+        "got {err:?}"
+    );
 }
