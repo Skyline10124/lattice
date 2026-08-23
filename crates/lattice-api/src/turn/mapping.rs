@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lattice_agent::{AgentTurnRequest, AgentTurnStatus, LlmRetryConfig};
+use super::model_rounds::{AgentTurnRequest, AgentTurnStatus, LlmRetryConfig};
 use lattice_llm::{ModelRouter, ModelTarget, ToolDefinition};
 use lattice_session::HeadTranscript;
 

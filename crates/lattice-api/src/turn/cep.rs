@@ -26,9 +26,6 @@ use lancet_native::{
 };
 use lancet_protocol::error::{CepErrorData, jsonrpc, method_not_found, parse_error};
 use lancet_protocol::{CepError, Retriability, ToolEvent};
-use lattice_agent::{
-    AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
-};
 use lattice_llm::ToolCall;
 #[cfg(test)]
 use lattice_profile::LancetWorkspacePolicySection;
@@ -37,6 +34,9 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::session::ApiError;
+use crate::turn::model_rounds::{
+    AgentTurnEvent, CepErrorPayload, ModelRoundSequencer, ToolDispatch, ToolExecutionError,
+};
 use crate::turn::types::RunTurnRequest;
 
 /// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
@@ -96,7 +96,7 @@ impl CepExecutorAdapter {
     fn map_cep_error(cep: CepError) -> ToolExecutionError {
         ToolExecutionError {
             message: cep.message.clone(),
-            cep_error: Some(lattice_agent::CepErrorPayload {
+            cep_error: Some(CepErrorPayload {
                 code: adapter_wire_code(&cep),
                 message: cep.message,
                 data: serde_json::to_value(&cep.data).unwrap_or(Value::Null),
@@ -106,9 +106,24 @@ impl CepExecutorAdapter {
     }
 }
 
+impl CepExecutorAdapter {
+    /// Dispatch one tool call through the CEP client (public test seam; the
+    /// production sequencing adapter reaches the same path through
+    /// [`ToolDispatch`]).
+    pub async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
+        self.dispatch(call).await
+    }
+}
+
 #[async_trait]
-impl ToolCallExecutor for CepExecutorAdapter {
+impl ToolDispatch for CepExecutorAdapter {
     async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
+        self.dispatch(call).await
+    }
+}
+
+impl CepExecutorAdapter {
+    async fn dispatch(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
         let name = &call.function.name;
         if !self.available_names.contains(name) || !self.enabled_names.contains(name) {
             return Err(Self::map_cep_error(method_not_found(name)));
@@ -130,9 +145,9 @@ impl ToolCallExecutor for CepExecutorAdapter {
 ///
 /// The LANCET runtime (server lifecycle, CEP client, audit) comes from
 /// [`lancet_api::LancetRuntime`]; this struct adds the LATTICE-side
-/// [`AgentLoop`] wired to a [`CepExecutorAdapter`].
+/// [`ModelRoundSequencer`] wired to a [`CepExecutorAdapter`].
 pub(crate) struct ProductionTurnDeps {
-    pub agent_loop: Arc<AgentLoop>,
+    pub sequencer: Arc<ModelRoundSequencer>,
     pub tool_definitions: Vec<lattice_llm::ToolDefinition>,
     pub runtime: lancet_api::ServerLifecycle,
     pub cep_client: CepClient,
@@ -412,7 +427,7 @@ fn resolve_lancet_policy(
     }
 }
 
-/// Build a turn-scoped LANCET runtime and wrap its client in an [`AgentLoop`].
+/// Build a turn-scoped LANCET runtime and wrap its client in a sequencer.
 ///
 /// Translation of the profile into policy happens here; runtime composition is
 /// delegated to [`lancet_api::LancetRuntime::build`], which constructs the
@@ -512,13 +527,10 @@ pub(crate) async fn build_production_turn_deps(
         .into_iter()
         .map(to_llm_tool_definition)
         .collect();
-    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm,
-        tool_executor: adapter,
-    }));
+    let sequencer = Arc::new(ModelRoundSequencer::new(llm, adapter));
 
     Ok(ProductionTurnDeps {
-        agent_loop,
+        sequencer,
         tool_definitions,
         runtime: parts.lifecycle,
         cep_client: parts.client,

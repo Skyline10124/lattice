@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
 use crate::session::SessionApi;
+use crate::turn::model_rounds::{ModelRoundSequencer, ToolDispatch, ToolExecutionError};
 use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_agent::{AgentLoop, AgentLoopConfig};
 use lattice_llm::{LlmEvent, TokenUsage};
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -25,14 +25,9 @@ const TEST_SESSION_ID: &str = "test-session";
 struct NoOpToolExecutor;
 
 #[async_trait::async_trait]
-impl lattice_agent::ToolCallExecutor for NoOpToolExecutor {
-    async fn execute(
-        &self,
-        _call: &lattice_llm::ToolCall,
-    ) -> Result<String, lattice_agent::ToolExecutionError> {
-        Err(lattice_agent::ToolExecutionError::simple(
-            "no tools configured in test",
-        ))
+impl ToolDispatch for NoOpToolExecutor {
+    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, ToolExecutionError> {
+        Err(ToolExecutionError::simple("no tools configured in test"))
     }
 }
 
@@ -53,23 +48,23 @@ fn open_session(dir: &std::path::Path) -> SessionApi {
     SessionApi::git_open(dir.join("sessions.git")).expect("open session store")
 }
 
-fn make_agent_loop(client: FakeStreamingLlmClient) -> Arc<AgentLoop> {
-    Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm: Arc::new(client),
-        tool_executor: Arc::new(NoOpToolExecutor),
-    }))
+fn make_agent_loop(client: FakeStreamingLlmClient) -> Arc<ModelRoundSequencer> {
+    Arc::new(ModelRoundSequencer::new(
+        Arc::new(client),
+        Arc::new(NoOpToolExecutor),
+    ))
 }
 
 async fn stream_turn_live_with_agent(
     session: SessionApi,
-    agent_loop: Arc<AgentLoop>,
+    sequencer: Arc<ModelRoundSequencer>,
     request: RunTurnRequest,
     tool_definitions: Vec<lattice_llm::ToolDefinition>,
 ) -> crate::session::Result<TurnEventStream> {
     let (cep_client, _server) = lancet_native::CepTransport::pair(1);
     let deps = super::cep::ProductionTurnDeps {
         workspace_history: std::sync::Arc::new(lancet_api::WorkspaceHistory::disabled()),
-        agent_loop,
+        sequencer,
         tool_definitions,
         runtime: lancet_api::ServerLifecycle::noop(),
         cep_client,

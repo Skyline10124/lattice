@@ -17,8 +17,8 @@ use lancet_protocol::effect_types::ImpactKind;
 
 use lancet_protocol::error::{CepErrorData, ExecutionErrorData, jsonrpc};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
-use lattice_agent::{ToolCallExecutor, ToolExecutionError};
-use lattice_api::CepExecutorAdapter;
+
+use lattice_api::{CepExecutorAdapter, ToolExecutionError};
 use lattice_llm::{FunctionCall, ToolCall};
 use serde_json::Value;
 use tempfile::TempDir;

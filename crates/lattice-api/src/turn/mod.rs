@@ -19,6 +19,7 @@ pub mod lifecycle;
 mod live;
 mod llm;
 mod mapping;
+mod model_rounds;
 mod types;
 
 #[cfg(test)]
@@ -52,3 +53,7 @@ pub use types::{
 
 #[doc(hidden)]
 pub use cep::CepExecutorAdapter;
+// #139-B Commit 4: the tool-dispatch vocabulary moved here from
+// `lattice-agent`; the CEP integration tests name it through the facade.
+#[doc(hidden)]
+pub use model_rounds::{CepErrorPayload, ToolExecutionError};

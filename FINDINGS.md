@@ -7,6 +7,28 @@
 
 ## HIGH
 
+### L-GH139B-01: provider wire builders not yet delegated to `provider_projection` — OPEN, slated for the #139-B hard cut — `residual` / `lattice-llm` / GitHub #139
+
+- **Location**: `crates/lattice-llm/src/providers/{openai,anthropic,gemini}.rs`
+  (request-body tool-call/tool-result encoding); mirror implementations in
+  `crates/lattice-llm/src/provider_projection/`.
+- **Problem**: #139-B Commit 4 moved agent-side request/response assembly
+  (strict batch validation, canonical arguments, typed
+  ToolResultWithoutProviderCallId failures) onto the projection contracts,
+  but the production provider adapters still hand-build their tool-call and
+  tool-result wire JSON from `lattice_llm::Message`. Two encoders of the
+  same official shapes now exist and can drift.
+- **Current status**: OPEN residual of Commit 4. Full delegation belongs with
+  the Commit 6 hard cut, which rebuilds the request assembly onto the
+  coordinator's bound binding path (and deletes the Gemini `tc_*` synthetic
+  streaming ids, which require `LlmEvent` id optionality). Blocking nothing
+  pre-cut: the temporary sequencer path is deleted whole in Commit 6.
+- **Plan**: extract per-provider shared wire builders in
+  `provider_projection` (single implementation of each official shape),
+  route both the projection and the provider adapters through them, and make
+  `lattice_llm::ToolCall.id` optional so id-less calls fail typed instead of
+  being synthesized.
+
 ### L-GH139A-12: `session_journal_pin` grows with closures already in the Turn — OPEN, non-blocking follow-up — `performance` / `lattice-session` / GitHub #153
 
 - **Location**: `crates/lattice-session/src/git_graph/pending.rs`

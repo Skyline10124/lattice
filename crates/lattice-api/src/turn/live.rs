@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
+use super::model_rounds::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use lattice_session::{FlockGuard, GraphHead, ProjectStoreKey, TurnCommitStatus};
 
 use super::cep::{ProductionTurnDeps, map_cep_tool_event};
@@ -268,7 +268,7 @@ async fn run_live_turn_task(
     execution_lock: FlockGuard,
 ) {
     let ProductionTurnDeps {
-        agent_loop,
+        sequencer,
         tool_definitions,
         runtime,
         cep_client,
@@ -332,7 +332,7 @@ async fn run_live_turn_task(
     });
 
     // 4. Pin agent future
-    let mut agent_fut = Box::pin(agent_loop.run_turn_live(agent_request, agent_tx));
+    let mut agent_fut = Box::pin(sequencer.run_turn_live(agent_request, agent_tx));
     let mut ordered_events = CepOrderedEmitter::default();
 
     // 5. Concurrent drain loop
@@ -617,7 +617,6 @@ mod tests {
             tool_results: vec![],
             terminal_reason,
             events: vec![],
-            cleanup_exhausted: false,
         }
     }
 

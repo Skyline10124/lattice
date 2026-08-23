@@ -204,7 +204,7 @@ accumulating.
 | `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`) over the `lattice-store` kernel: immutable `SessionState` objects in the global `sessions.git`, plus the per-session execution lock. Since #144 also owns the durable PendingTurn journal: the `src/pending` contract (twelve CAS stages, ResultDraft, typed `TurnOutcome`/`ClosureOrigin`) and the pure `reconcile` reducer over synthetic Invocation facts, persisted through `git_graph/pending.rs` under `active-turn`/`turns/<TurnId>`. Re-exports the `lattice-conversation` transcript types (`GraphMessage` family, `TurnUsage`); persistence stays here. |
 | `lattice-store` | ADR 0005 domain-neutral private-Git/Linux durability kernel (landed in #143): XDG state topology, `ProjectStoreKey` derivation, typed create/open with `refs/lattice/meta` identity, canonical bytes, object/commit mechanics, ref CAS and multi-ref transactions, per-repository flock, fsync/rename durability barriers, atomic first-create, retention primitives, and per-location capability probes. No domain schemas and no workspace-internal dependencies by contract. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
-| `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
+| `lattice-agent` | One-attempt `ModelStepDriver` over the injectable `LlmClient` seam (since #139-B Commit 4): frozen request assembly, protocol-ceiling metering, typed attempt outcomes. No loop, Tool execution, retry policy, or store authority. |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
 | `lattice-tui` | Full-screen TUI shell over `lattice-api` sessions and `stream_turn` (ratatui/crossterm, alternate screen). Owns terminal lifecycle, input state, transcript/status rendering, and the forthcoming transcript card renderer (#116) as this crate's `render/` module; `lattice-cli` consumes it through the existing `lattice-cli -> lattice-tui` edge. |
 | `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
@@ -353,8 +353,10 @@ store migrations. `lattice-conversation` landed in #142.
    `lancet_api::LancetRuntime::build` (native Local operations, server
    lifecycle, dispatch client, audit), then wraps the returned `CepClient` in a
    `CepExecutorAdapter`.
-4. `AgentLoop` reads session state, assembles messages, calls the LLM through
-   `LlmClient`, and sends requested tool calls through the injected executor.
+4. Pre-cut, the private `lattice-api` `model_rounds` sequencer calls the
+   one-attempt `ModelStepDriver` through `LlmClient` per model step and
+   dispatches requested tool calls through the CEP executor; #139-B Commit 6
+   replaces that sequencer with `TurnCoordinator`.
 5. During migration native handlers execute typed CEP methods. The ADR 0004
    target executes embedded Tool Components behind WIT Tool Host imports;
    host-side policy, Guard L1, effect, audit and concrete Local Workspace checks

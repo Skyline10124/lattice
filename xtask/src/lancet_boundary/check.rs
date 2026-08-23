@@ -225,13 +225,10 @@ pub const ISSUE139B_LEGACY_ALLOWLIST: &[&str] = &[
     "crates/lancet-runtime/src/history.rs",
     "crates/lancet-runtime/src/host_mutate.rs",
     "crates/lancet-runtime/src/runtime.rs",
-    "crates/lattice-agent/src/agent_loop/",
-    "crates/lattice-agent/src/lib.rs",
-    "crates/lattice-agent/tests/agent_loop.rs",
-    "crates/lattice-agent/tests/live_sink_and_cancel.rs",
-    "crates/lattice-agent/tests/provisional_completion.rs",
-    "crates/lattice-agent/tests/streaming_delta.rs",
     "crates/lattice-api/src/turn/cep.rs",
+    // Temporary #139-B pre-cut sequencing adapter; deleted by the Commit 6
+    // hard cut together with its numeric CEP event fields.
+    "crates/lattice-api/src/turn/model_rounds.rs",
     "crates/lattice-api/src/turn/cep_tests.rs",
     "crates/lattice-api/src/turn/live.rs",
     "crates/lattice-api/src/turn/live_tests.rs",

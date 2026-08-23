@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::turn::model_rounds::{ToolDispatch, ToolExecutionError};
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
@@ -14,7 +15,6 @@ use lancet_protocol::error::{
     StateErrorData, ValidationErrorData, jsonrpc,
 };
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
-use lattice_agent::{ToolCallExecutor, ToolExecutionError};
 use lattice_llm::{FunctionCall, ToolCall};
 
 use super::cep::CepExecutorAdapter;

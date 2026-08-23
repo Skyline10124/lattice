@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
+use super::model_rounds::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use futures::StreamExt;
-use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use lattice_session::{
     GraphMessage, TurnCommitInput, TurnLifecycleEvidence, WorkspaceDisposition,
     derive_commit_message,

@@ -37,6 +37,8 @@ pub use rewind::{
 };
 pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
 pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
+#[doc(hidden)]
+pub use turn::{CepErrorPayload, ToolExecutionError};
 pub use turn::{
     LifecycleFailureKind, RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus,
     STREAM_IDLE_TIMEOUT_SECS, ToolResultSummary, TurnEvent, TurnEventStream, TurnLifecycleOutcome,

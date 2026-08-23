@@ -54,12 +54,13 @@ async fn stream_turn_error_after_partial_commits_error() {
     {
         assert_eq!(*status, RunTurnStatus::Error);
         let transcript = fixture.store.as_ref().head_transcript(session_id).unwrap();
-        let assistant = transcript
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message in commit");
-        assert_eq!(assistant.content, "partial output before error");
+        // ADR 0005 §7 (#139-B Commit 4): partial assistant output from an
+        // interrupted attempt is diagnostic state, never committed
+        // conversation. The turn still commits with the typed error reason.
+        assert!(
+            !transcript.messages.iter().any(|m| m.role == "assistant"),
+            "interrupted partial output must not be committed"
+        );
         let entry = last_log_entry(fixture.store.as_ref(), session_id);
         assert_eq!(entry.status, TurnCommitStatus::Error);
         assert!(
