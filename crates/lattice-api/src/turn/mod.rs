@@ -14,6 +14,7 @@ mod collector;
 // #139-B coordinator shell: private until the single production hard cut.
 mod coordinator;
 mod execute;
+mod finalize;
 mod invocation_facts;
 pub mod lifecycle;
 mod live;

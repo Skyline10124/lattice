@@ -298,13 +298,11 @@ impl ModelRoundSequencer {
         let mut tool_summaries: Vec<AgentToolResultSummary> = Vec::new();
 
         let cancelled = |messages: Vec<GraphMessage>,
-                         all_messages: Vec<GraphMessage>,
+                         _all_messages: Vec<GraphMessage>,
                          usage: TokenUsage,
                          summaries: Vec<AgentToolResultSummary>,
                          events: Vec<AgentTurnEvent>| AgentTurnResult {
             messages,
-            #[allow(unused_variables)]
-            all_messages,
             assistant_output: String::new(),
             usage,
             tool_results: summaries,

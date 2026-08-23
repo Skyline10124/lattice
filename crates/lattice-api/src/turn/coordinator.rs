@@ -29,6 +29,10 @@ use lattice_session::pending::InvocationFactsSnapshot;
 use lattice_session::{GitSessionGraphStore, PendingTurnTip, SessionError};
 use thiserror::Error;
 
+use super::finalize::{
+    AttemptOutcome, FinalizeBudget, FinalizeClock, FinalizeFailure, TokioFinalizeClock,
+    finalize_under_budget,
+};
 use super::invocation_facts;
 
 /// Errors surfaced by the coordinator's private store adapters.
@@ -128,6 +132,59 @@ impl CoordinatorStoreIo {
         .await
         .map_err(CoordinatorIoError::Blocking)?;
         pinned.map_err(CoordinatorIoError::InvocationStore)
+    }
+}
+
+impl CoordinatorStoreIo {
+    /// Publish one frozen terminal candidate under the fixed
+    /// `FinalizeBudget` (plan §5 Commit 5): the budget is anchored at
+    /// executor return — the moment this method is called — and covers the
+    /// repository-lock wait, the append, and the retry backoff.
+    ///
+    /// The candidate is immutable for the whole call: every attempt
+    /// publishes byte-identical facts. Corruption, identity, material, and
+    /// digest mismatches fail closed immediately; only durability failures
+    /// retry inside the 60-second envelope.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn publish_terminal_under_budget(
+        &self,
+        invocation: lancet_protocol::InvocationId,
+        outcome: lancet_audit::invocation_store::TerminalOutcome,
+        material: lancet_audit::invocation_store::TerminalMaterial,
+        evidence: lancet_audit::invocation_store::TerminalEvidence,
+    ) -> Result<(), FinalizeFailure<lancet_audit::invocation_store::InvocationStoreError>> {
+        let clock = TokioFinalizeClock;
+        let budget = FinalizeBudget::anchored_at(clock.now());
+        let store = Arc::clone(&self.invocations);
+        // The frozen candidate is shared immutably by every attempt; each
+        // retry publishes byte-identical facts.
+        let candidate = Arc::new((invocation, outcome, material, evidence));
+        finalize_under_budget(&clock, budget, move || {
+            let store = Arc::clone(&store);
+            let candidate = Arc::clone(&candidate);
+            async move {
+                match tokio::task::spawn_blocking(move || {
+                    let (invocation, outcome, material, evidence) = &*candidate;
+                    store.publish_terminal(
+                        *invocation,
+                        outcome.clone(),
+                        material.clone(),
+                        evidence.clone(),
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(())) => AttemptOutcome::Published,
+                    Ok(Err(error)) => AttemptOutcome::Failed { error },
+                    Err(join) => AttemptOutcome::Failed {
+                        error: lancet_audit::invocation_store::InvocationStoreError::Corruption {
+                            detail: format!("blocking publication task failed: {join}"),
+                        },
+                    },
+                }
+            }
+        })
+        .await
     }
 }
 

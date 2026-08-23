@@ -348,6 +348,35 @@ pub enum InvocationStoreError {
 
 pub type Result<T> = std::result::Result<T, InvocationStoreError>;
 
+impl InvocationStoreError {
+    /// Narrow retryability classification for terminal/evidence publication
+    /// under the fixed `FinalizeBudget` (ADR 0005 §12, #139-B Commit 5).
+    ///
+    /// Only explicit kernel store/durability failures and the lock-free read
+    /// race are retriable. Corruption, topology, binding, identity, material
+    /// and digest mismatches fail immediately and are never retried.
+    pub fn is_durability_retryable(&self) -> bool {
+        match self {
+            Self::Store(store) => matches!(
+                store,
+                StoreError::Io { .. }
+                    | StoreError::Durability { .. }
+                    | StoreError::Busy { .. }
+                    | StoreError::Lock { .. }
+            ),
+            Self::ConcurrentRead => true,
+            Self::DuplicateInvocation { .. }
+            | Self::DifferentPlan { .. }
+            | Self::InvalidReservation { .. }
+            | Self::InvalidTransition { .. }
+            | Self::NotFound { .. }
+            | Self::UnreachableCommit { .. }
+            | Self::Serde(_)
+            | Self::Corruption { .. } => false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // InvocationStore
 // ---------------------------------------------------------------------------
