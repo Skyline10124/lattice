@@ -63,7 +63,7 @@ fn git_store_reset_moves_branch_pointer() {
     let mut parent_ids: Vec<String> = vec![];
     for i in 0..3 {
         let commit = store
-            .commit_turn(turn_input(
+            .test_commit_turn(turn_input(
                 &session_id,
                 parent_ids.clone(),
                 &format!("turn-{i}"),

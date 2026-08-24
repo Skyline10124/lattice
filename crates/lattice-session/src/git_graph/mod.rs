@@ -29,9 +29,8 @@ use std::path::{Path, PathBuf};
 use lattice_store::{Blocking, FlockGuard, LockMode, StateLayout, StoreMeta, StoreRepo};
 
 use crate::graph::{
-    GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript, PreparedTurnCommit, ResetResult,
-    SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput,
-    TurnLogEntry,
+    GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript, ResetResult, SessionGraphStore,
+    SessionGraphSummary, SessionStatus, TurnCommit, TurnLogEntry,
 };
 use crate::{Result, SessionError};
 
@@ -475,10 +474,10 @@ impl SessionGraphStore for GitSessionGraphStore {
         self.head_transcript_impl(session_id)
     }
 
-    fn commit_turn(&self, input: TurnCommitInput) -> Result<TurnCommit> {
-        self.commit_turn_impl(input)
+    #[cfg(any(test, feature = "test-utils"))]
+    fn test_commit_turn(&self, input: crate::graph::TurnCommitInput) -> Result<TurnCommit> {
+        GitSessionGraphStore::test_commit_turn(self, input)
     }
-
     fn checkout(&self, session_id: &str, target: &str) -> Result<GraphHead> {
         self.checkout_impl(session_id, target)
     }
@@ -499,10 +498,13 @@ impl SessionGraphStore for GitSessionGraphStore {
         self.reset_impl(session_id, target)
     }
 
-    fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> Result<TurnCommit> {
-        self.commit_prepared_turn_impl(prepared)
+    #[cfg(any(test, feature = "test-utils"))]
+    fn test_commit_prepared_turn(
+        &self,
+        prepared: crate::graph::PreparedTurnCommit,
+    ) -> Result<TurnCommit> {
+        GitSessionGraphStore::test_commit_prepared_turn(self, prepared)
     }
-
     fn get_turn_commit(&self, session_id: &str, commit_id: &str) -> Result<Option<TurnCommit>> {
         self.get_turn_commit_impl(session_id, commit_id)
     }
@@ -516,15 +518,14 @@ impl SessionGraphStore for GitSessionGraphStore {
         GitSessionGraphStore::acquire_execution_lock(self, session_id, mode, blocking)
     }
 
-    fn commit_turn_locked(
+    #[cfg(any(test, feature = "test-utils"))]
+    fn test_commit_turn_locked(
         &self,
-        input: TurnCommitInput,
+        input: crate::graph::TurnCommitInput,
         execution_lock: &FlockGuard,
     ) -> Result<TurnCommit> {
-        self.validate_execution_lock(&input.session_id, execution_lock)?;
-        self.commit_turn_impl_locked(input)
+        GitSessionGraphStore::test_commit_turn_locked(self, input, execution_lock)
     }
-
     fn status_locked(
         &self,
         session_id: &str,

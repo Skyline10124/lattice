@@ -3,23 +3,34 @@
 
 //! Commit creation, transcript reconstruction, and log.
 
+#[cfg(any(test, feature = "test-utils"))]
 use chrono::Utc;
+#[cfg(any(test, feature = "test-utils"))]
 use lattice_store::{Blocking, LockMode, RefExpectation, RefTxnEdit};
 
 use super::GitSessionGraphStore;
 use super::helpers::{
-    GitSessionManifest, MANIFEST_SCHEMA_VERSION, build_agent_json, build_root_tree,
-    build_turn_tree, messages_to_jsonl, parse_manifest, parse_messages_jsonl, parse_oid,
-    serialize_manifest, walk_commits_oldest_first,
+    GitSessionManifest, MANIFEST_SCHEMA_VERSION, parse_manifest, parse_messages_jsonl, parse_oid,
+    walk_commits_oldest_first,
+};
+#[cfg(any(test, feature = "test-utils"))]
+use super::helpers::{
+    build_agent_json, build_root_tree, build_turn_tree, messages_to_jsonl, serialize_manifest,
 };
 use super::session::resolve_head_oid;
-use super::state::{self, SessionHead};
+use super::state;
+#[cfg(any(test, feature = "test-utils"))]
+use super::state::SessionHead;
+#[cfg(any(test, feature = "test-utils"))]
 use super::validation;
-use crate::graph::{HeadTranscript, PreparedTurnCommit, TurnCommit, TurnCommitInput, TurnLogEntry};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::graph::TurnCommitInput;
+use crate::graph::{HeadTranscript, PreparedTurnCommit, TurnCommit, TurnLogEntry};
 use crate::{Result, SessionError};
 
 impl GitSessionGraphStore {
-    pub(super) fn commit_turn_impl(&self, input: TurnCommitInput) -> Result<TurnCommit> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_commit_turn(&self, input: TurnCommitInput) -> Result<TurnCommit> {
         let now = Utc::now().to_rfc3339();
         let prepared = crate::graph::prepare_turn_commit(&input, &now);
         let _exec = self.acquire_execution_lock(
@@ -30,33 +41,29 @@ impl GitSessionGraphStore {
         self.commit_prepared_turn_locked_impl(prepared)
     }
 
-    pub(super) fn commit_turn_impl_locked(&self, input: TurnCommitInput) -> Result<TurnCommit> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_commit_turn_locked(
+        &self,
+        input: TurnCommitInput,
+        execution_lock: &lattice_store::FlockGuard,
+    ) -> Result<TurnCommit> {
+        self.validate_execution_lock(&input.session_id, execution_lock)?;
         let now = Utc::now().to_rfc3339();
         let prepared = crate::graph::prepare_turn_commit(&input, &now);
         self.commit_prepared_turn_locked_impl(prepared)
     }
 
-    pub(super) fn commit_prepared_turn_impl(
-        &self,
-        prepared: PreparedTurnCommit,
-    ) -> Result<TurnCommit> {
-        let commit = &prepared.commit;
-        let session_id = &commit.session_id;
-
-        // Mutation: session execution lock (re-entrant under the caller's
-        // explicit full-Turn hold) then the repository write lock.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> Result<TurnCommit> {
+        let session_id = &prepared.commit.session_id;
         let _exec =
             self.acquire_execution_lock(session_id, LockMode::Exclusive, Blocking::Block)?;
         self.commit_prepared_turn_locked_impl(prepared)
     }
 
-    /// Commit with an already-held SessionExecutionLock. The caller supplies
-    /// the lock capability through the trait's `commit_turn_locked` method;
-    /// this implementation only takes the narrower repository lock.
-    pub(super) fn commit_prepared_turn_locked_impl(
-        &self,
-        prepared: PreparedTurnCommit,
-    ) -> Result<TurnCommit> {
+    /// Test-only direct commit with an already-held SessionExecutionLock.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn commit_prepared_turn_locked_impl(&self, prepared: PreparedTurnCommit) -> Result<TurnCommit> {
         let commit = &prepared.commit;
         let session_id = &commit.session_id;
         let _write = self.kernel().write_lock()?;

@@ -465,17 +465,16 @@ One sentence per crate:
   tool-call vocabulary, the provider replay/projection seam
   (`provider_projection`, #142), and logging. URL/DNS safety primitives live
   in the shared `net-guard` leaf and are composed here.
-- **`lattice-session`** — Session graph contract, immutable turn commits,
-  branch refs, HEAD state, and the git-backed `GitSessionGraphStore`. The
-  pure-data transcript types (`GraphMessage` family, `TurnUsage`) are
-  re-exported from `lattice-conversation` since #142; persistence stays here.
+- **`lattice-session`** — Git-backed Session graph, branch/HEAD state, typed
+  immutable Turns, full-Turn execution lock, and durable PendingTurn journal.
+  Final publication runs only through the journal transaction; persistence of
+  the typed `HeadTranscript` stays here.
 - **`lattice-profile`** — Strict `agent.toml` schema, discovery, defaults, and
   LANCET profile sections (no isolation section).
-- **`lattice-agent`** — Multi-turn `AgentLoop`, turn state machine, message
-  assembly, and injectable `LlmClient` / `ToolCallExecutor` traits.
-- **`lattice-api`** — Thin public facade for session creation/opening and turn
-  execution; translates profile `[lancet]` policy into LANCET-native config
-  and wires the agent loop over `lancet-api`'s CEP runtime.
+- **`lattice-agent`** — One-attempt `ModelStepDriver`, frozen request assembly,
+  provider streaming, protocol metering, and typed attempt outcomes.
+- **`lattice-api`** — Public Session/Turn facade and production
+  `TurnCoordinator` saga over the Session journal and InvocationStore.
 - **`lattice-tui`** — Full-screen `ratatui`/`crossterm` TUI over
   `lattice-api` sessions and `stream_turn`; owns the terminal lifecycle,
   multi-line input, history, viewport, and transcript rendering.
@@ -485,10 +484,9 @@ One sentence per crate:
 `lattice-conversation` joined the workspace in #142:
 
 - **`lattice-conversation`** — Data-only provider-neutral conversation
-  contract: ordered `NativeMessage`/`MessagePart` with `UnboundToolCall` /
-  `BoundToolCall` typestates, ToolResult closure, semantic/replay digests,
-  per-attempt usage and interruption/rejection records, and the migrated
-  `GraphMessage` transcript family; depends only on `lancet-protocol`.
+  contract: typed `NativeMessage`/`MessagePart`, bound Tool calls/results,
+  `HeadTranscript`, semantic/replay digests, and per-attempt outcome/usage;
+  depends only on `lancet-protocol`.
 
 `lattice-store` joined the workspace in #143:
 

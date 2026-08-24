@@ -9,14 +9,13 @@ use sha2::{Digest, Sha256};
 pub const COMMIT_MESSAGE_MAX_CHARS: usize = 72;
 pub const COMMIT_PAYLOAD_SCHEMA_VERSION: u32 = 3;
 
-// Conversation pure-data types are owned by `lattice-conversation` since
-// GitHub #142 (ADR 0005 §7); this crate re-exports them unchanged and remains
-// the persistence owner. `TurnUsage` is the historical name of the
-// provider-neutral `TokenUsage` contract.
+// Conversation pure-data types are owned by `lattice-conversation`; this crate
+// re-exports the typed transcript and historical `TurnUsage` name while remaining
+// the persistence owner.
 use crate::pending::{ClosureOrigin, TurnOutcome, WorkspaceHistoryCheckpoint};
+pub use lattice_conversation::HeadTranscript;
 pub use lattice_conversation::TokenUsage as TurnUsage;
 use lattice_conversation::{BoundToolCall, MessageSemantic, NativeMessage};
-pub use lattice_conversation::{GraphMessage, GraphToolCall, HeadTranscript};
 
 /// A session: container for branches, HEAD, and commits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -216,8 +215,8 @@ pub trait SessionGraphStore: Send + Sync {
 
     fn head_transcript(&self, session_id: &str) -> crate::Result<HeadTranscript>;
 
-    fn commit_turn(&self, input: TurnCommitInput) -> crate::Result<TurnCommit>;
-
+    #[cfg(any(test, feature = "test-utils"))]
+    fn test_commit_turn(&self, input: TurnCommitInput) -> crate::Result<TurnCommit>;
     fn checkout(&self, session_id: &str, target: &str) -> crate::Result<GraphHead>;
 
     fn branch(&self, session_id: &str, name: &str, from: Option<&str>) -> crate::Result<GraphRef>;
@@ -228,15 +227,11 @@ pub trait SessionGraphStore: Send + Sync {
 
     fn reset(&self, session_id: &str, target: &str) -> crate::Result<ResetResult>;
 
-    /// Persist a precomputed turn commit with prepared identity.
-    ///
-    /// Uses the prepared timestamp, message IDs, and commit ID. Validates current
-    /// HEAD as CAS. Rejects a same-ID row whose payload differs.
-    fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> crate::Result<TurnCommit>;
-
+    #[cfg(any(test, feature = "test-utils"))]
+    fn test_commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> crate::Result<TurnCommit>;
     /// Look up a single turn commit by session and commit ID.
     ///
-    /// Returns `None` if not found. Decodes lifecycle evidence strictly.
+    /// Returns `None` if not found. Decodes the typed v4 manifest strictly.
     fn get_turn_commit(
         &self,
         session_id: &str,
@@ -257,15 +252,12 @@ pub trait SessionGraphStore: Send + Sync {
         blocking: lattice_store::Blocking,
     ) -> crate::Result<lattice_store::FlockGuard>;
 
-    /// Commit while the caller already holds the SessionExecutionLock. The
-    /// explicit guard prevents lower layers from guessing same-task ownership;
-    /// production implementations skip a second path acquisition.
-    fn commit_turn_locked(
+    #[cfg(any(test, feature = "test-utils"))]
+    fn test_commit_turn_locked(
         &self,
         input: TurnCommitInput,
-        _execution_lock: &lattice_store::FlockGuard,
+        execution_lock: &lattice_store::FlockGuard,
     ) -> crate::Result<TurnCommit>;
-
     /// Read mutable status while the caller already holds the execution lock.
     fn status_locked(
         &self,
@@ -356,12 +348,6 @@ pub fn canonical_turn_seed(input: &TurnCommitInput, created_at: &str) -> String 
 /// Precomputed turn commit identity, produced before any storage effects.
 #[derive(Debug, Clone)]
 pub struct PreparedTurnCommit {
-    /// The computed commit ID (SHA-256 hex).
-    pub commit_id: String,
-    /// Computed message IDs in transcript order.
-    pub message_ids: Vec<String>,
-    /// The turn seed used for message ID scoping.
-    pub turn_seed: String,
     /// The full immutable turn commit.
     pub commit: TurnCommit,
     /// Original messages in transcript order, carried for persistence.
@@ -401,9 +387,6 @@ pub fn prepare_turn_commit(input: &TurnCommitInput, created_at: &str) -> Prepare
     };
 
     PreparedTurnCommit {
-        commit_id,
-        message_ids,
-        turn_seed,
         commit,
         messages: input.messages.clone(),
     }
@@ -528,9 +511,8 @@ mod graph_contract {
             &input("4f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c"),
             "2026-01-01T00:00:00Z",
         );
-        assert_ne!(first.turn_seed, second.turn_seed);
-        assert_ne!(first.message_ids, second.message_ids);
-        assert_ne!(first.commit_id, second.commit_id);
+        assert_ne!(first.commit.message_ids, second.commit.message_ids);
+        assert_ne!(first.commit.commit_id, second.commit.commit_id);
     }
 
     #[test]
@@ -548,7 +530,7 @@ mod graph_contract {
             },
             "2026-01-01T00:00:00Z",
         );
-        assert_ne!(completed.commit_id, interrupted.commit_id);
+        assert_ne!(completed.commit.commit_id, interrupted.commit.commit_id);
     }
 
     #[test]

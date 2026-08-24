@@ -40,7 +40,7 @@ use tokio::time::Instant;
 
 use super::cep::map_cep_tool_event;
 use super::coordinator::{CoordinatorIoError, TurnCoordinator};
-use super::execute::{AgentTurnEvent, AgentTurnStatus, derive_terminal_event, map_agent_event};
+
 use super::finalize::{FinalizeBudget, FinalizeFailure};
 use super::live::{PreparedTurn, TURN_EVENT_CHANNEL_CAPACITY};
 use super::observer::{CepOrderedEmitter, ObserverSink};
@@ -81,7 +81,7 @@ pub(super) async fn run_coordinator_saga(
         .map(|p| p.profile.llm.retry.max_retries.saturating_add(1).max(1))
         .unwrap_or(1);
 
-    let (agent_tx, mut agent_rx) = mpsc::channel::<AgentTurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
+    let (agent_tx, mut agent_rx) = mpsc::channel::<TurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
     let cep_forward_client = cep_client.clone();
     let cep_agent_tx = agent_tx.clone();
     let cep_forwarder = tokio::spawn(async move {
@@ -103,7 +103,6 @@ pub(super) async fn run_coordinator_saga(
         vec![user_message(&request.input)];
     let mut model_step: u32 = 0;
     let mut awaiting_model_continuation = false;
-    let mut terminal_status = AgentTurnStatus::Completed;
     let mut terminal_reason: Option<String> = None;
     let mut turn_outcome = TurnOutcome::Completed {
         finish_reason: TurnFinishReason::Stop,
@@ -114,7 +113,6 @@ pub(super) async fn run_coordinator_saga(
             turn_outcome = TurnOutcome::Failed {
                 reason: TurnFailure::ModelStepLimitExceeded,
             };
-            terminal_status = AgentTurnStatus::Error;
             terminal_reason = Some("model step limit exceeded".into());
             if !awaiting_model_continuation {
                 let recorded_at = chrono::Utc::now().timestamp();
@@ -146,7 +144,6 @@ pub(super) async fn run_coordinator_saga(
                         lattice_conversation::AttemptInterruption::Timeout,
                     ),
                 };
-                terminal_status = AgentTurnStatus::Error;
                 terminal_reason = Some("timeout".into());
                 if awaiting_model_continuation {
                     break 'saga Ok(());
@@ -177,7 +174,6 @@ pub(super) async fn run_coordinator_saga(
                 turn_outcome = TurnOutcome::Cancelled {
                     reason: TurnCancellation::UserCancelled,
                 };
-                terminal_status = AgentTurnStatus::Cancelled;
                 terminal_reason = Some("cancelled by caller".into());
                 if awaiting_model_continuation {
                     break 'saga Ok(());
@@ -301,7 +297,6 @@ pub(super) async fn run_coordinator_saga(
                     turn_outcome = TurnOutcome::Failed {
                         reason: TurnFailure::ModelRequestFailed,
                     };
-                    terminal_status = AgentTurnStatus::Error;
                     terminal_reason = Some(format!("LLM error: {message}"));
                     let recorded_at = chrono::Utc::now().timestamp();
                     if let Err(err) = coordinator
@@ -339,13 +334,8 @@ pub(super) async fn run_coordinator_saga(
                     )
                     .await
                     {
-                        AttemptHandled::TurnClosed {
-                            outcome,
-                            status,
-                            reason,
-                        } => {
+                        AttemptHandled::TurnClosed { outcome, reason } => {
                             turn_outcome = outcome;
-                            terminal_status = status;
                             terminal_reason = reason;
                             break 'saga Ok(());
                         }
@@ -416,7 +406,6 @@ pub(super) async fn run_coordinator_saga(
             turn_outcome = TurnOutcome::Completed {
                 finish_reason: TurnFinishReason::Stop,
             };
-            terminal_status = AgentTurnStatus::Completed;
             break 'saga Ok(());
         }
 
@@ -811,7 +800,6 @@ pub(super) async fn run_coordinator_saga(
                 turn_outcome = TurnOutcome::Cancelled {
                     reason: TurnCancellation::UserCancelled,
                 };
-                terminal_status = AgentTurnStatus::Cancelled;
                 terminal_reason = Some("cancelled by caller".into());
                 StepClosedKind::CancelTurn {
                     reason: TurnCancellation::UserCancelled,
@@ -824,7 +812,6 @@ pub(super) async fn run_coordinator_saga(
                 turn_outcome = TurnOutcome::Interrupted {
                     reason: reason.clone(),
                 };
-                terminal_status = AgentTurnStatus::Error;
                 terminal_reason = Some("timeout".into());
                 StepClosedKind::InterruptTurn { reason }
             }
@@ -845,7 +832,6 @@ pub(super) async fn run_coordinator_saga(
                 turn_outcome = TurnOutcome::Interrupted {
                     reason: reason.clone(),
                 };
-                terminal_status = AgentTurnStatus::Error;
                 terminal_reason = Some("tool invocation may have occurred".into());
                 StepClosedKind::InterruptTurn { reason }
             }
@@ -876,19 +862,15 @@ pub(super) async fn run_coordinator_saga(
     };
 
     while let Ok(Some(event)) = tokio::time::timeout(CEP_EVENT_DRAIN_GRACE, agent_rx.recv()).await {
-        ordered_events
-            .emit(&mut observer, map_agent_event(event))
-            .await;
+        ordered_events.emit(&mut observer, event).await;
     }
     cep_forwarder.abort();
     while let Ok(event) = agent_rx.try_recv() {
-        ordered_events
-            .emit(&mut observer, map_agent_event(event))
-            .await;
+        ordered_events.emit(&mut observer, event).await;
     }
     ordered_events.finish(&mut observer).await;
 
-    if let Some(terminal) = derive_terminal_event(&terminal_status, terminal_reason.as_deref()) {
+    if let Some(terminal) = diagnostic_terminal_event(&turn_outcome, terminal_reason.as_deref()) {
         observer.emit(terminal).await;
     }
     observer.emit(TurnEvent::TurnCommitting).await;
@@ -948,20 +930,90 @@ pub(super) async fn run_coordinator_saga(
 }
 
 async fn drain_ready_events(
-    agent_rx: &mut mpsc::Receiver<AgentTurnEvent>,
+    agent_rx: &mut mpsc::Receiver<TurnEvent>,
     ordered_events: &mut CepOrderedEmitter,
     observer: &mut ObserverSink,
 ) {
     while let Ok(event) = agent_rx.try_recv() {
-        ordered_events.emit(observer, map_agent_event(event)).await;
+        ordered_events.emit(observer, event).await;
     }
 }
 
+fn diagnostic_terminal_event(outcome: &TurnOutcome, reason: Option<&str>) -> Option<TurnEvent> {
+    match outcome {
+        TurnOutcome::Completed { .. } => None,
+        TurnOutcome::Cancelled { .. } => Some(TurnEvent::TurnCancelled {
+            reason: Some(
+                reason
+                    .map(str::to_string)
+                    .unwrap_or_else(|| typed_outcome_diagnostic(outcome)),
+            ),
+        }),
+        TurnOutcome::Failed { .. } | TurnOutcome::Interrupted { .. } => {
+            Some(TurnEvent::TurnFailed {
+                reason: reason
+                    .map(str::to_string)
+                    .unwrap_or_else(|| typed_outcome_diagnostic(outcome)),
+            })
+        }
+    }
+}
+
+fn typed_outcome_diagnostic(outcome: &TurnOutcome) -> String {
+    match outcome {
+        TurnOutcome::Completed { .. } => "turn completed".to_string(),
+        TurnOutcome::Failed { reason } => match reason {
+            TurnFailure::ModelRequestFailed => "model request failed".to_string(),
+            TurnFailure::ModelStepLimitExceeded => "model step limit exceeded".to_string(),
+            TurnFailure::InvalidToolCall { validation } => validation.to_string(),
+        },
+        TurnOutcome::Cancelled { .. } => "cancelled by caller".to_string(),
+        TurnOutcome::Interrupted { reason } => match reason {
+            TurnInterruption::ProcessInterruptedBeforeModelAttempt => {
+                "process interrupted before model attempt".to_string()
+            }
+            TurnInterruption::ProcessInterruptedDuringModelAttempt => {
+                "process interrupted during model attempt".to_string()
+            }
+            TurnInterruption::ProcessInterruptedDuringModelRetry => {
+                "process interrupted during model retry".to_string()
+            }
+            TurnInterruption::ModelAttempt(interruption) => match interruption {
+                lattice_conversation::AttemptInterruption::StreamError => {
+                    "model stream failed".to_string()
+                }
+                lattice_conversation::AttemptInterruption::Timeout => {
+                    "model attempt timed out".to_string()
+                }
+                lattice_conversation::AttemptInterruption::Cancelled => {
+                    "model attempt cancelled".to_string()
+                }
+                lattice_conversation::AttemptInterruption::OutputLimitExceeded { .. } => {
+                    "model output exceeded protocol limit".to_string()
+                }
+                lattice_conversation::AttemptInterruption::ProcessInterrupted => {
+                    "process interrupted during model attempt".to_string()
+                }
+            },
+            TurnInterruption::ProcessInterruptedDuringToolBinding => {
+                "process interrupted during Tool binding".to_string()
+            }
+            TurnInterruption::WhileAwaitingModelContinuation => {
+                "process interrupted while awaiting model continuation".to_string()
+            }
+            TurnInterruption::ProcessInterruptedDuringStepClosing => {
+                "process interrupted during step closing".to_string()
+            }
+            TurnInterruption::InvocationMayHaveOccurred { invocation } => {
+                format!("Tool invocation {invocation} may have occurred")
+            }
+        },
+    }
+}
 enum AttemptHandled {
     Complete(NativeMessage<UnboundToolCall>),
     TurnClosed {
         outcome: TurnOutcome,
-        status: AgentTurnStatus,
         reason: Option<String>,
     },
     Err(ApiError),
@@ -1024,7 +1076,6 @@ async fn handle_attempt_outcome(
             }
             AttemptHandled::TurnClosed {
                 outcome: TurnOutcome::Failed { reason },
-                status: AgentTurnStatus::Error,
                 reason: step.diagnostic.clone(),
             }
         }
@@ -1045,8 +1096,7 @@ async fn handle_attempt_outcome(
             {
                 return AttemptHandled::Err(map_io(err));
             }
-            let turn_reason = TurnInterruption::ModelAttempt(*interruption);
-            let (kind, outcome, status, reason) = match interruption {
+            let (kind, outcome, reason) = match interruption {
                 lattice_conversation::AttemptInterruption::Cancelled => (
                     StepClosedKind::CancelTurn {
                         reason: TurnCancellation::UserCancelled,
@@ -1054,7 +1104,6 @@ async fn handle_attempt_outcome(
                     TurnOutcome::Cancelled {
                         reason: TurnCancellation::UserCancelled,
                     },
-                    AgentTurnStatus::Cancelled,
                     Some("cancelled by caller".into()),
                 ),
                 other => (
@@ -1064,12 +1113,10 @@ async fn handle_attempt_outcome(
                     TurnOutcome::Interrupted {
                         reason: TurnInterruption::ModelAttempt(*other),
                     },
-                    AgentTurnStatus::Error,
                     step.diagnostic.clone(),
                 ),
             };
             let _ = observer;
-            let _ = turn_reason;
             if let Err(err) = coordinator
                 .io
                 .advance_turn(
@@ -1082,24 +1129,18 @@ async fn handle_attempt_outcome(
             {
                 return AttemptHandled::Err(map_io(err));
             }
-            AttemptHandled::TurnClosed {
-                outcome,
-                status,
-                reason,
-            }
+            AttemptHandled::TurnClosed { outcome, reason }
         }
     }
 }
 
-fn map_step_event(event: ModelStepEvent) -> Option<AgentTurnEvent> {
+fn map_step_event(event: ModelStepEvent) -> Option<TurnEvent> {
     match event {
         ModelStepEvent::Opened { .. } => None,
-        ModelStepEvent::ReasoningDelta { content } => {
-            Some(AgentTurnEvent::ReasoningDelta { content })
-        }
-        ModelStepEvent::TokenDelta { content } => Some(AgentTurnEvent::TokenDelta { content }),
+        ModelStepEvent::ReasoningDelta { content } => Some(TurnEvent::ReasoningDelta { content }),
+        ModelStepEvent::TokenDelta { content } => Some(TurnEvent::TokenDelta { content }),
         ModelStepEvent::ToolCallStarted { id, name } => {
-            Some(AgentTurnEvent::ToolCallStarted { id, name })
+            Some(TurnEvent::ToolCallStarted { id, name })
         }
         ModelStepEvent::ToolCallDelta { .. } | ModelStepEvent::ToolCallEnded { .. } => None,
     }
@@ -1644,6 +1685,37 @@ mod tests {
         assert_eq!(conversation, ToolResultOutcome::Indeterminate);
     }
 
+    #[test]
+    fn typed_outcome_supplies_non_empty_diagnostic_fallbacks() {
+        let invalid = TurnOutcome::Failed {
+            reason: TurnFailure::InvalidToolCall {
+                validation: lattice_conversation::ToolCallValidation::MalformedArguments {
+                    call_ordinal: 2,
+                },
+            },
+        };
+        let timeout = TurnOutcome::Interrupted {
+            reason: TurnInterruption::ModelAttempt(
+                lattice_conversation::AttemptInterruption::Timeout,
+            ),
+        };
+        let cancelled = TurnOutcome::Cancelled {
+            reason: TurnCancellation::UserCancelled,
+        };
+
+        for outcome in [&invalid, &timeout] {
+            let Some(TurnEvent::TurnFailed { reason }) = diagnostic_terminal_event(outcome, None)
+            else {
+                panic!("non-completed outcome must emit TurnFailed");
+            };
+            assert!(!reason.is_empty());
+        }
+        let Some(TurnEvent::TurnCancelled { reason }) = diagnostic_terminal_event(&cancelled, None)
+        else {
+            panic!("cancelled outcome must emit TurnCancelled");
+        };
+        assert_eq!(reason.as_deref(), Some("cancelled by caller"));
+    }
     #[test]
     fn successful_oversize_receipt_keeps_success_and_records_unavailable_material() {
         let value = serde_json::Value::String("x".repeat(65_535));

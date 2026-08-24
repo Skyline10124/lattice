@@ -3,15 +3,13 @@
 
 //! Turn execution and streaming API.
 //!
-//! [`stream_turn`] is the single production execution core: it runs the agent
-//! loop live, emits public [`TurnEvent`] values through a bounded channel, and
-//! commits exactly one turn. [`run_turn`] is a synchronous facade that drains
-//! the same live stream via [`collector::RunTurnCollector`] and returns
-//! [`RunTurnResult`].
+//! [`stream_turn`] is the single production execution core: `TurnCoordinator`
+//! drives the durable saga, emits public [`TurnEvent`] values through a bounded
+//! channel, and finalizes exactly one typed Turn. [`run_turn`] drains that same
+//! stream via [`collector::RunTurnCollector`] into [`RunTurnResult`].
 
 mod cep;
 mod collector;
-// #139-B coordinator shell: private until the single production hard cut.
 mod coordinator;
 mod execute;
 mod finalize;

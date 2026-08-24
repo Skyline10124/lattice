@@ -138,13 +138,14 @@ from the remaining #139-B delta:
 ```
 
 There is no `lancet-audit -> lattice-session` edge, and none may be added.
-`lancet-audit` owns the invocation ledger and returns audit-domain types only;
-projecting a pinned ledger view into
-`lattice_session::pending::InvocationFactsSnapshot` is cross-domain composition
-and lives in the #139-A non-production integration seam
+`lancet-audit` owns the invocation ledger and returns audit-domain types only.
+Projecting a pinned ledger view into
+`lattice_session::pending::InvocationFactsSnapshot` is cross-domain composition:
+the production projection lives in `lattice-api/src/turn/invocation_facts.rs`,
+while the #139-A qualification projection remains in the non-production seam
 (`crates/lancet-audit/tests/invocation_qualification.rs`, backed by a
-dev-dependency). Putting that projection in the production surface would make
-`lancet-api -> lancet-audit -> lattice-session` real and break LANCET's
+dev-dependency). Putting either projection in the `lancet-audit` production
+surface would make `lancet-api -> lancet-audit -> lattice-session` real and break LANCET's
 independent embeddability. `lattice-session` must not depend on `lancet-audit`
 either; applying a candidate revision is session-domain I/O
 (`GitSessionGraphStore::execute_candidate_revision`) over a session-domain
@@ -200,8 +201,8 @@ accumulating.
 | `lancet-api` | Unified public API. During migration it composes native CEP pieces; the target composes `lancet-runtime` without depending on LATTICE session/agent/profile layers. |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, public-address resolution, private/reserved IP checks, and rebinding-domain checks. Depends only on `url` and `std`. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, HTTP request pinning, logging, and (since #142) the pure-data provider replay/projection seam over `lattice-conversation`. |
-| `lattice-conversation` | ADR 0005 §7 data-only provider-neutral conversation contract: ordered `NativeMessage`/`MessagePart` with `UnboundToolCall`/`BoundToolCall` typestates, ToolResult closure, semantic/replay digests, per-attempt usage and interruption/rejection records, and (since #142) the migrated `GraphMessage` transcript family. Depends only on `lancet-protocol`; no I/O, stores, runtimes, or ID generators. |
-| `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`) over the `lattice-store` kernel: immutable `SessionState` objects in the global `sessions.git`, plus the per-session execution lock. Since #144 also owns the durable PendingTurn journal: the `src/pending` contract (twelve CAS stages, ResultDraft, typed `TurnOutcome`/`ClosureOrigin`) and the pure `reconcile` reducer over synthetic Invocation facts, persisted through `git_graph/pending.rs` under `active-turn`/`turns/<TurnId>`. Re-exports the `lattice-conversation` transcript types (`GraphMessage` family, `TurnUsage`); persistence stays here. |
+| `lattice-conversation` | ADR 0005 §7 data-only provider-neutral conversation contract: ordered `NativeMessage`/`MessagePart` with `UnboundToolCall`/`BoundToolCall` typestates, ToolResult closure, typed `HeadTranscript`, semantic/replay digests, and per-attempt usage/interruption/rejection records. Depends only on `lancet-protocol`; no I/O, stores, runtimes, or ID generators. |
+| `lattice-session` | Git-backed Session graph, immutable typed Turn commits, branch/HEAD state, full-Turn execution lock, and durable PendingTurn journal/reducer under `active-turn` and permanent `turns/<TurnId>` pins. Final Turn publication is reachable only through the journal transaction; direct commit helpers compile only under `test-utils`. |
 | `lattice-store` | ADR 0005 domain-neutral private-Git/Linux durability kernel (landed in #143): XDG state topology, `ProjectStoreKey` derivation, typed create/open with `refs/lattice/meta` identity, canonical bytes, object/commit mechanics, ref CAS and multi-ref transactions, per-repository flock, fsync/rename durability barriers, atomic first-create, retention primitives, and per-location capability probes. No domain schemas and no workspace-internal dependencies by contract. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | One-attempt `ModelStepDriver` over the injectable `LlmClient` seam (since #139-B Commit 4): frozen request assembly, protocol-ceiling metering, typed attempt outcomes. No loop, Tool execution, retry policy, or store authority. |

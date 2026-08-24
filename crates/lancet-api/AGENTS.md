@@ -17,8 +17,8 @@ Standalone Tool-execution product contract.
 
 - `src/runtime.rs` owns `LancetRuntime`, `LancetServer`, server lifecycle, and
   production composition.
-- `src/config.rs` owns `LancetRuntimeConfig`, `AuditBacking`, and re-exports
-  project-keyed state-path helpers from `lancet-audit`.
+- `src/config.rs` owns the reduced `LancetRuntimeConfig` over policy, capability
+  admission, the strict project `InvocationStore`, and WorkspaceHistory backing.
 - `src/audit.rs` is the thin delegating facade over `lancet_audit::operator`.
   It re-exports typed operator DTOs and maps `OperatorAuditError` to
   `LancetError` without changing messages.

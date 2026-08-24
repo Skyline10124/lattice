@@ -100,7 +100,7 @@ pub(crate) fn setup_session_with_commits(
         ];
         let parent_ids = commit_ids.last().cloned().into_iter().collect::<Vec<_>>();
         let input = commit_input(session_id, parent_ids, messages, ());
-        let commit = store.commit_turn(input).expect("commit turn");
+        let commit = store.test_commit_turn(input).expect("commit turn");
         commit_ids.push(commit.commit_id);
     }
     commit_ids

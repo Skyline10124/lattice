@@ -16,13 +16,14 @@ use std::path::PathBuf;
 
 pub use lancet_protocol::TurnId;
 pub use lattice_store::{Blocking, FlockGuard, LockMode, ProjectStoreKey, StateLayout, StoreError};
-pub mod graph;
+mod graph;
 pub use graph::{
-    COMMIT_PAYLOAD_SCHEMA_VERSION, GraphDiff, GraphHead, GraphMessage, GraphRef, GraphSession,
-    GraphToolCall, HeadTranscript, PreparedTurnCommit, ResetResult, SessionGraphStore,
-    SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput, TurnLogEntry, TurnUsage,
-    canonical_turn_seed, derive_commit_message, prepare_turn_commit,
+    COMMIT_PAYLOAD_SCHEMA_VERSION, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
+    ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit, TurnLogEntry,
+    TurnUsage, derive_commit_message,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use graph::{PreparedTurnCommit, TurnCommitInput, prepare_turn_commit};
 
 pub mod git_graph;
 pub use git_graph::{GitSessionGraphStore, PendingTurnTip};

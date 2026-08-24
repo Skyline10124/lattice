@@ -83,8 +83,6 @@ fn row_matches(row: &Value, session_id: &str, turn_id: &str, expected_method: &s
             .and_then(Value::as_str)
             == Some(expected_method)
         && row.get("metadata_json").is_none()
-        && row.get("audit_id").is_none()
-        && row.get("evidence_id").is_none()
 }
 
 fn turn_id_of(turn: &SendExecution) -> String {

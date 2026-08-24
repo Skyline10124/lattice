@@ -133,18 +133,59 @@ pub fn production_test_feature_hits(repo_root: &Path) -> anyhow::Result<Vec<Line
         .exec()
         .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))?;
 
+    let packages: std::collections::BTreeMap<_, _> = metadata
+        .packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect();
     let mut parts = Vec::new();
     for pkg in &metadata.packages {
+        for feature in pkg
+            .features
+            .keys()
+            .filter(|name| !name.starts_with("test-"))
+        {
+            if feature_reaches_test_only(
+                &pkg.features,
+                feature,
+                &mut std::collections::BTreeSet::new(),
+            ) {
+                parts.push(format!(
+                    "{}: production feature '{feature}' forwards to a test-only feature",
+                    pkg.name
+                ));
+            }
+        }
         for dep in &pkg.dependencies {
             if dep.kind != DependencyKind::Normal {
                 continue;
             }
-            let flagged: Vec<&str> = dep
-                .features
-                .iter()
-                .map(String::as_str)
-                .filter(|feature| feature.starts_with("test-"))
-                .collect();
+            let target = packages.get(dep.name.as_str()).copied();
+            let mut flagged = Vec::new();
+            for feature in &dep.features {
+                if feature.starts_with("test-")
+                    || target.is_some_and(|package| {
+                        feature_reaches_test_only(
+                            &package.features,
+                            feature,
+                            &mut std::collections::BTreeSet::new(),
+                        )
+                    })
+                {
+                    flagged.push(feature.as_str());
+                }
+            }
+            if dep.uses_default_features
+                && target.is_some_and(|package| {
+                    feature_reaches_test_only(
+                        &package.features,
+                        "default",
+                        &mut std::collections::BTreeSet::new(),
+                    )
+                })
+            {
+                flagged.push("default");
+            }
             if !flagged.is_empty() {
                 parts.push(format!(
                     "{}: [dependencies] {} enables test-only feature(s) {}; move the feature to the [dev-dependencies] entry",
@@ -156,6 +197,32 @@ pub fn production_test_feature_hits(repo_root: &Path) -> anyhow::Result<Vec<Line
         }
     }
     Ok(parts)
+}
+
+fn feature_reaches_test_only(
+    features: &std::collections::BTreeMap<String, Vec<String>>,
+    feature: &str,
+    visiting: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    if feature.starts_with("test-") {
+        return true;
+    }
+    if !visiting.insert(feature.to_string()) {
+        return false;
+    }
+    let reaches = features.get(feature).is_some_and(|members| {
+        members.iter().any(|member| {
+            if let Some((_, dependency_feature)) = member.split_once('/') {
+                dependency_feature.starts_with("test-")
+            } else if member.starts_with("dep:") {
+                false
+            } else {
+                feature_reaches_test_only(features, member, visiting)
+            }
+        })
+    });
+    visiting.remove(feature);
+    reaches
 }
 
 pub fn scan_with_allowlist(
@@ -185,59 +252,6 @@ pub const ISSUE139B_LEGACY_NEEDLES: &[&str] = &[
     // The numeric JSON-RPC request-id allocator in `lancet-dispatch`
     // transport, replaced by caller-allocated `InvocationId`.
     "next_id",
-];
-
-/// Temporary allowlist: every pre-#139-B file that still carries a legacy
-/// needle (plan §5 Commit 1).
-///
-/// This list is the machine-tracked residue ledger of the hard cut:
-///
-/// - every entry must name an existing file or directory, so deleting a
-///   legacy file forces its entry out (stale entries fail the gate);
-/// - Commit 7 must empty the list; from then on any hit anywhere under
-///   `crates/**/{src,tests}` fails CI.
-pub const ISSUE139B_LEGACY_ALLOWLIST: &[&str] = &[
-    "crates/lancet-api/src/audit.rs",
-    "crates/lancet-api/src/config.rs",
-    "crates/lancet-api/src/lib.rs",
-    "crates/lancet-api/src/rewind.rs",
-    "crates/lancet-api/src/runtime.rs",
-    "crates/lancet-api/src/status.rs",
-    "crates/lancet-audit/src/operator.rs",
-    "crates/lancet-audit/src/operator_tests.rs",
-    "crates/lancet-authority/tests/guard_decide_fuzz.rs",
-    "crates/lancet-dispatch/src/registry.rs",
-    "crates/lancet-dispatch/src/transport.rs",
-    "crates/lancet-native/src/effect_contract_tests/support.rs",
-    "crates/lancet-native/src/enforcement/guard_l1.rs",
-    "crates/lancet-native/src/handlers/external.rs",
-    "crates/lancet-native/src/handlers/scaffold.rs",
-    "crates/lancet-native/src/lib.rs",
-    "crates/lancet-native/src/server/registry.rs",
-    "crates/lancet-native/src/server/transport.rs",
-    "crates/lancet-native/tests/cep_component_round_trip.rs",
-    "crates/lancet-native/tests/cep_warn_harness.rs",
-    "crates/lancet-runtime/src/history.rs",
-    "crates/lancet-runtime/src/host_mutate.rs",
-    "crates/lancet-runtime/src/runtime.rs",
-    "crates/lattice-api/src/turn/cep.rs",
-    "crates/lattice-api/src/turn/cep_tests.rs",
-    "crates/lattice-api/src/turn/live.rs",
-    "crates/lattice-api/src/turn/live_tests.rs",
-    "crates/lattice-api/src/turn/types.rs",
-    "crates/lattice-api/tests/cep_round_trip.rs",
-    "crates/lattice-api/tests/direct_local_acceptance.rs",
-    "crates/lattice-api/tests/dogfood_impact_matrix.rs",
-    "crates/lattice-api/tests/release_e2e.rs",
-    "crates/lattice-api/tests/rewind_acceptance.rs",
-    "crates/lattice-api/tests/usage_turn.rs",
-    "crates/lattice-api/tests/workspace_history_acceptance.rs",
-    // Black-box negative assertion proving SQLite-only evidence identity is absent.
-    "crates/lattice-system-harness/tests/release_operator.rs",
-    "crates/lattice-session/src/git_graph/pending.rs",
-    "crates/lattice-session/src/git_graph/tests/pending_journal.rs",
-    "crates/lattice-session/src/pending/contract.rs",
-    "crates/lattice-session/src/pending/outcome.rs",
 ];
 
 /// Forbidden normal/dev dependency edges of the #139-B composition (plan
@@ -272,27 +286,31 @@ pub fn issue139b_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<
     Ok(parts)
 }
 
-/// Every legacy-symbol hit outside [`ISSUE139B_LEGACY_ALLOWLIST`] fails, and
-/// every allowlist entry must still name an existing path so the ledger
-/// cannot silently outlive its files (plan §5 Commit 1).
+/// Every legacy-symbol hit fails permanently after the Commit 7 hard cut.
 pub fn issue139b_legacy_residue_hits(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
     let mut hits = Vec::new();
     for needle in ISSUE139B_LEGACY_NEEDLES {
-        hits.extend(scan_crates_source_and_tests(repo_root, needle)?);
+        hits.extend(scan_workspace_rust_targets(repo_root, needle)?);
     }
     hits.sort();
     hits.dedup();
+    Ok(hits)
+}
 
-    let mut failures = filter_allowlist(&hits, ISSUE139B_LEGACY_ALLOWLIST);
-
-    for entry in ISSUE139B_LEGACY_ALLOWLIST {
-        if !repo_root.join(entry).exists() {
-            failures.push(format!(
-                "stale allowlist entry: {entry} names no existing path"
-            ));
+fn scan_workspace_rust_targets(repo_root: &Path, needle: &str) -> anyhow::Result<Vec<LineHit>> {
+    let mut hits = Vec::new();
+    for root in ["crates", "tools"] {
+        let path = repo_root.join(root);
+        if path.is_dir() {
+            hits.extend(collect_rs_line_hits(
+                &path,
+                repo_root,
+                |_| false,
+                |line| line.contains(needle),
+            )?);
         }
     }
-    Ok(failures)
+    Ok(hits)
 }
 
 pub fn tool_executor_reexport_hits(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
@@ -410,6 +428,7 @@ mod tests {
             "legacy_status",
             "call_id: u64",
             "evidence_id",
+            "next_id",
         ] {
             assert!(
                 ISSUE139B_LEGACY_NEEDLES.contains(&required),
@@ -419,47 +438,28 @@ mod tests {
     }
 
     #[test]
-    fn issue139b_allowlist_entries_live_under_crates() {
-        for entry in ISSUE139B_LEGACY_ALLOWLIST {
-            assert!(
-                entry.starts_with("crates/"),
-                "allowlist entries must live under crates/: {entry}"
-            );
-            assert!(
-                entry.ends_with(".rs") || entry.ends_with('/'),
-                "allowlist entries must name crate files or directories: {entry}"
-            );
-        }
+    fn issue139b_residue_scan_reports_every_hit() {
+        let dir = TempDir::new().unwrap();
+        let hit = dir.path().join("crates/lattice-api/src/turn/fresh.rs");
+        fs::create_dir_all(hit.parent().unwrap()).unwrap();
+        fs::write(&hit, "fn x() { let _ = AgentLoop; }\n").unwrap();
+        let hits = issue139b_legacy_residue_hits(dir.path()).unwrap();
+        assert!(joined(&hits).contains("fresh.rs"));
     }
 
     #[test]
-    fn issue139b_residue_scan_reports_unallowlisted_hits() {
+    fn issue139b_residue_scan_covers_build_scripts_and_tools() {
         let dir = TempDir::new().unwrap();
-        // Seed every allowlist entry as an empty existing path so the
-        // stale-entry check stays quiet, then plant one real hit inside an
-        // allowlisted file and one outside.
-        for entry in ISSUE139B_LEGACY_ALLOWLIST {
-            let path = dir.path().join(entry);
-            if path.extension().is_some() {
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-                if !path.exists() {
-                    fs::write(&path, "").unwrap();
-                }
-            } else {
-                fs::create_dir_all(&path).unwrap();
-            }
-        }
-        let allowlisted = dir.path().join("crates/lattice-agent/src/lib.rs");
-        let fresh = dir.path().join("crates/lattice-api/src/turn/fresh.rs");
-        fs::create_dir_all(fresh.parent().unwrap()).unwrap();
-        fs::write(&allowlisted, "fn x() { let _ = AgentLoop; }\n").unwrap();
-        fs::write(&fresh, "fn x() { let _ = AgentLoop; }\n").unwrap();
-        let hits = issue139b_legacy_residue_hits(dir.path()).unwrap();
-        let text = joined(&hits);
-        assert!(text.contains("fresh.rs"), "unallowlisted hit is reported");
-        assert!(!text.contains("lattice-agent/src/lib.rs"));
+        let build = dir.path().join("crates/example/build.rs");
+        let guest = dir.path().join("tools/example/src/lib.rs");
+        fs::create_dir_all(build.parent().unwrap()).unwrap();
+        fs::create_dir_all(guest.parent().unwrap()).unwrap();
+        fs::write(&build, "fn main() { let _ = AgentLoop; }\n").unwrap();
+        fs::write(&guest, "fn x() { let _ = next_id; }\n").unwrap();
+        let text = joined(&issue139b_legacy_residue_hits(dir.path()).unwrap());
+        assert!(text.contains("build.rs"));
+        assert!(text.contains("tools/example/src/lib.rs"));
     }
-
     #[test]
     fn cli_scan_skips_tests_dir_and_inline_test_files() {
         let dir = TempDir::new().unwrap();
@@ -586,6 +586,31 @@ mod tests {
         assert!(hits.is_empty(), "dev-only test-utils flagged: {hits:?}");
     }
 
+    #[test]
+    fn production_feature_forwarding_to_test_utils_is_flagged() {
+        let dir = TempDir::new().unwrap();
+        write_test_feature_workspace(dir.path(), "");
+        let manifest = dir.path().join("crates/consumer/Cargo.toml");
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        text.push_str("[features]\nrelease = [\"helper/test-utils\"]\n");
+        fs::write(&manifest, text).unwrap();
+        let hits = production_test_feature_hits(dir.path()).unwrap();
+        assert!(joined(&hits).contains("production feature 'release'"));
+    }
+
+    #[test]
+    fn dependency_default_forwarding_to_test_utils_is_flagged() {
+        let dir = TempDir::new().unwrap();
+        write_test_feature_workspace(dir.path(), "");
+        let manifest = dir.path().join("crates/helper/Cargo.toml");
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        text.push_str("default = [\"test-utils\"]\n");
+        fs::write(&manifest, text).unwrap();
+        let hits = production_test_feature_hits(dir.path()).unwrap();
+        let text = joined(&hits);
+        assert!(text.contains("consumer: [dependencies] helper"));
+        assert!(text.contains("default"));
+    }
     #[test]
     fn default_tool_definitions_allowlist_only_fixture() {
         let dir = TempDir::new().unwrap();

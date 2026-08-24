@@ -61,10 +61,10 @@ fn git_store_branch_and_checkout_moves_head() {
     // Commit two turns linearly on main so we have a first commit to branch
     // from and a divergent tip.
     let first = store
-        .commit_turn(turn_input(&session_id, vec![], "turn-0"))
+        .test_commit_turn(turn_input(&session_id, vec![], "turn-0"))
         .expect("commit turn 0");
     let _second = store
-        .commit_turn(turn_input(
+        .test_commit_turn(turn_input(
             &session_id,
             vec![first.commit_id.clone()],
             "turn-1",

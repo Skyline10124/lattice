@@ -61,13 +61,13 @@ fn git_store_diff_reports_unique_commits_per_side() {
 
     // 1. Base commit on main.
     let base = store
-        .commit_turn(turn_input(&session_id, vec![], "base"))
+        .test_commit_turn(turn_input(&session_id, vec![], "base"))
         .expect("base commit");
     let base_oid = base.commit_id.clone();
 
     // 2. One more commit on main (main-only).
     let main_only = store
-        .commit_turn(turn_input(&session_id, vec![base_oid.clone()], "main-only"))
+        .test_commit_turn(turn_input(&session_id, vec![base_oid.clone()], "main-only"))
         .expect("main-only commit");
     let main_only_oid = main_only.commit_id.clone();
 
@@ -81,7 +81,7 @@ fn git_store_diff_reports_unique_commits_per_side() {
         .checkout(&session_id, "feature")
         .expect("checkout feature");
     let feature_only = store
-        .commit_turn(turn_input(
+        .test_commit_turn(turn_input(
             &session_id,
             vec![base_oid.clone()],
             "feature-only",

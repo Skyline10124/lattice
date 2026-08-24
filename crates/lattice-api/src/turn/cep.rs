@@ -27,8 +27,7 @@ use lattice_profile::{LancetNetworkSection, LancetObservationSection, LancetSect
 use serde_json::Value;
 
 use crate::session::ApiError;
-use crate::turn::execute::AgentTurnEvent;
-use crate::turn::types::RunTurnRequest;
+use crate::turn::types::{RunTurnRequest, TurnEvent};
 
 /// Structured CEP error metadata preserved for API/CLI observation.
 #[derive(Debug, Clone, PartialEq)]
@@ -437,20 +436,20 @@ pub(crate) async fn build_production_turn_deps(
 }
 
 /// Map a CEP transport notification into an internal agent turn event.
-pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<AgentTurnEvent> {
+pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<TurnEvent> {
     let params = event.params;
     let invocation_id = params
         .get("invocation_id")
         .and_then(|value| value.as_str())
         .and_then(|raw| lancet_protocol::InvocationId::parse(raw).ok())?;
     match event.method.as_str() {
-        "cep.call_started" => Some(AgentTurnEvent::CepCallStarted {
+        "cep.call_started" => Some(TurnEvent::CepCallStarted {
             invocation_id,
             method: string_param(&params, "method")?,
             semantic_stage: string_param(&params, "semantic_stage")?,
             guard_stage: string_param(&params, "guard_stage")?,
         }),
-        "cep.call_finished" => Some(AgentTurnEvent::CepCallFinished {
+        "cep.call_finished" => Some(TurnEvent::CepCallFinished {
             invocation_id,
             method: string_param(&params, "method")?,
             ok: params.get("ok").and_then(|value| value.as_bool())?,
@@ -706,7 +705,7 @@ mod turn_wiring {
         );
         assert!(matches!(
             map_cep_tool_event(event),
-            Some(AgentTurnEvent::CepCallFinished { invocation_id, method, ok: true, .. })
+            Some(TurnEvent::CepCallFinished { invocation_id, method, ok: true, .. })
                 if invocation_id.to_string() == invocation && method == "fetch.web"
         ));
     }

@@ -71,7 +71,7 @@ fn git_store_concurrent_commit_same_parent_second_conflicts() {
 
     // 1. Commit the base turn A (no parents). Ref now points at A.
     let base = store
-        .commit_turn(turn_input(&session_id, vec![], "base"))
+        .test_commit_turn(turn_input(&session_id, vec![], "base"))
         .expect("base commit");
     let base_oid = base.commit_id.clone();
 
@@ -81,7 +81,7 @@ fn git_store_concurrent_commit_same_parent_second_conflicts() {
 
     // 3. Commit B first — should succeed and move the ref from A to B.
     let committed_b = store
-        .commit_prepared_turn(prepared_b)
+        .test_commit_prepared_turn(prepared_b)
         .expect("commit B should succeed");
     let b_oid = committed_b.commit_id.clone();
     assert_ne!(b_oid, base_oid, "B must be a distinct commit");
@@ -89,7 +89,7 @@ fn git_store_concurrent_commit_same_parent_second_conflicts() {
     // 4. Commit C — the ref is now at B, but C expects parent A. The CAS
     //    check detects the ref moved and returns a Conflict error.
     let err = store
-        .commit_prepared_turn(prepared_c)
+        .test_commit_prepared_turn(prepared_c)
         .expect_err("commit C should conflict");
     assert!(
         matches!(err, SessionError::Conflict(ref msg) if msg.contains("HEAD") || msg.contains("parent") || msg.contains("ref")),
@@ -141,7 +141,7 @@ fn git_store_threaded_concurrent_commits_one_wins_one_conflicts() {
 
     // Base commit A.
     let base = store
-        .commit_turn(turn_input(&session_id, vec![], "base"))
+        .test_commit_turn(turn_input(&session_id, vec![], "base"))
         .expect("base commit");
     let base_oid = base.commit_id.clone();
 
@@ -155,7 +155,7 @@ fn git_store_threaded_concurrent_commits_one_wins_one_conflicts() {
         .into_iter()
         .map(move |p| {
             let s = Arc::clone(&store_clone);
-            thread::spawn(move || s.commit_prepared_turn(p))
+            thread::spawn(move || s.test_commit_prepared_turn(p))
         })
         .collect();
 

@@ -546,7 +546,7 @@ mod session_graph {
                 commit_message: format!("Turn {i}"),
                 usage: None,
             };
-            let commit = api.store().commit_turn(input).expect("commit_turn");
+            let commit = api.store().test_commit_turn(input).expect("commit_turn");
             commit_ids.push(commit.commit_id);
         }
         commit_ids
@@ -786,7 +786,7 @@ mod session_graph {
             commit_message: "Feature work".to_string(),
             usage: None,
         };
-        let feature_commit = api.store().commit_turn(feature_input).expect("commit");
+        let feature_commit = api.store().test_commit_turn(feature_input).expect("commit");
 
         // Diff main head vs feature head.
         let diff = api

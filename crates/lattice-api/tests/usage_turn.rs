@@ -4,7 +4,7 @@
 //! Deterministic usage tests for the main turn path.
 //!
 //! These tests exercise the real `run_turn` → live `stream_turn` collector →
-//! `AgentLoop` CEP adapter pipeline with a fake streaming LLM.
+//! durable coordinator saga with a fake streaming LLM.
 //! No network, no real API keys.
 
 mod support;

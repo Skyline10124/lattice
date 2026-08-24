@@ -132,6 +132,6 @@ fn create_builds_a_fresh_kernel_store() {
         crate::test_helpers::assistant_msg("hi"),
     ];
     let input = super::commit_input("sess-auto-init", Vec::new(), messages, ());
-    let commit = store.commit_turn(input).expect("commit turn");
+    let commit = store.test_commit_turn(input).expect("commit turn");
     assert!(!commit.commit_id.is_empty());
 }

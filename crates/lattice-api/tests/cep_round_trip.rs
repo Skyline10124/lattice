@@ -309,7 +309,7 @@ async fn cep_round_trip_impact_matrix() {
             .execute(&call)
             .await
             .unwrap_or_else(|err| panic!("{} ({:?}) failed: {err:?}", row.method, row.impact));
-        let parsed: Value = serde_json::from_str(&result_json).expect("AgentLoop tool-result JSON");
+        let parsed: Value = serde_json::from_str(&result_json).expect("reserved CEP result JSON");
         (row.assert_result)(&parsed);
     }
 
@@ -557,7 +557,5 @@ async fn web_fetch_and_todo_write_return_content_free_receipts() {
         let json = serde_json::to_string(evidence).expect("serialize evidence");
         assert!(!json.contains("cep-body"));
         assert!(!json.contains("secret todo text"));
-        assert!(!json.contains("audit_id"));
-        assert!(!json.contains("evidence_id"));
     }
 }

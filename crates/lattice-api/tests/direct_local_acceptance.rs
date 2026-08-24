@@ -629,8 +629,6 @@ async fn component_receipts_carry_method_local_evidence_without_routing_metadata
             "adapter_preflight_invoked",
             "backend_invoked",
             "direct-local",
-            "audit_id",
-            "evidence_id",
         ] {
             assert!(
                 !json.contains(retired),

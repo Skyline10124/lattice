@@ -16,7 +16,7 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
 - `src/turn/live.rs` owns the live streaming turn core.
 - `src/turn/execute.rs` owns the `run_turn` entrypoint.
 - `src/turn/collector.rs` drains live streams into `RunTurnResult`.
-- `src/turn/cep.rs` owns profile→policy translation, CEP-event→agent-event
+- `src/turn/cep.rs` owns profile→policy translation, CEP-event→public-event
   mapping, and `build_production_turn_deps` over `lancet_api::LancetRuntime::build`.
   Runtime assembly itself remains in `lancet-api`.
 - `src/turn/coordinator.rs` owns the production #139-B `TurnCoordinator`:
@@ -81,8 +81,8 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
   copy — the helper owns a process-global env mutex, and a second copy
   reintroduces the `XDG_STATE_HOME` race that ENV-OOM-02 closed.
 - FIXED #46 (Codeberg #24): public `TurnStarted` includes `turn_id` for audit
-  replay, and `[llm].timeout_secs` lowers to the agent turn deadline in
-  `turn/mapping.rs`.
+  replay, and `[llm].timeout_secs` lowers to the Turn deadline in `turn/saga.rs`
+  (with the frozen live request prepared in `turn/live.rs`).
 - FIXED H-06: `stream_turn` now streams live instead of replaying buffered
   events after full turn completion.
 - FIXED M-19b: observer backpressure no longer blocks live task drain/commit.
@@ -104,9 +104,9 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
 - Keep `run_turn` implemented through `stream_turn` and `RunTurnCollector`.
 - Add focused tests whenever public `TurnEvent` mapping or commit semantics
   change.
-- Read the workspace-history identity after the LANCET server has drained,
-  and keep `build_commit_input`'s parameters explicit so a new call site
-  cannot silently commit a Turn with no history identity.
+- Read the workspace-history identity after the LANCET server has drained;
+  `TurnCommitCandidate.workspace_history_checkpoint` is required and finalization
+  must never substitute `Empty` for an unknown checkpoint.
 
 ## Record Maintenance
 

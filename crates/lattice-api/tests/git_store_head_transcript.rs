@@ -70,7 +70,7 @@ fn git_store_head_transcript_reads_ordered_messages() {
     ];
     for (user_text, assistant_text) in expected_texts.iter() {
         let commit = store
-            .commit_turn(turn_input(
+            .test_commit_turn(turn_input(
                 &session_id,
                 parent_ids.clone(),
                 user_text,

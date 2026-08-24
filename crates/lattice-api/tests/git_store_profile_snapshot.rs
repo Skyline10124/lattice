@@ -70,7 +70,7 @@ fn git_store_get_turn_commit_includes_profile_snapshot_json() {
         usage: None,
     };
 
-    let committed = store.commit_turn(input).expect("commit_turn");
+    let committed = store.test_commit_turn(input).expect("commit_turn");
     let commit_id = committed.commit_id.clone();
 
     // The committed TurnCommit carries the profile hash; the full profile

@@ -238,8 +238,6 @@ async fn dogfood_impact_matrix_five_production_classes() {
         let json = serde_json::to_string(evidence).expect("serialize evidence");
         assert!(!json.contains("hello dog04"));
         assert!(!json.contains("dog04 impact matrix verified"));
-        assert!(!json.contains("audit_id"));
-        assert!(!json.contains("evidence_id"));
     }
 
     let replay = replay_audit(AuditReplayRequest::new(

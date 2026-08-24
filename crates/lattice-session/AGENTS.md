@@ -146,13 +146,11 @@ payload compatibility.
   `create_session` takes a `ProjectStoreKey`; `SessionGraphStore` gained
   `lock_execution`; `SessionError` gained `SessionBusy` and `Store`.
   Acceptance lives in `src/git_graph/tests/state_and_locks.rs`.
-- ADDED #63: `TurnCommitInput`/`TurnCommit` carry `workspace_history_oid` and
-  the git manifest persists it (`skip_serializing_if`, so history-less turns
-  stay byte-identical to pre-#63 manifests). It is manifest-only — no
-  canonical seed or turn-id derivation changed — and `get_turn_commit`
-  re-reads it from the commit tree, so it survives session reopen, branch
-  movement, and process restart. The private history itself lives in
-  `lancet-runtime`, never in this store and never in the project `.git`.
+- LANDED #139-B Commit 6/7: every final Turn carries explicit typed
+  `WorkspaceHistoryCheckpoint::{Empty, Oid}` in the v4 manifest and canonical
+  identity. Final publication runs only through the PendingTurn transaction;
+  direct commit builders and methods are available only under `test-utils`.
+  Workspace history itself remains owned by `lancet-runtime`.
 - FIXED M-11: `head_transcript_impl` now traverses reachable commits
   topologically so merge-side messages are not dropped.
 - FIXED M-12: graph JSON hashing now canonicalizes object keys.

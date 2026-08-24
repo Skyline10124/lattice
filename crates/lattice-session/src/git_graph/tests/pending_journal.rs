@@ -39,7 +39,7 @@ fn turn_started_publishes_active_turn_grafted_on_the_conversation_tip() {
     let (_f, store, session) = setup();
     // One committed conversation turn to graft onto.
     let first = store
-        .commit_turn(super::commit_input(
+        .test_commit_turn(super::commit_input(
             &session,
             vec![],
             vec![
@@ -88,7 +88,7 @@ fn turn_started_publishes_active_turn_grafted_on_the_conversation_tip() {
 fn turn_started_rejects_a_moved_tip_and_a_second_active_turn() {
     let (_f, store, session) = setup();
     let first = store
-        .commit_turn(super::commit_input(
+        .test_commit_turn(super::commit_input(
             &session,
             vec![],
             vec![
@@ -290,7 +290,7 @@ fn draft_publication_is_durable_then_uncertain_then_reopen_classifies() {
 fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
     let (_f, store, session) = setup();
     let first = store
-        .commit_turn(super::commit_input(
+        .test_commit_turn(super::commit_input(
             &session,
             vec![],
             vec![
@@ -714,7 +714,7 @@ fn turn_started_root_rejects_a_graft_onto_a_foreign_parent() {
     // no frozen tip must have no parent at all.
     let (_f, store, session) = setup();
     let first = store
-        .commit_turn(super::commit_input(
+        .test_commit_turn(super::commit_input(
             &session,
             vec![],
             vec![

@@ -54,7 +54,7 @@ fn git_store_no_remote_push_refspec_for_lattice_refs() {
         commit_message: "turn-0".to_string(),
         usage: None,
     };
-    let commit = store.commit_turn(input).expect("commit_turn");
+    let commit = store.test_commit_turn(input).expect("commit_turn");
 
     let repo = gix::open_opts(dir.join("sessions.git"), gix::open::Options::isolated())
         .expect("open repo");

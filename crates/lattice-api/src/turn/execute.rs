@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use lancet_protocol::InvocationId;
 use sha2::{Digest, Sha256};
 
 use super::cep::{ProductionTurnDepsInput, build_production_turn_deps};
@@ -12,43 +11,8 @@ use super::collector::RunTurnCollector;
 use super::coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator};
 use super::llm::RealLlmClient;
 use super::mapping::resolve_project_root;
-use super::types::{RunTurnRequest, RunTurnResult, TurnEvent, TurnEventStream};
+use super::types::{RunTurnRequest, RunTurnResult, TurnEventStream};
 use crate::session::{Result, SessionApi};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum AgentTurnStatus {
-    Completed,
-    Error,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum AgentTurnEvent {
-    ReasoningDelta {
-        content: String,
-    },
-    TokenDelta {
-        content: String,
-    },
-    ToolCallStarted {
-        id: String,
-        name: String,
-    },
-    CepCallStarted {
-        invocation_id: InvocationId,
-        method: String,
-        semantic_stage: String,
-        guard_stage: String,
-    },
-    CepCallFinished {
-        invocation_id: InvocationId,
-        method: String,
-        ok: bool,
-        semantic_stage: String,
-        guard_stage: String,
-        error_code: Option<String>,
-    },
-}
 
 #[derive(Debug, Clone)]
 pub(super) struct ProfileSnapshotMetadata {
@@ -82,25 +46,6 @@ pub(super) fn build_profile_snapshot_metadata(
     })
 }
 
-/// Derive the terminal [`TurnEvent`] from the agent result status.
-///
-/// Returns `None` for `Completed`, `Some(TurnFailed)` for `Error`, and
-/// `Some(TurnCancelled)` for `Cancelled`.
-pub(super) fn derive_terminal_event(
-    status: &AgentTurnStatus,
-    terminal_reason: Option<&str>,
-) -> Option<TurnEvent> {
-    match status {
-        AgentTurnStatus::Error => Some(TurnEvent::TurnFailed {
-            reason: terminal_reason.unwrap_or_default().to_string(),
-        }),
-        AgentTurnStatus::Cancelled => Some(TurnEvent::TurnCancelled {
-            reason: terminal_reason.map(str::to_string),
-        }),
-        AgentTurnStatus::Completed => None,
-    }
-}
-
 /// Execute a turn and return its final result once it has been committed.
 pub async fn run_turn(session: SessionApi, request: RunTurnRequest) -> Result<RunTurnResult> {
     let mut stream = stream_turn(session, request).await?;
@@ -109,43 +54,6 @@ pub async fn run_turn(session: SessionApi, request: RunTurnRequest) -> Result<Ru
         collector.observe(event)?;
     }
     collector.finish()
-}
-
-/// Map a single agent process event to its public [`TurnEvent`] equivalent.
-///
-/// Maps the model/CEP events forwarded by the coordinator to the public stream.
-pub(super) fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
-    match event {
-        AgentTurnEvent::ReasoningDelta { content } => TurnEvent::ReasoningDelta { content },
-        AgentTurnEvent::TokenDelta { content } => TurnEvent::TokenDelta { content },
-        AgentTurnEvent::ToolCallStarted { id, name } => TurnEvent::ToolCallStarted { id, name },
-        AgentTurnEvent::CepCallStarted {
-            invocation_id,
-            method,
-            semantic_stage,
-            guard_stage,
-        } => TurnEvent::CepCallStarted {
-            invocation_id,
-            method,
-            semantic_stage,
-            guard_stage,
-        },
-        AgentTurnEvent::CepCallFinished {
-            invocation_id,
-            method,
-            ok,
-            semantic_stage,
-            guard_stage,
-            error_code,
-        } => TurnEvent::CepCallFinished {
-            invocation_id,
-            method,
-            ok,
-            semantic_stage,
-            guard_stage,
-            error_code,
-        },
-    }
 }
 
 fn enabled_tools(request: &RunTurnRequest) -> Vec<String> {

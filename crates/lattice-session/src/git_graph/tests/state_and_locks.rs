@@ -144,7 +144,7 @@ fn commit_publishes_head_and_state_together() {
     let ids = {
         let messages = vec![user_msg("hello"), assistant_msg("hi")];
         let input = commit_input("sess-txn", vec![], messages, ());
-        store.commit_turn(input).expect("commit")
+        store.test_commit_turn(input).expect("commit")
     };
 
     let head_ref = state::head_ref_name("sess-txn", "main").expect("head ref");
@@ -254,7 +254,7 @@ fn locked_apis_require_the_exact_exclusive_session_guard() {
     assert_invalid_lock(store.branch_locked("sess-guard-b", "wrong", None, &guard_a));
     assert_invalid_lock(store.checkout_locked("sess-guard-b", "main", &guard_a));
     assert_invalid_lock(store.reset_locked("sess-guard-b", &ids_b[0], &guard_a));
-    assert_invalid_lock(store.commit_turn_locked(
+    assert_invalid_lock(store.test_commit_turn_locked(
         commit_input(
             "sess-guard-b",
             vec![ids_b[0].clone()],
@@ -274,7 +274,7 @@ fn locked_apis_require_the_exact_exclusive_session_guard() {
         "sess-guard-b"
     );
     store
-        .commit_turn_locked(
+        .test_commit_turn_locked(
             commit_input(
                 "sess-guard-b",
                 vec![ids_b[0].clone()],
@@ -297,7 +297,7 @@ fn locked_apis_require_the_exact_exclusive_session_guard() {
     assert_invalid_lock(store.branch_locked("sess-guard-a", "wrong", None, &shared));
     assert_invalid_lock(store.checkout_locked("sess-guard-a", "main", &shared));
     assert_invalid_lock(store.reset_locked("sess-guard-a", &ids_a[0], &shared));
-    assert_invalid_lock(store.commit_turn_locked(
+    assert_invalid_lock(store.test_commit_turn_locked(
         commit_input(
             "sess-guard-a",
             vec![ids_a[0].clone()],

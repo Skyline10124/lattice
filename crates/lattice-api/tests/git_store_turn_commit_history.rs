@@ -57,7 +57,7 @@ fn git_store_turn_commit_creates_git_history() {
         usage: None,
     };
 
-    let commit = store.commit_turn(input).expect("commit_turn");
+    let commit = store.test_commit_turn(input).expect("commit_turn");
 
     // 1. commit_id is non-empty.
     assert!(!commit.commit_id.is_empty(), "commit_id must be non-empty");

@@ -17,7 +17,7 @@ fn test_commit_turn_tree_structure() {
 
     let messages = vec![user_msg("Hello")];
     let input = commit_input("sess-tree", vec![], messages, ());
-    let commit = store.commit_turn(input).expect("commit");
+    let commit = store.test_commit_turn(input).expect("commit");
     assert_eq!(commit.commit_id.len(), 40);
 
     let repo = gix::open_opts(
@@ -62,7 +62,7 @@ fn test_commit_turn_linear() {
 
     let messages = vec![user_msg("Hello")];
     let input = commit_input("sess-linear", vec![], messages, ());
-    let commit = store.commit_turn(input).expect("commit");
+    let commit = store.test_commit_turn(input).expect("commit");
     assert_eq!(commit.commit_id.len(), 40);
     assert!(commit.parent_ids.is_empty());
     assert_eq!(commit.message_ids.len(), 1);
@@ -79,7 +79,7 @@ fn test_commit_turn_with_parent() {
 
     let messages = vec![user_msg("Second")];
     let input = commit_input("sess-parent", vec![first_id.clone()], messages, ());
-    let commit = store.commit_turn(input).expect("commit");
+    let commit = store.test_commit_turn(input).expect("commit");
     assert_eq!(commit.parent_ids, vec![first_id]);
 }
 
@@ -96,7 +96,7 @@ fn commit_turn_rejects_detached_head_instead_of_advancing_main() {
         .expect("detach HEAD");
 
     let err = store
-        .commit_turn(commit_input(
+        .test_commit_turn(commit_input(
             "sess-detached-commit",
             vec![detached.clone()],
             vec![user_msg("must fail")],

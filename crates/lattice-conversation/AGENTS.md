@@ -15,9 +15,7 @@ ADR 0005 §7 (landed in GitHub #142):
   never merge;
 - per-attempt usage (`TokenUsage`), interruption, and rejection records;
 - provider origin and bounded part-local opaque replay state;
-- the `GraphMessage` / `GraphToolCall` / `HeadTranscript` transcript family
-  migrated verbatim from `lattice-session` (serde shape frozen), re-exported
-  there for persistence consumers;
+- the typed durable `HeadTranscript` over `NativeMessage<BoundToolCall>`;
 - strict ToolCall batch validation and the canonical arguments digest
   (SHA-256 over domain separator + u64_be byte length + canonical bytes).
 

@@ -1208,15 +1208,15 @@ impl SessionGraphStore for FailingResetStore {
     fn head_transcript(&self, session_id: &str) -> lattice_session::Result<HeadTranscript> {
         self.inner.head_transcript(session_id)
     }
-    fn commit_turn(&self, input: TurnCommitInput) -> lattice_session::Result<TurnCommit> {
-        self.inner.commit_turn(input)
+    fn test_commit_turn(&self, input: TurnCommitInput) -> lattice_session::Result<TurnCommit> {
+        self.inner.test_commit_turn(input)
     }
-    fn commit_turn_locked(
+    fn test_commit_turn_locked(
         &self,
         input: TurnCommitInput,
         execution_lock: &lattice_session::FlockGuard,
     ) -> lattice_session::Result<TurnCommit> {
-        self.inner.commit_turn_locked(input, execution_lock)
+        self.inner.test_commit_turn_locked(input, execution_lock)
     }
     fn checkout(&self, session_id: &str, target: &str) -> lattice_session::Result<GraphHead> {
         if self
@@ -1291,11 +1291,11 @@ impl SessionGraphStore for FailingResetStore {
             "injected session ref durability failure".to_string(),
         ))
     }
-    fn commit_prepared_turn(
+    fn test_commit_prepared_turn(
         &self,
         prepared: PreparedTurnCommit,
     ) -> lattice_session::Result<TurnCommit> {
-        self.inner.commit_prepared_turn(prepared)
+        self.inner.test_commit_prepared_turn(prepared)
     }
     fn get_turn_commit(
         &self,
@@ -1383,7 +1383,7 @@ async fn a_turn_without_a_history_identity_is_refused_when_an_ancestor_has_one()
         .expect("open session store");
     let head = api.status(&session_id).unwrap();
     let anomalous = store
-        .commit_turn(TurnCommitInput {
+        .test_commit_turn(TurnCommitInput {
             turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
                 .expect("valid test TurnId"),
             workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
@@ -1528,7 +1528,7 @@ async fn a_full_unwind_is_refused_when_this_session_installed_work_before_the_ta
     let mut committed = Vec::new();
     for label in ["first", "second"] {
         let commit = store
-            .commit_turn(TurnCommitInput {
+            .test_commit_turn(TurnCommitInput {
                 turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
                     .expect("valid test TurnId"),
                 workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
@@ -1738,7 +1738,7 @@ async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the
         .expect("open session store");
     let resolved = api.status(&session_id).unwrap().session_id;
     let target = store
-        .commit_turn(TurnCommitInput {
+        .test_commit_turn(TurnCommitInput {
             turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
                 .expect("valid test TurnId"),
             workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
@@ -1802,7 +1802,7 @@ async fn a_legitimate_full_unwind_still_succeeds() {
     let store = GitSessionGraphStore::open(test_state_layout().lattice_root().join("sessions.git"))
         .expect("open session store");
     let target = store
-        .commit_turn(TurnCommitInput {
+        .test_commit_turn(TurnCommitInput {
             turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
                 .expect("valid test TurnId"),
             workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,

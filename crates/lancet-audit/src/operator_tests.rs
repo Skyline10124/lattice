@@ -52,7 +52,7 @@ fn session_id() -> SessionId {
     SessionId::parse(SESSION).expect("session")
 }
 
-fn binding(step: u32, part: u32, method: &str) -> ReservationBinding {
+fn binding_for_turn(turn_id: TurnId, step: u32, part: u32, method: &str) -> ReservationBinding {
     ReservationBinding {
         invocation_id: InvocationId::parse(&format!(
             "00000000-0000-4000-8000-{step:06x}{part:06x}"
@@ -60,7 +60,7 @@ fn binding(step: u32, part: u32, method: &str) -> ReservationBinding {
         .expect("invocation"),
         identity: BindingIdentity {
             session_id: session_id(),
-            turn_id: turn_id(),
+            turn_id,
             model_step_ordinal: step,
             part_ordinal: part,
             method: method.to_string(),
@@ -68,6 +68,10 @@ fn binding(step: u32, part: u32, method: &str) -> ReservationBinding {
             arguments_digest: [part as u8; 32],
         },
     }
+}
+
+fn binding(step: u32, part: u32, method: &str) -> ReservationBinding {
+    binding_for_turn(turn_id(), step, part, method)
 }
 
 fn reserve(store: &InvocationStore, step: u32, bindings: &[ReservationBinding]) {
@@ -178,6 +182,38 @@ async fn query_filters_typed_identity_method_and_terminal_verdict() {
 }
 
 #[tokio::test]
+async fn same_parent_sibling_turn_ids_keep_operator_rows_isolated() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    let sibling = TurnId::parse("4f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap();
+    let first = binding_for_turn(turn_id(), 2, 0, "fetch.web");
+    let second = binding_for_turn(sibling, 3, 0, "fetch.web");
+    reserve(&store, 2, std::slice::from_ref(&first));
+    store
+        .reserve_batch(
+            PlanKey {
+                turn_id: sibling,
+                model_step_ordinal: 3,
+            },
+            std::slice::from_ref(&second),
+        )
+        .unwrap();
+
+    let mut first_query = fixture.request();
+    first_query.session_id = Some(SESSION.into());
+    first_query.turn_id = Some(turn_id().to_string());
+    let first_rows = query_audit(first_query).await.unwrap();
+    let mut second_query = fixture.request();
+    second_query.session_id = Some(SESSION.into());
+    second_query.turn_id = Some(sibling.to_string());
+    let second_rows = query_audit(second_query).await.unwrap();
+
+    assert_eq!(first_rows.rows.len(), 1);
+    assert_eq!(first_rows.rows[0].invocation_id, first.invocation_id);
+    assert_eq!(second_rows.rows.len(), 1);
+    assert_eq!(second_rows.rows[0].invocation_id, second.invocation_id);
+}
+#[tokio::test]
 async fn tail_is_transition_ordered_and_cursor_exclusive() {
     let fixture = Fixture::new();
     let store = fixture.store();
@@ -277,9 +313,6 @@ async fn operator_json_contains_digests_and_lengths_but_no_secret_material() {
         "provider_payload",
         "opaque_state",
         "metadata_json",
-        "audit_id",
-        "call_id",
-        "evidence_id",
     ] {
         assert!(
             !json.contains(&format!("\"{forbidden_key}\":")),

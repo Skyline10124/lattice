@@ -5,9 +5,8 @@
 //!
 //! This crate drives exactly one provider attempt per call and owns no
 //! persistence, invocation allocation, Tool execution, retry policy,
-//! reconciliation, or Turn lifecycle. Multi-step sequencing lives in the
-//! composition layer (`lattice-api`) until the #139-B production switch
-//! replaces it with `TurnCoordinator`.
+//! reconciliation, or Turn lifecycle. Multi-step sequencing is owned by
+//! `lattice-api::TurnCoordinator`.
 
 pub mod model_step;
 

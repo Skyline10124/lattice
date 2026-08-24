@@ -52,13 +52,13 @@ fn budget_at_limit() -> PolicyBudgetSnapshot {
     }
 }
 
-fn audit_ctx(call_id: u64, budget: PolicyBudgetSnapshot) -> PolicyAuditContext {
+fn audit_ctx(invocation_ordinal: u64, budget: PolicyBudgetSnapshot) -> PolicyAuditContext {
     PolicyAuditContext {
         turn_id: "fuzz-turn".into(),
         session_id: "fuzz-session".into(),
         invocation_id: Some(
             lancet_protocol::InvocationId::parse(&format!(
-                "00000000-0000-4000-8000-{call_id:012x}"
+                "00000000-0000-4000-8000-{invocation_ordinal:012x}"
             ))
             .expect("invocation id"),
         ),

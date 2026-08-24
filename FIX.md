@@ -7376,3 +7376,28 @@ removed `benchmarks/invocation-store/results/**`, and updated
 - **Changed files:** protocol binding/evidence/error contracts; LANCET dispatch/runtime/native/
   API and Git operator surfaces; lattice conversation/session/agent/API/CLI/TUI; system
   harnesses; boundary gate; workspace manifests and lockfile; AGENTS.md; FIX.md.
+
+## GitHub #139-B Commit 7: delete legacy orchestration and outcome residue — 2026-08-24
+
+- **ID/severity:** #139-B / HIGH architecture cleanup.
+- **Problem:** after the production hard cut, test-facing direct Turn commit methods,
+  obsolete `GraphMessage` DTOs, duplicate AgentTurn event/status projections, and the
+  temporary legacy-symbol allowlist still preserved alternate vocabulary and could
+  obscure a future bypass of the PendingTurn-only production path.
+- **Fix:** deleted `GraphMessage`/`GraphToolCall`, routed coordinator/model/CEP events
+  directly as public `TurnEvent`, derived diagnostics from typed `TurnOutcome`, removed
+  the allowlist mechanism and made the legacy scan permanently zero-hit across every
+  Rust target under `crates/` and `tools/`. Removed direct commit methods/types from the
+  default `SessionGraphStore`/crate API; CAS fixture helpers now compile only under
+  `test-utils`, with gates rejecting direct, forwarded, or default-enabled test features
+  from production dependencies. Closed M-GH100-01 with explicit UUID TurnId/operator
+  isolation coverage and L-GH144-02 with the typed v4 manifest as sole authority.
+- **Verification:** `cargo fmt --all -- --check`; `git diff --check`; `cargo test -p
+  lattice-conversation`; `cargo test -p lattice-session`; `cargo test -p lattice-agent
+  --features test-utils`; focused sibling-Turn operator isolation; `cargo test -p
+  lattice-api`; `cargo test -p lattice-cli`; `cargo test -p lattice-tui`; `cargo test -p
+  xtask lancet_boundary`; default-feature `cargo check -p lattice-session
+  --no-default-features --lib` and `cargo check -p lattice-api --lib`; `cargo xtask
+  lancet-boundary`.
+- **Changed files:** conversation/session/agent/API contracts and fixtures; operator
+  regressions; permanent boundary gates; AGENTS/ARCHITECTURE/FINDINGS/FIX records.
