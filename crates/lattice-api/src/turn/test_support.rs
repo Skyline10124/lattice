@@ -15,7 +15,7 @@ use crate::session::SessionApi;
 
 pub(super) fn make_test_run_turn_request(
     llm: Arc<dyn LlmClient>,
-    in_memory_audit: bool,
+    _in_memory_audit: bool,
     enabled_tools: &[String],
 ) -> RunTurnRequest {
     RunTurnRequest {
@@ -29,7 +29,6 @@ pub(super) fn make_test_run_turn_request(
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: None,
-        test_persist_audit: if in_memory_audit { None } else { Some(false) },
     }
 }
 
@@ -47,12 +46,8 @@ pub(super) async fn build_test_production_deps(
         std::fs::write(root.join("README.md"), "init\n").expect("write README");
         init_test_git_repo(root);
     }
-    if !in_memory_audit {
-        // A durable-audit fixture takes the production path, which strictly
-        // opens the project's stores; create them first, as `session new`
-        // does.
-        ensure_project_stores(root);
-    }
+    // Production composition always strictly opens both project stores.
+    ensure_project_stores(root);
     let request = make_test_run_turn_request(llm.clone(), in_memory_audit, enabled_tools);
     super::cep::build_production_turn_deps(super::cep::ProductionTurnDepsInput {
         request: &request,
@@ -62,14 +57,12 @@ pub(super) async fn build_test_production_deps(
         enabled_tools,
         llm,
         lancet,
-        model_id: "test-model",
-        runtime_version: "0.0.0-test",
     })
     .await
     .expect("production deps")
 }
 
-pub(super) const TEST_SESSION_ID: &str = "test-session";
+pub(super) const TEST_SESSION_ID: &str = "0123456789abcdef0123456789abcdef";
 
 /// The store key binding test sessions to the fixture's project root.
 pub(super) fn test_project_key(root: &std::path::Path) -> lattice_session::ProjectStoreKey {
@@ -121,8 +114,10 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     std::fs::write(root.join("src/lib.rs"), "pub fn hello() {}").unwrap();
     init_test_git_repo(&root);
 
-    let sessions_path = root.join("sessions.git");
     let layout = lattice_session::StateLayout::in_state_root(&root.join(".test-state"));
+    let sessions_path = layout.lattice_root().join("sessions.git");
+    crate::stores::create_project_stores(&layout, test_project_key(&root))
+        .expect("create project stores");
     let session_api =
         SessionApi::git_create_with_layout(&sessions_path, &layout).expect("create session store");
     let store: Box<dyn SessionGraphStore> = Box::new(
@@ -166,7 +161,6 @@ pub(super) fn make_request(input: &str) -> RunTurnRequest {
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
-        test_persist_audit: None,
     }
 }
 
@@ -178,7 +172,6 @@ pub(super) fn make_request_with_session(input: &str, session_id: &str) -> RunTur
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
-        test_persist_audit: None,
     }
 }
 

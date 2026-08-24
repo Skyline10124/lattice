@@ -138,22 +138,24 @@ fn assert_completed_turn(outcome: &SendOutcome, session_id: &str) -> Result<(), 
     )?;
 
     // Matching started/committed session IDs, nonempty commit ID, completed.
-    let (committed_session, commit_id, status) = outcome
+    let (committed_session, commit_id, committed_outcome) = outcome
         .events
         .iter()
         .find_map(|event| match event {
             TurnEventLine::TurnCommitted {
                 session_id,
                 commit_id,
-                status,
-            } => Some((session_id, commit_id, status)),
+                outcome,
+            } => Some((session_id, commit_id, outcome)),
             _ => None,
         })
         .expect("subsequence guarantees turn_committed");
     require(
-        committed_session == session_id && !commit_id.is_empty() && status == "completed",
+        committed_session == session_id
+            && !commit_id.is_empty()
+            && committed_outcome == "completed",
         format!(
-            "bad turn_committed: session={committed_session} commit={commit_id} status={status}"
+            "bad turn_committed: session={committed_session} commit={commit_id} outcome={committed_outcome}"
         ),
     )?;
 
@@ -448,7 +450,7 @@ fn direct_turn_sonnet_routed_provider_event() {
             !outcome.events.iter().any(|event| {
                 matches!(
                     event,
-                    TurnEventLine::TurnCommitted { status, .. } if status == "completed"
+                    TurnEventLine::TurnCommitted { outcome, .. } if outcome == "completed"
                 )
             }),
             "credential failure must not complete the turn",

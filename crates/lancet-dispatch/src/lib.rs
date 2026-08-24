@@ -3,9 +3,11 @@
 
 //! CEP dispatch and in-process transport.
 
+pub mod receipt;
 pub mod registry;
 pub mod transport;
 
+pub use receipt::{ExecutionReceipt, InternalCallResponse};
 pub use registry::{
     Cancellation, EventSink, MethodRegistry, duplicate_registration, wire_code_for_error,
 };

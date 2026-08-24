@@ -1,10 +1,6 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-// Private #139-B module until the Commit 6 production switch wires it into
-// the coordinator's terminal publication path.
-#![allow(dead_code)]
-
 //! The fixed terminal-finalization budget (ADR 0005 §12, #139-B Commit 5).
 //!
 //! `FinalizeBudget` is a private, fixed policy — neither profile
@@ -76,25 +72,12 @@ impl FinalizeBudget {
     pub(crate) fn allows_attempt(&self, now: Instant) -> bool {
         now < self.deadline
     }
-
-    /// Remaining envelope at `now` (zero once expired).
-    pub(crate) fn remaining(&self, now: Instant) -> Duration {
-        self.deadline.saturating_duration_since(now)
-    }
 }
 
 /// Deterministic exponential backoff: 0 for the first attempt, then 25 ms
 /// doubling, capped at 1 second.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FinalizeBackoff {
-    exponent: u32,
-}
-
-impl Default for FinalizeBackoff {
-    fn default() -> Self {
-        Self { exponent: 0 }
-    }
-}
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FinalizeBackoff;
 
 impl FinalizeBackoff {
     /// Delay before the attempt with this ordinal (1-based): attempt 1 is
@@ -193,7 +176,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use lancet_audit::invocation_store::InvocationStore;
@@ -202,12 +184,14 @@ mod tests {
     /// Stepping fake clock: `now()` returns the accumulated virtual time;
     /// `sleep(d)` advances it without real waiting.
     struct FakeClock {
+        base: Instant,
         elapsed_ms: AtomicU64,
     }
 
     impl FakeClock {
         fn new() -> Self {
             Self {
+                base: Instant::now(),
                 elapsed_ms: AtomicU64::new(0),
             }
         }
@@ -219,7 +203,7 @@ mod tests {
 
     impl FinalizeClock for FakeClock {
         fn now(&self) -> Instant {
-            Instant::now() + Duration::from_millis(self.elapsed_ms.load(Ordering::SeqCst))
+            self.base + Duration::from_millis(self.elapsed_ms.load(Ordering::SeqCst))
         }
 
         async fn sleep(&self, delay: Duration) {

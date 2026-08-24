@@ -10,7 +10,7 @@
 //!
 //! The history is read back with plain `gix` — a general Git library, not a
 //! product crate — so this scenario stays inside the harness boundary. The
-//! `TurnCommit.workspace_history_oid` binding is deliberately *not* asserted
+//! `TurnCommit.workspace_history_checkpoint` binding is deliberately *not* asserted
 //! here: #63 forbids new user-facing command surface, so that field is not
 //! observable through the CLI. It is covered at the library layer in
 //! `crates/lattice-api/tests/workspace_history_acceptance.rs`.

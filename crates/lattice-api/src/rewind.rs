@@ -61,8 +61,8 @@ pub struct RewindStep {
     pub method: String,
     /// Turn the mutation belonged to.
     pub turn_id: String,
-    /// CEP call id within that Turn.
-    pub call_id: Option<u64>,
+    /// Invocation that installed the mutation.
+    pub invocation_id: lancet_protocol::InvocationId,
     /// Workspace-relative path the mutation touched.
     pub path: String,
     /// Local Revision recorded right after the mutation installed.
@@ -579,41 +579,31 @@ pub fn rewind_to_turn_with_barriers(
     }))
 }
 
-/// The workspace-history identity to rewind back to.
-///
-/// A Turn records the identity it arrived at, so `Some` is authoritative.
-/// `None` is ambiguous: it means "no mutation had ever been recorded" for a
-/// Turn from before the first mutation, but the live turn path also stamps
-/// `None` when reading the identity failed. Treating the ambiguous case as
-/// "unwind everything" would reverse mutations installed *before* the target
-/// Turn, so a `None` target is only honoured when no ancestor Turn carries an
-/// identity either; otherwise the Rewind refuses.
+/// The project-global workspace-history checkpoint to rewind back to.
 fn effective_history_target(
-    session: &SessionApi,
-    session_id: &str,
+    _session: &SessionApi,
+    _session_id: &str,
     target: &lattice_session::TurnCommit,
     log: &[lattice_session::TurnLogEntry],
     target_index: usize,
 ) -> Result<Option<String>> {
-    if let Some(oid) = target.workspace_history_oid.clone() {
-        return Ok(Some(oid));
-    }
-    // `log` is the oldest-first walk of everything reachable from HEAD. For
-    // the linear turn graphs the session store produces, the entries before
-    // the target are its ancestors; a merge-shaped graph could interleave a
-    // sibling, which only makes this scan stricter, never laxer.
-    for entry in log.iter().take(target_index) {
-        let ancestor = session.get_turn_commit(session_id, &entry.commit_id)?;
-        if let Some(oid) = ancestor.and_then(|commit| commit.workspace_history_oid) {
-            return Err(ApiError::Conflict(format!(
-                "turn '{}' records no workspace-history identity while its ancestor '{}' records \
-                 '{oid}'; the identity for this turn is unavailable, so rewinding to it would \
-                 reverse mutations installed before it",
-                target.commit_id, entry.commit_id
-            )));
+    match &target.workspace_history_checkpoint {
+        lattice_session::WorkspaceHistoryCheckpoint::Oid(oid) => Ok(Some(oid.clone())),
+        lattice_session::WorkspaceHistoryCheckpoint::Empty => {
+            if let Some(ancestor) = log[..target_index].iter().rev().find(|entry| {
+                matches!(
+                    entry.workspace_history_checkpoint,
+                    lattice_session::WorkspaceHistoryCheckpoint::Oid(_)
+                )
+            }) {
+                return Err(ApiError::Conflict(format!(
+                    "turn '{}' records an empty workspace-history checkpoint after ancestor '{}' recorded one",
+                    target.commit_id, ancestor.commit_id
+                )));
+            }
+            Ok(None)
         }
     }
-    Ok(None)
 }
 
 /// Refuse a full unwind that would reverse this session's own pre-target work.
@@ -824,7 +814,7 @@ fn steps_of(steps: &[lancet_api::RewindStep]) -> Vec<RewindStep> {
             commit_id: step.commit_id.clone(),
             method: step.method.clone(),
             turn_id: step.turn_id.clone(),
-            call_id: step.call_id,
+            invocation_id: step.invocation_id,
             path: step.path.clone(),
             recorded_content_hash: step.recorded_content_hash.clone(),
         })

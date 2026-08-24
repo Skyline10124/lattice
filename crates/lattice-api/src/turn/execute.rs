@@ -3,82 +3,51 @@
 
 use std::sync::Arc;
 
-use super::model_rounds::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use futures::StreamExt;
-use lattice_session::{
-    GraphMessage, TurnCommitInput, TurnLifecycleEvidence, WorkspaceDisposition,
-    derive_commit_message,
-};
+use lancet_protocol::InvocationId;
 use sha2::{Digest, Sha256};
 
 use super::cep::{ProductionTurnDepsInput, build_production_turn_deps};
 use super::collector::RunTurnCollector;
+use super::coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator};
 use super::llm::RealLlmClient;
-use super::mapping::resolve_model_and_prompt;
-use super::mapping::{map_status, resolve_project_root};
-use super::types::{RunTurnRequest, RunTurnResult, TurnEvent, TurnEventStream, TurnUsageSummary};
+use super::mapping::resolve_project_root;
+use super::types::{RunTurnRequest, RunTurnResult, TurnEvent, TurnEventStream};
 use crate::session::{Result, SessionApi};
 
-/// Context needed to construct a [`TurnCommitInput`] from the live path.
-pub(super) struct TurnCommitContext {
-    pub session_id: String,
-    pub parent_ids: Vec<String>,
-    pub model: String,
-    pub provider: String,
-    pub agent_name: String,
-    pub profile_snapshot_hash: String,
-    pub profile_snapshot_json: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AgentTurnStatus {
+    Completed,
+    Error,
+    Cancelled,
 }
 
-/// Build a [`TurnCommitInput`] from the user input, commit context, and agent
-/// result. Shared by the live turn path to ensure commit construction stays
-/// consistent.
-///
-/// `disposition`, `lifecycle`, and `workspace_history_oid` are required
-/// parameters (not hardcoded defaults) so a new call site cannot silently
-/// produce a commit with `NotApplicable` / no lifecycle evidence / no
-/// workspace-history identity. The caller owns the lifecycle classification
-/// and the history read, and must pass all three explicitly.
-pub(super) fn build_commit_input(
-    user_input: &str,
-    ctx: &TurnCommitContext,
-    agent_result: &AgentTurnResult,
-    disposition: WorkspaceDisposition,
-    lifecycle: Option<TurnLifecycleEvidence>,
-    workspace_history_oid: Option<String>,
-) -> TurnCommitInput {
-    let commit_status = map_status(&agent_result.status).to_commit_status();
-
-    let mut commit_messages = Vec::new();
-    commit_messages.push(GraphMessage {
-        role: "user".to_string(),
-        content: user_input.to_string(),
-        reasoning_content: None,
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-    });
-    commit_messages.extend(agent_result.messages.iter().cloned());
-
-    let commit_message = derive_commit_message(&commit_messages);
-
-    TurnCommitInput {
-        workspace_history_oid,
-        session_id: ctx.session_id.clone(),
-        parent_ids: ctx.parent_ids.clone(),
-        messages: commit_messages,
-        agent_name: ctx.agent_name.clone(),
-        profile_snapshot_hash: ctx.profile_snapshot_hash.clone(),
-        profile_snapshot_json: ctx.profile_snapshot_json.clone(),
-        model: ctx.model.clone(),
-        provider: ctx.provider.clone(),
-        status: commit_status,
-        disposition,
-        lifecycle,
-        commit_message,
-        usage: Some(agent_result.usage),
-        terminal_reason: agent_result.terminal_reason.clone(),
-    }
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AgentTurnEvent {
+    ReasoningDelta {
+        content: String,
+    },
+    TokenDelta {
+        content: String,
+    },
+    ToolCallStarted {
+        id: String,
+        name: String,
+    },
+    CepCallStarted {
+        invocation_id: InvocationId,
+        method: String,
+        semantic_stage: String,
+        guard_stage: String,
+    },
+    CepCallFinished {
+        invocation_id: InvocationId,
+        method: String,
+        ok: bool,
+        semantic_stage: String,
+        guard_stage: String,
+        error_code: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -115,17 +84,18 @@ pub(super) fn build_profile_snapshot_metadata(
 
 /// Derive the terminal [`TurnEvent`] from the agent result status.
 ///
-/// Returns `None` for `Completed` (no terminal event needed), `Some(TurnFailed)`
-/// for `Error`, and `Some(TurnCancelled)` for `Cancelled`. Terminal status is
-/// always derived from `AgentTurnResult.status`, never from the presence or
-/// absence of `ModelFinished` in the event stream.
-pub(super) fn derive_terminal_event(result: &AgentTurnResult) -> Option<TurnEvent> {
-    match result.status {
+/// Returns `None` for `Completed`, `Some(TurnFailed)` for `Error`, and
+/// `Some(TurnCancelled)` for `Cancelled`.
+pub(super) fn derive_terminal_event(
+    status: &AgentTurnStatus,
+    terminal_reason: Option<&str>,
+) -> Option<TurnEvent> {
+    match status {
         AgentTurnStatus::Error => Some(TurnEvent::TurnFailed {
-            reason: result.terminal_reason.clone().unwrap_or_default(),
+            reason: terminal_reason.unwrap_or_default().to_string(),
         }),
         AgentTurnStatus::Cancelled => Some(TurnEvent::TurnCancelled {
-            reason: result.terminal_reason.clone(),
+            reason: terminal_reason.map(str::to_string),
         }),
         AgentTurnStatus::Completed => None,
     }
@@ -143,89 +113,33 @@ pub async fn run_turn(session: SessionApi, request: RunTurnRequest) -> Result<Ru
 
 /// Map a single agent process event to its public [`TurnEvent`] equivalent.
 ///
-/// This is a 1:1 mapping over the six process variants. Public terminal
-/// events (`TurnFailed`, `TurnCancelled`) and commit events are derived
-/// separately from `AgentTurnResult.status` and the commit outcome.
+/// Maps the model/CEP events forwarded by the coordinator to the public stream.
 pub(super) fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
     match event {
-        AgentTurnEvent::ModelStarted { provider, model } => {
-            TurnEvent::ModelStarted { provider, model }
-        }
-        AgentTurnEvent::LlmRequestError {
-            provider,
-            model,
-            attempt,
-            max_attempts,
-            error_kind,
-            retryable,
-            will_retry,
-            delay_ms,
-            status_code,
-            message,
-        } => TurnEvent::LlmRequestError {
-            provider,
-            model,
-            attempt,
-            max_attempts,
-            error_kind,
-            retryable,
-            will_retry,
-            delay_ms,
-            status_code,
-            message,
-        },
         AgentTurnEvent::ReasoningDelta { content } => TurnEvent::ReasoningDelta { content },
         AgentTurnEvent::TokenDelta { content } => TurnEvent::TokenDelta { content },
         AgentTurnEvent::ToolCallStarted { id, name } => TurnEvent::ToolCallStarted { id, name },
-        AgentTurnEvent::ToolCallFinished {
-            id,
-            name,
-            ok,
-            output_len,
-            error_summary,
-        } => TurnEvent::ToolCallFinished {
-            id,
-            name,
-            ok,
-            output_len,
-            error_summary,
-        },
-        AgentTurnEvent::ModelFinished {
-            finish_reason,
-            usage,
-        } => TurnEvent::ModelFinished {
-            finish_reason,
-            usage: usage.map(TurnUsageSummary::from),
-        },
         AgentTurnEvent::CepCallStarted {
-            call_id,
+            invocation_id,
             method,
-            impact_kind,
-            audit_id,
             semantic_stage,
             guard_stage,
         } => TurnEvent::CepCallStarted {
-            call_id,
+            invocation_id,
             method,
-            impact_kind,
-            audit_id,
             semantic_stage,
             guard_stage,
         },
         AgentTurnEvent::CepCallFinished {
-            call_id,
+            invocation_id,
             method,
-            impact_kind,
-            audit_id,
             ok,
             semantic_stage,
             guard_stage,
             error_code,
         } => TurnEvent::CepCallFinished {
-            call_id,
+            invocation_id,
             method,
-            impact_kind,
-            audit_id,
             ok,
             semantic_stage,
             guard_stage,
@@ -281,15 +195,43 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
             .map_err(|err| {
                 crate::session::ApiError::Internal(format!("acquire session lock task: {err}"))
             })??;
+    let execution_lock = Arc::new(execution_lock);
+    let session_store = session.git_store_for_coordinator()?;
+    let layout = session.state_layout().ok_or_else(|| {
+        crate::session::ApiError::Internal(
+            "TurnCoordinator requires a StateLayout-backed SessionApi".to_string(),
+        )
+    })?;
+    let invocation_store = Arc::new(
+        lancet_audit::invocation_store::InvocationStore::open(&layout, &workspace_root.store_key())
+            .map_err(|err| {
+                crate::session::ApiError::Internal(format!("open invocation store: {err}"))
+            })?,
+    );
+    let coordinator = TurnCoordinator::new(
+        CoordinatorStoreIo::new(session_store, invocation_store),
+        Arc::new(RandomIdSource),
+    );
+    coordinator
+        .reconcile_pending(request.session_id.clone(), Arc::clone(&execution_lock))
+        .await
+        .map_err(|err| match err {
+            super::coordinator::CoordinatorIoError::EvidenceDurabilityFailed { attempts } => {
+                crate::session::ApiError::RecoveryRequired(
+                    crate::session::RecoveryRequired::EvidenceDurabilityFailed(
+                        crate::session::EvidenceDurabilityFailed { attempts },
+                    ),
+                )
+            }
+            other => crate::session::ApiError::Internal(format!("reconcile pending Turn: {other}")),
+        })?;
     let prepared = super::live::prepare_live_turn_locked(
         &session,
         &request,
         workspace_root.canonical_path(),
-        &execution_lock,
+        execution_lock.as_ref(),
     )?;
     let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.lancet);
-    let (model_id, _, _) = resolve_model_and_prompt(&request);
-    let runtime_version = env!("CARGO_PKG_VERSION");
     let enabled_tools = enabled_tools(&request);
     let deps = build_production_turn_deps(ProductionTurnDepsInput {
         request: &request,
@@ -299,9 +241,15 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
         enabled_tools: &enabled_tools,
         llm: production_llm(&request),
         lancet: cep,
-        model_id: &model_id,
-        runtime_version,
     })
     .await?;
-    super::live::stream_turn_live_prepared(session, prepared, request, deps, execution_lock).await
+    super::live::stream_turn_live_prepared(
+        session,
+        prepared,
+        request,
+        deps,
+        Arc::new(coordinator),
+        execution_lock,
+    )
+    .await
 }

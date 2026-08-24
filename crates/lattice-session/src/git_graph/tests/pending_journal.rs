@@ -10,7 +10,7 @@ use lattice_store::{Blocking, LockMode, RefExpectation};
 use crate::SessionError;
 use crate::git_graph::GitSessionGraphStore;
 use crate::git_graph::tests::{Fixture, temp_dir};
-use crate::graph::{SessionGraphStore, TurnCommitStatus};
+use crate::graph::SessionGraphStore;
 use crate::pending::contract::PendingStage;
 use crate::pending::draft::ResultDraft;
 use crate::pending::{DraftClassification, DraftPublication};
@@ -46,7 +46,7 @@ fn turn_started_publishes_active_turn_grafted_on_the_conversation_tip() {
                 crate::test_helpers::user_msg("first"),
                 crate::test_helpers::assistant_msg("reply"),
             ],
-            TurnCommitStatus::Completed,
+            (),
         ))
         .expect("first turn");
     let tip = head_oid(&store);
@@ -95,7 +95,7 @@ fn turn_started_rejects_a_moved_tip_and_a_second_active_turn() {
                 crate::test_helpers::user_msg("first"),
                 crate::test_helpers::assistant_msg("reply"),
             ],
-            TurnCommitStatus::Completed,
+            (),
         ))
         .expect("first turn");
     let lock = store
@@ -297,7 +297,7 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
                 crate::test_helpers::user_msg("first"),
                 crate::test_helpers::assistant_msg("reply"),
             ],
-            TurnCommitStatus::Completed,
+            (),
         ))
         .expect("first turn");
     let head = head_oid(&store);
@@ -357,6 +357,7 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
         .finalize_turn(&session, &turn_id(), &lock)
         .expect("finalize");
     let commit_oid = committed.commit_id.clone();
+    assert_eq!(committed.turn_id, turn_id());
 
     // Head advanced, pin created, active-turn deleted.
     assert_eq!(head_oid(&store).as_deref(), Some(commit_oid.as_str()));
@@ -381,11 +382,39 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
     // Transcript reconstruction skips journal commits and keeps both turns.
     let transcript = store.head_transcript(&session).expect("transcript");
     assert_eq!(transcript.messages.len(), 4);
-    assert_eq!(transcript.messages[2].content, "please continue");
-    assert_eq!(transcript.messages[3].content, "done");
-    // Log sees two conversation turns, no journal noise.
-    assert_eq!(store.log(&session).expect("log").len(), 2);
+    assert_eq!(
+        crate::test_helpers::text(&transcript.messages[2]),
+        Some("please continue")
+    );
+    assert_eq!(
+        crate::test_helpers::text(&transcript.messages[3]),
+        Some("done")
+    );
+    // Log sees two conversation turns, no journal noise, and preserves the
+    // explicit durable identity of the finalized Turn.
+    let log = store.log(&session).expect("log");
+    assert_eq!(log.len(), 2);
+    assert_eq!(log.last().expect("finalized log row").turn_id, turn_id());
 
+    // Public counts include conversation Turns only, never journal snapshots.
+    assert_eq!(
+        store
+            .status_locked(&session, &lock)
+            .expect("status")
+            .commit_count,
+        2
+    );
+    drop(lock);
+    let summary = store
+        .list()
+        .expect("list")
+        .into_iter()
+        .find(|summary| summary.session_id == session)
+        .expect("session summary");
+    assert_eq!(summary.commit_count, 2);
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("relock");
     // Finalize is idempotent: the exact pinned TurnCommit comes back.
     let again = store
         .finalize_turn(&session, &turn_id(), &lock)
@@ -692,7 +721,7 @@ fn turn_started_root_rejects_a_graft_onto_a_foreign_parent() {
                 crate::test_helpers::user_msg("first"),
                 crate::test_helpers::assistant_msg("reply"),
             ],
-            TurnCommitStatus::Completed,
+            (),
         ))
         .expect("first turn");
 
@@ -721,17 +750,7 @@ fn turn_started_root_rejects_a_graft_onto_a_foreign_parent() {
 
 #[test]
 fn journal_finalized_turns_keep_no_legacy_outcome_authority() {
-    // F1 / AC#8 migration contract: the typed `TurnOutcome` is the only
-    // outcome authority a journal-finalized Turn records. The conversation
-    // manifest's `disposition`, lifecycle evidence, and `terminal_reason`
-    // carry nothing #139-B could lose by deleting them:
-    //
-    // - `disposition` is always `not_applicable` (worktree/promotion
-    //   lifecycle was removed by #62);
-    // - `turn/audit.json` records no lifecycle evidence;
-    // - `terminal_reason` is always absent (free text is never logic
-    //   authority, ADR 0005 §15);
-    // - `execution_status` is exactly `TurnOutcome::legacy_status()`.
+    // Typed outcome/origin/checkpoint are the only terminal facts in schema v4.
     use crate::pending::outcome::{
         TurnCancellation, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
     };
@@ -798,34 +817,32 @@ fn journal_finalized_turns_keep_no_legacy_outcome_authority() {
             ref other => panic!("expected Committed, got {}", other.stage_name()),
         }
 
-        // The legacy manifest fields are a total projection of it.
         let manifest_bytes = store
             .kernel()
             .read_tree_blob(commit_oid, "turn/manifest.json")
             .expect("manifest");
         let manifest: serde_json::Value =
             serde_json::from_slice(&manifest_bytes).expect("manifest json");
-        assert_eq!(
-            manifest["disposition"], "not_applicable",
-            "no workspace disposition survives the journal path"
-        );
+        assert_eq!(manifest["outcome"], serde_json::to_value(&outcome).unwrap());
+        assert_eq!(manifest["origin"], "live");
+        assert!(manifest.get("workspace_history_checkpoint").is_some());
+        for retired in [
+            "execution_status",
+            "disposition",
+            "terminal_reason",
+            "lifecycle",
+        ] {
+            assert!(
+                manifest.get(retired).is_none(),
+                "retired field {retired}: {manifest:#}"
+            );
+        }
         assert!(
-            manifest.get("terminal_reason").is_none() || manifest["terminal_reason"].is_null(),
-            "no logic-bearing terminal string: {manifest:#}"
-        );
-        assert_eq!(
-            manifest["execution_status"],
-            serde_json::Value::String(outcome.legacy_status().as_str().to_string()),
-            "legacy status is derived from the typed outcome"
-        );
-        let audit_bytes = store
-            .kernel()
-            .read_tree_blob(commit_oid, "turn/audit.json")
-            .expect("audit");
-        let audit: serde_json::Value = serde_json::from_slice(&audit_bytes).expect("audit json");
-        assert!(
-            audit.get("target_project_ref").is_none(),
-            "no TurnLifecycleEvidence survives the journal path: {audit:#}"
+            store
+                .kernel()
+                .read_tree_blob(commit_oid, "turn/audit.json")
+                .is_err(),
+            "retired lifecycle audit blob must not exist"
         );
     }
 }

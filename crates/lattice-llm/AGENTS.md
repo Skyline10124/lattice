@@ -16,8 +16,8 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 - `src/providers/` owns provider-specific protocol adapters.
 - `src/provider_projection/` owns the pure-data provider replay/projection
   seam (#142): official wire JSON ↔ `lattice-conversation` `NativeMessage`,
-  with official-wire fixtures in `tests/fixtures/projection/`. It is not
-  wired into the production codecs until #139-B. `wire_to_native` meters every
+  with official-wire fixtures in `tests/fixtures/projection/`. Production model
+  steps consume this typed conversation contract through `lattice-agent`.
   body through `lattice_conversation::AttemptAssembly`, so an over-limit wire
   fails closed with `ProjectionError::OutputLimitExceeded` instead of yielding
   a partial message. `project_cross_provider` drops replay state, provider

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lattice_session::{StateLayout, WorkspaceDisposition};
+use lattice_session::StateLayout;
 
 // ─── Stream timeout constants ───────────────────────────────────
 
@@ -77,7 +77,7 @@ fn session_store_lives_under_the_xdg_state_root() {
 struct StubLlmClient;
 
 #[async_trait::async_trait]
-impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
+impl lattice_agent::LlmClient for StubLlmClient {
     async fn chat(
         &self,
         _request: lattice_llm::ChatRequest,
@@ -140,9 +140,9 @@ async fn run_integration_commits_existing_session() {
     let _ = lattice_session::test_utils::init_fixture_repo(temp.path(), &__refs);
 
     let layout = StateLayout::in_state_root(&temp.path().join("state"));
+    let sessions_repo = layout.lattice_root().join("sessions.git");
     let session_api =
-        lattice_api::SessionApi::git_create_with_layout(temp.path().join("sessions.git"), &layout)
-            .unwrap();
+        lattice_api::SessionApi::git_create_with_layout(sessions_repo, &layout).unwrap();
     let created = session_api
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
@@ -162,7 +162,6 @@ async fn run_integration_commits_existing_session() {
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
-        test_persist_audit: None,
     };
 
     let result = lattice_api::run_turn(session_api, request).await;
@@ -172,7 +171,12 @@ async fn run_integration_commits_existing_session() {
             assert!(!turn_result.session_id.is_empty());
             assert!(!turn_result.commit_id.is_empty());
             assert_eq!(turn_result.assistant_output, "stub response");
-            assert_eq!(turn_result.status, RunTurnStatus::Completed);
+            assert_eq!(
+                turn_result.outcome,
+                lattice_api::TurnOutcome::Completed {
+                    finish_reason: lattice_api::TurnFinishReason::Stop
+                }
+            );
         }
         Err(e) => {
             panic!("run_turn failed: {e}");
@@ -251,10 +255,13 @@ fn render_json_event_roundtrips_every_variant() {
         },
         TurnEvent::TurnCommitting,
         TurnEvent::TurnCommitted {
+            origin: lattice_api::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
             session_id: "s1".into(),
             commit_id: "c1".into(),
-            status: RunTurnStatus::Completed,
-            disposition: WorkspaceDisposition::NotApplicable,
+            outcome: lattice_api::TurnOutcome::Completed {
+                finish_reason: lattice_api::TurnFinishReason::Stop,
+            },
         },
         TurnEvent::CommitFailed {
             reason: "parent mismatch".into(),
@@ -463,10 +470,13 @@ fn render_human_turn_started_silent_default() {
 #[test]
 fn render_human_committed_lowercases_status() {
     let event = TurnEvent::TurnCommitted {
+        origin: lattice_api::ClosureOrigin::Live,
+        workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
         session_id: "s1".into(),
         commit_id: "c1".into(),
-        status: RunTurnStatus::Completed,
-        disposition: WorkspaceDisposition::NotApplicable,
+        outcome: lattice_api::TurnOutcome::Completed {
+            finish_reason: lattice_api::TurnFinishReason::Stop,
+        },
     };
     let mut state = RunRenderState::default();
     let mut out = Vec::new();
@@ -490,7 +500,9 @@ fn verbose_epilogue_emits_all_fields_when_populated() {
     let state = RunRenderState {
         session_id: Some("s1".into()),
         commit_id: Some("c1".into()),
-        last_status: Some(RunTurnStatus::Completed),
+        last_outcome: Some(lattice_api::TurnOutcome::Completed {
+            finish_reason: lattice_api::TurnFinishReason::Stop,
+        }),
         usage_total: Some(TurnUsageSummary {
             prompt_tokens: 20,
             completion_tokens: 10,
@@ -506,7 +518,7 @@ fn verbose_epilogue_emits_all_fields_when_populated() {
     assert!(err_str.contains("s1"));
     assert!(err_str.contains("commit"));
     assert!(err_str.contains("c1"));
-    assert!(err_str.contains("status"));
+    assert!(err_str.contains("outcome"));
     assert!(err_str.contains("usage"));
     assert!(err_str.contains("30 tok"));
     assert!(err_str.contains("tools"));
@@ -552,7 +564,9 @@ fn exit_code_from_state_covers_all_da4_rows() {
 
     // Row 1: TurnCommitted{Completed} -> 0
     let mut s = RunRenderState {
-        last_status: Some(RunTurnStatus::Completed),
+        last_outcome: Some(lattice_api::TurnOutcome::Completed {
+            finish_reason: lattice_api::TurnFinishReason::Stop,
+        }),
         last_commit: Some(CommitSignal::Committed),
         ..Default::default()
     };
@@ -562,20 +576,24 @@ fn exit_code_from_state_covers_all_da4_rows() {
     );
 
     // Row 2: TurnCommitted{Error} -> 1
-    s.last_status = Some(RunTurnStatus::Error);
+    s.last_outcome = Some(lattice_api::TurnOutcome::Failed {
+        reason: lattice_session::pending::TurnFailure::ModelRequestFailed,
+    });
     assert_ne!(
         ec_to_dbg(exit_code_from_state(&s)),
         ec_to_dbg(ExitCode::SUCCESS)
     );
 
     // Row 3: TurnCommitted{Cancelled} -> 1
-    s.last_status = Some(RunTurnStatus::Cancelled);
+    s.last_outcome = Some(lattice_api::TurnOutcome::Cancelled {
+        reason: lattice_session::pending::TurnCancellation::UserCancelled,
+    });
     assert_ne!(
         ec_to_dbg(exit_code_from_state(&s)),
         ec_to_dbg(ExitCode::SUCCESS)
     );
 
-    // Row 4: CommitFailed -> 1 (regardless of last_status)
+    // Row 4: CommitFailed -> 1 (regardless of last_outcome)
     s.last_commit = Some(CommitSignal::Failed {
         reason: "parent mismatch".into(),
     });
@@ -685,10 +703,13 @@ fn seq_happy_path_human() {
         },
         TurnEvent::TurnCommitting,
         TurnEvent::TurnCommitted {
+            origin: lattice_api::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
             session_id: "S1".into(),
             commit_id: "C1".into(),
-            status: RunTurnStatus::Completed,
-            disposition: WorkspaceDisposition::NotApplicable,
+            outcome: lattice_api::TurnOutcome::Completed {
+                finish_reason: lattice_api::TurnFinishReason::Stop,
+            },
         },
     ];
     let (out, err, state) = fake_event_loop(events, false);
@@ -739,10 +760,13 @@ fn seq_happy_path_verbose_with_epilogue() {
         },
         TurnEvent::TurnCommitting,
         TurnEvent::TurnCommitted {
+            origin: lattice_api::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
             session_id: "S1".into(),
             commit_id: "C1".into(),
-            status: RunTurnStatus::Completed,
-            disposition: WorkspaceDisposition::NotApplicable,
+            outcome: lattice_api::TurnOutcome::Completed {
+                finish_reason: lattice_api::TurnFinishReason::Stop,
+            },
         },
     ];
     let (out, mut err, state) = fake_event_loop(events, true);
@@ -754,7 +778,7 @@ fn seq_happy_path_verbose_with_epilogue() {
     // Verbose stderr contains session, commit, status, usage labels
     assert!(err_str.contains("session"));
     assert!(err_str.contains("commit"));
-    assert!(err_str.contains("status"));
+    assert!(err_str.contains("outcome"));
     assert!(err_str.contains("usage"));
     assert!(err_str.contains("15 tok"));
     assert!(err_str.contains("prompt: 10"));
@@ -773,10 +797,13 @@ fn seq_trailing_token_newline_emitted() {
         },
         TurnEvent::TurnCommitting,
         TurnEvent::TurnCommitted {
+            origin: lattice_api::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
             session_id: "S".into(),
             commit_id: "C".into(),
-            status: RunTurnStatus::Completed,
-            disposition: WorkspaceDisposition::NotApplicable,
+            outcome: lattice_api::TurnOutcome::Completed {
+                finish_reason: lattice_api::TurnFinishReason::Stop,
+            },
         },
     ];
     let (out, _err, _state) = fake_event_loop(events, false);
@@ -872,10 +899,13 @@ fn seq_tool_failure_renders_summary() {
         },
         TurnEvent::TurnCommitting,
         TurnEvent::TurnCommitted {
+            origin: lattice_api::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
             session_id: "S".into(),
             commit_id: "C".into(),
-            status: RunTurnStatus::Completed,
-            disposition: WorkspaceDisposition::NotApplicable,
+            outcome: lattice_api::TurnOutcome::Completed {
+                finish_reason: lattice_api::TurnFinishReason::Stop,
+            },
         },
     ];
     let (_out, err, state) = fake_event_loop(events, false);
@@ -910,10 +940,13 @@ fn seq_turn_failed_then_commit_drains_stream() {
         },
         TurnEvent::TurnCommitting,
         TurnEvent::TurnCommitted {
+            origin: lattice_api::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
             session_id: "S".into(),
             commit_id: "C".into(),
-            status: RunTurnStatus::Error,
-            disposition: WorkspaceDisposition::NotApplicable,
+            outcome: lattice_api::TurnOutcome::Failed {
+                reason: lattice_session::pending::TurnFailure::ModelRequestFailed,
+            },
         },
     ];
     let (_out, err, state) = fake_event_loop(events, false);
@@ -927,7 +960,12 @@ fn seq_turn_failed_then_commit_drains_stream() {
     assert!(err_str.contains("error")); // lowercase status
     // State accumulated correctly
     assert!(state.last_terminal.is_some());
-    assert_eq!(state.last_status, Some(RunTurnStatus::Error));
+    assert_eq!(
+        state.last_outcome,
+        Some(lattice_api::TurnOutcome::Failed {
+            reason: lattice_session::pending::TurnFailure::ModelRequestFailed
+        })
+    );
     assert!(state.last_commit.is_some());
     // row 2: TurnCommitted{Error} -> exit 1
     assert_ne!(
@@ -1043,10 +1081,13 @@ fn seq_jsonl_round_trips_every_variant() {
         },
         TurnEvent::TurnCommitting,
         TurnEvent::TurnCommitted {
+            origin: lattice_api::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
             session_id: "s1".into(),
             commit_id: "c1".into(),
-            status: RunTurnStatus::Completed,
-            disposition: WorkspaceDisposition::NotApplicable,
+            outcome: lattice_api::TurnOutcome::Completed {
+                finish_reason: lattice_api::TurnFinishReason::Stop,
+            },
         },
         TurnEvent::CommitFailed {
             reason: "parent mismatch".into(),
@@ -1109,10 +1150,13 @@ fn seq_reasoning_hidden_default_in_human() {
             content: "b".into(),
         },
         TurnEvent::TurnCommitted {
+            origin: lattice_api::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
             session_id: "S".into(),
             commit_id: "C".into(),
-            status: RunTurnStatus::Completed,
-            disposition: WorkspaceDisposition::NotApplicable,
+            outcome: lattice_api::TurnOutcome::Completed {
+                finish_reason: lattice_api::TurnFinishReason::Stop,
+            },
         },
     ];
     let (out, err, _state) = fake_event_loop(events, false);
@@ -1147,10 +1191,13 @@ fn seq_reasoning_visible_in_verbose() {
             content: "b".into(),
         },
         TurnEvent::TurnCommitted {
+            origin: lattice_api::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
             session_id: "S".into(),
             commit_id: "C".into(),
-            status: RunTurnStatus::Completed,
-            disposition: WorkspaceDisposition::NotApplicable,
+            outcome: lattice_api::TurnOutcome::Completed {
+                finish_reason: lattice_api::TurnFinishReason::Stop,
+            },
         },
     ];
     let (out, err, _state) = fake_event_loop(events, true);

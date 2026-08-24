@@ -100,6 +100,8 @@ pub enum CompositionError {
 /// and the static resource footprint used to classify count-limit failures.
 pub struct CompiledTool {
     pub descriptor: Arc<ToolDescriptor>,
+    /// Host-pinned digest of the exact descriptor JSON accepted at composition.
+    pub descriptor_identity: String,
     pub component: Component,
     pub params_validator: jsonschema::Validator,
     pub result_validator: jsonschema::Validator,
@@ -226,6 +228,7 @@ impl ClosedCatalog {
                 descriptor.name.clone(),
                 CompiledTool {
                     descriptor,
+                    descriptor_identity: encode_sha256_hex(identity.descriptor_sha256),
                     component,
                     params_validator,
                     result_validator,
@@ -256,6 +259,12 @@ impl ClosedCatalog {
 
     pub fn descriptors(&self) -> impl Iterator<Item = &ToolDescriptor> {
         self.tools.values().map(|tool| tool.descriptor.as_ref())
+    }
+
+    pub fn descriptor_identities(&self) -> impl Iterator<Item = (&ToolDescriptor, &str)> {
+        self.tools
+            .values()
+            .map(|tool| (tool.descriptor.as_ref(), tool.descriptor_identity.as_str()))
     }
 }
 

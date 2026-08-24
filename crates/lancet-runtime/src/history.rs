@@ -77,6 +77,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gix::objs::tree::EntryKind;
+use lancet_protocol::InvocationId;
 
 use lattice_store::{
     Blocking, LockMode, ProjectStoreKey, RefExpectation, StateLayout, StoreError, StoreRepo,
@@ -93,7 +94,7 @@ pub const HISTORY_REPO_DIR: &str = "workspace-history.git";
 pub const HISTORY_STORE_KIND: &str = "workspace-history";
 
 /// Domain schema version of this store's contents.
-pub const HISTORY_STORE_SCHEMA_VERSION: u32 = 1;
+pub const HISTORY_STORE_SCHEMA_VERSION: u32 = 2;
 
 /// Lock file name of the per-project `WorkspaceOperationLock` (ADR 0005 §5).
 pub const WORKSPACE_OPERATION_LOCK: &str = "workspace.lock";
@@ -216,7 +217,7 @@ pub struct MutationRecord {
     /// Turn this mutation belongs to.
     pub turn_id: String,
     /// CEP call id within the turn.
-    pub call_id: u64,
+    pub invocation_id: InvocationId,
     /// Workspace-relative path of the mutated file.
     pub path: String,
     /// Pre-mutation bytes, when the mutation replaced existing content.
@@ -475,7 +476,7 @@ pub struct RewindStep {
     /// Turn the mutation belonged to.
     pub turn_id: String,
     /// CEP call id within the turn, when the trailer parses.
-    pub call_id: Option<u64>,
+    pub invocation_id: InvocationId,
     /// Workspace-relative path the mutation touched.
     pub path: String,
     /// Post-install Local Revision recorded for the mutation.
@@ -770,7 +771,7 @@ fn parse_mutation_step(
     let mut kind = None;
     let mut method = None;
     let mut turn_id = None;
-    let mut call_id = None;
+    let mut invocation_id = None;
     let mut path = None;
     let mut content_hash = None;
     for line in message.lines() {
@@ -782,7 +783,7 @@ fn parse_mutation_step(
             KIND_TRAILER => kind = Some(value.to_string()),
             "lattice-method" => method = Some(value.to_string()),
             "lattice-turn-id" => turn_id = Some(value.to_string()),
-            "lattice-call-id" => call_id = value.parse::<u64>().ok(),
+            "lattice-invocation-id" => invocation_id = value.parse::<InvocationId>().ok(),
             // The path must round-trip byte-exactly: a workspace-relative
             // path can legitimately begin or end with a space (`./ a.txt`
             // normalizes to ` a.txt`), and trimming it here would plan a
@@ -802,7 +803,7 @@ fn parse_mutation_step(
         commit_id: oid.to_string(),
         method: method.unwrap_or_default(),
         turn_id: turn_id.unwrap_or_default(),
-        call_id,
+        invocation_id: invocation_id?,
         path: path?,
         recorded_content_hash: content_hash,
         recorded_at,
@@ -990,12 +991,12 @@ fn mutation_message(record: &MutationRecord, path: &str) -> String {
          {KIND_TRAILER}: {KIND_MUTATION}\n\
          lattice-method: {method}\n\
          lattice-turn-id: {turn}\n\
-         lattice-call-id: {call}\n\
+         lattice-invocation-id: {invocation}\n\
          lattice-path: {path}\n\
          lattice-content-hash: {hash}\n",
         method = record.method,
         turn = record.turn_id,
-        call = record.call_id,
+        invocation = record.invocation_id,
         hash = record.content_hash,
     )
 }
@@ -1006,11 +1007,11 @@ fn baseline_message(record: &MutationRecord, path: &str) -> String {
          {KIND_TRAILER}: {KIND_BASELINE}\n\
          lattice-method: {method}\n\
          lattice-turn-id: {turn}\n\
-         lattice-call-id: {call}\n\
+         lattice-invocation-id: {invocation}\n\
          lattice-path: {path}\n",
         method = record.method,
         turn = record.turn_id,
-        call = record.call_id,
+        invocation = record.invocation_id,
     )
 }
 
@@ -1087,6 +1088,11 @@ fn normalize_history_path(path: &str) -> Result<String, WorkspaceHistoryError> {
 
 #[cfg(test)]
 mod tests {
+    fn test_invocation_id(ordinal: u64) -> InvocationId {
+        InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
+            .expect("invocation id")
+    }
+
     use super::*;
     use gix::refs::transaction::PreviousValue;
     use tempfile::TempDir;
@@ -1120,7 +1126,7 @@ mod tests {
         MutationRecord {
             method: "mutate.create".into(),
             turn_id: "turn-1".into(),
-            call_id: 1,
+            invocation_id: test_invocation_id(1),
             path: path.into(),
             before: None,
             after: after.as_bytes().to_vec(),
@@ -1133,7 +1139,7 @@ mod tests {
         MutationRecord {
             method: "mutate.edit".into(),
             turn_id: "turn-1".into(),
-            call_id: 2,
+            invocation_id: test_invocation_id(2),
             path: path.into(),
             before: Some(before.as_bytes().to_vec()),
             after: after.as_bytes().to_vec(),
@@ -1438,7 +1444,7 @@ mod tests {
         assert_eq!(plan.steps[0].method, "mutate.edit");
         assert_eq!(plan.steps[0].path, "a.txt");
         assert_eq!(plan.steps[0].turn_id, "turn-1");
-        assert_eq!(plan.steps[0].call_id, Some(2));
+        assert_eq!(plan.steps[0].invocation_id, test_invocation_id(2));
         assert!(
             plan.steps[0]
                 .recorded_content_hash

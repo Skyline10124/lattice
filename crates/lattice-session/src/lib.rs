@@ -14,15 +14,14 @@
 
 use std::path::PathBuf;
 
+pub use lancet_protocol::TurnId;
 pub use lattice_store::{Blocking, FlockGuard, LockMode, ProjectStoreKey, StateLayout, StoreError};
 pub mod graph;
 pub use graph::{
-    COMMIT_PAYLOAD_SCHEMA_VERSION_V2, GraphDiff, GraphHead, GraphMessage, GraphRef, GraphSession,
+    COMMIT_PAYLOAD_SCHEMA_VERSION, GraphDiff, GraphHead, GraphMessage, GraphRef, GraphSession,
     GraphToolCall, HeadTranscript, PreparedTurnCommit, ResetResult, SessionGraphStore,
-    SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput, TurnCommitStatus,
-    TurnLifecycleEvidence, TurnLogEntry, TurnSnapshotIdentity, TurnSnapshotRef, TurnUsage,
-    TurnVerificationEvidence, WorkspaceDisposition, canonical_turn_seed, derive_commit_message,
-    prepare_turn_commit,
+    SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput, TurnLogEntry, TurnUsage,
+    canonical_turn_seed, derive_commit_message, prepare_turn_commit,
 };
 
 pub mod git_graph;
@@ -31,7 +30,7 @@ pub use git_graph::{GitSessionGraphStore, PendingTurnTip};
 /// Durable PendingTurn journal contract and pure reconciliation decision
 /// function (ADR 0005 §9/§14, GitHub #144).
 pub mod pending;
-
+pub use pending::{ClosureOrigin, TurnFinishReason, TurnOutcome, WorkspaceHistoryCheckpoint};
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 #[cfg(feature = "test-utils")]
@@ -111,58 +110,35 @@ pub(crate) fn validate_branch_name(name: &str) -> Result<()> {
     }
 }
 
-/// Shared test helpers for constructing `GraphMessage` values.
-///
-/// These are used by internal tests and downstream crate test suites.
-/// Not intended for production use.
+/// Shared typed transcript helpers for tests.
 #[doc(hidden)]
 pub mod test_helpers {
-    use crate::graph::{GraphMessage, GraphToolCall};
+    use lattice_conversation::{
+        BoundToolCall, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
 
-    pub fn user_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "user".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
+    fn text_message(role: MessageRole, text: &str) -> NativeMessage<BoundToolCall> {
+        NativeMessage::new(
+            role,
+            None,
+            vec![MessagePart::semantic_only(MessageSemantic::Text {
+                text: text.to_string(),
+            })],
+        )
     }
 
-    pub fn assistant_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "assistant".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
+    pub fn user_msg(text: &str) -> NativeMessage<BoundToolCall> {
+        text_message(MessageRole::User, text)
     }
 
-    pub fn assistant_msg_with_tool_calls(
-        text: &str,
-        tool_calls: Vec<GraphToolCall>,
-    ) -> GraphMessage {
-        GraphMessage {
-            role: "assistant".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: Some(tool_calls),
-            tool_call_id: None,
-            name: None,
-        }
+    pub fn assistant_msg(text: &str) -> NativeMessage<BoundToolCall> {
+        text_message(MessageRole::Assistant, text)
     }
 
-    pub fn tool_msg(text: &str, tool_call_id: &str, name: &str) -> GraphMessage {
-        GraphMessage {
-            role: "tool".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some(tool_call_id.to_string()),
-            name: Some(name.to_string()),
-        }
+    pub fn text(message: &NativeMessage<BoundToolCall>) -> Option<&str> {
+        message.parts.iter().find_map(|part| match &part.semantic {
+            MessageSemantic::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
     }
 }

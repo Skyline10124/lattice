@@ -35,13 +35,11 @@ impl<'de> Deserialize<'de> for Version {
 }
 
 /// JSON-RPC request identifier.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum Id {
-    Number(i64),
-    String(String),
-    Null,
-}
+///
+/// Product calls use exactly the caller-allocated canonical `InvocationId`.
+/// Numeric IDs, arbitrary strings, and null cannot enter the typed request or
+/// response vocabulary.
+pub type Id = crate::InvocationId;
 
 /// A JSON-RPC 2.0 request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -160,13 +158,16 @@ mod tests {
     #[test]
     fn request_round_trip_with_object_params() {
         let req: Request<serde_json::Value> = Request::new(
-            Id::Number(1),
+            Id::parse("11111111-1111-4111-8111-111111111111").expect("valid InvocationId"),
             "execute".into(),
             json!({"path": "/tmp/test"}),
         );
         let serialized = serde_json::to_string(&req).unwrap();
         let deserialized: Request<serde_json::Value> = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.id, Id::Number(1));
+        assert_eq!(
+            deserialized.id,
+            Id::parse("11111111-1111-4111-8111-111111111111").expect("valid InvocationId")
+        );
         assert_eq!(deserialized.method, "execute");
         assert_eq!(deserialized.params["path"], "/tmp/test");
 
@@ -190,7 +191,7 @@ mod tests {
     fn success_response_round_trip() {
         let resp: Response<serde_json::Value, serde_json::Value> = Response::Success {
             result: json!({"status": "ok"}),
-            id: Id::Number(42),
+            id: Id::parse("11111111-1111-4111-8111-111111111111").expect("valid InvocationId"),
         };
         let serialized = serde_json::to_string(&resp).unwrap();
         let deserialized: Response<serde_json::Value, serde_json::Value> =
@@ -206,7 +207,7 @@ mod tests {
                 message: "validation failed".into(),
                 data: Some(json!({"field": "path"})),
             },
-            id: Id::String("abc".into()),
+            id: Id::parse("11111111-1111-4111-8111-111111111111").expect("valid InvocationId"),
         };
         let serialized = serde_json::to_string(&resp).unwrap();
         let deserialized: Response<serde_json::Value, serde_json::Value> =
@@ -241,7 +242,7 @@ mod tests {
     #[test]
     fn params_are_direct_method_data() {
         let req: Request<serde_json::Value> = Request::new(
-            Id::Number(1),
+            Id::parse("11111111-1111-4111-8111-111111111111").expect("valid InvocationId"),
             "read_file".into(),
             json!({"path": "/etc/hosts"}),
         );

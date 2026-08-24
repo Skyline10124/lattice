@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_api::{RunTurnRequest, RunTurnStatus};
+use lattice_api::RunTurnRequest;
+use lattice_conversation::MessageRole;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{GitSessionGraphStore, SessionGraphStore, StateLayout};
@@ -26,16 +27,21 @@ fn session_layout(sessions_path: &std::path::Path) -> StateLayout {
     StateLayout::in_state_root(&state_root)
 }
 
+fn session_repo(sessions_path: &std::path::Path) -> std::path::PathBuf {
+    session_layout(sessions_path)
+        .lattice_root()
+        .join("sessions.git")
+}
 fn create_session_store(sessions_path: impl AsRef<std::path::Path>) -> lattice_api::SessionApi {
     let sessions_path = sessions_path.as_ref();
     let layout = session_layout(sessions_path);
-    lattice_api::SessionApi::git_create_with_layout(sessions_path, &layout)
+    lattice_api::SessionApi::git_create_with_layout(session_repo(sessions_path), &layout)
         .expect("create session store")
 }
 
 fn open_session_store(sessions_path: &std::path::Path) -> lattice_api::SessionApi {
     let layout = session_layout(sessions_path);
-    lattice_api::SessionApi::git_open_with_layout(sessions_path, &layout)
+    lattice_api::SessionApi::git_open_with_layout(session_repo(sessions_path), &layout)
         .expect("open session store")
 }
 
@@ -199,7 +205,6 @@ fn make_request(
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
-        test_persist_audit: None,
     }
 }
 
@@ -252,7 +257,10 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
         edit_result.error_summary
     );
 
-    assert_eq!(result.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        result.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
 
     let verify_api = open_session_store(&sessions_path);
     let log = verify_api
@@ -293,14 +301,21 @@ async fn usage_resume_session_includes_previous_turn_context() {
     )
     .await
     .expect("turn 1 must succeed");
-    assert_eq!(result1.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        result1.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
     let request2 = make_request(&ws, "Follow up", &session_id, fake_llm);
     let result2 = lattice_api::run_turn(open_session_store(&sessions_path), request2)
         .await
         .expect("turn 2 must succeed");
-    assert_eq!(result2.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        result2.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
 
-    let store = GitSessionGraphStore::open(&sessions_path).expect("open session store");
+    let store =
+        GitSessionGraphStore::open(session_repo(&sessions_path)).expect("open session store");
     let transcript = store
         .head_transcript(&session_id)
         .expect("head_transcript after turn 2");
@@ -308,14 +323,16 @@ async fn usage_resume_session_includes_previous_turn_context() {
         transcript
             .messages
             .iter()
-            .any(|m| m.role == "user" && m.content == "Hello"),
+            .any(|message| message.role == MessageRole::User
+                && lattice_session::test_helpers::text(message) == Some("Hello")),
         "transcript must include first turn user message"
     );
     assert!(
         transcript
             .messages
             .iter()
-            .any(|m| m.role == "assistant" && m.content == "First turn done."),
+            .any(|message| message.role == MessageRole::Assistant
+                && lattice_session::test_helpers::text(message) == Some("First turn done.")),
         "transcript must include first turn assistant message"
     );
 

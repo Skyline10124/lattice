@@ -23,10 +23,7 @@ use lancet_protocol::policy::PolicyHook;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::runtime::Runtime;
-use tokio::sync::RwLock;
 
-use crate::audit::CepAuditContext;
-use crate::server::call_durable_metadata::CallDurableMetadata;
 use crate::server::registry::{Cancellation, EventSink, HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{
     AuthorizedRegionSlot, EffectLedger, EffectSource, ObservedEffect,
@@ -186,22 +183,23 @@ pub fn build_test_context(
     let cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
 
     let ctx = HandlerContext {
-        call_id: 1,
-        events: EventSink::new(event_tx, 1),
+        invocation_id: lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
+            .expect("invocation id"),
+        events: EventSink::new(
+            event_tx,
+            lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
+                .expect("invocation id"),
+        ),
         cancellation: Cancellation::new(cancel_rx),
         cep_context,
-        turn_id: "test-turn".into(),
-        durable_metadata: CallDurableMetadata::default(),
+        session_id: lancet_protocol::SessionId::parse("00000000000000000000000000000001")
+            .expect("session id"),
+        turn_id: lancet_protocol::TurnId::parse("00000000-0000-4000-8000-000000000001")
+            .expect("turn id"),
         effect_ledger: EffectLedger::new(),
         authorized_region: AuthorizedRegionSlot::new(),
         policy_hook: default_hook.clone() as Arc<dyn PolicyHook>,
         default_policy_hook: Some(default_hook),
-        audit_context: Arc::new(RwLock::new(CepAuditContext {
-            turn_id: "test-turn".into(),
-            session_id: "test-session".into(),
-            ..Default::default()
-        })),
-        audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::policy::CepMode::Off,
     };
     (ctx, event_rx, canonical_root)

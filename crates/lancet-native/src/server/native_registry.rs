@@ -124,6 +124,45 @@ mod cep_native_registry_tests {
         config.default_policy_hook = Some(default_hook);
         config
     }
+    fn reserve_call(
+        config: &ServerRunConfig,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> lancet_protocol::InvocationBinding {
+        use lancet_audit::invocation_store::{BindingIdentity, ReservationBinding};
+        use lancet_protocol::{PlanKey, SessionId, TurnId, arguments_digest};
+
+        let session_id = SessionId::parse("11111111111111111111111111111111").unwrap();
+        let turn_id = TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
+        let invocation_id =
+            lancet_protocol::InvocationId::parse("33333333-3333-4333-8333-333333333333").unwrap();
+        let identity = BindingIdentity {
+            session_id,
+            turn_id,
+            model_step_ordinal: 0,
+            part_ordinal: 0,
+            method: method.to_string(),
+            descriptor_identity: "native-test".to_string(),
+            arguments_digest: arguments_digest(params),
+        };
+        config
+            .invocations
+            .reserve_batch(
+                PlanKey {
+                    turn_id,
+                    model_step_ordinal: 0,
+                },
+                &[ReservationBinding {
+                    invocation_id,
+                    identity: identity.clone(),
+                }],
+            )
+            .expect("reserve test invocation");
+        lancet_protocol::InvocationBinding {
+            invocation_id,
+            identity,
+        }
+    }
 
     async fn spawn_ok_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -165,34 +204,18 @@ mod cep_native_registry_tests {
         let config =
             config_with_denied_effect_kind(root, lancet_protocol::ImpactKind::ExternalObservation);
 
+        let params = serde_json::json!({ "url": "https://backend-must-not-run.invalid/" });
+        let binding = reserve_call(&config, Fetch::NAME, &params);
         let (client, server) = CepTransport::pair(8);
-        let audit = Arc::clone(&config.audit);
         let server_task = tokio::spawn(async move {
             server.run_native(registry, config).await.unwrap();
         });
 
         let err = client
-            .call_raw(
-                Fetch::NAME,
-                serde_json::json!({ "url": "https://backend-must-not-run.invalid/" }),
-            )
+            .call_raw(binding, Fetch::NAME, params)
             .await
             .expect_err("denied ExternalObservation must reject fetch.web");
         assert_pre_dispatch_denial(&err);
-
-        let row = audit.row_by_audit_id(1).expect("denied audit row");
-        assert_eq!(row.method, Fetch::NAME);
-        let result = row.result_or_error.as_deref().unwrap_or("");
-        assert!(
-            !result.is_empty() && !result.to_lowercase().contains("success"),
-            "denied call must record a non-success audit result: {result:?}"
-        );
-        let metadata = row.metadata_json.as_deref().unwrap_or("");
-        let metadata: serde_json::Value =
-            serde_json::from_str(metadata).expect("denied row must carry metadata json");
-        assert_eq!(metadata["rejection_stage"], "policy_gate");
-        assert_eq!(metadata["denial_source"], "effect_kind_deny");
-        assert_eq!(metadata["policy_enforced"], true);
 
         drop(client);
         server_task.abort();
@@ -210,6 +233,8 @@ mod cep_native_registry_tests {
         let config =
             config_with_denied_effect_kind(root, lancet_protocol::ImpactKind::WorkspaceMutation);
         let url = spawn_ok_server().await;
+        let params = serde_json::json!({ "url": url });
+        let binding = reserve_call(&config, Fetch::NAME, &params);
 
         let (client, server) = CepTransport::pair(8);
         let server_task = tokio::spawn(async move {
@@ -217,7 +242,7 @@ mod cep_native_registry_tests {
         });
 
         let value = client
-            .call_raw(Fetch::NAME, serde_json::json!({ "url": url }))
+            .call_raw(binding, Fetch::NAME, params)
             .await
             .expect("fetch.web must survive an unrelated WorkspaceMutation effect-kind deny");
         assert_eq!(value["status"], 200);

@@ -19,10 +19,22 @@ fn test_head_transcript_linear() {
     assert_eq!(transcript.session_id, "sess-transcript");
     assert_eq!(transcript.parent_commit_id, Some(commit_ids[1].clone()));
     assert_eq!(transcript.messages.len(), 4);
-    assert_eq!(transcript.messages[0].content, "Turn 0");
-    assert_eq!(transcript.messages[1].content, "Response 0");
-    assert_eq!(transcript.messages[2].content, "Turn 1");
-    assert_eq!(transcript.messages[3].content, "Response 1");
+    assert_eq!(
+        crate::test_helpers::text(&transcript.messages[0]),
+        Some("Turn 0")
+    );
+    assert_eq!(
+        crate::test_helpers::text(&transcript.messages[1]),
+        Some("Response 0")
+    );
+    assert_eq!(
+        crate::test_helpers::text(&transcript.messages[2]),
+        Some("Turn 1")
+    );
+    assert_eq!(
+        crate::test_helpers::text(&transcript.messages[3]),
+        Some("Response 1")
+    );
 }
 
 #[test]

@@ -1,43 +1,65 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! LATTICE↔LANCET turn seam: the CEP client-backed executor adapter, the
-//! `lattice_profile` → LANCET policy translation, and turn-runtime assembly over
-//! [`lancet_api`].
-//!
-//! Runtime composition itself lives in `lancet-api`. This module owns only the
-//! pieces that depend on LATTICE types: the [`ToolCallExecutor`] bridge, the
-//! profile-to-policy translation, and CEP-event → agent-event mapping.
+//! LATTICE↔LANCET turn seam: profile/policy translation, runtime assembly,
+//! and CEP-event projection over [`lancet_api`].
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use lancet_api::{
-    AuditBacking, LancetError, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory,
-    WorkspaceHistoryBacking, workspace_history_backing,
+    LancetError, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory, WorkspaceHistoryBacking,
+    workspace_history_backing,
 };
 use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig};
-use lancet_native::{
-    CepAuditContext, CepAuditStore, CepClient, impact_kind_for_method, impact_kind_label,
-    wire_code_for_error,
-};
-use lancet_protocol::error::{CepErrorData, jsonrpc, method_not_found, parse_error};
-use lancet_protocol::{CepError, Retriability, ToolEvent};
-use lattice_llm::ToolCall;
+use lancet_native::CepClient;
+#[cfg(test)]
+use lancet_native::wire_code_for_error;
+use lancet_protocol::ToolEvent;
+#[cfg(test)]
+use lancet_protocol::error::{CepErrorData, jsonrpc};
+#[cfg(test)]
+use lancet_protocol::{CepError, Retriability};
 #[cfg(test)]
 use lattice_profile::LancetWorkspacePolicySection;
 use lattice_profile::{LancetNetworkSection, LancetObservationSection, LancetSection};
 use serde_json::Value;
-use tokio::sync::RwLock;
 
 use crate::session::ApiError;
-use crate::turn::model_rounds::{
-    AgentTurnEvent, CepErrorPayload, ModelRoundSequencer, ToolDispatch, ToolExecutionError,
-};
+use crate::turn::execute::AgentTurnEvent;
 use crate::turn::types::RunTurnRequest;
+
+/// Structured CEP error metadata preserved for API/CLI observation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CepErrorPayload {
+    pub code: i32,
+    pub message: String,
+    pub data: serde_json::Value,
+    pub retriability: String,
+}
+
+/// Tool execution failure with optional structured CEP metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolExecutionError {
+    pub message: String,
+    pub cep_error: Option<CepErrorPayload>,
+}
+
+impl ToolExecutionError {
+    pub fn simple(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cep_error: None,
+        }
+    }
+}
+
+impl From<String> for ToolExecutionError {
+    fn from(message: String) -> Self {
+        Self::simple(message)
+    }
+}
 
 /// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
 fn map_lancet_err(err: LancetError) -> ApiError {
@@ -54,105 +76,20 @@ fn map_lancet_err(err: LancetError) -> ApiError {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CepRuntimeBuildMetrics {
-    pub adapter_instances: usize,
+    pub client_instances: usize,
     pub transport_pairs: usize,
-}
-
-/// Client-backed adapter that maps LLM-shape tool calls into CEP invocations.
-///
-/// D.5: the available set is driven by runtime definitions (native catalog
-/// methods + Component Tools projected from generated descriptors), not by
-/// a hardcoded catalog membership check. All methods — native and Component
-/// alike — go through `CepClient::call_raw`, so the server-side dispatch
-/// split (D.3) handles routing. The adapter does not hand-write method
-/// matches or schemas; params/result validation is done by the native typed
-/// registry or by generated descriptor validators on the server side.
-pub struct CepExecutorAdapter {
-    client: CepClient,
-    available_names: HashSet<String>,
-    enabled_names: HashSet<String>,
-}
-
-impl CepExecutorAdapter {
-    /// Construct from a CEP client, the runtime-projected tool definitions
-    /// (available set), and the enabled-tool names.
-    ///
-    /// `definitions` is the combined native + Component projection from
-    /// `LancetRuntime::build`; `enabled_names` is the subset the profile
-    /// allows for this turn. A tool call is accepted only if its name is in
-    /// both sets.
-    pub fn new(
-        client: CepClient,
-        definitions: &[lancet_api::ToolDefinition],
-        enabled_names: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        Self {
-            client,
-            available_names: definitions.iter().map(|d| d.name.clone()).collect(),
-            enabled_names: enabled_names.into_iter().map(Into::into).collect(),
-        }
-    }
-
-    fn map_cep_error(cep: CepError) -> ToolExecutionError {
-        ToolExecutionError {
-            message: cep.message.clone(),
-            cep_error: Some(CepErrorPayload {
-                code: adapter_wire_code(&cep),
-                message: cep.message,
-                data: serde_json::to_value(&cep.data).unwrap_or(Value::Null),
-                retriability: retriability_label(&cep.retriability),
-            }),
-        }
-    }
-}
-
-impl CepExecutorAdapter {
-    /// Dispatch one tool call through the CEP client (public test seam; the
-    /// production sequencing adapter reaches the same path through
-    /// [`ToolDispatch`]).
-    pub async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
-        self.dispatch(call).await
-    }
-}
-
-#[async_trait]
-impl ToolDispatch for CepExecutorAdapter {
-    async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
-        self.dispatch(call).await
-    }
-}
-
-impl CepExecutorAdapter {
-    async fn dispatch(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
-        let name = &call.function.name;
-        if !self.available_names.contains(name) || !self.enabled_names.contains(name) {
-            return Err(Self::map_cep_error(method_not_found(name)));
-        }
-        let params: Value = serde_json::from_str(&call.function.arguments).map_err(|e| {
-            Self::map_cep_error(parse_error(format!("invalid tool arguments JSON: {e}")))
-        })?;
-        let value = self
-            .client
-            .call_raw(name.clone(), params)
-            .await
-            .map_err(Self::map_cep_error)?;
-        serde_json::to_string(&value)
-            .map_err(|e| ToolExecutionError::simple(format!("serialize tool result: {e}")))
-    }
 }
 
 /// Resolved production turn dependencies assembled by the API layer.
 ///
-/// The LANCET runtime (server lifecycle, CEP client, audit) comes from
-/// [`lancet_api::LancetRuntime`]; this struct adds the LATTICE-side
-/// [`ModelRoundSequencer`] wired to a [`CepExecutorAdapter`].
+/// The LANCET runtime (server lifecycle and bound CEP client) plus the
+/// one-attempt model driver and descriptor-pinned Tool catalog consumed by
+/// the production TurnCoordinator.
 pub(crate) struct ProductionTurnDeps {
-    pub sequencer: Arc<ModelRoundSequencer>,
-    pub tool_definitions: Vec<lattice_llm::ToolDefinition>,
+    pub model_driver: lattice_agent::ModelStepDriver,
+    pub tool_catalog: Vec<lancet_api::ToolDefinition>,
     pub runtime: lancet_api::ServerLifecycle,
     pub cep_client: CepClient,
-    pub audit: Arc<CepAuditStore>,
-    pub audit_context: Arc<RwLock<CepAuditContext>>,
     /// Private durable history of successfully installed Atomic Local
     /// Mutations (#63). The live turn path reads its current object id once
     /// the agent loop is done and records it on the Turn commit.
@@ -172,8 +109,6 @@ pub(crate) struct ProductionTurnDepsInput<'a> {
     pub enabled_tools: &'a [String],
     pub llm: Arc<dyn lattice_agent::LlmClient>,
     pub lancet: Option<&'a LancetSection>,
-    pub model_id: &'a str,
-    pub runtime_version: &'a str,
 }
 
 /// Build executor-facing CEP policy from profile `[lancet]` and the runtime project root.
@@ -287,10 +222,6 @@ fn apply_network_profile(section: &LancetNetworkSection, network: &mut NetworkPo
     if let Some(value) = section.max_web_response_bytes {
         network.max_web_response_bytes = value;
     }
-}
-
-fn to_llm_tool_definition(tool: lancet_api::ToolDefinition) -> lattice_llm::ToolDefinition {
-    lattice_llm::ToolDefinition::new(tool.name, tool.description, tool.parameters)
 }
 
 pub(crate) fn load_policy_config(
@@ -445,8 +376,6 @@ pub(crate) async fn build_production_turn_deps(
         enabled_tools,
         llm,
         lancet,
-        model_id,
-        runtime_version,
     } = input;
     // Canonicalize the project root up front so the profile policy and the
     // runtime share one canonical root. Falls back to the raw path on failure,
@@ -460,32 +389,15 @@ pub(crate) async fn build_production_turn_deps(
     let cep_mode = lancet
         .map(|c| c.mode.clone())
         .unwrap_or(lancet_protocol::policy::CepMode::Enforce);
-    let in_memory_audit = request.test_llm.is_some() && request.test_persist_audit != Some(false);
-    // The CEP audit database and the private workspace mutation history (#63)
-    // are the two pieces of durable per-project state that live outside the
-    // Local Workspace and the project `.git`. They are resolved together: a
-    // run with an ephemeral audit store writes no durable history either, so
-    // an ephemeral turn never touches the user's state directory.
-    let (audit, workspace_history) = if in_memory_audit {
-        (AuditBacking::InMemory, WorkspaceHistoryBacking::Disabled)
-    } else {
-        let history_backing = match (state_layout, project_store_key) {
-            (Some(layout), Some(key)) => WorkspaceHistoryBacking::for_key(layout, key),
-            (None, None) => workspace_history_backing(Path::new(project_root)).map_err(|err| {
-                ApiError::Internal(format!("resolve workspace history path: {err}"))
-            })?,
-            _ => {
-                return Err(ApiError::Internal(
-                    "Session project-store layout and ProjectStoreKey must be supplied together"
-                        .into(),
-                ));
-            }
-        };
-        (
-            AuditBacking::external_for_project(Path::new(project_root))
-                .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?,
-            history_backing,
-        )
+    let workspace_history = match (state_layout, project_store_key) {
+        (Some(layout), Some(key)) => WorkspaceHistoryBacking::for_key(layout, key),
+        (None, None) => workspace_history_backing(Path::new(project_root))
+            .map_err(|err| ApiError::Internal(format!("resolve workspace history path: {err}")))?,
+        _ => {
+            return Err(ApiError::Internal(
+                "Session project-store layout and ProjectStoreKey must be supplied together".into(),
+            ));
+        }
     };
 
     // #28 B8/D6: the profile is the single admission authority — `[tools].enabled`
@@ -498,48 +410,27 @@ pub(crate) async fn build_production_turn_deps(
         .unwrap_or_default();
 
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
-        project_root: PathBuf::from(project_root),
         enabled_tools: enabled_tools.to_vec(),
         policy,
         capability_admission,
         cep_mode,
-        audit,
+        invocations: workspace_history.clone(),
         workspace_history,
-        model_id: model_id.to_string(),
-        runtime_version: runtime_version.to_string(),
     })
     .map_err(map_lancet_err)?;
 
     let parts = runtime.into_parts();
 
-    let enabled_names: HashSet<String> = parts
-        .tool_definitions
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect();
-    let adapter = Arc::new(CepExecutorAdapter::new(
-        parts.client.clone(),
-        &parts.tool_definitions,
-        enabled_names,
-    ));
-    let tool_definitions = parts
-        .tool_definitions
-        .into_iter()
-        .map(to_llm_tool_definition)
-        .collect();
-    let sequencer = Arc::new(ModelRoundSequencer::new(llm, adapter));
-
+    let tool_catalog = parts.tool_definitions;
     Ok(ProductionTurnDeps {
-        sequencer,
-        tool_definitions,
+        model_driver: lattice_agent::ModelStepDriver::new(llm),
+        tool_catalog,
         runtime: parts.lifecycle,
         cep_client: parts.client,
-        audit: parts.audit,
-        audit_context: parts.audit_context,
         workspace_history: parts.workspace_history,
         #[cfg(test)]
         build_metrics: CepRuntimeBuildMetrics {
-            adapter_instances: 1,
+            client_instances: 1,
             transport_pairs: 1,
         },
     })
@@ -548,36 +439,28 @@ pub(crate) async fn build_production_turn_deps(
 /// Map a CEP transport notification into an internal agent turn event.
 pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<AgentTurnEvent> {
     let params = event.params;
-    let call_id = params.get("call_id").and_then(|v| v.as_u64())?;
+    let invocation_id = params
+        .get("invocation_id")
+        .and_then(|value| value.as_str())
+        .and_then(|raw| lancet_protocol::InvocationId::parse(raw).ok())?;
     match event.method.as_str() {
         "cep.call_started" => Some(AgentTurnEvent::CepCallStarted {
-            call_id,
+            invocation_id,
             method: string_param(&params, "method")?,
-            impact_kind: string_param(&params, "impact_kind").unwrap_or_else(|| "unknown".into()),
-            audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
             semantic_stage: string_param(&params, "semantic_stage")?,
             guard_stage: string_param(&params, "guard_stage")?,
         }),
-        "cep.call_finished" => {
-            let method = string_param(&params, "method")?;
-            Some(AgentTurnEvent::CepCallFinished {
-                call_id,
-                method: method.clone(),
-                impact_kind: impact_kind_for_method(&method)
-                    .as_ref()
-                    .map(impact_kind_label)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
-                ok: params.get("ok").and_then(|v| v.as_bool())?,
-                semantic_stage: string_param(&params, "semantic_stage")?,
-                guard_stage: string_param(&params, "guard_stage")?,
-                error_code: params
-                    .get("error_code")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-            })
-        }
+        "cep.call_finished" => Some(AgentTurnEvent::CepCallFinished {
+            invocation_id,
+            method: string_param(&params, "method")?,
+            ok: params.get("ok").and_then(|value| value.as_bool())?,
+            semantic_stage: string_param(&params, "semantic_stage")?,
+            guard_stage: string_param(&params, "guard_stage")?,
+            error_code: params
+                .get("error_code")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        }),
         _ => None,
     }
 }
@@ -586,7 +469,8 @@ fn string_param(params: &Value, key: &str) -> Option<String> {
     params.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
 
-fn adapter_wire_code(cep: &CepError) -> i32 {
+#[cfg(test)]
+pub(super) fn test_wire_code(cep: &CepError) -> i32 {
     if let CepErrorData::Validation(data) = &cep.data
         && data.reason == "invalid params"
     {
@@ -595,7 +479,8 @@ fn adapter_wire_code(cep: &CepError) -> i32 {
     wire_code_for_error(cep)
 }
 
-fn retriability_label(value: &Retriability) -> String {
+#[cfg(test)]
+pub(super) fn retriability_label(value: &Retriability) -> String {
     match value {
         Retriability::Permanent => "permanent".to_string(),
         Retriability::Transient => "transient".to_string(),
@@ -804,153 +689,32 @@ mod cep_context_profile_policy {
 #[cfg(test)]
 mod turn_wiring {
     use super::*;
-    use lancet_audit::{AuditOutcome, CallAuditMetadata};
-    use lancet_catalog::CepMethod;
-    use lancet_catalog::test_method::TestEcho;
 
-    /// `observe.workspace` as a plain method name. It is a Component Tool since
-    /// #30, so there is no catalog type — and calling it untyped is what a
-    /// production caller does too, since the contract now lives in the Tool's
-    /// source manifest rather than in a Rust type.
-    const OBSERVE_WORKSPACE: &str = "observe.workspace";
+    #[test]
+    fn maps_typed_lifecycle_events_without_numeric_audit_ids() {
+        let invocation = "00000000-0000-4000-8000-000000000001";
+        let event = lancet_protocol::jsonrpc::Notification::new(
+            "cep.call_finished".to_string(),
+            serde_json::json!({
+                "invocation_id": invocation,
+                "method": "fetch.web",
+                "ok": true,
+                "semantic_stage": "cep_native",
+                "guard_stage": "cep_policy_lifecycle",
+                "error_code": null
+            }),
+        );
+        assert!(matches!(
+            map_cep_tool_event(event),
+            Some(AgentTurnEvent::CepCallFinished { invocation_id, method, ok: true, .. })
+                if invocation_id.to_string() == invocation && method == "fetch.web"
+        ));
+    }
+
     use lancet_cep::ToolExposure;
     use lattice_agent::testing::FakeStreamingLlmClient;
-    use lattice_profile::{
-        AgentProfile, AgentSection, LancetSection, LlmSection, LoadedAgentProfile, PromptSection,
-        ToolsSection,
-    };
+    use lattice_profile::LoadedAgentProfile;
     use tempfile::TempDir;
-
-    fn test_profile(enabled: Vec<String>) -> LoadedAgentProfile {
-        LoadedAgentProfile {
-            path: PathBuf::from("/tmp/agent.toml"),
-            package_dir: PathBuf::from("/tmp"),
-            profile: AgentProfile {
-                schema_version: 1,
-                agent: AgentSection {
-                    name: "t".into(),
-                    model: "m".into(),
-                    description: None,
-                },
-                prompt: PromptSection {
-                    system: Some("sys".into()),
-                    system_path: None,
-                },
-                tools: ToolsSection { enabled },
-                llm: LlmSection::default(),
-                lancet: LancetSection::default(),
-            },
-            system_prompt: "sys".into(),
-        }
-    }
-
-    fn init_git_repo(root: &std::path::Path) {
-        let mut files: Vec<(String, String)> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(root) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    let content = std::fs::read_to_string(&path).unwrap_or_default();
-                    files.push((name, content));
-                }
-            }
-        }
-        let refs: Vec<(&str, &str)> = files
-            .iter()
-            .map(|(p, c)| (p.as_str(), c.as_str()))
-            .collect();
-        let _ = lattice_session::test_utils::init_fixture_repo(root, &refs);
-    }
-
-    #[tokio::test]
-    async fn external_audit_preserves_lower() {
-        let _xdg = lancet_audit::ScopedXdgStateHome::new();
-        let project = TempDir::new().unwrap();
-        init_git_repo(project.path());
-        // Durable path: the project's stores exist before the Turn, exactly
-        // as `session new` leaves them (#143).
-        crate::turn::test_support::ensure_project_stores(project.path());
-        let legacy_dir = project.path().join(".lattice");
-        std::fs::create_dir_all(&legacy_dir).unwrap();
-        let legacy_path = legacy_dir.join("cep_audit.db");
-        let legacy_store = CepAuditStore::open(&legacy_path).unwrap();
-        let ctx = CepAuditContext {
-            turn_id: "legacy".into(),
-            session_id: "legacy".into(),
-            ..Default::default()
-        };
-        let start = legacy_store
-            .start_call(
-                &ctx,
-                1,
-                TestEcho::NAME,
-                &CallAuditMetadata::native_policy_enforced(Some("started")),
-            )
-            .unwrap();
-        legacy_store
-            .finalize_call(
-                start,
-                AuditOutcome::Success {
-                    summary: "legacy".into(),
-                },
-                None,
-                None,
-            )
-            .unwrap();
-        let before = std::fs::read(&legacy_path).unwrap();
-
-        let llm: Arc<dyn lattice_agent::LlmClient> =
-            Arc::new(FakeStreamingLlmClient::builder().build());
-        // A production build's available set is the three native catalog methods
-        // plus the embedded Component Tools, so an enabled name must be one of
-        // those — a synthetic fixture name would be refused as unknown.
-        //
-        // `[tools].enabled` is also the stage-1 capability grant, so naming the
-        // Component here is what admits it: since #30 `observe.workspace` is a
-        // Component Tool, and Cell admission is fail-closed.
-        let profile = test_profile(vec![OBSERVE_WORKSPACE.to_string()]);
-        let request = RunTurnRequest {
-            input: "hi".into(),
-            session_id: "s".into(),
-            loaded_profile: Some(profile.clone()),
-            cancel_flag: None,
-            test_llm: Some(llm.clone()),
-            test_project_root: Some(project.path().to_string_lossy().into()),
-            test_persist_audit: Some(false),
-        };
-        let enabled_tools = [OBSERVE_WORKSPACE.to_string()];
-        let deps = build_production_turn_deps(ProductionTurnDepsInput {
-            request: &request,
-            project_root: project.path().to_str().unwrap(),
-            project_store_key: None,
-            state_layout: None,
-            enabled_tools: &enabled_tools,
-            llm,
-            lancet: None,
-            model_id: "m",
-            runtime_version: "v",
-        })
-        .await
-        .expect("direct deps");
-
-        deps.cep_client
-            .call_raw(
-                OBSERVE_WORKSPACE,
-                serde_json::json!({ "mode": "list_directory", "path": "." }),
-            )
-            .await
-            .expect("component observation");
-
-        deps.audit.await_pending().await;
-
-        let external_path = lancet_api::audit_db_path_for_project(project.path()).unwrap();
-        let external = CepAuditStore::open(&external_path).unwrap();
-        assert!(external.row_count().unwrap() >= 2);
-
-        let after = std::fs::read(&legacy_path).unwrap();
-        assert_eq!(before, after);
-    }
 
     // #37: `upper_lifecycle_session_tool_creates_lease` was removed — the
     // Upper lease it asserted on no longer exists. The Direct-Local runtime
@@ -1009,6 +773,10 @@ enabled = ["{tool}"]
         profile: &LoadedAgentProfile,
         project: &TempDir,
     ) -> Result<ProductionTurnDeps, ApiError> {
+        let layout = lattice_session::StateLayout::in_state_root(&project.path().join("state"));
+        let project_key = crate::turn::test_support::test_project_key(project.path());
+        crate::stores::create_project_stores(&layout, project_key)
+            .expect("create fixture project stores");
         let llm: Arc<dyn lattice_agent::LlmClient> =
             Arc::new(FakeStreamingLlmClient::builder().build());
         let request = RunTurnRequest {
@@ -1018,19 +786,16 @@ enabled = ["{tool}"]
             cancel_flag: None,
             test_llm: Some(llm.clone()),
             test_project_root: Some(project.path().to_string_lossy().into()),
-            test_persist_audit: None,
         };
         let enabled_tools = ["session.todo_write".to_string()];
         build_production_turn_deps(ProductionTurnDepsInput {
             request: &request,
             project_root: project.path().to_str().unwrap(),
-            project_store_key: None,
-            state_layout: None,
+            project_store_key: Some(project_key),
+            state_layout: Some(layout),
             enabled_tools: &enabled_tools,
             llm,
             lancet: Some(&profile.profile.lancet),
-            model_id: "m",
-            runtime_version: "v",
         })
         .await
     }

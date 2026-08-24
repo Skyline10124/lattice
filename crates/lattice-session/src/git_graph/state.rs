@@ -60,13 +60,6 @@ pub(crate) fn sessions_prefix() -> &'static str {
     "refs/lattice/sessions/"
 }
 
-/// Candidate reachability pin (unchanged pre-#143 namespace).
-pub(crate) fn candidate_ref_name(session_id: &str, turn_id: &str) -> Result<String> {
-    validate_session_ref_id(session_id)?;
-    validate_turn_ref_id(turn_id)?;
-    Ok(format!("refs/lattice/candidates/{session_id}/{turn_id}"))
-}
-
 pub(crate) fn validate_session_ref_id(session_id: &str) -> Result<()> {
     validate_ref_component(session_id, "session_id")
 }

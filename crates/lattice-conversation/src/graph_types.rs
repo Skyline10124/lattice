@@ -1,13 +1,15 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pure-data transcript types migrated verbatim from `lattice-session`
-//! (GitHub #142): identical field names and serde shapes, so every existing
-//! committed payload stays byte-compatible. `lattice-session` re-exports these
-//! and remains the persistence owner.
+//! Public graph DTOs plus the typed durable branch transcript.
+//!
+//! `GraphMessage`/`GraphToolCall` remain presentation DTOs. Session persistence
+//! uses [`NativeMessage<BoundToolCall>`] so canonical invocation identity, structural
+//! address, provider replay state, and ToolResult closure survive reopen.
 
 use serde::{Deserialize, Serialize};
 
+use crate::{BoundToolCall, NativeMessage};
 /// A single transcript message: user, assistant, or tool role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphMessage {
@@ -31,13 +33,12 @@ pub struct GraphToolCall {
     pub arguments: String,
 }
 
-/// Complete ordered transcript for the current branch HEAD.
+/// Complete ordered typed transcript for the current branch HEAD.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeadTranscript {
     pub session_id: String,
-    #[serde(default)]
     pub parent_commit_id: Option<String>,
-    pub messages: Vec<GraphMessage>,
+    pub messages: Vec<NativeMessage<BoundToolCall>>,
 }
 
 #[cfg(test)]

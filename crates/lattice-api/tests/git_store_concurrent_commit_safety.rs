@@ -14,7 +14,7 @@ use std::thread;
 use lattice_session::test_helpers::{assistant_msg, user_msg};
 use lattice_session::{
     GitSessionGraphStore, PreparedTurnCommit, SessionError, SessionGraphStore, TurnCommitInput,
-    TurnCommitStatus, WorkspaceDisposition, prepare_turn_commit,
+    prepare_turn_commit,
 };
 use tempfile::TempDir;
 
@@ -24,7 +24,9 @@ fn test_store_key() -> lattice_session::ProjectStoreKey {
 
 fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCommitInput {
     TurnCommitInput {
-        workspace_history_oid: None,
+        turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .expect("valid test TurnId"),
+        workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
         session_id: session_id.to_string(),
         parent_ids,
         messages: vec![
@@ -36,12 +38,12 @@ fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCom
         profile_snapshot_json: "{}".to_string(),
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
-        status: TurnCommitStatus::Completed,
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
+        outcome: lattice_session::TurnOutcome::Completed {
+            finish_reason: lattice_session::TurnFinishReason::Stop,
+        },
+        origin: lattice_session::ClosureOrigin::Live,
         commit_message: label.to_string(),
         usage: None,
-        terminal_reason: None,
     }
 }
 

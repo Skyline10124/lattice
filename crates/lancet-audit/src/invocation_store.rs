@@ -38,6 +38,7 @@ use gix::objs::tree::EntryKind;
 use lancet_protocol::{
     AdmissionEvidence, DeniedOperationsRecord, InvocationId, ObservedEffectsRecord, PlanKey,
 };
+pub use lancet_protocol::{BindingIdentity, InvocationBinding as ReservationBinding};
 use lattice_store::{
     ProjectStoreKey, RefExpectation, RefTxnEdit, StateLayout, StoreError, StoreRepo, TreeSpec,
 };
@@ -58,7 +59,7 @@ const REPO_NAME: &str = "invocations.git";
 const STORE_KIND: &str = "invocations";
 
 /// Schema version — bump on any record-shape change.
-const STORE_SCHEMA_VERSION: u32 = 3;
+const STORE_SCHEMA_VERSION: u32 = 4;
 
 /// Version of the per-commit event payload.
 const LEDGER_EVENT_VERSION: u32 = 1;
@@ -107,22 +108,8 @@ pub struct InvocationRecord {
     pub owner: PlanKey,
     /// Current lifecycle state.
     pub state: InvocationState,
-    /// Binding identity: method, descriptor, arguments digest.
+    /// Binding identity: address, method, descriptor, arguments digest.
     pub binding: BindingIdentity,
-}
-
-/// Binding identity recorded at reservation time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BindingIdentity {
-    pub session_id: lancet_protocol::SessionId,
-    pub turn_id: lancet_protocol::TurnId,
-    pub model_step_ordinal: u32,
-    pub part_ordinal: u32,
-    pub method: String,
-    pub descriptor_identity: String,
-    #[serde(with = "hex_digest")]
-    pub arguments_digest: [u8; 32],
 }
 
 /// Lifecycle states (mirrors `InvocationLifecycleFact` but store-internal).
@@ -490,6 +477,27 @@ pub struct InvocationStore {
 }
 
 impl InvocationStore {
+    /// Create the invocation ledger for a canonical Local Workspace.
+    pub fn create_project(project_root: &std::path::Path) -> Result<Self> {
+        let layout = StateLayout::resolve()?;
+        let key = ProjectStoreKey::derive(project_root)?;
+        Self::create(&layout, &key)
+    }
+
+    /// Strictly open the invocation ledger for a canonical Local Workspace.
+    pub fn open_project(project_root: &std::path::Path) -> Result<Self> {
+        let layout = StateLayout::resolve()?;
+        let key = ProjectStoreKey::derive(project_root)?;
+        Self::open(&layout, &key)
+    }
+
+    /// Whether the project-scoped invocation repository exists.
+    pub fn project_store_exists(project_root: &std::path::Path) -> Result<bool> {
+        let layout = StateLayout::resolve()?;
+        let key = ProjectStoreKey::derive(project_root)?;
+        Ok(layout.project_store(&key, REPO_NAME).exists())
+    }
+
     /// Open an existing invocations store (strict — fails if missing).
     pub fn open(layout: &StateLayout, key: &ProjectStoreKey) -> Result<Self> {
         let repo =
@@ -597,11 +605,17 @@ impl InvocationStore {
     }
 
     /// Return lifecycle transitions after an optional reachable exclusive cursor.
-    ///
-    /// The authoritative tip is pinned once. Immutable commits are then read without
-    /// taking the repository write lock. Batch reservations preserve binding order;
-    /// commit order is oldest-to-newest and the cursor commit itself is excluded.
     pub fn tail(&self, after: Option<gix::ObjectId>) -> Result<Vec<LifecycleTransition>> {
+        self.tail_pinned(after).map(|(_, transitions)| transitions)
+    }
+
+    /// Return the pinned authoritative tip and lifecycle transitions after an
+    /// optional reachable exclusive cursor. The tip and transitions come from
+    /// the same topology validation, so operator output cannot mix two reads.
+    pub fn tail_pinned(
+        &self,
+        after: Option<gix::ObjectId>,
+    ) -> Result<(gix::ObjectId, Vec<LifecycleTransition>)> {
         let tip = self.ledger_tip()?;
         let (genesis, groups) = self.validated_transition_groups(tip)?;
         let start = match after {
@@ -614,10 +628,11 @@ impl InvocationStore {
             None => 0,
         };
 
-        Ok(groups[start..]
+        let transitions = groups[start..]
             .iter()
             .flat_map(|(_, group)| group.iter().cloned())
-            .collect())
+            .collect();
+        Ok((tip, transitions))
     }
 
     /// Reserve an entire batch atomically (ADR 0005 §11).
@@ -651,6 +666,50 @@ impl InvocationStore {
             } else {
                 Err(InvocationStoreError::DifferentPlan { plan_key })
             };
+        }
+
+        validate_event_against_snapshot(&state.snapshot, &prepared.event)?;
+        self.append(&mut write_state, &prepared)
+    }
+
+    /// Admit one exact reserved binding and durably publish `DispatchStarted`.
+    ///
+    /// Unlike [`Self::dispatch_started`], this is not idempotent: an already-started
+    /// or terminal invocation is rejected so a duplicate request cannot reach the
+    /// executor twice. Binding comparison and the transition happen under the same
+    /// repository write lock.
+    pub fn admit_reserved(&self, binding: &ReservationBinding) -> Result<()> {
+        let id = binding.invocation_id;
+        let prepared = PreparedEvent::new(
+            LedgerEvent::Transition {
+                invocation_id: id,
+                state: InvocationState::DispatchStarted,
+            },
+            format!("dispatch {id}"),
+        )?;
+
+        let _lock = self.measured_write_lock()?;
+        let mut write_state = self.write_state()?;
+        let state = write_state.as_mut().expect("write state initialized");
+        let record = state
+            .snapshot
+            .invocations
+            .get(&id)
+            .ok_or(InvocationStoreError::NotFound { id })?;
+
+        if record.binding != binding.identity {
+            return Err(InvocationStoreError::Corruption {
+                detail: format!(
+                    "request binding for invocation {id} does not match its reservation"
+                ),
+            });
+        }
+        if !matches!(record.state, InvocationState::Reserved) {
+            return Err(InvocationStoreError::InvalidTransition {
+                id,
+                expected: "Reserved for first executor admission".to_string(),
+                actual: format!("{:?}", record.state),
+            });
         }
 
         validate_event_against_snapshot(&state.snapshot, &prepared.event)?;
@@ -1841,14 +1900,6 @@ fn apply_replayed_event(
     })
 }
 
-/// One binding in a `reserve_batch` call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReservationBinding {
-    pub invocation_id: InvocationId,
-    pub identity: BindingIdentity,
-}
-
 // ---------------------------------------------------------------------------
 // Hex digest serde (same convention as lattice-session)
 // ---------------------------------------------------------------------------
@@ -2529,6 +2580,33 @@ mod tests {
         assert!(matches!(
             snap.invocations[&b.invocation_id].state,
             InvocationState::Terminal { .. }
+        ));
+    }
+
+    #[test]
+    fn exact_admission_rejects_mismatch_and_duplicate_handoff() {
+        let (_tmp, layout, key) = test_env();
+        let store = InvocationStore::create(&layout, &key).unwrap();
+        let reserved = binding(0);
+        store
+            .reserve_batch(plan_key(0), std::slice::from_ref(&reserved))
+            .unwrap();
+
+        let mut mismatched = reserved.clone();
+        mismatched.identity.descriptor_identity = "e".repeat(64);
+        assert!(matches!(
+            store.admit_reserved(&mismatched),
+            Err(InvocationStoreError::Corruption { .. })
+        ));
+        assert!(matches!(
+            store.snapshot().unwrap().1.invocations[&reserved.invocation_id].state,
+            InvocationState::Reserved
+        ));
+
+        store.admit_reserved(&reserved).unwrap();
+        assert!(matches!(
+            store.admit_reserved(&reserved),
+            Err(InvocationStoreError::InvalidTransition { .. })
         ));
     }
 

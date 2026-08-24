@@ -36,7 +36,6 @@ lancet-catalog = { workspace = true }
 lancet-native = { workspace = true }
 async-trait = { workspace = true }
 tempfile = { workspace = true }
-rusqlite = { workspace = true }
 
 [features]
 default = []

@@ -2,23 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Impact matrix: one representative method per `ImpactKind` round-trips
-//! from catalog-derived LLM tool shape through `CepExecutorAdapter` and back.
-
-use std::sync::Arc;
+//! from catalog-derived LLM tool shape through `reserved CepClient fixture` and back.
 
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_native::{
-    CepAuditStore, CepServerNativeExt, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE,
-    ServerRunConfig, register_production_method_registry,
+    CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
+    register_production_method_registry,
 };
 use lancet_protocol::effect_types::ImpactKind;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use lancet_protocol::error::{CepErrorData, ExecutionErrorData, jsonrpc};
-use lancet_protocol::{CepError, CepErrorCode, Retriability};
+use lancet_protocol::{
+    BindingIdentity, CepError, CepErrorCode, InvocationBinding, InvocationId, PlanKey,
+    Retriability, SessionId, TurnId, arguments_digest,
+};
 
-use lattice_api::{CepExecutorAdapter, ToolExecutionError};
+use lancet_audit::invocation_store::InvocationStore;
+use lattice_api::{CepErrorPayload, ToolExecutionError};
 use lattice_llm::{FunctionCall, ToolCall};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -30,22 +35,150 @@ struct ImpactRow {
     assert_result: fn(&Value),
 }
 
-async fn adapter_with_registry(registry: MethodRegistry) -> CepExecutorAdapter {
+struct ReservedClient {
+    client: lancet_api::CepClient,
+    invocations: Arc<InvocationStore>,
+    descriptors: BTreeMap<String, String>,
+    enabled_names: HashSet<String>,
+    next: AtomicU32,
+}
+
+impl ReservedClient {
+    fn new(
+        client: lancet_api::CepClient,
+        invocations: Arc<InvocationStore>,
+        definitions: &[lancet_cep::ToolDefinition],
+        enabled_names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            client,
+            invocations,
+            descriptors: definitions
+                .iter()
+                .map(|definition| {
+                    (
+                        definition.name.clone(),
+                        definition.descriptor_identity.clone(),
+                    )
+                })
+                .collect(),
+            enabled_names: enabled_names.into_iter().map(Into::into).collect(),
+            next: AtomicU32::new(0),
+        }
+    }
+
+    fn binding(&self, call: &ToolCall) -> InvocationBinding {
+        let ordinal = self.next.fetch_add(1, Ordering::Relaxed);
+        let params: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+        let turn_id = TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
+        let binding = InvocationBinding {
+            invocation_id: InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}",))
+                .unwrap(),
+            identity: BindingIdentity {
+                session_id: SessionId::parse("11111111111111111111111111111111").unwrap(),
+                turn_id,
+                model_step_ordinal: ordinal,
+                part_ordinal: 0,
+                method: call.function.name.clone(),
+                descriptor_identity: self
+                    .descriptors
+                    .get(&call.function.name)
+                    .cloned()
+                    .unwrap_or_else(|| "0".repeat(64)),
+                arguments_digest: arguments_digest(&params),
+            },
+        };
+        if self.descriptors.contains_key(&call.function.name)
+            && serde_json::from_str::<Value>(&call.function.arguments).is_ok()
+        {
+            self.invocations
+                .reserve_batch(
+                    PlanKey {
+                        turn_id,
+                        model_step_ordinal: ordinal,
+                    },
+                    std::slice::from_ref(&binding),
+                )
+                .expect("reserve round-trip invocation");
+        }
+        binding
+    }
+
+    async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
+        let name = &call.function.name;
+        if !self.descriptors.contains_key(name) || !self.enabled_names.contains(name) {
+            return Err(map_test_error(lancet_protocol::error::method_not_found(
+                name,
+            )));
+        }
+        let params = serde_json::from_str(&call.function.arguments).map_err(|error| {
+            map_test_error(lancet_protocol::error::parse_error(format!(
+                "invalid tool arguments JSON: {error}"
+            )))
+        })?;
+        let value = self
+            .client
+            .call_raw(self.binding(call), name.clone(), params)
+            .await
+            .map_err(map_test_error)?;
+        serde_json::to_string(&value).map_err(|error| ToolExecutionError {
+            message: format!("serialize tool result: {error}"),
+            cep_error: None,
+        })
+    }
+
+    async fn execute_receipt(
+        &self,
+        call: &ToolCall,
+    ) -> Result<lancet_api::ExecutionReceipt, lancet_protocol::CepError> {
+        let params: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+        self.client
+            .call_raw_with_receipt(self.binding(call), call.function.name.clone(), params)
+            .await
+    }
+}
+
+fn map_test_error(error: CepError) -> ToolExecutionError {
+    let code = if let CepErrorData::Validation(data) = &error.data
+        && data.reason == "invalid params"
+    {
+        jsonrpc::INVALID_PARAMS
+    } else {
+        lancet_native::wire_code_for_error(&error)
+    };
+    let retriability = match error.retriability {
+        Retriability::Permanent => "permanent",
+        Retriability::Transient => "transient",
+        Retriability::RequiresReplan => "requires_replan",
+        Retriability::Unknown => "unknown",
+    };
+    ToolExecutionError {
+        message: error.message.clone(),
+        cep_error: Some(CepErrorPayload {
+            code,
+            message: error.message,
+            data: serde_json::to_value(&error.data).unwrap_or(Value::Null),
+            retriability: retriability.into(),
+        }),
+    }
+}
+
+async fn reserved_client_with_registry(registry: MethodRegistry) -> ReservedClient {
     let (client, server) = CepTransport::pair(8);
+    let config = ServerRunConfig::in_memory_for_tests();
+    let invocations = Arc::clone(&config.invocations);
     let server_task = tokio::spawn(async move {
-        let _ = server
-            .run_native(registry, ServerRunConfig::in_memory_for_tests())
-            .await;
+        let _ = server.run_native(registry, config).await;
     });
     let definitions = lancet_cep::project_tool_definitions(catalog());
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    let adapter = CepExecutorAdapter::new(client, &definitions, enabled);
+    let adapter = ReservedClient::new(client, invocations, &definitions, enabled);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
     adapter
 }
 
-async fn fetch_only_adapter() -> CepExecutorAdapter {
+async fn fetch_only_client() -> ReservedClient {
     let mut registry = MethodRegistry::new();
     registry
         .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
@@ -57,7 +190,7 @@ async fn fetch_only_adapter() -> CepExecutorAdapter {
             })
         })
         .expect("fetch handler");
-    adapter_with_registry(registry).await
+    reserved_client_with_registry(registry).await
 }
 
 /// A method the production runtime can actually serve: a native catalog method,
@@ -115,7 +248,7 @@ async fn cep_round_trip_impact_matrix() {
     let root = dir.path();
     std::fs::write(root.join("hello.txt"), "hello impact matrix\n").expect("seed file");
 
-    let (adapter, _audit) = production_adapter(
+    let adapter = production_client(
         root.to_str().unwrap(),
         &[OBSERVE_WORKSPACE, "mutate.create", TODO_WRITE],
         false,
@@ -148,7 +281,7 @@ async fn cep_round_trip_impact_matrix() {
             method: "mutate.create",
             arguments: serde_json::json!({
                 "path": "created.txt",
-                "content": "written via adapter"
+                "content": "written via reserved client"
             }),
             assert_result: |value| {
                 assert_eq!(value["path"].as_str(), Some("created.txt"));
@@ -180,7 +313,7 @@ async fn cep_round_trip_impact_matrix() {
         (row.assert_result)(&parsed);
     }
 
-    let fetch_adapter = fetch_only_adapter().await;
+    let fetch_adapter = fetch_only_client().await;
     let fetch_call = llm_tool_call(
         Fetch::NAME,
         serde_json::json!({ "url": "https://example.invalid/cep-round-trip" }),
@@ -198,10 +331,10 @@ async fn cep_round_trip_impact_matrix() {
 }
 
 #[tokio::test]
-async fn cep_round_trip_unknown_method_rejected_at_adapter() {
+async fn cep_round_trip_unknown_method_rejected_at_client() {
     let dir = TempDir::new().unwrap();
-    let (adapter, _audit) =
-        production_adapter(dir.path().to_str().unwrap(), &[OBSERVE_WORKSPACE], false).await;
+    let adapter =
+        production_client(dir.path().to_str().unwrap(), &[OBSERVE_WORKSPACE], false).await;
 
     let err = adapter
         .execute(&ToolCall {
@@ -220,8 +353,8 @@ async fn cep_round_trip_unknown_method_rejected_at_adapter() {
 #[tokio::test]
 async fn cep_round_trip_schema_mismatch_returns_invalid_params() {
     let dir = TempDir::new().unwrap();
-    let (adapter, _audit) =
-        production_adapter(dir.path().to_str().unwrap(), &[OBSERVE_WORKSPACE], false).await;
+    let adapter =
+        production_client(dir.path().to_str().unwrap(), &[OBSERVE_WORKSPACE], false).await;
 
     let err = adapter
         .execute(&llm_tool_call(
@@ -231,7 +364,7 @@ async fn cep_round_trip_schema_mismatch_returns_invalid_params() {
         .await
         .expect_err("missing required path must fail");
 
-    // D.5: the adapter no longer does client-side typed deserialization, so it
+    // D.5: the reserved client no longer does client-side typed deserialization, so it
     // does not extract the missing field path. Since #30 the validator is the
     // Component host's `params_validator` running the manifest's JSON Schema
     // before Wasmtime is entered, rather than the native registry's typed
@@ -270,7 +403,7 @@ async fn cep_round_trip_cep_family_error_preserves_payload() {
             }
         })
         .expect("fetch handler");
-    let adapter = adapter_with_registry(registry).await;
+    let adapter = reserved_client_with_registry(registry).await;
 
     let err = adapter
         .execute(&llm_tool_call(
@@ -311,11 +444,7 @@ async fn spawn_echo_server(status_line: &str, body: &str) -> String {
     format!("http://127.0.0.1:{}/", addr.port())
 }
 
-async fn production_adapter(
-    root: &str,
-    enabled: &[&str],
-    allow_localhost: bool,
-) -> (CepExecutorAdapter, Arc<CepAuditStore>) {
+async fn production_client(root: &str, enabled: &[&str], allow_localhost: bool) -> ReservedClient {
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig, WorkspacePolicy};
     use lancet_authority::{CepPolicyConfig, CepTurnContext};
 
@@ -342,9 +471,7 @@ async fn production_adapter(
     };
 
     let (client, server) = CepTransport::pair(16);
-    let audit = Arc::new(CepAuditStore::in_memory().expect("audit"));
     let mut config = ServerRunConfig::in_memory_for_tests();
-    config.audit = Arc::clone(&audit);
     // #29: the production dispatch surface is native handlers *plus* the
     // embedded Component catalog. Composing from `from_embedded()` here is what
     // makes `session.todo_write` reachable at all — a hand-built transport
@@ -362,39 +489,51 @@ async fn production_adapter(
     config.policy_hook = default_hook.clone();
     config.default_policy_hook = Some(default_hook);
 
+    let invocations = Arc::clone(&config.invocations);
     let server_task = tokio::spawn(async move {
         let _ = server.run_native(registry, config).await;
     });
     let enabled_names: Vec<String> = enabled.iter().map(|s| (*s).to_string()).collect();
     // Mirror `LancetRuntime::build`: the LLM-facing set is the native catalog
-    // projection extended with the Component descriptors.
+    // projection extended with the Component descriptors and pinned identities.
     let mut definitions = lancet_cep::project_tool_definitions(catalog());
-    definitions.extend(components.descriptors().map(|descriptor| {
-        lancet_cep::ToolDefinition::new(
-            descriptor.name.clone(),
-            descriptor.description.clone(),
-            descriptor.params_schema.clone(),
-        )
-    }));
-    let adapter = CepExecutorAdapter::new(client, &definitions, enabled_names);
+    definitions.extend(
+        components
+            .descriptor_identities()
+            .map(|(descriptor, identity)| {
+                lancet_cep::ToolDefinition::new(
+                    descriptor.name.clone(),
+                    descriptor.description.clone(),
+                    descriptor.params_schema.clone(),
+                    identity.to_string(),
+                )
+            }),
+    );
+    let adapter = ReservedClient::new(client, invocations, &definitions, enabled_names);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
-    (adapter, audit)
+    adapter
 }
 
 #[tokio::test]
-async fn web_fetch_and_todo_write_audit_without_workspace_envelope() {
+async fn web_fetch_and_todo_write_return_content_free_receipts() {
     let dir = TempDir::new().expect("temp workspace");
-    let root = dir.path();
     let fetch_url = spawn_echo_server("200 OK", "cep-body").await;
-
-    let (adapter, audit) =
-        production_adapter(root.to_str().unwrap(), &[Fetch::NAME, TODO_WRITE], true).await;
+    let adapter = production_client(
+        dir.path().to_str().unwrap(),
+        &[Fetch::NAME, TODO_WRITE],
+        true,
+    )
+    .await;
 
     let fetch_call = llm_tool_call(Fetch::NAME, serde_json::json!({ "url": fetch_url }));
-    let fetch_result = adapter.execute(&fetch_call).await.expect("fetch.web");
-    let fetch_parsed: Value = serde_json::from_str(&fetch_result).expect("fetch json");
-    assert_eq!(fetch_parsed["body"].as_str(), Some("cep-body"));
+    let fetch = adapter
+        .execute_receipt(&fetch_call)
+        .await
+        .expect("fetch receipt");
+    let fetch_value = fetch.result.expect("fetch result");
+    assert_eq!(fetch_value["body"].as_str(), Some("cep-body"));
+    assert_eq!(fetch.evidence.admission.tool, Fetch::NAME);
 
     let todo_call = llm_tool_call(
         TODO_WRITE,
@@ -402,50 +541,23 @@ async fn web_fetch_and_todo_write_audit_without_workspace_envelope() {
             "todos": [{ "content": "secret todo text", "status": "in_progress" }]
         }),
     );
-    adapter.execute(&todo_call).await.expect("todo_write");
-
-    let fetch_row = audit.row_by_audit_id(1).expect("fetch.web audit row");
-    assert_eq!(fetch_row.method, Fetch::NAME);
-    assert_eq!(fetch_row.impact_kind, "external_observation");
-    assert_eq!(fetch_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
-    assert!(fetch_row.policy_enforced);
-    let fetch_metadata = fetch_row.metadata_json.expect("fetch metadata");
-    assert!(fetch_metadata.contains("response_size"));
-    assert!(!fetch_metadata.contains("cep-body"));
-    assert!(!fetch_metadata.contains("secret todo"));
-
-    // The migrated Tool is Cell-governed: it is labeled by the vocabulary that
-    // actually authorized it, and it claims no legacy impact kind.
-    let todo_row = audit.row_by_audit_id(2).expect("todo audit row");
-    assert_eq!(todo_row.method, TODO_WRITE);
-    assert_eq!(todo_row.semantic_stage, "cell_component");
-    assert_eq!(todo_row.guard_stage, "cell_admission");
-    assert!(todo_row.policy_enforced);
+    let todo = adapter
+        .execute_receipt(&todo_call)
+        .await
+        .expect("todo receipt");
+    todo.result.expect("todo result");
+    assert_eq!(todo.evidence.admission.tool, TODO_WRITE);
+    assert_eq!(todo.evidence.effects.effects.len(), 1);
     assert_eq!(
-        todo_row.impact_kind, "unknown",
-        "a Cell-governed row must not claim a legacy impact kind"
-    );
-    let todo_metadata = todo_row.metadata_json.expect("todo metadata");
-    // The row points at its evidence and carries the derived cell key; the todo
-    // text itself never reaches audit.
-    assert!(todo_metadata.contains("evidence_id"));
-    assert!(todo_metadata.contains("alloc:none:session:in"));
-    assert!(!todo_metadata.contains("secret todo"));
-
-    // And the evidence the row points at is really there, with the one effect
-    // the descriptor declares.
-    let evidence_id =
-        serde_json::from_str::<Value>(&todo_metadata).expect("metadata json")["evidence_id"]
-            .as_i64()
-            .expect("evidence pointer");
-    let evidence = audit
-        .call_evidence(lancet_native::EvidenceId(evidence_id))
-        .expect("evidence read")
-        .expect("evidence row exists");
-    assert_eq!(evidence.tool, TODO_WRITE);
-    assert_eq!(evidence.effects.effects.len(), 1);
-    assert_eq!(
-        evidence.effects.effects[0].source,
+        todo.evidence.effects.effects[0].source,
         lancet_protocol::evidence::EffectSource::Result
     );
+
+    for evidence in [&fetch.evidence, &todo.evidence] {
+        let json = serde_json::to_string(evidence).expect("serialize evidence");
+        assert!(!json.contains("cep-body"));
+        assert!(!json.contains("secret todo text"));
+        assert!(!json.contains("audit_id"));
+        assert!(!json.contains("evidence_id"));
+    }
 }

@@ -23,15 +23,15 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use lancet_api::{
-    AuditBacking, HeldWorkspaceOperation, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory,
-    WorkspaceHistoryBacking, WorkspaceRewindError, WorkspaceRewindOutcome, rewind_workspace,
+    HeldWorkspaceOperation, LancetRuntimeConfig, WorkspaceHistory, WorkspaceHistoryBacking,
+    WorkspaceRewindError, WorkspaceRewindOutcome, rewind_workspace,
 };
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
 use lancet_catalog::catalog;
 use lancet_protocol::CepErrorCode;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_api::{RewindOutcome, RunTurnRequest, RunTurnStatus, SessionApi};
+use lattice_api::{RewindOutcome, RunTurnRequest, SessionApi};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{
@@ -39,6 +39,7 @@ use lattice_session::{
     PreparedTurnCommit, ResetResult, SessionError, SessionGraphStore, SessionGraphSummary,
     SessionStatus, StateLayout, TurnCommit, TurnCommitInput, TurnLogEntry,
 };
+use support::ReservedRuntime;
 use tempfile::TempDir;
 
 fn store_key_hex(root: &Path) -> String {
@@ -55,7 +56,7 @@ const COMPONENT_TOOLS: [&str; 3] = ["mutate.create", "mutate.edit", "observe.wor
 /// A runtime rooted at a temp Local Workspace whose private history lives in
 /// a separate temp state directory.
 struct RewindRuntime {
-    runtime: LancetRuntime,
+    runtime: ReservedRuntime,
     root: TempDir,
     state: TempDir,
 }
@@ -106,7 +107,7 @@ fn backing(state_root: &Path, workspace_root: &Path) -> WorkspaceHistoryBacking 
     backing
 }
 
-fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntime {
+fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRuntime {
     let mut policy = PolicyConfig::defaults_for_project_root(root.to_path_buf());
     policy.workspace = WorkspacePolicy {
         denied_write_patterns: Vec::new(),
@@ -115,12 +116,11 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntim
     // Catalog natives plus the mutate/observe Components this harness drives.
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
-    LancetRuntime::build(LancetRuntimeConfig {
-        project_root: root.to_path_buf(),
+    ReservedRuntime::build(LancetRuntimeConfig {
+        invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        audit: AuditBacking::InMemory,
         // mutate.create/edit are Components (#31): Cell admission is fail-closed.
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
             enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
@@ -128,8 +128,6 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntim
             max_boundary: lancet_protocol::cell::Trust::In,
         },
         workspace_history: history.clone(),
-        model_id: "test".into(),
-        runtime_version: "test".into(),
     })
     .expect("runtime with private history builds")
 }
@@ -139,7 +137,7 @@ fn content_hash(bytes: &[u8]) -> String {
 }
 
 async fn create_file(
-    runtime: &LancetRuntime,
+    runtime: &ReservedRuntime,
     path: &str,
     content: &str,
 ) -> Result<(), CepErrorCode> {
@@ -155,7 +153,7 @@ async fn create_file(
 }
 
 async fn replace_text(
-    runtime: &LancetRuntime,
+    runtime: &ReservedRuntime,
     path: &str,
     expected_hash: &str,
     old: &str,
@@ -626,7 +624,6 @@ fn turn_request(
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
         // Durable path: external audit store and a real private history,
         // both under the scoped state root.
-        test_persist_audit: Some(false),
     }
 }
 
@@ -635,12 +632,15 @@ fn test_state_layout() -> StateLayout {
     StateLayout::in_state_root(Path::new(&state_root))
 }
 
-fn open_session_store(sessions: &Path) -> SessionApi {
-    SessionApi::git_open_with_layout(sessions, &test_state_layout()).expect("open session store")
+fn open_session_store(_sessions: &Path) -> SessionApi {
+    let layout = test_state_layout();
+    SessionApi::git_open_with_layout(layout.lattice_root().join("sessions.git"), &layout)
+        .expect("open session store")
 }
 
-fn new_session(sessions: &Path, project_root: &Path) -> String {
-    SessionApi::git_create_with_layout(sessions, &test_state_layout())
+fn new_session(_sessions: &Path, project_root: &Path) -> String {
+    let layout = test_state_layout();
+    SessionApi::git_create_with_layout(layout.lattice_root().join("sessions.git"), &layout)
         .expect("create session store")
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
@@ -686,9 +686,11 @@ async fn turn_creating(
     )
     .await
     .expect("turn runs");
-    assert_eq!(
-        result.status,
-        RunTurnStatus::Completed,
+    assert!(
+        matches!(
+            result.outcome,
+            lattice_session::TurnOutcome::Completed { .. }
+        ),
         "turn creating {path} must complete"
     );
     // A mis-scripted tool call would still complete the Turn, so prove the
@@ -731,9 +733,11 @@ async fn turn_editing(
     )
     .await
     .expect("turn runs");
-    assert_eq!(
-        result.status,
-        RunTurnStatus::Completed,
+    assert!(
+        matches!(
+            result.outcome,
+            lattice_session::TurnOutcome::Completed { .. }
+        ),
         "turn editing {path} must complete"
     );
     let installed =
@@ -789,7 +793,9 @@ async fn rewind_aligns_the_conversation_target_and_the_local_workspace() {
         .get_turn_commit(&session_id, &first)
         .unwrap()
         .unwrap()
-        .workspace_history_oid
+        .workspace_history_checkpoint
+        .as_oid()
+        .map(str::to_owned)
         .expect("turn 1 recorded an identity");
 
     let outcome =
@@ -1129,7 +1135,9 @@ async fn rewind_works_after_reopen_on_a_branch_and_from_a_detached_head() {
         .get_turn_commit(&session_id, &base)
         .unwrap()
         .unwrap()
-        .workspace_history_oid;
+        .workspace_history_checkpoint
+        .as_oid()
+        .map(str::to_owned);
     assert_eq!(history.current().unwrap(), base_oid);
 }
 
@@ -1143,9 +1151,11 @@ struct FailingResetStore {
 }
 
 impl FailingResetStore {
-    fn new(dir: &Path) -> Self {
+    fn new(_dir: &Path) -> Self {
+        let layout = test_state_layout();
         Self {
-            inner: GitSessionGraphStore::open(dir).expect("open session store"),
+            inner: GitSessionGraphStore::open(layout.lattice_root().join("sessions.git"))
+                .expect("open session store"),
             allow_checkout: std::sync::atomic::AtomicBool::new(true),
         }
     }
@@ -1334,7 +1344,9 @@ async fn a_session_ref_failure_is_not_reported_as_success() {
         .get_turn_commit(&session_id, &first)
         .unwrap()
         .unwrap()
-        .workspace_history_oid;
+        .workspace_history_checkpoint
+        .as_oid()
+        .map(str::to_owned);
     assert_eq!(history.current().unwrap(), target_oid);
 
     // The session head did not move, and the failure is durably recorded.
@@ -1367,11 +1379,14 @@ async fn a_turn_without_a_history_identity_is_refused_when_an_ancestor_has_one()
     // A Turn stamped without an identity, exactly as the live path does when
     // reading the identity fails.
     let api = open_session_store(&sessions);
-    let store = GitSessionGraphStore::open(&sessions).expect("open session store");
+    let store = GitSessionGraphStore::open(test_state_layout().lattice_root().join("sessions.git"))
+        .expect("open session store");
     let head = api.status(&session_id).unwrap();
     let anomalous = store
         .commit_turn(TurnCommitInput {
-            workspace_history_oid: None,
+            turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .expect("valid test TurnId"),
+            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
             session_id: head.session_id.clone(),
             parent_ids: vec![first.clone()],
             messages: vec![
@@ -1383,12 +1398,12 @@ async fn a_turn_without_a_history_identity_is_refused_when_an_ancestor_has_one()
             profile_snapshot_json: "{}".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
-            status: lattice_session::TurnCommitStatus::Completed,
-            disposition: lattice_session::WorkspaceDisposition::NotApplicable,
-            lifecycle: None,
+            outcome: lattice_session::TurnOutcome::Completed {
+                finish_reason: lattice_session::TurnFinishReason::Stop,
+            },
+            origin: lattice_session::ClosureOrigin::Live,
             commit_message: "anomalous turn".to_string(),
             usage: None,
-            terminal_reason: None,
         })
         .expect("commit anomalous turn");
 
@@ -1431,7 +1446,7 @@ async fn a_rewind_reverses_in_range_mutations_from_every_session() {
 
     let target = turn_creating(&ws, &sessions, &session_a, "a-owned.md", "a\n").await;
     // Another session mutates the same Local Workspace afterwards.
-    turn_creating(&ws, &sessions, &session_b, "b-owned.md", "b\n").await;
+    let session_b_commit = turn_creating(&ws, &sessions, &session_b, "b-owned.md", "b\n").await;
 
     let api = open_session_store(&sessions);
     let outcome =
@@ -1447,10 +1462,15 @@ async fn a_rewind_reverses_in_range_mutations_from_every_session() {
         "an in-range mutation from another session is reversed"
     );
     assert_eq!(std::fs::read(ws.root.join("a-owned.md")).unwrap(), b"a\n");
-    assert!(
-        success.steps[0].turn_id.contains(&session_b),
-        "the reversed step names the Turn that installed it: {}",
-        success.steps[0].turn_id
+    let session_b_turn_id = api
+        .get_turn_commit(&session_b, &session_b_commit)
+        .expect("read Session B Turn")
+        .expect("Session B Turn exists")
+        .turn_id
+        .to_string();
+    assert_eq!(
+        success.steps[0].turn_id, session_b_turn_id,
+        "the reversed step names the typed Turn that installed it",
     );
 
     // Session B's own conversation target is untouched by A's rewind — only
@@ -1458,7 +1478,7 @@ async fn a_rewind_reverses_in_range_mutations_from_every_session() {
     assert_eq!(api.log(&session_b).unwrap().len(), 1);
     let records = rewind_records(&ws.root, &success.session_id);
     assert_eq!(records.len(), 1);
-    assert!(records[0].steps_json.contains(&session_b));
+    assert!(records[0].steps_json.contains(&session_b_turn_id));
     let _ = scoped;
 }
 
@@ -1485,7 +1505,10 @@ async fn a_full_unwind_is_refused_when_this_session_installed_work_before_the_ta
         .record(&lancet_runtime::MutationRecord {
             method: "mutate.create".into(),
             turn_id: format!("{resolved}:root"),
-            call_id: 1,
+            invocation_id: lancet_protocol::InvocationId::parse(
+                "00000000-0000-4000-8000-000000001490",
+            )
+            .unwrap(),
             path: "early.md".into(),
             before: None,
             after: b"early\n".to_vec(),
@@ -1499,13 +1522,16 @@ async fn a_full_unwind_is_refused_when_this_session_installed_work_before_the_ta
     // Two Turns, both stamped with no identity — the shape a swallowed
     // end-of-turn identity read produces. The second is the rewind target,
     // and every one of its ancestors is identity-less.
-    let store = GitSessionGraphStore::open(&sessions).expect("open session store");
+    let store = GitSessionGraphStore::open(test_state_layout().lattice_root().join("sessions.git"))
+        .expect("open session store");
     let mut parent: Vec<String> = Vec::new();
     let mut committed = Vec::new();
     for label in ["first", "second"] {
         let commit = store
             .commit_turn(TurnCommitInput {
-                workspace_history_oid: None,
+                turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                    .expect("valid test TurnId"),
+                workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
                 session_id: resolved.clone(),
                 parent_ids: parent.clone(),
                 messages: vec![
@@ -1517,12 +1543,12 @@ async fn a_full_unwind_is_refused_when_this_session_installed_work_before_the_ta
                 profile_snapshot_json: "{}".to_string(),
                 model: "sonnet".to_string(),
                 provider: "anthropic".to_string(),
-                status: lattice_session::TurnCommitStatus::Completed,
-                disposition: lattice_session::WorkspaceDisposition::NotApplicable,
-                lifecycle: None,
+                outcome: lattice_session::TurnOutcome::Completed {
+                    finish_reason: lattice_session::TurnFinishReason::Stop,
+                },
+                origin: lattice_session::ClosureOrigin::Live,
                 commit_message: format!("{label} turn"),
                 usage: None,
-                terminal_reason: None,
             })
             .expect("commit turn");
         parent = vec![commit.commit_id.clone()];
@@ -1596,7 +1622,9 @@ async fn a_detached_session_ref_failure_is_not_reported_as_success() {
         .get_turn_commit(&session_id, &first)
         .unwrap()
         .unwrap()
-        .workspace_history_oid;
+        .workspace_history_checkpoint
+        .as_oid()
+        .map(str::to_owned);
     assert_eq!(history.current().unwrap(), target_oid);
 
     let status = open_session_store(&sessions).status(&session_id).unwrap();
@@ -1629,7 +1657,10 @@ async fn a_restore_failure_is_recorded_and_never_reported_as_success() {
         .record(&lancet_runtime::MutationRecord {
             method: "mutate.create".into(),
             turn_id: format!("{resolved}:{target}"),
-            call_id: 1,
+            invocation_id: lancet_protocol::InvocationId::parse(
+                "00000000-0000-4000-8000-000000001636",
+            )
+            .unwrap(),
             path: ".lattice/private.toml".into(),
             before: None,
             after: b"x\n".to_vec(),
@@ -1686,7 +1717,10 @@ async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the
         .record(&lancet_runtime::MutationRecord {
             method: "mutate.create".into(),
             turn_id: format!("{resolved_other}:root"),
-            call_id: 1,
+            invocation_id: lancet_protocol::InvocationId::parse(
+                "00000000-0000-4000-8000-000000001693",
+            )
+            .unwrap(),
             path: "theirs.md".into(),
             before: None,
             after: b"theirs\n".to_vec(),
@@ -1700,11 +1734,14 @@ async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the
 
     // Our session's target Turn records no identity — the shape a swallowed
     // end-of-turn read produces — and has no same-session ancestor to catch.
-    let store = GitSessionGraphStore::open(&sessions).expect("open session store");
+    let store = GitSessionGraphStore::open(test_state_layout().lattice_root().join("sessions.git"))
+        .expect("open session store");
     let resolved = api.status(&session_id).unwrap().session_id;
     let target = store
         .commit_turn(TurnCommitInput {
-            workspace_history_oid: None,
+            turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .expect("valid test TurnId"),
+            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
             session_id: resolved.clone(),
             parent_ids: Vec::new(),
             messages: vec![
@@ -1716,12 +1753,12 @@ async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the
             profile_snapshot_json: "{}".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
-            status: lattice_session::TurnCommitStatus::Completed,
-            disposition: lattice_session::WorkspaceDisposition::NotApplicable,
-            lifecycle: None,
+            outcome: lattice_session::TurnOutcome::Completed {
+                finish_reason: lattice_session::TurnFinishReason::Stop,
+            },
+            origin: lattice_session::ClosureOrigin::Live,
             commit_message: "anomalous turn".to_string(),
             usage: None,
-            terminal_reason: None,
         })
         .expect("commit target turn");
 
@@ -1762,10 +1799,13 @@ async fn a_legitimate_full_unwind_still_succeeds() {
 
     // A first Turn that installs nothing: the history is still empty, so it
     // legitimately records no identity.
-    let store = GitSessionGraphStore::open(&sessions).expect("open session store");
+    let store = GitSessionGraphStore::open(test_state_layout().lattice_root().join("sessions.git"))
+        .expect("open session store");
     let target = store
         .commit_turn(TurnCommitInput {
-            workspace_history_oid: None,
+            turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .expect("valid test TurnId"),
+            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
             session_id: resolved.clone(),
             parent_ids: Vec::new(),
             messages: vec![
@@ -1777,12 +1817,12 @@ async fn a_legitimate_full_unwind_still_succeeds() {
             profile_snapshot_json: "{}".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
-            status: lattice_session::TurnCommitStatus::Completed,
-            disposition: lattice_session::WorkspaceDisposition::NotApplicable,
-            lifecycle: None,
+            outcome: lattice_session::TurnOutcome::Completed {
+                finish_reason: lattice_session::TurnFinishReason::Stop,
+            },
+            origin: lattice_session::ClosureOrigin::Live,
             commit_message: "chat only".to_string(),
             usage: None,
-            terminal_reason: None,
         })
         .expect("commit chat-only turn");
     assert!(
@@ -1827,7 +1867,7 @@ async fn a_legitimate_full_unwind_still_succeeds() {
 #[tokio::test]
 async fn barriers_observe_each_action_to_audit_window_and_the_chain_survives_later_rewinds() {
     let ws = setup_turn_workspace(&COMPONENT_TOOLS);
-    let scoped = ScopedState::new(&ws.root);
+    let _scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
     let sessions = sessions_dir.path().join("sessions");
     let session_id = new_session(&sessions, &ws.root);

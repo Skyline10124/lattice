@@ -16,7 +16,7 @@ use lancet_dispatch::{Cancellation, EventSink};
 use lancet_protocol::canonical::canonical_json;
 use lancet_protocol::cell::{Cell, ChannelKind, ToolDescriptor, parse_cell_ref};
 use lancet_protocol::evidence::{EffectSource, ObservedTarget};
-use lancet_protocol::{CepError, CepErrorCode, Retriability};
+use lancet_protocol::{CepError, CepErrorCode, InvocationId, Retriability};
 use wasmtime::component::Linker;
 use wasmtime::{Engine, Store, UpdateDeadline};
 
@@ -39,7 +39,7 @@ use crate::limits::{AbortReason, ExecutionLimits, RecordingLimits, ResourceFootp
 /// before the runtime is entered; it is the sole authorization authority for
 /// this call's operations and result cell.
 pub struct ComponentCallContext {
-    pub call_id: u64,
+    pub invocation_id: InvocationId,
     pub turn_id: String,
     pub events: EventSink,
     pub cancellation: Cancellation,
@@ -168,6 +168,11 @@ impl ComponentRuntime {
     /// The tool descriptors in the closed catalog.
     pub fn descriptors(&self) -> impl Iterator<Item = &ToolDescriptor> {
         self.core.catalog.descriptors()
+    }
+
+    /// Descriptors paired with their host-pinned descriptor identities.
+    pub fn descriptor_identities(&self) -> impl Iterator<Item = (&ToolDescriptor, &str)> {
+        self.core.catalog.descriptor_identities()
     }
 
     /// The shared descriptor for a Component method. The admission step (D1)
@@ -490,7 +495,7 @@ fn host_refusal(ctx: &ComponentCallContext) -> Option<CepError> {
         .or_else(|| {
             ctx.mutate
                 .as_ref()
-                .and_then(|mutate| mutate.take_refusal(ctx.call_id))
+                .and_then(|mutate| mutate.take_refusal(ctx.invocation_id))
         })
 }
 

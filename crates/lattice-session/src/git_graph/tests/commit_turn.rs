@@ -5,7 +5,6 @@
 
 use super::*;
 use crate::git_graph::{GitSessionGraphStore, state};
-use crate::graph::TurnCommitStatus;
 
 #[test]
 fn test_commit_turn_tree_structure() {
@@ -17,7 +16,7 @@ fn test_commit_turn_tree_structure() {
         .expect("create");
 
     let messages = vec![user_msg("Hello")];
-    let input = commit_input("sess-tree", vec![], messages, TurnCommitStatus::Completed);
+    let input = commit_input("sess-tree", vec![], messages, ());
     let commit = store.commit_turn(input).expect("commit");
     assert_eq!(commit.commit_id.len(), 40);
 
@@ -43,13 +42,13 @@ fn test_commit_turn_tree_structure() {
         "messages.jsonl",
         "agent.json",
         "profile.json",
-        "audit.json",
     ] {
         assert!(
             turn_tree.find_entry(name).is_some(),
             "missing {name} in turn tree"
         );
     }
+    assert!(turn_tree.find_entry("audit.json").is_none());
 }
 
 #[test]
@@ -62,7 +61,7 @@ fn test_commit_turn_linear() {
         .expect("create");
 
     let messages = vec![user_msg("Hello")];
-    let input = commit_input("sess-linear", vec![], messages, TurnCommitStatus::Completed);
+    let input = commit_input("sess-linear", vec![], messages, ());
     let commit = store.commit_turn(input).expect("commit");
     assert_eq!(commit.commit_id.len(), 40);
     assert!(commit.parent_ids.is_empty());
@@ -79,12 +78,7 @@ fn test_commit_turn_with_parent() {
     let first_id = commit_ids[0].clone();
 
     let messages = vec![user_msg("Second")];
-    let input = commit_input(
-        "sess-parent",
-        vec![first_id.clone()],
-        messages,
-        TurnCommitStatus::Completed,
-    );
+    let input = commit_input("sess-parent", vec![first_id.clone()], messages, ());
     let commit = store.commit_turn(input).expect("commit");
     assert_eq!(commit.parent_ids, vec![first_id]);
 }
@@ -106,7 +100,7 @@ fn commit_turn_rejects_detached_head_instead_of_advancing_main() {
             "sess-detached-commit",
             vec![detached.clone()],
             vec![user_msg("must fail")],
-            TurnCommitStatus::Completed,
+            (),
         ))
         .expect_err("a detached HEAD is read-only for Turn commits");
     assert!(

@@ -1,14 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use lattice_llm::{ModelRouter, ModelTarget};
 use std::path::PathBuf;
-use std::time::Duration;
 
-use super::model_rounds::{AgentTurnRequest, AgentTurnStatus, LlmRetryConfig};
-use lattice_llm::{ModelRouter, ModelTarget, ToolDefinition};
-use lattice_session::HeadTranscript;
-
-use super::types::{RunTurnRequest, RunTurnStatus};
+use super::types::RunTurnRequest;
 
 /// Resolve model alias and system prompt from the request.
 pub(crate) fn resolve_model_and_prompt(
@@ -43,55 +39,4 @@ pub(crate) fn resolve_project_root(request: &RunTurnRequest) -> crate::session::
             "cannot resolve current Local Workspace root: {err}"
         ))
     })
-}
-
-/// Build an AgentTurnRequest from the API request, session context, and resolved model/prompt.
-pub(crate) fn build_agent_request(
-    request: &RunTurnRequest,
-    session_id: &str,
-    transcript: HeadTranscript,
-    model: String,
-    system_prompt: Option<String>,
-    provider: Option<String>,
-    tool_definitions: Vec<ToolDefinition>,
-) -> AgentTurnRequest {
-    AgentTurnRequest {
-        session_id: session_id.to_string(),
-        transcript,
-        user_input: request.input.clone(),
-        system_prompt,
-        model,
-        provider,
-        tool_definitions,
-        cancel_flag: request.cancel_flag.clone(),
-        timeout: request
-            .loaded_profile
-            .as_ref()
-            .and_then(|lp| lp.profile.llm.timeout_secs.map(Duration::from_secs)),
-        llm_retry: llm_retry_config_from_request(request),
-    }
-}
-
-fn llm_retry_config_from_request(request: &RunTurnRequest) -> LlmRetryConfig {
-    request
-        .loaded_profile
-        .as_ref()
-        .map(|loaded| {
-            let retry = &loaded.profile.llm.retry;
-            LlmRetryConfig {
-                max_retries: retry.max_retries,
-                initial_delay_ms: retry.initial_delay_ms,
-                max_delay_ms: retry.max_delay_ms,
-            }
-        })
-        .unwrap_or_default()
-}
-
-/// Map agent turn status to API turn status.
-pub(crate) fn map_status(status: &AgentTurnStatus) -> RunTurnStatus {
-    match status {
-        AgentTurnStatus::Completed => RunTurnStatus::Completed,
-        AgentTurnStatus::Error => RunTurnStatus::Error,
-        AgentTurnStatus::Cancelled => RunTurnStatus::Cancelled,
-    }
 }

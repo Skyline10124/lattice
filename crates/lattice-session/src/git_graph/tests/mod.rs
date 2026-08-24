@@ -5,11 +5,9 @@
 
 mod commit_turn;
 mod head_transcript;
-mod no_remote;
 mod pending_crash;
 mod pending_fixtures;
 mod pending_journal;
-mod pointer_ops;
 mod session_meta;
 mod state_and_locks;
 mod strict_open_scaling;
@@ -18,11 +16,10 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use crate::graph::{
-    GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus, WorkspaceDisposition,
-    derive_commit_message,
-};
+use crate::graph::{SessionGraphStore, TurnCommitInput, derive_commit_message};
+use crate::pending::{ClosureOrigin, TurnFinishReason, TurnOutcome, WorkspaceHistoryCheckpoint};
 use crate::test_helpers::{assistant_msg, user_msg};
+use lattice_conversation::{BoundToolCall, NativeMessage};
 /// A fixture directory that lives only as long as the test holds it.
 ///
 /// Earlier revisions built a host-global path
@@ -57,12 +54,13 @@ pub(crate) fn temp_dir(name: &str) -> Fixture {
 pub(crate) fn commit_input(
     session_id: &str,
     parent_ids: Vec<String>,
-    messages: Vec<GraphMessage>,
-    status: TurnCommitStatus,
+    messages: Vec<NativeMessage<BoundToolCall>>,
+    _terminal: (),
 ) -> TurnCommitInput {
     TurnCommitInput {
-        workspace_history_oid: None,
         session_id: session_id.to_string(),
+        turn_id: lancet_protocol::TurnId::parse("11111111-1111-4111-8111-111111111111")
+            .expect("valid test TurnId"),
         parent_ids,
         messages: messages.clone(),
         agent_name: "coder".to_string(),
@@ -70,12 +68,13 @@ pub(crate) fn commit_input(
         profile_snapshot_json: "{}".to_string(),
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
-        status,
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
+        outcome: TurnOutcome::Completed {
+            finish_reason: TurnFinishReason::Stop,
+        },
+        origin: ClosureOrigin::Live,
         commit_message: derive_commit_message(&messages),
         usage: None,
-        terminal_reason: None,
+        workspace_history_checkpoint: WorkspaceHistoryCheckpoint::Empty,
     }
 }
 /// A fixed test project key: session-store tests have no real workspace, so
@@ -100,12 +99,7 @@ pub(crate) fn setup_session_with_commits(
             assistant_msg(&format!("Response {i}")),
         ];
         let parent_ids = commit_ids.last().cloned().into_iter().collect::<Vec<_>>();
-        let input = commit_input(
-            session_id,
-            parent_ids,
-            messages,
-            TurnCommitStatus::Completed,
-        );
+        let input = commit_input(session_id, parent_ids, messages, ());
         let commit = store.commit_turn(input).expect("commit turn");
         commit_ids.push(commit.commit_id);
     }

@@ -33,7 +33,7 @@ fn is_non_completed_terminal(outcome: &lattice_system_harness::SendOutcome) -> b
         TurnEventLine::TurnFailed { .. }
         | TurnEventLine::TurnCancelled { .. }
         | TurnEventLine::CommitFailed { .. } => true,
-        TurnEventLine::TurnCommitted { status, .. } => status != "completed",
+        TurnEventLine::TurnCommitted { outcome, .. } => outcome != "completed",
         _ => false,
     }) || outcome.exit_code == Some(SendExitCode::Failed)
 }

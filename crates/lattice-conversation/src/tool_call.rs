@@ -11,12 +11,11 @@
 //! `BindingPlanned`, `InvocationId`, or transcript content — this validator is
 //! the fail-closed gate that decision is built from.
 
-use lancet_protocol::{InvocationId, ToolCallAddress};
+use lancet_protocol::{InvocationId, ToolCallAddress, arguments_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::digest::arguments_digest;
 use crate::limits::MAX_TOOL_CALL_ARGUMENTS_BYTES;
 use crate::message::{ToolCallState, sealed};
 

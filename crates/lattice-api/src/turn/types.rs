@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 use futures::stream::Stream;
 use lattice_profile::LoadedAgentProfile;
-use lattice_session::WorkspaceDisposition;
+use lattice_session::pending::{ClosureOrigin, TurnOutcome, WorkspaceHistoryCheckpoint};
 
 /// Request to run a turn through either [`run_turn`] or [`stream_turn`].
 ///
@@ -35,9 +35,6 @@ pub struct RunTurnRequest {
     /// Test-only project root for CEP runtime wiring.
     #[serde(skip)]
     pub test_project_root: Option<String>,
-    /// When `Some(false)` with `test_llm`, persist audit to `.lattice/cep_audit.db` instead of in-memory.
-    #[serde(skip)]
-    pub test_persist_audit: Option<bool>,
 }
 
 impl PartialEq for RunTurnRequest {
@@ -70,25 +67,6 @@ impl std::fmt::Display for RunTurnStage {
             RunTurnStage::Tools => write!(f, "tools"),
             RunTurnStage::Commit => write!(f, "commit"),
             RunTurnStage::Render => write!(f, "render"),
-        }
-    }
-}
-
-/// Terminal status of an API turn.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunTurnStatus {
-    Completed,
-    Error,
-    Cancelled,
-}
-
-impl RunTurnStatus {
-    pub fn to_commit_status(&self) -> lattice_session::TurnCommitStatus {
-        match self {
-            Self::Completed => lattice_session::TurnCommitStatus::Completed,
-            Self::Error => lattice_session::TurnCommitStatus::Error,
-            Self::Cancelled => lattice_session::TurnCommitStatus::Cancelled,
         }
     }
 }
@@ -127,8 +105,9 @@ pub struct RunTurnResult {
     pub session_id: String,
     pub commit_id: String,
     pub assistant_output: String,
-    pub status: RunTurnStatus,
-    pub disposition: WorkspaceDisposition,
+    pub outcome: TurnOutcome,
+    pub origin: ClosureOrigin,
+    pub workspace_history_checkpoint: WorkspaceHistoryCheckpoint,
     pub usage: Option<TurnUsageSummary>,
     pub tool_results: Vec<ToolResultSummary>,
     pub stages: Vec<RunTurnStage>,
@@ -204,26 +183,25 @@ pub enum TurnEvent {
     TurnCommitted {
         session_id: String,
         commit_id: String,
-        status: RunTurnStatus,
-        disposition: WorkspaceDisposition,
+        outcome: TurnOutcome,
+        origin: ClosureOrigin,
+        workspace_history_checkpoint: WorkspaceHistoryCheckpoint,
     },
+    /// Terminal/evidence publication exhausted its fixed durability budget.
+    EvidenceDurabilityFailed { attempts: u32 },
     /// Commit persistence failed.
     CommitFailed { reason: String },
     /// A CEP call has started on the embedded server.
     CepCallStarted {
-        call_id: u64,
+        invocation_id: lancet_protocol::InvocationId,
         method: String,
-        impact_kind: String,
-        audit_id: i64,
         semantic_stage: String,
         guard_stage: String,
     },
     /// A CEP call has finished on the embedded server.
     CepCallFinished {
-        call_id: u64,
+        invocation_id: lancet_protocol::InvocationId,
         method: String,
-        impact_kind: String,
-        audit_id: i64,
         ok: bool,
         semantic_stage: String,
         guard_stage: String,

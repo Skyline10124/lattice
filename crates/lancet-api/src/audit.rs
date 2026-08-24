@@ -15,9 +15,9 @@
 
 use lancet_audit::OperatorAuditError;
 pub use lancet_audit::{
-    AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput, AuditReplayRequest,
-    AuditReplayResult, AuditRequest, AuditTailOutput, OperatorAuditRow, OperatorCellEvidence,
-    OperatorReplayCall, OperatorTailRow, OperatorTurnTrace,
+    AUDIT_QUERY_MAX_ROWS, AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput,
+    AuditReplayRequest, AuditReplayResult, AuditRequest, AuditTailOutput, OperatorAuditRow,
+    OperatorTailRow, OperatorTurnTrace,
 };
 
 use crate::error::{LancetError, LancetResult};
@@ -66,105 +66,29 @@ pub async fn replay_audit(request: AuditReplayRequest) -> LancetResult<AuditRepl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_audit::{
-        AuditOutcome, CallAuditMetadata, CepAuditContext, CepAuditStore, ScopedXdgStateHome,
-        audit_db_path_for_project_in,
-    };
-
-    /// `observe.workspace` as a plain method name. It is a Component Tool since
-    /// #30, so there is no catalog type to take `NAME` from; the operator audit
-    /// read path stores and queries method names as strings and never consults
-    /// the catalog.
-    const OBSERVE_WORKSPACE: &str = "observe.workspace";
-    use std::path::Path;
+    use lancet_audit::{ScopedXdgStateHome, invocation_store::InvocationStore};
     use tempfile::TempDir;
 
-    /// Env-isolated project fixture: `XDG_STATE_HOME` redirected to a temp
-    /// state root (via the shared [`ScopedXdgStateHome`] guard) plus a distinct
-    /// temp project directory the audit store is keyed by.
-    struct IsolatedProjectAudit {
-        xdg: ScopedXdgStateHome,
-        project: TempDir,
-    }
-
-    impl IsolatedProjectAudit {
-        fn setup() -> Self {
-            Self {
-                xdg: ScopedXdgStateHome::new(),
-                project: TempDir::new().expect("project tempdir"),
-            }
-        }
-
-        fn state_path(&self) -> &Path {
-            self.xdg.path()
-        }
-
-        fn project_path(&self) -> &Path {
-            self.project.path()
-        }
-    }
-
-    fn seed_audit_db(
-        state: &Path,
-        project: &Path,
-        session_id: &str,
-        count: usize,
-    ) -> CepAuditStore {
-        let db_path =
-            audit_db_path_for_project_in(state, project).expect("resolve external audit path");
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let audit = CepAuditStore::open(&db_path).expect("open audit db");
-        for i in 0..count {
-            let ctx = CepAuditContext {
-                turn_id: "turn-op".into(),
-                session_id: session_id.into(),
-                model_id: "cli-model".into(),
-                runtime_version: "test".into(),
-            };
-            let start = audit
-                .start_call(
-                    &ctx,
-                    i as u64 + 1,
-                    OBSERVE_WORKSPACE,
-                    &CallAuditMetadata::native_policy_enforced(Some("started")),
-                )
-                .unwrap();
-            audit
-                .finalize_call(
-                    start,
-                    AuditOutcome::Success {
-                        summary: format!("read ok {i}"),
-                    },
-                    Some("native_handler"),
-                    Some(r#"{"required_capability":"read_path"}"#),
-                )
-                .unwrap();
-        }
-        audit
-    }
-
-    /// Delegation smoke: the facade reads the store the fixture seeded.
-    /// Behavior coverage lives in `lancet-audit` (`src/operator_tests.rs`).
     #[tokio::test]
-    async fn query_audit_reads_store_without_cep_server() {
-        let iso = IsolatedProjectAudit::setup();
-        let session = "sess-direct-query";
-        seed_audit_db(iso.state_path(), iso.project_path(), session, 2);
-        let mut request = AuditRequest::new(iso.project_path());
-        request.session_id = session.to_string();
-        let output = query_audit(request).await.expect("query");
-        assert_eq!(output.session_id, session);
-        assert_eq!(output.row_count, 2);
-        assert_eq!(output.rows.len(), 2);
+    async fn query_audit_reads_invocation_store_without_cep_server() {
+        let _xdg = ScopedXdgStateHome::new();
+        let project = TempDir::new().unwrap();
+        InvocationStore::create_project(project.path()).unwrap();
+
+        let output = query_audit(AuditRequest::new(project.path()))
+            .await
+            .expect("query");
+        assert_eq!(output.row_count, 0);
+        assert_eq!(output.ledger_oid.len(), 40);
     }
 
-    /// The error mapping must land operator `Config` errors on
-    /// [`LancetError::Config`], not `Internal`.
     #[tokio::test]
     async fn query_audit_errors_when_store_missing() {
-        let iso = IsolatedProjectAudit::setup();
-        let request = AuditRequest::new(iso.project_path());
-        let err = query_audit(request).await.expect_err("missing store");
+        let _xdg = ScopedXdgStateHome::new();
+        let project = TempDir::new().unwrap();
+        let err = query_audit(AuditRequest::new(project.path()))
+            .await
+            .expect_err("missing store");
         assert!(matches!(err, LancetError::Config(_)));
     }
 }

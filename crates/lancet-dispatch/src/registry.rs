@@ -5,7 +5,9 @@
 
 use lancet_catalog::CatalogMethod;
 use lancet_protocol::error::{StateErrorData, invalid_params, method_not_found, to_jsonrpc_error};
-use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, ToolEvent};
+use lancet_protocol::{
+    CepError, CepErrorCode, CepErrorData, InvocationId, Retriability, ToolEvent,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -52,25 +54,25 @@ impl Cancellation {
 #[derive(Clone, Debug)]
 pub struct EventSink {
     tx: mpsc::Sender<ToolEvent>,
-    call_id: u64,
+    invocation_id: InvocationId,
 }
 
 impl EventSink {
-    /// Create an event sink for one call.
-    pub fn new(tx: mpsc::Sender<ToolEvent>, call_id: u64) -> Self {
-        Self { tx, call_id }
+    /// Create an event sink for one invocation.
+    pub fn new(tx: mpsc::Sender<ToolEvent>, invocation_id: InvocationId) -> Self {
+        Self { tx, invocation_id }
     }
 
-    /// Emit a CEP notification tagged with this call's id.
+    /// Emit a CEP notification tagged with this invocation's id.
     ///
     /// Progress events are best-effort: a closed or full client channel does not fail the handler.
     pub async fn emit(&self, method: impl Into<String>, mut params: Value) {
         if let Some(obj) = params.as_object_mut() {
-            obj.entry("call_id".to_string())
-                .or_insert_with(|| Value::from(self.call_id));
+            obj.entry("invocation_id".to_string())
+                .or_insert_with(|| Value::from(self.invocation_id.to_string()));
         } else {
             params = serde_json::json!({
-                "call_id": self.call_id,
+                "invocation_id": self.invocation_id,
                 "payload": params,
             });
         }
@@ -85,11 +87,11 @@ impl EventSink {
     /// call.
     pub fn emit_sync(&self, method: impl Into<String>, mut params: Value) {
         if let Some(obj) = params.as_object_mut() {
-            obj.entry("call_id".to_string())
-                .or_insert_with(|| Value::from(self.call_id));
+            obj.entry("invocation_id".to_string())
+                .or_insert_with(|| Value::from(self.invocation_id.to_string()));
         } else {
             params = serde_json::json!({
-                "call_id": self.call_id,
+                "invocation_id": self.invocation_id,
                 "payload": params,
             });
         }
@@ -238,6 +240,11 @@ mod tests {
         events: EventSink,
     }
 
+    fn invocation_id(ordinal: u64) -> InvocationId {
+        InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
+            .expect("test invocation id")
+    }
+
     fn sample_registry() -> MethodRegistry<TestContext> {
         let mut registry = MethodRegistry::new();
         registry
@@ -258,7 +265,7 @@ mod tests {
         let registry = sample_registry();
         let (event_tx, _event_rx) = mpsc::channel(8);
         let ctx = TestContext {
-            events: EventSink::new(event_tx, 1),
+            events: EventSink::new(event_tx, invocation_id(1)),
         };
 
         let params = serde_json::to_value(TestEchoParams {
@@ -282,7 +289,7 @@ mod tests {
         let registry = sample_registry();
         let (event_tx, _event_rx) = mpsc::channel(8);
         let ctx = TestContext {
-            events: EventSink::new(event_tx, 2),
+            events: EventSink::new(event_tx, invocation_id(2)),
         };
 
         let err = registry
@@ -297,7 +304,7 @@ mod tests {
         let registry = sample_registry();
         let (event_tx, _event_rx) = mpsc::channel(8);
         let ctx = TestContext {
-            events: EventSink::new(event_tx, 3),
+            events: EventSink::new(event_tx, invocation_id(3)),
         };
 
         let err = registry

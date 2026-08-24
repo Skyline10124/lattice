@@ -143,7 +143,7 @@ fn commit_publishes_head_and_state_together() {
 
     let ids = {
         let messages = vec![user_msg("hello"), assistant_msg("hi")];
-        let input = commit_input("sess-txn", vec![], messages, TurnCommitStatus::Completed);
+        let input = commit_input("sess-txn", vec![], messages, ());
         store.commit_turn(input).expect("commit")
     };
 
@@ -259,7 +259,7 @@ fn locked_apis_require_the_exact_exclusive_session_guard() {
             "sess-guard-b",
             vec![ids_b[0].clone()],
             vec![user_msg("wrong guard")],
-            TurnCommitStatus::Completed,
+            (),
         ),
         &guard_a,
     ));
@@ -279,7 +279,7 @@ fn locked_apis_require_the_exact_exclusive_session_guard() {
                 "sess-guard-b",
                 vec![ids_b[0].clone()],
                 vec![user_msg("correct guard")],
-                TurnCommitStatus::Completed,
+                (),
             ),
             &guard_b,
         )
@@ -302,7 +302,7 @@ fn locked_apis_require_the_exact_exclusive_session_guard() {
             "sess-guard-a",
             vec![ids_a[0].clone()],
             vec![user_msg("shared guard")],
-            TurnCommitStatus::Completed,
+            (),
         ),
         &shared,
     ));

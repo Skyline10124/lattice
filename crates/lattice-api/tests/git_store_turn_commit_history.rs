@@ -9,10 +9,7 @@
 //! database (looked up via gix).
 
 use lattice_session::test_helpers::{assistant_msg, user_msg};
-use lattice_session::{
-    GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
-    WorkspaceDisposition,
-};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore, TurnCommitInput};
 use tempfile::TempDir;
 
 fn test_store_key() -> lattice_session::ProjectStoreKey {
@@ -41,7 +38,9 @@ fn git_store_turn_commit_creates_git_history() {
     // Build a minimal first turn (no parents).
     let messages = vec![user_msg("Hello, git history!"), assistant_msg("Hi there.")];
     let input = TurnCommitInput {
-        workspace_history_oid: None,
+        turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .expect("valid test TurnId"),
+        workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
         session_id: session_id.clone(),
         parent_ids: vec![],
         messages,
@@ -50,12 +49,12 @@ fn git_store_turn_commit_creates_git_history() {
         profile_snapshot_json: "{}".to_string(),
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
-        status: TurnCommitStatus::Completed,
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
+        outcome: lattice_session::TurnOutcome::Completed {
+            finish_reason: lattice_session::TurnFinishReason::Stop,
+        },
+        origin: lattice_session::ClosureOrigin::Live,
         commit_message: "Turn 0".to_string(),
         usage: None,
-        terminal_reason: None,
     };
 
     let commit = store.commit_turn(input).expect("commit_turn");

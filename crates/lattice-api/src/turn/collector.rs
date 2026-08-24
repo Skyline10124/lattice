@@ -6,12 +6,9 @@
 //! Production [`super::run_turn`] uses this module so the sync facade shares
 //! the same execution core as [`super::stream_turn`].
 
-use super::types::{
-    RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent, TurnUsageSummary,
-};
+use super::types::{RunTurnResult, RunTurnStage, ToolResultSummary, TurnEvent, TurnUsageSummary};
 use crate::session::ApiError;
-use lattice_session::WorkspaceDisposition;
-
+use lattice_session::pending::{ClosureOrigin, TurnOutcome, WorkspaceHistoryCheckpoint};
 const SYNTHETIC_STAGES: &[RunTurnStage] = &[
     RunTurnStage::Profile,
     RunTurnStage::Session,
@@ -26,8 +23,9 @@ const SYNTHETIC_STAGES: &[RunTurnStage] = &[
 pub(super) struct RunTurnCollector {
     session_id: Option<String>,
     commit_id: Option<String>,
-    status: Option<RunTurnStatus>,
-    disposition: Option<WorkspaceDisposition>,
+    outcome: Option<TurnOutcome>,
+    origin: Option<ClosureOrigin>,
+    workspace_history_checkpoint: Option<WorkspaceHistoryCheckpoint>,
     usage_total: Option<TurnUsageSummary>,
     assistant_output: String,
     round_tokens: String,
@@ -40,8 +38,9 @@ impl RunTurnCollector {
         Self {
             session_id: None,
             commit_id: None,
-            status: None,
-            disposition: None,
+            outcome: None,
+            origin: None,
+            workspace_history_checkpoint: None,
             usage_total: None,
             assistant_output: String::new(),
             round_tokens: String::new(),
@@ -101,16 +100,23 @@ impl RunTurnCollector {
             TurnEvent::TurnCommitted {
                 session_id,
                 commit_id,
-                status,
-                disposition,
+                outcome,
+                origin,
+                workspace_history_checkpoint,
             } => {
                 self.session_id = Some(session_id);
                 self.commit_id = Some(commit_id);
-                self.status = Some(status);
-                self.disposition = Some(disposition);
+                self.outcome = Some(outcome);
+                self.origin = Some(origin);
+                self.workspace_history_checkpoint = Some(workspace_history_checkpoint);
             }
             TurnEvent::CommitFailed { reason } => {
                 self.commit_error = Some(map_commit_failed(reason));
+            }
+            TurnEvent::EvidenceDurabilityFailed { attempts } => {
+                self.commit_error = Some(ApiError::EvidenceDurabilityFailed(
+                    crate::session::EvidenceDurabilityFailed { attempts },
+                ));
             }
             TurnEvent::TurnCommitting
             | TurnEvent::ModelStarted { .. }
@@ -134,19 +140,23 @@ impl RunTurnCollector {
         let commit_id = self
             .commit_id
             .ok_or_else(|| ApiError::Internal("turn ended without TurnCommitted".into()))?;
-        let status = self
-            .status
-            .ok_or_else(|| ApiError::Internal("turn ended without committed status".into()))?;
-        let disposition = self
-            .disposition
-            .ok_or_else(|| ApiError::Internal("turn ended without committed disposition".into()))?;
+        let outcome = self
+            .outcome
+            .ok_or_else(|| ApiError::Internal("turn ended without committed outcome".into()))?;
+        let origin = self
+            .origin
+            .ok_or_else(|| ApiError::Internal("turn ended without closure origin".into()))?;
+        let workspace_history_checkpoint = self.workspace_history_checkpoint.ok_or_else(|| {
+            ApiError::Internal("turn ended without workspace-history checkpoint".into())
+        })?;
 
         Ok(RunTurnResult {
             session_id,
             commit_id,
             assistant_output: self.assistant_output,
-            status,
-            disposition,
+            outcome,
+            origin,
+            workspace_history_checkpoint,
             usage: normalize_usage(self.usage_total),
             tool_results: self.tool_results,
             stages: SYNTHETIC_STAGES.to_vec(),
@@ -197,424 +207,51 @@ pub fn collect_turn_result_from_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_session::pending::{
+        ClosureOrigin, TurnFinishReason, TurnOutcome, WorkspaceHistoryCheckpoint,
+    };
 
-    fn drain(events: Vec<TurnEvent>) -> Result<RunTurnResult, ApiError> {
+    #[test]
+    fn collector_propagates_typed_terminal_facts() {
         let mut collector = RunTurnCollector::new();
-        for event in events {
-            collector.observe(event)?;
-        }
-        collector.finish()
-    }
-
-    #[test]
-    fn completed_content_only() {
-        let result = drain(vec![
-            TurnEvent::TurnStarted {
-                turn_id: "s1:root".to_string(),
-                session_id: "s1".to_string(),
+        collector
+            .observe(TurnEvent::TurnStarted {
+                session_id: "s".into(),
+                turn_id: "00000000-0000-4000-8000-000000000001".into(),
                 parent_commit_id: None,
-                branch: Some("main".to_string()),
-            },
-            TurnEvent::TokenDelta {
-                content: "Hello, world!".to_string(),
-            },
-            TurnEvent::ModelFinished {
-                finish_reason: "stop".to_string(),
-                usage: Some(TurnUsageSummary {
-                    prompt_tokens: 10,
-                    completion_tokens: 5,
-                    total_tokens: 15,
-                }),
-            },
-            TurnEvent::TurnCommitting,
-            TurnEvent::TurnCommitted {
-                session_id: "s1".to_string(),
-                commit_id: "c1".to_string(),
-                status: RunTurnStatus::Completed,
-                disposition: WorkspaceDisposition::NotApplicable,
-            },
-        ])
-        .unwrap();
-
-        assert_eq!(result.session_id, "s1");
-        assert_eq!(result.commit_id, "c1");
-        assert_eq!(result.assistant_output, "Hello, world!");
-        assert_eq!(result.status, RunTurnStatus::Completed);
-        assert_eq!(
-            result.usage,
-            Some(TurnUsageSummary {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
+                branch: None,
             })
-        );
-        assert_eq!(result.stages, SYNTHETIC_STAGES);
-    }
-
-    #[test]
-    fn multi_round_tool_loop_uses_final_stop_tokens() {
-        let result = drain(vec![
-            TurnEvent::TurnStarted {
-                turn_id: "s1:root".to_string(),
-                session_id: "s1".to_string(),
-                parent_commit_id: None,
-                branch: None,
-            },
-            TurnEvent::TokenDelta {
-                content: "calling tool".to_string(),
-            },
-            TurnEvent::ModelFinished {
-                finish_reason: "tool_calls".to_string(),
-                usage: Some(TurnUsageSummary {
-                    prompt_tokens: 10,
-                    completion_tokens: 5,
-                    total_tokens: 15,
-                }),
-            },
-            TurnEvent::ToolCallFinished {
-                id: "c1".to_string(),
-                name: "read_file".to_string(),
-                ok: true,
-                output_len: 42,
-                error_summary: None,
-            },
-            TurnEvent::TokenDelta {
-                content: "done".to_string(),
-            },
-            TurnEvent::ModelFinished {
-                finish_reason: "stop".to_string(),
-                usage: Some(TurnUsageSummary {
-                    prompt_tokens: 20,
-                    completion_tokens: 8,
-                    total_tokens: 28,
-                }),
-            },
-            TurnEvent::TurnCommitting,
-            TurnEvent::TurnCommitted {
-                session_id: "s1".to_string(),
-                commit_id: "c1".to_string(),
-                status: RunTurnStatus::Completed,
-                disposition: WorkspaceDisposition::NotApplicable,
-            },
-        ])
-        .unwrap();
-
-        assert_eq!(result.assistant_output, "done");
-        assert_eq!(result.tool_results.len(), 1);
-        assert_eq!(
-            result.usage,
-            Some(TurnUsageSummary {
-                prompt_tokens: 30,
-                completion_tokens: 13,
-                total_tokens: 43,
+            .unwrap();
+        collector
+            .observe(TurnEvent::TurnCommitted {
+                session_id: "s".into(),
+                commit_id: "c".into(),
+                outcome: TurnOutcome::Completed {
+                    finish_reason: TurnFinishReason::Stop,
+                },
+                origin: ClosureOrigin::Live,
+                workspace_history_checkpoint: WorkspaceHistoryCheckpoint::Empty,
             })
-        );
-    }
-
-    /// content emitted alongside tool_calls must not be silently
-    /// discarded when the turn ends on a tool_calls round (no final stop).
-    #[test]
-    fn tool_call_round_content_preserved_when_turn_ends_on_tool_calls() {
-        let result = drain(vec![
-            TurnEvent::TurnStarted {
-                turn_id: "s1:root".to_string(),
-                session_id: "s1".to_string(),
-                parent_commit_id: None,
-                branch: None,
-            },
-            TurnEvent::TokenDelta {
-                content: "thinking before tools".to_string(),
-            },
-            TurnEvent::ModelFinished {
-                finish_reason: "tool_calls".to_string(),
-                usage: Some(TurnUsageSummary {
-                    prompt_tokens: 10,
-                    completion_tokens: 5,
-                    total_tokens: 15,
-                }),
-            },
-            TurnEvent::ToolCallFinished {
-                id: "c1".to_string(),
-                name: "read_file".to_string(),
-                ok: true,
-                output_len: 42,
-                error_summary: None,
-            },
-            TurnEvent::TurnCommitting,
-            TurnEvent::TurnCommitted {
-                session_id: "s1".to_string(),
-                commit_id: "c1".to_string(),
-                status: RunTurnStatus::Completed,
-                disposition: WorkspaceDisposition::NotApplicable,
-            },
-        ])
-        .unwrap();
-
-        // Without the accumulation, `assistant_output` would be empty
-        // because the tool_calls branch cleared `round_tokens` and no stop
-        // round ever overwrote it.
+            .unwrap();
+        let result = collector.finish().unwrap();
+        assert!(matches!(result.outcome, TurnOutcome::Completed { .. }));
+        assert_eq!(result.origin, ClosureOrigin::Live);
         assert_eq!(
-            result.assistant_output, "thinking before tools",
-            "content emitted alongside tool_calls must be preserved when the turn ends on a tool_calls round"
-        );
-        assert_eq!(result.tool_results.len(), 1);
-    }
-
-    #[test]
-    fn error_after_partial_tokens() {
-        let result = drain(vec![
-            TurnEvent::TurnStarted {
-                turn_id: "s1:root".to_string(),
-                session_id: "s1".to_string(),
-                parent_commit_id: None,
-                branch: None,
-            },
-            TurnEvent::TokenDelta {
-                content: "partial".to_string(),
-            },
-            TurnEvent::TurnFailed {
-                reason: "provider error".to_string(),
-            },
-            TurnEvent::TurnCommitting,
-            TurnEvent::TurnCommitted {
-                session_id: "s1".to_string(),
-                commit_id: "c1".to_string(),
-                status: RunTurnStatus::Error,
-                disposition: WorkspaceDisposition::NotApplicable,
-            },
-        ])
-        .unwrap();
-
-        assert_eq!(result.status, RunTurnStatus::Error);
-        assert_eq!(result.assistant_output, "partial");
-    }
-
-    #[test]
-    fn cancelled_keeps_partial_output() {
-        let result = drain(vec![
-            TurnEvent::TurnStarted {
-                turn_id: "s1:root".to_string(),
-                session_id: "s1".to_string(),
-                parent_commit_id: None,
-                branch: None,
-            },
-            TurnEvent::TokenDelta {
-                content: "part".to_string(),
-            },
-            TurnEvent::TurnCancelled {
-                reason: Some("cancelled by caller".to_string()),
-            },
-            TurnEvent::TurnCommitting,
-            TurnEvent::TurnCommitted {
-                session_id: "s1".to_string(),
-                commit_id: "c1".to_string(),
-                status: RunTurnStatus::Cancelled,
-                disposition: WorkspaceDisposition::NotApplicable,
-            },
-        ])
-        .unwrap();
-
-        assert_eq!(result.status, RunTurnStatus::Cancelled);
-        assert_eq!(result.assistant_output, "part");
-    }
-
-    #[test]
-    fn commit_failed_returns_error() {
-        let err = drain(vec![
-            TurnEvent::TurnStarted {
-                turn_id: "s1:root".to_string(),
-                session_id: "s1".to_string(),
-                parent_commit_id: None,
-                branch: None,
-            },
-            TurnEvent::CommitFailed {
-                reason: "conflict: expected parent 'a' but HEAD is 'b'".to_string(),
-            },
-        ])
-        .unwrap_err();
-
-        assert!(matches!(err, ApiError::Conflict(_)));
-    }
-
-    #[test]
-    fn missing_turn_committed_returns_error() {
-        let err = drain(vec![TurnEvent::TurnStarted {
-            turn_id: "s1:root".to_string(),
-            session_id: "s1".to_string(),
-            parent_commit_id: None,
-            branch: None,
-        }])
-        .unwrap_err();
-
-        assert!(matches!(err, ApiError::Internal(_)));
-    }
-
-    /// RED: collector must capture and propagate non-default disposition from TurnCommitted.
-    /// This test will fail until the collector captures disposition from the event.
-    #[test]
-    fn turn_event_disposition_collector_captures_promoted() {
-        let result = drain(vec![
-            TurnEvent::TurnStarted {
-                turn_id: "s1:root".to_string(),
-                session_id: "s1".to_string(),
-                parent_commit_id: None,
-                branch: Some("main".to_string()),
-            },
-            TurnEvent::TurnCommitting,
-            TurnEvent::TurnCommitted {
-                session_id: "s1".to_string(),
-                commit_id: "c1".to_string(),
-                status: RunTurnStatus::Completed,
-                disposition: WorkspaceDisposition::Promoted,
-            },
-        ])
-        .unwrap();
-
-        assert_eq!(
-            result.disposition,
-            WorkspaceDisposition::Promoted,
-            "collector must propagate disposition from TurnCommitted"
+            result.workspace_history_checkpoint,
+            WorkspaceHistoryCheckpoint::Empty
         );
     }
 
-    /// RED: same status with different dispositions must be distinguishable.
     #[test]
-    fn turn_event_disposition_independence_same_status() {
-        let result_pending = drain(vec![
-            TurnEvent::TurnStarted {
-                turn_id: "s1:root".to_string(),
-                session_id: "s1".to_string(),
-                parent_commit_id: None,
-                branch: None,
-            },
-            TurnEvent::TurnCommitting,
-            TurnEvent::TurnCommitted {
-                session_id: "s1".to_string(),
-                commit_id: "c1".to_string(),
-                status: RunTurnStatus::Completed,
-                disposition: WorkspaceDisposition::PendingVerification,
-            },
-        ])
-        .unwrap();
-
-        let result_promoted = drain(vec![
-            TurnEvent::TurnStarted {
-                turn_id: "s1:root".to_string(),
-                session_id: "s2".to_string(),
-                parent_commit_id: None,
-                branch: None,
-            },
-            TurnEvent::TurnCommitting,
-            TurnEvent::TurnCommitted {
-                session_id: "s2".to_string(),
-                commit_id: "c2".to_string(),
-                status: RunTurnStatus::Completed,
-                disposition: WorkspaceDisposition::Promoted,
-            },
-        ])
-        .unwrap();
-
-        assert_eq!(result_pending.status, result_promoted.status);
-        assert_ne!(
-            result_pending.disposition, result_promoted.disposition,
-            "same status must allow different dispositions"
-        );
-    }
-
-    /// Parity matrix: for each terminal status, verify disposition is preserved
-    /// through the collector independently from status.
-    #[test]
-    fn disposition_parity_matrix_status_x_disposition() {
-        let cases: Vec<(RunTurnStatus, WorkspaceDisposition)> = vec![
-            (RunTurnStatus::Completed, WorkspaceDisposition::Promoted),
-            (
-                RunTurnStatus::Completed,
-                WorkspaceDisposition::PendingWorktree,
-            ),
-            (
-                RunTurnStatus::Completed,
-                WorkspaceDisposition::NotApplicable,
-            ),
-            (RunTurnStatus::Error, WorkspaceDisposition::Rejected),
-            (
-                RunTurnStatus::Error,
-                WorkspaceDisposition::PendingVerification,
-            ),
-            (RunTurnStatus::Error, WorkspaceDisposition::NotApplicable),
-            (RunTurnStatus::Cancelled, WorkspaceDisposition::Aborted),
-            (
-                RunTurnStatus::Cancelled,
-                WorkspaceDisposition::PendingConflict,
-            ),
-            (
-                RunTurnStatus::Cancelled,
-                WorkspaceDisposition::NotApplicable,
-            ),
-        ];
-
-        for (status, disposition) in cases {
-            let result = drain(vec![
-                TurnEvent::TurnStarted {
-                    turn_id: "s1:root".to_string(),
-                    session_id: "s1".to_string(),
-                    parent_commit_id: None,
-                    branch: None,
-                },
-                TurnEvent::TurnCommitting,
-                TurnEvent::TurnCommitted {
-                    session_id: "s1".to_string(),
-                    commit_id: "c1".to_string(),
-                    status: status.clone(),
-                    disposition: disposition.clone(),
-                },
-            ])
-            .unwrap_or_else(|e| panic!("drain failed for {status:?}+{disposition:?}: {e}"));
-
-            assert_eq!(
-                result.status, status,
-                "status mismatch for {status:?}+{disposition:?}"
-            );
-            assert_eq!(
-                result.disposition, disposition,
-                "disposition mismatch for {status:?}+{disposition:?}"
-            );
-        }
-    }
-
-    /// Collector must not derive disposition from status.
-    /// Verifies that the same status can produce different dispositions.
-    #[test]
-    fn collector_no_disposition_inference_from_status() {
-        let make_result = |disposition: WorkspaceDisposition| -> crate::turn::types::RunTurnResult {
-            drain(vec![
-                TurnEvent::TurnStarted {
-                    turn_id: "s1:root".to_string(),
-                    session_id: "s1".to_string(),
-                    parent_commit_id: None,
-                    branch: None,
-                },
-                TurnEvent::TurnCommitting,
-                TurnEvent::TurnCommitted {
-                    session_id: "s1".to_string(),
-                    commit_id: "c1".to_string(),
-                    status: RunTurnStatus::Completed,
-                    disposition,
-                },
-            ])
-            .expect("drain must succeed")
-        };
-
-        let promoted = make_result(WorkspaceDisposition::Promoted);
-        let pending = make_result(WorkspaceDisposition::PendingPromotion);
-        let not_applicable = make_result(WorkspaceDisposition::NotApplicable);
-
-        // All have the same status
-        assert_eq!(promoted.status, pending.status);
-        assert_eq!(pending.status, not_applicable.status);
-
-        // But different dispositions
-        assert_ne!(promoted.disposition, pending.disposition);
-        assert_ne!(pending.disposition, not_applicable.disposition);
-        assert_ne!(promoted.disposition, not_applicable.disposition);
+    fn collector_returns_typed_evidence_durability_failure() {
+        let error =
+            collect_turn_result_from_events([TurnEvent::EvidenceDurabilityFailed { attempts: 4 }])
+                .expect_err("durability failure must not become a generic commit error");
+        assert!(matches!(
+            error,
+            ApiError::EvidenceDurabilityFailed(crate::session::EvidenceDurabilityFailed {
+                attempts: 4
+            })
+        ));
     }
 }

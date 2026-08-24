@@ -21,6 +21,7 @@ use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::validate_path_facts;
 use lancet_authority::under_system_exclusion;
 use lancet_dispatch::Cancellation;
+use lancet_protocol::InvocationId;
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact};
 use lancet_protocol::error::{
     CepError, CepErrorCode, CepErrorData, ExecutionErrorData, GuardErrorData, Retriability,
@@ -46,7 +47,7 @@ const MAX_WRITE_SIZE: usize = crate::workspace::MAX_WORKSPACE_WRITE_BYTES;
 
 /// Call-scoped inputs for one mutate import.
 pub struct MutationCallContext<'a> {
-    pub call_id: u64,
+    pub invocation_id: InvocationId,
     pub turn_id: &'a str,
     /// CEP method name recorded into private history (`mutate.create` / `mutate.edit`).
     pub method: &'a str,
@@ -251,11 +252,20 @@ pub fn mutate_cep_error(method: &str, err: &MutateError) -> CepError {
             }),
             Retriability::Permanent,
         ),
-        MutateError::Io { .. } | MutateError::History { .. } => CepError::new(
+        MutateError::Io { .. } => CepError::new(
             CepErrorCode::ExecutionFailed,
             err.guest_message(),
             CepErrorData::Validation(ValidationErrorData {
                 field: "path".into(),
+                reason: err.audit_label().into(),
+            }),
+            Retriability::Permanent,
+        ),
+        MutateError::History { .. } => CepError::new(
+            CepErrorCode::OutcomeIndeterminate,
+            err.guest_message(),
+            CepErrorData::Validation(ValidationErrorData {
+                field: "workspace_history".into(),
                 reason: err.audit_label().into(),
             }),
             Retriability::Permanent,
@@ -271,7 +281,7 @@ pub struct WorkspaceMutationHost {
     scope_name: String,
     max_write_size: usize,
     mutation_gate: Arc<Mutex<()>>,
-    refusals: Mutex<HashMap<u64, CepError>>,
+    refusals: Mutex<HashMap<InvocationId, CepError>>,
 }
 
 impl WorkspaceMutationHost {
@@ -299,15 +309,15 @@ impl WorkspaceMutationHost {
         self
     }
 
-    pub fn take_refusal(&self, call_id: u64) -> Option<CepError> {
-        self.refusals.lock().unwrap().remove(&call_id)
+    pub fn take_refusal(&self, invocation_id: InvocationId) -> Option<CepError> {
+        self.refusals.lock().unwrap().remove(&invocation_id)
     }
 
-    fn remember_refusal(&self, call_id: u64, method: &str, err: &MutateError) {
+    fn remember_refusal(&self, invocation_id: InvocationId, method: &str, err: &MutateError) {
         self.refusals
             .lock()
             .unwrap()
-            .entry(call_id)
+            .entry(invocation_id)
             .or_insert_with(|| mutate_cep_error(method, err));
     }
 
@@ -380,7 +390,7 @@ impl WorkspaceMutationHost {
                     installation: MutationInstallation::NotAttempted,
                 }),
             );
-            self.remember_refusal(ctx.call_id, ctx.method, &err);
+            self.remember_refusal(ctx.invocation_id, ctx.method, &err);
             return Err(err);
         }
         Ok(())
@@ -396,7 +406,7 @@ impl WorkspaceMutationHost {
             err.audit_label(),
             mutation_evidence_for(err),
         );
-        self.remember_refusal(ctx.call_id, ctx.method, err);
+        self.remember_refusal(ctx.invocation_id, ctx.method, err);
     }
 
     /// Early refusal (parse / guard / size) before install: still records
@@ -653,13 +663,13 @@ impl WorkspaceMutationHost {
         let history = match history {
             Ok(history) => history,
             Err(err) => {
-                self.remember_refusal(ctx.call_id, ctx.method, &err);
+                self.remember_refusal(ctx.invocation_id, ctx.method, &err);
                 return Err(err);
             }
         };
 
         if let Some(err) = post_install_error {
-            self.remember_refusal(ctx.call_id, ctx.method, &err);
+            self.remember_refusal(ctx.invocation_id, ctx.method, &err);
             return Err(err);
         }
 
@@ -776,13 +786,13 @@ impl WorkspaceMutationHost {
         let history = match history {
             Ok(history) => history,
             Err(err) => {
-                self.remember_refusal(ctx.call_id, ctx.method, &err);
+                self.remember_refusal(ctx.invocation_id, ctx.method, &err);
                 return Err(err);
             }
         };
 
         if let Some(err) = post_install_error {
-            self.remember_refusal(ctx.call_id, ctx.method, &err);
+            self.remember_refusal(ctx.invocation_id, ctx.method, &err);
             return Err(err);
         }
 
@@ -808,7 +818,7 @@ impl WorkspaceMutationHost {
         let record = MutationRecord {
             method: ctx.method.to_string(),
             turn_id: ctx.turn_id.to_string(),
-            call_id: ctx.call_id,
+            invocation_id: ctx.invocation_id,
             path: path.to_string(),
             before: before.map(<[u8]>::to_vec),
             after: after.to_vec(),
@@ -1014,7 +1024,7 @@ impl StoreState {
         Ok((
             host,
             MutationCallContext {
-                call_id: self.call.call_id,
+                invocation_id: self.call.invocation_id,
                 turn_id: &self.call.turn_id,
                 method,
                 admitted: &self.call.admitted,
@@ -1045,6 +1055,11 @@ fn wit_mutate_error(err: MutateError) -> WitMutateError {
 
 #[cfg(test)]
 mod tests {
+    fn test_invocation_id(ordinal: u64) -> InvocationId {
+        InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
+            .expect("invocation id")
+    }
+
     use super::*;
 
     use std::collections::BTreeSet;
@@ -1155,7 +1170,7 @@ mod tests {
     ) -> MutationCallContext<'a> {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         MutationCallContext {
-            call_id: 7,
+            invocation_id: test_invocation_id(7),
             turn_id: "turn-1",
             method,
             admitted: tool,
@@ -1171,7 +1186,7 @@ mod tests {
     ) -> MutationCallContext<'a> {
         let (_cancel_tx, cancel_rx) = watch::channel(true);
         MutationCallContext {
-            call_id: 7,
+            invocation_id: test_invocation_id(7),
             turn_id: "turn-1",
             method,
             admitted: tool,
@@ -1435,7 +1450,9 @@ mod tests {
             .expect_err("escape");
         assert!(matches!(err, MutateError::PathRejected { .. }));
         assert_eq!(
-            host.take_refusal(7).expect("structured refusal").code,
+            host.take_refusal(test_invocation_id(7))
+                .expect("structured refusal")
+                .code,
             CepErrorCode::PathContainment
         );
     }
@@ -1454,7 +1471,9 @@ mod tests {
         assert!(matches!(err, MutateError::Denied { .. }));
         assert!(!dir.path().join("locked.txt").exists());
         assert_eq!(
-            host.take_refusal(7).expect("structured refusal").code,
+            host.take_refusal(test_invocation_id(7))
+                .expect("structured refusal")
+                .code,
             CepErrorCode::EffectViolation
         );
     }
@@ -1480,7 +1499,9 @@ mod tests {
         ));
         assert!(!dir.path().join("big.txt").exists());
         assert_eq!(
-            host.take_refusal(7).expect("structured refusal").code,
+            host.take_refusal(test_invocation_id(7))
+                .expect("structured refusal")
+                .code,
             CepErrorCode::ToolResourceExhausted
         );
     }
@@ -1519,7 +1540,9 @@ mod tests {
         assert_eq!(err, MutateError::Cancelled);
         assert!(!dir.path().join("cancelled.txt").exists());
         assert_eq!(
-            host.take_refusal(7).expect("structured refusal").code,
+            host.take_refusal(test_invocation_id(7))
+                .expect("structured refusal")
+                .code,
             CepErrorCode::CallCancelled
         );
     }
@@ -1540,7 +1563,9 @@ mod tests {
             "v1\n"
         );
         assert_eq!(
-            host.take_refusal(7).expect("structured refusal").code,
+            host.take_refusal(test_invocation_id(7))
+                .expect("structured refusal")
+                .code,
             CepErrorCode::CallCancelled
         );
     }
@@ -1606,8 +1631,10 @@ mod tests {
             "an installed write is not a denial"
         );
         assert_eq!(
-            host.take_refusal(7).expect("structured failure").code,
-            CepErrorCode::ExecutionFailed
+            host.take_refusal(test_invocation_id(7))
+                .expect("structured failure")
+                .code,
+            CepErrorCode::OutcomeIndeterminate
         );
     }
 
@@ -1708,7 +1735,9 @@ mod tests {
             .expect_err("stale read");
         assert!(matches!(err, MutateError::StaleRevision { .. }));
         assert_eq!(
-            host.take_refusal(7).expect("structured refusal").code,
+            host.take_refusal(test_invocation_id(7))
+                .expect("structured refusal")
+                .code,
             CepErrorCode::ReplanRequired
         );
         assert_eq!(
@@ -1733,7 +1762,9 @@ mod tests {
         );
         assert!(matches!(err, MutateError::SemanticReplan { .. }));
         assert_eq!(
-            host.take_refusal(7).expect("structured refusal").code,
+            host.take_refusal(test_invocation_id(7))
+                .expect("structured refusal")
+                .code,
             CepErrorCode::ReplanRequired
         );
     }
@@ -1753,7 +1784,9 @@ mod tests {
             "semantic edit produced no changes",
         );
         assert!(matches!(err, MutateError::Validation { .. }));
-        let refusal = host.take_refusal(7).expect("structured refusal");
+        let refusal = host
+            .take_refusal(test_invocation_id(7))
+            .expect("structured refusal");
         assert_eq!(refusal.code, CepErrorCode::SchemaMismatch);
         let CepErrorData::Validation(data) = refusal.data else {
             panic!("validation details");
@@ -1768,7 +1801,7 @@ mod tests {
         let tool = admitted();
         let first = ctx(&tool, &evidence, "mutate.edit");
         let mut second = ctx(&tool, &evidence, "mutate.edit");
-        second.call_id = 8;
+        second.invocation_id = test_invocation_id(8);
 
         host.refuse_edit(
             &first,
@@ -1786,11 +1819,15 @@ mod tests {
         );
 
         assert_eq!(
-            host.take_refusal(8).expect("second refusal").code,
+            host.take_refusal(test_invocation_id(8))
+                .expect("second refusal")
+                .code,
             CepErrorCode::ReplanRequired
         );
         assert_eq!(
-            host.take_refusal(7).expect("first refusal").code,
+            host.take_refusal(test_invocation_id(7))
+                .expect("first refusal")
+                .code,
             CepErrorCode::SchemaMismatch
         );
     }

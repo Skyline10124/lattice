@@ -34,8 +34,8 @@ use lancet_protocol::InvocationId;
 use super::GitSessionGraphStore;
 use super::commit::turn_commit_from_manifest_and_oid;
 use super::helpers::{
-    build_agent_json, build_audit_json, build_root_tree, build_turn_tree, messages_to_jsonl,
-    parse_oid, serialize_manifest,
+    build_agent_json, build_root_tree, build_turn_tree, messages_to_jsonl, parse_oid,
+    serialize_manifest,
 };
 use super::session::resolve_head_oid;
 use super::state::{self, SessionHead};
@@ -735,7 +735,7 @@ impl GitSessionGraphStore {
         // Idempotent completion: the pin exists exactly when the
         // transaction committed (ref transactions are atomic).
         if let Some(pinned) = self.read_turn_pin(session_id, &turn_id_str)? {
-            return self.read_finalized_turn(session_id, &pinned);
+            return self.read_finalized_turn(session_id, turn_id, &pinned);
         }
 
         let _write = self.kernel().write_lock()?;
@@ -793,7 +793,6 @@ impl GitSessionGraphStore {
             &messages_jsonl,
             &build_agent_json(&candidate.agent_name),
             &candidate.profile_snapshot_json,
-            &build_audit_json(&None),
         )?;
         let root_tree = build_root_tree(self.kernel(), turn_tree)?;
 
@@ -906,6 +905,7 @@ impl GitSessionGraphStore {
     fn read_finalized_turn(
         &self,
         session_id: &str,
+        expected_turn_id: &lancet_protocol::TurnId,
         commit_oid_hex: &str,
     ) -> Result<crate::graph::TurnCommit> {
         let oid = parse_oid(commit_oid_hex)?;
@@ -916,6 +916,14 @@ impl GitSessionGraphStore {
                 detail: format!(
                     "turn pin of '{session_id}' points at a commit of session '{}'",
                     manifest.session_id
+                ),
+            });
+        }
+        if manifest.turn_id != *expected_turn_id {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "turn pin for '{expected_turn_id}' points at turn '{}'",
+                    manifest.turn_id
                 ),
             });
         }
@@ -978,17 +986,13 @@ fn parse_rfc3339_to_unix(value: &str, field: &str) -> Result<i64> {
         .map_err(|e| SessionError::InvalidInput(format!("{field} is not RFC 3339: {e}")))
 }
 
-/// Project the pinned candidate onto today's conversation-commit input.
-/// The legacy status is a projection of the typed outcome (the journal
-/// chain remains the typed authority); `terminal_reason` stays empty
-/// because the typed reasons are the logic authority and free text is
-/// never logic-bearing. #139-B deletes the legacy fields.
+/// Project the pinned candidate onto the typed conversation-commit input.
 fn candidate_turn_commit_input(
     session_id: &str,
     candidate: &TurnCommitCandidate,
     frozen_tip: &Option<String>,
 ) -> Result<crate::graph::TurnCommitInput> {
-    use crate::graph::{TurnCommitInput, WorkspaceDisposition};
+    use crate::graph::TurnCommitInput;
     // Logical lineage: the frozen tip (journal authority) plus the
     // candidate's durable side-parents.
     let mut parent_ids = Vec::with_capacity(candidate.side_parent_ids.len() + 1);
@@ -998,6 +1002,10 @@ fn candidate_turn_commit_input(
     parent_ids.extend(candidate.side_parent_ids.iter().cloned());
     Ok(TurnCommitInput {
         session_id: session_id.to_string(),
+        // The journal's explicit TurnId is the commit's canonical identity
+        // (ADR 0005 §1); including it in the identity payloads is the
+        // M-GH100-01 sibling-uniqueness fix.
+        turn_id: candidate.turn_id,
         parent_ids,
         messages: candidate.messages.clone(),
         agent_name: candidate.agent_name.clone(),
@@ -1005,25 +1013,21 @@ fn candidate_turn_commit_input(
         profile_snapshot_json: candidate.profile_snapshot_json.clone(),
         model: candidate.model.clone(),
         provider: candidate.provider.clone(),
-        status: candidate.outcome.legacy_status(),
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
+        outcome: candidate.outcome.clone(),
+        origin: candidate.origin,
         commit_message: candidate.commit_message.clone(),
         usage: candidate.usage_aggregate.map(|aggregate| aggregate.usage()),
-        terminal_reason: None,
-        workspace_history_oid: candidate.workspace_history_oid.clone(),
+        workspace_history_checkpoint: candidate.workspace_history_checkpoint.clone(),
     })
 }
 
-/// The conversation manifest of a journal-finalized Turn: the existing v2
-/// shape with the Turn's **explicit** TurnId (never derived from a seed,
-/// ADR 0005 §1) and the typed outcome projected into the legacy fields.
+/// The typed conversation manifest of a journal-finalized Turn.
 fn candidate_manifest(
     prepared: &crate::graph::PreparedTurnCommit,
     candidate: &TurnCommitCandidate,
 ) -> super::helpers::GitSessionManifest {
-    let mut manifest = super::commit::build_manifest_from_prepared(prepared);
-    manifest.turn_id = candidate.turn_id.to_string();
+    let manifest = super::commit::build_manifest_from_prepared(prepared);
+    debug_assert_eq!(manifest.turn_id, candidate.turn_id);
     manifest
 }
 

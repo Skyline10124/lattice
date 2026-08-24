@@ -44,15 +44,11 @@ mod runtime;
 mod status;
 
 pub use audit::{
-    AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput, AuditReplayRequest,
-    AuditReplayResult, AuditRequest, AuditTailOutput, OperatorAuditRow, OperatorCellEvidence,
-    OperatorReplayCall, OperatorTailRow, OperatorTurnTrace, query_audit, replay_audit, tail_audit,
+    AUDIT_QUERY_MAX_ROWS, AUDIT_TAIL_MAX_BATCHES, AUDIT_TAIL_MAX_ROWS, AuditQueryOutput,
+    AuditReplayRequest, AuditReplayResult, AuditRequest, AuditTailOutput, OperatorAuditRow,
+    OperatorTailRow, OperatorTurnTrace, query_audit, replay_audit, tail_audit,
 };
-pub use config::{
-    AuditBacking, ExternalAuditPathError, LancetRuntimeConfig, audit_db_path_for_project,
-    audit_db_path_for_project_in, audit_state_root, project_state_dir, project_state_dir_in,
-    project_storage_key, workspace_history_backing, workspace_history_backing_in,
-};
+pub use config::{LancetRuntimeConfig, workspace_history_backing, workspace_history_backing_in};
 pub use doctor::{LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks};
 pub use error::{LancetError, LancetResult};
 pub use rewind::{
@@ -60,26 +56,20 @@ pub use rewind::{
     WorkspaceRewindReport, plan_workspace_rewind, record_rewind_audit, rewind_audit_records,
     rewind_workspace,
 };
-pub use runtime::{
-    DEFAULT_CHANNEL_CAPACITY, LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle,
-};
-pub use status::{LancetRecentCallEntry, LancetStatusOutput, collect_status};
+pub use runtime::{LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle};
+pub use status::{LancetStatusOutput, collect_status};
 
-// --- Curated re-exports: types that appear in this crate's public signatures,
-// so consumers can name them without taking direct dependencies on the
+// --- Curated re-exports so callers need not depend on
 // individual LANCET runtime crates. ---
 
 pub use lancet_authority::policy::default::PolicyConfig;
 pub use lancet_authority::{CepPolicyConfig, CepTurnContext};
 pub use lancet_cep::ToolDefinition;
-pub use lancet_dispatch::{CepClient, CepTransport};
+pub use lancet_dispatch::{CallControl, CepClient, CepTransport, ExecutionReceipt};
 pub use lancet_native::rewind::{
     RestoredPath, RewindPathConflict, RewindPathPreflight, RewindRestoreError, RewindRestoreOutcome,
 };
-pub use lancet_native::{
-    AuditQueryFilters, CepAuditContext, CepAuditStore, MethodRegistry, ServerRunConfig,
-    register_production_method_registry,
-};
+pub use lancet_native::{MethodRegistry, ServerRunConfig, register_production_method_registry};
 pub use lancet_protocol::{CapabilityAdmissionPolicy, CepError};
 pub use lancet_runtime::rewind_audit::{
     MAX_REWIND_AUDIT_READ, REWIND_AUDIT_SCHEMA_VERSION, RewindAuditLog, RewindAuditRecord,

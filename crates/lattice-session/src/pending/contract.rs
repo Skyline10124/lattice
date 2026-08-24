@@ -15,7 +15,8 @@
 
 use lancet_protocol::{ModelAttemptKey, SessionId, TurnId};
 use lattice_conversation::{
-    AttemptInterruption, AttemptRejection, NativeMessage, TokenUsage, UnboundToolCall,
+    AttemptInterruption, AttemptRejection, BoundToolCall, NativeMessage, TokenUsage,
+    UnboundToolCall,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +24,6 @@ use super::binding::{BindingPlan, PlannedBinding};
 use super::config::{MAX_MODEL_STEPS, TurnStartedFacts};
 use super::outcome::{ClosureOrigin, TurnOutcome, TurnUsageAggregate};
 use super::step::{StepClosedKind, StepClosingState};
-use crate::graph::GraphMessage;
 use crate::{Result, SessionError};
 
 /// Schema version of the `pending.json` payload.
@@ -286,7 +286,7 @@ pub struct TurnCommitCandidate {
     /// input, so recovery cannot misstate lineage from mutable input.
     pub side_parent_ids: Vec<String>,
     /// Transcript content in order (user message, closures, final message).
-    pub messages: Vec<GraphMessage>,
+    pub messages: Vec<NativeMessage<BoundToolCall>>,
     /// Agent name for the commit projection.
     pub agent_name: String,
     /// Frozen profile snapshot hash.
@@ -305,9 +305,8 @@ pub struct TurnCommitCandidate {
     pub commit_message: String,
     /// Derived per-Turn usage aggregate, when any attempt reported usage.
     pub usage_aggregate: Option<TurnUsageAggregate>,
-    /// Project-global workspace-history checkpoint, when the closing Turn
-    /// records one (ADR 0005 §15).
-    pub workspace_history_oid: Option<String>,
+    /// Project-global workspace-history checkpoint (ADR 0005 §15).
+    pub workspace_history_checkpoint: super::outcome::WorkspaceHistoryCheckpoint,
     /// Pinned commit-time timestamp (RFC 3339). Reconciled closures pin the
     /// durable journal tip's commit time; a live owner pins its own clock at
     /// pinning time. Either way the value is frozen here before publication.
@@ -315,13 +314,6 @@ pub struct TurnCommitCandidate {
 }
 
 impl TurnCommitCandidate {
-    /// The legacy conversation-manifest projection inputs derived from the
-    /// typed outcome. Diagnostic only until the #139-B hard cut deletes the
-    /// legacy fields; the typed value remains the authority.
-    pub fn legacy_status(&self) -> crate::graph::TurnCommitStatus {
-        self.outcome.legacy_status()
-    }
-
     fn validate(&self) -> Result<()> {
         if self.session_id.is_empty() || self.agent_name.is_empty() {
             return Err(SessionError::JournalCorruption {
@@ -1150,7 +1142,7 @@ mod tests {
             origin: ClosureOrigin::Reconciled,
             commit_message: "hello".to_string(),
             usage_aggregate: None,
-            workspace_history_oid: None,
+            workspace_history_checkpoint: crate::pending::WorkspaceHistoryCheckpoint::Empty,
             created_at: "2026-08-16T00:00:00Z".to_string(),
         }
     }
@@ -1379,14 +1371,7 @@ mod tests {
             session_id: "00000000000000000000000000000001".to_string(),
             turn_id: turn_id(),
             side_parent_ids: vec![],
-            messages: vec![crate::graph::GraphMessage {
-                role: "user".to_string(),
-                content: "hi".to_string(),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            }],
+            messages: vec![crate::test_helpers::user_msg("hi")],
             agent_name: "coder".to_string(),
             profile_snapshot_hash: "h".to_string(),
             profile_snapshot_json: "{}".to_string(),
@@ -1398,7 +1383,7 @@ mod tests {
             origin: ClosureOrigin::Reconciled,
             commit_message: "hi".to_string(),
             usage_aggregate: None,
-            workspace_history_oid: None,
+            workspace_history_checkpoint: crate::pending::WorkspaceHistoryCheckpoint::Empty,
             created_at: "2026-08-16T00:00:00Z".to_string(),
         };
         let snapshot = snapshot_of(PendingStage::TurnClosing(TurnClosingFacts {

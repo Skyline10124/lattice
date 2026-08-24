@@ -20,8 +20,8 @@
 
 use lancet_protocol::{InvocationId, PlanKey};
 use lattice_conversation::{
-    AttemptRejection, MessageSemantic, NativeMessage, TokenUsage, ToolResultOutcome,
-    UnboundToolCall,
+    AttemptRejection, BoundToolCall, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    TokenUsage, ToolResultOutcome, UnboundToolCall,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +37,6 @@ use super::outcome::{
     ClosureOrigin, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome, TurnUsageAggregate,
 };
 use super::step::{ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState};
-use crate::graph::GraphMessage;
 use crate::{Result, SessionError};
 
 /// One closure step the executor performs. Actions are ordered; the
@@ -749,7 +748,7 @@ fn candidate_messages(
     snapshot: &PendingSnapshot,
     root: &TurnStartedFacts,
     closures: &[ClosedBinding],
-) -> Vec<GraphMessage> {
+) -> Vec<NativeMessage<BoundToolCall>> {
     let mut messages = vec![user_transcript(root)];
     match &snapshot.stage {
         PendingStage::MessageComplete { message, .. } => messages.push(native_transcript(message)),
@@ -781,7 +780,7 @@ fn build_candidate(
     snapshot: &PendingSnapshot,
     root: &TurnStartedFacts,
     outcome: TurnOutcome,
-    messages: Vec<GraphMessage>,
+    messages: Vec<NativeMessage<BoundToolCall>>,
 ) -> Result<TurnCommitCandidate> {
     // The durable journal tip's own committer time: recovery introduces no
     // new clock, and it never substitutes another durable field for the one
@@ -815,95 +814,43 @@ fn build_candidate(
         origin: ClosureOrigin::Reconciled,
         commit_message,
         usage_aggregate: tip_usage(snapshot).map(|usage| TurnUsageAggregate::Partial { usage }),
-        workspace_history_oid: None,
+        workspace_history_checkpoint: super::outcome::WorkspaceHistoryCheckpoint::Empty,
         created_at,
     })
 }
 
 /// The frozen user message in transcript shape.
-fn user_transcript(root: &TurnStartedFacts) -> GraphMessage {
-    let mut content = String::new();
-    for part in &root.user_message.parts {
-        if let MessageSemantic::Text { text } = &part.semantic {
-            if !content.is_empty() {
-                content.push('\n');
-            }
-            content.push_str(text);
-        }
-    }
-    GraphMessage {
-        role: "user".to_string(),
-        content,
-        reasoning_content: None,
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-    }
+fn user_transcript(root: &TurnStartedFacts) -> NativeMessage<BoundToolCall> {
+    root.user_message
+        .clone()
+        .bind_zero_tool()
+        .expect("validated TurnStarted user message carries no ToolCall")
 }
 
 /// One provider-produced message in transcript shape: text parts join in
 /// order (zero-Tool messages only).
-fn native_transcript(message: &NativeMessage<UnboundToolCall>) -> GraphMessage {
-    let mut content = String::new();
-    for part in &message.parts {
-        if let MessageSemantic::Text { text } = &part.semantic {
-            if !content.is_empty() {
-                content.push('\n');
-            }
-            content.push_str(text);
-        }
-    }
-    GraphMessage {
-        role: "assistant".to_string(),
-        content,
-        reasoning_content: None,
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-    }
+fn native_transcript(message: &NativeMessage<UnboundToolCall>) -> NativeMessage<BoundToolCall> {
+    message
+        .clone()
+        .bind_zero_tool()
+        .expect("validated zero-Tool terminal message")
 }
 
 /// Explicit closure framing for one closed binding: canonical structured
 /// content naming the invocation, its closure outcome, and material
 /// availability. This is operator/operator-visible framing, never
 /// model-authored speech.
-fn closure_transcript(closure: &ClosedBinding) -> GraphMessage {
-    let material = match &closure.material {
-        MaterialAvailability::Available {
-            digest,
-            byte_length,
-        } => serde_json::json!({
-            "available": true,
-            "digest": encode_hex(digest),
-            "byte_length": byte_length,
-        }),
-        MaterialAvailability::Unavailable {
-            reason,
-            digest,
-            byte_length,
-        } => serde_json::json!({
-            "available": false,
-            "reason": match reason {
-                UnavailableMaterialReason::DraftPublicationFailed => "draft_publication_failed",
-                UnavailableMaterialReason::OutputTooLarge => "output_too_large",
-                UnavailableMaterialReason::NotExecuted => "not_executed",
-            },
-            "digest": digest.map(|d| encode_hex(&d)),
-            "byte_length": byte_length,
-        }),
-    };
-    GraphMessage {
-        role: "tool".to_string(),
-        content: lancet_protocol::canonical_json(&serde_json::json!({
-            "invocation_id": closure.binding.invocation_id.to_string(),
-            "outcome": closure.outcome.as_str(),
-            "material": material,
-        })),
-        reasoning_content: None,
-        tool_calls: None,
-        tool_call_id: None,
-        name: Some(closure.binding.method.clone()),
-    }
+fn closure_transcript(closure: &ClosedBinding) -> NativeMessage<BoundToolCall> {
+    NativeMessage::new(
+        MessageRole::Tool,
+        None,
+        vec![MessagePart::semantic_only(MessageSemantic::ToolResult {
+            invocation_id: closure.binding.invocation_id,
+            name: closure.binding.method.clone(),
+            outcome: closure.outcome,
+            content: None,
+        })],
+    )
 }
 
 #[cfg(test)]
@@ -1241,8 +1188,14 @@ mod tests {
             })
             .expect("candidate");
         assert_eq!(candidate.messages.len(), 2);
-        assert_eq!(candidate.messages[0].role, "user");
-        assert_eq!(candidate.messages[1].content, "done");
+        assert_eq!(
+            candidate.messages[0].role,
+            lattice_conversation::MessageRole::User
+        );
+        assert_eq!(
+            crate::test_helpers::text(&candidate.messages[1]),
+            Some("done")
+        );
         assert_eq!(
             candidate.created_at,
             chrono::DateTime::from_timestamp(STEP_TIME, 0)
@@ -1602,8 +1555,14 @@ mod tests {
             .expect("candidate");
         // user + the durable closure 0 + the resumed closure 1 framing.
         assert_eq!(candidate.messages.len(), 3);
-        assert_eq!(candidate.messages[1].role, "tool");
-        assert_eq!(candidate.messages[2].role, "tool");
+        assert_eq!(
+            candidate.messages[1].role,
+            lattice_conversation::MessageRole::Tool
+        );
+        assert_eq!(
+            candidate.messages[2].role,
+            lattice_conversation::MessageRole::Tool
+        );
     }
 
     #[test]

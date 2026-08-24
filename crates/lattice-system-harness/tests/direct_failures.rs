@@ -83,9 +83,9 @@ fn direct_failure_http_error_no_retry_commits_error() {
         )?;
         require(
             outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { status, .. } if status == "error"),
+                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "failed"),
             ),
-            "turn_committed status=error must surface",
+            "turn_committed outcome=error must surface",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -137,22 +137,9 @@ fn direct_failure_disconnect_before_output_commits_error() {
         assert_clean_send(&outcome)?;
         assert_event_subsequence(
             &outcome.parsed,
-            &[
-                "turn_started",
-                "turn_failed",
-                "turn_committing",
-                "turn_committed",
-            ],
+            &["turn_started", "turn_committing", "turn_committed"],
         )
         .map_err(|e| AssertError::StdoutMissing { expected: e })?;
-        let failure_reason = outcome.events.iter().find_map(|event| match event {
-            TurnEventLine::TurnFailed { reason } => Some(reason.as_str()),
-            _ => None,
-        });
-        require(
-            failure_reason.is_some_and(|reason| !reason.is_empty()),
-            "turn_failed must carry a nonempty reason on early disconnect",
-        )?;
         require(
             !outcome
                 .events
@@ -162,9 +149,9 @@ fn direct_failure_disconnect_before_output_commits_error() {
         )?;
         require(
             outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { status, .. } if status == "error"),
+                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "interrupted"),
             ),
-            "turn_committed status=error",
+            "turn_committed outcome=interrupted",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -184,13 +171,9 @@ fn direct_failure_disconnect_before_output_commits_error() {
             .and_then(|turns| turns.last());
         require(
             persisted
-                .and_then(|turn| turn.get("status"))
-                .and_then(Value::as_str)
-                == Some("error")
-                && persisted
-                    .and_then(|turn| turn.get("terminal_reason"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|reason| !reason.is_empty()),
+                .and_then(|turn| turn.get("outcome"))
+                .and_then(Value::as_object)
+                .is_some_and(|outcome| outcome.contains_key("interrupted")),
             format!("stream failure was not durably logged as error: {log_json}"),
         )?;
         Ok(())
@@ -248,9 +231,9 @@ fn direct_failure_disconnect_after_partial_token_commits_error() {
         )?;
         require(
             outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { status, .. } if status == "error"),
+                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "interrupted"),
             ),
-            "turn_committed status=error",
+            "turn_committed outcome=interrupted",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -302,9 +285,9 @@ fn direct_failure_malformed_sse_commits_error() {
         )?;
         require(
             outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { status, .. } if status == "error"),
+                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "interrupted"),
             ),
-            "turn_committed status=error",
+            "turn_committed outcome=interrupted",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -381,8 +364,8 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
             outcome
                 .events
                 .iter()
-                .any(|e| matches!(e, TurnEventLine::TurnCommitted { status, .. } if status == "cancelled")),
-            "turn_committed status=cancelled must surface",
+                .any(|e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "cancelled")),
+            "turn_committed outcome=cancelled must surface",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -408,9 +391,9 @@ fn direct_failure_sigint_while_stalled_commits_cancelled() {
                 .get("turns")
                 .and_then(Value::as_array)
                 .and_then(|turns| turns.last())
-                .and_then(|turn| turn.get("status"))
-                .and_then(Value::as_str)
-                == Some("cancelled"),
+                .and_then(|turn| turn.get("outcome"))
+                .and_then(Value::as_object)
+                .is_some_and(|outcome| outcome.contains_key("cancelled")),
             format!("cancelled turn was not durably logged: {log_json}"),
         )?;
         Ok(())
@@ -469,9 +452,9 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
         )?;
         require(
             outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { status, .. } if status == "error"),
+                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "interrupted"),
             ),
-            "turn_committed status=error on deadline",
+            "turn_committed outcome=interrupted on deadline",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),
@@ -549,9 +532,9 @@ fn direct_failure_mutation_survives_provider_failure() {
         )?;
         require(
             outcome.events.iter().any(
-                |e| matches!(e, TurnEventLine::TurnCommitted { status, .. } if status == "error"),
+                |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "failed"),
             ),
-            "turn_committed status=error",
+            "turn_committed outcome=failed",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),

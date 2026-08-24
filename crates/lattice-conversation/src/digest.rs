@@ -30,7 +30,6 @@ use sha2::{Digest, Sha256};
 
 use crate::message::{MessageSemantic, NativeMessage, ToolCallState};
 
-const ARGUMENTS_DOMAIN: &[u8] = b"lattice-tool-arguments-digest-v1\0";
 const SEMANTIC_DOMAIN: &[u8] = b"lattice-message-semantic-digest-v1\0";
 const REPLAY_DOMAIN: &[u8] = b"lattice-message-replay-state-digest-v1\0";
 
@@ -40,15 +39,6 @@ fn digest_with_domain(domain: &[u8], canonical_bytes: &[u8]) -> [u8; 32] {
     hasher.update((canonical_bytes.len() as u64).to_be_bytes());
     hasher.update(canonical_bytes);
     hasher.finalize().into()
-}
-
-/// SHA-256 over the domain separator, explicit byte length, and the canonical
-/// JSON bytes of a Tool arguments object (ADR 0005 §7).
-///
-/// This digest validates a complete binding; it is not an identity. Only the
-/// canonical object is digested, never the provider's textual spelling.
-pub fn arguments_digest(arguments: &Value) -> [u8; 32] {
-    digest_with_domain(ARGUMENTS_DOMAIN, canonical_json(arguments).as_bytes())
 }
 
 fn semantic_projection<S: ToolCallState>(message: &NativeMessage<S>) -> Value {
@@ -131,6 +121,7 @@ mod tests {
     use super::*;
     use crate::message::{MessagePart, MessageRole, OpaqueProviderState, ProviderOrigin};
     use crate::tool_call::UnboundToolCall;
+    use lancet_protocol::arguments_digest;
 
     fn call(name: &str, id: Option<&str>, arguments: Value) -> UnboundToolCall {
         UnboundToolCall {

@@ -16,11 +16,11 @@ mod coordinator;
 mod execute;
 mod finalize;
 mod invocation_facts;
-pub mod lifecycle;
 mod live;
 mod llm;
 mod mapping;
-mod model_rounds;
+mod observer;
+mod saga;
 mod types;
 
 #[cfg(test)]
@@ -43,18 +43,10 @@ mod live_tests;
 
 pub use collector::collect_turn_result_from_events;
 pub use execute::{STREAM_IDLE_TIMEOUT_SECS, run_turn, stream_turn};
-pub use lifecycle::{
-    LifecycleFailureKind, ResourceAction, TurnLifecycleOutcome, UnfinalizedTurn,
-    classify_lifecycle_failure, finalize_turn, outcome_workspace_less,
-};
 pub use types::{
-    RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,
-    TurnEventStream, TurnUsageSummary,
+    RunTurnRequest, RunTurnResult, RunTurnStage, ToolResultSummary, TurnEvent, TurnEventStream,
+    TurnUsageSummary,
 };
 
 #[doc(hidden)]
-pub use cep::CepExecutorAdapter;
-// #139-B Commit 4: the tool-dispatch vocabulary moved here from
-// `lattice-agent`; the CEP integration tests name it through the facade.
-#[doc(hidden)]
-pub use model_rounds::{CepErrorPayload, ToolExecutionError};
+pub use cep::{CepErrorPayload, ToolExecutionError};

@@ -1,9 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native CEP server lifecycle, registry binding, and durable call metadata.
-
-pub(crate) mod call_durable_metadata;
+//! Native CEP server lifecycle and registry binding.
+pub(crate) mod evidence_respond;
 pub(crate) mod native_registry;
 pub(crate) mod registry;
 pub(crate) mod transport;

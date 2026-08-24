@@ -67,7 +67,7 @@ pub use facts::{
 };
 pub use outcome::{
     ClosureOrigin, TurnCancellation, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
-    TurnUsageAggregate,
+    TurnUsageAggregate, WorkspaceHistoryCheckpoint,
 };
 pub use reconcile::{
     CandidateRevisionRequest, ReconciliationAction, ReconciliationDecision, ReconciliationPlan,
@@ -213,7 +213,7 @@ pub(crate) mod tests_support {
             origin: ClosureOrigin::Live,
             commit_message: "please continue".to_string(),
             usage_aggregate: None,
-            workspace_history_oid: None,
+            workspace_history_checkpoint: crate::pending::WorkspaceHistoryCheckpoint::Empty,
             created_at: "2026-08-16T12:00:00Z".to_string(),
         }
     }

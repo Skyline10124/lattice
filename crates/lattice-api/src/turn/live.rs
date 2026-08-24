@@ -3,54 +3,31 @@
 
 //! Live turn streaming path (live turn).
 //!
-//! This module implements the live `stream_turn` path: startup validation via
-//! [`prepare_live_turn`], a spawned background task ([`run_live_turn_task`])
-//! that drains agent events concurrently via `tokio::select!`, and emits public
-//! [`TurnEvent`] values through a bounded channel before committing.
-//!
-//! The spawned task classifies the terminal outcome using the lifecycle state
-//! machine, ensuring every committed turn carries an explicit
-//! `(status, disposition)` pair.
+//! Startup validation via [`prepare_live_turn_locked`], then a spawned task
+//! that publishes durable `TurnStarted` and hands the Turn to the #139-B
+//! [`super::saga`] coordinator loop.
 
-use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
-
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::model_rounds::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
-use lattice_session::{FlockGuard, GraphHead, ProjectStoreKey, TurnCommitStatus};
+use lattice_session::{FlockGuard, GraphHead, ProjectStoreKey};
 
-use super::cep::{ProductionTurnDeps, map_cep_tool_event};
-use super::execute::{
-    TurnCommitContext, build_commit_input, build_profile_snapshot_metadata, derive_terminal_event,
-    map_agent_event,
-};
-use super::lifecycle::{
-    LifecycleFailureKind, TurnLifecycleOutcome, classify_lifecycle_failure, outcome_workspace_less,
-};
-use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
+use super::cep::ProductionTurnDeps;
+use super::mapping::resolve_model_and_prompt;
+#[cfg(test)]
+use super::observer::CepOrderedEmitter;
+use super::observer::ObserverSink;
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
 use crate::session::{OpenSessionRequest, Result, SessionApi};
 
 /// Bounded channel capacity for the turn event stream.
 pub(super) const TURN_EVENT_CHANNEL_CAPACITY: usize = 256;
 
-/// Max wait when forwarding a non-delta [`TurnEvent`] to a slow observer.
-/// After timeout, further public events are skipped but the turn still commits.
-const OBSERVER_SEND_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// Short grace period for CEP side-channel events after the agent future
-/// returns. The CEP server emits call-finished before the tool response, but
-/// live forwarding crosses a separate channel.
-const CEP_EVENT_DRAIN_GRACE: Duration = Duration::from_millis(50);
-
 /// All state gathered during startup validation, before the live task spawns.
 pub(crate) struct PreparedTurn {
     pub session_id: String,
     pub parent_commit_id: Option<String>,
-    pub parent_ids: Vec<String>,
     pub branch: Option<String>,
     pub model: String,
     pub provider: String,
@@ -63,8 +40,7 @@ pub(crate) struct PreparedTurn {
 }
 
 /// Prepare a live Turn while the caller already holds the full
-/// `SessionExecutionLock`. The lock is acquired before this snapshot so the
-/// parent, branch, and binding cannot race a concurrent Turn or rewind.
+/// `SessionExecutionLock`.
 pub(crate) fn prepare_live_turn_locked(
     session: &SessionApi,
     request: &RunTurnRequest,
@@ -93,7 +69,6 @@ pub(crate) fn prepare_live_turn_locked(
 
     let transcript = session.head_transcript(&session_id)?;
     let parent_commit_id = transcript.parent_commit_id.clone();
-    let parent_ids = parent_commit_id.clone().into_iter().collect::<Vec<_>>();
 
     let status = session.status_locked(&session_id, execution_lock)?;
     let branch = match status.head {
@@ -104,12 +79,11 @@ pub(crate) fn prepare_live_turn_locked(
     let loaded_profile = request.loaded_profile.as_ref().ok_or_else(|| {
         crate::session::ApiError::BadRequest("loaded active agent profile is required".to_string())
     })?;
-    let profile_snapshot = build_profile_snapshot_metadata(loaded_profile)?;
+    let profile_snapshot = super::execute::build_profile_snapshot_metadata(loaded_profile)?;
 
     Ok(PreparedTurn {
         session_id,
         parent_commit_id,
-        parent_ids,
         branch,
         model,
         provider,
@@ -122,341 +96,127 @@ pub(crate) fn prepare_live_turn_locked(
     })
 }
 
-fn is_streaming_delta(event: &TurnEvent) -> bool {
-    matches!(
-        event,
-        TurnEvent::TokenDelta { .. } | TurnEvent::ReasoningDelta { .. }
-    )
-}
-
-/// Best-effort public observer sink.
-struct ObserverSink {
-    sender: mpsc::Sender<TurnEvent>,
-    gave_up: bool,
-}
-
-impl ObserverSink {
-    fn new(sender: mpsc::Sender<TurnEvent>) -> Self {
-        Self {
-            sender,
-            gave_up: false,
-        }
-    }
-
-    async fn emit(&mut self, event: TurnEvent) {
-        if self.gave_up {
-            return;
-        }
-        if is_streaming_delta(&event) {
-            let _ = self.sender.try_send(event);
-            return;
-        }
-        let send = self.sender.send(event);
-        match tokio::time::timeout(OBSERVER_SEND_TIMEOUT, send).await {
-            Ok(Ok(())) => {}
-            _ => self.gave_up = true,
-        }
-    }
-}
-
-#[derive(Default)]
-struct CepOrderedEmitter {
-    pending_calls: HashSet<u64>,
-    buffered: VecDeque<TurnEvent>,
-}
-
-impl CepOrderedEmitter {
-    async fn emit(&mut self, observer: &mut ObserverSink, event: TurnEvent) {
-        match event {
-            TurnEvent::CepCallStarted { call_id, .. } => {
-                self.pending_calls.insert(call_id);
-                observer.emit(event).await;
-            }
-            TurnEvent::CepCallFinished { call_id, .. } => {
-                observer.emit(event).await;
-                self.pending_calls.remove(&call_id);
-                if self.pending_calls.is_empty() {
-                    self.flush_buffered(observer).await;
-                }
-            }
-            event if is_cep_event(&event) => {
-                observer.emit(event).await;
-                if self.pending_calls.is_empty() {
-                    self.flush_buffered(observer).await;
-                }
-            }
-            event if self.pending_calls.is_empty() && !is_tool_call_finished(&event) => {
-                self.flush_buffered(observer).await;
-                observer.emit(event).await;
-            }
-            event => {
-                self.buffered.push_back(event);
-            }
-        }
-    }
-
-    async fn finish(&mut self, observer: &mut ObserverSink) {
-        self.pending_calls.clear();
-        self.flush_buffered(observer).await;
-    }
-
-    async fn flush_buffered(&mut self, observer: &mut ObserverSink) {
-        while let Some(event) = self.buffered.pop_front() {
-            observer.emit(event).await;
-        }
-    }
-}
-
-fn is_tool_call_finished(event: &TurnEvent) -> bool {
-    matches!(event, TurnEvent::ToolCallFinished { .. })
-}
-
-fn is_cep_event(event: &TurnEvent) -> bool {
-    matches!(
-        event,
-        TurnEvent::CepCallStarted { .. } | TurnEvent::CepCallFinished { .. }
-    )
-}
-
-/// Classify an agent result into a typed lifecycle outcome.
-///
-/// For the current non-promotion flow (no candidate export, no workspace
-/// verification), the classification is:
-///
-/// - **Completed** → `outcome_workspace_less()` (NotApplicable, no resource action).
-/// - **Error** → `Aborted + Destroy` (agent error before candidate).
-/// - **Cancelled** → `Aborted + Destroy` (cancelled before candidate).
-///
-/// When promotion is wired in a future plan, this function will be extended
-/// to handle `candidate_exported = true` with verification and promotion
-/// outcomes.
-pub(super) fn classify_live_outcome(
-    agent_result: &AgentTurnResult,
-    _candidate_exported: bool,
-) -> TurnLifecycleOutcome {
-    match agent_result.status {
-        AgentTurnStatus::Completed => outcome_workspace_less(),
-        AgentTurnStatus::Error => classify_lifecycle_failure(
-            TurnCommitStatus::Error,
-            false,
-            false,
-            LifecycleFailureKind::AgentErrorBeforeCandidate,
-        ),
-        AgentTurnStatus::Cancelled => classify_lifecycle_failure(
-            TurnCommitStatus::Cancelled,
-            false,
-            false,
-            LifecycleFailureKind::CancelledBeforeCandidate,
-        ),
-    }
-}
-
-/// Background task that runs the agent loop, maps events live, and commits.
-///
-/// Event emission order: TurnStarted -> [agent events] -> [terminal] ->
-/// TurnCommitting -> TurnCommitted/CommitFailed. The sender is dropped after
-/// the final event, closing the stream.
-///
-/// The committed outcome carries an explicit `(status, disposition)` pair
-/// classified by [`classify_live_outcome`].
 async fn run_live_turn_task(
-    session: SessionApi,
+    _session: SessionApi,
     prepared: PreparedTurn,
     request: RunTurnRequest,
     turn_tx: mpsc::Sender<TurnEvent>,
     deps: ProductionTurnDeps,
-    execution_lock: FlockGuard,
+    coordinator: Arc<super::coordinator::TurnCoordinator>,
+    execution_lock: Arc<FlockGuard>,
 ) {
     let ProductionTurnDeps {
-        sequencer,
-        tool_definitions,
+        model_driver,
+        tool_catalog,
         runtime,
         cep_client,
-        audit,
-        audit_context,
         workspace_history,
         ..
     } = deps;
 
-    let mut runtime = runtime;
-
-    let turn_id = format!(
-        "{}:{}",
-        prepared.session_id,
-        prepared.parent_commit_id.as_deref().unwrap_or("root")
+    let turn_id = coordinator.ids.new_turn_id();
+    let loaded = request.loaded_profile.as_ref().expect("validated profile");
+    let catalog = lattice_session::pending::ToolCatalogSnapshot::new(
+        env!("CARGO_PKG_VERSION").to_string(),
+        tool_catalog
+            .iter()
+            .map(|tool| lattice_session::pending::ToolCatalogEntry {
+                name: tool.name.clone(),
+                descriptor_identity: tool.descriptor_identity.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.parameters.clone(),
+            })
+            .collect(),
     );
-    {
-        let mut ctx = audit_context.write().await;
-        ctx.turn_id = turn_id.clone();
-        ctx.session_id = prepared.session_id.clone();
-        ctx.model_id = prepared.model.clone();
-        ctx.runtime_version = env!("CARGO_PKG_VERSION").to_string();
+    let accepted_at = chrono::Utc::now().to_rfc3339();
+    let begin = coordinator
+        .io
+        .begin_turn(
+            lattice_session::pending::TurnStartedFacts {
+                turn_id,
+                session_id: lancet_protocol::SessionId::parse(&prepared.session_id)
+                    .expect("SessionApi stores canonical SessionIds"),
+                parent_conversation_tip: prepared.parent_commit_id.clone(),
+                user_message: lattice_conversation::NativeMessage::new(
+                    lattice_conversation::MessageRole::User,
+                    None,
+                    vec![lattice_conversation::MessagePart::semantic_only(
+                        lattice_conversation::MessageSemantic::Text {
+                            text: request.input.clone(),
+                        },
+                    )],
+                ),
+                config: lattice_session::pending::FrozenTurnConfig {
+                    agent_name: prepared.agent_name.clone(),
+                    model: prepared.model.clone(),
+                    provider: prepared.provider.clone(),
+                    system_prompt: prepared.system_prompt.clone(),
+                    profile_snapshot_json: prepared.profile_snapshot_json.clone(),
+                    policy_snapshot_json: serde_json::to_string(&loaded.profile.lancet)
+                        .unwrap_or_else(|_| "{}".to_string()),
+                    catalog: match catalog {
+                        Ok(catalog) => catalog,
+                        Err(err) => {
+                            let mut observer = ObserverSink::new(turn_tx);
+                            observer
+                                .emit(TurnEvent::CommitFailed {
+                                    reason: err.to_string(),
+                                })
+                                .await;
+                            return;
+                        }
+                    },
+                    limits: lattice_session::pending::TurnExecutionLimits {
+                        timeout_secs: loaded.profile.llm.timeout_secs.unwrap_or(300),
+                        max_model_steps: lattice_session::pending::MAX_MODEL_STEPS,
+                        max_model_attempts: loaded.profile.llm.retry.max_retries.saturating_add(1),
+                    },
+                },
+                accepted_at,
+            },
+            Arc::clone(&execution_lock),
+        )
+        .await;
+    if let Err(err) = begin {
+        let mut observer = ObserverSink::new(turn_tx);
+        observer
+            .emit(TurnEvent::CommitFailed {
+                reason: err.to_string(),
+            })
+            .await;
+        return;
     }
-
     let mut observer = ObserverSink::new(turn_tx);
-
-    // 1. Emit TurnStarted
     observer
         .emit(TurnEvent::TurnStarted {
             session_id: prepared.session_id.clone(),
-            turn_id: turn_id.clone(),
+            turn_id: turn_id.to_string(),
             parent_commit_id: prepared.parent_commit_id.clone(),
             branch: prepared.branch.clone(),
         })
         .await;
 
-    // 2. Build agent request
-    let agent_request = build_agent_request(
-        &request,
-        &prepared.session_id,
-        prepared.transcript,
-        prepared.model.clone(),
-        prepared.system_prompt.clone(),
-        Some(prepared.provider.clone()).filter(|p| p != "unknown"),
-        tool_definitions.clone(),
-    );
+    let llm_tools: Vec<lattice_llm::ToolDefinition> = tool_catalog
+        .iter()
+        .cloned()
+        .map(|tool| lattice_llm::ToolDefinition::new(tool.name, tool.description, tool.parameters))
+        .collect();
 
-    // 3. Create agent event channel
-    let (agent_tx, mut agent_rx) = mpsc::channel::<AgentTurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
-
-    let cep_client = cep_client.clone();
-    let cep_agent_tx = agent_tx.clone();
-    let cep_forwarder = tokio::spawn(async move {
-        while let Some(event) = cep_client.next_event().await {
-            if let Some(agent_event) = map_cep_tool_event(event)
-                && cep_agent_tx.send(agent_event).await.is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    // 4. Pin agent future
-    let mut agent_fut = Box::pin(sequencer.run_turn_live(agent_request, agent_tx));
-    let mut ordered_events = CepOrderedEmitter::default();
-
-    // 5. Concurrent drain loop
-    let agent_result: AgentTurnResult = loop {
-        tokio::select! {
-            maybe_event = agent_rx.recv() => {
-                if let Some(event) = maybe_event {
-                    ordered_events.emit(&mut observer, map_agent_event(event)).await;
-                }
-            }
-            result = &mut agent_fut => {
-                break result;
-            }
-        }
-    };
-    // 6. Post-loop drain
-    while let Ok(Some(event)) = tokio::time::timeout(CEP_EVENT_DRAIN_GRACE, agent_rx.recv()).await {
-        ordered_events
-            .emit(&mut observer, map_agent_event(event))
-            .await;
-    }
-
-    cep_forwarder.abort();
-    while let Ok(event) = agent_rx.try_recv() {
-        ordered_events
-            .emit(&mut observer, map_agent_event(event))
-            .await;
-    }
-    ordered_events.finish(&mut observer).await;
-
-    // 6a. Classify the lifecycle outcome BEFORE resource teardown.
-    let outcome = classify_live_outcome(&agent_result, false);
-
-    runtime.shutdown().await;
-    audit.await_pending().await;
-
-    // #37: the Upper teardown sequence was removed with the Upper lifecycle.
-    // Direct-Local mutations are immediate and are not rolled back by a
-    // later Tool/model/audit failure (ADR 0003 decision 8).
-
-    // 7. Terminal event derived from AgentTurnResult.status.
-    if let Some(terminal) = derive_terminal_event(&agent_result) {
-        observer.emit(terminal).await;
-    }
-
-    // 8. Emit TurnCommitting
-    observer.emit(TurnEvent::TurnCommitting).await;
-
-    // 9–10. Close the Turn under the lock order
-    // SessionExecutionLock -> shared WorkspaceOperationLock -> SessionStore
-    // publication. The history checkpoint read and Session commit are one
-    // critical section: a mutation cannot be inserted between them, and a
-    // history read error is a commit error rather than `Empty`.
-    let ctx = TurnCommitContext {
-        session_id: prepared.session_id.clone(),
-        parent_ids: prepared.parent_ids,
-        model: prepared.model,
-        provider: prepared.provider,
-        agent_name: prepared.agent_name,
-        profile_snapshot_hash: prepared.profile_snapshot_hash,
-        profile_snapshot_json: prepared.profile_snapshot_json,
-    };
-
-    let user_input = request.input.clone();
-    let session_for_commit = session.clone();
-    let history_for_close = Arc::clone(&workspace_history);
-    let agent_status = agent_result.status.clone();
-    let finalization = tokio::task::spawn_blocking(move || {
-        let _workspace_guard = history_for_close
-            .lock_workspace_operation(
-                lattice_session::LockMode::Shared,
-                lattice_session::Blocking::Block,
-            )
-            .map_err(|err| {
-                crate::session::ApiError::Internal(format!(
-                    "acquire workspace checkpoint lock: {err}"
-                ))
-            })?;
-        let workspace_history_oid = history_for_close.current().map_err(|err| {
-            crate::session::ApiError::Internal(format!(
-                "read workspace history checkpoint for {turn_id}: {err}"
-            ))
-        })?;
-        // Pass all lifecycle fields explicitly so this close cannot silently
-        // invent a disposition or lose the project checkpoint.
-        let commit_input = build_commit_input(
-            &user_input,
-            &ctx,
-            &agent_result,
-            outcome.disposition.clone(),
-            None,
-            workspace_history_oid,
-        );
-        session_for_commit.commit_turn_locked(commit_input, &execution_lock)
-    })
+    super::saga::run_coordinator_saga(
+        prepared,
+        request,
+        turn_id,
+        model_driver,
+        llm_tools,
+        tool_catalog,
+        runtime,
+        cep_client,
+        workspace_history,
+        coordinator,
+        execution_lock,
+        observer,
+    )
     .await;
-
-    // 11. Commit and emit result.
-    let commit_result = match finalization {
-        Ok(result) => result,
-        Err(err) => Err(crate::session::ApiError::Internal(format!(
-            "Turn close task failed: {err}"
-        ))),
-    };
-    match commit_result {
-        Ok(commit) => {
-            let status = map_status(&agent_status);
-            observer
-                .emit(TurnEvent::TurnCommitted {
-                    session_id: prepared.session_id,
-                    commit_id: commit.commit_id,
-                    status,
-                    disposition: commit.disposition,
-                })
-                .await;
-        }
-        Err(e) => {
-            observer
-                .emit(TurnEvent::CommitFailed {
-                    reason: e.to_string(),
-                })
-                .await;
-        }
-    }
 }
 
 /// Execute a turn with an already-prepared session snapshot and return a live stream.
@@ -465,14 +225,22 @@ pub(super) async fn stream_turn_live_prepared(
     prepared: PreparedTurn,
     request: RunTurnRequest,
     deps: ProductionTurnDeps,
-    execution_lock: FlockGuard,
+    coordinator: Arc<super::coordinator::TurnCoordinator>,
+    execution_lock: Arc<FlockGuard>,
 ) -> Result<TurnEventStream> {
-    // The full live task owns this guard from TurnStarted through checkpoint
-    // publication. The caller acquired it before preparing the snapshot.
     let (tx, rx) = mpsc::channel::<TurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
 
     tokio::spawn(async move {
-        run_live_turn_task(session, prepared, request, tx, deps, execution_lock).await;
+        run_live_turn_task(
+            session,
+            prepared,
+            request,
+            tx,
+            deps,
+            coordinator,
+            execution_lock,
+        )
+        .await;
     });
 
     Ok(Box::pin(ReceiverStream::new(rx)))
@@ -495,38 +263,69 @@ pub(super) async fn stream_turn_live(
             .map_err(|err| {
                 crate::session::ApiError::Internal(format!("acquire session lock task: {err}"))
             })??;
+    let execution_lock = Arc::new(execution_lock);
     let prepared = prepare_live_turn_locked(
         &session,
         &request,
         workspace_root.canonical_path(),
-        &execution_lock,
+        execution_lock.as_ref(),
     )?;
-    stream_turn_live_prepared(session, prepared, request, deps, execution_lock).await
+    let layout = session.state_layout().ok_or_else(|| {
+        crate::session::ApiError::Internal(
+            "test live Turn requires a StateLayout-backed SessionApi".to_string(),
+        )
+    })?;
+    let key = prepared.project_store_key;
+    let invocations = Arc::new(
+        lancet_audit::invocation_store::InvocationStore::open(&layout, &key).map_err(|err| {
+            crate::session::ApiError::Internal(format!("open invocation store: {err}"))
+        })?,
+    );
+    let coordinator = Arc::new(super::coordinator::TurnCoordinator::new(
+        super::coordinator::CoordinatorStoreIo::new(
+            session.git_store_for_coordinator()?,
+            invocations,
+        ),
+        Arc::new(super::coordinator::RandomIdSource),
+    ));
+    stream_turn_live_prepared(
+        session,
+        prepared,
+        request,
+        deps,
+        coordinator,
+        execution_lock,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc;
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
+    use crate::turn::types::TurnEvent;
 
-    fn cep_started(call_id: u64) -> TurnEvent {
+    fn cep_started(ordinal: u64) -> TurnEvent {
         TurnEvent::CepCallStarted {
-            call_id,
+            invocation_id: lancet_protocol::InvocationId::parse(&format!(
+                "00000000-0000-4000-8000-{ordinal:012x}"
+            ))
+            .unwrap(),
             method: "session.todo_write".to_string(),
-            impact_kind: "session_state_mutation".to_string(),
-            audit_id: 7,
             semantic_stage: "cep_native".to_string(),
             guard_stage: "cep_policy_lifecycle".to_string(),
         }
     }
 
-    fn cep_finished(call_id: u64) -> TurnEvent {
+    fn cep_finished(ordinal: u64) -> TurnEvent {
         TurnEvent::CepCallFinished {
-            call_id,
+            invocation_id: lancet_protocol::InvocationId::parse(&format!(
+                "00000000-0000-4000-8000-{ordinal:012x}"
+            ))
+            .unwrap(),
             method: "session.todo_write".to_string(),
-            impact_kind: "session_state_mutation".to_string(),
-            audit_id: 7,
             ok: true,
             semantic_stage: "cep_native".to_string(),
             guard_stage: "cep_policy_lifecycle".to_string(),
@@ -558,11 +357,11 @@ mod tests {
 
         assert!(matches!(
             rx.recv().await,
-            Some(TurnEvent::CepCallStarted { call_id: 1, .. })
+            Some(TurnEvent::CepCallStarted { invocation_id, .. }) if invocation_id.to_string() == "00000000-0000-4000-8000-000000000001"
         ));
         assert!(matches!(
             rx.recv().await,
-            Some(TurnEvent::CepCallFinished { call_id: 1, .. })
+            Some(TurnEvent::CepCallFinished { invocation_id, .. }) if invocation_id.to_string() == "00000000-0000-4000-8000-000000000001"
         ));
         assert!(matches!(
             rx.recv().await,
@@ -595,112 +394,5 @@ mod tests {
             rx.recv().await,
             Some(TurnEvent::ModelStarted { model, .. }) if model == "model"
         ));
-    }
-
-    // ── Live activation lifecycle tests (Task 3) ────────────────────────────
-
-    fn make_agent_result(status: AgentTurnStatus) -> AgentTurnResult {
-        let terminal_reason = if matches!(status, AgentTurnStatus::Completed) {
-            None
-        } else {
-            Some("test reason".to_string())
-        };
-        AgentTurnResult {
-            status,
-            messages: vec![],
-            assistant_output: String::new(),
-            usage: lattice_session::TurnUsage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-            },
-            tool_results: vec![],
-            terminal_reason,
-            events: vec![],
-        }
-    }
-
-    #[test]
-    fn live_activation_completed_classifies_as_workspace_less() {
-        let result = make_agent_result(AgentTurnStatus::Completed);
-        let outcome = classify_live_outcome(&result, false);
-
-        assert_eq!(outcome.status, TurnCommitStatus::Completed);
-        assert_eq!(
-            outcome.disposition,
-            lattice_session::WorkspaceDisposition::NotApplicable
-        );
-        assert_eq!(
-            outcome.resource_action,
-            super::super::lifecycle::ResourceAction::Destroy
-        );
-    }
-
-    #[test]
-    fn live_activation_error_classifies_as_aborted() {
-        let result = make_agent_result(AgentTurnStatus::Error);
-        let outcome = classify_live_outcome(&result, false);
-
-        assert_eq!(outcome.status, TurnCommitStatus::Error);
-        assert_eq!(
-            outcome.disposition,
-            lattice_session::WorkspaceDisposition::Aborted
-        );
-        assert_eq!(
-            outcome.resource_action,
-            super::super::lifecycle::ResourceAction::Destroy
-        );
-    }
-
-    #[test]
-    fn live_activation_cancelled_classifies_as_aborted() {
-        let result = make_agent_result(AgentTurnStatus::Cancelled);
-        let outcome = classify_live_outcome(&result, false);
-
-        assert_eq!(outcome.status, TurnCommitStatus::Cancelled);
-        assert_eq!(
-            outcome.disposition,
-            lattice_session::WorkspaceDisposition::Aborted
-        );
-        assert_eq!(
-            outcome.resource_action,
-            super::super::lifecycle::ResourceAction::Destroy
-        );
-    }
-
-    #[test]
-    fn live_activation_outcome_messages_are_typed() {
-        let completed =
-            classify_live_outcome(&make_agent_result(AgentTurnStatus::Completed), false);
-        assert!(
-            completed
-                .messages
-                .iter()
-                .any(|m| m.contains("no workspace"))
-        );
-
-        let errored = classify_live_outcome(&make_agent_result(AgentTurnStatus::Error), false);
-        assert!(errored.messages.iter().any(|m| m.contains("agent error")));
-
-        let cancelled =
-            classify_live_outcome(&make_agent_result(AgentTurnStatus::Cancelled), false);
-        assert!(cancelled.messages.iter().any(|m| m.contains("cancelled")));
-    }
-
-    #[test]
-    fn live_activation_no_candidate_exported_flag() {
-        let statuses: [(AgentTurnStatus, &str); 3] = [
-            (AgentTurnStatus::Completed, "Completed"),
-            (AgentTurnStatus::Error, "Error"),
-            (AgentTurnStatus::Cancelled, "Cancelled"),
-        ];
-        for (status, name) in statuses {
-            let result = make_agent_result(status);
-            let outcome = classify_live_outcome(&result, false);
-            assert!(
-                !outcome.candidate_exported,
-                "candidate_exported must be false for {name}"
-            );
-        }
     }
 }

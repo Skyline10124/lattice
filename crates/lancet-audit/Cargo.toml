@@ -4,19 +4,15 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LANCET CEP audit store, query filters, row model, stage labels, and Cell evidence"
+description = "LANCET authoritative Git invocation ledger and operator reads"
 
 [dependencies]
 lancet-protocol = { workspace = true }
-lancet-catalog = { workspace = true }
-dirs = { workspace = true }
-rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
 lattice-store = { workspace = true }
 gix = { workspace = true }
 # Optional: only compiled into non-test builds when `test-support` is enabled.
@@ -39,6 +35,3 @@ lattice-conversation = { workspace = true }
 # production surface, so `lancet-api` cannot reach LATTICE session types
 # through audit.
 lattice-session = { workspace = true }
-# `test-method` provides the synthetic `TestEcho` typed method the audit tests
-# use as a stand-in method name. Dev-only.
-lancet-catalog = { workspace = true, features = ["test-method"] }

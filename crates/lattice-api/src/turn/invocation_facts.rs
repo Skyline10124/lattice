@@ -1,10 +1,6 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-// Private #139-B shell module: nothing routes through it until the Commit 6
-// production switch, so the non-test lib build sees it as dead code.
-#![allow(dead_code)]
-
 //! The cross-domain ledger→reconciliation-facts projection (ADR 0005 §2.1,
 //! GitHub #139-B Commit 1).
 //!

@@ -367,7 +367,7 @@ impl GitSessionGraphStore {
                                 ),
                             });
                         }
-                        if manifest.turn_id != pinned_turn {
+                        if manifest.turn_id.as_str() != pinned_turn {
                             return Err(SessionError::JournalCorruption {
                                 detail: format!(
                                     "turn pin '{name}' points at turn '{}'",

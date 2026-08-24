@@ -67,10 +67,10 @@ Standalone Tool-execution product contract.
   rewind, while session-graph movement stays above this crate.
 - FIXED #39: operator audit behavior and DTO ownership moved to `lancet-audit`;
   public `lancet_api` paths remain stable through a small error-mapping facade.
-- FIXED #114: query/tail/replay return typed full finalized rows and a compact
-  call trace; replay is complete for the selected turn, while status performs
-  its newest-20 bound in SQLite and includes optional structured Cell evidence.
-  The old attestation writer and provenance reconstruction surface were deleted.
+- LANDED #139-B Commit 6: query/tail/replay/status project the production Git
+  InvocationStore through typed identities and pinned OID cursors; status applies
+  its newest-20 bound to one pinned ledger view. SQLite audit/evidence adapters,
+  attestation reconstruction, and row import paths are deleted.
 
 ## Verification
 

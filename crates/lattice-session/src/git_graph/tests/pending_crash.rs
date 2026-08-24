@@ -17,7 +17,7 @@ use lattice_store::{Blocking, LockMode};
 use crate::SessionError;
 use crate::git_graph::GitSessionGraphStore;
 use crate::git_graph::tests::{Fixture, temp_dir};
-use crate::graph::{SessionGraphStore, TurnCommitStatus};
+use crate::graph::SessionGraphStore;
 use crate::pending::PendingSnapshot;
 use crate::pending::ResultDraft;
 use crate::pending::contract::{PendingStage, TurnClosingFacts};
@@ -958,10 +958,8 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
         .get_turn_commit(&session, &pinned)
         .expect("commit")
         .expect("found");
-    // Interrupted closes as legacy `error` with no logic-bearing terminal
-    // string; the typed outcome lives in the journal chain.
-    assert_eq!(commit.status, TurnCommitStatus::Error);
-    assert_eq!(commit.terminal_reason, None);
+    assert_eq!(commit.outcome, plan.outcome);
+    assert_eq!(commit.origin, ClosureOrigin::Reconciled);
 
     // The journal chain stays reachable from the pin: TurnCommit ->
     // Committed -> ... -> TurnStarted, and the Committed object carries the
@@ -994,8 +992,14 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
     // framing; the branch head is the recovered TurnCommit.
     let transcript = reopened.head_transcript(&session).expect("transcript");
     assert_eq!(transcript.messages.len(), 2);
-    assert_eq!(transcript.messages[0].content, "please continue");
-    assert_eq!(transcript.messages[1].role, "tool");
+    assert_eq!(
+        crate::test_helpers::text(&transcript.messages[0]),
+        Some("please continue")
+    );
+    assert_eq!(
+        transcript.messages[1].role,
+        lattice_conversation::MessageRole::Tool
+    );
     let head = reopened
         .kernel()
         .ref_target(&format!("refs/lattice/sessions/{session}/heads/main"))

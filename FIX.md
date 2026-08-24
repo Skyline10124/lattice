@@ -7345,3 +7345,34 @@ removed `benchmarks/invocation-store/results/**`, and updated
 - **Changed files:**
   `docs/adr/0005-durable-turn-invocation-and-private-git-stores.md`,
   `docs/plans/2026-08-17-issue139a-decision-record.md`, `FIX.md`.
+
+## GitHub #139-B Commit 6: production durable Turn and invocation hard cut — 2026-08-24
+
+- **ID/severity:** #139-B / CRITICAL architecture and durability cutover.
+- **Problem:** production Turn execution still crossed legacy unbound/numeric CEP identity,
+  mutable PendingTurn/legacy Turn dual authority, SQLite audit/evidence authority, and
+  status/disposition outcome projections. Crash recovery could not close every invocation
+  from one durable Git ledger without compatibility paths.
+- **Fix:** made caller-supplied `InvocationBinding` and typed `InvocationId` mandatory;
+  added strict server-side durable admission; moved live execution to the journal-backed
+  `TurnCoordinator` saga; persisted typed bound conversation messages and typed
+  `TurnOutcome`/`ClosureOrigin`/workspace checkpoints; published ResultDraft, terminal
+  material, and Cell evidence under one finite finalize budget; terminalized every skipped
+  binding and stopped live continuation after cancellation/deadline/indeterminate outcomes;
+  switched query/tail/replay/status and CLI surfaces to `invocations.git`; deleted SQLite
+  stores/dependencies, numeric audit identity, legacy outcome schema, and the product
+  `CepExecutorAdapter`; migrated black-box operator, privacy, failure, rewind, and release
+  harnesses. Review follow-ups added exact uncertain-draft revalidation, typed durability and
+  recovery errors, UTF-8-safe bounded errors, fail-closed journal timestamps, and deadline
+  enforcement while the provider stream is still opening.
+- **Verification:** `cargo fmt --all -- --check`; `git diff --check`;
+  `cargo check -p lancet-protocol -p lancet-dispatch -p lancet-audit -p lancet-runtime
+  -p lancet-native -p lancet-api -p lattice-session -p lattice-api -p lattice-cli
+  -p lattice-tui --all-targets`; package suites for the same crates; `cargo test -p
+  lattice-api` (98 unit tests plus all integrations, including Rewind 19/19);
+  `cargo xtask lancet-boundary`; `cargo xtask harness-boundary`; pinned-binary system
+  harnesses including `direct_failures` 8/8, `direct_secrets` 2/2, direct Tool/operator/
+  mutation/workspace-history/turn-contract targets, and release operator 1/1.
+- **Changed files:** protocol binding/evidence/error contracts; LANCET dispatch/runtime/native/
+  API and Git operator surfaces; lattice conversation/session/agent/API/CLI/TUI; system
+  harnesses; boundary gate; workspace manifests and lockfile; AGENTS.md; FIX.md.

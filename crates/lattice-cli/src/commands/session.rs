@@ -476,11 +476,19 @@ fn render_turn_log_entry(index: usize, entry: &lattice_api::TurnLogEntry) -> Str
     let mut lines = vec![
         format!("{}", format!("turn {index}").bold()),
         format!("  {} {}", "commit:".green(), display_id(&entry.commit_id)),
-        format!("  {} {}", "status:".green(), entry.status.as_str()),
         format!(
             "  {} {}",
-            "disposition:".green(),
-            entry.disposition.as_str()
+            "outcome:".green(),
+            serde_json::to_string(&entry.outcome).expect("serialize outcome")
+        ),
+        format!("  {} {}", "origin:".green(), entry.origin.as_str()),
+        format!(
+            "  {} {}",
+            "workspace history:".green(),
+            entry
+                .workspace_history_checkpoint
+                .as_oid()
+                .unwrap_or("empty")
         ),
         format!("  {} {}", "agent:".green(), entry.agent_name),
         format!("  {} {}", "model:".green(), entry.model),
@@ -848,12 +856,17 @@ mod session_cli {
     }
 
     #[test]
-    fn human_turn_log_renders_disposition_next_to_status() {
+    fn human_turn_log_renders_typed_terminal_facts() {
         let entry = lattice_session::TurnLogEntry {
             commit_id: "abc123".to_string(),
+            turn_id: lattice_session::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .expect("valid test TurnId"),
             parent_ids: vec![],
-            status: lattice_session::TurnCommitStatus::Completed,
-            disposition: lattice_session::WorkspaceDisposition::PendingWorktree,
+            outcome: lattice_session::TurnOutcome::Completed {
+                finish_reason: lattice_session::TurnFinishReason::Stop,
+            },
+            origin: lattice_session::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
             agent_name: "coder".to_string(),
             profile_snapshot_hash: "profile".to_string(),
             model: "test-model".to_string(),
@@ -862,15 +875,14 @@ mod session_cli {
             message_count: 2,
             tool_message_count: 0,
             usage: None,
-            terminal_reason: None,
             created_at: "2026-06-22T00:00:00Z".to_string(),
         };
 
         let rendered = render_turn_log_entry(0, &entry);
-        assert!(rendered.contains("status:"));
+        assert!(rendered.contains("outcome:"));
         assert!(rendered.contains("completed"));
-        assert!(rendered.contains("disposition:"));
-        assert!(rendered.contains("pending_worktree"));
+        assert!(rendered.contains("origin:"));
+        assert!(rendered.contains("live"));
     }
 
     #[test]

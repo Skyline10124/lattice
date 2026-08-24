@@ -9,10 +9,7 @@
 //! string).
 
 use lattice_session::test_helpers::{assistant_msg, user_msg};
-use lattice_session::{
-    GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
-    WorkspaceDisposition,
-};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore, TurnCommitInput};
 use tempfile::TempDir;
 
 fn test_store_key() -> lattice_session::ProjectStoreKey {
@@ -54,7 +51,9 @@ fn git_store_get_turn_commit_includes_profile_snapshot_json() {
     let profile_hash = "deadbeefcafebabe".to_string();
 
     let input = TurnCommitInput {
-        workspace_history_oid: None,
+        turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .expect("valid test TurnId"),
+        workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
         session_id: session_id.clone(),
         parent_ids: vec![],
         messages: vec![user_msg("run"), assistant_msg("done")],
@@ -63,12 +62,12 @@ fn git_store_get_turn_commit_includes_profile_snapshot_json() {
         profile_snapshot_json: profile_json.clone(),
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
-        status: TurnCommitStatus::Completed,
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
+        outcome: lattice_session::TurnOutcome::Completed {
+            finish_reason: lattice_session::TurnFinishReason::Stop,
+        },
+        origin: lattice_session::ClosureOrigin::Live,
         commit_message: "turn-0".to_string(),
         usage: None,
-        terminal_reason: None,
     };
 
     let committed = store.commit_turn(input).expect("commit_turn");

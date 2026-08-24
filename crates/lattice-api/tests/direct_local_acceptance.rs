@@ -17,12 +17,15 @@
 //! - a successful mutation is NOT rolled back when a later step fails.
 //! - the closed five-method catalog is exactly what the runtime exposes.
 
-use lancet_api::{LancetRuntime, LancetRuntimeConfig};
+mod support;
+
+use lancet_api::LancetRuntimeConfig;
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
 use lancet_catalog::catalog;
 use lancet_cep::ToolExposure;
 use lancet_protocol::Retriability;
 use lancet_protocol::evidence::{MutationInstallation, MutationPrecondition, ObservedTarget};
+use support::ReservedRuntime;
 use tempfile::TempDir;
 
 /// The migrated Component Tool's method name (#29). Not a catalog constant: its
@@ -43,7 +46,7 @@ const COMPONENT_TOOLS: [&str; 4] = [OBSERVE_WORKSPACE, MUTATE_CREATE, MUTATE_EDI
 /// Build a production runtime rooted at `root` with all five shipped Tools
 /// enabled — the one native catalog method plus four embedded Components —
 /// and an empty write-deny list.
-fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
+fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
     let mut policy = PolicyConfig::defaults_for_project_root(root.to_path_buf());
     policy.workspace = WorkspacePolicy {
         denied_write_patterns: Vec::new(),
@@ -51,9 +54,9 @@ fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
     };
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
-    LancetRuntime::build(LancetRuntimeConfig {
+    ReservedRuntime::build(LancetRuntimeConfig {
+        invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
-        project_root: root.to_path_buf(),
         enabled_tools: enabled,
         policy,
         // The embedded Component Tools are admitted too: `enabled_tools` is the
@@ -68,9 +71,6 @@ fn direct_local_runtime(root: &std::path::Path) -> LancetRuntime {
             max_boundary: lancet_protocol::cell::Trust::In,
         },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        audit: lancet_api::AuditBacking::InMemory,
-        model_id: "test".into(),
-        runtime_version: "test".into(),
     })
     .expect("direct-local runtime builds")
 }
@@ -248,9 +248,9 @@ async fn policy_deny_blocks_create_on_direct_local() {
     };
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     enabled.push(TODO_WRITE.to_string());
-    let runtime = LancetRuntime::build(LancetRuntimeConfig {
+    let runtime = ReservedRuntime::build(LancetRuntimeConfig {
+        invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
-        project_root: dir.path().to_path_buf(),
         enabled_tools: enabled,
         policy,
         // The embedded Component Tool is admitted too: `enabled_tools` is the
@@ -261,9 +261,6 @@ async fn policy_deny_blocks_create_on_direct_local() {
             ..Default::default()
         },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        audit: lancet_api::AuditBacking::InMemory,
-        model_id: "test".into(),
-        runtime_version: "test".into(),
     })
     .expect("runtime");
     let client = runtime.client();
@@ -558,71 +555,30 @@ async fn component_mutation_install_failure_leaves_no_partial_target() {
     );
 }
 
-/// Audit records method-local evidence (guarded path + Local Revision) and
-/// carries no routing identity: no `execution_backend`, no
-/// `upper_workspace_id`, no adapter-preflight or generic routing invocation
-/// flags (#60 (Codeberg #38)).
-///
-/// Both migrated Component paths get a leg: mutation and observation record
-/// their concrete targets in the versioned evidence tables and leave only an
-/// evidence pointer in the audit row. The no-routing-identity assertion is the
-/// same for both — that is the #60 subject.
+/// Component receipts carry method-local Cell evidence without routing metadata.
 #[tokio::test]
-async fn audit_records_method_local_evidence_without_routing_metadata() {
+async fn component_receipts_carry_method_local_evidence_without_routing_metadata() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("a.txt"), "audit-body\n").unwrap();
     let runtime = direct_local_runtime(dir.path());
     let client = runtime.client();
 
-    client
-        .call_raw("mutate.create", serde_json::json!({"path": "b.txt", "content": "audit-body\n", "create_parents": false}))
-        .await
-        .expect("component create");
-    client
-        .call_raw(
-            OBSERVE_WORKSPACE,
-            serde_json::json!({ "mode": "read_file", "path": "a.txt" }),
+    let create = client
+        .call_receipt(
+            MUTATE_CREATE,
+            serde_json::json!({
+                "path": "b.txt",
+                "content": "audit-body\n",
+                "create_parents": false
+            }),
         )
         .await
-        .expect("component read");
-    runtime.audit().await_pending().await;
-
-    let rows = runtime
-        .audit()
-        .query_rows(&lancet_native::AuditQueryFilters::default())
-        .expect("rows");
-    assert_eq!(rows.len(), 2, "audit must record both calls: {rows:?}");
-
-    // ── The mutate.create Component leg: Cell evidence, not native metadata ──
-    let create_row = rows
-        .iter()
-        .find(|row| row.method == "mutate.create")
-        .expect("the create call is audited");
-    let create_meta = create_row.metadata_json.as_deref().unwrap_or("{}");
-    assert!(
-        create_meta.contains("evidence_id") || create_meta.contains("component_cells"),
-        "Component mutate.create must point at Cell evidence: {create_meta}"
-    );
-    assert!(
-        create_meta.contains("mutate:write:workspace")
-            || create_meta.contains("alloc:write:workspace"),
-        "Component mutate.create must record mutation/result cells: {create_meta}"
-    );
-    assert!(
-        dir.path().join("b.txt").is_file(),
-        "mutate.create Component must have installed the file on disk"
-    );
-    let create_evidence_id = serde_json::from_str::<serde_json::Value>(create_meta)
-        .expect("create metadata json")["evidence_id"]
-        .as_i64()
-        .expect("the create Component row points at its evidence");
-    let create_evidence = runtime
-        .audit()
-        .call_evidence(lancet_native::EvidenceId(create_evidence_id))
-        .expect("create evidence read")
-        .expect("create evidence row exists");
-    assert_eq!(create_evidence.tool, MUTATE_CREATE);
-    let create_effect = create_evidence
+        .expect("component create receipt");
+    create.result.expect("component create result");
+    assert!(dir.path().join("b.txt").is_file());
+    assert_eq!(create.evidence.admission.tool, MUTATE_CREATE);
+    let create_effect = create
+        .evidence
         .effects
         .effects
         .iter()
@@ -644,50 +600,41 @@ async fn audit_records_method_local_evidence_without_routing_metadata() {
     assert_eq!(mutation.precondition, MutationPrecondition::Satisfied);
     assert_eq!(mutation.installation, MutationInstallation::Installed);
 
-    // ── The Component leg: the same fact, one indirection away ───────────
-    let observe_row = rows
-        .iter()
-        .find(|row| row.method == OBSERVE_WORKSPACE)
-        .expect("the observation is audited");
-    assert_eq!(
-        observe_row.semantic_stage, "cell_component",
-        "since #30 the observation is labeled by the vocabulary that authorized it"
-    );
-    let observe_meta = observe_row.metadata_json.as_deref().unwrap_or("{}");
-    let evidence_id = serde_json::from_str::<serde_json::Value>(observe_meta)
-        .expect("metadata json")["evidence_id"]
-        .as_i64()
-        .expect("a Component row points at its evidence");
-    let evidence = runtime
-        .audit()
-        .call_evidence(lancet_native::EvidenceId(evidence_id))
-        .expect("evidence read")
-        .expect("evidence row exists");
-    assert_eq!(evidence.tool, OBSERVE_WORKSPACE);
-    // The concrete path the host resolved and authorized — the Component's
-    // equivalent of `guarded_path`, recorded by the host rather than reported by
-    // the guest.
+    let observe = client
+        .call_receipt(
+            OBSERVE_WORKSPACE,
+            serde_json::json!({ "mode": "read_file", "path": "a.txt" }),
+        )
+        .await
+        .expect("component read receipt");
+    observe.result.expect("component read result");
+    assert_eq!(observe.evidence.admission.tool, OBSERVE_WORKSPACE);
     assert!(
-        evidence.effects.effects.iter().any(|effect| matches!(
-            &effect.target,
-            ObservedTarget::Path { path } if path == "a.txt"
-        )),
-        "the observation's evidence must name the resolved Local path: {:?}",
-        evidence.effects.effects
+        observe
+            .evidence
+            .effects
+            .effects
+            .iter()
+            .any(|effect| matches!(
+                &effect.target,
+                ObservedTarget::Path { path } if path == "a.txt"
+            ))
     );
 
-    // No routing identity or invocation flags survive, in either vocabulary.
-    for meta in [create_meta, observe_meta] {
+    for evidence in [&create.evidence, &observe.evidence] {
+        let json = serde_json::to_string(evidence).expect("serialize evidence");
         for retired in [
             "execution_backend",
             "upper_workspace_id",
             "adapter_preflight_invoked",
             "backend_invoked",
             "direct-local",
+            "audit_id",
+            "evidence_id",
         ] {
             assert!(
-                !meta.contains(retired),
-                "audit metadata must not carry retired routing field '{retired}': {meta}"
+                !json.contains(retired),
+                "Cell evidence must not carry retired field '{retired}': {json}"
             );
         }
     }

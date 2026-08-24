@@ -1,9 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-
-use crate::turn::model_rounds::{ToolDispatch, ToolExecutionError};
+use crate::turn::cep::ToolExecutionError;
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
@@ -14,11 +12,78 @@ use lancet_protocol::error::{
     CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData, PermissionErrorData,
     StateErrorData, ValidationErrorData, jsonrpc,
 };
-use lancet_protocol::{CepError, CepErrorCode, Retriability};
+use lancet_protocol::{
+    BindingIdentity, CepError, CepErrorCode, InvocationBinding, InvocationId, PlanKey,
+    Retriability, SessionId, TurnId, arguments_digest,
+};
 use lattice_llm::{FunctionCall, ToolCall};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::cep::CepExecutorAdapter;
+use super::cep::{CepErrorPayload, retriability_label, test_wire_code};
+use std::collections::HashSet;
 
+struct TestCepClient {
+    client: lancet_native::CepClient,
+    available_names: HashSet<String>,
+    enabled_names: HashSet<String>,
+}
+
+impl TestCepClient {
+    fn new(
+        client: lancet_native::CepClient,
+        definitions: &[lancet_cep::ToolDefinition],
+        enabled_names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            client,
+            available_names: definitions
+                .iter()
+                .map(|definition| definition.name.clone())
+                .collect(),
+            enabled_names: enabled_names.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    async fn execute(
+        &self,
+        binding: InvocationBinding,
+        call: &ToolCall,
+    ) -> Result<String, ToolExecutionError> {
+        let name = &call.function.name;
+        if !self.available_names.contains(name) || !self.enabled_names.contains(name) {
+            return Err(test_tool_error(lancet_protocol::error::method_not_found(
+                name,
+            )));
+        }
+        let params = serde_json::from_str(&call.function.arguments).map_err(|error| {
+            test_tool_error(lancet_protocol::error::parse_error(format!(
+                "invalid tool arguments JSON: {error}"
+            )))
+        })?;
+        let value = self
+            .client
+            .call_raw(binding, name.clone(), params)
+            .await
+            .map_err(test_tool_error)?;
+        serde_json::to_string(&value).map_err(|error| ToolExecutionError {
+            message: format!("serialize tool result: {error}"),
+            cep_error: None,
+        })
+    }
+}
+
+fn test_tool_error(error: CepError) -> ToolExecutionError {
+    ToolExecutionError {
+        message: error.message.clone(),
+        cep_error: Some(CepErrorPayload {
+            code: test_wire_code(&error),
+            message: error.message,
+            data: serde_json::to_value(&error.data).unwrap_or(serde_json::Value::Null),
+            retriability: retriability_label(&error.retriability),
+        }),
+    }
+}
 fn todo_registry<F, Fut>(handler: F) -> MethodRegistry
 where
     F: Fn(TestEchoParams, lancet_native::HandlerContext) -> Fut + Send + Sync + 'static,
@@ -29,32 +94,101 @@ where
     registry
 }
 
-async fn adapter_over_registry(registry: MethodRegistry) -> CepExecutorAdapter {
+struct ReservedTestClient {
+    adapter: TestCepClient,
+    invocations: Arc<lancet_audit::invocation_store::InvocationStore>,
+    definitions: Vec<lancet_cep::ToolDefinition>,
+}
+
+impl ReservedTestClient {
+    async fn execute_reserved(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
+        let ordinal = NEXT_TEST_INVOCATION.fetch_add(1, Ordering::Relaxed) as u32;
+        let params =
+            serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
+        let descriptor_identity = self
+            .definitions
+            .iter()
+            .find(|definition| definition.name == call.function.name)
+            .map(|definition| definition.descriptor_identity.clone())
+            .unwrap_or_else(|| "0".repeat(64));
+        let turn_id = TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
+        let binding = InvocationBinding {
+            invocation_id: InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
+                .unwrap(),
+            identity: BindingIdentity {
+                session_id: SessionId::parse("11111111111111111111111111111111").unwrap(),
+                turn_id,
+                model_step_ordinal: ordinal,
+                part_ordinal: 0,
+                method: call.function.name.clone(),
+                descriptor_identity,
+                arguments_digest: arguments_digest(&params),
+            },
+        };
+        if self
+            .definitions
+            .iter()
+            .any(|definition| definition.name == call.function.name)
+            && params != serde_json::Value::Null
+        {
+            self.invocations
+                .reserve_batch(
+                    PlanKey {
+                        turn_id,
+                        model_step_ordinal: ordinal,
+                    },
+                    std::slice::from_ref(&binding),
+                )
+                .expect("reserve test invocation");
+        }
+        self.adapter.execute(binding, call).await
+    }
+}
+
+static NEXT_TEST_INVOCATION: AtomicU64 = AtomicU64::new(1);
+
+fn unreserved_binding(call: &ToolCall) -> InvocationBinding {
+    let ordinal = NEXT_TEST_INVOCATION.fetch_add(1, Ordering::Relaxed) as u32;
+    let turn_id = TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
+    let params = serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
+    InvocationBinding {
+        invocation_id: InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
+            .unwrap(),
+        identity: BindingIdentity {
+            session_id: SessionId::parse("11111111111111111111111111111111").unwrap(),
+            turn_id,
+            model_step_ordinal: ordinal,
+            part_ordinal: 0,
+            method: call.function.name.clone(),
+            descriptor_identity: "0".repeat(64),
+            arguments_digest: arguments_digest(&params),
+        },
+    }
+}
+
+async fn reserved_client_over_registry(registry: MethodRegistry) -> ReservedTestClient {
     let (client, server) = CepTransport::pair(8);
+    let config = ServerRunConfig::in_memory_for_tests();
+    let invocations = Arc::clone(&config.invocations);
     let server_task = tokio::spawn(async move {
-        let _ = server
-            .run_native(registry, ServerRunConfig::in_memory_for_tests())
-            .await;
+        let _ = server.run_native(registry, config).await;
     });
-    // D.5: the adapter's available set is driven by runtime definitions, not by
-    // hardcoded catalog membership. Project the catalog definitions and pass
-    // them — same shape as LancetRuntime::build, which also extends the set with
-    // the Component descriptors. `lancet_cep` is a dev-dependency;
-    // `lancet_api::ToolDefinition` re-exports the same type.
-    //
-    // `test.echo` is added explicitly: it is the registered fixture these tests
-    // dispatch to, and it is deliberately not a catalog method.
     let mut definitions = lancet_cep::project_tool_definitions(catalog());
     definitions.push(lancet_cep::ToolDefinition::new(
         TestEcho::NAME,
         TestEcho::DESCRIPTION,
         serde_json::json!({"type": "object"}),
+        "0".repeat(64),
     ));
     let enabled: Vec<String> = definitions.iter().map(|d| d.name.clone()).collect();
-    let adapter = CepExecutorAdapter::new(client, &definitions, enabled);
+    let adapter = TestCepClient::new(client, &definitions, enabled);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
-    adapter
+    ReservedTestClient {
+        adapter,
+        invocations,
+        definitions,
+    }
 }
 
 fn assert_cep_payload(err: &ToolExecutionError, expected_code: i32) {
@@ -69,8 +203,8 @@ fn assert_cep_payload(err: &ToolExecutionError, expected_code: i32) {
 }
 
 #[tokio::test]
-async fn cep_executor_adapter_retired_methods_return_method_not_found() {
-    let adapter = adapter_over_registry(todo_registry(|params, _ctx| async move {
+async fn reserved_cep_client_retired_methods_return_method_not_found() {
+    let adapter = reserved_client_over_registry(todo_registry(|params, _ctx| async move {
         Ok(TestEchoResult {
             items: params.items,
         })
@@ -79,7 +213,7 @@ async fn cep_executor_adapter_retired_methods_return_method_not_found() {
 
     for method in ["observe.audit", "observe.audit_replay", "mutate.batch"] {
         let err = adapter
-            .execute(&ToolCall {
+            .execute_reserved(&ToolCall {
                 id: format!("call_{method}"),
                 function: FunctionCall {
                     name: method.to_string(),
@@ -93,8 +227,8 @@ async fn cep_executor_adapter_retired_methods_return_method_not_found() {
 }
 
 #[tokio::test]
-async fn cep_executor_adapter_parse_error_maps_to_32700() {
-    let adapter = adapter_over_registry(todo_registry(|params, _ctx| async move {
+async fn reserved_cep_client_parse_error_maps_to_32700() {
+    let adapter = reserved_client_over_registry(todo_registry(|params, _ctx| async move {
         Ok(TestEchoResult {
             items: params.items,
         })
@@ -102,7 +236,7 @@ async fn cep_executor_adapter_parse_error_maps_to_32700() {
     .await;
 
     let err = adapter
-        .execute(&ToolCall {
+        .execute_reserved(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
                 name: TestEcho::NAME.to_string(),
@@ -115,14 +249,14 @@ async fn cep_executor_adapter_parse_error_maps_to_32700() {
     assert_cep_payload(&err, jsonrpc::PARSE_ERROR);
 }
 
-/// A single-name enabled set lets that name through the adapter and the
+/// A single-name enabled set lets that name through the reserved client and the
 /// arguments reach the handler.
 ///
 /// Driven through `fetch.web`: this fixture needs a *registrable* handler seam.
-/// Component Tools have no `register_method` seam; their adapter coverage lives
-/// in `component_adapter::cep_executor_adapter_executes_component_tool`.
+/// Component Tools have no `register_method` seam; their reserved-client coverage lives
+/// in `component_client::reserved_cep_client_executes_component_tool`.
 #[tokio::test]
-async fn cep_executor_adapter_allows_enabled_native_method() {
+async fn reserved_cep_client_allows_enabled_native_method() {
     let mut registry = MethodRegistry::new();
     registry
         .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
@@ -134,19 +268,10 @@ async fn cep_executor_adapter_allows_enabled_native_method() {
             })
         })
         .unwrap();
-    let (client, server) = CepTransport::pair(8);
-    let server_task = tokio::spawn(async move {
-        let _ = server
-            .run_native(registry, ServerRunConfig::in_memory_for_tests())
-            .await;
-    });
-    let definitions = lancet_cep::project_tool_definitions(catalog());
-    let adapter = CepExecutorAdapter::new(client, &definitions, ["fetch.web".to_string()]);
-    tokio::task::yield_now().await;
-    std::mem::forget(server_task);
+    let adapter = reserved_client_over_registry(registry).await;
 
     let result = adapter
-        .execute(&ToolCall {
+        .execute_reserved(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
                 name: "fetch.web".to_string(),
@@ -157,16 +282,16 @@ async fn cep_executor_adapter_allows_enabled_native_method() {
         .expect("enabled tool should execute");
     assert!(
         result.contains("ok-from-handler") || result.contains("status"),
-        "handler result must surface through the adapter: {result}"
+        "handler result must surface through the reserved client: {result}"
     );
 }
 
 #[tokio::test]
-async fn cep_executor_adapter_unknown_method_maps_to_32601() {
-    let adapter = adapter_over_registry(MethodRegistry::new()).await;
+async fn reserved_cep_client_unknown_method_maps_to_32601() {
+    let adapter = reserved_client_over_registry(MethodRegistry::new()).await;
 
     let err = adapter
-        .execute(&ToolCall {
+        .execute_reserved(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
                 name: "crafted.unknown".to_string(),
@@ -185,7 +310,7 @@ async fn cep_executor_adapter_unknown_method_maps_to_32601() {
 /// validation, which needs a registered handler. `url` is the omitted required
 /// field.
 #[tokio::test]
-async fn cep_executor_adapter_invalid_params_maps_to_32602() {
+async fn reserved_cep_client_invalid_params_maps_to_32602() {
     let mut registry = MethodRegistry::new();
     registry
         .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
@@ -197,10 +322,10 @@ async fn cep_executor_adapter_invalid_params_maps_to_32602() {
             })
         })
         .unwrap();
-    let adapter = adapter_over_registry(registry).await;
+    let adapter = reserved_client_over_registry(registry).await;
 
     let err = adapter
-        .execute(&ToolCall {
+        .execute_reserved(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
                 name: "fetch.web".to_string(),
@@ -226,7 +351,7 @@ macro_rules! cep_family_test {
             let expected_data = expected.data.clone();
             let wire_code = expected.wire_code();
             let server_err = Arc::new(expected);
-            let adapter = adapter_over_registry(todo_registry({
+            let adapter = reserved_client_over_registry(todo_registry({
                 let server_err = Arc::clone(&server_err);
                 move |_params, _ctx| {
                     let err = Arc::clone(&server_err);
@@ -236,7 +361,7 @@ macro_rules! cep_family_test {
             .await;
 
             let err = adapter
-                .execute(&ToolCall {
+                .execute_reserved(&ToolCall {
                     id: "call_1".to_string(),
                     function: FunctionCall {
                         name: TestEcho::NAME.to_string(),
@@ -256,7 +381,7 @@ macro_rules! cep_family_test {
 }
 
 cep_family_test!(
-    cep_executor_adapter_validation_family_preserves_payload,
+    reserved_cep_client_validation_family_preserves_payload,
     CepErrorCode::SchemaMismatch,
     CepErrorData::Validation(ValidationErrorData {
         field: "path".into(),
@@ -266,7 +391,7 @@ cep_family_test!(
 );
 
 cep_family_test!(
-    cep_executor_adapter_permission_family_preserves_payload,
+    reserved_cep_client_permission_family_preserves_payload,
     CepErrorCode::CapabilityNotGranted,
     CepErrorData::Permission(PermissionErrorData {
         required_capability: "read_path".into(),
@@ -276,7 +401,7 @@ cep_family_test!(
 );
 
 cep_family_test!(
-    cep_executor_adapter_execution_family_preserves_payload,
+    reserved_cep_client_execution_family_preserves_payload,
     CepErrorCode::ExecutionFailed,
     CepErrorData::Execution(ExecutionErrorData {
         command: "ls".into(),
@@ -287,7 +412,7 @@ cep_family_test!(
 );
 
 cep_family_test!(
-    cep_executor_adapter_state_family_preserves_payload,
+    reserved_cep_client_state_family_preserves_payload,
     CepErrorCode::StaleContext,
     CepErrorData::State(StateErrorData {
         resource: "session".into(),
@@ -297,7 +422,7 @@ cep_family_test!(
 );
 
 cep_family_test!(
-    cep_executor_adapter_guard_family_preserves_payload,
+    reserved_cep_client_guard_family_preserves_payload,
     CepErrorCode::GuardDenied,
     CepErrorData::Guard(GuardErrorData {
         method: TestEcho::NAME.into(),
@@ -312,7 +437,7 @@ cep_family_test!(
 // declares no `ImpactKind` at all — a fixture claiming otherwise would document
 // a combination the production surface can no longer produce.
 cep_family_test!(
-    cep_executor_adapter_effect_family_preserves_payload,
+    reserved_cep_client_effect_family_preserves_payload,
     CepErrorCode::EffectViolation,
     CepErrorData::Effect(Box::new(EffectErrorData {
         method: "mutate.create".into(),
@@ -330,7 +455,7 @@ cep_family_test!(
 );
 
 #[tokio::test]
-async fn turn_runtime_constructs_one_adapter_per_turn() {
+async fn turn_runtime_constructs_one_client_per_turn() {
     use tempfile::TempDir;
 
     use lattice_agent::LlmClient;
@@ -360,7 +485,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 
     let deps = build_test_production_deps(dir.path().to_str().unwrap(), &[], llm, true, None).await;
 
-    assert_eq!(deps.build_metrics.adapter_instances, 1);
+    assert_eq!(deps.build_metrics.client_instances, 1);
     assert_eq!(deps.build_metrics.transport_pairs, 1);
 
     let deps2 = build_test_production_deps(
@@ -371,14 +496,13 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
         None,
     )
     .await;
-    assert_eq!(deps2.build_metrics.adapter_instances, 1);
+    assert_eq!(deps2.build_metrics.client_instances, 1);
     assert_eq!(deps2.build_metrics.transport_pairs, 1);
 }
 
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use lancet_native::SEMANTIC_STAGE_NATIVE;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -390,6 +514,7 @@ mod cep_native_registry {
 
         use crate::turn::test_support::build_test_production_deps;
 
+        let _xdg = lancet_audit::ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
 
         let llm: Arc<dyn LlmClient> = Arc::new(
@@ -440,28 +565,58 @@ mod cep_native_registry {
         )
         .await;
 
+        let params = FetchParams {
+            url,
+            headers: Default::default(),
+        };
+        let value = serde_json::to_value(&params).unwrap();
+        let binding = lancet_protocol::InvocationBinding {
+            invocation_id: lancet_protocol::InvocationId::parse(
+                "00000000-0000-4000-8000-000000000001",
+            )
+            .unwrap(),
+            identity: lancet_protocol::BindingIdentity {
+                session_id: lancet_protocol::SessionId::parse("11111111111111111111111111111111")
+                    .unwrap(),
+                turn_id: lancet_protocol::TurnId::parse("22222222-2222-4222-8222-222222222222")
+                    .unwrap(),
+                model_step_ordinal: 0,
+                part_ordinal: 0,
+                method: Fetch::NAME.to_string(),
+                descriptor_identity: deps
+                    .tool_catalog
+                    .iter()
+                    .find(|tool| tool.name == Fetch::NAME)
+                    .expect("fetch definition")
+                    .descriptor_identity
+                    .clone(),
+                arguments_digest: lancet_protocol::arguments_digest(&value),
+            },
+        };
+        let layout = lattice_session::StateLayout::resolve().unwrap();
+        let key = crate::turn::test_support::test_project_key(dir.path());
+        lancet_audit::invocation_store::InvocationStore::open(&layout, &key)
+            .unwrap()
+            .reserve_batch(
+                lancet_protocol::PlanKey {
+                    turn_id: binding.identity.turn_id,
+                    model_step_ordinal: 0,
+                },
+                std::slice::from_ref(&binding),
+            )
+            .unwrap();
         deps.cep_client
-            .call::<Fetch>(FetchParams {
-                url,
-                headers: Default::default(),
-            })
+            .call::<Fetch>(binding, params)
             .await
             .expect("native fetch.web");
-
-        let row = deps.audit.row_by_audit_id(1).unwrap();
-        assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
-        assert!(row.policy_enforced);
-        assert_eq!(row.impact_kind, "external_observation");
-        assert_eq!(row.model_id.as_deref(), Some("test-model"));
-        assert_eq!(row.runtime_version.as_deref(), Some("0.0.0-test"));
     }
 }
 
-/// D.6: `CepExecutorAdapter` can execute a Component Tool using a
+/// D.6: `reserved CepClient fixture` can execute a Component Tool using a
 /// descriptor-projected definition. This proves the LLM tool-call path
 /// is reachable for Component Tools (D.5's `call_raw` dispatch + D.4's
 /// descriptor projection).
-mod component_adapter {
+mod component_client {
     use super::*;
     use lancet_native::{
         CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
@@ -471,18 +626,19 @@ mod component_adapter {
     use std::sync::Arc;
 
     /// Spawn a native server with the no-op Component fixture, then build
-    /// a `CepExecutorAdapter` from the projected Component descriptor.
-    async fn adapter_with_noop_component() -> CepExecutorAdapter {
+    /// a `reserved CepClient fixture` from the projected Component descriptor.
+    async fn reserved_client_with_noop_component() -> ReservedTestClient {
         let components =
             Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op composition"));
         // #28: admission is fail-closed by default, so the fixture's tool has
-        // to be enabled for the adapter to reach it at all.
+        // to be enabled for the reserved client to reach it at all.
         let mut config = ServerRunConfig::in_memory_for_tests().with_capability_admission(
             lancet_protocol::CapabilityAdmissionPolicy {
                 enabled_tools: std::collections::BTreeSet::from(["noop.echo".to_string()]),
                 ..Default::default()
             },
         );
+        let invocations = Arc::clone(&config.invocations);
         config.components = Some(components);
 
         let mut registry = MethodRegistry::new();
@@ -497,55 +653,61 @@ mod component_adapter {
         // shape as LancetRuntime::build (D.4).
         let components = ComponentRuntime::noop_fixture().expect("fixture");
         let definitions: Vec<lancet_api::ToolDefinition> = components
-            .descriptors()
-            .map(|d| {
+            .descriptor_identities()
+            .map(|(descriptor, identity)| {
                 lancet_api::ToolDefinition::new(
-                    d.name.clone(),
-                    d.description.clone(),
-                    d.params_schema.clone(),
+                    descriptor.name.clone(),
+                    descriptor.description.clone(),
+                    descriptor.params_schema.clone(),
+                    identity,
                 )
             })
             .collect();
 
-        let adapter = CepExecutorAdapter::new(client, &definitions, ["noop.echo".to_string()]);
+        let adapter = TestCepClient::new(client, &definitions, ["noop.echo".to_string()]);
         tokio::task::yield_now().await;
         std::mem::forget(server_task);
-        adapter
+        ReservedTestClient {
+            adapter,
+            invocations,
+            definitions,
+        }
     }
 
     #[tokio::test]
-    async fn cep_executor_adapter_executes_component_tool() {
-        let adapter = adapter_with_noop_component().await;
+    async fn reserved_cep_client_executes_component_tool() {
+        let adapter = reserved_client_with_noop_component().await;
 
         let result = adapter
-            .execute(&ToolCall {
+            .execute_reserved(&ToolCall {
                 id: "call_noop".to_string(),
                 function: FunctionCall {
                     name: "noop.echo".to_string(),
-                    arguments: r#"{"message":"adapter"}"#.to_string(),
+                    arguments: r#"{"message":"reserved-client"}"#.to_string(),
                 },
             })
             .await
-            .expect("adapter executes component tool");
+            .expect("reserved client executes component tool");
 
         assert!(
-            result.contains("adapter"),
+            result.contains("reserved-client"),
             "result must contain echoed message: {result}"
         );
     }
 
     #[tokio::test]
-    async fn cep_executor_adapter_rejects_disabled_component_tool() {
+    async fn reserved_cep_client_rejects_disabled_component_tool() {
         // The no-op descriptor is in the available set, but not in the
         // enabled set → method_not_found.
         let components = ComponentRuntime::noop_fixture().expect("fixture");
         let definitions: Vec<lancet_api::ToolDefinition> = components
-            .descriptors()
-            .map(|d| {
+            .descriptor_identities()
+            .map(|(descriptor, identity)| {
                 lancet_api::ToolDefinition::new(
-                    d.name.clone(),
-                    d.description.clone(),
-                    d.params_schema.clone(),
+                    descriptor.name.clone(),
+                    descriptor.description.clone(),
+                    descriptor.params_schema.clone(),
+                    identity,
                 )
             })
             .collect();
@@ -558,7 +720,7 @@ mod component_adapter {
                 )
                 .await;
         });
-        let adapter = CepExecutorAdapter::new(
+        let adapter = TestCepClient::new(
             client,
             &definitions,
             Vec::<String>::new(), // nothing enabled
@@ -566,14 +728,15 @@ mod component_adapter {
         tokio::task::yield_now().await;
         std::mem::forget(server_task);
 
+        let call = ToolCall {
+            id: "call_noop".to_string(),
+            function: FunctionCall {
+                name: "noop.echo".to_string(),
+                arguments: r#"{"message":"x"}"#.to_string(),
+            },
+        };
         let err = adapter
-            .execute(&ToolCall {
-                id: "call_noop".to_string(),
-                function: FunctionCall {
-                    name: "noop.echo".to_string(),
-                    arguments: r#"{"message":"x"}"#.to_string(),
-                },
-            })
+            .execute(unreserved_binding(&call), &call)
             .await
             .expect_err("disabled tool must fail");
         assert_cep_payload(&err, jsonrpc::METHOD_NOT_FOUND);

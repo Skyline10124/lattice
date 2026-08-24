@@ -9,12 +9,23 @@
 //! is the only production path since #143.
 use lattice_session::{
     GitSessionGraphStore, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
-    ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit,
-    TurnCommitInput, TurnLogEntry,
+    ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit, TurnLogEntry,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, thiserror::Error)]
+#[error("terminal evidence durability failed after {attempts} attempt(s)")]
+pub struct EvidenceDurabilityFailed {
+    pub attempts: u32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, thiserror::Error)]
+pub enum RecoveryRequired {
+    #[error("{0}")]
+    EvidenceDurabilityFailed(EvidenceDurabilityFailed),
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -35,6 +46,12 @@ pub enum ApiError {
 
     #[error("store unavailable: {0}")]
     StoreUnavailable(String),
+
+    #[error(transparent)]
+    EvidenceDurabilityFailed(#[from] EvidenceDurabilityFailed),
+
+    #[error("recovery required: {0}")]
+    RecoveryRequired(RecoveryRequired),
 }
 
 pub type Result<T> = std::result::Result<T, ApiError>;
@@ -149,6 +166,20 @@ impl SessionApi {
     pub fn with_state_layout(mut self, layout: lattice_session::StateLayout) -> Self {
         self.layout = Some(layout);
         self
+    }
+
+    pub(crate) fn git_store_for_coordinator(
+        &self,
+    ) -> Result<Arc<lattice_session::GitSessionGraphStore>> {
+        let layout = self.layout.as_ref().ok_or_else(|| {
+            ApiError::Internal(
+                "TurnCoordinator requires an explicit StateLayout-backed SessionApi".to_string(),
+            )
+        })?;
+        Ok(Arc::new(
+            lattice_session::GitSessionGraphStore::open_layout(layout)
+                .map_err(map_session_error)?,
+        ))
     }
 
     #[cfg(test)]
@@ -321,19 +352,6 @@ impl SessionApi {
         Ok((resolved, guard))
     }
 
-    pub(crate) fn commit_turn_locked(
-        &self,
-        input: TurnCommitInput,
-        execution_lock: &lattice_session::FlockGuard,
-    ) -> Result<TurnCommit> {
-        let resolved = self.resolve_id(&input.session_id)?;
-        let mut input = input;
-        input.session_id = resolved;
-        self.store
-            .commit_turn_locked(input, execution_lock)
-            .map_err(map_session_error)
-    }
-
     pub(crate) fn status_locked(
         &self,
         session_id: &str,
@@ -402,7 +420,7 @@ impl SessionApi {
     ///
     /// Resolution is by object id, so it is unaffected by branch movement,
     /// session reopen, or process restart. This is how a caller recovers the
-    /// `workspace_history_oid` a Turn arrived at (#63).
+    /// `WorkspaceHistoryCheckpoint` a Turn arrived at (#63).
     pub fn get_turn_commit(&self, session_id: &str, commit_id: &str) -> Result<Option<TurnCommit>> {
         let resolved = self.resolve_id(session_id)?;
         self.store
@@ -457,7 +475,7 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
 #[cfg(test)]
 mod session_graph {
     use super::*;
-    use lattice_session::{TurnCommitInput, TurnCommitStatus, WorkspaceDisposition};
+    use lattice_session::TurnCommitInput;
     use std::env;
     use std::fs;
 
@@ -508,8 +526,12 @@ mod session_graph {
                 assistant_msg(&format!("{session_id} response {i}")),
             ];
             let input = TurnCommitInput {
-                workspace_history_oid: None,
+                workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
                 session_id: session_id.to_string(),
+                turn_id: lancet_protocol::TurnId::parse(&format!(
+                    "00000000-0000-4000-8000-{i:012x}"
+                ))
+                .expect("valid test TurnId"),
                 parent_ids,
                 messages: messages.clone(),
                 agent_name: "coder".to_string(),
@@ -517,12 +539,12 @@ mod session_graph {
                 profile_snapshot_json: "{}".to_string(),
                 model: "sonnet".to_string(),
                 provider: "anthropic".to_string(),
-                status: TurnCommitStatus::Completed,
-                disposition: WorkspaceDisposition::NotApplicable,
-                lifecycle: None,
+                outcome: lattice_session::TurnOutcome::Completed {
+                    finish_reason: lattice_session::TurnFinishReason::Stop,
+                },
+                origin: lattice_session::ClosureOrigin::Live,
                 commit_message: format!("Turn {i}"),
                 usage: None,
-                terminal_reason: None,
             };
             let commit = api.store().commit_turn(input).expect("commit_turn");
             commit_ids.push(commit.commit_id);
@@ -746,8 +768,10 @@ mod session_graph {
 
         let feature_messages = vec![user_msg("Feature work"), assistant_msg("Done")];
         let feature_input = TurnCommitInput {
-            workspace_history_oid: None,
+            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
             session_id: "sess-diff".to_string(),
+            turn_id: lancet_protocol::TurnId::parse("ffffffff-ffff-4fff-bfff-ffffffffffff")
+                .expect("valid test TurnId"),
             parent_ids: vec![base_id.clone()],
             messages: feature_messages,
             agent_name: "coder".to_string(),
@@ -755,12 +779,12 @@ mod session_graph {
             profile_snapshot_json: "{}".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
-            status: TurnCommitStatus::Completed,
-            disposition: WorkspaceDisposition::NotApplicable,
-            lifecycle: None,
+            outcome: lattice_session::TurnOutcome::Completed {
+                finish_reason: lattice_session::TurnFinishReason::Stop,
+            },
+            origin: lattice_session::ClosureOrigin::Live,
             commit_message: "Feature work".to_string(),
             usage: None,
-            terminal_reason: None,
         };
         let feature_commit = api.store().commit_turn(feature_input).expect("commit");
 

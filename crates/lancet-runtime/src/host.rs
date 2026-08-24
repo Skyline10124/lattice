@@ -182,9 +182,16 @@ mod tests {
         let evidence = CellEvidenceLedger::new();
         let mut state = StoreState {
             call: ComponentCallContext {
-                call_id: 1,
+                invocation_id: lancet_protocol::InvocationId::parse(
+                    "00000000-0000-4000-8000-000000000001",
+                )
+                .expect("invocation id"),
                 turn_id: "turn-1".into(),
-                events: EventSink::new(tx, 1),
+                events: EventSink::new(
+                    tx,
+                    lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
+                        .expect("invocation id"),
+                ),
                 cancellation: Cancellation::new(cancel_rx),
                 evidence: evidence.clone(),
                 admitted: Arc::new(admitted),

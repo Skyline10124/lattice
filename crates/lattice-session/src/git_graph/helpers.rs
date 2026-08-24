@@ -11,12 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use lattice_store::{StoreRepo, TreeSpec};
 
-use crate::graph::{
-    GraphMessage, PreparedTurnCommit, TurnLifecycleEvidence, TurnLogEntry, canonical_json_bytes,
-};
+use lattice_conversation::{BoundToolCall, NativeMessage};
+
+use crate::graph::{TurnLogEntry, canonical_json_bytes};
+use crate::pending::{ClosureOrigin, TurnOutcome, WorkspaceHistoryCheckpoint};
 use crate::{Result, SessionError};
 
-pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 4;
 
 /// Canonical manifest stored at `turn/manifest.json` in every session commit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,71 +25,24 @@ pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 2;
 pub(crate) struct GitSessionManifest {
     pub schema_version: u32,
     pub session_id: String,
-    pub turn_id: String,
+    pub turn_id: lancet_protocol::TurnId,
     pub parent_oids: Vec<String>,
-    pub execution_status: String,
-    pub disposition: String,
+    pub outcome: TurnOutcome,
+    pub origin: ClosureOrigin,
     pub model: String,
     pub provider: String,
     pub agent_name: String,
     pub profile_snapshot_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub baseline_oid: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_oid: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_project_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_ref: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verification: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resumes_turn_oid: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_reason: Option<String>,
-    /// Workspace-history object id this Turn ended at (GitHub #63).
-    ///
-    /// Durable in the commit tree, so the Turn's LATTICE mutations stay
-    /// resolvable after session reopen, branch movement, and process restart.
-    /// Omitted when absent, keeping manifests for history-less turns
-    /// byte-identical to pre-#63 ones.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_history_oid: Option<String>,
-    // Legacy-ID traceability fields retained for forward-compatible reads of
-    // historically migrated manifests. Native commits leave these as `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_commit_id: Option<String>,
+    pub workspace_history_checkpoint: WorkspaceHistoryCheckpoint,
     pub commit_message: String,
     pub timestamp: String,
-}
-
-pub(crate) fn derive_turn_id(prepared: &PreparedTurnCommit) -> String {
-    prepared.turn_seed.chars().take(16).collect()
 }
 
 /// Build the `turn/agent.json` blob.
 pub(crate) fn build_agent_json(agent_name: &str) -> String {
     serde_json::json!({ "agent_name": agent_name }).to_string()
-}
-
-/// Build the `turn/audit.json` blob carrying lifecycle ref pointers.
-pub(crate) fn build_audit_json(lifecycle: &Option<TurnLifecycleEvidence>) -> String {
-    match lifecycle {
-        Some(lc) => serde_json::json!({
-            "target_project_ref": lc.target_project_ref,
-            "baseline_oid": lc.baseline_oid,
-            "candidate_oid": lc.candidate_oid,
-            "candidate_ref": lc.candidate_ref,
-        })
-        .to_string(),
-        None => "{}".to_string(),
-    }
 }
 
 pub(crate) fn parse_oid(hex: &str) -> Result<gix::ObjectId> {
@@ -102,20 +56,17 @@ pub(crate) fn build_turn_tree(
     messages_jsonl: &str,
     agent_json: &str,
     profile_json: &str,
-    audit_json: &str,
 ) -> Result<gix::ObjectId> {
     let manifest_blob = store.write_blob(manifest_bytes)?;
     let messages_blob = store.write_blob(messages_jsonl.as_bytes())?;
     let agent_blob = store.write_blob(agent_json.as_bytes())?;
     let profile_blob = store.write_blob(profile_json.as_bytes())?;
-    let audit_blob = store.write_blob(audit_json.as_bytes())?;
 
     let mut spec = TreeSpec::new();
     spec.upsert("manifest.json", EntryKind::Blob, manifest_blob)
         .upsert("messages.jsonl", EntryKind::Blob, messages_blob)
         .upsert("agent.json", EntryKind::Blob, agent_blob)
-        .upsert("profile.json", EntryKind::Blob, profile_blob)
-        .upsert("audit.json", EntryKind::Blob, audit_blob);
+        .upsert("profile.json", EntryKind::Blob, profile_blob);
     Ok(store.write_tree(&spec)?)
 }
 
@@ -135,11 +86,18 @@ pub(crate) fn serialize_manifest(manifest: &GitSessionManifest) -> Result<Vec<u8
 }
 
 pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<GitSessionManifest> {
-    serde_json::from_slice(bytes)
-        .map_err(|e| SessionError::Git(format!("parse manifest.json: {e}")))
+    let manifest: GitSessionManifest = serde_json::from_slice(bytes)
+        .map_err(|e| SessionError::Git(format!("parse manifest.json: {e}")))?;
+    if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
+        return Err(SessionError::Git(format!(
+            "unsupported manifest schema version {}, expected {MANIFEST_SCHEMA_VERSION}",
+            manifest.schema_version
+        )));
+    }
+    Ok(manifest)
 }
 
-pub(crate) fn messages_to_jsonl(messages: &[GraphMessage]) -> Result<String> {
+pub(crate) fn messages_to_jsonl(messages: &[NativeMessage<BoundToolCall>]) -> Result<String> {
     let mut lines = Vec::with_capacity(messages.len());
     for m in messages {
         let line = serde_json::to_string(m)
@@ -149,7 +107,7 @@ pub(crate) fn messages_to_jsonl(messages: &[GraphMessage]) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-pub(crate) fn parse_messages_jsonl(jsonl: &str) -> Result<Vec<GraphMessage>> {
+pub(crate) fn parse_messages_jsonl(jsonl: &str) -> Result<Vec<NativeMessage<BoundToolCall>>> {
     if jsonl.is_empty() {
         return Ok(Vec::new());
     }
@@ -187,11 +145,10 @@ pub(crate) fn turn_log_entry_from_manifest(
         .and_then(|v| serde_json::from_value(v.clone()).ok());
     TurnLogEntry {
         commit_id: commit_oid.to_string(),
+        turn_id: manifest.turn_id,
         parent_ids: manifest.parent_oids.clone(),
-        status: crate::graph::TurnCommitStatus::parse(&manifest.execution_status)
-            .unwrap_or(crate::graph::TurnCommitStatus::Completed),
-        disposition: crate::graph::WorkspaceDisposition::parse(&manifest.disposition)
-            .unwrap_or(crate::graph::WorkspaceDisposition::NotApplicable),
+        outcome: manifest.outcome.clone(),
+        origin: manifest.origin,
         agent_name: manifest.agent_name.clone(),
         profile_snapshot_hash: manifest.profile_snapshot_hash.clone(),
         model: manifest.model.clone(),
@@ -200,7 +157,7 @@ pub(crate) fn turn_log_entry_from_manifest(
         message_count,
         tool_message_count,
         usage,
-        terminal_reason: manifest.terminal_reason.clone(),
+        workspace_history_checkpoint: manifest.workspace_history_checkpoint.clone(),
         created_at: manifest.timestamp.clone(),
     }
 }

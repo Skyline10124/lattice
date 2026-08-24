@@ -203,13 +203,8 @@ pub const ISSUE139B_LEGACY_ALLOWLIST: &[&str] = &[
     "crates/lancet-api/src/rewind.rs",
     "crates/lancet-api/src/runtime.rs",
     "crates/lancet-api/src/status.rs",
-    "crates/lancet-audit/src/audit.rs",
-    "crates/lancet-audit/src/audit_tests.rs",
-    "crates/lancet-audit/src/evidence.rs",
-    "crates/lancet-audit/src/evidence_tests.rs",
     "crates/lancet-audit/src/operator.rs",
     "crates/lancet-audit/src/operator_tests.rs",
-    "crates/lancet-audit/src/store_path.rs",
     "crates/lancet-authority/tests/guard_decide_fuzz.rs",
     "crates/lancet-dispatch/src/registry.rs",
     "crates/lancet-dispatch/src/transport.rs",
@@ -226,9 +221,6 @@ pub const ISSUE139B_LEGACY_ALLOWLIST: &[&str] = &[
     "crates/lancet-runtime/src/host_mutate.rs",
     "crates/lancet-runtime/src/runtime.rs",
     "crates/lattice-api/src/turn/cep.rs",
-    // Temporary #139-B pre-cut sequencing adapter; deleted by the Commit 6
-    // hard cut together with its numeric CEP event fields.
-    "crates/lattice-api/src/turn/model_rounds.rs",
     "crates/lattice-api/src/turn/cep_tests.rs",
     "crates/lattice-api/src/turn/live.rs",
     "crates/lattice-api/src/turn/live_tests.rs",
@@ -240,6 +232,8 @@ pub const ISSUE139B_LEGACY_ALLOWLIST: &[&str] = &[
     "crates/lattice-api/tests/rewind_acceptance.rs",
     "crates/lattice-api/tests/usage_turn.rs",
     "crates/lattice-api/tests/workspace_history_acceptance.rs",
+    // Black-box negative assertion proving SQLite-only evidence identity is absent.
+    "crates/lattice-system-harness/tests/release_operator.rs",
     "crates/lattice-session/src/git_graph/pending.rs",
     "crates/lattice-session/src/git_graph/tests/pending_journal.rs",
     "crates/lattice-session/src/pending/contract.rs",

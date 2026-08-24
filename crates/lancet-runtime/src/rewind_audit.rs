@@ -359,7 +359,10 @@ mod tests {
         history
             .record(&crate::history::MutationRecord {
                 turn_id: "s0:root".to_string(),
-                call_id: 1,
+                invocation_id: lancet_protocol::InvocationId::parse(
+                    "00000000-0000-4000-8000-000000000001",
+                )
+                .expect("invocation id"),
                 method: "mutate.create".to_string(),
                 path: "file.txt".to_string(),
                 before: None,

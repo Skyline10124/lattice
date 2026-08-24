@@ -1,19 +1,12 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-// Private #139-B shell module: nothing routes through it until the Commit 6
-// production switch, so the non-test lib build sees it as dead code.
-#![allow(dead_code)]
-
 //! Private `TurnCoordinator` dependency bundle (ADR 0005 §10, GitHub #139-B).
 //!
-//! Commit 1 of the #139-B hard cut lands only the coordinator's composition
-//! shape: the blocking store adapters, the ledger→facts projection seam, and
-//! the injectable identity source. Nothing in the production turn path
-//! constructs or drives this bundle — `stream_turn` still runs the numeric /
-//! SQLite-backed agent-loop orchestration until the single production switch,
-//! and the temporary structural allowlist in `cargo xtask lancet-boundary`
-//! tracks exactly those legacy files.
+//! The coordinator owns the production cross-store Turn saga. It freezes and
+//! journals accepted inputs, drives one provider attempt at a time, reserves exact
+//! invocation bindings before dispatch, and reconciles interrupted Turns without
+//! repeating provider or Tool execution.
 //!
 //! Locking contract carried by every adapter (ADR 0005 §5, plan §2.2): the
 //! coordinator holds the full-Turn `SessionExecutionLock`, but no repository
@@ -44,6 +37,8 @@ pub(crate) enum CoordinatorIoError {
     InvocationStore(#[from] lancet_audit::invocation_store::InvocationStoreError),
     #[error("blocking adapter task failed: {0}")]
     Blocking(#[from] tokio::task::JoinError),
+    #[error("terminal evidence durability failed after {attempts} attempt(s)")]
+    EvidenceDurabilityFailed { attempts: u32 },
 }
 
 /// Injectable canonical identity source (ADR 0005 §1).
@@ -108,6 +103,102 @@ impl CoordinatorStoreIo {
             .map_err(CoordinatorIoError::Blocking)?
             .map_err(CoordinatorIoError::Session)
     }
+    pub(crate) async fn begin_turn(
+        &self,
+        facts: lattice_session::pending::TurnStartedFacts,
+        lock: Arc<lattice_session::FlockGuard>,
+    ) -> Result<PendingTurnTip, CoordinatorIoError> {
+        let store = Arc::clone(&self.session);
+        tokio::task::spawn_blocking(move || store.begin_pending_turn(facts, &lock))
+            .await
+            .map_err(CoordinatorIoError::Blocking)?
+            .map_err(CoordinatorIoError::Session)
+    }
+
+    pub(crate) async fn advance_turn(
+        &self,
+        session_id: String,
+        stage: lattice_session::pending::PendingStage,
+        recorded_at: i64,
+        lock: Arc<lattice_session::FlockGuard>,
+    ) -> Result<PendingTurnTip, CoordinatorIoError> {
+        let store = Arc::clone(&self.session);
+        tokio::task::spawn_blocking(move || {
+            store.advance_pending_turn(&session_id, stage, recorded_at, &lock)
+        })
+        .await
+        .map_err(CoordinatorIoError::Blocking)?
+        .map_err(CoordinatorIoError::Session)
+    }
+
+    pub(crate) async fn reserve_plan(
+        &self,
+        plan: lattice_session::pending::BindingPlan,
+    ) -> Result<(), CoordinatorIoError> {
+        let store = Arc::clone(&self.invocations);
+        let bindings = plan
+            .bindings
+            .iter()
+            .map(
+                |binding| lancet_audit::invocation_store::ReservationBinding {
+                    invocation_id: binding.invocation_id,
+                    identity: lancet_audit::invocation_store::BindingIdentity {
+                        session_id: binding.address.message.session_id,
+                        turn_id: binding.address.message.turn_id,
+                        model_step_ordinal: binding.address.message.model_step_ordinal,
+                        part_ordinal: binding.address.part_ordinal,
+                        method: binding.method.clone(),
+                        descriptor_identity: binding.descriptor_identity.clone(),
+                        arguments_digest: binding.arguments_digest,
+                    },
+                },
+            )
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || store.reserve_batch(plan.plan_key, &bindings))
+            .await
+            .map_err(CoordinatorIoError::Blocking)?
+            .map_err(CoordinatorIoError::InvocationStore)
+    }
+
+    pub(crate) async fn finalize_turn(
+        &self,
+        session_id: String,
+        turn_id: TurnId,
+        lock: Arc<lattice_session::FlockGuard>,
+    ) -> Result<lattice_session::TurnCommit, CoordinatorIoError> {
+        let store = Arc::clone(&self.session);
+        tokio::task::spawn_blocking(move || store.finalize_turn(&session_id, &turn_id, &lock))
+            .await
+            .map_err(CoordinatorIoError::Blocking)?
+            .map_err(CoordinatorIoError::Session)
+    }
+
+    pub(crate) async fn publish_draft(
+        &self,
+        candidate: lattice_session::pending::ResultDraft,
+        lock: Arc<lattice_session::FlockGuard>,
+    ) -> Result<lattice_session::pending::DraftPublication, CoordinatorIoError> {
+        let store = Arc::clone(&self.session);
+        tokio::task::spawn_blocking(move || store.publish_draft(&candidate, &lock))
+            .await
+            .map_err(CoordinatorIoError::Blocking)?
+            .map_err(CoordinatorIoError::Session)
+    }
+
+    pub(crate) async fn classify_draft(
+        &self,
+        candidate: lattice_session::pending::ResultDraft,
+    ) -> Result<lattice_session::pending::DraftClassification, CoordinatorIoError> {
+        let store = Arc::clone(&self.session);
+        tokio::task::spawn_blocking(move || store.classify_draft(&candidate))
+            .await
+            .map_err(CoordinatorIoError::Blocking)?
+            .map_err(CoordinatorIoError::Session)
+    }
+
+    pub(crate) fn session_store(&self) -> Arc<GitSessionGraphStore> {
+        Arc::clone(&self.session)
+    }
 
     /// Pin one invocation ledger view and project it into the pure
     /// reconciliation vocabulary.
@@ -155,6 +246,20 @@ impl CoordinatorStoreIo {
     ) -> Result<(), FinalizeFailure<lancet_audit::invocation_store::InvocationStoreError>> {
         let clock = TokioFinalizeClock;
         let budget = FinalizeBudget::anchored_at(clock.now());
+        self.publish_terminal_with_budget(invocation, outcome, material, evidence, budget)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn publish_terminal_with_budget(
+        &self,
+        invocation: lancet_protocol::InvocationId,
+        outcome: lancet_audit::invocation_store::TerminalOutcome,
+        material: lancet_audit::invocation_store::TerminalMaterial,
+        evidence: lancet_audit::invocation_store::TerminalEvidence,
+        budget: FinalizeBudget,
+    ) -> Result<(), FinalizeFailure<lancet_audit::invocation_store::InvocationStoreError>> {
+        let clock = TokioFinalizeClock;
         let store = Arc::clone(&self.invocations);
         // The frozen candidate is shared immutably by every attempt; each
         // retry publishes byte-identical facts.
@@ -186,21 +291,295 @@ impl CoordinatorStoreIo {
         })
         .await
     }
+
+    pub(crate) async fn revalidate_draft_under_budget(
+        &self,
+        candidate: lattice_session::pending::ResultDraft,
+        budget: FinalizeBudget,
+    ) -> Result<
+        lattice_session::pending::DraftClassification,
+        FinalizeFailure<lancet_audit::invocation_store::InvocationStoreError>,
+    > {
+        let clock = TokioFinalizeClock;
+        let candidate = Arc::new(candidate);
+        let classification = Arc::new(std::sync::Mutex::new(None));
+        finalize_under_budget(&clock, budget, {
+            let candidate = Arc::clone(&candidate);
+            let classification = Arc::clone(&classification);
+            move || {
+                let candidate = Arc::clone(&candidate);
+                let classification = Arc::clone(&classification);
+                async move {
+                    match self.classify_draft((*candidate).clone()).await {
+                        Ok(value) => {
+                            *classification.lock().expect("classification lock") = Some(value);
+                            AttemptOutcome::Published
+                        }
+                        Err(error) => AttemptOutcome::Failed {
+                            error: coordinator_error_for_finalize(error),
+                        },
+                    }
+                }
+            }
+        })
+        .await?;
+        classification
+            .lock()
+            .expect("classification lock")
+            .clone()
+            .ok_or_else(|| {
+                FinalizeFailure::Fatal(
+                    lancet_audit::invocation_store::InvocationStoreError::Corruption {
+                        detail: "draft revalidation completed without a classification".into(),
+                    },
+                )
+            })
+    }
 }
 
-/// The coordinator's private dependency bundle (plan §5 Commit 1).
-///
-/// Shell only. It is not wired into `stream_turn`, `run_turn`, or the
-/// temporary CEP adapter, and it performs no reservation, `DispatchStarted`
-/// publication, or Turn-commit I/O until the production hard cut.
-pub(crate) struct CoordinatorDeps {
+fn coordinator_error_for_finalize(
+    error: CoordinatorIoError,
+) -> lancet_audit::invocation_store::InvocationStoreError {
+    match error {
+        CoordinatorIoError::Session(lattice_session::SessionError::Store(error)) => {
+            lancet_audit::invocation_store::InvocationStoreError::Store(error)
+        }
+        other => lancet_audit::invocation_store::InvocationStoreError::Corruption {
+            detail: format!("draft revalidation failed: {other}"),
+        },
+    }
+}
+
+/// Production Turn coordinator. Owns the durable Session/Invocation saga.
+pub(crate) struct TurnCoordinator {
     pub(crate) io: CoordinatorStoreIo,
     pub(crate) ids: Arc<dyn IdSource>,
 }
-
-impl CoordinatorDeps {
+impl TurnCoordinator {
     pub(crate) fn new(io: CoordinatorStoreIo, ids: Arc<dyn IdSource>) -> Self {
         Self { io, ids }
+    }
+
+    pub(crate) async fn reconcile_pending(
+        &self,
+        session_id: String,
+        lock: Arc<lattice_session::FlockGuard>,
+    ) -> Result<Option<lattice_session::TurnCommit>, CoordinatorIoError> {
+        loop {
+            let Some(tip) = self.io.read_active_turn(session_id.clone()).await? else {
+                return Ok(None);
+            };
+            let (plan_key, candidates) = match &tip.snapshot.stage {
+                lattice_session::pending::PendingStage::BindingPlanned { plan, .. }
+                | lattice_session::pending::PendingStage::Bound { plan } => (
+                    plan.plan_key,
+                    plan.bindings
+                        .iter()
+                        .map(|binding| binding.invocation_id)
+                        .collect(),
+                ),
+                lattice_session::pending::PendingStage::StepClosing(state) => (
+                    state.plan_key,
+                    state
+                        .bindings
+                        .iter()
+                        .map(|binding| binding.invocation_id)
+                        .collect(),
+                ),
+                _ => (
+                    PlanKey {
+                        turn_id: tip.snapshot.turn_id,
+                        model_step_ordinal: 0,
+                    },
+                    Vec::new(),
+                ),
+            };
+            let facts = if candidates.is_empty() {
+                InvocationFactsSnapshot::empty()
+            } else {
+                self.io.pin_invocation_facts(plan_key, candidates).await?
+            };
+            match lattice_session::pending::reconcile(&tip.snapshot, &facts)? {
+                lattice_session::pending::ReconciliationDecision::ReviseCandidates(request) => {
+                    let store = self.io.session_store();
+                    let ids = Arc::clone(&self.ids);
+                    let lock = Arc::clone(&lock);
+                    tokio::task::spawn_blocking(move || {
+                        store.execute_candidate_revision(
+                            &request,
+                            &tip,
+                            tip.snapshot.recorded_at.ok_or_else(|| {
+                                SessionError::JournalCorruption {
+                                    detail: "pending journal commit has no readable committer time"
+                                        .into(),
+                                }
+                            })?,
+                            &lock,
+                            || ids.new_invocation_id(),
+                        )
+                    })
+                    .await
+                    .map_err(CoordinatorIoError::Blocking)??;
+                }
+                lattice_session::pending::ReconciliationDecision::Closure(plan) => {
+                    let mut finalized = None;
+                    for action in plan.actions {
+                        let current = self
+                            .io
+                            .read_active_turn(session_id.clone())
+                            .await?
+                            .ok_or_else(|| {
+                                SessionError::Conflict("active Turn disappeared".into())
+                            })?;
+                        let recorded_at = require_recorded_at(&current.snapshot)?;
+                        match action {
+                            lattice_session::pending::ReconciliationAction::ReserveExactPlan {
+                                plan_key,
+                                bindings,
+                            } => {
+                                let plan = lattice_session::pending::BindingPlan {
+                                    plan_key,
+                                    message: match &current.snapshot.stage {
+                                        lattice_session::pending::PendingStage::BindingPlanned { plan, .. }
+                                        | lattice_session::pending::PendingStage::Bound { plan } => plan.message.clone(),
+                                        _ => return Err(SessionError::JournalCorruption { detail: "reservation action outside binding stage".into() }.into()),
+                                    },
+                                    bindings,
+                                };
+                                self.io.reserve_plan(plan).await?;
+                            }
+                            lattice_session::pending::ReconciliationAction::TerminalizeInvocation { invocation, outcome, material } => {
+                                match self.io.publish_terminal_under_budget(
+                                    invocation,
+                                    map_outcome(outcome),
+                                    map_material(material),
+                                    empty_terminal_evidence("reconcile"),
+                                ).await {
+                                    Ok(()) => {}
+                                    Err(FinalizeFailure::EvidenceDurabilityFailed { attempts }) => {
+                                        return Err(CoordinatorIoError::EvidenceDurabilityFailed { attempts });
+                                    }
+                                    Err(FinalizeFailure::Fatal(inner)) => {
+                                        return Err(CoordinatorIoError::InvocationStore(inner));
+                                    }
+                                }
+                            }
+                            lattice_session::pending::ReconciliationAction::PublishBound { plan } => {
+                                self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::Bound { plan }, recorded_at, Arc::clone(&lock)).await?;
+                            }
+                            lattice_session::pending::ReconciliationAction::AdvanceStepClosing { state } => {
+                                self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::StepClosing(state), recorded_at, Arc::clone(&lock)).await?;
+                            }
+                            lattice_session::pending::ReconciliationAction::PublishStepClosed { kind } => {
+                                self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::StepClosed { kind }, recorded_at, Arc::clone(&lock)).await?;
+                            }
+                            lattice_session::pending::ReconciliationAction::PublishTurnClosing { candidate } => {
+                                self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::TurnClosing(lattice_session::pending::TurnClosingFacts { turn_id: current.snapshot.turn_id, candidate }), recorded_at, Arc::clone(&lock)).await?;
+                            }
+                            lattice_session::pending::ReconciliationAction::FinalizeTurn => {
+                                finalized = Some(self.io.finalize_turn(session_id.clone(), current.snapshot.turn_id, Arc::clone(&lock)).await?);
+                            }
+                        }
+                    }
+                    return Ok(finalized);
+                }
+            }
+        }
+    }
+}
+
+fn require_recorded_at(
+    snapshot: &lattice_session::pending::PendingSnapshot,
+) -> Result<i64, CoordinatorIoError> {
+    snapshot.recorded_at.ok_or_else(|| {
+        SessionError::JournalCorruption {
+            detail: "pending journal commit has no readable committer time".into(),
+        }
+        .into()
+    })
+}
+
+fn map_outcome(
+    outcome: lattice_session::pending::ExecutionOutcome,
+) -> lancet_audit::invocation_store::TerminalOutcome {
+    use lancet_audit::invocation_store::{IndeterminateReason, NotExecutedReason, TerminalOutcome};
+    use lattice_session::pending::ExecutionOutcome;
+    match outcome {
+        ExecutionOutcome::Succeeded => TerminalOutcome::Succeeded,
+        ExecutionOutcome::Failed => TerminalOutcome::Failed,
+        ExecutionOutcome::Rejected => TerminalOutcome::Rejected,
+        ExecutionOutcome::Cancelled => TerminalOutcome::Cancelled,
+        ExecutionOutcome::NotExecuted { reason } => TerminalOutcome::NotExecuted {
+            reason: match reason {
+                lattice_session::pending::NotExecutedReason::BeforeDispatch => {
+                    NotExecutedReason::BeforeDispatch
+                }
+                lattice_session::pending::NotExecutedReason::CancelledBeforeDispatch => {
+                    NotExecutedReason::CancelledBeforeDispatch
+                }
+                lattice_session::pending::NotExecutedReason::PrecedingInvocationIndeterminate => {
+                    NotExecutedReason::PrecedingInvocationIndeterminate
+                }
+            },
+        },
+        ExecutionOutcome::Indeterminate { .. } => TerminalOutcome::Indeterminate {
+            reason: IndeterminateReason::MayHaveOccurred,
+        },
+    }
+}
+
+fn map_material(
+    material: lattice_session::pending::ResultMaterial,
+) -> lancet_audit::invocation_store::TerminalMaterial {
+    use lancet_audit::invocation_store::{TerminalMaterial, UnavailableMaterialReason};
+    match material {
+        lattice_session::pending::ResultMaterial::Available {
+            digest,
+            byte_length,
+        } => TerminalMaterial::Available {
+            digest,
+            byte_length,
+        },
+        lattice_session::pending::ResultMaterial::Unavailable {
+            reason,
+            digest,
+            byte_length,
+        } => TerminalMaterial::Unavailable {
+            reason: match reason {
+                lattice_session::pending::UnavailableMaterialReason::DraftPublicationFailed => {
+                    UnavailableMaterialReason::DraftPublicationFailed
+                }
+                lattice_session::pending::UnavailableMaterialReason::OutputTooLarge => {
+                    UnavailableMaterialReason::OutputTooLarge
+                }
+                lattice_session::pending::UnavailableMaterialReason::NotExecuted => {
+                    UnavailableMaterialReason::NotExecuted
+                }
+            },
+            digest,
+            byte_length,
+        },
+    }
+}
+
+fn empty_terminal_evidence(tool: &str) -> lancet_audit::invocation_store::TerminalEvidence {
+    lancet_audit::invocation_store::TerminalEvidence {
+        admission: lancet_protocol::AdmissionEvidence {
+            version: lancet_protocol::ADMISSION_EVIDENCE_VERSION,
+            tool: tool.to_string(),
+            approved_capabilities: Vec::new(),
+            denied_capabilities: Vec::new(),
+            boundary_excluded: Vec::new(),
+            max_boundary: lancet_protocol::Trust::In,
+        },
+        effects: lancet_protocol::ObservedEffectsRecord {
+            version: lancet_protocol::OBSERVED_EFFECTS_RECORD_VERSION,
+            effects: Vec::new(),
+        },
+        denied: lancet_protocol::DeniedOperationsRecord {
+            version: lancet_protocol::DENIED_OPERATIONS_RECORD_VERSION,
+            denied: Vec::new(),
+        },
     }
 }
 

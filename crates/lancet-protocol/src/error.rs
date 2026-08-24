@@ -60,6 +60,8 @@ pub enum CepErrorCode {
     ToolTimeout,
     ToolResourceExhausted,
     CallCancelled,
+    /// The effect may have occurred, but durable outcome evidence could not be completed.
+    OutcomeIndeterminate,
     // State (-32030..-32039)
     StaleContext,
     ResourceConflict,
@@ -92,6 +94,7 @@ impl CepErrorCode {
             Self::ToolTimeout => -32024,
             Self::ToolResourceExhausted => -32025,
             Self::CallCancelled => -32026,
+            Self::OutcomeIndeterminate => -32027,
             Self::StaleContext => -32030,
             Self::ResourceConflict => -32031,
             Self::EnvelopeAlreadyActive => -32032,
@@ -119,7 +122,8 @@ impl CepErrorCode {
             | Self::ToolTrap
             | Self::ToolTimeout
             | Self::ToolResourceExhausted
-            | Self::CallCancelled => CepErrorFamily::Execution,
+            | Self::CallCancelled
+            | Self::OutcomeIndeterminate => CepErrorFamily::Execution,
             Self::StaleContext
             | Self::ResourceConflict
             | Self::EnvelopeAlreadyActive
@@ -148,6 +152,7 @@ impl CepErrorCode {
             -32024 => Self::ToolTimeout,
             -32025 => Self::ToolResourceExhausted,
             -32026 => Self::CallCancelled,
+            -32027 => Self::OutcomeIndeterminate,
             -32030 => Self::StaleContext,
             -32031 => Self::ResourceConflict,
             -32032 => Self::EnvelopeAlreadyActive,
@@ -525,7 +530,8 @@ mod tests {
                     message: err.message.clone(),
                     data: Some(err.clone()),
                 },
-                id: crate::jsonrpc::Id::Number(1),
+                id: crate::jsonrpc::Id::parse("11111111-1111-4111-8111-111111111111")
+                    .expect("valid InvocationId"),
             };
             let serialized = serde_json::to_string(&resp).unwrap();
             let parsed: crate::frame::ToolResult = serde_json::from_str(&serialized).unwrap();
@@ -770,7 +776,8 @@ mod tests {
                 message: err.message.clone(),
                 data: Some(err.clone()),
             },
-            id: crate::jsonrpc::Id::Number(1),
+            id: crate::jsonrpc::Id::parse("11111111-1111-4111-8111-111111111111")
+                .expect("valid InvocationId"),
         };
         let serialized = serde_json::to_string(&resp).unwrap();
         let parsed: crate::frame::ToolResult = serde_json::from_str(&serialized).unwrap();

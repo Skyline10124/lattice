@@ -257,14 +257,44 @@ impl ModelStepDriver {
             max_completion_tokens: None,
         };
 
-        let stream = match self.llm.stream_chat(chat).await {
-            Ok(stream) => stream,
-            Err(err) => {
-                let message = err.to_string();
-                return Err(ModelStepError::OpeningFailed {
-                    message,
-                    retryable: classify_retryable(err.as_ref()),
-                });
+        let opening = self.llm.stream_chat(chat);
+        tokio::pin!(opening);
+        let stream = loop {
+            tokio::select! {
+                result = &mut opening => {
+                    break match result {
+                        Ok(stream) => stream,
+                        Err(err) => {
+                            let message = err.to_string();
+                            return Err(ModelStepError::OpeningFailed {
+                                message,
+                                retryable: classify_retryable(err.as_ref()),
+                            });
+                        }
+                    };
+                }
+                _ = tokio::time::sleep(CANCEL_POLL_INTERVAL), if request.deadline.is_some() || request.cancel.is_some() => {
+                    if let Some(flag) = &request.cancel
+                        && flag.load(Ordering::Relaxed)
+                    {
+                        return Ok(interrupted(
+                            AttemptInterruption::Cancelled,
+                            None,
+                            None,
+                            None,
+                        ));
+                    }
+                    if let Some(deadline) = request.deadline
+                        && Instant::now() >= deadline
+                    {
+                        return Ok(interrupted(
+                            AttemptInterruption::Timeout,
+                            None,
+                            None,
+                            None,
+                        ));
+                    }
+                }
             }
         };
 
@@ -657,6 +687,17 @@ mod tests {
     };
     use lattice_llm::LlmEvent;
 
+    struct NeverOpeningClient;
+
+    #[async_trait::async_trait]
+    impl LlmClient for NeverOpeningClient {
+        async fn chat(
+            &self,
+            _request: ChatRequest,
+        ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+            std::future::pending().await
+        }
+    }
     fn driver(events: Vec<LlmEvent>) -> ModelStepDriver {
         ModelStepDriver::new(Arc::new(
             FakeStreamingLlmClient::builder()
@@ -997,6 +1038,23 @@ mod tests {
             .expect("attempt runs");
         assert!(matches!(
             timed_out.status,
+            ModelStepStatus::Interrupted(AttemptInterruption::Timeout)
+        ));
+    }
+
+    #[test]
+    fn deadline_interrupts_while_the_provider_stream_is_still_opening() {
+        let attempt = runtime()
+            .block_on(ModelStepDriver::new(Arc::new(NeverOpeningClient)).run(
+                &ModelStepRequest {
+                    deadline: Some(Instant::now() + Duration::from_millis(100)),
+                    ..request()
+                },
+                None,
+            ))
+            .expect("attempt runs");
+        assert!(matches!(
+            attempt.status,
             ModelStepStatus::Interrupted(AttemptInterruption::Timeout)
         ));
     }

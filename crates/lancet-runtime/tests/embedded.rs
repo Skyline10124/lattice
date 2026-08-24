@@ -13,9 +13,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lancet_dispatch::{Cancellation, EventSink};
-use lancet_protocol::CepErrorCode;
 use lancet_protocol::cell::{CtxOp, ExtImpact, Trust};
 use lancet_protocol::evidence::{CapabilityAdmissionPolicy, EffectSource};
+use lancet_protocol::{CepErrorCode, InvocationId};
 use lancet_runtime::{
     CellEvidenceLedger, ComponentCallContext, ComponentRuntime, ExecutionLimits, admit_tool,
 };
@@ -54,10 +54,11 @@ fn call_ctx(
     let admitted = admit_tool(descriptor, &policy()).expect("admitted");
     let evidence = CellEvidenceLedger::new();
     evidence.set_admission(admitted.evidence.clone());
+    let invocation_id = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
     let ctx = ComponentCallContext {
-        call_id: 1,
+        invocation_id,
         turn_id: "test-turn".into(),
-        events: EventSink::new(tx, 1),
+        events: EventSink::new(tx, invocation_id),
         cancellation: Cancellation::new(cancel_rx),
         evidence: evidence.clone(),
         admitted: Arc::new(admitted),

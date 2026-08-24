@@ -82,7 +82,6 @@ url = "2"
 unicode-width = "0.2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
-rusqlite = { version = "0.32.1", features = ["bundled"] }
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
 # fd-relative filesystem operations (openat/mkdirat/renameat/unlinkat) for

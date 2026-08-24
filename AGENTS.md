@@ -192,7 +192,7 @@ accumulating.
 | `lancet-catalog` | Legacy central Tool-contract authority scheduled for removal by ADR 0004 after source manifests and generated descriptors take over. |
 | `lancet-dispatch` | Current generic registry/transport surface scheduled for absorption into `lancet-runtime`. |
 | `lancet-cep` | Current CEP/catalog projection facade scheduled for absorption or retirement after descriptor-generated projection lands. |
-| `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, typed operator query/tail/replay DTOs, versioned Cell evidence, and the #139-A non-production Git `InvocationStore` on the `lattice-store` kernel. Its public surface is audit-domain only: projecting a pinned ledger view into `lattice-session` reconciliation facts happens in the non-production integration seam, not here. The production operator path remains SQLite until #139-B. |
+| `lancet-audit` | Production project-keyed Git `InvocationStore`, exact reservation/admission lifecycle, terminal material and Cell evidence, pinned views, and typed operator query/tail/replay DTOs. Its public surface is audit-domain only; `lattice-api` projects pinned ledger facts into Session reconciliation types. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger, and effect-region checks. |
 | `lancet-native` | Current native handler/server surface for the method still native (`fetch.web`), plus the CEP server lifecycle and the Component/native dispatch split. ADR 0004 moves the remaining built-ins to Components and absorbs the rest into `lancet-runtime`. |
 | `lancet-runtime` | Component engine, generated descriptor inventory, Tool Host enforcement, the concrete Local Workspace and its Policy-Visible visibility engine (moved down here in #30), audit/effect integration, and private gix history. The production Component path since #29; #31/#32 finish absorbing dispatch/transport. |
@@ -205,7 +205,7 @@ accumulating.
 | `lattice-store` | ADR 0005 domain-neutral private-Git/Linux durability kernel (landed in #143): XDG state topology, `ProjectStoreKey` derivation, typed create/open with `refs/lattice/meta` identity, canonical bytes, object/commit mechanics, ref CAS and multi-ref transactions, per-repository flock, fsync/rename durability barriers, atomic first-create, retention primitives, and per-location capability probes. No domain schemas and no workspace-internal dependencies by contract. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | One-attempt `ModelStepDriver` over the injectable `LlmClient` seam (since #139-B Commit 4): frozen request assembly, protocol-ceiling metering, typed attempt outcomes. No loop, Tool execution, retry policy, or store authority. |
-| `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
+| `lattice-api` | Public Session/Turn facade and production `TurnCoordinator` saga. Translates profile policy, owns binding/reservation/dispatch/ResultDraft/terminal/reconciliation/final commit composition over `lancet-api`, `lancet-audit`, and `lattice-session`. |
 | `lattice-tui` | Full-screen TUI shell over `lattice-api` sessions and `stream_turn` (ratatui/crossterm, alternate screen). Owns terminal lifecycle, input state, transcript/status rendering, and the forthcoming transcript card renderer (#116) as this crate's `render/` module; `lattice-cli` consumes it through the existing `lattice-cli -> lattice-tui` edge. |
 | `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
 
@@ -280,24 +280,16 @@ store migrations. `lattice-conversation` landed in #142.
   project root, observation, network, effects, workspace policy, and external
   policy file pointers. Sandbox `[workspace]`, command, isolation, and verify
   configuration are retired surface; do not reintroduce them.
-- Cell evidence is persisted in `lancet-audit`'s versioned evidence tables
-  (`evidence_calls` / `evidence_effects` / `evidence_denials`), keyed by a
-  store-generated `evidence_id` that a CEP audit row merely points at. After
-  #114 this is explicitly a transitional SQLite lookup key, not a public
-  invocation identity. ADR 0005/#139-B replaces public call/audit/evidence IDs
-  with one `InvocationId` and deletes the SQLite identity/path in the same hard
-  cut; #139-A's Git Adapter stays non-production until then. Do not put
-  structured evidence back into `metadata_json`, expose `evidence_id` as a
-  domain identity, or add a second record shape beside
+- Cell evidence is persisted directly in each terminal `InvocationStore` record
+  under the typed `InvocationId`. SQLite evidence tables, `evidence_id`, numeric
+  call/audit IDs, metadata pointers, and compatibility import paths are deleted;
+  do not recreate them or add a second record shape beside
   `lancet_protocol::evidence`.
-- SQLite for CEP audit records belongs in `lancet-audit`; the conversation
-  graph is git-backed (git refs under `refs/lattice/sessions/<id>/**` in
-  `$XDG_STATE_HOME/lattice/sessions.git`) and lives in `lattice-session`;
-  since #143 there are no mutable `.lattice/sessions/**` sidecars and every
-  store is strictly opened. SQLite session graph storage was retired. This is
-  the current state: #139-B atomically switches the operator Adapter to
-  `invocations.git` and deletes the SQLite audit/evidence backend rather than
-  dual-writing or importing it.
+- Conversation state lives in global `sessions.git`; invocation lifecycle/evidence
+  lives in project-keyed `invocations.git`; workspace history lives in its own
+  project-keyed Git store. They have separate locks, refs, schemas, and failure
+  domains. All stores open strictly; there are no SQLite or mutable sidecar
+  production paths, dual writes, or legacy importers.
 - Operator audit read (query/tail/replay) is implemented in `lancet-audit`
   and only re-exported by `lancet-api`; it is never an Agent Tool. Keep
   `lancet-audit` free of `lancet-native`/`lancet-dispatch`/`lancet-cep`/
@@ -350,13 +342,11 @@ store migrations. `lattice-conversation` landed in #142.
 2. `run_turn` drains the same stream through `RunTurnCollector`.
 3. `turn/cep.rs` translates profile `[lancet]` policy into LANCET-native config
    rooted at the canonical Local Workspace and delegates runtime composition to
-   `lancet_api::LancetRuntime::build` (native Local operations, server
-   lifecycle, dispatch client, audit), then wraps the returned `CepClient` in a
-   `CepExecutorAdapter`.
-4. Pre-cut, the private `lattice-api` `model_rounds` sequencer calls the
-   one-attempt `ModelStepDriver` through `LlmClient` per model step and
-   dispatches requested tool calls through the CEP executor; #139-B Commit 6
-   replaces that sequencer with `TurnCoordinator`.
+   `lancet_api::LancetRuntime::build`, which returns the bound `CepClient` and
+   frozen Tool catalog.
+4. `TurnCoordinator` and `turn/saga.rs` own the durable live path: one model
+   attempt at a time, binding and reservation, sequential Tool dispatch, exact
+   ResultDraft/terminal publication, typed closure, and final Turn commit.
 5. During migration native handlers execute typed CEP methods. The ADR 0004
    target executes embedded Tool Components behind WIT Tool Host imports;
    host-side policy, Guard L1, effect, audit and concrete Local Workspace checks

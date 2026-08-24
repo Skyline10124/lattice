@@ -3,10 +3,8 @@
 
 //! Typed Turn outcome and closure origin (ADR 0005 §15, GitHub #144).
 //!
-//! This is the journal's outcome authority. The legacy
-//! `TurnCommitStatus`/`WorkspaceDisposition`/`terminal_reason` fields on the
-//! conversation manifest are a projection for today's readers; #139-B deletes
-//! them in the production hard cut. Free text is never logic authority here:
+//! This is the sole durable and public Turn outcome authority. Free text is
+//! never logic authority here:
 //! every failure, cancellation, and interruption reason is typed, and bounded
 //! diagnostics live in the attempt records owned by `lattice-conversation`.
 
@@ -31,6 +29,25 @@ impl ClosureOrigin {
         match self {
             Self::Live => "live",
             Self::Reconciled => "reconciled",
+        }
+    }
+}
+
+/// Project-global WorkspaceHistory cut recorded by every committed Turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceHistoryCheckpoint {
+    /// No LATTICE mutation has ever been recorded for this project.
+    Empty,
+    /// The current project-global WorkspaceHistory object identifier.
+    Oid(String),
+}
+
+impl WorkspaceHistoryCheckpoint {
+    pub fn as_oid(&self) -> Option<&str> {
+        match self {
+            Self::Empty => None,
+            Self::Oid(oid) => Some(oid),
         }
     }
 }
@@ -118,10 +135,7 @@ pub enum TurnInterruption {
     },
 }
 
-/// The typed outcome of one accepted Turn (ADR 0005 §15). This replaces
-/// `TurnCommitStatus + WorkspaceDisposition + terminal_reason` as the
-/// journal authority; a projection onto the legacy conversation manifest
-/// vocabulary exists only until the #139-B hard cut.
+/// The typed outcome of one accepted Turn (ADR 0005 §15).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOutcome {
@@ -146,21 +160,6 @@ pub enum TurnOutcome {
         /// Typed interruption reason.
         reason: TurnInterruption,
     },
-}
-
-impl TurnOutcome {
-    /// The legacy `TurnCommitStatus` projection used by today's
-    /// conversation manifest. Diagnostic only; the typed value remains the
-    /// authority. #139-B deletes this mapping together with the legacy
-    /// fields.
-    pub fn legacy_status(&self) -> crate::graph::TurnCommitStatus {
-        use crate::graph::TurnCommitStatus;
-        match self {
-            Self::Completed { .. } => TurnCommitStatus::Completed,
-            Self::Failed { .. } | Self::Interrupted { .. } => TurnCommitStatus::Error,
-            Self::Cancelled { .. } => TurnCommitStatus::Cancelled,
-        }
-    }
 }
 
 /// Derived per-Turn usage aggregate (ADR 0005 §10): the attempt facts remain
@@ -229,43 +228,6 @@ mod tests {
         assert_eq!(ClosureOrigin::Reconciled.as_str(), "reconciled");
         let json = serde_json::to_string(&ClosureOrigin::Reconciled).unwrap();
         assert_eq!(json, "\"reconciled\"");
-    }
-
-    #[test]
-    fn legacy_status_projection_is_total_and_deterministic() {
-        let cases = [
-            (
-                TurnOutcome::Completed {
-                    finish_reason: TurnFinishReason::Stop,
-                },
-                crate::graph::TurnCommitStatus::Completed,
-            ),
-            (
-                TurnOutcome::Failed {
-                    reason: TurnFailure::ModelRequestFailed,
-                },
-                crate::graph::TurnCommitStatus::Error,
-            ),
-            (
-                TurnOutcome::Interrupted {
-                    reason: TurnInterruption::ProcessInterruptedBeforeModelAttempt,
-                },
-                crate::graph::TurnCommitStatus::Error,
-            ),
-            (
-                TurnOutcome::Cancelled {
-                    reason: TurnCancellation::UserCancelled,
-                },
-                crate::graph::TurnCommitStatus::Cancelled,
-            ),
-        ];
-        for (outcome, status) in cases {
-            assert_eq!(outcome.legacy_status(), status);
-            // Serde round-trip keeps the typed value intact.
-            let back: TurnOutcome =
-                serde_json::from_value(serde_json::to_value(&outcome).unwrap()).unwrap();
-            assert_eq!(back, outcome);
-        }
     }
 
     #[test]

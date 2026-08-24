@@ -338,12 +338,21 @@ mod tests {
 
     #[test]
     fn cli_surface_audit_replay_subcommand() {
-        let cli = Cli::try_parse_from(["lattice", "audit", "replay", "--turn", "turn-1"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "lattice",
+            "audit",
+            "replay",
+            "--session",
+            "11111111111111111111111111111111",
+            "--turn",
+            "22222222-2222-4222-8222-222222222222",
+        ])
+        .unwrap();
         match cli.command {
             Some(Commands::Audit(audit_cmd)) => match audit_cmd.action {
                 Some(super::audit::AuditAction::Replay(args)) => {
-                    assert_eq!(args.turn, "turn-1");
-                    assert!(args.session.is_none());
+                    assert_eq!(args.turn, "22222222-2222-4222-8222-222222222222");
+                    assert_eq!(args.session, "11111111111111111111111111111111");
                 }
                 _ => panic!("expected Replay action"),
             },

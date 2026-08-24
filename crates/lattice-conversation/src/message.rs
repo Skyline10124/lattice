@@ -256,6 +256,39 @@ impl<S: ToolCallState> NativeMessage<S> {
     }
 }
 
+impl NativeMessage<crate::UnboundToolCall> {
+    /// Convert a complete zero-Tool message into the durable bound typestate.
+    pub fn bind_zero_tool(self) -> Result<NativeMessage<crate::BoundToolCall>, Self> {
+        if self.tool_calls().next().is_some() {
+            return Err(self);
+        }
+        let parts = self
+            .parts
+            .into_iter()
+            .map(|part| MessagePart {
+                semantic: match part.semantic {
+                    MessageSemantic::Text { text } => MessageSemantic::Text { text },
+                    MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
+                    MessageSemantic::ToolResult {
+                        invocation_id,
+                        name,
+                        outcome,
+                        content,
+                    } => MessageSemantic::ToolResult {
+                        invocation_id,
+                        name,
+                        outcome,
+                        content,
+                    },
+                    MessageSemantic::ToolCall { .. } => unreachable!("checked above"),
+                },
+                replay_state: part.replay_state,
+            })
+            .collect();
+        Ok(NativeMessage::new(self.role, self.provider_origin, parts))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

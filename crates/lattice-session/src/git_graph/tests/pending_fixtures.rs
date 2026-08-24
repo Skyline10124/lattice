@@ -182,7 +182,7 @@ pub(crate) fn completed_candidate(parent: Option<String>) -> TurnCommitCandidate
                 total_tokens: 15,
             },
         }),
-        workspace_history_oid: None,
+        workspace_history_checkpoint: crate::pending::WorkspaceHistoryCheckpoint::Empty,
         created_at: CREATED_AT.to_string(),
     }
 }

@@ -34,10 +34,12 @@ pub use lancet_protocol::canonical_json;
 // structural-address types (`BoundToolCall::invocation_id`,
 // `BoundToolCall::address`), so consumers of the crate can name them without
 // reaching for `lancet-protocol` themselves.
-pub use lancet_protocol::{InvocationId, ModelMessageAddress, SessionId, ToolCallAddress, TurnId};
+pub use lancet_protocol::{
+    InvocationId, ModelMessageAddress, SessionId, ToolCallAddress, TurnId, arguments_digest,
+};
 
 pub use attempt::{AttemptInterruption, AttemptOutcome, AttemptRejection, ModelAttemptRecord};
-pub use digest::{arguments_digest, replay_state_digest, semantic_digest};
+pub use digest::{replay_state_digest, semantic_digest};
 pub use graph_types::{GraphMessage, GraphToolCall, HeadTranscript};
 pub use history::ConversationHistory;
 pub use limits::{
