@@ -101,10 +101,16 @@ async fn duplicate_reserved_call_is_rejected_without_second_execution() {
         .await
         .expect("first reserved call executes");
     assert_eq!(first, serde_json::json!({ "echoed": "once" }));
+    let tip_before_duplicate = config.invocations.pinned_view().unwrap().commit_oid;
 
     let err = client
         .call_raw(binding, "noop.echo", params)
         .await
         .expect_err("duplicate DispatchStarted admission must fail closed");
     assert_eq!(err.code, CepErrorCode::ResourceConflict);
+    assert_eq!(
+        config.invocations.pinned_view().unwrap().commit_oid,
+        tip_before_duplicate,
+        "rejected duplicate must not publish another lifecycle/effect record",
+    );
 }

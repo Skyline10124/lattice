@@ -79,6 +79,8 @@ pub enum ReconciliationAction {
     PublishStepClosed {
         /// The closed sum kind.
         kind: StepClosedKind,
+        /// Post-user typed transcript delta.
+        messages: Vec<NativeMessage<BoundToolCall>>,
     },
     /// Pin and publish the `TurnClosing` snapshot from the constructed
     /// candidate (all inputs durable; `created_at` is the tip's committer
@@ -189,14 +191,14 @@ pub fn reconcile(
             let reason = TurnInterruption::ProcessInterruptedBeforeModelAttempt;
             (
                 interrupted(reason.clone()),
-                vec![step_closed_interrupt(reason)],
+                vec![step_closed_interrupt(reason, Vec::new())],
             )
         }
         PendingStage::ModelAttemptStarted { .. } => {
             let reason = TurnInterruption::ProcessInterruptedDuringModelAttempt;
             (
                 interrupted(reason.clone()),
-                vec![step_closed_interrupt(reason)],
+                vec![step_closed_interrupt(reason, Vec::new())],
             )
         }
         PendingStage::ModelAttemptFailed { key, retryable, .. } => {
@@ -206,7 +208,7 @@ pub fn reconcile(
                 let reason = TurnInterruption::ProcessInterruptedDuringModelRetry;
                 (
                     interrupted(reason.clone()),
-                    vec![step_closed_interrupt(reason)],
+                    vec![step_closed_interrupt(reason, Vec::new())],
                 )
             } else {
                 let reason = TurnFailure::ModelRequestFailed;
@@ -216,6 +218,7 @@ pub fn reconcile(
                     },
                     vec![ReconciliationAction::PublishStepClosed {
                         kind: StepClosedKind::FailTurn { reason },
+                        messages: Vec::new(),
                     }],
                 )
             }
@@ -224,7 +227,7 @@ pub fn reconcile(
             let turn_reason = TurnInterruption::ModelAttempt(*reason);
             (
                 interrupted(turn_reason.clone()),
-                vec![step_closed_interrupt(turn_reason)],
+                vec![step_closed_interrupt(turn_reason, Vec::new())],
             )
         }
         PendingStage::ModelAttemptRejected { rejection, .. } => {
@@ -238,6 +241,7 @@ pub fn reconcile(
                 },
                 vec![ReconciliationAction::PublishStepClosed {
                     kind: StepClosedKind::FailTurn { reason },
+                    messages: Vec::new(),
                 }],
             )
         }
@@ -249,6 +253,7 @@ pub fn reconcile(
                 kind: StepClosedKind::FinishTurn {
                     final_message: message.clone(),
                 },
+                messages: vec![native_transcript(message)],
             }],
         ),
         PendingStage::BindingPlanned { plan, .. } => {
@@ -284,7 +289,7 @@ pub fn reconcile(
             }
         }
         PendingStage::StepClosing(state) => step_closing_closure(state, facts)?,
-        PendingStage::StepClosed { kind } => step_closed_closure(kind)?,
+        PendingStage::StepClosed { kind, .. } => step_closed_closure(kind)?,
         PendingStage::TurnClosing(closing) => (
             closing.candidate.outcome.clone(),
             vec![ReconciliationAction::FinalizeTurn],
@@ -313,7 +318,18 @@ pub fn reconcile(
             })
             .next_back()
             .unwrap_or_default();
-        let messages = candidate_messages(snapshot, root, &closures);
+        let messages = actions
+            .iter()
+            .rev()
+            .find_map(|action| match action {
+                ReconciliationAction::PublishStepClosed { messages, .. } => {
+                    let mut transcript = vec![user_transcript(root)];
+                    transcript.extend(messages.clone());
+                    Some(transcript)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| candidate_messages(snapshot, root, &closures));
         actions.push(ReconciliationAction::PublishTurnClosing {
             candidate: build_candidate(snapshot, root, outcome.clone(), messages)?,
         });
@@ -344,6 +360,7 @@ fn binding_window_closure(
     publish_bound: bool,
 ) -> Result<StageDecision> {
     let mut actions = Vec::new();
+    let assistant_message = plan.bound_message()?;
     match facts.validate_against_plan(&plan.plan_key, &plan.bindings)? {
         PlanValidation::Collision => {
             // Truth table #2: candidate IDs owned by another plan. No
@@ -413,24 +430,34 @@ fn binding_window_closure(
             };
             let classifications = classifications_for(&plan.bindings, 0, Some(index), None);
             actions.extend(closing_loop_actions(
+                true,
+                None,
                 plan.plan_key,
+                &[assistant_message.clone()],
+                None,
                 &plan.bindings,
                 &[],
                 &classifications,
             ));
-            actions.push(step_closed_interrupt(reason.clone()));
+            let messages = closing_messages(&actions);
+            actions.push(step_closed_interrupt(reason.clone(), messages));
             Ok(StageDecision::Close(interrupted(reason), actions))
         }
         None => {
             let reason = TurnInterruption::ProcessInterruptedDuringToolBinding;
             let classifications = classifications_for(&plan.bindings, 0, None, None);
             actions.extend(closing_loop_actions(
+                true,
+                None,
                 plan.plan_key,
+                &[assistant_message.clone()],
+                None,
                 &plan.bindings,
                 &[],
                 &classifications,
             ));
-            actions.push(step_closed_interrupt(reason.clone()));
+            let messages = closing_messages(&actions);
+            actions.push(step_closed_interrupt(reason.clone(), messages));
             Ok(StageDecision::Close(interrupted(reason), actions))
         }
     }
@@ -509,11 +536,20 @@ fn step_closing_closure(
             });
         }
     };
+    let already_terminal_at =
+        matches!(current_fact, Some(InvocationLifecycleFact::Terminal { .. })).then_some(cursor);
 
     let mut actions = Vec::new();
     let classifications = classifications_for(&state.bindings, cursor, indeterminate_at, resume);
     actions.extend(closing_loop_actions(
+        false,
+        already_terminal_at,
         state.plan_key,
+        &state.messages,
+        state
+            .current_candidate
+            .as_ref()
+            .map(|draft| draft.canonical_tool_content.as_str()),
         &state.bindings,
         &state.closures,
         &classifications,
@@ -525,7 +561,15 @@ fn step_closing_closure(
         },
         None => TurnInterruption::ProcessInterruptedDuringStepClosing,
     };
-    actions.push(step_closed_interrupt(reason.clone()));
+    let messages = actions
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            ReconciliationAction::AdvanceStepClosing { state } => Some(state.messages.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| state.messages.clone());
+    actions.push(step_closed_interrupt(reason.clone(), messages));
     Ok((interrupted(reason), actions))
 }
 
@@ -622,17 +666,23 @@ fn not_executed_material() -> ResultMaterial {
 /// otherwise it resumes the existing tip at its cursor. Each binding is
 /// terminalized, then closed by exactly one cursor advance.
 fn closing_loop_actions(
+    publish_baseline: bool,
+    already_terminal_at: Option<usize>,
     plan_key: PlanKey,
+    messages: &[NativeMessage<BoundToolCall>],
+    available_content: Option<&str>,
     bindings: &[PlannedBinding],
     closed: &[ClosedBinding],
     classifications: &[(ExecutionOutcome, ResultMaterial)],
 ) -> Vec<ReconciliationAction> {
     let mut actions = Vec::new();
     let mut closures = closed.to_vec();
-    if closures.is_empty() {
+    let mut transcript = messages.to_vec();
+    if publish_baseline && closures.is_empty() {
         actions.push(ReconciliationAction::AdvanceStepClosing {
             state: StepClosingState {
                 plan_key,
+                messages: transcript.clone(),
                 bindings: bindings.to_vec(),
                 closure_cursor: 0,
                 closures: Vec::new(),
@@ -640,25 +690,33 @@ fn closing_loop_actions(
             },
         });
     }
-    for (_index, (binding, (outcome, material))) in bindings
+    for (index, (binding, (outcome, material))) in bindings
         .iter()
         .zip(classifications.iter())
         .enumerate()
         .skip(closures.len())
     {
-        actions.push(ReconciliationAction::TerminalizeInvocation {
-            invocation: binding.invocation_id,
-            outcome: outcome.clone(),
-            material: material.clone(),
-        });
-        closures.push(ClosedBinding {
+        if already_terminal_at != Some(index) {
+            actions.push(ReconciliationAction::TerminalizeInvocation {
+                invocation: binding.invocation_id,
+                outcome: outcome.clone(),
+                material: material.clone(),
+            });
+        }
+        let closure = ClosedBinding {
             binding: binding.clone(),
             outcome: to_tool_result_outcome(outcome),
             material: to_material_availability(material),
-        });
+        };
+        let content = matches!(material, ResultMaterial::Available { .. })
+            .then(|| available_content.map(str::to_owned))
+            .flatten();
+        transcript.push(closure_transcript(&closure, content));
+        closures.push(closure);
         actions.push(ReconciliationAction::AdvanceStepClosing {
             state: StepClosingState {
                 plan_key,
+                messages: transcript.clone(),
                 bindings: bindings.to_vec(),
                 closure_cursor: closures.len() as u32,
                 closures: closures.clone(),
@@ -707,9 +765,22 @@ fn interrupted(reason: TurnInterruption) -> TurnOutcome {
     TurnOutcome::Interrupted { reason }
 }
 
-fn step_closed_interrupt(reason: TurnInterruption) -> ReconciliationAction {
+fn closing_messages(actions: &[ReconciliationAction]) -> Vec<NativeMessage<BoundToolCall>> {
+    let Some(state) = actions.iter().rev().find_map(|action| match action {
+        ReconciliationAction::AdvanceStepClosing { state } => Some(state),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    state.messages.clone()
+}
+fn step_closed_interrupt(
+    reason: TurnInterruption,
+    messages: Vec<NativeMessage<BoundToolCall>>,
+) -> ReconciliationAction {
     ReconciliationAction::PublishStepClosed {
         kind: StepClosedKind::InterruptTurn { reason },
+        messages,
     }
 }
 
@@ -750,28 +821,32 @@ fn candidate_messages(
     closures: &[ClosedBinding],
 ) -> Vec<NativeMessage<BoundToolCall>> {
     let mut messages = vec![user_transcript(root)];
-    match &snapshot.stage {
-        PendingStage::MessageComplete { message, .. } => messages.push(native_transcript(message)),
-        PendingStage::StepClosed {
-            kind: StepClosedKind::FinishTurn { final_message },
-        } => messages.push(native_transcript(final_message)),
-        // ContinueModel closures are already durable in the snapshot; the
-        // resumed closures from the plan append after them.
-        PendingStage::StepClosed {
-            kind:
-                StepClosedKind::ContinueModel {
-                    ordered_tool_results,
-                    ..
-                },
-        } => {
-            for closure in ordered_tool_results {
-                messages.push(closure_transcript(closure));
-            }
+    let has_durable_delta = match &snapshot.stage {
+        PendingStage::BindingPlanned { plan, .. } | PendingStage::Bound { plan } => {
+            messages.push(plan.bound_message().expect("validated binding plan"));
+            false
         }
-        _ => {}
-    }
-    for closure in closures {
-        messages.push(closure_transcript(closure));
+        PendingStage::StepClosing(state) => {
+            messages.extend(state.messages.clone());
+            true
+        }
+        PendingStage::MessageComplete { message, .. } => {
+            messages.push(native_transcript(message));
+            true
+        }
+        PendingStage::StepClosed {
+            messages: durable_messages,
+            ..
+        } => {
+            messages.extend(durable_messages.clone());
+            true
+        }
+        _ => false,
+    };
+    if !has_durable_delta {
+        for closure in closures {
+            messages.push(closure_transcript(closure, None));
+        }
     }
     messages
 }
@@ -840,7 +915,10 @@ fn native_transcript(message: &NativeMessage<UnboundToolCall>) -> NativeMessage<
 /// content naming the invocation, its closure outcome, and material
 /// availability. This is operator/operator-visible framing, never
 /// model-authored speech.
-fn closure_transcript(closure: &ClosedBinding) -> NativeMessage<BoundToolCall> {
+fn closure_transcript(
+    closure: &ClosedBinding,
+    content: Option<String>,
+) -> NativeMessage<BoundToolCall> {
     NativeMessage::new(
         MessageRole::Tool,
         None,
@@ -848,7 +926,7 @@ fn closure_transcript(closure: &ClosedBinding) -> NativeMessage<BoundToolCall> {
             invocation_id: closure.binding.invocation_id,
             name: closure.binding.method.clone(),
             outcome: closure.outcome,
-            content: None,
+            content,
         })],
     )
 }
@@ -1021,7 +1099,7 @@ mod tests {
                 ReconciliationAction::TerminalizeInvocation { .. } => "terminalize",
                 ReconciliationAction::PublishBound { .. } => "bound",
                 ReconciliationAction::AdvanceStepClosing { .. } => "step_closing",
-                ReconciliationAction::PublishStepClosed { kind } => match kind {
+                ReconciliationAction::PublishStepClosed { kind, .. } => match kind {
                     StepClosedKind::FinishTurn { .. } => "closed_finish",
                     StepClosedKind::ContinueModel { .. } => "closed_continue",
                     StepClosedKind::FailTurn { .. } => "closed_fail",
@@ -1502,6 +1580,11 @@ mod tests {
         };
         let state = StepClosingState {
             plan_key: plan_two.plan_key,
+
+            messages: vec![
+                plan_two.bound_message().unwrap(),
+                closure_transcript(&closed0, Some(draft.canonical_tool_content.clone())),
+            ],
             bindings: plan_two.bindings.clone(),
             closure_cursor: 1,
             closures: vec![closed0],
@@ -1553,11 +1636,11 @@ mod tests {
                 _ => None,
             })
             .expect("candidate");
-        // user + the durable closure 0 + the resumed closure 1 framing.
-        assert_eq!(candidate.messages.len(), 3);
+        // user + bound assistant + durable closure 0 + resumed closure 1.
+        assert_eq!(candidate.messages.len(), 4);
         assert_eq!(
             candidate.messages[1].role,
-            lattice_conversation::MessageRole::Tool
+            lattice_conversation::MessageRole::Assistant
         );
         assert_eq!(
             candidate.messages[2].role,
@@ -1573,6 +1656,8 @@ mod tests {
         let wrong = draft_for(binding0, "{\"rows\":[1]}");
         let state = StepClosingState {
             plan_key: plan_one.plan_key,
+
+            messages: vec![plan_one.bound_message().unwrap()],
             bindings: plan_one.bindings.clone(),
             closure_cursor: 0,
             closures: vec![],
@@ -1600,6 +1685,8 @@ mod tests {
         let plan_one = plan(1);
         let state = StepClosingState {
             plan_key: plan_one.plan_key,
+
+            messages: vec![plan_one.bound_message().unwrap()],
             bindings: plan_one.bindings.clone(),
             closure_cursor: 0,
             closures: vec![],
@@ -1619,6 +1706,8 @@ mod tests {
         let plan_two = plan(2);
         let state = StepClosingState {
             plan_key: plan_two.plan_key,
+
+            messages: vec![plan_two.bound_message().unwrap()],
             bindings: plan_two.bindings.clone(),
             closure_cursor: 0,
             closures: vec![],
@@ -1646,6 +1735,7 @@ mod tests {
             kind: StepClosedKind::FinishTurn {
                 final_message: text_message("done"),
             },
+            messages: Vec::new(),
         });
         let result = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
@@ -1678,6 +1768,7 @@ mod tests {
                 }],
                 conversation_digest: [0u8; 32],
             },
+            messages: Vec::new(),
         });
         let result = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
@@ -1690,6 +1781,7 @@ mod tests {
             kind: StepClosedKind::FailTurn {
                 reason: TurnFailure::ModelStepLimitExceeded,
             },
+            messages: Vec::new(),
         });
         let result = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(
@@ -1703,6 +1795,7 @@ mod tests {
             kind: StepClosedKind::CancelTurn {
                 reason: super::super::outcome::TurnCancellation::UserCancelled,
             },
+            messages: Vec::new(),
         });
         let result = closure(&snap, &empty_facts(), "plan");
         assert!(matches!(

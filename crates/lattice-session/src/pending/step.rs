@@ -11,7 +11,9 @@
 //! `StepClosed` is published only when every binding is closed.
 
 use lancet_protocol::PlanKey;
-use lattice_conversation::{NativeMessage, ToolResultOutcome, UnboundToolCall};
+use lattice_conversation::{
+    BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome, UnboundToolCall,
+};
 use serde::{Deserialize, Serialize};
 
 use super::binding::PlannedBinding;
@@ -65,6 +67,8 @@ pub struct ClosedBinding {
 pub struct StepClosingState {
     /// The plan being closed.
     pub plan_key: PlanKey,
+    /// Complete bound assistant message for durable transcript replay.
+    pub messages: Vec<NativeMessage<BoundToolCall>>,
     /// The complete ordered bindings of the plan.
     pub bindings: Vec<PlannedBinding>,
     /// Monotonic closure cursor: bindings at ordinals `< closure_cursor`
@@ -82,6 +86,56 @@ impl StepClosingState {
     /// ordinals in order, candidate points at the unclosed binding, and
     /// every closure's binding matches the plan's binding at that ordinal.
     pub fn validate(&self) -> Result<()> {
+        let Some(assistant_message) = self.messages.first() else {
+            return Err(SessionError::JournalCorruption {
+                detail: "step closing transcript omits the bound assistant".to_string(),
+            });
+        };
+        if assistant_message.role != MessageRole::Assistant {
+            return Err(SessionError::JournalCorruption {
+                detail: "step closing transcript must start with an assistant message".to_string(),
+            });
+        }
+        let mut bound_calls = 0usize;
+        for binding in &self.bindings {
+            let Some(part) = assistant_message
+                .parts
+                .get(binding.address.part_ordinal as usize)
+            else {
+                return Err(SessionError::JournalCorruption {
+                    detail: "step closing message omits a bound ToolCall".to_string(),
+                });
+            };
+            let MessageSemantic::ToolCall { call } = &part.semantic else {
+                return Err(SessionError::JournalCorruption {
+                    detail: "step closing binding points at a non-ToolCall part".to_string(),
+                });
+            };
+            if call.invocation_id != binding.invocation_id
+                || call.address != binding.address
+                || call.name != binding.method
+                || call.arguments_digest != binding.arguments_digest
+            {
+                return Err(SessionError::JournalCorruption {
+                    detail: "step closing bound ToolCall differs from its binding".to_string(),
+                });
+            }
+            bound_calls += 1;
+        }
+        if assistant_message.tool_calls().count() != bound_calls {
+            return Err(SessionError::JournalCorruption {
+                detail: "step closing message contains an unplanned ToolCall".to_string(),
+            });
+        }
+        if self.messages.len() != self.closure_cursor as usize + 1 {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "step closing transcript has {} messages at closure cursor {}",
+                    self.messages.len(),
+                    self.closure_cursor
+                ),
+            });
+        }
         if self.closures.len() != self.closure_cursor as usize {
             return Err(SessionError::JournalCorruption {
                 detail: format!(
@@ -109,6 +163,49 @@ impl StepClosingState {
                 });
             }
             closure.binding.validate()?;
+            let message = &self.messages[index + 1];
+            if message.role != MessageRole::Tool || message.parts.len() != 1 {
+                return Err(SessionError::JournalCorruption {
+                    detail: format!("closure {index} has no exact ToolResult message"),
+                });
+            }
+            let MessageSemantic::ToolResult {
+                invocation_id,
+                name,
+                outcome,
+                content,
+            } = &message.parts[0].semantic
+            else {
+                return Err(SessionError::JournalCorruption {
+                    detail: format!("closure {index} transcript part is not a ToolResult"),
+                });
+            };
+            if *invocation_id != closure.binding.invocation_id
+                || *name != closure.binding.method
+                || *outcome != closure.outcome
+            {
+                return Err(SessionError::JournalCorruption {
+                    detail: format!("closure {index} ToolResult differs from its binding"),
+                });
+            }
+            match (&closure.material, content) {
+                (
+                    MaterialAvailability::Available {
+                        digest,
+                        byte_length,
+                    },
+                    Some(content),
+                ) if super::draft::tool_content_digest(content) == *digest
+                    && content.len() as u64 == *byte_length => {}
+                (MaterialAvailability::Unavailable { .. }, None) => {}
+                _ => {
+                    return Err(SessionError::JournalCorruption {
+                        detail: format!(
+                            "closure {index} ToolResult content differs from material availability"
+                        ),
+                    });
+                }
+            }
         }
         if let Some(candidate) = &self.current_candidate {
             let index = self.closure_cursor as usize;
@@ -184,7 +281,7 @@ mod tests {
     use super::super::binding::PlannedBinding;
     use super::*;
     use lancet_protocol::{ModelMessageAddress, SessionId, TurnId};
-    use lattice_conversation::arguments_digest;
+    use lattice_conversation::{MessagePart, arguments_digest};
 
     fn turn_id() -> TurnId {
         TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap()
@@ -221,6 +318,27 @@ mod tests {
         }
     }
 
+    fn assistant_message(bindings: &[PlannedBinding]) -> NativeMessage<BoundToolCall> {
+        NativeMessage::new(
+            MessageRole::Assistant,
+            None,
+            bindings
+                .iter()
+                .map(|binding| {
+                    MessagePart::semantic_only(MessageSemantic::ToolCall {
+                        call: BoundToolCall {
+                            invocation_id: binding.invocation_id,
+                            provider_call_id: Some("provider-call".to_string()),
+                            name: binding.method.clone(),
+                            arguments: serde_json::json!({}),
+                            arguments_digest: binding.arguments_digest,
+                            address: binding.address,
+                        },
+                    })
+                })
+                .collect(),
+        )
+    }
     fn closure(binding: &PlannedBinding) -> ClosedBinding {
         ClosedBinding {
             binding: binding.clone(),
@@ -231,6 +349,22 @@ mod tests {
                 byte_length: None,
             },
         }
+    }
+
+    fn tool_result(
+        closure: &ClosedBinding,
+        content: Option<String>,
+    ) -> NativeMessage<BoundToolCall> {
+        NativeMessage::new(
+            MessageRole::Tool,
+            None,
+            vec![MessagePart::semantic_only(MessageSemantic::ToolResult {
+                invocation_id: closure.binding.invocation_id,
+                name: closure.binding.method.clone(),
+                outcome: closure.outcome,
+                content,
+            })],
+        )
     }
 
     fn candidate(invocation: lancet_protocol::InvocationId) -> ResultDraft {
@@ -257,11 +391,13 @@ mod tests {
                 turn_id: turn_id(),
                 model_step_ordinal: 0,
             },
+            messages: vec![assistant_message(&bindings)],
             bindings: bindings.clone(),
             closure_cursor: 1,
             closures: vec![closure(&bindings[0])],
             current_candidate: None,
         };
+        state.messages.push(tool_result(&state.closures[0], None));
         state.validate().expect("one closed in order");
         assert!(!state.all_closed());
 
@@ -274,6 +410,7 @@ mod tests {
 
         state.closure_cursor = 2;
         state.closures = vec![closure(&bindings[0]), closure(&bindings[1])];
+        state.messages.push(tool_result(&state.closures[1], None));
         state.validate().expect("all closed");
         assert!(state.all_closed());
     }
@@ -286,6 +423,7 @@ mod tests {
                 turn_id: turn_id(),
                 model_step_ordinal: 0,
             },
+            messages: vec![assistant_message(&bindings)],
             bindings: bindings.clone(),
             closure_cursor: 0,
             closures: vec![],

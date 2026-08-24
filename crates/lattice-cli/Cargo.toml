@@ -39,3 +39,4 @@ tempfile = { workspace = true }
 
 [features]
 default = []
+test-crash-barriers = ["lattice-api/test-crash-barriers"]

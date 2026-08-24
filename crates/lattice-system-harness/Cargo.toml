@@ -9,11 +9,22 @@ publish = false
 
 [features]
 release-operator = []
+crash-barriers = []
 
 [[test]]
 name = "release_operator"
 path = "tests/release_operator.rs"
 required-features = ["release-operator"]
+
+[[test]]
+name = "direct_crash_barriers"
+path = "tests/direct_crash_barriers.rs"
+required-features = ["crash-barriers"]
+
+[[test]]
+name = "direct_rewind_crash_barriers"
+path = "tests/direct_rewind_crash_barriers.rs"
+required-features = ["crash-barriers"]
 
 [dependencies]
 # General hashing library (not a product crate): scenarios need the same

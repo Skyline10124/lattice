@@ -90,6 +90,8 @@ fn drive_to_empty_step_closing(
     driver.advance(PendingStage::Bound { plan: plan.clone() });
     driver.advance(PendingStage::StepClosing(StepClosingState {
         plan_key: plan.plan_key,
+
+        messages: vec![plan.bound_message().unwrap()],
         bindings: plan.bindings.clone(),
         closure_cursor: 0,
         closures: Vec::new(),
@@ -194,10 +196,13 @@ fn execute_plan(
                     lock,
                 )?;
             }
-            ReconciliationAction::PublishStepClosed { kind } => {
+            ReconciliationAction::PublishStepClosed { kind, messages } => {
                 let _ = store.advance_pending_turn(
                     session,
-                    PendingStage::StepClosed { kind: kind.clone() },
+                    PendingStage::StepClosed {
+                        kind: kind.clone(),
+                        messages: messages.clone(),
+                    },
                     recorded_at,
                     lock,
                 )?;
@@ -415,6 +420,7 @@ fn stage_cases() -> Vec<StageCase> {
                     kind: crate::pending::StepClosedKind::FinishTurn {
                         final_message: assistant_text("done"),
                     },
+                    messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
                 },
                 PendingStage::TurnClosing(turn_closing(completed_candidate(None))),
             ],
@@ -530,6 +536,8 @@ fn step_closing_candidate_pin_object_barrier_failure_does_not_publish_the_candid
         &session,
         PendingStage::StepClosing(StepClosingState {
             plan_key: plan.plan_key,
+
+            messages: vec![plan.bound_message().unwrap()],
             bindings: plan.bindings.clone(),
             closure_cursor: 0,
             closures: Vec::new(),
@@ -587,6 +595,8 @@ fn step_closing_candidate_pin_uses_one_object_barrier_and_one_ref_barrier() {
             &session,
             PendingStage::StepClosing(StepClosingState {
                 plan_key: plan.plan_key,
+
+                messages: vec![plan.bound_message().unwrap()],
                 bindings: plan.bindings.clone(),
                 closure_cursor: 0,
                 closures: Vec::new(),
@@ -647,6 +657,7 @@ fn unwritable_finalization_keeps_step_closing_and_active_turn() {
         kind: crate::pending::StepClosedKind::FinishTurn {
             final_message: assistant_text("done"),
         },
+        messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
     });
     driver.advance(PendingStage::TurnClosing(turn_closing(
         completed_candidate(None),
@@ -716,6 +727,7 @@ fn crash_after_final_publication_reports_failure_but_is_idempotent() {
         kind: crate::pending::StepClosedKind::FinishTurn {
             final_message: assistant_text("done"),
         },
+        messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
     });
     driver.advance(PendingStage::TurnClosing(turn_closing(
         completed_candidate(None),
@@ -775,6 +787,8 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
     });
     driver.advance(PendingStage::StepClosing(StepClosingState {
         plan_key: plan_one.plan_key,
+
+        messages: vec![plan_one.bound_message().unwrap()],
         bindings: plan_one.bindings.clone(),
         closure_cursor: 0,
         closures: vec![],
@@ -799,6 +813,8 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
             &session,
             PendingStage::StepClosing(StepClosingState {
                 plan_key: plan_one.plan_key,
+
+                messages: vec![plan_one.bound_message().unwrap()],
                 bindings: plan_one.bindings.clone(),
                 closure_cursor: 0,
                 closures: vec![],
@@ -988,16 +1004,19 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
         .expect("chain root");
     assert!(root.snapshot.predecessor.is_none());
 
-    // The transcript keeps the user message and the explicit closure
-    // framing; the branch head is the recovered TurnCommit.
+    // The transcript keeps user, exact bound assistant, and closure framing.
     let transcript = reopened.head_transcript(&session).expect("transcript");
-    assert_eq!(transcript.messages.len(), 2);
+    assert_eq!(transcript.messages.len(), 3);
     assert_eq!(
         crate::test_helpers::text(&transcript.messages[0]),
         Some("please continue")
     );
     assert_eq!(
         transcript.messages[1].role,
+        lattice_conversation::MessageRole::Assistant
+    );
+    assert_eq!(
+        transcript.messages[2].role,
         lattice_conversation::MessageRole::Tool
     );
     let head = reopened
@@ -1212,6 +1231,7 @@ fn sigkill_child_loop(root: &std::path::Path) {
                     kind: crate::pending::StepClosedKind::FinishTurn {
                         final_message: assistant_text("done"),
                     },
+                    messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
                 },
                 101,
                 &lock,

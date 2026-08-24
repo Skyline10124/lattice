@@ -31,6 +31,7 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 unicode-width = { workspace = true }
 uuid = { workspace = true }
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `test-method` provides the synthetic `TestEcho` typed method the turn/CEP tests
@@ -51,3 +52,4 @@ tokio-stream = { workspace = true }
 
 [features]
 default = []
+test-crash-barriers = ["dep:libc", "lancet-native/test-crash-barriers"]

@@ -27,7 +27,7 @@ fn admission_error(err: InvocationStoreError) -> CepError {
     match err {
         InvocationStoreError::InvalidTransition { .. } => CepError::new(
             CepErrorCode::ResourceConflict,
-            format!("invocation admission rejected: {err}"),
+            "invocation admission rejected",
             CepErrorData::State(StateErrorData {
                 resource: "invocation".into(),
                 reason: "duplicate or non-reserved admission".into(),
@@ -37,9 +37,9 @@ fn admission_error(err: InvocationStoreError) -> CepError {
         InvocationStoreError::NotFound { .. }
         | InvocationStoreError::Corruption { .. }
         | InvocationStoreError::InvalidReservation { .. } => {
-            CepError::invalid_params(format!("invocation binding rejected: {err}"))
+            CepError::invalid_params("invocation binding rejected")
         }
-        other => CepError::internal_error(format!("invocation store admission failed: {other}")),
+        _ => CepError::internal_error("invocation store admission failed"),
     }
 }
 
@@ -92,6 +92,8 @@ pub(super) async fn handle_request(
             return;
         }
     }
+    #[cfg(feature = "test-crash-barriers")]
+    stop_after_dispatch_started(&invocations, invocation_id);
     let is_component = is_component_method(components.as_deref(), &method);
     let (semantic_stage, guard_stage, policy_enforced) = if is_component {
         ("cell_component", "cell_admission", true)
@@ -251,4 +253,107 @@ pub(super) async fn handle_request(
         final_result,
         triple_from_ledger(&component_evidence, &method),
     );
+}
+
+#[cfg(feature = "test-crash-barriers")]
+fn stop_after_dispatch_started(
+    invocations: &lancet_audit::invocation_store::InvocationStore,
+    invocation_id: lancet_protocol::InvocationId,
+) {
+    if std::env::var("LATTICE_TEST_TURN_BARRIER").ok().as_deref() != Some("dispatch_started") {
+        return;
+    }
+    let view = invocations
+        .pinned_view()
+        .expect("pin dispatch barrier ledger");
+    let record = view
+        .snapshot
+        .invocations
+        .get(&invocation_id)
+        .expect("dispatch barrier invocation record");
+    assert!(
+        matches!(
+            record.state,
+            lancet_audit::invocation_store::InvocationState::DispatchStarted
+        ),
+        "dispatch barrier must observe DispatchStarted"
+    );
+    let ack_path = crash_barrier_ack_path();
+    let mut context_path = ack_path.clone().into_os_string();
+    context_path.push(".context");
+    let context: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::PathBuf::from(context_path))
+            .expect("read dispatch barrier session context"),
+    )
+    .expect("parse dispatch barrier session context");
+    assert_eq!(
+        context
+            .get("invocation_id")
+            .and_then(serde_json::Value::as_str),
+        Some(invocation_id.to_string().as_str()),
+        "dispatch barrier context names another invocation"
+    );
+    let facts = serde_json::json!({
+        "barrier": "dispatch_started",
+        "invocation_id": invocation_id,
+        "ledger_oid": view.commit_oid.to_string(),
+        "record": record,
+        "session_context": context["session"].clone(),
+    });
+    write_crash_barrier_ack(&facts);
+    // SAFETY: test-only Linux feature; the harness verifies the fsynced ack
+    // before SIGKILLing the process group.
+    let result = unsafe { libc::raise(libc::SIGSTOP) };
+    panic!("dispatch crash barrier resumed unexpectedly ({result})");
+}
+
+#[cfg(feature = "test-crash-barriers")]
+fn crash_barrier_ack_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var_os("LATTICE_TEST_TURN_BARRIER_ACK").expect("dispatch crash barrier ack path"),
+    )
+}
+#[cfg(feature = "test-crash-barriers")]
+fn write_crash_barrier_ack(facts: &serde_json::Value) {
+    use std::io::Write;
+
+    let path = crash_barrier_ack_path();
+    assert!(
+        path.is_absolute(),
+        "crash barrier ack path must be absolute"
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .expect("create dispatch crash barrier ack");
+    serde_json::to_writer(&mut file, facts).expect("write dispatch crash barrier facts");
+    file.write_all(b"\n").expect("terminate dispatch ack");
+    file.sync_all().expect("fsync dispatch crash barrier ack");
+    std::fs::File::open(path.parent().expect("ack parent"))
+        .expect("open dispatch ack parent")
+        .sync_all()
+        .expect("fsync dispatch ack parent");
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_errors_never_echo_internal_details_or_paths() {
+        let invalid = admission_error(InvocationStoreError::InvalidReservation {
+            detail: "/private/state/lattice/invocations.git secret".into(),
+        });
+        assert_eq!(invalid.message, "invocation binding rejected");
+        assert!(!invalid.message.contains('/'));
+
+        let conflict = admission_error(InvocationStoreError::InvalidTransition {
+            id: lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
+                .unwrap(),
+            expected: "reserved at /private/state".into(),
+            actual: "dispatch_started".into(),
+        });
+        assert_eq!(conflict.message, "invocation admission rejected");
+        assert!(!conflict.message.contains('/'));
+    }
 }

@@ -17,7 +17,9 @@
 use sha2::{Digest, Sha256};
 
 use lancet_protocol::{InvocationId, PlanKey, ToolCallAddress};
-use lattice_conversation::{NativeMessage, UnboundToolCall, arguments_digest};
+use lattice_conversation::{
+    BoundToolCall, MessagePart, MessageSemantic, NativeMessage, UnboundToolCall, arguments_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -211,6 +213,51 @@ impl BindingPlan {
             });
         }
         Ok(())
+    }
+
+    /// Project the durable unbound assistant message into its exact bound
+    /// transcript form without dropping provider IDs or opaque replay state.
+    pub fn bound_message(&self) -> Result<NativeMessage<BoundToolCall>> {
+        self.validate()?;
+        let mut parts = Vec::with_capacity(self.message.parts.len());
+        for (ordinal, part) in self.message.parts.iter().enumerate() {
+            let semantic = match &part.semantic {
+                MessageSemantic::Text { text } => MessageSemantic::Text { text: text.clone() },
+                MessageSemantic::Reasoning { text } => {
+                    MessageSemantic::Reasoning { text: text.clone() }
+                }
+                MessageSemantic::ToolResult {
+                    invocation_id,
+                    name,
+                    outcome,
+                    content,
+                } => MessageSemantic::ToolResult {
+                    invocation_id: *invocation_id,
+                    name: name.clone(),
+                    outcome: *outcome,
+                    content: content.clone(),
+                },
+                MessageSemantic::ToolCall { call } => {
+                    let binding = self
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.address.part_ordinal as usize == ordinal)
+                        .expect("validated plan binds every ToolCall");
+                    MessageSemantic::ToolCall {
+                        call: call.clone().bind(binding.invocation_id, binding.address),
+                    }
+                }
+            };
+            parts.push(MessagePart {
+                semantic,
+                replay_state: part.replay_state.clone(),
+            });
+        }
+        Ok(NativeMessage::new(
+            self.message.role,
+            self.message.provider_origin,
+            parts,
+        ))
     }
 }
 

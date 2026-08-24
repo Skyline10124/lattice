@@ -440,6 +440,32 @@ fn direct_tools_todo_write_success() {
             }
             _ => None,
         });
+        let public_started_id = outcome.events.iter().find_map(|event| match event {
+            TurnEventLine::ToolCallStarted { id, name } if name == "session.todo_write" => {
+                Some(id.as_str())
+            }
+            _ => None,
+        });
+        let public_finished_id = outcome.events.iter().find_map(|event| match event {
+            TurnEventLine::ToolCallFinished { id, name, .. } if name == "session.todo_write" => {
+                Some(id.as_str())
+            }
+            _ => None,
+        });
+        let cep_invocation_id = cep_started_raw
+            .and_then(|raw| raw.get("invocation_id"))
+            .and_then(Value::as_str);
+        require(
+            cep_invocation_id.is_some()
+                && public_started_id == cep_invocation_id
+                && public_finished_id == cep_invocation_id,
+            format!(
+                "public Tool events must use the typed InvocationId: \
+                 started={public_started_id:?} finished={public_finished_id:?} \
+                 cep={cep_invocation_id:?}"
+            ),
+        )?;
+
         require(
             cep_started_raw.is_some_and(|raw| {
                 raw.get("invocation_id")

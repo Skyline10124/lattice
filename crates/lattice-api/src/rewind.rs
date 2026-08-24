@@ -42,7 +42,7 @@
 use std::path::Path;
 
 use lancet_api::{
-    HeldWorkspaceOperation, REWIND_AUDIT_SCHEMA_VERSION, RewindAuditRecord,
+    HeldWorkspaceOperation, REWIND_AUDIT_SCHEMA_VERSION, RewindAuditRecord, WorkspaceHistory,
     WorkspaceHistoryBacking, WorkspaceRewindError, WorkspaceRewindOutcome, plan_workspace_rewind,
     record_rewind_audit, rewind_audit_records, rewind_workspace,
 };
@@ -217,7 +217,7 @@ pub enum RewindError {
 }
 
 /// Durable facts a [`RewindBarriers`] observer sees at one phase boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RewindBarrierFacts {
     /// Resolved session id.
     pub session_id: String,
@@ -229,8 +229,43 @@ pub struct RewindBarrierFacts {
     /// backing is disabled). Read live from the chain, so a barrier can
     /// assert the exact durable state it observes.
     pub audit_records_on_chain: usize,
+    /// Fresh private workspace-history `current` OID at the barrier.
+    pub workspace_history_oid: Option<String>,
+    /// Fresh Session History commit at the barrier.
+    pub session_head_commit_id: Option<String>,
 }
 
+#[cfg(feature = "test-crash-barriers")]
+fn hit_rewind_barrier(label: &str, facts: &RewindBarrierFacts) {
+    if std::env::var("LATTICE_TEST_REWIND_BARRIER").ok().as_deref() != Some(label) {
+        return;
+    }
+    use std::io::Write;
+    let path = std::path::PathBuf::from(
+        std::env::var_os("LATTICE_TEST_REWIND_BARRIER_ACK").expect("rewind barrier ack path"),
+    );
+    assert!(
+        path.is_absolute(),
+        "rewind barrier ack path must be absolute"
+    );
+    let value = json!({ "barrier": label, "facts": facts });
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .expect("create rewind barrier ack");
+    serde_json::to_writer(&mut file, &value).expect("write rewind barrier ack");
+    file.write_all(b"\n").expect("terminate rewind barrier ack");
+    file.sync_all().expect("fsync rewind barrier ack");
+    std::fs::File::open(path.parent().expect("rewind ack parent"))
+        .expect("open rewind ack parent")
+        .sync_all()
+        .expect("fsync rewind ack parent");
+    // SAFETY: test-only Linux feature; the harness SIGKILLs the process group
+    // after validating this fsynced durable-state acknowledgement.
+    let result = unsafe { libc::raise(libc::SIGSTOP) };
+    panic!("rewind crash barrier resumed unexpectedly ({result})");
+}
 /// Deterministic phase barriers for tests (#139-B Commit 3).
 ///
 /// Production passes [`RewindBarriers::none`]. Each observer runs at a
@@ -359,6 +394,8 @@ pub fn rewind_to_turn_with_barriers(
     // 4. Workspace half.
     let audit = RewindAuditContext {
         backing: &backing,
+        session,
+        execution_lock: &execution_lock,
         session_id: &resolved_session_id,
         target_commit_id: &target.commit_id,
         barriers,
@@ -371,6 +408,13 @@ pub fn rewind_to_turn_with_barriers(
             audit_records_on_chain: rewind_audit_records(&backing, &resolved_session_id)
                 .map(|records| records.len())
                 .unwrap_or(0),
+            workspace_history_oid: WorkspaceHistory::open(backing.clone())
+                .ok()
+                .and_then(|history| history.current().ok().flatten()),
+            session_head_commit_id: session
+                .status_locked(&resolved_session_id, &execution_lock)
+                .ok()
+                .and_then(|status| status.current_commit_id),
         }
     };
     let workspace = match rewind_workspace(
@@ -479,6 +523,13 @@ pub fn rewind_to_turn_with_barriers(
         WorkspaceRewindOutcome::Applied(report) => report,
     };
 
+    let workspace_facts = barrier_facts("workspace_applied");
+    if let Some(barrier) = barriers.after_workspace_half {
+        barrier(&workspace_facts);
+    }
+    #[cfg(feature = "test-crash-barriers")]
+    hit_rewind_barrier("rewind_workspace_applied", &workspace_facts);
+
     // 5. Session History ref, last. The abandoned head is pinned first so the
     //    Turns this Rewind leaves behind keep an internal ref of their own.
     let steps = steps_of(&report.steps);
@@ -548,12 +599,12 @@ pub fn rewind_to_turn_with_barriers(
         }
     };
 
-    if let Some(barrier) = barriers.after_workspace_half {
-        barrier(&barrier_facts("workspace_applied"));
-    }
+    let session_facts = barrier_facts("session_moved");
     if let Some(barrier) = barriers.after_session_ref_move {
-        barrier(&barrier_facts("session_moved"));
+        barrier(&session_facts);
     }
+    #[cfg(feature = "test-crash-barriers")]
+    hit_rewind_barrier("rewind_session_moved", &session_facts);
 
     // 6. Durable record of the completed Rewind.
     audit.write(
@@ -739,12 +790,32 @@ fn pin_abandoned_head(
 /// must not be reported as success.
 struct RewindAuditContext<'a> {
     backing: &'a WorkspaceHistoryBacking,
+    session: &'a SessionApi,
+    execution_lock: &'a lattice_session::FlockGuard,
     session_id: &'a str,
     target_commit_id: &'a str,
     barriers: &'a RewindBarriers<'a>,
 }
 
 impl RewindAuditContext<'_> {
+    fn barrier_facts(&self, outcome: &str) -> RewindBarrierFacts {
+        RewindBarrierFacts {
+            session_id: self.session_id.to_string(),
+            target_commit_id: self.target_commit_id.to_string(),
+            outcome: outcome.to_string(),
+            audit_records_on_chain: rewind_audit_records(self.backing, self.session_id)
+                .map(|records| records.len())
+                .unwrap_or(0),
+            workspace_history_oid: WorkspaceHistory::open(self.backing.clone())
+                .ok()
+                .and_then(|history| history.current().ok().flatten()),
+            session_head_commit_id: self
+                .session
+                .status_locked(self.session_id, self.execution_lock)
+                .ok()
+                .and_then(|status| status.current_commit_id),
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     fn write(
         &self,
@@ -793,16 +864,12 @@ impl RewindAuditContext<'_> {
                 partial: Box::new(partial()),
             }
         })?;
+        let facts = self.barrier_facts(outcome);
         if let Some(barrier) = self.barriers.after_audit_append {
-            barrier(&RewindBarrierFacts {
-                session_id: self.session_id.to_string(),
-                target_commit_id: self.target_commit_id.to_string(),
-                outcome: outcome.to_string(),
-                audit_records_on_chain: rewind_audit_records(self.backing, self.session_id)
-                    .map(|records| records.len())
-                    .unwrap_or(0),
-            });
+            barrier(&facts);
         }
+        #[cfg(feature = "test-crash-barriers")]
+        hit_rewind_barrier("rewind_audit_appended", &facts);
         Ok(())
     }
 }

@@ -11,6 +11,8 @@
 mod cep;
 mod collector;
 mod coordinator;
+#[cfg(feature = "test-crash-barriers")]
+mod crash_barrier;
 mod execute;
 mod finalize;
 mod invocation_facts;

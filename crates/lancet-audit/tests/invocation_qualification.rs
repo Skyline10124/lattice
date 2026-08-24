@@ -1408,6 +1408,8 @@ fn result_finalize_stress() {
         // The closing loop starts at cursor 0 with nothing pinned.
         let mut state = StepClosingState {
             plan_key: plan.plan_key,
+
+            messages: vec![plan.bound_message().unwrap()],
             bindings: plan.bindings.clone(),
             closure_cursor: 0,
             closures: Vec::new(),
@@ -1676,6 +1678,7 @@ fn result_finalize_stress() {
                         ordered_tool_results: state.closures.clone(),
                         conversation_digest: semantic_digest(&plan.message),
                     },
+                    messages: state.messages.clone(),
                 },
                 recorded_at,
                 &execution_lock,

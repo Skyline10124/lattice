@@ -50,3 +50,4 @@ inspect-scaffold = ["lancet-catalog/inspect-scaffold"]
 # Enables only one-shot install and parent-fsync flags; not a plugin seam.
 # Since #30 the flag lives in `lancet-runtime`, so this forwards there.
 test-fault-injection = ["lancet-runtime/test-fault-injection"]
+test-crash-barriers = []

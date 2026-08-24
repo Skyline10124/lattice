@@ -186,6 +186,18 @@ async fn run_live_turn_task(
             .await;
         return;
     }
+    #[cfg(feature = "test-crash-barriers")]
+    if let Err(err) =
+        super::crash_barrier::hit(&coordinator, &prepared.session_id, "turn_started").await
+    {
+        let mut observer = ObserverSink::new(turn_tx);
+        observer
+            .emit(TurnEvent::CommitFailed {
+                reason: err.to_string(),
+            })
+            .await;
+        return;
+    }
     let mut observer = ObserverSink::new(turn_tx);
     observer
         .emit(TurnEvent::TurnStarted {

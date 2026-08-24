@@ -103,6 +103,43 @@ impl CoordinatorStoreIo {
             .map_err(CoordinatorIoError::Blocking)?
             .map_err(CoordinatorIoError::Session)
     }
+
+    #[cfg(feature = "test-crash-barriers")]
+    pub(crate) async fn crash_barrier_snapshot(
+        &self,
+        session_id: String,
+    ) -> Result<
+        (
+            lattice_session::PendingTurnTip,
+            lancet_audit::invocation_store::PinnedLedgerView,
+            Option<lattice_session::pending::DraftClassification>,
+        ),
+        CoordinatorIoError,
+    > {
+        let session = Arc::clone(&self.session);
+        let invocations = Arc::clone(&self.invocations);
+        tokio::task::spawn_blocking(move || {
+            let tip = session.read_active_turn(&session_id)?.ok_or_else(|| {
+                lattice_session::SessionError::JournalCorruption {
+                    detail: "crash barrier observed no active Turn".into(),
+                }
+            })?;
+            let draft_classification = match &tip.snapshot.stage {
+                lattice_session::pending::PendingStage::StepClosing(state) => state
+                    .current_candidate
+                    .as_ref()
+                    .map(|candidate| session.classify_draft(candidate))
+                    .transpose()?,
+                _ => None,
+            };
+            let ledger = invocations
+                .pinned_view()
+                .map_err(CoordinatorIoError::InvocationStore)?;
+            Ok((tip, ledger, draft_classification))
+        })
+        .await
+        .map_err(CoordinatorIoError::Blocking)?
+    }
     pub(crate) async fn begin_turn(
         &self,
         facts: lattice_session::pending::TurnStartedFacts,
@@ -470,8 +507,8 @@ impl TurnCoordinator {
                             lattice_session::pending::ReconciliationAction::AdvanceStepClosing { state } => {
                                 self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::StepClosing(state), recorded_at, Arc::clone(&lock)).await?;
                             }
-                            lattice_session::pending::ReconciliationAction::PublishStepClosed { kind } => {
-                                self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::StepClosed { kind }, recorded_at, Arc::clone(&lock)).await?;
+                            lattice_session::pending::ReconciliationAction::PublishStepClosed { kind, messages } => {
+                                self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::StepClosed { kind, messages }, recorded_at, Arc::clone(&lock)).await?;
                             }
                             lattice_session::pending::ReconciliationAction::PublishTurnClosing { candidate } => {
                                 self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::TurnClosing(lattice_session::pending::TurnClosingFacts { turn_id: current.snapshot.turn_id, candidate }), recorded_at, Arc::clone(&lock)).await?;

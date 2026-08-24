@@ -15,7 +15,7 @@
 
 use lancet_protocol::{ModelAttemptKey, SessionId, TurnId};
 use lattice_conversation::{
-    AttemptInterruption, AttemptRejection, BoundToolCall, NativeMessage, TokenUsage,
+    AttemptInterruption, AttemptRejection, BoundToolCall, MessageRole, NativeMessage, TokenUsage,
     UnboundToolCall,
 };
 use serde::{Deserialize, Serialize};
@@ -99,6 +99,8 @@ pub enum PendingStage {
     StepClosed {
         /// The closed sum kind.
         kind: StepClosedKind,
+        /// Post-user typed transcript delta required for finalization/reopen.
+        messages: Vec<NativeMessage<lattice_conversation::BoundToolCall>>,
     },
     /// The exact canonical `Committed` and TurnCommit candidate identities
     /// are pinned (including every commit-time field); the final ref
@@ -151,7 +153,17 @@ impl PendingStage {
             Self::BindingPlanned { plan, .. } => plan.validate(),
             Self::Bound { plan } => plan.validate(),
             Self::StepClosing(state) => state.validate(),
-            Self::StepClosed { kind } => validate_step_closed(kind),
+            Self::StepClosed { kind, messages } => {
+                validate_step_closed(kind)?;
+                for message in messages {
+                    if message.role == MessageRole::System || message.role == MessageRole::User {
+                        return Err(SessionError::JournalCorruption {
+                            detail: "StepClosed transcript delta contains a root message".into(),
+                        });
+                    }
+                }
+                Ok(())
+            }
             Self::TurnClosing(facts) => facts.validate(),
             Self::Committed(facts) => facts.validate(),
         }
@@ -474,7 +486,7 @@ impl PendingSnapshot {
                     });
                 }
             }
-            PendingStage::StepClosed { kind } => {
+            PendingStage::StepClosed { kind, .. } => {
                 if let StepClosedKind::ContinueModel {
                     ordered_tool_results,
                     ..
@@ -505,6 +517,10 @@ impl PendingSnapshot {
         }
         Ok(())
     }
+}
+
+fn step_closing_messages(state: &StepClosingState) -> Vec<NativeMessage<BoundToolCall>> {
+    state.messages.clone()
 }
 
 /// Pure stage-transition validation: may `next` legally follow `prev` in one
@@ -575,6 +591,7 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                     StepClosedKind::ContinueModel {
                         model_step_ordinal, ..
                     },
+                ..
             },
             ModelAttemptStarted { key },
         ) => {
@@ -636,6 +653,7 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                 && state.current_candidate.is_none()
                 && state.plan_key == plan.plan_key
                 && state.bindings == plan.bindings
+                && state.messages == vec![plan.bound_message()?]
             {
                 Ok(())
             } else {
@@ -654,6 +672,7 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                 (None, Some(candidate)) => {
                     if prev_state.closure_cursor == next_state.closure_cursor
                         && prev_state.closures == next_state.closures
+                        && prev_state.messages == next_state.messages
                     {
                         let index = next_state.closure_cursor as usize;
                         match next_state.bindings.get(index) {
@@ -673,6 +692,9 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                         || next_state.closures.len() != prev_state.closures.len() + 1
                         || next_state.closures[..prev_state.closures.len()]
                             != prev_state.closures[..]
+                        || next_state.messages.len() != prev_state.messages.len() + 1
+                        || next_state.messages[..prev_state.messages.len()]
+                            != prev_state.messages[..]
                     {
                         return mismatch(
                             "only the lowest unclosed ordinal may advance, by exactly one"
@@ -696,21 +718,38 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                     Ok(())
                 }
                 (None, None) => {
-                    // Closure without a pinned candidate: the binding never
-                    // dispatched, so its material is typed not-executed.
+                    // Without a pinned ResultDraft, exactly two conservative
+                    // closures are legal: a never-dispatched binding is
+                    // NotExecuted, while durable DispatchStarted with no terminal
+                    // is Indeterminate(MayHaveOccurred).
                     if next_state.closure_cursor == prev_state.closure_cursor + 1
                         && next_state.closures.len() == prev_state.closures.len() + 1
                         && next_state.closures[..prev_state.closures.len()]
                             == prev_state.closures[..]
+                        && next_state.messages.len() == prev_state.messages.len() + 1
+                        && next_state.messages[..prev_state.messages.len()]
+                            == prev_state.messages[..]
                     {
                         let closure = next_state.closures.last().expect("extended by one");
-                        match &closure.material {
-                            super::step::MaterialAvailability::Unavailable {
-                                reason: super::facts::UnavailableMaterialReason::NotExecuted,
-                                ..
-                            } => Ok(()),
+                        match (&closure.outcome, &closure.material) {
+                            (
+                                lattice_conversation::ToolResultOutcome::NotExecuted,
+                                super::step::MaterialAvailability::Unavailable {
+                                    reason: super::facts::UnavailableMaterialReason::NotExecuted,
+                                    digest: None,
+                                    byte_length: None,
+                                },
+                            )
+                            | (
+                                lattice_conversation::ToolResultOutcome::Indeterminate,
+                                super::step::MaterialAvailability::Unavailable {
+                                    reason: super::facts::UnavailableMaterialReason::DraftPublicationFailed,
+                                    digest: None,
+                                    byte_length: None,
+                                },
+                            ) => Ok(()),
                             _ => mismatch(
-                                "closing without a pinned candidate requires not-executed material"
+                                "closing without a pinned candidate requires exact conservative material"
                                     .to_string(),
                             ),
                         }
@@ -727,10 +766,11 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                 ),
             }
         }
-        // StepClosed after every binding is closed. A ContinueModel closure
+        // StepClosed after every binding is closed. The durable transcript
+        // delta must be the exact bound assistant followed by its closures.
         // must name the step whose plan it just finished closing, so the
         // ordinal the next attempt is validated against is durable fact.
-        (StepClosing(state), StepClosed { kind }) => {
+        (StepClosing(state), StepClosed { kind, messages }) => {
             if !state.all_closed() {
                 return mismatch("StepClosed requires every binding closed".to_string());
             }
@@ -744,9 +784,29 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                     state.plan_key.model_step_ordinal
                 ));
             }
+            if *messages != step_closing_messages(state) {
+                return mismatch("StepClosed transcript differs from the closed plan".to_string());
+            }
             Ok(())
         }
+        (
+            MessageComplete { message, .. },
+            StepClosed {
+                kind: StepClosedKind::FinishTurn { final_message },
+                messages,
+            },
+        ) => {
+            let expected = message.clone().bind_zero_tool().map_err(|_| {
+                SessionError::InvalidInput("FinishTurn message has ToolCalls".into())
+            })?;
+            if message == final_message && messages == &vec![expected] {
+                Ok(())
+            } else {
+                mismatch("FinishTurn transcript differs from MessageComplete".to_string())
+            }
+        }
         // Reopen closure paths close the step directly from pre-execution
+        // stages; they have no post-user transcript delta.
         // stages; a live coordinator also closes failed/cancelled/interrupted
         // turns this way.
         (
@@ -755,11 +815,16 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
             | ModelAttemptFailed { .. }
             | ModelAttemptInterrupted { .. }
             | ModelAttemptRejected { .. }
-            | MessageComplete { .. }
             | BindingPlanned { .. }
             | Bound { .. },
-            StepClosed { .. },
-        ) => Ok(()),
+            StepClosed { messages, .. },
+        ) => {
+            if messages.is_empty() {
+                Ok(())
+            } else {
+                mismatch("early StepClosed must have an empty transcript delta".to_string())
+            }
+        }
         (StepClosed { .. }, TurnClosing(_)) => Ok(()),
         (_, Committed(_)) => mismatch(
             "Committed is never published through active-turn; the final ref \
@@ -901,6 +966,8 @@ mod tests {
     fn step_closing_cursor_0(plan: &BindingPlan) -> super::super::step::StepClosingState {
         super::super::step::StepClosingState {
             plan_key: plan.plan_key,
+
+            messages: vec![plan.bound_message().unwrap()],
             bindings: plan.bindings.clone(),
             closure_cursor: 0,
             closures: vec![],
@@ -908,6 +975,58 @@ mod tests {
         }
     }
 
+    fn append_last_closure_message(state: &mut super::super::step::StepClosingState) {
+        let closure = state.closures.last().unwrap();
+        state.messages.push(NativeMessage::new(
+            MessageRole::Tool,
+            None,
+            vec![lattice_conversation::MessagePart::semantic_only(
+                lattice_conversation::MessageSemantic::ToolResult {
+                    invocation_id: closure.binding.invocation_id,
+                    name: closure.binding.method.clone(),
+                    outcome: closure.outcome,
+                    content: None,
+                },
+            )],
+        ));
+    }
+
+    #[test]
+    fn unpinned_dispatch_started_closes_as_exact_indeterminate() {
+        let plan = one_call_plan();
+        let previous = step_closing_cursor_0(&plan);
+        let mut next = previous.clone();
+        next.closure_cursor = 1;
+        next.closures.push(super::super::step::ClosedBinding {
+            binding: plan.bindings[0].clone(),
+            outcome: lattice_conversation::ToolResultOutcome::Indeterminate,
+            material: super::super::step::MaterialAvailability::Unavailable {
+                reason: super::super::facts::UnavailableMaterialReason::DraftPublicationFailed,
+                digest: None,
+                byte_length: None,
+            },
+        });
+        append_last_closure_message(&mut next);
+        validate_transition(
+            &PendingStage::StepClosing(previous.clone()),
+            &PendingStage::StepClosing(next.clone()),
+        )
+        .expect("DispatchStarted before candidate pin is conservatively indeterminate");
+
+        next.closures[0].material = super::super::step::MaterialAvailability::Unavailable {
+            reason: super::super::facts::UnavailableMaterialReason::DraftPublicationFailed,
+            digest: Some([7; 32]),
+            byte_length: None,
+        };
+        assert!(
+            validate_transition(
+                &PendingStage::StepClosing(previous),
+                &PendingStage::StepClosing(next),
+            )
+            .is_err(),
+            "unpinned indeterminate material must not invent a digest",
+        );
+    }
     #[test]
     fn turn_started_must_be_first() {
         let started = turn_started();
@@ -1162,7 +1281,8 @@ mod tests {
         assert!(validate_transition(&PendingStage::StepClosed {
             kind: super::super::step::StepClosedKind::InterruptTurn {
                 reason: super::super::outcome::TurnInterruption::ProcessInterruptedBeforeModelAttempt,
-            }
+            },
+            messages: Vec::new(),
         }, &closing)
         .is_ok());
     }
@@ -1225,6 +1345,7 @@ mod tests {
         // must agree with the durable binding addresses it closes.
         let ok = PendingStage::StepClosed {
             kind: continue_model(0),
+            messages: Vec::new(),
         };
         ok.validate().expect("ordinal agrees with the closures");
 
@@ -1242,6 +1363,7 @@ mod tests {
                 ordered_tool_results: ordered_tool_results.clone(),
                 conversation_digest,
             },
+            messages: Vec::new(),
         };
         assert!(
             matches!(
@@ -1257,6 +1379,7 @@ mod tests {
                 ordered_tool_results: vec![],
                 conversation_digest,
             },
+            messages: Vec::new(),
         };
         assert!(
             matches!(
@@ -1273,6 +1396,7 @@ mod tests {
         // next ordinal and a fresh attempt, not merely a legal attempt key.
         let closed = PendingStage::StepClosed {
             kind: continue_model(0),
+            messages: Vec::new(),
         };
         validate_transition(
             &closed,
@@ -1306,18 +1430,21 @@ mod tests {
                 byte_length: None,
             },
         }];
+        append_last_closure_message(&mut closing);
         validate_transition(
             &PendingStage::StepClosing(closing.clone()),
             &PendingStage::StepClosed {
                 kind: continue_model(0),
+                messages: closing.messages.clone(),
             },
         )
         .expect("the plan's own step");
         assert!(
             validate_transition(
-                &PendingStage::StepClosing(closing),
+                &PendingStage::StepClosing(closing.clone()),
                 &PendingStage::StepClosed {
                     kind: continue_model(1),
+                    messages: closing.messages.clone(),
                 },
             )
             .is_err(),

@@ -50,6 +50,25 @@ use crate::session::ApiError;
 const CEP_EVENT_DRAIN_GRACE: Duration = Duration::from_millis(50);
 const BOUNDED_ERROR_CONTENT_BYTES: usize = 4_096;
 
+#[cfg(feature = "test-crash-barriers")]
+async fn hit_turn_crash_barrier(
+    coordinator: &TurnCoordinator,
+    session_id: &str,
+    barrier: &str,
+) -> Result<(), ApiError> {
+    super::crash_barrier::hit(coordinator, session_id, barrier)
+        .await
+        .map_err(map_io)
+}
+
+#[cfg(not(feature = "test-crash-barriers"))]
+async fn hit_turn_crash_barrier(
+    _coordinator: &TurnCoordinator,
+    _session_id: &str,
+    _barrier: &str,
+) -> Result<(), ApiError> {
+    Ok(())
+}
 /// Drive the durable live Turn after `TurnStarted` is published.
 pub(super) async fn run_coordinator_saga(
     prepared: PreparedTurn,
@@ -108,6 +127,13 @@ pub(super) async fn run_coordinator_saga(
         finish_reason: TurnFinishReason::Stop,
     };
 
+    macro_rules! crash_barrier {
+        ($label:lifetime, $name:expr) => {
+            if let Err(error) = hit_turn_crash_barrier(&coordinator, &session_id, $name).await {
+                break $label Err(error);
+            }
+        };
+    }
     let saga_result: Result<(), ApiError> = 'saga: loop {
         if model_step >= MAX_MODEL_STEPS {
             turn_outcome = TurnOutcome::Failed {
@@ -124,6 +150,7 @@ pub(super) async fn run_coordinator_saga(
                             kind: StepClosedKind::FailTurn {
                                 reason: TurnFailure::ModelStepLimitExceeded,
                             },
+                            messages: Vec::new(),
                         },
                         recorded_at,
                         Arc::clone(&execution_lock),
@@ -159,6 +186,7 @@ pub(super) async fn run_coordinator_saga(
                                     lattice_conversation::AttemptInterruption::Timeout,
                                 ),
                             },
+                            messages: Vec::new(),
                         },
                         recorded_at,
                         Arc::clone(&execution_lock),
@@ -187,6 +215,7 @@ pub(super) async fn run_coordinator_saga(
                             kind: StepClosedKind::CancelTurn {
                                 reason: TurnCancellation::UserCancelled,
                             },
+                            messages: Vec::new(),
                         },
                         recorded_at,
                         Arc::clone(&execution_lock),
@@ -216,6 +245,7 @@ pub(super) async fn run_coordinator_saga(
             {
                 break 'saga Err(map_io(err));
             }
+            crash_barrier!('saga, "model_attempt_started");
             awaiting_model_continuation = false;
 
             observer
@@ -307,6 +337,7 @@ pub(super) async fn run_coordinator_saga(
                                 kind: StepClosedKind::FailTurn {
                                     reason: TurnFailure::ModelRequestFailed,
                                 },
+                                messages: Vec::new(),
                             },
                             recorded_at,
                             Arc::clone(&execution_lock),
@@ -380,6 +411,10 @@ pub(super) async fn run_coordinator_saga(
             {
                 break 'saga Err(map_io(err));
             }
+            let final_message = complete_message
+                .clone()
+                .bind_zero_tool()
+                .expect("zero-Tool completion");
             let recorded_at = chrono::Utc::now().timestamp();
             if let Err(err) = coordinator
                 .io
@@ -389,6 +424,7 @@ pub(super) async fn run_coordinator_saga(
                         kind: StepClosedKind::FinishTurn {
                             final_message: complete_message.clone(),
                         },
+                        messages: vec![final_message.clone()],
                     },
                     recorded_at,
                     Arc::clone(&execution_lock),
@@ -397,12 +433,7 @@ pub(super) async fn run_coordinator_saga(
             {
                 break 'saga Err(map_io(err));
             }
-            candidate_messages.push(
-                complete_message
-                    .clone()
-                    .bind_zero_tool()
-                    .expect("zero-Tool completion"),
-            );
+            candidate_messages.push(final_message);
             turn_outcome = TurnOutcome::Completed {
                 finish_reason: TurnFinishReason::Stop,
             };
@@ -438,12 +469,14 @@ pub(super) async fn run_coordinator_saga(
         {
             break 'saga Err(map_io(err));
         }
+        crash_barrier!('saga, "binding_planned");
 
         let mut plan = plan;
         match reserve_with_revision(&coordinator, &session_id, &execution_lock, &mut plan).await {
             Ok(()) => {}
             Err(err) => break 'saga Err(err),
         }
+        crash_barrier!('saga, "reservation_published");
 
         let recorded_at = chrono::Utc::now().timestamp();
         if let Err(err) = coordinator
@@ -458,9 +491,15 @@ pub(super) async fn run_coordinator_saga(
         {
             break 'saga Err(map_io(err));
         }
+        crash_barrier!('saga, "bound");
 
+        let bound_assistant = match plan.bound_message() {
+            Ok(message) => message,
+            Err(error) => break 'saga Err(ApiError::Internal(error.to_string())),
+        };
         let mut closing = StepClosingState {
             plan_key: plan.plan_key,
+            messages: vec![bound_assistant.clone()],
             bindings: plan.bindings.clone(),
             closure_cursor: 0,
             closures: Vec::new(),
@@ -479,8 +518,8 @@ pub(super) async fn run_coordinator_saga(
         {
             break 'saga Err(map_io(err));
         }
+        crash_barrier!('saga, "step_closing_empty");
 
-        let bound_assistant = bind_assistant_message(&complete_message, &plan);
         history.push(bound_assistant.clone());
         candidate_messages.push(bound_assistant.clone());
 
@@ -508,6 +547,8 @@ pub(super) async fn run_coordinator_saga(
                         byte_length: None,
                     },
                 };
+                let tool_result = tool_result_message(&closure);
+                closing.messages.push(tool_result.clone());
                 closing.closures.push(closure.clone());
                 closing.closure_cursor += 1;
                 closing.current_candidate = None;
@@ -524,8 +565,9 @@ pub(super) async fn run_coordinator_saga(
                 {
                     break 'saga Err(map_io(err));
                 }
-                history.push(tool_result_message(&closure));
-                candidate_messages.push(tool_result_message(&closure));
+                crash_barrier!('saga, &format!("cursor_{}", closing.closure_cursor));
+                history.push(tool_result.clone());
+                candidate_messages.push(tool_result);
                 continue;
             }
 
@@ -545,10 +587,10 @@ pub(super) async fn run_coordinator_saga(
                 }
             };
 
-            let provider_id = call.provider_call_id.clone().unwrap_or_default();
+            let public_invocation_id = binding.invocation_id.to_string();
             observer
                 .emit(TurnEvent::ToolCallStarted {
-                    id: provider_id.clone(),
+                    id: public_invocation_id.clone(),
                     name: binding.method.clone(),
                 })
                 .await;
@@ -565,10 +607,22 @@ pub(super) async fn run_coordinator_saga(
                     arguments_digest: binding.arguments_digest,
                 },
             };
+            #[cfg(feature = "test-crash-barriers")]
+            if let Err(err) = super::crash_barrier::prepare_dispatch(
+                &coordinator,
+                &session_id,
+                binding.invocation_id,
+            )
+            .await
+            {
+                break 'saga Err(map_io(err));
+            }
             let params = call.arguments.clone();
             let receipt = cep_client
                 .call_raw_with_receipt(invocation_binding, binding.method.clone(), params)
                 .await;
+            #[cfg(feature = "test-crash-barriers")]
+            super::crash_barrier::record_tool_effect(binding.invocation_id);
             let finalize_budget = FinalizeBudget::anchored_at(Instant::now());
 
             let (exec_outcome, conversation_outcome, canonical_content, evidence) =
@@ -582,6 +636,7 @@ pub(super) async fn run_coordinator_saga(
                 binding.address.part_ordinal,
                 canonical_content.clone(),
             );
+            crash_barrier!('saga, "candidate_computed");
 
             let (material, draft_for_pin) = match draft_result {
                 Ok(draft) => {
@@ -599,6 +654,7 @@ pub(super) async fn run_coordinator_saga(
                     {
                         break 'saga Err(map_io(err));
                     }
+                    crash_barrier!('saga, "candidate_pinned");
                     let publication = coordinator
                         .io
                         .publish_draft(draft.clone(), Arc::clone(&execution_lock))
@@ -660,6 +716,8 @@ pub(super) async fn run_coordinator_saga(
                 ),
             };
 
+            crash_barrier!('saga, "draft_published");
+
             let terminal_material = match &material {
                 MaterialAvailability::Available {
                     digest,
@@ -703,11 +761,28 @@ pub(super) async fn run_coordinator_saga(
                 break 'saga Err(map_finalize_failure(err));
             }
 
+            crash_barrier!('saga, "terminal_published");
+
             let closure = ClosedBinding {
                 binding: binding.clone(),
                 outcome: conversation_outcome,
                 material,
             };
+            let content = match &closure.material {
+                MaterialAvailability::Available { .. } => Some(canonical_content),
+                MaterialAvailability::Unavailable { .. } => None,
+            };
+            let tool_result = NativeMessage::new(
+                MessageRole::Tool,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::ToolResult {
+                    invocation_id: binding.invocation_id,
+                    name: binding.method.clone(),
+                    outcome: conversation_outcome,
+                    content,
+                })],
+            );
+            closing.messages.push(tool_result.clone());
             closing.closures.push(closure.clone());
             closing.closure_cursor = (index as u32) + 1;
             closing.current_candidate = None;
@@ -724,27 +799,14 @@ pub(super) async fn run_coordinator_saga(
             {
                 break 'saga Err(map_io(err));
             }
+            crash_barrier!('saga, &format!("cursor_{}", closing.closure_cursor));
 
-            let content = match &closure.material {
-                MaterialAvailability::Available { .. } => Some(canonical_content),
-                MaterialAvailability::Unavailable { .. } => None,
-            };
-            let tool_result = NativeMessage::new(
-                MessageRole::Tool,
-                None,
-                vec![MessagePart::semantic_only(MessageSemantic::ToolResult {
-                    invocation_id: binding.invocation_id,
-                    name: binding.method.clone(),
-                    outcome: conversation_outcome,
-                    content,
-                })],
-            );
             history.push(tool_result.clone());
             candidate_messages.push(tool_result);
 
             observer
                 .emit(TurnEvent::ToolCallFinished {
-                    id: provider_id,
+                    id: public_invocation_id,
                     name: binding.method.clone(),
                     ok: matches!(conversation_outcome, ToolResultOutcome::Succeeded),
                     output_len: match &closure.material {
@@ -844,6 +906,7 @@ pub(super) async fn run_coordinator_saga(
                 session_id.clone(),
                 PendingStage::StepClosed {
                     kind: step_closed_kind,
+                    messages: closing.messages.clone(),
                 },
                 recorded_at,
                 Arc::clone(&execution_lock),
@@ -852,6 +915,8 @@ pub(super) async fn run_coordinator_saga(
         {
             break 'saga Err(map_io(err));
         }
+
+        crash_barrier!('saga, "step_closed");
 
         if stop_batch.is_some() {
             break 'saga Ok(());
@@ -1066,6 +1131,7 @@ async fn handle_attempt_outcome(
                         kind: StepClosedKind::FailTurn {
                             reason: reason.clone(),
                         },
+                        messages: Vec::new(),
                     },
                     chrono::Utc::now().timestamp(),
                     Arc::clone(execution_lock),
@@ -1121,7 +1187,10 @@ async fn handle_attempt_outcome(
                 .io
                 .advance_turn(
                     session_id.to_string(),
-                    PendingStage::StepClosed { kind },
+                    PendingStage::StepClosed {
+                        kind,
+                        messages: Vec::new(),
+                    },
                     chrono::Utc::now().timestamp(),
                     Arc::clone(execution_lock),
                 )
@@ -1139,10 +1208,9 @@ fn map_step_event(event: ModelStepEvent) -> Option<TurnEvent> {
         ModelStepEvent::Opened { .. } => None,
         ModelStepEvent::ReasoningDelta { content } => Some(TurnEvent::ReasoningDelta { content }),
         ModelStepEvent::TokenDelta { content } => Some(TurnEvent::TokenDelta { content }),
-        ModelStepEvent::ToolCallStarted { id, name } => {
-            Some(TurnEvent::ToolCallStarted { id, name })
-        }
-        ModelStepEvent::ToolCallDelta { .. } | ModelStepEvent::ToolCallEnded { .. } => None,
+        ModelStepEvent::ToolCallStarted { .. }
+        | ModelStepEvent::ToolCallDelta { .. }
+        | ModelStepEvent::ToolCallEnded { .. } => None,
     }
 }
 
@@ -1281,55 +1349,6 @@ fn build_binding_plan(
     plan.validate()
         .map_err(|err| ApiError::Internal(err.to_string()))?;
     Ok(plan)
-}
-
-fn bind_assistant_message(
-    message: &NativeMessage<UnboundToolCall>,
-    plan: &BindingPlan,
-) -> NativeMessage<BoundToolCall> {
-    let parts = message
-        .parts
-        .iter()
-        .enumerate()
-        .map(|(ordinal, part)| match &part.semantic {
-            MessageSemantic::ToolCall { call } => {
-                let binding = plan
-                    .bindings
-                    .iter()
-                    .find(|b| b.address.part_ordinal == ordinal as u32)
-                    .expect("plan binds every ToolCall");
-                MessagePart {
-                    semantic: MessageSemantic::ToolCall {
-                        call: call.clone().bind(binding.invocation_id, binding.address),
-                    },
-                    replay_state: part.replay_state.clone(),
-                }
-            }
-            MessageSemantic::Text { text } => MessagePart {
-                semantic: MessageSemantic::Text { text: text.clone() },
-                replay_state: part.replay_state.clone(),
-            },
-            MessageSemantic::Reasoning { text } => MessagePart {
-                semantic: MessageSemantic::Reasoning { text: text.clone() },
-                replay_state: part.replay_state.clone(),
-            },
-            MessageSemantic::ToolResult {
-                invocation_id,
-                name,
-                outcome,
-                content,
-            } => MessagePart {
-                semantic: MessageSemantic::ToolResult {
-                    invocation_id: *invocation_id,
-                    name: name.clone(),
-                    outcome: *outcome,
-                    content: content.clone(),
-                },
-                replay_state: part.replay_state.clone(),
-            },
-        })
-        .collect();
-    NativeMessage::new(message.role, message.provider_origin.clone(), parts)
 }
 
 async fn reserve_with_revision(
@@ -1619,10 +1638,7 @@ async fn close_live_turn(
         created_at,
     };
 
-    let session_store = coordinator.io.session_store();
-    let lock = Arc::clone(&execution_lock);
-    let session_id_owned = session_id.to_string();
-    tokio::task::spawn_blocking(move || {
+    let checkpoint = tokio::task::spawn_blocking(move || {
         let _ws_guard = workspace_history
             .lock_workspace_operation(
                 lattice_session::LockMode::Shared,
@@ -1631,26 +1647,45 @@ async fn close_live_turn(
             .map_err(|err| {
                 ApiError::Internal(format!("acquire workspace checkpoint lock: {err}"))
             })?;
-        let oid = workspace_history.current().map_err(|err| {
-            ApiError::Internal(format!("read workspace history checkpoint: {err}"))
-        })?;
-        candidate.workspace_history_checkpoint = oid
-            .map(WorkspaceHistoryCheckpoint::Oid)
-            .unwrap_or(WorkspaceHistoryCheckpoint::Empty);
-        session_store
-            .advance_pending_turn(
-                &session_id_owned,
-                PendingStage::TurnClosing(TurnClosingFacts { turn_id, candidate }),
-                recorded_at,
-                lock.as_ref(),
-            )
-            .map_err(|err| ApiError::Internal(format!("publish TurnClosing: {err}")))?;
-        session_store
-            .finalize_turn(&session_id_owned, &turn_id, lock.as_ref())
-            .map_err(|err| ApiError::Internal(format!("finalize Turn: {err}")))
+        workspace_history
+            .current()
+            .map_err(|err| ApiError::Internal(format!("read workspace history checkpoint: {err}")))
     })
     .await
-    .map_err(|err| ApiError::Internal(format!("close turn task failed: {err}")))?
+    .map_err(|err| ApiError::Internal(format!("read checkpoint task failed: {err}")))??;
+    candidate.workspace_history_checkpoint = checkpoint
+        .map(WorkspaceHistoryCheckpoint::Oid)
+        .unwrap_or(WorkspaceHistoryCheckpoint::Empty);
+
+    let session_store = coordinator.io.session_store();
+    let lock = Arc::clone(&execution_lock);
+    let session_id_owned = session_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        session_store.advance_pending_turn(
+            &session_id_owned,
+            PendingStage::TurnClosing(TurnClosingFacts { turn_id, candidate }),
+            recorded_at,
+            lock.as_ref(),
+        )
+    })
+    .await
+    .map_err(|err| ApiError::Internal(format!("publish TurnClosing task failed: {err}")))?
+    .map_err(|err| ApiError::Internal(format!("publish TurnClosing: {err}")))?;
+
+    #[cfg(feature = "test-crash-barriers")]
+    super::crash_barrier::hit(coordinator, session_id, "turn_closing")
+        .await
+        .map_err(map_io)?;
+
+    let session_store = coordinator.io.session_store();
+    let lock = Arc::clone(&execution_lock);
+    let session_id_owned = session_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        session_store.finalize_turn(&session_id_owned, &turn_id, lock.as_ref())
+    })
+    .await
+    .map_err(|err| ApiError::Internal(format!("finalize Turn task failed: {err}")))?
+    .map_err(|err| ApiError::Internal(format!("finalize Turn: {err}")))
 }
 
 #[cfg(test)]

@@ -338,6 +338,7 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
                 kind: crate::pending::StepClosedKind::FinishTurn {
                     final_message: assistant_text("done"),
                 },
+                messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
             },
             102,
             &lock,
@@ -482,6 +483,7 @@ fn finalize_conflict_publishes_nothing() {
                 kind: crate::pending::StepClosedKind::FinishTurn {
                     final_message: assistant_text("done"),
                 },
+                messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
             },
             102,
             &lock,
@@ -613,6 +615,7 @@ fn strict_open_validates_the_turn_pin_identity() {
                 kind: crate::pending::StepClosedKind::FinishTurn {
                     final_message: assistant_text("done"),
                 },
+                messages: Vec::new(),
             },
             99,
             &lock,
@@ -787,6 +790,7 @@ fn journal_finalized_turns_keep_no_legacy_outcome_authority() {
                     kind: crate::pending::StepClosedKind::FinishTurn {
                         final_message: assistant_text("done"),
                     },
+                    messages: Vec::new(),
                 },
                 99,
                 &lock,

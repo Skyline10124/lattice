@@ -86,7 +86,7 @@ fn reserve(store: &InvocationStore, step: u32, bindings: &[ReservationBinding]) 
         .expect("reserve");
 }
 
-fn evidence(secret: &str) -> TerminalEvidence {
+fn evidence() -> TerminalEvidence {
     TerminalEvidence {
         admission: lancet_protocol::AdmissionEvidence {
             version: lancet_protocol::ADMISSION_EVIDENCE_VERSION,
@@ -105,18 +105,7 @@ fn evidence(secret: &str) -> TerminalEvidence {
             denied: Vec::new(),
         },
     }
-    .tap(|_| {
-        let _ = secret;
-    })
 }
-
-trait Tap: Sized {
-    fn tap(self, f: impl FnOnce(&Self)) -> Self {
-        f(&self);
-        self
-    }
-}
-impl<T> Tap for T {}
 
 #[tokio::test]
 async fn query_pins_current_state_and_includes_unfinalized_records() {
@@ -167,7 +156,7 @@ async fn query_filters_typed_identity_method_and_terminal_verdict() {
                 digest: Some([7; 32]),
                 byte_length: Some(99),
             },
-            evidence("do-not-leak"),
+            evidence(),
         )
         .unwrap();
 
@@ -298,7 +287,7 @@ async fn operator_json_contains_digests_and_lengths_but_no_secret_material() {
                 digest: [9; 32],
                 byte_length: 65_537,
             },
-            evidence("super-secret-value"),
+            evidence(),
         )
         .unwrap();
 
@@ -306,7 +295,6 @@ async fn operator_json_contains_digests_and_lengths_but_no_secret_material() {
     let json = serde_json::to_string(&output).unwrap();
     assert!(json.contains("65537"));
     assert!(json.contains(&"09".repeat(32)));
-    assert!(!json.contains("super-secret-value"));
     for forbidden_key in [
         "arguments",
         "result_bytes",
@@ -334,7 +322,7 @@ fn state_labels_cover_closed_sums() {
                 digest: None,
                 byte_length: None,
             },
-            evidence: Box::new(evidence("x")),
+            evidence: Box::new(evidence()),
         }),
         "not_executed"
     );
@@ -349,7 +337,7 @@ fn state_labels_cover_closed_sums() {
                 digest: None,
                 byte_length: None,
             },
-            evidence: Box::new(evidence("x")),
+            evidence: Box::new(evidence()),
         }),
         "indeterminate"
     );

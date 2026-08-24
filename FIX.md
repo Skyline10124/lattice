@@ -7401,3 +7401,44 @@ removed `benchmarks/invocation-store/results/**`, and updated
   lancet-boundary`.
 - **Changed files:** conversation/session/agent/API contracts and fixtures; operator
   regressions; permanent boundary gates; AGENTS/ARCHITECTURE/FINDINGS/FIX records.
+
+
+## GitHub #139-B Commit 8：端到端崩溃、Rewind、身份与隐私门禁 — 2026-08-23
+
+**Severity:** HIGH
+
+补齐生产 durable Turn/Rewind hard cut 的真实进程崩溃证明与边界回归。新增仅由
+`test-crash-barriers` feature启用的fsynced acknowledged barriers，覆盖
+`TurnStarted`、model attempt、binding/reservation/Bound、`DispatchStarted`、
+candidate/draft/terminal、每个多Tool cursor、`StepClosed`、`TurnClosing` final
+transaction，以及 Rewind 的 workspace-history、Session ref、success-audit 三个窗口。
+Provider请求与Tool执行使用位于workspace/XDG之外的append-only fsynced日志；每个case
+在SIGKILL前验证非零计数、typed `InvocationId`和精确durable stage，strict reopen后验证
+provider不重放、Tool不重派发、`active-turn`仅在完整closure后删除。
+
+崩溃矩阵发现并修复四个真实恢复缺口：Tool-bearing assistant未进入reconciled transcript；
+已有pinned candidate恢复时错误重发cursor-0 baseline；已有exact terminal被重复发布；
+`StepClosed`未持久化完整post-user transcript delta。`StepClosingState`现以required
+`messages`作为单一provider transcript authority，validator逐cursor校验assistant、
+ToolResult身份/outcome/content与material digest/length，live/reconcile/TurnClosing复用同一
+bytes。另修Rewind workspace barrier原先误放在Session ref移动之后，并使workspace
+checkpoint lock在Session repo写入前释放，避免双repo lock重叠。
+
+同时收紧身份/隐私：public Tool started/finished事件统一使用durable `InvocationId`；native
+admission错误不回吐store path/detail；operator DTO隐私测试改为真实shape gate；duplicate
+admission断言ledger tip不变；同parent sibling Turn operator隔离回归落地。
+
+**Verification:**
+
+- `cargo test -p lattice-session` — 132 passed。
+- `cargo test -p lancet-audit` — 56 unit + contract/qualification suites passed。
+- `cargo test -p lancet-native` — all targets passed。
+- `cargo test -p lattice-api` — 99 unit + integrations passed；`release_e2e` passed。
+- feature binary Turn SIGKILL matrix — 4/4 targets passed，含multi-Tool cursor-1/cursor-2。
+- feature binary Rewind SIGKILL matrix — 3/3 action-to-audit windows passed。
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` — passed。
+- `cargo fmt --all -- --check` / `git diff --check` — clean。
+
+**Changed areas:** `lattice-session::pending`, `lattice-api::turn`/Rewind,
+`lancet-native` admission, `lancet-audit` operator regressions, and
+`lattice-system-harness` crash/provider/effect fixtures.

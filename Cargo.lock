@@ -3073,6 +3073,7 @@ dependencies = [
  "lattice-llm",
  "lattice-profile",
  "lattice-session",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
