@@ -830,18 +830,8 @@ pub(super) async fn run_coordinator_saga(
                 .await;
 
             let _ = draft_for_pin;
-            match conversation_outcome {
-                ToolResultOutcome::Indeterminate => {
-                    stop_batch = Some(
-                        lancet_audit::invocation_store::NotExecutedReason::PrecedingInvocationIndeterminate,
-                    );
-                }
-                ToolResultOutcome::Cancelled => {
-                    stop_batch = Some(
-                        lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch,
-                    );
-                }
-                _ => {}
+            if let Some(reason) = batch_stop_reason(conversation_outcome) {
+                stop_batch = Some(reason);
             }
         }
 
@@ -1489,6 +1479,20 @@ fn classify_receipt(
     }
 }
 
+fn batch_stop_reason(
+    outcome: ToolResultOutcome,
+) -> Option<lancet_audit::invocation_store::NotExecutedReason> {
+    match outcome {
+        ToolResultOutcome::Indeterminate => Some(
+            lancet_audit::invocation_store::NotExecutedReason::PrecedingInvocationIndeterminate,
+        ),
+        ToolResultOutcome::Cancelled => {
+            Some(lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch)
+        }
+        _ => None,
+    }
+}
+
 fn map_cep_outcome(
     err: &CepError,
 ) -> (
@@ -1714,6 +1718,7 @@ mod tests {
     };
     use lancet_protocol::InvocationId;
     use lattice_session::{ProjectStoreKey, StateLayout};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn empty_triple(tool: &str) -> lancet_protocol::CellEvidenceTriple {
         lancet_protocol::CellEvidenceTriple {
@@ -1735,6 +1740,150 @@ mod tests {
             }
         ));
         assert_eq!(conversation, ToolResultOutcome::Indeterminate);
+    }
+
+    #[tokio::test]
+    async fn post_dispatch_response_loss_is_durable_indeterminate_and_stops_the_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = StateLayout::in_state_root(tmp.path());
+        let key = ProjectStoreKey::derive(tmp.path()).unwrap();
+        let invocations = Arc::new(InvocationStore::create(&layout, &key).unwrap());
+        let session_id = SessionId::parse("00000000000040008000000000000001").unwrap();
+        let turn_id = TurnId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let method = "test.response";
+        let first_params = serde_json::json!({"ordinal": 0});
+        let second_params = serde_json::json!({"ordinal": 1});
+        let first = InvocationBinding {
+            invocation_id: InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
+            identity: BindingIdentity {
+                session_id,
+                turn_id,
+                model_step_ordinal: 0,
+                part_ordinal: 0,
+                method: method.into(),
+                descriptor_identity: "test-descriptor".into(),
+                arguments_digest: arguments_digest(&first_params),
+            },
+        };
+        let second = InvocationBinding {
+            invocation_id: InvocationId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
+            identity: BindingIdentity {
+                session_id,
+                turn_id,
+                model_step_ordinal: 0,
+                part_ordinal: 1,
+                method: method.into(),
+                descriptor_identity: "test-descriptor".into(),
+                arguments_digest: arguments_digest(&second_params),
+            },
+        };
+        invocations
+            .reserve_batch(
+                PlanKey {
+                    turn_id,
+                    model_step_ordinal: 0,
+                },
+                &[first.clone(), second.clone()],
+            )
+            .unwrap();
+
+        let (client, server) = lancet_api::CepTransport::pair(4);
+        let shutdown = server.shutdown_handle();
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let server_invocations = Arc::clone(&invocations);
+        let server_dispatches = Arc::clone(&dispatches);
+        let server_task = tokio::spawn(async move {
+            server
+                .run_with_handler(move |call| {
+                    let invocations = Arc::clone(&server_invocations);
+                    let dispatches = Arc::clone(&server_dispatches);
+                    async move {
+                        invocations
+                            .admit_reserved(call.binding())
+                            .expect("authoritative admission");
+                        call.mark_dispatch_started();
+                        dispatches.fetch_add(1, Ordering::SeqCst);
+                        drop(call);
+                    }
+                })
+                .await
+                .expect("transport server")
+        });
+
+        let receipt = client
+            .call_raw_with_receipt(first.clone(), method, first_params)
+            .await;
+        let (terminal, conversation, _content, evidence) = classify_receipt(receipt, method);
+        assert!(matches!(
+            terminal,
+            TerminalOutcome::Indeterminate {
+                reason: lancet_audit::invocation_store::IndeterminateReason::MayHaveOccurred
+            }
+        ));
+        assert_eq!(conversation, ToolResultOutcome::Indeterminate);
+        assert!(evidence.effects.effects.is_empty());
+        let stop = batch_stop_reason(conversation).expect("indeterminate stops the batch");
+        assert_eq!(stop, NotExecutedReason::PrecedingInvocationIndeterminate);
+
+        invocations
+            .publish_terminal(
+                first.invocation_id,
+                terminal,
+                lancet_audit::invocation_store::TerminalMaterial::Unavailable {
+                    reason: lancet_audit::invocation_store::UnavailableMaterialReason::DraftPublicationFailed,
+                    digest: None,
+                    byte_length: None,
+                },
+                evidence,
+            )
+            .unwrap();
+        invocations
+            .publish_terminal(
+                second.invocation_id,
+                TerminalOutcome::NotExecuted { reason: stop },
+                lancet_audit::invocation_store::TerminalMaterial::Unavailable {
+                    reason: lancet_audit::invocation_store::UnavailableMaterialReason::NotExecuted,
+                    digest: None,
+                    byte_length: None,
+                },
+                empty_evidence(method),
+            )
+            .unwrap();
+
+        let view = invocations.pinned_view().unwrap();
+        assert!(matches!(
+            view.snapshot.invocations[&first.invocation_id].state,
+            InvocationState::Terminal {
+                outcome: TerminalOutcome::Indeterminate { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            view.snapshot.invocations[&second.invocation_id].state,
+            InvocationState::Terminal {
+                outcome: TerminalOutcome::NotExecuted {
+                    reason: NotExecutedReason::PrecedingInvocationIndeterminate
+                },
+                ..
+            }
+        ));
+        let transitions = invocations.tail(None).unwrap();
+        assert_eq!(transitions.len(), 5);
+        assert_eq!(
+            transitions
+                .iter()
+                .filter(|transition| matches!(
+                    transition.record.state,
+                    InvocationState::DispatchStarted
+                ))
+                .count(),
+            1,
+            "the following binding is terminalized without redispatch"
+        );
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+
+        shutdown.send(true).expect("shutdown");
+        server_task.await.expect("server task");
     }
 
     #[test]

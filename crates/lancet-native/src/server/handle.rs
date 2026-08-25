@@ -9,7 +9,9 @@ mod effect;
 mod helpers;
 
 use self::effect::apply_effect_check;
-use self::helpers::{admission_denied_error, emit_cep_call_finished, emit_cep_call_started};
+use self::helpers::{
+    admission_denied_error, call_cancelled_error, emit_cep_call_finished, emit_cep_call_started,
+};
 use super::hosts::{is_component_method, workspace_mutation_host, workspace_observation_host};
 use super::transport_config::ServerRunConfig;
 use crate::server::evidence_respond::triple_from_ledger;
@@ -22,6 +24,10 @@ use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, admit_tool};
 use serde_json::Value;
 use std::sync::Arc;
+
+fn admission_task_error() -> CepError {
+    CepError::internal_error("invocation admission unavailable")
+}
 
 fn admission_error(err: InvocationStoreError) -> CepError {
     match err {
@@ -67,6 +73,11 @@ pub(super) async fn handle_request(
     let events = call.event_sink();
     let cancellation = call.cancellation();
 
+    if cancellation.is_cancelled() {
+        call.respond(Err(call_cancelled_error(&method)));
+        return;
+    }
+
     if !binding.matches_request(&method, &params) {
         call.respond(Err(CepError::invalid_params(
             "invocation binding does not match request method/arguments",
@@ -85,13 +96,12 @@ pub(super) async fn handle_request(
             call.respond(Err(admission_error(err)));
             return;
         }
-        Err(err) => {
-            call.respond(Err(CepError::internal_error(format!(
-                "invocation admission task failed: {err}"
-            ))));
+        Err(_join_error) => {
+            call.respond(Err(admission_task_error()));
             return;
         }
     }
+    call.mark_dispatch_started();
     #[cfg(feature = "test-crash-barriers")]
     stop_after_dispatch_started(&invocations, invocation_id);
     let is_component = is_component_method(components.as_deref(), &method);
@@ -343,5 +353,20 @@ mod tests {
         });
         assert_eq!(conflict.message, "invocation admission rejected");
         assert!(!conflict.message.contains('/'));
+
+        let store = admission_error(InvocationStoreError::Serde(
+            serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+        ));
+        assert_eq!(store.code, CepErrorCode::ExecutionFailed);
+        assert_eq!(store.message, "invocation store admission failed");
+        assert!(!serde_json::to_string(&store).unwrap().contains('/'));
+    }
+
+    #[test]
+    fn admission_join_error_has_a_stable_redacted_public_classification() {
+        let error = admission_task_error();
+        assert_eq!(error.code, CepErrorCode::ExecutionFailed);
+        assert_eq!(error.message, "invocation admission unavailable");
+        assert!(error.message.len() < 64);
     }
 }

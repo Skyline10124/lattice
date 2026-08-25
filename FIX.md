@@ -7528,3 +7528,35 @@ reader, import, fallback, dual write, or reverse crate dependency was added.
 **Changed areas:** `lattice-session` PendingTurn/session-store contracts, `lattice-api` Session and
 Turn startup/coordinator wiring, `lancet-api` runtime store validation, InvocationStore key
 exposure, and focused unit/integration fixtures.
+
+## GitHub #158: isolate CEP requests and preserve post-dispatch uncertainty — 2026-08-25
+
+**Severity:** P0 / BLOCKER
+
+**Problem:** CEP transport used durable `InvocationId` as cancellation/task correlation and mapped a
+lost response channel to one generic transport failure. A caller drop could therefore leave stale
+cancellation state for another request, while a worker panic after durable `DispatchStarted` was
+reported as deterministic failure even though the Tool may already have executed.
+
+**Fix:** Transport now gives every request a private pointer-identity key while retaining
+`InvocationId` exclusively as the domain binding/event/ledger identity. All completion, panic,
+shutdown, queue-drop, and cancellation paths clean up the exact request entry. Native admission
+marks the shared response phase only after `InvocationStore::admit_reserved` has durably published
+`DispatchStarted`; response loss before that boundary is `ExecutionFailed`, while loss afterward is
+typed `OutcomeIndeterminate` and the saga persists `Indeterminate(MayHaveOccurred)` without
+redispatching later bindings. Async and sync EventSink paths overwrite payload-provided identity
+with the host-bound invocation. Admission/store/JoinError messages are stable, bounded, path-free
+classifications. No unsafe post-dispatch abort or observer-backpressure scope expansion was added.
+
+**Verification:**
+
+- `cargo test -p lancet-dispatch -p lancet-native -p lancet-api -p lattice-api` — passed: dispatch
+  7 tests, native 49 unit plus all integrations, LANCET API 10, lattice-api 105 unit plus every
+  integration including 19 Rewind cases.
+- `cargo clippy -p lancet-protocol -p lancet-dispatch -p lancet-native -p lancet-api -p lattice-api --all-targets -- -D warnings` — passed.
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` — passed.
+- `cargo fmt --all -- --check` / `git diff --check` / LSP diagnostics — clean.
+
+**Changed areas:** `lancet-dispatch` request transport and EventSink, `lancet-native` admission/error
+mapping and recovery regressions, `lattice-api` saga indeterminate/batch-stop coverage, and current
+crate-local architecture guidance.

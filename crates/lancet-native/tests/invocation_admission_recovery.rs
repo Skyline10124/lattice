@@ -49,11 +49,7 @@ fn reserve(config: &ServerRunConfig, binding: &lancet_protocol::InvocationBindin
         .expect("reserve invocation");
 }
 
-async fn spawn_noop() -> (
-    lancet_native::CepClient,
-    ServerRunConfig,
-    tokio::task::JoinHandle<()>,
-) {
+fn noop_server_config() -> (ServerRunConfig, MethodRegistry) {
     let components =
         Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
     let mut config = ServerRunConfig::in_memory_for_tests().with_capability_admission(
@@ -66,6 +62,15 @@ async fn spawn_noop() -> (
     config.components = Some(components);
     let mut registry = MethodRegistry::new();
     register_production_method_registry(&mut registry).unwrap();
+    (config, registry)
+}
+
+async fn spawn_noop() -> (
+    lancet_native::CepClient,
+    ServerRunConfig,
+    tokio::task::JoinHandle<()>,
+) {
+    let (config, registry) = noop_server_config();
     let (client, server) = CepTransport::pair(64);
     let config_for_calls = config.clone();
     let task = tokio::spawn(async move {
@@ -97,11 +102,21 @@ async fn duplicate_reserved_call_is_rejected_without_second_execution() {
     reserve(&config, &binding);
 
     let first = client
-        .call_raw(binding.clone(), "noop.echo", params.clone())
+        .call_raw_with_receipt(binding.clone(), "noop.echo", params.clone())
         .await
         .expect("first reserved call executes");
-    assert_eq!(first, serde_json::json!({ "echoed": "once" }));
+    assert_eq!(first.result, Ok(serde_json::json!({ "echoed": "once" })));
+    assert_eq!(
+        first.evidence.effects.effects.len(),
+        2,
+        "one no-op execution has exactly its operation and result effects"
+    );
     let tip_before_duplicate = config.invocations.pinned_view().unwrap().commit_oid;
+    assert_eq!(
+        config.invocations.tail(None).unwrap().len(),
+        2,
+        "the ledger contains one Reserved and one DispatchStarted transition"
+    );
 
     let err = client
         .call_raw(binding, "noop.echo", params)
@@ -113,4 +128,60 @@ async fn duplicate_reserved_call_is_rejected_without_second_execution() {
         tip_before_duplicate,
         "rejected duplicate must not publish another lifecycle/effect record",
     );
+    assert_eq!(config.invocations.tail(None).unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn dropped_queued_caller_is_cancelled_before_admission_and_does_not_poison_retry() {
+    let (config, registry) = noop_server_config();
+    let (client, server) = CepTransport::pair(1);
+    let shutdown = server.shutdown_handle();
+    let params = serde_json::json!({ "message": "retry" });
+    let binding = binding("noop.echo", &params);
+    reserve(&config, &binding);
+    let reserved_tip = config.invocations.pinned_view().unwrap().commit_oid;
+
+    let (abandoned, _control) =
+        client.start_call_raw(binding.clone(), "noop.echo".into(), params.clone());
+    let abandoned_task = tokio::spawn(abandoned);
+    tokio::task::yield_now().await;
+    assert!(
+        !abandoned_task.is_finished(),
+        "request is queued for a server"
+    );
+    abandoned_task.abort();
+    assert!(
+        abandoned_task
+            .await
+            .expect_err("caller future dropped")
+            .is_cancelled()
+    );
+
+    let server_config = config.clone();
+    let server_task = tokio::spawn(async move {
+        server
+            .run_native(registry, server_config)
+            .await
+            .expect("native server");
+    });
+
+    let receipt = client
+        .call_raw_with_receipt(binding.clone(), "noop.echo", params)
+        .await
+        .expect("fresh transport request for the still-reserved invocation executes");
+    assert_eq!(receipt.result, Ok(serde_json::json!({ "echoed": "retry" })));
+    assert_eq!(receipt.evidence.effects.effects.len(), 2);
+    assert_ne!(
+        config.invocations.pinned_view().unwrap().commit_oid,
+        reserved_tip,
+        "only the fresh request may publish DispatchStarted"
+    );
+    assert_eq!(
+        config.invocations.tail(None).unwrap().len(),
+        2,
+        "abandoned pre-admission request adds no lifecycle transition"
+    );
+
+    shutdown.send(true).expect("shutdown");
+    server_task.await.expect("server task");
 }

@@ -67,6 +67,10 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Recent Issues
 
+- FIXED #158: queued caller cancellation is rejected before invocation
+  admission; successful durable admission marks the private transport request
+  as `DispatchStarted` before executor handoff. Admission store/task failures
+  expose only stable typed, path-free public errors.
 - ADDED #30: `observe.workspace` migrated to the embedded
   `tools/observe-workspace` Component Tool. The native observation handler,
   its registration, the executor render helpers, and the authority's

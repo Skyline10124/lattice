@@ -63,13 +63,16 @@ impl EventSink {
         Self { tx, invocation_id }
     }
 
-    /// Emit a CEP notification tagged with this invocation's id.
+    /// Emit a CEP notification tagged with this invocation's host-bound id.
+    /// Any payload-supplied `invocation_id` is overwritten.
     ///
     /// Progress events are best-effort: a closed or full client channel does not fail the handler.
     pub async fn emit(&self, method: impl Into<String>, mut params: Value) {
         if let Some(obj) = params.as_object_mut() {
-            obj.entry("invocation_id".to_string())
-                .or_insert_with(|| Value::from(self.invocation_id.to_string()));
+            obj.insert(
+                "invocation_id".to_string(),
+                Value::from(self.invocation_id.to_string()),
+            );
         } else {
             params = serde_json::json!({
                 "invocation_id": self.invocation_id,
@@ -81,14 +84,16 @@ impl EventSink {
         let _ = self.tx.try_send(event);
     }
 
-    /// Emit a CEP notification synchronously, without the `&self` async
-    /// context required by `emit`. Used by Component Tool Host imports
-    /// (#27 (Codeberg #5) slice C), which run inside a synchronous wasmtime
-    /// call.
+    /// Emit a CEP notification synchronously with the same host-bound identity
+    /// overwrite as [`Self::emit`], without the `&self` async context. Used by
+    /// Component Tool Host imports (#27 (Codeberg #5) slice C), which run
+    /// inside a synchronous wasmtime call.
     pub fn emit_sync(&self, method: impl Into<String>, mut params: Value) {
         if let Some(obj) = params.as_object_mut() {
-            obj.entry("invocation_id".to_string())
-                .or_insert_with(|| Value::from(self.invocation_id.to_string()));
+            obj.insert(
+                "invocation_id".to_string(),
+                Value::from(self.invocation_id.to_string()),
+            );
         } else {
             params = serde_json::json!({
                 "invocation_id": self.invocation_id,
@@ -312,6 +317,40 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(wire_code_for_error(&err), jsonrpc::METHOD_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn event_sink_overwrites_spoofed_invocation_identity() {
+        let bound = invocation_id(9);
+        let spoofed = invocation_id(99);
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let sink = EventSink::new(event_tx, bound);
+
+        sink.emit(
+            "test.async",
+            serde_json::json!({
+                "invocation_id": spoofed,
+                "method": "observe.workspace",
+                "ok": true,
+            }),
+        )
+        .await;
+        sink.emit_sync(
+            "test.sync",
+            serde_json::json!({
+                "invocation_id": spoofed,
+                "semantic_stage": "guest",
+            }),
+        );
+
+        for expected_method in ["test.async", "test.sync"] {
+            let event = event_rx.recv().await.expect("bound event");
+            assert_eq!(event.method, expected_method);
+            assert_eq!(
+                event.params["invocation_id"],
+                serde_json::Value::String(bound.to_string())
+            );
+        }
     }
 
     #[test]

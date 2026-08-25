@@ -18,6 +18,16 @@ pub(super) fn admission_denied_error(method: &str, denial: &AdmissionDenial) -> 
     )
 }
 
+pub(super) fn call_cancelled_error(method: &str) -> CepError {
+    CepError::tool_execution(
+        CepErrorCode::CallCancelled,
+        method,
+        "cancelled",
+        None,
+        Retriability::Permanent,
+    )
+}
+
 pub(super) fn is_incomplete_dispatch(result: &Result<Value, CepError>) -> bool {
     matches!(result, Err(err) if err.code == CepErrorCode::CallCancelled)
 }
