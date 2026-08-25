@@ -15,6 +15,7 @@ pub mod fixture_http;
 pub mod pty_tui;
 pub mod scenario;
 pub mod session_send;
+pub mod tui_mock;
 pub mod world;
 pub use artifacts::{
     ArtifactScanError, EvidenceError, ScenarioEvidence, WorkspaceSnapshot,
@@ -40,4 +41,5 @@ pub use session_send::{
     SessionSendError, TurnEventLine, assert_event_subsequence, classify_exit,
     derive_send_exit_code, parse_event_line, parse_send_stdout,
 };
+pub use tui_mock::{TuiMockError, TuiMockScenario, run_tui_mock};
 pub use world::{ScenarioWorld, WorldError};
