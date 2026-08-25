@@ -9,6 +9,7 @@ mod rollout;
 mod scan_rs_tree;
 mod tool_build;
 mod tool_codegen;
+mod tui_mock;
 
 use clap::{Parser, Subcommand};
 
@@ -31,6 +32,8 @@ enum Commands {
     ToolCodegen(tool_codegen::ToolCodegenArgs),
     /// Build a Source Tool's WASM Component and pin its artifact hash.
     ToolBuild(tool_build::ToolBuildArgs),
+    /// Launch the real TUI against a deterministic local fake provider.
+    TuiMock(tui_mock::TuiMockArgs),
     /// Alpha rollout gate: clean-worktree check, locked release build,
     /// evidence steps, versioned JSON record.
     Rollout(rollout::RolloutArgs),
@@ -44,6 +47,7 @@ fn main() -> anyhow::Result<()> {
         Commands::LancetBoundary => lancet_boundary::run(),
         Commands::ToolCodegen(args) => tool_codegen::run(args),
         Commands::ToolBuild(args) => tool_build::run(args),
+        Commands::TuiMock(args) => tui_mock::run(args),
         Commands::Rollout(args) => rollout::run(args),
     }
 }

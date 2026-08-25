@@ -7345,3 +7345,28 @@ removed `benchmarks/invocation-store/results/**`, and updated
 - **Changed files:**
   `docs/adr/0005-durable-turn-invocation-and-private-git-stores.md`,
   `docs/plans/2026-08-17-issue139a-decision-record.md`, `FIX.md`.
+
+## 2026-08-26 — GitHub #156 TUI mock backend and deterministic visual fixture
+
+- **ID/severity:** GitHub #156 / developer-experience enhancement.
+- **Problem:** exercising the real full-screen TUI required a paid provider and
+  hard-to-repeat live conversations; the existing fake SSE server, PTY driver, and
+  `TestBackend` checks had no reusable scenario catalog or one-command interactive
+  entry, and rendering was only checked for non-panicking output.
+- **Fix:** added `cargo xtask tui-mock --scenario <name>`, which builds the current
+  `lattice` binary and launches its real TUI in an isolated harness world against
+  the existing fake provider. The reusable catalog supplies `long-text`,
+  `tool-call`, `disconnect`, `slow`, and `error`; the slow case uses the existing
+  response gate so Esc exercises cooperative cancellation. The existing PTY smoke
+  now consumes the shared long-text scenario, and the TUI has an exact 40×8 raw
+  buffer regression without a snapshot framework.
+- **Verification:** `cargo test -p lattice-tui` (25 passed);
+  `cargo test -p lattice-system-harness --lib` (63 passed);
+  `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness --test pty_tui_smoke`
+  (1 passed); `cargo test -p xtask` (115 passed);
+  `cargo xtask harness-boundary` passed; one-command entry smoke entered the
+  alternate screen and exited cleanly through `/quit`;
+  `env -u LATTICE_BIN cargo xtask ci` passed all gates.
+- **Changed files:** `crates/lattice-system-harness/src/{lib.rs,tui_mock.rs,bin/tui_mock.rs}`,
+  `crates/lattice-system-harness/tests/pty_tui_smoke.rs`,
+  `crates/lattice-tui/src/view.rs`, `xtask/src/{main.rs,tui_mock.rs}`, `FIX.md`.
