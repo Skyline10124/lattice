@@ -180,10 +180,12 @@ mapping (`lancet-native`) that `lancet-api` does not re-export, and
 Prefer naming a type through `lancet-api` when it re-exports it; do not add new
 crates to these edge sets without a reason recorded here.
 
-Note that only one edge in this graph is machine-checked today
-(`lattice-agent -> lancet-native`, by `cargo xtask lancet-boundary`). GitHub
-#108 tracks turning this diagram into gate data so drift fails CI instead of
-accumulating.
+`cargo xtask lancet-boundary` now machine-checks the forbidden dependency and
+legacy-surface set required by the hard cut, including the absence of
+`lattice-agent -> lancet-native` and production test-only feature reachability.
+GitHub #108 still tracks turning the complete positive edge diagram into gate
+data; `cargo metadata` and this diagram remain the authority for edges not yet
+encoded there.
 
 ## Crate Roles
 
@@ -431,15 +433,14 @@ notification cannot create an invocation.
   to substitute.
 - Keep LANCET runtime composition and its public surface in `lancet-api`; it
   takes LANCET-native policy types and must not depend on LATTICE
-  session/agent/profile crates. During the current transition, callers that
-  drive CEP must spawn through `lancet_api::LancetServer`/`LancetRuntime`, not
-  hand-roll the registry/transport/server dance. ADR 0005/#139-B removes the
-  Standalone/direct-embedder product contract: only `lattice-api` may initiate
-  a production invocation, while lower-level transport/runtime tests remain
-  internal and must supply explicit typed binding facts.
-- Keep public session and turn API contracts in `lattice-api`; it owns the
-  profile→policy translation and the agent-loop wiring over `lancet-api`. Keep
-  TUI terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
+  session/agent/profile crates. Callers that drive lower-level CEP tests must use
+  `lancet_api::LancetServer`/`LancetRuntime` with explicit durable bindings; only
+  `lattice-api` initiates production invocations.
+- Keep public session and Turn API contracts in `lattice-api`; it owns
+  profile→policy translation and the `TurnCoordinator` saga over PendingTurn,
+  InvocationStore, and LANCET. `lattice-agent::ModelStepDriver` performs one
+  provider attempt and owns no store, Tool dispatch, or Turn commit. Keep TUI
+  terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
   output, non-interactive rendering, and argument parsing in `lattice-cli`.
   Exception: shared transcript rendering sinks into `lattice-tui` (as the
   `render/` module, #116), because `lattice-tui` cannot depend on `lattice-cli`

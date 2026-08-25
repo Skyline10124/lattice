@@ -7,27 +7,33 @@
 
 ## HIGH
 
-### L-GH139B-01: provider wire builders not yet delegated to `provider_projection` — OPEN, slated for the #139-B hard cut — `residual` / `lattice-llm` / GitHub #139
+### L-GH139B-01: provider wire builders are not delegated to `provider_projection` — OPEN BLOCKER — `residual` / `lattice-llm` / GitHub #139
 
-- **Location**: `crates/lattice-llm/src/providers/{openai,anthropic,gemini}.rs`
-  (request-body tool-call/tool-result encoding); mirror implementations in
-  `crates/lattice-llm/src/provider_projection/`.
-- **Problem**: #139-B Commit 4 moved agent-side request/response assembly
-  (strict batch validation, canonical arguments, typed
-  ToolResultWithoutProviderCallId failures) onto the projection contracts,
-  but the production provider adapters still hand-build their tool-call and
-  tool-result wire JSON from `lattice_llm::Message`. Two encoders of the
-  same official shapes now exist and can drift.
-- **Current status**: OPEN residual of Commit 4. Full delegation belongs with
-  the Commit 6 hard cut, which rebuilds the request assembly onto the
-  coordinator's bound binding path (and deletes the Gemini `tc_*` synthetic
-  streaming ids, which require `LlmEvent` id optionality). Blocking nothing
-  pre-cut: the temporary sequencer path is deleted whole in Commit 6.
-- **Plan**: extract per-provider shared wire builders in
-  `provider_projection` (single implementation of each official shape),
-  route both the projection and the provider adapters through them, and make
-  `lattice_llm::ToolCall.id` optional so id-less calls fail typed instead of
-  being synthesized.
+- **Location**: `crates/lattice-agent/src/model_step.rs`
+  (`assemble_request_messages`);
+  `crates/lattice-llm/src/providers/{openai,anthropic,gemini}.rs`
+  (request-body ToolCall/ToolResult encoding and Gemini stream IDs);
+  parallel implementations in `crates/lattice-llm/src/provider_projection/`.
+- **Problem**: #139-B Commit 4 required production request/response assembly to
+  adopt the provider-neutral projection and delete the parallel Tool-call codec.
+  The landed `ModelStepDriver` still converts `NativeMessage<BoundToolCall>` into
+  legacy `lattice_llm::Message`, each production provider independently rebuilds
+  official ToolCall/ToolResult JSON, and Gemini still synthesizes `tc_*` IDs when
+  the provider supplies none. The pure projection module is referenced only by
+  tests, so same-provider replay state/cross-provider non-leakage fixtures do not
+  prove the production path.
+- **Current status**: OPEN after Commit 8 and blocks final #139-B completion. A
+  2026-08-25 source/reference audit confirmed no production call to
+  `provider_projection`; this is the unfulfilled Commit 4 acceptance item, not a
+  documentation-only residual.
+- **Plan**: make one provider-neutral request contract carry bound native history;
+  route all three production provider request builders through the official
+  `provider_projection` shapes; preserve same-provider replay state and apply
+  cross-provider dropping exactly once; make provider Tool Call IDs optional
+  through stream events and binding; delete `assemble_request_messages`, provider
+  duplicate ToolCall/ToolResult encoders, and Gemini `tc_*` synthesis. Run the
+  official projection fixtures plus all provider, ModelStepDriver, Direct-Local
+  Tool, replay, privacy, and crash gates before closing.
 
 ### L-GH139A-12: `session_journal_pin` grows with closures already in the Turn — OPEN, non-blocking follow-up — `performance` / `lattice-session` / GitHub #153
 
