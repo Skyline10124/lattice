@@ -105,20 +105,35 @@ async fn run_live_turn_task(
     coordinator: Arc<super::coordinator::TurnCoordinator>,
     execution_lock: Arc<FlockGuard>,
 ) {
-    let ProductionTurnDeps {
-        model_driver,
-        tool_catalog,
-        runtime,
-        cep_client,
-        workspace_history,
-        ..
-    } = deps;
-
     let turn_id = coordinator.ids.new_turn_id();
     let loaded = request.loaded_profile.as_ref().expect("validated profile");
+    let session_id = match lancet_protocol::SessionId::parse(&prepared.session_id) {
+        Ok(session_id) => session_id,
+        Err(err) => {
+            let mut observer = ObserverSink::new(turn_tx.clone());
+            observer
+                .emit(TurnEvent::CommitFailed {
+                    reason: format!("invalid persisted SessionId: {err}"),
+                })
+                .await;
+            return;
+        }
+    };
+    let policy_snapshot_json = match serde_json::to_string(&loaded.profile.lancet) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            let mut observer = ObserverSink::new(turn_tx.clone());
+            observer
+                .emit(TurnEvent::CommitFailed {
+                    reason: format!("failed to freeze LANCET policy: {err}"),
+                })
+                .await;
+            return;
+        }
+    };
     let catalog = lattice_session::pending::ToolCatalogSnapshot::new(
         env!("CARGO_PKG_VERSION").to_string(),
-        tool_catalog
+        deps.tool_catalog
             .iter()
             .map(|tool| lattice_session::pending::ToolCatalogEntry {
                 name: tool.name.clone(),
@@ -134,8 +149,7 @@ async fn run_live_turn_task(
         .begin_turn(
             lattice_session::pending::TurnStartedFacts {
                 turn_id,
-                session_id: lancet_protocol::SessionId::parse(&prepared.session_id)
-                    .expect("SessionApi stores canonical SessionIds"),
+                session_id,
                 parent_conversation_tip: prepared.parent_commit_id.clone(),
                 user_message: lattice_conversation::NativeMessage::new(
                     lattice_conversation::MessageRole::User,
@@ -152,8 +166,7 @@ async fn run_live_turn_task(
                     provider: prepared.provider.clone(),
                     system_prompt: prepared.system_prompt.clone(),
                     profile_snapshot_json: prepared.profile_snapshot_json.clone(),
-                    policy_snapshot_json: serde_json::to_string(&loaded.profile.lancet)
-                        .unwrap_or_else(|_| "{}".to_string()),
+                    policy_snapshot_json,
                     catalog: match catalog {
                         Ok(catalog) => catalog,
                         Err(err) => {
@@ -208,22 +221,11 @@ async fn run_live_turn_task(
         })
         .await;
 
-    let llm_tools: Vec<lattice_llm::ToolDefinition> = tool_catalog
-        .iter()
-        .cloned()
-        .map(|tool| lattice_llm::ToolDefinition::new(tool.name, tool.description, tool.parameters))
-        .collect();
-
     super::saga::run_coordinator_saga(
         prepared,
         request,
         turn_id,
-        model_driver,
-        llm_tools,
-        tool_catalog,
-        runtime,
-        cep_client,
-        workspace_history,
+        deps,
         coordinator,
         execution_lock,
         observer,

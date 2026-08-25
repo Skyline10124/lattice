@@ -10,19 +10,22 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 
 ## Sub-Architecture
 
-- `src/types.rs` owns messages, tool calls, tool definitions, events, requests,
-  responses, roles, targets, and token usage.
+- `src/types.rs` owns provider request envelopes, tool definitions, streaming
+  events, and targets; durable message and usage semantics come directly from
+  `lattice-conversation::{NativeMessage, TokenUsage}`.
 - `src/client.rs` owns HTTP client behavior and request-time security hooks.
-- `src/providers/` owns provider-specific protocol adapters.
-- `src/provider_projection/` owns the pure-data provider replay/projection
-  seam (#142): official wire JSON ↔ `lattice-conversation` `NativeMessage`,
-  with official-wire fixtures in `tests/fixtures/projection/`. Production model
-  steps consume this typed conversation contract through `lattice-agent`.
-  body through `lattice_conversation::AttemptAssembly`, so an over-limit wire
-  fails closed with `ProjectionError::OutputLimitExceeded` instead of yielding
-  a partial message. `project_cross_provider` drops replay state, provider
-  call IDs, **and** reasoning parts: ADR 0005 §7 forbids replaying source
-  reasoning into another provider.
+- `src/providers/` owns provider envelopes, auth, and SSE accumulation. It must
+  not implement a second ToolCall/ToolResult codec.
+- `src/provider_projection/` is the sole production provider message codec: all
+  three request builders call `request_messages_to_wire`, and all three SSE
+  parsers publish their authoritative `MessageComplete` through
+  `wire_to_native`; all three parse usage through `wire_usage`. Official-wire
+  `tests/fixtures/projection/`. The seam meters assembled bodies through
+  `lattice_conversation::AttemptAssembly`, so an over-limit wire fails closed
+  with `ProjectionError::OutputLimitExceeded` instead of yielding a partial
+  message. `project_cross_provider` drops replay state, provider call IDs, and
+  reasoning parts: ADR 0005 §7 forbids replaying source reasoning into another
+  provider.
 - `src/sse.rs` owns streaming parser behavior.
 - `src/router.rs` and `src/endpoints.rs` own model alias/provider resolution.
 - `net-guard` owns shared URL validation, DNS checks, private-address

@@ -47,43 +47,30 @@ pub(crate) fn extract_api_error(root: &serde_json::Value) -> Option<LlmEvent> {
         })
 }
 
-/// Append `text` to an optional system-message accumulator.
-pub(crate) fn push_system_text(slot: &mut Option<String>, text: &str) {
-    match slot {
-        Some(existing) => {
-            existing.push_str("\n\n");
-            existing.push_str(text);
+pub(crate) fn projection_result_event(
+    result: Result<
+        lattice_conversation::NativeMessage<lattice_conversation::UnboundToolCall>,
+        crate::provider_projection::ProjectionError,
+    >,
+) -> LlmEvent {
+    match result {
+        Ok(message) => LlmEvent::MessageComplete { message },
+        Err(crate::provider_projection::ProjectionError::InvalidToolCall(validation)) => {
+            LlmEvent::MessageRejected {
+                rejection: lattice_conversation::AttemptRejection::InvalidToolCall { validation },
+            }
         }
-        None => *slot = Some(text.to_string()),
+        Err(error) => LlmEvent::Error {
+            message: error.to_string(),
+        },
     }
 }
 
-/// Read a `u32` field from a JSON object, defaulting to 0.
-///
-/// Saturates at `u32::MAX` instead of silently truncating to avoid
-/// surprising usage values when a provider returns an unexpectedly large
-/// number.
-pub(crate) fn u32_field(obj: &serde_json::Value, key: &str) -> u32 {
-    obj.get(key)
-        .and_then(|v| v.as_u64())
-        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
-        .unwrap_or(0)
-}
-
-use crate::types::TokenUsage;
-
-/// Build a `TokenUsage` from a JSON object using provider-specific keys.
-pub(crate) fn token_usage_from_keys(
-    obj: &serde_json::Value,
-    prompt_key: &str,
-    completion_key: &str,
-    total_key: &str,
-) -> TokenUsage {
-    TokenUsage {
-        prompt_tokens: u32_field(obj, prompt_key),
-        completion_tokens: u32_field(obj, completion_key),
-        total_tokens: u32_field(obj, total_key),
-    }
+pub(crate) fn complete_message_event(
+    provider: lattice_conversation::ProviderOrigin,
+    wire: &serde_json::Value,
+) -> LlmEvent {
+    projection_result_event(crate::provider_projection::wire_to_native(provider, wire))
 }
 
 #[cfg(test)]

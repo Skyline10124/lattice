@@ -73,50 +73,6 @@ fn session_store_lives_under_the_xdg_state_root() {
         "durable session state must not live under the config root: {shown}"
     );
 }
-
-struct StubLlmClient;
-
-#[async_trait::async_trait]
-impl lattice_agent::LlmClient for StubLlmClient {
-    async fn chat(
-        &self,
-        _request: lattice_llm::ChatRequest,
-    ) -> std::result::Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>>
-    {
-        Ok(lattice_llm::ChatResponse {
-            content: "stub response".to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            finish_reason: "stop".to_string(),
-            model: "stub-model".to_string(),
-            usage: Some(lattice_llm::TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-            }),
-        })
-    }
-
-    async fn stream_chat(
-        &self,
-        _request: lattice_llm::ChatRequest,
-    ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(Box::pin(futures::stream::iter(vec![
-            lattice_llm::LlmEvent::Token {
-                content: "stub response".to_string(),
-            },
-            lattice_llm::LlmEvent::Done {
-                finish_reason: "stop".to_string(),
-                usage: Some(lattice_llm::TokenUsage {
-                    prompt_tokens: 10,
-                    completion_tokens: 5,
-                    total_tokens: 15,
-                }),
-            },
-        ])))
-    }
-}
-
 #[tokio::test]
 async fn run_integration_commits_existing_session() {
     let temp = tempfile::tempdir().unwrap();
@@ -153,7 +109,23 @@ async fn run_integration_commits_existing_session() {
                 .store_key_hex(),
         })
         .expect("create session");
-    let llm = std::sync::Arc::new(StubLlmClient);
+    let llm = std::sync::Arc::new(
+        lattice_agent::testing::FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                lattice_llm::LlmEvent::Token {
+                    content: "stub response".to_string(),
+                },
+                lattice_llm::LlmEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: Some(lattice_llm::TokenUsage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
+                        total_tokens: 15,
+                    }),
+                },
+            ])
+            .build(),
+    );
 
     let request = lattice_api::RunTurnRequest {
         input: "hello".to_string(),

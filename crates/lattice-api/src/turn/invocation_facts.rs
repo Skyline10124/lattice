@@ -268,10 +268,7 @@ mod tests {
         assert_eq!(plan.bindings.len(), 2);
         // The digest is recomputed from the projected identity, so a round
         // trip through the ledger preserves `PlannedBinding` equality.
-        let expected: Vec<PlannedBinding> = bindings
-            .iter()
-            .map(|binding| project_binding(binding))
-            .collect();
+        let expected: Vec<PlannedBinding> = bindings.iter().map(project_binding).collect();
         assert_eq!(plan.bindings, expected);
         for candidate in &candidates {
             assert_eq!(

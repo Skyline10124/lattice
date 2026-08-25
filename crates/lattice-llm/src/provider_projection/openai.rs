@@ -112,7 +112,7 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
                     .map_err(limit_exceeded)?;
                 raw_calls.push(RawToolCall {
                     provider_call_id,
-                    name: name.to_string(),
+                    name: super::openai_canonical_tool_name(name),
                     arguments: arguments.to_string(),
                 });
             }
@@ -163,7 +163,7 @@ pub fn native_to_wire<S: ToolCallState>(
                 let mut function_call = json!({
                     "type": "function",
                     "function": {
-                        "name": call.name(),
+                        "name": super::openai_wire_tool_name(call.name()),
                         "arguments": lattice_conversation::canonical_json(call.arguments()),
                     },
                 });

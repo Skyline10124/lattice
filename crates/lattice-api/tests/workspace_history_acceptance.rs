@@ -856,14 +856,15 @@ fn usage() -> TokenUsage {
 fn tool_call(id: &str, name: &str, args: serde_json::Value) -> Vec<LlmEvent> {
     vec![
         LlmEvent::ToolCallStart {
-            id: id.into(),
+            index: 0,
+            provider_call_id: Some(id.into()),
             name: name.into(),
         },
         LlmEvent::ToolCallDelta {
-            id: id.into(),
+            index: 0,
             arguments_delta: args.to_string(),
         },
-        LlmEvent::ToolCallEnd { id: id.into() },
+        LlmEvent::ToolCallEnd { index: 0 },
         LlmEvent::Done {
             finish_reason: "tool_calls".into(),
             usage: Some(usage()),

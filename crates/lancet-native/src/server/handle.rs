@@ -135,16 +135,11 @@ pub(super) async fn handle_request(
         )
     {
         let final_result: Result<Value, CepError> = Err(denial);
-        let error_code = final_result
-            .as_ref()
-            .err()
-            .map(|err| format!("{:?}", err.code));
         emit_cep_call_finished(
             &events,
             invocation_id,
             &method,
-            false,
-            error_code.as_deref(),
+            &final_result,
             semantic_stage,
             guard_stage,
             policy_enforced,
@@ -231,18 +226,11 @@ pub(super) async fn handle_request(
         &cep_context.policy.denied_effect_kinds,
     );
 
-    let ok = final_result.is_ok();
-    let error_code = final_result
-        .as_ref()
-        .err()
-        .map(|err| format!("{:?}", err.code));
-
     emit_cep_call_finished(
         &events,
         invocation_id,
         &method,
-        ok,
-        error_code.as_deref(),
+        &final_result,
         semantic_stage,
         guard_stage,
         policy_enforced,

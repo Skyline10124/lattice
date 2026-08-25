@@ -13,13 +13,11 @@ pub mod sse;
 mod stub;
 mod types;
 
+pub use lattice_conversation::TokenUsage;
 pub use logging::init_logging;
 pub use router::{CredentialStatus, ModelRouter, ProviderKind, ResolvedModel};
-pub use stub::{LlmError, LlmStream, StubLlm, chat, stream};
-pub use types::{
-    ChatRequest, ChatResponse, FunctionCall, LlmEvent, Message, ModelTarget, Role, TokenUsage,
-    ToolCall, ToolDefinition,
-};
+pub use stub::{LlmError, LlmStream, StubLlm, stream};
+pub use types::{ChatRequest, LlmEvent, ModelTarget, ToolDefinition};
 
 #[cfg(test)]
 mod test_env {
@@ -53,6 +51,39 @@ mod test_env {
                 Some(value) => std::env::set_var(key, value),
                 None => std::env::remove_var(key),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod production_codec_boundary {
+    #[test]
+    fn every_provider_delegates_request_and_response_projection() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers");
+        for (file, response_marker) in [
+            ("openai.rs", "wire_to_native"),
+            ("anthropic.rs", "wire_to_native"),
+            ("gemini.rs", "complete_message_event"),
+        ] {
+            let source = std::fs::read_to_string(root.join(file)).expect("provider source");
+            let production = source
+                .split("#[cfg(test)]")
+                .next()
+                .expect("production prefix");
+            assert!(
+                production.contains("request_messages_to_wire"),
+                "{file} bypasses the sole request projector"
+            );
+            assert!(
+                production.contains(response_marker),
+                "{file} bypasses the sole completed-response projector"
+            );
+            assert!(
+                production.contains("wire_usage"),
+                "{file} bypasses the sole usage projector"
+            );
+            assert!(!production.contains("assemble_request_messages"));
+            assert!(!production.contains("tc_"));
         }
     }
 }

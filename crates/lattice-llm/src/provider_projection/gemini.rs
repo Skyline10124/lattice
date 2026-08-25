@@ -91,9 +91,9 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
             let arguments = match function_call.get("args") {
                 Some(args) => serde_json::to_string(args)
                     .map_err(|_| malformed("functionCall args not serializable"))?,
-                // An absent `args` object is not an empty-object spelling;
-                // there is no empty-to-`{}` normalization.
-                None => return Err(malformed("functionCall missing args")),
+                // Gemini may omit `args` for a parameterless function call; its
+                // documented meaning is the empty input object.
+                None => "{}".to_string(),
             };
             let provider_call_id = match function_call.get("id") {
                 Some(Value::String(id)) => Some(id.to_string()),
@@ -248,8 +248,8 @@ pub(crate) fn tool_result_messages(
     })])
 }
 
-/// `usageMetadata: {promptTokenCount, candidatesTokenCount}`; the neutral
-/// total is the sum when the body omits `totalCount`.
+/// `usageMetadata: {promptTokenCount, candidatesTokenCount, totalTokenCount}`;
+/// the neutral total is the sum when the body omits `totalTokenCount`.
 pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {
     let Some(usage) = wire.get("usageMetadata") else {
         return Ok(None);
@@ -269,10 +269,10 @@ pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError>
     };
     let prompt_tokens = field("promptTokenCount")?;
     let completion_tokens = field("candidatesTokenCount")?;
-    let total_tokens = match usage.get("totalCount") {
-        Some(total) => total
-            .as_u64()
-            .ok_or_else(|| malformed("usageMetadata.totalCount is not an integer".to_string()))?,
+    let total_tokens = match usage.get("totalTokenCount") {
+        Some(total) => total.as_u64().ok_or_else(|| {
+            malformed("usageMetadata.totalTokenCount is not an integer".to_string())
+        })?,
         None => prompt_tokens.saturating_add(completion_tokens),
     };
     Ok(Some(TokenUsage {

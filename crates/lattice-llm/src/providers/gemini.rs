@@ -7,77 +7,25 @@
 //! Uses Gemini-specific wire format: `systemInstruction`, role `"model"`,
 //! `functionCall` / `functionResponse`, and `x-goog-api-key` auth.
 
+use lattice_conversation::ProviderOrigin;
+
+use crate::provider_projection::{ProjectionError, request_messages_to_wire, wire_usage};
 use crate::router::ResolvedModel;
-use crate::types::{ChatRequest, LlmEvent, Role};
+use crate::types::{ChatRequest, LlmEvent};
 
 /// Build the JSON body for a Gemini `streamGenerateContent` request.
-pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> serde_json::Value {
-    let mut contents: Vec<serde_json::Value> = Vec::new();
-    let mut system_instruction: Option<String> = None;
-
-    for msg in &request.messages {
-        match msg.role {
-            Role::System => super::push_system_text(&mut system_instruction, &msg.content),
-            Role::User => {
-                let parts = serde_json::json!([{"text": msg.content}]);
-                contents.push(serde_json::json!({
-                    "role": "user",
-                    "parts": parts,
-                }));
-            }
-            Role::Assistant => {
-                let mut parts: Vec<serde_json::Value> = Vec::new();
-
-                if !msg.content.is_empty() {
-                    parts.push(serde_json::json!({"text": msg.content}));
-                }
-
-                if let Some(tool_calls) = &msg.tool_calls {
-                    for tc in tool_calls {
-                        let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(serde_json::json!({}));
-                        parts.push(serde_json::json!({
-                            "functionCall": {
-                                "name": tc.function.name,
-                                "args": args,
-                            }
-                        }));
-                    }
-                }
-
-                if parts.is_empty() {
-                    parts.push(serde_json::json!({"text": ""}));
-                }
-
-                contents.push(serde_json::json!({
-                    "role": "model",
-                    "parts": parts,
-                }));
-            }
-            Role::Tool => {
-                let name = msg.name.clone().unwrap_or_default();
-                let response: serde_json::Value = serde_json::from_str(&msg.content)
-                    .unwrap_or(serde_json::json!({"result": msg.content}));
-                contents.push(serde_json::json!({
-                    "role": "user",
-                    "parts": [{
-                        "functionResponse": {
-                            "name": name,
-                            "response": response,
-                        }
-                    }]
-                }));
-            }
-        }
-    }
-
+pub fn build_request_json(
+    request: &ChatRequest,
+    resolved: &ResolvedModel,
+) -> Result<serde_json::Value, ProjectionError> {
+    let projected = request_messages_to_wire(ProviderOrigin::Gemini, &request.messages)?;
     let mut body = serde_json::json!({
-        "contents": contents,
+        "contents": projected.messages,
     });
 
-    if let Some(si) = system_instruction {
+    if let Some(system) = projected.system {
         body["systemInstruction"] = serde_json::json!({
-            "parts": [{"text": si}]
+            "parts": [{"text": system}]
         });
     }
 
@@ -85,11 +33,11 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
         let function_declarations: Vec<serde_json::Value> = request
             .tools
             .iter()
-            .map(|t| {
+            .map(|tool| {
                 serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
                 })
             })
             .collect();
@@ -98,10 +46,9 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
         }]);
     }
 
-    // Generation config: forward temperature and max_tokens to Gemini.
     let mut generation_config = serde_json::Map::new();
-    if let Some(temp) = request.temperature {
-        generation_config.insert("temperature".to_string(), serde_json::json!(temp));
+    if let Some(temperature) = request.temperature {
+        generation_config.insert("temperature".to_string(), serde_json::json!(temperature));
     }
     if let Some(max_tokens) = request.max_tokens {
         generation_config.insert("maxOutputTokens".to_string(), serde_json::json!(max_tokens));
@@ -111,8 +58,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
     }
 
     let _ = resolved;
-
-    body
+    Ok(body)
 }
 
 /// Build the full Gemini streaming endpoint URL.
@@ -133,17 +79,55 @@ pub fn auth_header_value(api_key: &str) -> String {
 /// Stateful parser for Gemini `streamGenerateContent` SSE.
 #[derive(Default)]
 pub struct GeminiSseParser {
-    tool_call_ids: Vec<String>,
-    tc_counter: usize,
+    parts: Vec<serde_json::Value>,
+    tool_call_indices: Vec<usize>,
+    completed: bool,
 }
 
 impl GeminiSseParser {
     /// Create a new parser with no tracked state.
     pub fn new() -> Self {
-        Self {
-            tool_call_ids: Vec::new(),
-            tc_counter: 0,
+        Self::default()
+    }
+
+    fn merge_part(&mut self, part: &serde_json::Value) -> (usize, bool) {
+        if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+            let thought = part.get("thought").and_then(|value| value.as_bool()) == Some(true);
+            let signature = part.get("thoughtSignature");
+            if let Some((index, previous)) = self.parts.iter_mut().enumerate().next_back()
+                && previous.get("text").is_some()
+                && (previous.get("thought").and_then(|value| value.as_bool()) == Some(true))
+                    == thought
+                && !(text.is_empty() && signature.is_some())
+                && !(signature.is_some() && previous.get("thoughtSignature").is_some())
+            {
+                let mut merged = previous
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                merged.push_str(text);
+                previous["text"] = serde_json::Value::String(merged);
+                if let Some(signature) = signature {
+                    previous["thoughtSignature"] = signature.clone();
+                }
+                return (index, false);
+            }
         }
+
+        let index = self.parts.len();
+        self.parts.push(part.clone());
+        if part.get("functionCall").is_some() {
+            self.tool_call_indices.push(index);
+        }
+        (index, true)
+    }
+
+    fn completion_root(&self, root: &serde_json::Value) -> serde_json::Value {
+        let mut complete = root.clone();
+        complete["candidates"][0]["content"]["parts"] =
+            serde_json::Value::Array(self.parts.clone());
+        complete
     }
 
     /// Map Gemini finish reasons to internal finish-reason strings.
@@ -159,6 +143,9 @@ impl GeminiSseParser {
 
     /// Parse a Gemini SSE data chunk into [`LlmEvent`] values.
     pub fn parse_chunk(&mut self, _event_type: Option<&str>, data: &str) -> Vec<LlmEvent> {
+        if self.completed {
+            return Vec::new();
+        }
         let root = match super::parse_json_data("Gemini", data) {
             Ok(Some(v)) => v,
             Ok(None) => return vec![],
@@ -170,8 +157,6 @@ impl GeminiSseParser {
         }
 
         let mut events = Vec::new();
-        let mut done_emitted = false;
-
         if let Some(cands) = root.get("candidates").and_then(|c| c.as_array())
             && let Some(cand) = cands.first()
         {
@@ -180,13 +165,18 @@ impl GeminiSseParser {
                 .and_then(|c| c.get("parts"))
                 .and_then(|p| p.as_array());
 
-            let mut has_tool_calls = false;
-
             if let Some(parts_arr) = parts {
                 for part in parts_arr {
-                    // Thinking/reasoning parts
-                    if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
-                        if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                    if part.get("text").is_some() && part.get("functionCall").is_some() {
+                        return vec![LlmEvent::Error {
+                            message:
+                                "malformed Gemini wire: one part contains text and functionCall"
+                                    .to_string(),
+                        }];
+                    }
+                    let (index, is_new_part) = self.merge_part(part);
+                    if part.get("thought").and_then(|value| value.as_bool()) == Some(true) {
+                        if let Some(text) = part.get("text").and_then(|value| value.as_str())
                             && !text.is_empty()
                         {
                             events.push(LlmEvent::Reasoning {
@@ -196,8 +186,7 @@ impl GeminiSseParser {
                         continue;
                     }
 
-                    // Text parts
-                    if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                    if let Some(text) = part.get("text").and_then(|value| value.as_str())
                         && !text.is_empty()
                     {
                         events.push(LlmEvent::Token {
@@ -205,37 +194,40 @@ impl GeminiSseParser {
                         });
                     }
 
-                    // Function call parts
-                    if let Some(fc) = part.get("functionCall") {
-                        let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                        let args: serde_json::Value = fc
+                    if is_new_part && let Some(function_call) = part.get("functionCall") {
+                        let name = function_call
+                            .get("name")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("");
+                        let arguments = function_call
                             .get("args")
                             .cloned()
-                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                        let arguments = serde_json::to_string(&args).unwrap_or_default();
-                        let counter = self.tc_counter;
-                        let id = format!("tc_{name}_{counter}");
-                        self.tool_call_ids.push(id.clone());
-                        self.tc_counter += 1;
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let provider_call_id = function_call
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string);
+                        let arguments_delta = serde_json::to_string(&arguments).unwrap_or_default();
 
                         events.push(LlmEvent::ToolCallStart {
-                            id: id.clone(),
+                            index,
+                            provider_call_id,
                             name: name.to_string(),
                         });
                         events.push(LlmEvent::ToolCallDelta {
-                            id,
-                            arguments_delta: arguments,
+                            index,
+                            arguments_delta,
                         });
-                        has_tool_calls = true;
                     }
                 }
             }
 
             // Finish reason
             if let Some(reason) = cand.get("finishReason").and_then(|r| r.as_str()) {
-                let had_tool_calls = has_tool_calls || !self.tool_call_ids.is_empty();
-                for id in self.tool_call_ids.drain(..) {
-                    events.push(LlmEvent::ToolCallEnd { id });
+                self.completed = true;
+                let had_tool_calls = !self.tool_call_indices.is_empty();
+                for index in &self.tool_call_indices {
+                    events.push(LlmEvent::ToolCallEnd { index: *index });
                 }
 
                 // Safety ratings
@@ -285,34 +277,31 @@ impl GeminiSseParser {
                     Self::map_finish_reason(reason)
                 };
 
-                let usage = root.get("usageMetadata").map(|u| {
-                    super::token_usage_from_keys(
-                        u,
-                        "promptTokenCount",
-                        "candidatesTokenCount",
-                        "totalTokenCount",
-                    )
-                });
+                let usage = match wire_usage(ProviderOrigin::Gemini, &root) {
+                    Ok(usage) => usage,
+                    Err(error) => {
+                        events.push(LlmEvent::Error {
+                            message: error.to_string(),
+                        });
+                        return events;
+                    }
+                };
 
+                let complete_root = self.completion_root(&root);
+                let completion =
+                    super::complete_message_event(ProviderOrigin::Gemini, &complete_root);
+                self.parts.clear();
+                self.tool_call_indices.clear();
+                let failed = matches!(completion, LlmEvent::Error { .. });
+                events.push(completion);
+                if failed {
+                    return events;
+                }
                 events.push(LlmEvent::Done {
                     finish_reason: mapped,
                     usage,
                 });
-                done_emitted = true;
             }
-        }
-
-        // Fallback: usageMetadata without finishReason
-        if !done_emitted && let Some(u) = root.get("usageMetadata") {
-            events.push(LlmEvent::Done {
-                finish_reason: "stop".to_string(),
-                usage: Some(super::token_usage_from_keys(
-                    u,
-                    "promptTokenCount",
-                    "candidatesTokenCount",
-                    "totalTokenCount",
-                )),
-            });
         }
 
         events
@@ -321,10 +310,14 @@ impl GeminiSseParser {
 
 #[cfg(test)]
 mod tests {
+    use lattice_conversation::{
+        BoundToolCall, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+
     use super::*;
     use crate::endpoints::GEMINI_BASE_URL;
     use crate::router::{CredentialStatus, ProviderKind};
-    use crate::types::{ChatRequest, Message, ModelTarget, Role, ToolDefinition};
+    use crate::types::{ChatRequest, ModelTarget, ToolDefinition};
 
     fn make_resolved() -> ResolvedModel {
         ResolvedModel {
@@ -337,244 +330,192 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_request_includes_system_instruction() {
-        let req = ChatRequest {
-            messages: vec![Message::system("You are helpful."), Message::user("Hello!")],
-            tools: vec![],
-            target: ModelTarget::new("gemini"),
-            temperature: None,
-            max_tokens: None,
-            max_completion_tokens: None,
-        };
-        let resolved = make_resolved();
-        let json = build_request_json(&req, &resolved);
-        let si = &json["systemInstruction"];
-        assert!(si.is_object() || si.is_string());
-        let parts = si["parts"].as_array().unwrap();
-        assert_eq!(parts[0]["text"], "You are helpful.");
+    fn text(role: MessageRole, content: &str) -> NativeMessage<BoundToolCall> {
+        NativeMessage::new(
+            role,
+            None,
+            vec![MessagePart::semantic_only(MessageSemantic::Text {
+                text: content.to_string(),
+            })],
+        )
     }
 
     #[test]
-    fn build_request_maps_user_role() {
-        let req = ChatRequest {
-            messages: vec![Message::user("Hello")],
-            tools: vec![],
-            target: ModelTarget::new("gemini"),
-            temperature: None,
-            max_tokens: None,
-            max_completion_tokens: None,
-        };
-        let resolved = make_resolved();
-        let json = build_request_json(&req, &resolved);
-        let contents = json["contents"].as_array().unwrap();
-        assert_eq!(contents[0]["role"], "user");
-    }
-
-    #[test]
-    fn build_request_maps_assistant_to_model_role() {
-        let req = ChatRequest {
-            messages: vec![Message::assistant("I can help.")],
-            tools: vec![],
-            target: ModelTarget::new("gemini"),
-            temperature: None,
-            max_tokens: None,
-            max_completion_tokens: None,
-        };
-        let resolved = make_resolved();
-        let json = build_request_json(&req, &resolved);
-        let contents = json["contents"].as_array().unwrap();
-        assert_eq!(contents[0]["role"], "model");
-    }
-
-    #[test]
-    fn build_request_maps_function_call() {
-        let req = ChatRequest {
-            messages: vec![Message {
-                role: Role::Assistant,
-                content: String::new(),
-                reasoning_content: None,
-                tool_calls: Some(vec![crate::types::ToolCall::new(
-                    "call_1",
-                    crate::types::FunctionCall::new("get_weather", r#"{"city":"Tokyo"}"#),
-                )]),
-                tool_call_id: None,
-                name: None,
-            }],
-            tools: vec![],
-            target: ModelTarget::new("gemini"),
-            temperature: None,
-            max_tokens: None,
-            max_completion_tokens: None,
-        };
-        let resolved = make_resolved();
-        let json = build_request_json(&req, &resolved);
-        let contents = json["contents"].as_array().unwrap();
-        let parts = contents[0]["parts"].as_array().unwrap();
-        let fc = parts.iter().find(|p| p.get("functionCall").is_some());
-        assert!(
-            fc.is_some(),
-            "should have functionCall in parts, got: {:?}",
-            parts
-        );
-        let fc = fc.unwrap();
-        assert_eq!(fc["functionCall"]["name"], "get_weather");
-    }
-
-    #[test]
-    fn build_request_maps_function_response() {
-        let req = ChatRequest {
-            messages: vec![Message {
-                role: Role::Tool,
-                content: r#"{"temp":22}"#.to_string(),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("get_weather".to_string()),
-            }],
-            tools: vec![],
-            target: ModelTarget::new("gemini"),
-            temperature: None,
-            max_tokens: None,
-            max_completion_tokens: None,
-        };
-        let resolved = make_resolved();
-        let json = build_request_json(&req, &resolved);
-        let contents = json["contents"].as_array().unwrap();
-        let parts = contents[0]["parts"].as_array().unwrap();
-        let fr = parts.iter().find(|p| p.get("functionResponse").is_some());
-        assert!(
-            fr.is_some(),
-            "should have functionResponse in parts, got: {:?}",
-            parts
-        );
-        let fr = fr.unwrap();
-        assert_eq!(fr["functionResponse"]["name"], "get_weather");
-    }
-
-    #[test]
-    fn build_request_includes_tools_as_function_declarations() {
-        let req = ChatRequest {
-            messages: vec![Message::user("weather?")],
+    fn request_envelope_uses_typed_projection() {
+        let request = ChatRequest {
+            messages: vec![
+                text(MessageRole::System, "You are helpful."),
+                text(MessageRole::User, "Hello"),
+            ],
             tools: vec![ToolDefinition::new(
                 "get_weather",
                 "Get weather",
-                serde_json::json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+                serde_json::json!({"type": "object"}),
             )],
             target: ModelTarget::new("gemini"),
-            temperature: None,
-            max_tokens: None,
+            temperature: Some(0.3),
+            max_tokens: Some(2048),
             max_completion_tokens: None,
         };
-        let resolved = make_resolved();
-        let json = build_request_json(&req, &resolved);
-        let tools = json["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["functionDeclarations"][0]["name"], "get_weather");
+        let body = build_request_json(&request, &make_resolved()).expect("projection");
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            "You are helpful."
+        );
+        assert_eq!(body["contents"][0]["role"], "user");
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "get_weather"
+        );
+        assert_eq!(body["generationConfig"]["temperature"], 0.3);
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 2048);
     }
 
     #[test]
-    fn build_stream_url_includes_url_encoded_model() {
+    fn parser_preserves_thought_state_and_optional_ids_without_synthesis() {
+        for (id_field, expected_id) in [(",\"id\":\"real-id\"", Some("real-id")), ("", None)] {
+            let mut parser = GeminiSseParser::new();
+            let chunk = format!(
+                r#"{{"candidates":[{{"content":{{"role":"model","parts":[{{"text":"reason","thought":true,"thoughtSignature":"sig"}},{{"functionCall":{{"name":"observe.workspace","args":{{}}{id_field}}}}}]}},"finishReason":"STOP"}}]}}"#
+            );
+            let events = parser.parse_chunk(None, &chunk);
+            let message = events
+                .iter()
+                .find_map(|event| match event {
+                    LlmEvent::MessageComplete { message } => Some(message),
+                    _ => None,
+                })
+                .expect("complete message");
+            assert_eq!(
+                message.parts[0].replay_state.as_ref().unwrap().as_str(),
+                "sig"
+            );
+            assert_eq!(
+                message
+                    .tool_calls()
+                    .next()
+                    .expect("ToolCall")
+                    .1
+                    .provider_call_id
+                    .as_deref(),
+                expected_id
+            );
+            assert!(!serde_json::to_string(message).unwrap().contains("tc_"));
+        }
+    }
+
+    #[test]
+    fn parser_completes_usage() {
+        let mut parser = GeminiSseParser::new();
+        let events = parser.parse_chunk(
+            None,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}"#,
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::MessageComplete { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LlmEvent::Done { usage: Some(usage), .. } if usage.total_tokens == 30
+        )));
+        assert!(parser
+            .parse_chunk(
+                None,
+                r#"{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}"#,
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn parser_accumulates_multichunk_reasoning_text_and_signature() {
+        let mut parser = GeminiSseParser::new();
+        for chunk in [
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"rea","thought":true}]}}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"son","thought":true,"thoughtSignature":"sig"}]}}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]}}]}"#,
+        ] {
+            assert!(
+                parser
+                    .parse_chunk(None, chunk)
+                    .iter()
+                    .all(|event| !matches!(event, LlmEvent::MessageComplete { .. }))
+            );
+        }
+        let events = parser.parse_chunk(
+            None,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"lo"}]},"finishReason":"STOP"}]}"#,
+        );
+        let message = events
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::MessageComplete { message } => Some(message),
+                _ => None,
+            })
+            .expect("complete message");
+        assert_eq!(message.parts.len(), 2);
+        assert!(matches!(
+            &message.parts[0].semantic,
+            MessageSemantic::Reasoning { text } if text == "reason"
+        ));
+        assert_eq!(
+            message.parts[0].replay_state.as_ref().unwrap().as_str(),
+            "sig"
+        );
+        assert!(matches!(
+            &message.parts[1].semantic,
+            MessageSemantic::Text { text } if text == "hello"
+        ));
+    }
+
+    #[test]
+    fn parser_preserves_distinct_signatures_and_rejects_union_parts() {
+        let mut parser = GeminiSseParser::new();
+        parser.parse_chunk(
+            None,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"a","thought":true,"thoughtSignature":"sig-a"}]}}]}"#,
+        );
+        let events = parser.parse_chunk(
+            None,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"b","thought":true,"thoughtSignature":"sig-b"}]},"finishReason":"STOP"}]}"#,
+        );
+        let message = events
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::MessageComplete { message } => Some(message),
+                _ => None,
+            })
+            .expect("complete message");
+        assert_eq!(message.parts.len(), 2);
+        assert_eq!(
+            message.parts[0].replay_state.as_ref().unwrap().as_str(),
+            "sig-a"
+        );
+        assert_eq!(
+            message.parts[1].replay_state.as_ref().unwrap().as_str(),
+            "sig-b"
+        );
+
+        let mut parser = GeminiSseParser::new();
+        let events = parser.parse_chunk(
+            None,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"x","functionCall":{"name":"observe.workspace","args":{}}}]}}]}"#,
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LlmEvent::Error { message } if message.contains("text and functionCall")
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            LlmEvent::Token { .. } | LlmEvent::ToolCallStart { .. }
+        )));
+    }
+
+    #[test]
+    fn endpoint_and_auth_are_stable() {
         let url = build_stream_url(GEMINI_BASE_URL, "gemini-2.5-flash");
-        assert!(
-            url.contains("gemini-2.5-flash"),
-            "URL should contain model name, got: {}",
-            url
-        );
-        assert!(
-            url.contains("streamGenerateContent"),
-            "URL should contain streamGenerateContent, got: {}",
-            url
-        );
-        assert!(
-            url.contains("alt=sse"),
-            "URL should contain alt=sse, got: {}",
-            url
-        );
-    }
-
-    #[test]
-    fn build_stream_url_encodes_special_chars_in_model() {
-        let url = build_stream_url("https://api.example.com/v1", "models/my-model@v1");
-        assert!(
-            url.contains("models%2Fmy-model%40v1") || url.contains("my-model@v1"),
-            "URL should contain encoded model name, got: {}",
-            url
-        );
-    }
-
-    #[test]
-    fn auth_header_name_is_x_goog_api_key() {
-        let val = auth_header_value("gemini-key-123");
-        assert_eq!(val, "gemini-key-123");
-    }
-
-    #[test]
-    fn parse_sse_token_chunk() {
-        let mut parser = GeminiSseParser::new();
-        let data = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":null}]}"#;
-        let events = parser.parse_chunk(None, data);
-        let has_token = events
-            .iter()
-            .any(|e| matches!(e, LlmEvent::Token { content } if content == "Hello"));
-        assert!(has_token, "should emit Token, got: {:?}", events);
-    }
-
-    #[test]
-    fn parse_sse_reasoning_chunk() {
-        let mut parser = GeminiSseParser::new();
-        let data = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Let me think...","thought":true}]},"finishReason":null}]}"#;
-        let events = parser.parse_chunk(None, data);
-        let has_reasoning = events
-            .iter()
-            .any(|e| matches!(e, LlmEvent::Reasoning { content } if content == "Let me think..."));
-        assert!(has_reasoning, "should emit Reasoning, got: {:?}", events);
-    }
-
-    #[test]
-    fn parse_sse_function_call() {
-        let mut parser = GeminiSseParser::new();
-        let data = r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}}}]},"finishReason":null}]}"#;
-        let events = parser.parse_chunk(None, data);
-        let has_start = events
-            .iter()
-            .any(|e| matches!(e, LlmEvent::ToolCallStart { name, .. } if name == "get_weather"));
-        assert!(has_start, "should emit ToolCallStart, got: {:?}", events);
-    }
-
-    #[test]
-    fn parse_sse_done_with_finish_reason_and_usage() {
-        let mut parser = GeminiSseParser::new();
-        let data = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Done"}],"finishReason":"STOP"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}"#;
-        let events = parser.parse_chunk(None, data);
-        let has_done = events.iter().any(|e| matches!(e, LlmEvent::Done { finish_reason, usage } if finish_reason == "stop" && usage.as_ref().unwrap().total_tokens == 30));
-        assert!(has_done, "should emit Done with usage, got: {:?}", events);
-    }
-
-    #[test]
-    fn parse_sse_error_chunk() {
-        let mut parser = GeminiSseParser::new();
-        let data = r#"{"error":{"message":"Resource exhausted","code":429}}"#;
-        let events = parser.parse_chunk(None, data);
-        assert_eq!(events.len(), 1);
-        assert!(
-            matches!(&events[0], LlmEvent::Error { message } if message.contains("Resource exhausted"))
-        );
-    }
-
-    #[test]
-    fn parse_sse_empty_data() {
-        let mut parser = GeminiSseParser::new();
-        let events = parser.parse_chunk(None, "");
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn gemini_provider_has_no_lattice_core_imports() {
-        let json = build_request_json(
-            &ChatRequest::new(vec![Message::user("test")], ModelTarget::new("gemini")),
-            &make_resolved(),
-        );
-        assert!(!json.is_null());
+        assert!(url.contains("streamGenerateContent?alt=sse"));
+        assert_eq!(auth_header_value("gemini-key"), "gemini-key");
     }
 }

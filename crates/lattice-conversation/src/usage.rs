@@ -12,10 +12,9 @@ use serde::{Deserialize, Serialize};
 
 /// Token usage reported by one provider attempt.
 ///
-/// Previously defined in `lattice-session` as `TurnUsage`; the shape is
-/// unchanged and `lattice-session` re-exports it under that name. The
-/// provider-neutral contract uses `u64` counters; the `lattice-llm` wire type
-/// (`u32`) is widened checked at the Agent boundary until #139-B unifies them.
+/// `lattice-session` re-exports this type as `TurnUsage`, and provider wire
+/// projectors parse directly into the same `u64` counters. Missing usage remains
+/// `None`; malformed or overflowing provider counters fail at the projection seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: u64,

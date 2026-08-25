@@ -7,34 +7,6 @@
 
 ## HIGH
 
-### L-GH139B-01: provider wire builders are not delegated to `provider_projection` — OPEN BLOCKER — `residual` / `lattice-llm` / GitHub #139
-
-- **Location**: `crates/lattice-agent/src/model_step.rs`
-  (`assemble_request_messages`);
-  `crates/lattice-llm/src/providers/{openai,anthropic,gemini}.rs`
-  (request-body ToolCall/ToolResult encoding and Gemini stream IDs);
-  parallel implementations in `crates/lattice-llm/src/provider_projection/`.
-- **Problem**: #139-B Commit 4 required production request/response assembly to
-  adopt the provider-neutral projection and delete the parallel Tool-call codec.
-  The landed `ModelStepDriver` still converts `NativeMessage<BoundToolCall>` into
-  legacy `lattice_llm::Message`, each production provider independently rebuilds
-  official ToolCall/ToolResult JSON, and Gemini still synthesizes `tc_*` IDs when
-  the provider supplies none. The pure projection module is referenced only by
-  tests, so same-provider replay state/cross-provider non-leakage fixtures do not
-  prove the production path.
-- **Current status**: OPEN after Commit 8 and blocks final #139-B completion. A
-  2026-08-25 source/reference audit confirmed no production call to
-  `provider_projection`; this is the unfulfilled Commit 4 acceptance item, not a
-  documentation-only residual.
-- **Plan**: make one provider-neutral request contract carry bound native history;
-  route all three production provider request builders through the official
-  `provider_projection` shapes; preserve same-provider replay state and apply
-  cross-provider dropping exactly once; make provider Tool Call IDs optional
-  through stream events and binding; delete `assemble_request_messages`, provider
-  duplicate ToolCall/ToolResult encoders, and Gemini `tc_*` synthesis. Run the
-  official projection fixtures plus all provider, ModelStepDriver, Direct-Local
-  Tool, replay, privacy, and crash gates before closing.
-
 ### L-GH139A-12: `session_journal_pin` grows with closures already in the Turn — OPEN, non-blocking follow-up — `performance` / `lattice-session` / GitHub #153
 
 - **Location**: `crates/lattice-session/src/git_graph/pending.rs`
@@ -348,6 +320,10 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### L-GH139B-01: ~~production provider adapters bypassed `provider_projection`~~ — CLOSED by #139-B
+- **Resolution:** `ChatRequest.messages` now carries `NativeMessage<BoundToolCall>` directly. Every production provider request builder delegates message and ToolResult encoding to `request_messages_to_wire`; every SSE parser accumulates one provider-complete response and publishes `MessageComplete` through `wire_to_native`, while all usage is parsed through `wire_usage` into the single `lattice-conversation::TokenUsage`. `ModelStepDriver` no longer assembles protocol messages, Tool IDs, or wire usage. Provider call IDs remain optional; Gemini `tc_*` synthesis, the legacy `Message`/`Role` request DTOs, and the buffered response assembler are deleted. A production-source boundary regression requires all three adapters to call the shared request, response, and usage projectors.
+- **Verification:** `cargo test -p lattice-llm` (81 unit + 34 official-wire projection tests), `cargo test -p lattice-agent` (12 unit + 5 streaming-seam tests), `cargo test -p lattice-api`, workspace all-target compilation, and the #139-B black-box privacy/replay/crash gates. Official OpenAI finish→usage-only→`[DONE]`, malformed usage/arguments, OpenAI and Gemini multi-chunk accumulation, Anthropic/Gemini opaque replay state, optional/missing IDs, parameterless Gemini calls, same-provider exact replay, and cross-provider non-leakage are pinned on the production seam.
 
 ### L-47-01: harness SIGINT 广播到测试进程自身的进程组，使 ubuntu CI 以 exit 130 中断 — `robustness` / harness / #47 / #105
 - **当前状态**: 2026-07-27 closed — 由 **#105** 修复。`driver.rs` 现在用 `libc::getpgid(child_pid)` 从内核回读实际 pgid（不再假定等于 `child.id()`），任何组信号发送前先用 `libc::getpgrp()` 比对并在命中自身组时 fail-closed，且改用 `libc::killpg` 直接投递而非 spawn `kill(1)`（消除负号参数在不同 `kill` 实现间的解释差异）。新增两条回归测试锁定该契约；`direct_failure_sigint_while_stalled_commits_cancelled` 保留并通过，SIGINT 协作取消覆盖未削弱。**CI 实跑确认（2026-07-27）**：ubuntu lane 已转绿。同一对上游提交（`44ceabc1` + `38af35bb`）在 PR #104 上 ubuntu-latest 仍以 exit 130 失败（run 30222133081，macos 通过），而叠加本修复的 PR #107 ubuntu-latest 与 macos-latest 双双通过（run 30257981171）；两次运行只差这一个提交，坐实信号源在 harness 内且已消除，无需启用 #105 计划第 4 步的 `#[ignore]` + serial lane 退路。完整记录见 FIX.md `#105 / #106`。

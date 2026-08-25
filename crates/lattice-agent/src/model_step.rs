@@ -20,20 +20,16 @@
 //! whose closing call carries no provider ID fails the request assembly with
 //! a typed error (plan decision 9) instead of inventing an ID.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
 use lattice_conversation::{
-    AttemptAssembly, AttemptInterruption, AttemptRejection, InvocationId, MessagePart, MessageRole,
-    MessageSemantic, NativeMessage, RawToolCall, ToolCallState, ToolResultOutcome, UnboundToolCall,
-    validate_tool_call_batch,
+    AttemptAssembly, AttemptInterruption, AttemptRejection, MessagePart, MessageRole,
+    MessageSemantic, NativeMessage, UnboundToolCall,
 };
-use lattice_llm::{
-    ChatRequest, FunctionCall, LlmEvent, Message, ModelTarget, Role, ToolCall, ToolDefinition,
-};
+use lattice_llm::{ChatRequest, LlmEvent, ModelTarget, ToolDefinition};
 use tokio::time::Instant;
 
 /// Polling interval for cooperative cancellation while a provider stream is
@@ -50,75 +46,22 @@ const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// ([`crate::testing::FakeStreamingLlmClient`]).
 #[async_trait::async_trait]
 pub trait LlmClient: Send + Sync {
-    /// Execute a chat completion.
-    async fn chat(
-        &self,
-        request: ChatRequest,
-    ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>>;
-
-    /// Execute a chat completion as a stream.
+    /// Execute one chat completion as a provider stream.
     ///
-    /// The default is a single-blob fallback over [`Self::chat`]: startup or
-    /// dispatch failures propagate through `Result::Err`, while provider
-    /// implementations stream real deltas and may use in-band
-    /// [`LlmEvent::Error`] values for failures after the stream opened.
+    /// Startup or dispatch failures propagate through `Result::Err`; failures
+    /// after opening use in-band typed [`LlmEvent`] values.
     async fn stream_chat(
         &self,
         request: ChatRequest,
-    ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        let response = self.chat(request).await?;
-        let mut events: Vec<LlmEvent> = Vec::new();
-
-        if let Some(reasoning) = &response.reasoning_content
-            && !reasoning.is_empty()
-        {
-            events.push(LlmEvent::Reasoning {
-                content: reasoning.clone(),
-            });
-        }
-
-        if !response.content.is_empty() {
-            events.push(LlmEvent::Token {
-                content: response.content.clone(),
-            });
-        }
-
-        if let Some(tool_calls) = &response.tool_calls {
-            for tool_call in tool_calls {
-                events.push(LlmEvent::ToolCallStart {
-                    id: tool_call.id.clone(),
-                    name: tool_call.function.name.clone(),
-                });
-
-                if !tool_call.function.arguments.is_empty() {
-                    events.push(LlmEvent::ToolCallDelta {
-                        id: tool_call.id.clone(),
-                        arguments_delta: tool_call.function.arguments.clone(),
-                    });
-                }
-
-                events.push(LlmEvent::ToolCallEnd {
-                    id: tool_call.id.clone(),
-                });
-            }
-        }
-
-        events.push(LlmEvent::Done {
-            finish_reason: response.finish_reason.clone(),
-            usage: response.usage.clone(),
-        });
-
-        Ok(Box::pin(futures::stream::iter(events)))
-    }
+    ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// Why a model step could not even start streaming.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelStepError {
-    /// A recorded ToolResult closure cannot be encoded because its closing
-    /// call carries no provider call ID and the provider wire correlates
-    /// results by ID (plan decision 9). No ID is ever synthesized.
-    ToolResultWithoutProviderCallId { invocation_id: InvocationId },
+    /// Provider request projection failed before transport; exact typed cause is
+    /// retained so missing IDs and replay-state failures are not flattened.
+    Projection(lattice_llm::provider_projection::ProjectionError),
     /// The provider request failed before any stream event. `retryable` is a
     /// hint from the transport classification; the caller owns retry policy.
     OpeningFailed {
@@ -131,11 +74,7 @@ pub enum ModelStepError {
 impl std::fmt::Display for ModelStepError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ToolResultWithoutProviderCallId { invocation_id } => write!(
-                f,
-                "tool result for invocation {invocation_id} cannot be encoded: \
-                 the closing call has no provider call id"
-            ),
+            Self::Projection(error) => write!(f, "provider request projection failed: {error}"),
             Self::OpeningFailed { message, .. } => write!(
                 f,
                 "provider request failed before the stream opened: {message}"
@@ -192,12 +131,6 @@ pub enum ModelStepEvent {
     ReasoningDelta { content: String },
     /// A visible assistant text delta.
     TokenDelta { content: String },
-    /// A tool call started streaming.
-    ToolCallStarted { id: String, name: String },
-    /// A tool call arguments delta.
-    ToolCallDelta { id: String, arguments_delta: String },
-    /// A tool call finished streaming.
-    ToolCallEnded { id: String },
 }
 
 /// Frozen request data for one model step (ADR 0005 §8: the coordinator
@@ -244,7 +177,17 @@ impl ModelStepDriver {
         request: &ModelStepRequest,
         live: Option<&tokio::sync::mpsc::Sender<ModelStepEvent>>,
     ) -> Result<ModelStepAttempt, ModelStepError> {
-        let messages = assemble_request_messages(request)?;
+        let mut messages = Vec::with_capacity(request.history.len() + 1);
+        if let Some(system) = &request.system_prompt {
+            messages.push(NativeMessage::<lattice_conversation::BoundToolCall>::new(
+                MessageRole::System,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: system.clone(),
+                })],
+            ));
+        }
+        messages.extend(request.history.iter().cloned());
         let chat = ChatRequest {
             messages,
             tools: request.tools.clone(),
@@ -264,13 +207,7 @@ impl ModelStepDriver {
                 result = &mut opening => {
                     break match result {
                         Ok(stream) => stream,
-                        Err(err) => {
-                            let message = err.to_string();
-                            return Err(ModelStepError::OpeningFailed {
-                                message,
-                                retryable: classify_retryable(err.as_ref()),
-                            });
-                        }
+                        Err(err) => return Err(model_step_opening_error(err)),
                     };
                 }
                 _ = tokio::time::sleep(CANCEL_POLL_INTERVAL), if request.deadline.is_some() || request.cancel.is_some() => {
@@ -316,9 +253,8 @@ impl ModelStepDriver {
         };
 
         let mut assembly = AttemptAssembly::new();
-        let mut reasoning = String::new();
-        let mut text = String::new();
-        let mut raw_calls: Vec<RawToolCall> = Vec::new();
+        let mut complete_message: Option<NativeMessage<UnboundToolCall>> = None;
+        let mut rejection: Option<AttemptRejection> = None;
         let mut saw_stream_event = false;
         let mut usage: Option<lattice_conversation::TokenUsage> = None;
         let mut finish_reason: Option<String> = None;
@@ -404,61 +340,50 @@ impl ModelStepDriver {
                     if let Err(interruption) = assembly.push_assistant(&content) {
                         return Ok(interrupted(interruption, usage, finish_reason, None));
                     }
-                    text.push_str(&content);
                     emit(ModelStepEvent::TokenDelta { content }, live);
                 }
                 LlmEvent::Reasoning { content } => {
                     if let Err(interruption) = assembly.push_reasoning(&content) {
                         return Ok(interrupted(interruption, usage, finish_reason, None));
                     }
-                    reasoning.push_str(&content);
                     emit(ModelStepEvent::ReasoningDelta { content }, live);
                 }
-                LlmEvent::ToolCallStart { id, name } => {
-                    assembly.begin_tool_call();
-                    raw_calls.push(RawToolCall {
-                        provider_call_id: Some(id.clone()),
-                        name: name.clone(),
-                        arguments: String::new(),
-                    });
-                    emit(ModelStepEvent::ToolCallStarted { id, name }, live);
-                }
+                LlmEvent::ToolCallStart { .. } => assembly.begin_tool_call(),
                 LlmEvent::ToolCallDelta {
-                    id,
-                    arguments_delta,
+                    arguments_delta, ..
                 } => {
                     if let Err(interruption) = assembly.push_tool_arguments(&arguments_delta) {
                         return Ok(interrupted(interruption, usage, finish_reason, None));
                     }
-                    // Wires stream one call's deltas contiguously; match from
-                    // the end so repeated ids still land on the newest call.
-                    if let Some(call) = raw_calls
-                        .iter_mut()
-                        .rev()
-                        .find(|call| call.provider_call_id.as_deref() == Some(id.as_str()))
-                    {
-                        call.arguments.push_str(&arguments_delta);
-                    }
-                    emit(
-                        ModelStepEvent::ToolCallDelta {
-                            id,
-                            arguments_delta,
-                        },
-                        live,
-                    );
                 }
-                LlmEvent::ToolCallEnd { id } => {
-                    emit(ModelStepEvent::ToolCallEnded { id }, live);
+                LlmEvent::ToolCallEnd { .. } => {}
+                LlmEvent::MessageComplete { message } => {
+                    if complete_message.replace(message).is_some() {
+                        return Ok(interrupted(
+                            AttemptInterruption::StreamError,
+                            usage,
+                            finish_reason,
+                            Some("provider emitted more than one complete message".to_string()),
+                        ));
+                    }
+                }
+                LlmEvent::MessageRejected {
+                    rejection: rejected,
+                } => {
+                    if rejection.replace(rejected).is_some() {
+                        return Ok(interrupted(
+                            AttemptInterruption::StreamError,
+                            usage,
+                            finish_reason,
+                            Some("provider emitted more than one rejection".to_string()),
+                        ));
+                    }
                 }
                 LlmEvent::Done {
                     finish_reason: reason,
                     usage: reported,
                 } => {
-                    usage = reported.map(|tokens| lattice_conversation::TokenUsage {
-                        prompt_tokens: u64::from(tokens.prompt_tokens),
-                        completion_tokens: u64::from(tokens.completion_tokens),
-                        total_tokens: u64::from(tokens.total_tokens),
-                    });
+                    usage = reported;
                     finish_reason = Some(reason);
                     break;
                 }
@@ -473,49 +398,35 @@ impl ModelStepDriver {
                 LlmEvent::Citation { .. }
                 | LlmEvent::Signature { .. }
                 | LlmEvent::GroundingChunk { .. }
-                | LlmEvent::SafetyRating { .. } => {
-                    // Provider metadata events are not conversation parts.
-                }
+                | LlmEvent::SafetyRating { .. } => {}
             }
         }
 
-        // Assemble the authoritative ordered message.
-        let mut parts: Vec<MessagePart<UnboundToolCall>> = Vec::new();
-        if !reasoning.is_empty() {
-            parts.push(MessagePart::semantic_only(MessageSemantic::Reasoning {
-                text: reasoning,
-            }));
-        }
-        if !text.is_empty() {
-            parts.push(MessagePart::semantic_only(MessageSemantic::Text { text }));
-        }
-        match validate_tool_call_batch(&raw_calls) {
-            Ok(validated) => {
-                for call in validated {
-                    parts.push(MessagePart::semantic_only(MessageSemantic::ToolCall {
-                        call,
-                    }));
-                }
-                Ok(ModelStepAttempt {
-                    status: ModelStepStatus::Complete,
-                    message: Some(NativeMessage::new(
-                        MessageRole::Assistant,
-                        request.provider.as_deref().map(provider_origin),
-                        parts,
-                    )),
-                    usage,
-                    finish_reason,
-                    diagnostic: None,
-                })
-            }
-            Err(validation) => Ok(ModelStepAttempt {
-                status: ModelStepStatus::Rejected(AttemptRejection::InvalidToolCall { validation }),
+        if let Some(rejection) = rejection {
+            return Ok(ModelStepAttempt {
+                status: ModelStepStatus::Rejected(rejection),
                 message: None,
                 usage,
                 finish_reason,
                 diagnostic: None,
-            }),
+            });
         }
+
+        let Some(message) = complete_message else {
+            return Ok(interrupted(
+                AttemptInterruption::StreamError,
+                usage,
+                finish_reason,
+                Some("provider completed without an authoritative message".to_string()),
+            ));
+        };
+        Ok(ModelStepAttempt {
+            status: ModelStepStatus::Complete,
+            message: Some(message),
+            usage,
+            finish_reason,
+            diagnostic: None,
+        })
     }
 }
 
@@ -534,6 +445,18 @@ fn interrupted(
     }
 }
 
+fn model_step_opening_error(error: Box<dyn std::error::Error + Send + Sync>) -> ModelStepError {
+    if let Some(lattice_llm::LlmError::Projection(projection)) =
+        error.downcast_ref::<lattice_llm::LlmError>()
+    {
+        return ModelStepError::Projection(projection.clone());
+    }
+    ModelStepError::OpeningFailed {
+        message: error.to_string(),
+        retryable: classify_retryable(error.as_ref()),
+    }
+}
+
 /// Transport retryability classification for an opening failure. The caller
 /// may still choose never to retry; this is a hint, not a policy.
 fn classify_retryable(err: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
@@ -545,145 +468,13 @@ fn classify_retryable(err: &(dyn std::error::Error + Send + Sync + 'static)) -> 
     false
 }
 
-/// Map the frozen provider override onto the conversation origin family.
-fn provider_origin(provider: &str) -> lattice_conversation::ProviderOrigin {
-    match provider {
-        "anthropic" => lattice_conversation::ProviderOrigin::Anthropic,
-        "gemini" => lattice_conversation::ProviderOrigin::Gemini,
-        _ => lattice_conversation::ProviderOrigin::OpenAiCompatible,
-    }
-}
-
-/// Model-facing content of one closure: available material verbatim, else the
-/// honest outcome spelling (same convention as the provider projection).
-fn closure_content(outcome: ToolResultOutcome, content: &Option<String>) -> String {
-    match content {
-        Some(text) => text.clone(),
-        None => format!("{{\"outcome\":\"{}\"}}", outcome.as_str()),
-    }
-}
-
-/// Assemble the provider request messages from the frozen history.
-///
-/// ToolResult closures join to their closing bound ToolCalls by canonical
-/// `InvocationId`; the provider call ID the wire needs comes from that call.
-/// A closure whose call carries none fails typed rather than synthesizing an
-/// ID (plan decision 9).
-fn assemble_request_messages(request: &ModelStepRequest) -> Result<Vec<Message>, ModelStepError> {
-    let mut messages = Vec::new();
-    if let Some(system) = &request.system_prompt {
-        messages.push(Message::system(system.clone()));
-    }
-
-    // invocation -> provider call id, from every bound assistant message.
-    let mut closing_ids: BTreeMap<InvocationId, Option<String>> = BTreeMap::new();
-    for message in &request.history {
-        for (_, call) in message.tool_calls() {
-            closing_ids.insert(call.invocation_id, call.provider_call_id.clone());
-        }
-    }
-
-    for message in &request.history {
-        match message.role {
-            MessageRole::System => {
-                let content = flat_text(message);
-                messages.push(Message::system(content));
-            }
-            MessageRole::User => {
-                messages.push(Message::user(flat_text(message)));
-            }
-            MessageRole::Assistant => {
-                let mut content = String::new();
-                let mut reasoning_content = None;
-                let mut tool_calls: Vec<ToolCall> = Vec::new();
-                for part in &message.parts {
-                    match &part.semantic {
-                        MessageSemantic::Text { text } => content.push_str(text),
-                        MessageSemantic::Reasoning { text } => {
-                            let slot = reasoning_content.get_or_insert_with(String::new);
-                            slot.push_str(text);
-                        }
-                        MessageSemantic::ToolCall { call } => {
-                            // A bound call without a provider ID cannot be
-                            // replayed to an ID-correlating wire; fail typed.
-                            tool_calls.push(ToolCall {
-                                id: call.provider_call_id.clone().ok_or(
-                                    ModelStepError::ToolResultWithoutProviderCallId {
-                                        invocation_id: call.invocation_id,
-                                    },
-                                )?,
-                                function: FunctionCall {
-                                    name: call.name.clone(),
-                                    arguments: lattice_conversation::canonical_json(
-                                        call.arguments(),
-                                    ),
-                                },
-                            });
-                        }
-                        MessageSemantic::ToolResult { .. } => {}
-                    }
-                }
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content,
-                    reasoning_content,
-                    tool_calls: if tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(tool_calls)
-                    },
-                    tool_call_id: None,
-                    name: None,
-                });
-            }
-            MessageRole::Tool => {
-                for part in &message.parts {
-                    let MessageSemantic::ToolResult {
-                        invocation_id,
-                        name,
-                        outcome,
-                        content,
-                    } = &part.semantic
-                    else {
-                        continue;
-                    };
-                    let tool_call_id = closing_ids.get(invocation_id).cloned().flatten().ok_or(
-                        ModelStepError::ToolResultWithoutProviderCallId {
-                            invocation_id: *invocation_id,
-                        },
-                    )?;
-                    messages.push(Message {
-                        role: Role::Tool,
-                        content: closure_content(*outcome, content),
-                        reasoning_content: None,
-                        tool_calls: None,
-                        tool_call_id: Some(tool_call_id),
-                        name: Some(name.clone()),
-                    });
-                }
-            }
-        }
-    }
-    Ok(messages)
-}
-
-fn flat_text(message: &NativeMessage<lattice_conversation::BoundToolCall>) -> String {
-    let mut text = String::new();
-    for part in &message.parts {
-        if let MessageSemantic::Text { text: delta } = &part.semantic {
-            text.push_str(delta);
-        }
-    }
-    text
-}
-
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;
     use crate::testing::FakeStreamingLlmClient;
     use lattice_conversation::{
-        MAX_ASSISTANT_CONTENT_BYTES, MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES,
-        ToolCallAddress,
+        InvocationId, MAX_ASSISTANT_CONTENT_BYTES, MAX_REASONING_CONTENT_BYTES,
+        MAX_TOOL_CALL_ARGUMENTS_BYTES, ToolCallAddress, ToolResultOutcome,
     };
     use lattice_llm::LlmEvent;
 
@@ -691,11 +482,31 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmClient for NeverOpeningClient {
-        async fn chat(
+        async fn stream_chat(
             &self,
             _request: ChatRequest,
-        ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
             std::future::pending().await
+        }
+    }
+
+    struct ProjectionCheckingClient;
+
+    #[async_trait::async_trait]
+    impl LlmClient for ProjectionCheckingClient {
+        async fn stream_chat(
+            &self,
+            request: ChatRequest,
+        ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+            lattice_llm::provider_projection::request_messages_to_wire(
+                lattice_conversation::ProviderOrigin::OpenAiCompatible,
+                &request.messages,
+            )
+            .map_err(|error| {
+                Box::new(lattice_llm::LlmError::Projection(error))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?;
+            Ok(Box::pin(futures::stream::empty()))
         }
     }
     fn driver(events: Vec<LlmEvent>) -> ModelStepDriver {
@@ -808,16 +619,15 @@ mod tests {
             .block_on(
                 driver(vec![
                     LlmEvent::ToolCallStart {
-                        id: "call_1".to_string(),
+                        index: 0,
+                        provider_call_id: Some("call_1".to_string()),
                         name: "observe.workspace".to_string(),
                     },
                     LlmEvent::ToolCallDelta {
-                        id: "call_1".to_string(),
+                        index: 0,
                         arguments_delta: r#"{"path":"a"}"#.to_string(),
                     },
-                    LlmEvent::ToolCallEnd {
-                        id: "call_1".to_string(),
-                    },
+                    LlmEvent::ToolCallEnd { index: 0 },
                     LlmEvent::Done {
                         finish_reason: "tool_calls".to_string(),
                         usage: None,
@@ -841,16 +651,15 @@ mod tests {
             .block_on(
                 driver(vec![
                     LlmEvent::ToolCallStart {
-                        id: "call_1".to_string(),
+                        index: 0,
+                        provider_call_id: Some("call_1".to_string()),
                         name: "observe.workspace".to_string(),
                     },
                     LlmEvent::ToolCallDelta {
-                        id: "call_1".to_string(),
+                        index: 0,
                         arguments_delta: "not json".to_string(),
                     },
-                    LlmEvent::ToolCallEnd {
-                        id: "call_1".to_string(),
-                    },
+                    LlmEvent::ToolCallEnd { index: 0 },
                     LlmEvent::Done {
                         finish_reason: "tool_calls".to_string(),
                         usage: None,
@@ -937,11 +746,12 @@ mod tests {
             .block_on(
                 driver(vec![
                     LlmEvent::ToolCallStart {
-                        id: "c".to_string(),
+                        index: 0,
+                        provider_call_id: Some("c".to_string()),
                         name: "t".to_string(),
                     },
                     LlmEvent::ToolCallDelta {
-                        id: "c".to_string(),
+                        index: 0,
                         arguments_delta: format!(
                             "{{\"a\":\"{}\"}}",
                             "z".repeat(MAX_TOOL_CALL_ARGUMENTS_BYTES - overhead + 1)
@@ -1092,11 +902,7 @@ mod tests {
             })],
         );
         let result = runtime().block_on(
-            driver(vec![LlmEvent::Done {
-                finish_reason: "stop".to_string(),
-                usage: None,
-            }])
-            .run(
+            ModelStepDriver::new(Arc::new(ProjectionCheckingClient)).run(
                 &ModelStepRequest {
                     history: vec![assistant, tool],
                     ..request()
@@ -1106,8 +912,12 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(ModelStepError::ToolResultWithoutProviderCallId { invocation_id })
-                if invocation_id == invocation(0)
+            Err(ModelStepError::Projection(
+                lattice_llm::provider_projection::ProjectionError::ToolResultWithoutProviderCallId {
+                    invocation_id,
+                    ..
+                },
+            )) if invocation_id == invocation(0)
         ));
     }
 

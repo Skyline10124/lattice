@@ -360,17 +360,13 @@ impl CoordinatorStoreIo {
             }
         })
         .await?;
-        classification
-            .lock()
-            .expect("classification lock")
-            .clone()
-            .ok_or_else(|| {
-                FinalizeFailure::Fatal(
-                    lancet_audit::invocation_store::InvocationStoreError::Corruption {
-                        detail: "draft revalidation completed without a classification".into(),
-                    },
-                )
-            })
+        (*classification.lock().expect("classification lock")).ok_or_else(|| {
+            FinalizeFailure::Fatal(
+                lancet_audit::invocation_store::InvocationStoreError::Corruption {
+                    detail: "draft revalidation completed without a classification".into(),
+                },
+            )
+        })
     }
 }
 

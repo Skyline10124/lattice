@@ -6,10 +6,10 @@
 //! `planned_audit_cli`).
 //!
 //! Drives the built `lattice` binary for the no-turn audit surface. With no
-//! agent turn having run in the project, the audit store does not exist, so
-//! `audit query` / `replay` / `--tail` must degrade to a clean
-//! configuration error (exit 1, message naming the missing store) rather than
-//! panic. This is exactly the regression guard for the runtime-nesting bug
+//! agent turn having run in the project, the invocation ledger does not exist, so
+//! `audit query` / `replay` / `--tail` must degrade to a clean configuration
+//! error (exit 1, message naming the missing store) rather than panic.
+//! This is exactly the regression guard for the runtime-nesting bug
 //! fixed in `lattice-cli/src/commands/audit.rs` (`audit::run` is now async and
 //! reuses the top-level `#[tokio::main]` runtime instead of nesting one).
 //!
@@ -58,11 +58,11 @@ fn ok_or_artifacts(
 }
 
 /// Assert an audit subcommand degrades to the documented missing-store
-/// configuration error (exit 1) instead of panicking. The audit store is
-/// created lazily on the first agent turn; with no turn run it is absent.
+/// invocation-ledger configuration error (exit 1) instead of panicking. The
+/// ledger is created lazily on the first agent turn; with no turn run it is absent.
 fn assert_missing_store(world: &ScenarioWorld, name: &str, summary: &str, out: &Output) {
     let result = assert_exit_failure(out)
-        .and_then(|_| assert_stderr_contains(out, "audit database not found"));
+        .and_then(|_| assert_stderr_contains(out, "invocation ledger not found"));
     ok_or_artifacts(world, name, summary, out, result);
 }
 
@@ -124,9 +124,9 @@ fn fast_audit_replay_missing_store_errors_cleanly() {
             "audit",
             "replay",
             "--session",
-            "nobody",
+            "00000000000000000000000000000001",
             "--turn",
-            "nope",
+            "00000000-0000-4000-8000-000000000001",
             "--json",
         ],
     );

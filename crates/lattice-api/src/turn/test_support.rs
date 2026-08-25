@@ -271,13 +271,6 @@ impl CancelOnDoneLlm {
 
 #[async_trait::async_trait]
 impl LlmClient for CancelOnDoneLlm {
-    async fn chat(
-        &self,
-        _request: lattice_llm::ChatRequest,
-    ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-        unreachable!("stream-only fake")
-    }
-
     async fn stream_chat(
         &self,
         _request: lattice_llm::ChatRequest,
@@ -290,7 +283,7 @@ impl LlmClient for CancelOnDoneLlm {
             .expect("CancelOnDoneLlm only supports a single round");
         let cancel = self.cancel.clone();
         let finish_reason = self.finish_reason.clone();
-        let usage = self.usage.clone();
+        let usage = self.usage;
 
         enum StreamState {
             Pending(

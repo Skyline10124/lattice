@@ -256,6 +256,21 @@ fn gemini_function_call_without_id_is_none_not_synthesized() {
     assert_eq!(calls[0].1.provider_call_id, None);
     let serialized = serde_json::to_string(&native).expect("serialize");
     assert!(!serialized.contains("tc_"), "no synthetic tc_* ids");
+
+    let parameterless = serde_json::json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{"functionCall": {"name": "ping"}}],
+            }
+        }],
+    });
+    let native = wire_to_native(ProviderOrigin::Gemini, &parameterless).expect("projection");
+    assert_eq!(
+        tool_call_parts(&native)[0].1.arguments,
+        serde_json::json!({}),
+        "an omitted Gemini args field is the documented empty object",
+    );
 }
 
 // ─── Cross-provider projection ────────────────────────────────────────────

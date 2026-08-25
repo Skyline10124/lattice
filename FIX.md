@@ -7442,3 +7442,55 @@ admission断言ledger tip不变；同parent sibling Turn operator隔离回归落
 **Changed areas:** `lattice-session::pending`, `lattice-api::turn`/Rewind,
 `lancet-native` admission, `lancet-audit` operator regressions, and
 `lattice-system-harness` crash/provider/effect fixtures.
+
+## GitHub #139-B Commit 9: production provider codec hard cut and ledger closeout — 2026-08-24
+
+**Severity:** HIGH
+
+**Problem:** The durable Turn/Invocation cutover was complete, but production provider
+adapters still encoded request messages independently, the Agent still retained a parallel
+response assembler, Gemini synthesized `tc_*` Tool-call IDs, and wire usage had a second
+`u32` authority. That left replay identity, ToolResult joining, malformed-batch rejection,
+and provider-switch behavior dependent on adapter-local conventions. Current architecture
+and onboarding documents also still described transitional SQLite/audit and direct-loop
+surfaces.
+
+**Fix:** `ChatRequest.messages` now carries `NativeMessage<BoundToolCall>` directly.
+All three production request builders call the single `request_messages_to_wire` projector;
+all SSE parsers accumulate the provider-complete response and publish one typed
+`MessageComplete` through `wire_to_native`; all usage goes through `wire_usage` into the
+single `lattice-conversation::TokenUsage { u64 }` vocabulary. Same-provider opaque replay
+state is byte-preserved, cross-provider projection intentionally drops provider IDs and
+reasoning, ToolResults join by durable `InvocationId`, and a missing provider call ID fails
+closed without synthesis. The legacy request DTOs, buffered `chat`/`ChatResponse` surface,
+Agent-side assembler, duplicate usage type, and Gemini `tc_*` generation were deleted.
+Malformed arguments/usage, conflicting stream fragments, duplicate terminal frames, and
+multi-chunk OpenAI/Gemini responses now have production-seam regressions. A source boundary
+test requires every shipped provider to use the shared request, response, and usage
+projectors.
+
+Final-gate review also closed adjacent correctness gaps without compatibility paths: public
+Session diff ancestry now excludes PendingTurn journal commits; observation and operator
+harnesses assert the typed Git-ledger/error envelopes; native finished events derive status
+from the exact result; Turn startup fails closed if the persisted SessionId or frozen LANCET
+policy cannot be represented. `L-GH139B-01` moved to CLOSED, while historical ADR/plan
+records remain historical rather than being rewritten.
+
+**Verification:**
+
+- `cargo test -p lattice-llm` — 81 unit + 34 official-wire projection tests passed.
+- `cargo test -p lattice-agent --features test-utils` — 12 unit + 5 streaming-seam
+  tests passed.
+- `cargo test -p lattice-session` — 132 passed.
+- `cargo test -p lattice-api` — 99 unit plus every integration, including 19 Rewind
+  acceptance cases, passed.
+- `LATTICE_BIN=$PWD/target/debug/lattice cargo test --workspace` — passed, including
+  the complete ordinary black-box system-harness matrix.
+- `env -u LATTICE_BIN cargo xtask ci` — passed: format, Clippy `-D warnings`, debug
+  binary, system/LANCET boundaries, generated Tool artifacts, all 27 workspace-member
+  suites, black-box scenarios, Component identities, and performance regression gates.
+- Final specification and security reviews: PASS, no blocking findings.
+
+**Changed areas:** `lattice-llm` provider projection/parsers/contracts,
+`lattice-agent::model_step`, Turn test fixtures and startup wiring, Session public ancestry,
+typed black-box harness assertions, `FINDINGS.md`, and this append-only record.

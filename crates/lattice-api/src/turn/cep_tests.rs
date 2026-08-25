@@ -16,7 +16,16 @@ use lancet_protocol::{
     BindingIdentity, CepError, CepErrorCode, InvocationBinding, InvocationId, PlanKey,
     Retriability, SessionId, TurnId, arguments_digest,
 };
-use lattice_llm::{FunctionCall, ToolCall};
+#[derive(Clone)]
+struct FunctionCall {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Clone)]
+struct ToolCall {
+    function: FunctionCall,
+}
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -214,7 +223,6 @@ async fn reserved_cep_client_retired_methods_return_method_not_found() {
     for method in ["observe.audit", "observe.audit_replay", "mutate.batch"] {
         let err = adapter
             .execute_reserved(&ToolCall {
-                id: format!("call_{method}"),
                 function: FunctionCall {
                     name: method.to_string(),
                     arguments: "{}".to_string(),
@@ -237,7 +245,6 @@ async fn reserved_cep_client_parse_error_maps_to_32700() {
 
     let err = adapter
         .execute_reserved(&ToolCall {
-            id: "call_1".to_string(),
             function: FunctionCall {
                 name: TestEcho::NAME.to_string(),
                 arguments: "{not-json".to_string(),
@@ -272,7 +279,6 @@ async fn reserved_cep_client_allows_enabled_native_method() {
 
     let result = adapter
         .execute_reserved(&ToolCall {
-            id: "call_1".to_string(),
             function: FunctionCall {
                 name: "fetch.web".to_string(),
                 arguments: r#"{"url":"https://example.com/"}"#.to_string(),
@@ -292,7 +298,6 @@ async fn reserved_cep_client_unknown_method_maps_to_32601() {
 
     let err = adapter
         .execute_reserved(&ToolCall {
-            id: "call_1".to_string(),
             function: FunctionCall {
                 name: "crafted.unknown".to_string(),
                 arguments: "{}".to_string(),
@@ -326,7 +331,6 @@ async fn reserved_cep_client_invalid_params_maps_to_32602() {
 
     let err = adapter
         .execute_reserved(&ToolCall {
-            id: "call_1".to_string(),
             function: FunctionCall {
                 name: "fetch.web".to_string(),
                 arguments: r#"{"headers":{}}"#.to_string(),
@@ -362,7 +366,6 @@ macro_rules! cep_family_test {
 
             let err = adapter
                 .execute_reserved(&ToolCall {
-                    id: "call_1".to_string(),
                     function: FunctionCall {
                         name: TestEcho::NAME.to_string(),
                         arguments: r#"{"items":[]}"#.to_string(),
@@ -680,7 +683,6 @@ mod component_client {
 
         let result = adapter
             .execute_reserved(&ToolCall {
-                id: "call_noop".to_string(),
                 function: FunctionCall {
                     name: "noop.echo".to_string(),
                     arguments: r#"{"message":"reserved-client"}"#.to_string(),
@@ -729,7 +731,6 @@ mod component_client {
         std::mem::forget(server_task);
 
         let call = ToolCall {
-            id: "call_noop".to_string(),
             function: FunctionCall {
                 name: "noop.echo".to_string(),
                 arguments: r#"{"message":"x"}"#.to_string(),

@@ -166,15 +166,32 @@ async fn run_turn_cancelled_outcome_is_committed() {
         cancel.clone(),
         vec![
             LlmEvent::ToolCallStart {
-                id: "call_1".to_string(),
+                index: 0,
+                provider_call_id: Some("call_1".to_string()),
                 name: "observe.workspace".to_string(),
             },
             LlmEvent::ToolCallDelta {
-                id: "call_1".to_string(),
+                index: 0,
                 arguments_delta: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
             },
-            LlmEvent::ToolCallEnd {
-                id: "call_1".to_string(),
+            LlmEvent::ToolCallEnd { index: 0 },
+            LlmEvent::MessageComplete {
+                message: lattice_conversation::NativeMessage::new(
+                    lattice_conversation::MessageRole::Assistant,
+                    Some(lattice_conversation::ProviderOrigin::OpenAiCompatible),
+                    vec![lattice_conversation::MessagePart::semantic_only(
+                        lattice_conversation::MessageSemantic::ToolCall {
+                            call: lattice_conversation::UnboundToolCall {
+                                provider_call_id: Some("call_1".to_string()),
+                                name: "observe.workspace".to_string(),
+                                arguments: serde_json::json!({
+                                    "mode": "read_file",
+                                    "path": "src/lib.rs",
+                                }),
+                            },
+                        },
+                    )],
+                ),
             },
         ],
         "tool_calls",

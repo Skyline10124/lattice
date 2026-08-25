@@ -140,7 +140,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = AttemptOutcome>,
 {
-    let mut backoff = FinalizeBackoff::default();
+    let mut backoff = FinalizeBackoff;
     let mut attempt_ordinal: u32 = 0;
     loop {
         let now = clock.now();
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn backoff_schedule_is_25ms_exponential_capped_at_1s() {
-        let mut backoff = FinalizeBackoff::default();
+        let mut backoff = FinalizeBackoff;
         assert_eq!(backoff.delay_before(1), Duration::ZERO);
         assert_eq!(backoff.delay_before(2), Duration::from_millis(25));
         assert_eq!(backoff.delay_before(3), Duration::from_millis(50));

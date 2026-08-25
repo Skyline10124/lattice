@@ -60,14 +60,15 @@ fn usage_tokens() -> TokenUsage {
 fn tool_call_events(id: &str, name: &str, args: &str) -> Vec<LlmEvent> {
     vec![
         LlmEvent::ToolCallStart {
-            id: id.to_string(),
+            index: 0,
+            provider_call_id: Some(id.to_string()),
             name: name.to_string(),
         },
         LlmEvent::ToolCallDelta {
-            id: id.to_string(),
+            index: 0,
             arguments_delta: args.to_string(),
         },
-        LlmEvent::ToolCallEnd { id: id.to_string() },
+        LlmEvent::ToolCallEnd { index: 0 },
         LlmEvent::Done {
             finish_reason: "tool_calls".to_string(),
             usage: Some(usage_tokens()),

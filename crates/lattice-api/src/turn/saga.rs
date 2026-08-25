@@ -12,15 +12,13 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use lancet_api::{ExecutionReceipt, WorkspaceHistory};
-use lancet_native::CepClient;
 use lancet_protocol::{
     BindingIdentity, CepError, CepErrorFamily, InvocationBinding, ModelAttemptKey,
     ModelMessageAddress, PlanKey, SessionId, ToolCallAddress, TurnId, arguments_digest,
     canonical_json,
 };
 use lattice_agent::{
-    ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
-    ModelStepStatus,
+    ModelStepAttempt, ModelStepError, ModelStepEvent, ModelStepRequest, ModelStepStatus,
 };
 use lattice_conversation::{
     BoundToolCall, MessagePart, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome,
@@ -38,7 +36,7 @@ use lattice_session::{FlockGuard, TurnCommit};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::cep::map_cep_tool_event;
+use super::cep::{ProductionTurnDeps, map_cep_tool_event};
 use super::coordinator::{CoordinatorIoError, TurnCoordinator};
 
 use super::finalize::{FinalizeBudget, FinalizeFailure};
@@ -74,16 +72,24 @@ pub(super) async fn run_coordinator_saga(
     prepared: PreparedTurn,
     request: RunTurnRequest,
     turn_id: TurnId,
-    model_driver: ModelStepDriver,
-    tool_definitions: Vec<ToolDefinition>,
-    tool_catalog: Vec<lancet_api::ToolDefinition>,
-    mut runtime: lancet_api::ServerLifecycle,
-    cep_client: CepClient,
-    workspace_history: Arc<WorkspaceHistory>,
+    deps: ProductionTurnDeps,
     coordinator: Arc<TurnCoordinator>,
     execution_lock: Arc<FlockGuard>,
     mut observer: ObserverSink,
 ) {
+    let ProductionTurnDeps {
+        model_driver,
+        tool_catalog,
+        mut runtime,
+        cep_client,
+        workspace_history,
+        ..
+    } = deps;
+    let tool_definitions = tool_catalog
+        .iter()
+        .cloned()
+        .map(|tool| ToolDefinition::new(tool.name, tool.description, tool.parameters))
+        .collect::<Vec<_>>();
     let session_id = prepared.session_id.clone();
     let session_proto = SessionId::parse(&session_id).expect("canonical SessionId");
     let turn_deadline = Instant::now()
@@ -348,9 +354,9 @@ pub(super) async fn run_coordinator_saga(
                     }
                     break 'saga Ok(());
                 }
-                Err(ModelStepError::ToolResultWithoutProviderCallId { invocation_id }) => {
+                Err(ModelStepError::Projection(error)) => {
                     break 'saga Err(ApiError::Internal(format!(
-                        "tool result for {invocation_id} lacks provider call id"
+                        "provider request projection failed: {error}"
                     )));
                 }
                 Ok(step) => {
@@ -944,14 +950,17 @@ pub(super) async fn run_coordinator_saga(
 
     match saga_result {
         Ok(()) => {
+            let closure = LiveTurnClosure {
+                session_id: &session_id,
+                turn_id,
+                prepared: &prepared,
+                outcome: turn_outcome,
+                messages: candidate_messages,
+                usage_aggregate: TurnUsageAggregate::derive(&attempt_usages),
+            };
             let commit = close_live_turn(
                 &coordinator,
-                &session_id,
-                turn_id,
-                &prepared,
-                turn_outcome,
-                candidate_messages,
-                TurnUsageAggregate::derive(&attempt_usages),
+                closure,
                 Arc::clone(&execution_lock),
                 workspace_history,
             )
@@ -1208,9 +1217,6 @@ fn map_step_event(event: ModelStepEvent) -> Option<TurnEvent> {
         ModelStepEvent::Opened { .. } => None,
         ModelStepEvent::ReasoningDelta { content } => Some(TurnEvent::ReasoningDelta { content }),
         ModelStepEvent::TokenDelta { content } => Some(TurnEvent::TokenDelta { content }),
-        ModelStepEvent::ToolCallStarted { .. }
-        | ModelStepEvent::ToolCallDelta { .. }
-        | ModelStepEvent::ToolCallEnded { .. } => None,
     }
 }
 
@@ -1557,18 +1563,29 @@ fn empty_evidence(tool: &str) -> lancet_audit::invocation_store::TerminalEvidenc
         },
     }
 }
-
-async fn close_live_turn(
-    coordinator: &TurnCoordinator,
-    session_id: &str,
+struct LiveTurnClosure<'a> {
+    session_id: &'a str,
     turn_id: TurnId,
-    prepared: &PreparedTurn,
+    prepared: &'a PreparedTurn,
     outcome: TurnOutcome,
     messages: Vec<NativeMessage<BoundToolCall>>,
     usage_aggregate: Option<TurnUsageAggregate>,
+}
+
+async fn close_live_turn(
+    coordinator: &TurnCoordinator,
+    closure: LiveTurnClosure<'_>,
     execution_lock: Arc<FlockGuard>,
     workspace_history: Arc<WorkspaceHistory>,
 ) -> Result<TurnCommit, ApiError> {
+    let LiveTurnClosure {
+        session_id,
+        turn_id,
+        prepared,
+        outcome,
+        messages,
+        usage_aggregate,
+    } = closure;
     let tip = coordinator
         .io
         .read_active_turn(session_id.to_string())
@@ -1590,7 +1607,7 @@ async fn close_live_turn(
         .snapshot
         .root
         .as_ref()
-        .or_else(|| match &tip.snapshot.stage {
+        .or(match &tip.snapshot.stage {
             PendingStage::TurnStarted(facts) => Some(facts),
             _ => None,
         })

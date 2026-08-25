@@ -24,7 +24,14 @@ use lancet_protocol::{
 
 use lancet_audit::invocation_store::InvocationStore;
 use lattice_api::{CepErrorPayload, ToolExecutionError};
-use lattice_llm::{FunctionCall, ToolCall};
+struct FunctionCall {
+    name: String,
+    arguments: String,
+}
+
+struct ToolCall {
+    function: FunctionCall,
+}
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -223,7 +230,6 @@ const OBSERVE_WORKSPACE: &str = "observe.workspace";
 fn llm_tool_call(method: &str, arguments: Value) -> ToolCall {
     assert_dispatchable_method(method);
     ToolCall {
-        id: format!("call_{method}"),
         function: FunctionCall {
             name: method.to_string(),
             arguments: serde_json::to_string(&arguments).expect("serialize tool arguments"),
@@ -338,7 +344,6 @@ async fn cep_round_trip_unknown_method_rejected_at_client() {
 
     let err = adapter
         .execute(&ToolCall {
-            id: "call_unknown".into(),
             function: FunctionCall {
                 name: "crafted.unknown".into(),
                 arguments: "{}".into(),

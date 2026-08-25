@@ -8,7 +8,11 @@
 //! production builds.
 
 use crate::LlmClient;
-use lattice_llm::{ChatRequest, ChatResponse, FunctionCall, LlmEvent, LlmStream, ToolCall};
+use lattice_conversation::{
+    MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, RawToolCall,
+    validate_tool_call_batch,
+};
+use lattice_llm::{ChatRequest, LlmEvent, LlmStream};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -48,7 +52,8 @@ impl FakeStreamingLlmClient {
 
 impl FakeStreamingLlmClientBuilder {
     pub fn push_events(mut self, events: Vec<LlmEvent>) -> Self {
-        self.queue.push_back(FakeStreamingResponse::Events(events));
+        self.queue
+            .push_back(FakeStreamingResponse::Events(with_complete_message(events)));
         self
     }
 
@@ -71,25 +76,95 @@ impl FakeStreamingLlmClientBuilder {
     }
 }
 
-#[async_trait::async_trait]
-impl LlmClient for FakeStreamingLlmClient {
-    async fn chat(
-        &self,
-        request: ChatRequest,
-    ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-        self.call_count.fetch_add(1, Ordering::Relaxed);
-        let response = self.queue.lock().unwrap().pop_front();
+fn with_complete_message(mut events: Vec<LlmEvent>) -> Vec<LlmEvent> {
+    if !events
+        .iter()
+        .any(|event| matches!(event, LlmEvent::Done { .. }))
+        || events.iter().any(|event| {
+            matches!(
+                event,
+                LlmEvent::MessageComplete { .. }
+                    | LlmEvent::MessageRejected { .. }
+                    | LlmEvent::Error { .. }
+            )
+        })
+    {
+        return events;
+    }
 
-        match response {
-            None => Err("no more fake responses".into()),
-            Some(FakeStreamingResponse::Error(message)) => Err(message.into()),
-            Some(FakeStreamingResponse::LlmError(error)) => Err(Box::new(error)),
-            Some(FakeStreamingResponse::Events(events)) => {
-                aggregate_events_to_chat_response(events, &request).map_err(Into::into)
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut calls = std::collections::BTreeMap::<usize, RawToolCall>::new();
+    for event in &events {
+        match event {
+            LlmEvent::Token { content } => text.push_str(content),
+            LlmEvent::Reasoning { content } => reasoning.push_str(content),
+            LlmEvent::ToolCallStart {
+                index,
+                provider_call_id,
+                name,
+            } => {
+                calls.insert(
+                    *index,
+                    RawToolCall {
+                        provider_call_id: provider_call_id.clone(),
+                        name: name.clone(),
+                        arguments: String::new(),
+                    },
+                );
             }
+            LlmEvent::ToolCallDelta {
+                index,
+                arguments_delta,
+            } => {
+                if let Some(call) = calls.get_mut(index) {
+                    call.arguments.push_str(arguments_delta);
+                }
+            }
+            _ => {}
         }
     }
 
+    let raw_calls: Vec<_> = calls.into_values().collect();
+    let completion = match validate_tool_call_batch(&raw_calls) {
+        Ok(calls) => {
+            let mut parts = Vec::new();
+            if !reasoning.is_empty() {
+                parts.push(MessagePart::semantic_only(MessageSemantic::Reasoning {
+                    text: reasoning,
+                }));
+            }
+            if !text.is_empty() {
+                parts.push(MessagePart::semantic_only(MessageSemantic::Text { text }));
+            }
+            parts.extend(
+                calls
+                    .into_iter()
+                    .map(|call| MessagePart::semantic_only(MessageSemantic::ToolCall { call })),
+            );
+            LlmEvent::MessageComplete {
+                message: NativeMessage::new(
+                    MessageRole::Assistant,
+                    Some(ProviderOrigin::OpenAiCompatible),
+                    parts,
+                ),
+            }
+        }
+        Err(validation) => LlmEvent::MessageRejected {
+            rejection: lattice_conversation::AttemptRejection::InvalidToolCall { validation },
+        },
+    };
+
+    let done = events
+        .iter()
+        .position(|event| matches!(event, LlmEvent::Done { .. }))
+        .expect("Done checked above");
+    events.insert(done, completion);
+    events
+}
+
+#[async_trait::async_trait]
+impl LlmClient for FakeStreamingLlmClient {
     async fn stream_chat(
         &self,
         _request: ChatRequest,
@@ -106,83 +181,4 @@ impl LlmClient for FakeStreamingLlmClient {
             }
         }
     }
-}
-
-/// Aggregates provider-stream events into a buffered chat response.
-///
-/// The helper mirrors the production stub chat aggregation contract: content,
-/// reasoning, tool calls, final finish reason, and final usage are folded into
-/// a `ChatResponse`; provider metadata events are ignored.
-fn aggregate_events_to_chat_response(
-    events: Vec<LlmEvent>,
-    request: &ChatRequest,
-) -> Result<ChatResponse, String> {
-    let mut content = String::new();
-    let mut reasoning_content = String::new();
-    let mut tool_calls: Option<Vec<ToolCall>> = None;
-    let mut finish_reason = String::new();
-    let mut usage = None;
-
-    for event in events {
-        match event {
-            LlmEvent::Token { content: token } => content.push_str(&token),
-            LlmEvent::Reasoning { content: reasoning } => {
-                reasoning_content.push_str(&reasoning);
-            }
-            LlmEvent::ToolCallStart { id, name } => {
-                let calls = tool_calls.get_or_insert_with(Vec::new);
-                calls.push(ToolCall {
-                    id,
-                    function: FunctionCall {
-                        name,
-                        arguments: String::new(),
-                    },
-                });
-            }
-            LlmEvent::ToolCallDelta {
-                id,
-                arguments_delta,
-            } => {
-                if let Some(calls) = &mut tool_calls
-                    && let Some(call) = calls.iter_mut().find(|call| call.id == id)
-                {
-                    call.function.arguments.push_str(&arguments_delta);
-                }
-            }
-            LlmEvent::ToolCallEnd { .. } => {}
-            LlmEvent::Done {
-                finish_reason: reason,
-                usage: token_usage,
-            } => {
-                finish_reason = reason;
-                usage = token_usage;
-            }
-            LlmEvent::Error { message } => return Err(message),
-            LlmEvent::Started
-            | LlmEvent::Citation { .. }
-            | LlmEvent::Signature { .. }
-            | LlmEvent::GroundingChunk { .. }
-            | LlmEvent::SafetyRating { .. } => {}
-        }
-    }
-
-    Ok(ChatResponse {
-        content,
-        reasoning_content: if reasoning_content.is_empty() {
-            None
-        } else {
-            Some(reasoning_content)
-        },
-        tool_calls,
-        // Intentional StubLlm/chat parity: missing Done defaults to "stop".
-        // streaming streaming consumers must treat this as Error instead —
-        // do not emit ModelFinished on incomplete streams.
-        finish_reason: if finish_reason.is_empty() {
-            "stop".to_string()
-        } else {
-            finish_reason
-        },
-        model: request.target.model.clone(),
-        usage,
-    })
 }

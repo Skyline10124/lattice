@@ -361,6 +361,14 @@ fn binding_window_closure(
 ) -> Result<StageDecision> {
     let mut actions = Vec::new();
     let assistant_message = plan.bound_message()?;
+    let baseline = StepClosingState {
+        plan_key: plan.plan_key,
+        messages: vec![assistant_message],
+        bindings: plan.bindings.clone(),
+        closure_cursor: 0,
+        closures: Vec::new(),
+        current_candidate: None,
+    };
     match facts.validate_against_plan(&plan.plan_key, &plan.bindings)? {
         PlanValidation::Collision => {
             // Truth table #2: candidate IDs owned by another plan. No
@@ -432,11 +440,8 @@ fn binding_window_closure(
             actions.extend(closing_loop_actions(
                 true,
                 None,
-                plan.plan_key,
-                &[assistant_message.clone()],
+                &baseline,
                 None,
-                &plan.bindings,
-                &[],
                 &classifications,
             ));
             let messages = closing_messages(&actions);
@@ -449,11 +454,8 @@ fn binding_window_closure(
             actions.extend(closing_loop_actions(
                 true,
                 None,
-                plan.plan_key,
-                &[assistant_message.clone()],
+                &baseline,
                 None,
-                &plan.bindings,
-                &[],
                 &classifications,
             ));
             let messages = closing_messages(&actions);
@@ -544,14 +546,11 @@ fn step_closing_closure(
     actions.extend(closing_loop_actions(
         false,
         already_terminal_at,
-        state.plan_key,
-        &state.messages,
+        state,
         state
             .current_candidate
             .as_ref()
             .map(|draft| draft.canonical_tool_content.as_str()),
-        &state.bindings,
-        &state.closures,
         &classifications,
     ));
 
@@ -668,16 +667,15 @@ fn not_executed_material() -> ResultMaterial {
 fn closing_loop_actions(
     publish_baseline: bool,
     already_terminal_at: Option<usize>,
-    plan_key: PlanKey,
-    messages: &[NativeMessage<BoundToolCall>],
+    state: &StepClosingState,
     available_content: Option<&str>,
-    bindings: &[PlannedBinding],
-    closed: &[ClosedBinding],
     classifications: &[(ExecutionOutcome, ResultMaterial)],
 ) -> Vec<ReconciliationAction> {
     let mut actions = Vec::new();
-    let mut closures = closed.to_vec();
-    let mut transcript = messages.to_vec();
+    let plan_key = state.plan_key;
+    let bindings = &state.bindings;
+    let mut closures = state.closures.clone();
+    let mut transcript = state.messages.clone();
     if publish_baseline && closures.is_empty() {
         actions.push(ReconciliationAction::AdvanceStepClosing {
             state: StepClosingState {

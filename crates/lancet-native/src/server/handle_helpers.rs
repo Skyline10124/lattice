@@ -48,12 +48,16 @@ pub(super) async fn emit_cep_call_finished(
     events: &lancet_dispatch::EventSink,
     invocation_id: InvocationId,
     method: &str,
-    ok: bool,
-    error_code: Option<&str>,
+    result: &Result<Value, CepError>,
     semantic_stage: &str,
     guard_stage: &str,
     policy_enforced: bool,
 ) {
+    let ok = result.is_ok();
+    let error_code = result
+        .as_ref()
+        .err()
+        .map(|error| format!("{:?}", error.code));
     let mut payload = json!({
         "invocation_id": invocation_id,
         "method": method,

@@ -350,8 +350,8 @@ fn flood_token_events(count: usize) -> Vec<LlmEvent> {
         finish_reason: "stop".to_string(),
         usage: Some(TokenUsage {
             prompt_tokens: 1,
-            completion_tokens: count as u32,
-            total_tokens: (count as u32) + 1,
+            completion_tokens: count as u64,
+            total_tokens: count as u64 + 1,
         }),
     });
     events

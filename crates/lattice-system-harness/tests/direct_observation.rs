@@ -22,8 +22,7 @@ use lattice_system_harness::{
 };
 use serde_json::{Value, json};
 use support::{
-    assert_clean_send, driver, evidence, finish_scenario, last_tool_content, require,
-    tool_result_value, wire_fake_llm,
+    assert_clean_send, driver, evidence, finish_scenario, require, tool_result_value, wire_fake_llm,
 };
 
 /// Build the observation fixture world with the full visibility matrix and
@@ -290,13 +289,14 @@ fn direct_observation_visibility_and_bounds() {
             format!("notes.txt result mismatch: {r2}"),
         )?;
 
-        // 3. private/ignored.txt -> denied (no JSON result)
+        // 3. private/ignored.txt -> reported as missing, with no hidden reason
+        let r3 = tool_result_value(&captures[3]).expect("ignored-path error envelope");
         require(
-            tool_result_value(&captures[3]).is_none(),
-            format!(
-                "ignored path should not produce a JSON result: {:?}",
-                last_tool_content(&captures[3])
-            ),
+            r3.pointer("/error/code").and_then(Value::as_u64) == Some(2)
+                && r3.pointer("/error/message").and_then(Value::as_str)
+                    == Some("not_found: 'private/ignored.txt'")
+                && !r3.to_string().contains("HiddenReason"),
+            format!("ignored-path error mismatch: {r3}"),
         )?;
 
         // 4. private/included.txt -> visible (explicitly included)
@@ -309,22 +309,35 @@ fn direct_observation_visibility_and_bounds() {
             format!("included.txt result mismatch: {r4}"),
         )?;
 
-        // 5. denied/hidden.txt -> denied (read denial)
+        // 5. denied/hidden.txt -> reported as missing, with no policy detail
+        let r5 = tool_result_value(&captures[5]).expect("denied-path error envelope");
         require(
-            tool_result_value(&captures[5]).is_none(),
-            "denied-read path should not produce a JSON result",
+            r5.pointer("/error/code").and_then(Value::as_u64) == Some(2)
+                && r5.pointer("/error/message").and_then(Value::as_str)
+                    == Some("not_found: 'denied/hidden.txt'")
+                && !r5.to_string().contains("HiddenReason"),
+            format!("denied-path error mismatch: {r5}"),
         )?;
 
-        // 6. .lattice/private.txt -> denied (system exclusion)
+        // 6. .lattice/private.txt -> system exclusion, reported as missing
+        let r6 = tool_result_value(&captures[6]).expect("system-path error envelope");
         require(
-            tool_result_value(&captures[6]).is_none(),
-            ".lattice path should not produce a JSON result (system exclusion)",
+            r6.pointer("/error/code").and_then(Value::as_u64) == Some(2)
+                && r6.pointer("/error/message").and_then(Value::as_str)
+                    == Some("not_found: '.lattice/private.txt'")
+                && !r6.to_string().contains("HiddenReason"),
+            format!("system-path error mismatch: {r6}"),
         )?;
 
-        // 7. big.txt -> denied (single-read budget exceeded)
+        // 7. big.txt -> explicit bounded-read error
+        let r7 = tool_result_value(&captures[7]).expect("read-limit error envelope");
         require(
-            tool_result_value(&captures[7]).is_none(),
-            "big.txt should not produce a JSON result (budget exceeded)",
+            r7.pointer("/error/code").and_then(Value::as_u64) == Some(23)
+                && r7.pointer("/error/message").and_then(Value::as_str)
+                    == Some(
+                        "limit observation.max_single_read_bytes exceeded: requested 53, allowed 32",
+                    ),
+            format!("read-limit error mismatch: {r7}"),
         )?;
 
         // 8. list_directory "." -> truncated
@@ -402,21 +415,18 @@ fn direct_observation_visibility_and_bounds() {
         ];
         for (offset, (path, traversal)) in escape_paths.iter().enumerate() {
             let capture = &captures[11 + offset];
-            require(
-                tool_result_value(capture).is_none(),
-                format!("root escape unexpectedly returned JSON for {path:?}"),
-            )?;
+            let error = tool_result_value(capture)
+                .unwrap_or_else(|| panic!("root escape missing error envelope for {path:?}"));
             let expected = if *traversal {
                 format!("path contains '..' traversal: '{path}'")
             } else {
                 format!("path must be relative: '{path}'")
             };
             require(
-                last_tool_content(capture).as_deref() == Some(expected.as_str()),
-                format!(
-                    "root-escape error mismatch for {path:?}: {:?}",
-                    last_tool_content(capture)
-                ),
+                error.pointer("/error/code").and_then(Value::as_u64) == Some(1)
+                    && error.pointer("/error/message").and_then(Value::as_str)
+                        == Some(expected.as_str()),
+                format!("root-escape error mismatch for {path:?}: {error}"),
             )?;
         }
         require(
