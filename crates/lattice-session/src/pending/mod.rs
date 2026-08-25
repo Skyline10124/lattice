@@ -161,6 +161,7 @@ pub(crate) mod tests_support {
         TurnStartedFacts {
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+            project_store_key: crate::ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
             parent_conversation_tip: None,
             user_message: NativeMessage::new(
                 MessageRole::User,

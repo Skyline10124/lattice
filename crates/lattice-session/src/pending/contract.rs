@@ -27,7 +27,7 @@ use super::step::{StepClosedKind, StepClosingState};
 use crate::{Result, SessionError};
 
 /// Schema version of the `pending.json` payload.
-pub const PENDING_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const PENDING_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// The twelve durable states of one pending Turn (ADR 0005 §9).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -872,6 +872,7 @@ mod tests {
         PendingStage::TurnStarted(TurnStartedFacts {
             turn_id: turn_id(),
             session_id: session_id(),
+            project_store_key: crate::ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
             parent_conversation_tip: None,
             user_message: NativeMessage::new(
                 MessageRole::User,
@@ -1306,6 +1307,29 @@ mod tests {
         let back: PendingSnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(back, snapshot);
         back.validate().expect("round-tripped");
+    }
+
+    #[test]
+    fn turn_started_project_binding_is_required_and_strictly_typed() {
+        let snapshot = PendingSnapshot {
+            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
+            session_id: session_id(),
+            turn_id: turn_id(),
+            predecessor: None,
+            stage: turn_started(),
+            recorded_at: None,
+            root: None,
+        };
+        let mut missing = serde_json::to_value(&snapshot).unwrap();
+        missing["stage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("project_store_key");
+        assert!(serde_json::from_value::<PendingSnapshot>(missing).is_err());
+
+        let mut corrupt = serde_json::to_value(snapshot).unwrap();
+        corrupt["stage"]["project_store_key"] = serde_json::json!("not-a-project-key");
+        assert!(serde_json::from_value::<PendingSnapshot>(corrupt).is_err());
     }
 
     // ─── Review-round contract depth (F3/F4) ────────────────────────────

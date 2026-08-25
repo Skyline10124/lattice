@@ -108,6 +108,7 @@ pub(crate) fn turn_started_facts(parent_tip: Option<String>) -> TurnStartedFacts
     TurnStartedFacts {
         turn_id: turn_id(),
         session_id: session_id(),
+        project_store_key: super::test_project_key(),
         parent_conversation_tip: parent_tip,
         user_message: user_message("please continue"),
         config: frozen_config(),

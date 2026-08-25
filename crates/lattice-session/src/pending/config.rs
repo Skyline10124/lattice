@@ -21,7 +21,7 @@ use lattice_conversation::{NativeMessage, UnboundToolCall};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Result, SessionError};
+use crate::{ProjectStoreKey, Result, SessionError};
 
 /// Code-defined model-step safety limit; not profile-configurable
 /// (ADR 0005 §10).
@@ -286,6 +286,9 @@ pub struct TurnStartedFacts {
     pub turn_id: TurnId,
     /// Owning session identity.
     pub session_id: SessionId,
+    /// Exact project-store address persisted by the owning Session. Recovery
+    /// uses this binding before it opens any project-keyed store.
+    pub project_store_key: ProjectStoreKey,
     /// Conversation tip (commit oid hex) the Turn started from; `None` for
     /// the first Turn of an empty branch. The final publication transaction
     /// CASes the conversation head against exactly this value.
@@ -476,6 +479,7 @@ mod tests {
         let facts = |message: NativeMessage<UnboundToolCall>| TurnStartedFacts {
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+            project_store_key: ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
             parent_conversation_tip: None,
             user_message: message,
             config: config(),
@@ -511,6 +515,7 @@ mod tests {
         let mut facts = TurnStartedFacts {
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+            project_store_key: ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
             parent_conversation_tip: None,
             user_message: user_message(&"x".repeat(MAX_USER_INPUT_BYTES)),
             config: config(),

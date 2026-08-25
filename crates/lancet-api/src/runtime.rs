@@ -170,13 +170,21 @@ impl LancetRuntime {
     /// and projected into LLM tool definitions (D.4).
     pub fn build(config: LancetRuntimeConfig) -> Result<Self, LancetError> {
         let LancetRuntimeConfig {
+            local_workspace_root,
             enabled_tools,
-            policy,
+            mut policy,
             capability_admission,
             cep_mode,
             invocations,
             workspace_history,
         } = config;
+
+        policy.project_root = validate_project_store_bindings(
+            &local_workspace_root,
+            &policy.project_root,
+            &invocations,
+            &workspace_history,
+        )?;
 
         // D.2: compose the Component runtime once from embedded inventory +
         // the generated `EXPECTED_COMPONENTS`. Since #29 that is non-empty: it
@@ -289,6 +297,72 @@ impl LancetRuntime {
     }
 }
 
+fn validate_project_store_bindings(
+    local_workspace_root: &std::path::Path,
+    policy_root: &std::path::Path,
+    invocations: &WorkspaceHistoryBacking,
+    workspace_history: &WorkspaceHistoryBacking,
+) -> Result<std::path::PathBuf, LancetError> {
+    let canonical_workspace = std::fs::canonicalize(local_workspace_root).map_err(|err| {
+        LancetError::Config(format!(
+            "cannot canonicalize Local Workspace root '{}': {err}",
+            local_workspace_root.display()
+        ))
+    })?;
+    let canonical_policy = std::fs::canonicalize(policy_root).map_err(|err| {
+        LancetError::Config(format!(
+            "cannot canonicalize policy project root '{}': {err}",
+            policy_root.display()
+        ))
+    })?;
+    if !canonical_policy.starts_with(&canonical_workspace) {
+        return Err(LancetError::Config(format!(
+            "policy project root '{}' resolves outside Local Workspace root '{}'",
+            canonical_policy.display(),
+            canonical_workspace.display()
+        )));
+    }
+
+    let expected_key = lancet_runtime::ProjectStoreKey::derive(&canonical_workspace)
+        .map_err(|err| LancetError::Config(format!("derive Local Workspace project key: {err}")))?;
+    let (invocation_layout, invocation_key) = project_backing(invocations, "InvocationStore")?;
+    let (history_layout, history_key) = project_backing(workspace_history, "WorkspaceHistory")?;
+    if invocation_key != expected_key {
+        return Err(LancetError::Config(format!(
+            "InvocationStore project key {invocation_key} does not match canonical Local Workspace key {expected_key}"
+        )));
+    }
+    if history_key != expected_key {
+        return Err(LancetError::Config(format!(
+            "WorkspaceHistory project key {history_key} does not match canonical Local Workspace key {expected_key}"
+        )));
+    }
+    if invocation_layout != history_layout {
+        return Err(LancetError::Config(
+            "InvocationStore and WorkspaceHistory use different StateLayout roots".into(),
+        ));
+    }
+    Ok(canonical_policy)
+}
+
+fn project_backing<'a>(
+    backing: &'a WorkspaceHistoryBacking,
+    name: &str,
+) -> Result<
+    (
+        &'a lancet_runtime::StateLayout,
+        lancet_runtime::ProjectStoreKey,
+    ),
+    LancetError,
+> {
+    match backing {
+        WorkspaceHistoryBacking::Project { layout, key } => Ok((layout, *key)),
+        WorkspaceHistoryBacking::Disabled => Err(LancetError::Config(format!(
+            "production runtime requires a project {name} backing"
+        ))),
+    }
+}
+
 fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
     LancetError::UnknownTools {
         unknown: err.unknown,
@@ -346,6 +420,100 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("InvocationStore"));
+    }
+
+    #[test]
+    fn runtime_rejects_mismatched_project_stores_before_any_append() {
+        let state_a = tempfile::TempDir::new().expect("state a");
+        let state_b = tempfile::TempDir::new().expect("state b");
+        let project = tempfile::TempDir::new().expect("project");
+        let key = lancet_runtime::ProjectStoreKey::derive(project.path()).unwrap();
+        let layout_a = lancet_runtime::StateLayout::in_state_root(state_a.path());
+        let layout_b = lancet_runtime::StateLayout::in_state_root(state_b.path());
+        let invocations = WorkspaceHistoryBacking::for_key(layout_a.clone(), key);
+        let history = WorkspaceHistoryBacking::for_key(layout_b.clone(), key);
+        let ledger = lancet_audit::invocation_store::InvocationStore::create(&layout_a, &key)
+            .expect("invocation store");
+        WorkspaceHistory::create(history.clone()).expect("history store");
+        let before = ledger.pinned_view().unwrap().commit_oid;
+
+        let mut config = LancetRuntimeConfig::new(project.path());
+        config.invocations = invocations;
+        config.workspace_history = history.clone();
+        let err = match LancetRuntime::build(config) {
+            Ok(_) => panic!("different state roots must fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("different StateLayout"), "{err}");
+        assert_eq!(ledger.pinned_view().unwrap().commit_oid, before);
+        assert_eq!(
+            WorkspaceHistory::open(history).unwrap().current().unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_rejects_mismatched_project_keys_before_any_store_open() {
+        let state = tempfile::TempDir::new().expect("state");
+        let project = tempfile::TempDir::new().expect("project");
+        let other_project = tempfile::TempDir::new().expect("other project");
+        let layout = lancet_runtime::StateLayout::in_state_root(state.path());
+        let key = lancet_runtime::ProjectStoreKey::derive(project.path()).unwrap();
+        let other_key = lancet_runtime::ProjectStoreKey::derive(other_project.path()).unwrap();
+
+        let mut config = LancetRuntimeConfig::new(project.path());
+        config.invocations = WorkspaceHistoryBacking::for_key(layout.clone(), key);
+        config.workspace_history = WorkspaceHistoryBacking::for_key(layout, other_key);
+        let err = match LancetRuntime::build(config) {
+            Ok(_) => panic!("different project keys must fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("WorkspaceHistory project key"),
+            "{err}"
+        );
+        assert!(err.to_string().contains(&key.to_string()), "{err}");
+        assert!(err.to_string().contains(&other_key.to_string()), "{err}");
+    }
+
+    #[test]
+    fn runtime_rejects_canonical_policy_root_divergence_before_store_reads() {
+        use std::os::unix::fs::symlink;
+
+        let state = tempfile::TempDir::new().expect("state");
+        let project = tempfile::TempDir::new().expect("project");
+        let outside = tempfile::TempDir::new().expect("outside");
+        symlink(outside.path(), project.path().join("scope")).expect("symlink scope");
+        let backing = WorkspaceHistoryBacking::for_project_in(state.path(), project.path())
+            .expect("project backing");
+        let (layout, key) = match &backing {
+            WorkspaceHistoryBacking::Project { layout, key } => (layout.clone(), *key),
+            WorkspaceHistoryBacking::Disabled => unreachable!(),
+        };
+        lancet_audit::invocation_store::InvocationStore::create(&layout, &key)
+            .expect("invocation store");
+        WorkspaceHistory::create(backing.clone()).expect("history store");
+
+        let mut config = LancetRuntimeConfig::new(project.path());
+        config.policy.project_root = project.path().join("scope");
+        config.invocations = backing.clone();
+        config.workspace_history = backing;
+        let err = match LancetRuntime::build(config) {
+            Ok(_) => panic!("symlink escape must fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("outside Local Workspace"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn runtime_allows_policy_to_narrow_within_the_bound_workspace() {
+        let (_state, project, mut config) = production_config();
+        let scope = project.path().join("scope");
+        std::fs::create_dir(&scope).unwrap();
+        config.policy.project_root = scope.clone();
+        let mut runtime = LancetRuntime::build(config).expect("narrow policy scope");
+        assert_eq!(runtime.tool_definitions().len(), 0);
+        runtime.shutdown().await;
     }
 
     #[tokio::test]

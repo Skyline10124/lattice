@@ -32,11 +32,20 @@ impl ReservedRuntime {
     ) -> Result<Self, lancet_api::LancetError> {
         let state = tempfile::TempDir::new()
             .map_err(|err| lancet_api::LancetError::Internal(err.to_string()))?;
-        let backing = lancet_api::WorkspaceHistoryBacking::for_project_in(
-            state.path(),
-            &config.policy.project_root,
-        )
-        .map_err(|err| lancet_api::LancetError::Internal(err.to_string()))?;
+        let backing = match &config.workspace_history {
+            lancet_api::WorkspaceHistoryBacking::Project { .. } => config.workspace_history.clone(),
+            lancet_api::WorkspaceHistoryBacking::Disabled => {
+                let backing = lancet_api::WorkspaceHistoryBacking::for_project_in(
+                    state.path(),
+                    &config.local_workspace_root,
+                )
+                .map_err(|err| lancet_api::LancetError::Internal(err.to_string()))?;
+                lancet_api::WorkspaceHistory::create(backing.clone())
+                    .map_err(|err| lancet_api::LancetError::Internal(err.to_string()))?;
+                config.workspace_history = backing.clone();
+                backing
+            }
+        };
         let (layout, key) = match &backing {
             lancet_api::WorkspaceHistoryBacking::Project { layout, key } => (layout.clone(), *key),
             lancet_api::WorkspaceHistoryBacking::Disabled => unreachable!(),

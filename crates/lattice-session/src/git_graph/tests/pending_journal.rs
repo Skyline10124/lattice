@@ -82,6 +82,29 @@ fn turn_started_publishes_active_turn_grafted_on_the_conversation_tip() {
     assert_eq!(read, started);
     assert!(read.snapshot.predecessor.is_none());
     assert!(read.snapshot.recorded_at.is_some(), "recorded_at filled");
+    let PendingStage::TurnStarted(facts) = &read.snapshot.stage else {
+        panic!("expected TurnStarted");
+    };
+    assert_eq!(facts.project_store_key, super::test_project_key());
+}
+
+#[test]
+fn turn_started_rejects_a_foreign_project_binding_without_moving_refs() {
+    let (_f, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    let mut facts = turn_started_facts(None);
+    facts.project_store_key =
+        lattice_store::ProjectStoreKey::from_canonical_path_bytes(b"/another/project");
+    let head_before = head_oid(&store);
+
+    let err = store
+        .begin_pending_turn(facts, &lock)
+        .expect_err("foreign project binding must fail closed");
+    assert!(matches!(err, SessionError::InvalidInput(_)));
+    assert_eq!(head_oid(&store), head_before);
+    assert!(store.read_active_turn(&session).unwrap().is_none());
 }
 
 #[test]

@@ -97,13 +97,26 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
     // dispatch. Blocking lock acquisition runs on Tokio's blocking pool.
     let session_for_lock = session.clone();
     let requested_session_id = request.session_id.clone();
-    let (_, execution_lock) =
+    let (locked_session_id, execution_lock) =
         tokio::task::spawn_blocking(move || session_for_lock.lock_execution(&requested_session_id))
             .await
             .map_err(|err| {
                 crate::session::ApiError::Internal(format!("acquire session lock task: {err}"))
             })??;
     let execution_lock = Arc::new(execution_lock);
+
+    // SessionState and the PendingTurn root are the project authority. Validate
+    // both against the canonical request hint before any project-keyed store is
+    // opened or queried.
+    let (session_id, project_store_key) =
+        session.turn_project_binding_locked(&locked_session_id, execution_lock.as_ref())?;
+    if project_store_key != workspace_root.store_key() {
+        return Err(crate::session::ApiError::Conflict(format!(
+            "session '{session_id}' is bound to project key {project_store_key}, but the requested Local Workspace resolves to {}",
+            workspace_root.store_key()
+        )));
+    }
+
     let session_store = session.git_store_for_coordinator()?;
     let layout = session.state_layout().ok_or_else(|| {
         crate::session::ApiError::Internal(
@@ -111,17 +124,37 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
         )
     })?;
     let invocation_store = Arc::new(
-        lancet_audit::invocation_store::InvocationStore::open(&layout, &workspace_root.store_key())
+        lancet_audit::invocation_store::InvocationStore::open(&layout, &project_store_key)
             .map_err(|err| {
                 crate::session::ApiError::Internal(format!("open invocation store: {err}"))
             })?,
     );
     let coordinator = TurnCoordinator::new(
-        CoordinatorStoreIo::new(session_store, invocation_store),
+        CoordinatorStoreIo::new(session_store, invocation_store, project_store_key).map_err(
+            |err| crate::session::ApiError::Internal(format!("compose TurnCoordinator: {err}")),
+        )?,
         Arc::new(RandomIdSource),
     );
+
+    // Compose and strictly open both project stores before reconciliation can
+    // advance the PendingTurn or append ledger facts. Build performs the final
+    // canonical-root/key/layout consistency proof; it starts no provider or
+    // Tool work.
+    let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.lancet);
+    let enabled_tools = enabled_tools(&request);
+    let deps = build_production_turn_deps(ProductionTurnDepsInput {
+        request: &request,
+        project_root: &project_root,
+        project_store_key: Some(project_store_key),
+        state_layout: Some(layout),
+        enabled_tools: &enabled_tools,
+        llm: production_llm(&request),
+        lancet: cep,
+    })
+    .await?;
+
     coordinator
-        .reconcile_pending(request.session_id.clone(), Arc::clone(&execution_lock))
+        .reconcile_pending(session_id, Arc::clone(&execution_lock))
         .await
         .map_err(|err| match err {
             super::coordinator::CoordinatorIoError::EvidenceDurabilityFailed { attempts } => {
@@ -139,18 +172,6 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
         workspace_root.canonical_path(),
         execution_lock.as_ref(),
     )?;
-    let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.lancet);
-    let enabled_tools = enabled_tools(&request);
-    let deps = build_production_turn_deps(ProductionTurnDepsInput {
-        request: &request,
-        project_root: &project_root,
-        project_store_key: Some(prepared.project_store_key),
-        state_layout: session.state_layout(),
-        enabled_tools: &enabled_tools,
-        llm: production_llm(&request),
-        lancet: cep,
-    })
-    .await?;
     super::live::stream_turn_live_prepared(
         session,
         prepared,

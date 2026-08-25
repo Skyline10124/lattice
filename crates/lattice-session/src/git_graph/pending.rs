@@ -144,7 +144,43 @@ impl GitSessionGraphStore {
         let Some(oid) = self.kernel().ref_target(&ref_name)? else {
             return Ok(None);
         };
-        Ok(Some(self.read_pending_snapshot_at(oid)?))
+        let tip = self.read_pending_snapshot_at(oid)?;
+        self.validate_pending_project_binding(session_id, &tip)?;
+        Ok(Some(tip))
+    }
+
+    fn validate_pending_project_binding(
+        &self,
+        session_id: &str,
+        tip: &PendingTurnTip,
+    ) -> Result<()> {
+        let (_, session_state) = state::read_state(self.kernel(), session_id)?;
+        let session_key = lattice_store::ProjectStoreKey::parse(&session_state.project_store_key)
+            .map_err(|err| SessionError::JournalCorruption {
+            detail: format!("session '{session_id}' has an invalid project-store binding: {err}"),
+        })?;
+        let started = match &tip.snapshot.stage {
+            PendingStage::TurnStarted(facts) => facts,
+            _ => tip
+                .snapshot
+                .root
+                .as_ref()
+                .ok_or_else(|| SessionError::JournalCorruption {
+                    detail: format!(
+                        "pending Turn {} has no TurnStarted root facts",
+                        tip.snapshot.turn_id
+                    ),
+                })?,
+        };
+        if started.project_store_key != session_key {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "pending Turn {} is bound to project key {}, but session '{session_id}' is bound to {session_key}",
+                    tip.snapshot.turn_id, started.project_store_key
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Read the permanent Turn pin of one committed Turn, when present.
@@ -304,6 +340,16 @@ impl GitSessionGraphStore {
         // The session must exist and be quiet: no active Turn may exist and
         // the frozen tip must equal the resolved head.
         let (_, session_state) = state::read_state(self.kernel(), &session_id)?;
+        let session_key = lattice_store::ProjectStoreKey::parse(&session_state.project_store_key)
+            .map_err(|err| SessionError::JournalCorruption {
+            detail: format!("session '{session_id}' has an invalid project-store binding: {err}"),
+        })?;
+        if facts.project_store_key != session_key {
+            return Err(SessionError::InvalidInput(format!(
+                "TurnStarted project key {} does not match session '{session_id}' binding {session_key}",
+                facts.project_store_key
+            )));
+        }
         let head_oid = resolve_head_oid(self.kernel(), &session_state, &session_id)?;
         match (&facts.parent_conversation_tip, head_oid) {
             (Some(frozen), Some(actual)) if frozen == &actual.to_string() => {}

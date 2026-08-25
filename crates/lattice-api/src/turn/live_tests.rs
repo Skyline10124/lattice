@@ -42,6 +42,56 @@ fn make_model_driver(client: FakeStreamingLlmClient) -> ModelStepDriver {
     ModelStepDriver::new(Arc::new(client))
 }
 
+fn begin_pending_turn(
+    session: &SessionApi,
+    project_store_key: lattice_session::ProjectStoreKey,
+) -> lattice_session::PendingTurnTip {
+    let store = session.git_store_for_coordinator().expect("turn store");
+    let (_, lock) = session
+        .lock_execution(TEST_SESSION_ID)
+        .expect("session execution lock");
+    store
+        .begin_pending_turn(
+            lattice_session::pending::TurnStartedFacts {
+                turn_id: lancet_protocol::TurnId::parse("11111111-1111-4111-8111-111111111111")
+                    .unwrap(),
+                session_id: lancet_protocol::SessionId::parse(TEST_SESSION_ID).unwrap(),
+                project_store_key,
+                parent_conversation_tip: None,
+                user_message: lattice_conversation::NativeMessage::new(
+                    lattice_conversation::MessageRole::User,
+                    None,
+                    vec![lattice_conversation::MessagePart::semantic_only(
+                        lattice_conversation::MessageSemantic::Text {
+                            text: "recover me".to_string(),
+                        },
+                    )],
+                ),
+                config: lattice_session::pending::FrozenTurnConfig {
+                    agent_name: "test".to_string(),
+                    model: "sonnet".to_string(),
+                    provider: "test".to_string(),
+                    system_prompt: Some("System from profile.".to_string()),
+                    profile_snapshot_json: "{}".to_string(),
+                    policy_snapshot_json: "{}".to_string(),
+                    catalog: lattice_session::pending::ToolCatalogSnapshot::new(
+                        "test-build".to_string(),
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                    limits: lattice_session::pending::TurnExecutionLimits {
+                        timeout_secs: 300,
+                        max_model_steps: lattice_session::pending::MAX_MODEL_STEPS,
+                        max_model_attempts: 1,
+                    },
+                },
+                accepted_at: "2026-08-24T00:00:00Z".to_string(),
+            },
+            &lock,
+        )
+        .expect("begin pending Turn")
+}
+
 async fn stream_turn_live_with_agent(
     session: SessionApi,
     model_driver: ModelStepDriver,
@@ -138,24 +188,191 @@ fn happy_events() -> Vec<LlmEvent> {
 }
 
 #[tokio::test]
-async fn stream_turn_live_rejects_a_project_store_key_mismatch() {
+async fn recovery_rejects_the_wrong_workspace_before_any_side_effect() {
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
+    let layout = session.state_layout().unwrap();
+    let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
+    let project_key = workspace.store_key();
+    let pending_before = begin_pending_turn(&session, project_key);
+    let ledger = lancet_audit::invocation_store::InvocationStore::open(&layout, &project_key)
+        .expect("invocation store");
+    let ledger_before = ledger.pinned_view().unwrap().commit_oid;
+    let session_before = session
+        .open_session(crate::session::OpenSessionRequest {
+            id: TEST_SESSION_ID.to_string(),
+        })
+        .unwrap();
+    let history = lancet_api::WorkspaceHistory::open(lancet_api::WorkspaceHistoryBacking::for_key(
+        layout,
+        project_key,
+    ))
+    .unwrap();
+    let history_before = history.current().unwrap();
+
     let other_workspace = tempfile::tempdir().unwrap();
-    let client = FakeStreamingLlmClient::builder()
-        .push_events(happy_events())
-        .build();
-    let driver = make_model_driver(client);
+    let sentinel = other_workspace.path().join("sentinel.txt");
+    std::fs::write(&sentinel, "unchanged").unwrap();
+    let client = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
+    );
     let mut request = make_request("wrong workspace");
+    request.test_llm = Some(client.clone());
     request.test_project_root = Some(other_workspace.path().to_string_lossy().into_owned());
 
-    let err = match stream_turn_live_with_agent(session, driver, request, vec![]).await {
+    let err = match super::execute::stream_turn(session.clone(), request).await {
         Ok(_) => panic!("a session bound to another workspace must fail closed"),
         Err(err) => err,
     };
     assert!(
         matches!(err, crate::session::ApiError::Conflict(_)),
         "got {err:?}"
+    );
+    assert_eq!(client.call_count(), 0, "provider must not be requested");
+    assert_eq!(ledger.pinned_view().unwrap().commit_oid, ledger_before);
+    assert_eq!(history.current().unwrap(), history_before);
+    assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "unchanged");
+    assert_eq!(
+        session
+            .git_store_for_coordinator()
+            .unwrap()
+            .read_active_turn(TEST_SESSION_ID)
+            .unwrap()
+            .unwrap()
+            .oid,
+        pending_before.oid
+    );
+    assert_eq!(
+        session
+            .open_session(crate::session::OpenSessionRequest {
+                id: TEST_SESSION_ID.to_string(),
+            })
+            .unwrap(),
+        session_before
+    );
+}
+
+#[tokio::test]
+async fn recovery_strict_open_failure_does_not_advance_the_session_or_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = make_session(dir.path());
+    let layout = session.state_layout().unwrap();
+    let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
+    let project_key = workspace.store_key();
+    let pending_before = begin_pending_turn(&session, project_key);
+    let ledger = lancet_audit::invocation_store::InvocationStore::open(&layout, &project_key)
+        .expect("invocation store");
+    let ledger_before = ledger.pinned_view().unwrap().commit_oid;
+    let history_backing = lancet_api::WorkspaceHistoryBacking::for_key(layout, project_key);
+    std::fs::remove_dir_all(history_backing.store_path().unwrap()).unwrap();
+    let client = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
+    );
+    let mut request = make_request("strict reopen");
+    request.test_llm = Some(client.clone());
+    request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
+
+    let err = match super::execute::stream_turn(session.clone(), request).await {
+        Ok(_) => panic!("missing WorkspaceHistory must fail closed"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("workspace history setup"), "{err}");
+    assert_eq!(client.call_count(), 0, "provider must not be requested");
+    assert_eq!(ledger.pinned_view().unwrap().commit_oid, ledger_before);
+    assert_eq!(
+        session
+            .git_store_for_coordinator()
+            .unwrap()
+            .read_active_turn(TEST_SESSION_ID)
+            .unwrap()
+            .unwrap()
+            .oid,
+        pending_before.oid
+    );
+}
+
+#[tokio::test]
+async fn valid_recovery_closes_the_pending_turn_then_runs_the_new_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = make_session(dir.path());
+    let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
+    begin_pending_turn(&session, workspace.store_key());
+    let client = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
+    );
+    let mut request = make_request("after recovery");
+    request.test_llm = Some(client.clone());
+    request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
+
+    let events: Vec<_> = super::execute::stream_turn(session.clone(), request)
+        .await
+        .expect("valid recovery starts the new Turn")
+        .collect()
+        .await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::TurnCommitted { .. }))
+    );
+    assert_eq!(client.call_count(), 1);
+    assert!(
+        session
+            .git_store_for_coordinator()
+            .unwrap()
+            .read_active_turn(TEST_SESSION_ID)
+            .unwrap()
+            .is_none()
+    );
+    let log = session.log(TEST_SESSION_ID).unwrap();
+    assert_eq!(log.len(), 2, "reconciled Turn plus new live Turn");
+    assert_eq!(log[0].origin, lattice_session::ClosureOrigin::Reconciled);
+    assert_eq!(log[1].origin, lattice_session::ClosureOrigin::Live);
+}
+
+#[tokio::test]
+async fn turn_uses_the_injected_non_default_session_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = lattice_session::StateLayout::in_state_root(dir.path());
+    let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
+    let project_key = workspace.store_key();
+    crate::stores::create_project_stores(&layout, project_key).unwrap();
+    let custom_repo = dir.path().join("injected").join("authoritative.git");
+    let session = SessionApi::git_create_with_layout(&custom_repo, &layout).unwrap();
+    session
+        .store()
+        .create_session(TEST_SESSION_ID, None, "test", "main", &project_key)
+        .unwrap();
+    let client = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
+    );
+    let mut request = make_request("custom repository");
+    request.test_llm = Some(client.clone());
+    request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
+
+    let events: Vec<_> = super::execute::stream_turn(session, request)
+        .await
+        .expect("custom repository Turn starts")
+        .collect()
+        .await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::TurnCommitted { .. }))
+    );
+    assert_eq!(client.call_count(), 1);
+    let reopened = SessionApi::git_open_with_layout(&custom_repo, &layout).unwrap();
+    assert_eq!(reopened.log(TEST_SESSION_ID).unwrap().len(), 1);
+    assert!(
+        !layout.lattice_root().join("sessions.git").exists(),
+        "TurnCoordinator must not reopen the layout-default session repository"
     );
 }
 

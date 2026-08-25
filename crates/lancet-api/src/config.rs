@@ -32,6 +32,10 @@ pub fn workspace_history_backing(
 /// stores; disabled backings are valid only in lower-level tests that do not
 /// build a production runtime.
 pub struct LancetRuntimeConfig {
+    /// Canonicalizable full Local Workspace root used for project-store
+    /// addressing. `policy.project_root` may narrow authority to a subdirectory
+    /// but may never identify a different workspace.
+    pub local_workspace_root: std::path::PathBuf,
     /// Tool names exposed to the model/caller.
     pub enabled_tools: Vec<String>,
     /// Fully-resolved authority/policy configuration.
@@ -49,8 +53,10 @@ pub struct LancetRuntimeConfig {
 impl LancetRuntimeConfig {
     /// Minimal fail-closed config rooted at `project_root`.
     pub fn new(project_root: impl Into<std::path::PathBuf>) -> Self {
-        let policy = PolicyConfig::defaults_for_project_root(project_root.into());
+        let local_workspace_root = project_root.into();
+        let policy = PolicyConfig::defaults_for_project_root(local_workspace_root.clone());
         Self {
+            local_workspace_root,
             enabled_tools: Vec::new(),
             policy,
             capability_admission: CapabilityAdmissionPolicy::default(),

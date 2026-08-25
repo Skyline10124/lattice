@@ -55,6 +55,7 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
     ReservedRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: root.to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
@@ -249,6 +250,7 @@ async fn policy_deny_blocks_create_on_direct_local() {
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     enabled.push(TODO_WRITE.to_string());
     let runtime = ReservedRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: dir.path().to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,

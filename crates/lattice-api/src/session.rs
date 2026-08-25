@@ -75,6 +75,10 @@ pub struct OpenSessionRequest {
 #[derive(Clone)]
 pub struct SessionApi {
     store: Arc<dyn SessionGraphStore>,
+    /// The exact Git store behind `store`, when this handle was built by a Git
+    /// constructor. Turn coordination must use this handle rather than
+    /// reopening a repository inferred from the state layout.
+    turn_store: Option<Arc<GitSessionGraphStore>>,
     /// The private-state layout paired with this session repository. Custom
     /// graph-only constructors deliberately have no project-store context and
     /// cannot create or open project stores implicitly through XDG globals.
@@ -82,9 +86,22 @@ pub struct SessionApi {
 }
 
 impl SessionApi {
+    fn from_git_store(
+        store: GitSessionGraphStore,
+        layout: Option<lattice_session::StateLayout>,
+    ) -> Self {
+        let store = Arc::new(store);
+        Self {
+            store: store.clone(),
+            turn_store: Some(store),
+            layout,
+        }
+    }
+
     pub fn new(store: Box<dyn SessionGraphStore>) -> Self {
         Self {
             store: Arc::from(store),
+            turn_store: None,
             layout: None,
         }
     }
@@ -93,38 +110,36 @@ impl SessionApi {
     /// (`$XDG_STATE_HOME/lattice/sessions.git` in production). Absent or
     /// identity-invalid stores fail closed — never auto-initialize.
     pub fn git_open(dir: impl Into<PathBuf>) -> Result<Self> {
-        Ok(Self {
-            store: Arc::new(GitSessionGraphStore::open(dir).map_err(map_session_error)?),
-            layout: None,
-        })
+        Ok(Self::from_git_store(
+            GitSessionGraphStore::open(dir).map_err(map_session_error)?,
+            None,
+        ))
     }
 
     /// First-create (or validate) the git-backed session store at `dir`.
     /// Reserved for the `session new` composition path (ADR 0005 §3).
     pub fn git_create(dir: impl Into<PathBuf>) -> Result<Self> {
-        Ok(Self {
-            store: Arc::new(GitSessionGraphStore::create(dir).map_err(map_session_error)?),
-            layout: None,
-        })
+        Ok(Self::from_git_store(
+            GitSessionGraphStore::create(dir).map_err(map_session_error)?,
+            None,
+        ))
     }
 
     /// Strictly open the global `sessions.git` from the XDG state layout.
     pub fn git_open_layout(layout: &lattice_session::StateLayout) -> Result<Self> {
-        Ok(Self {
-            store: Arc::new(GitSessionGraphStore::open_layout(layout).map_err(map_session_error)?),
-            layout: Some(layout.clone()),
-        })
+        Ok(Self::from_git_store(
+            GitSessionGraphStore::open_layout(layout).map_err(map_session_error)?,
+            Some(layout.clone()),
+        ))
     }
 
     /// First-create (or validate) the global `sessions.git` in the XDG state
     /// layout. Reserved for `session new`.
     pub fn git_create_layout(layout: &lattice_session::StateLayout) -> Result<Self> {
-        Ok(Self {
-            store: Arc::new(
-                GitSessionGraphStore::create_layout(layout).map_err(map_session_error)?,
-            ),
-            layout: Some(layout.clone()),
-        })
+        Ok(Self::from_git_store(
+            GitSessionGraphStore::create_layout(layout).map_err(map_session_error)?,
+            Some(layout.clone()),
+        ))
     }
 
     /// Open a custom session repository while explicitly pairing it with the
@@ -137,10 +152,7 @@ impl SessionApi {
         let store = GitSessionGraphStore::open(dir)
             .map_err(map_session_error)?
             .with_locks_dir(layout.session_locks_dir());
-        Ok(Self {
-            store: Arc::new(store),
-            layout: Some(layout.clone()),
-        })
+        Ok(Self::from_git_store(store, Some(layout.clone())))
     }
 
     /// Create a custom session repository while explicitly pairing it with the
@@ -153,10 +165,7 @@ impl SessionApi {
         let store = GitSessionGraphStore::create(dir)
             .map_err(map_session_error)?
             .with_locks_dir(layout.session_locks_dir());
-        Ok(Self {
-            store: Arc::new(store),
-            layout: Some(layout.clone()),
-        })
+        Ok(Self::from_git_store(store, Some(layout.clone())))
     }
 
     /// Pair a graph-only API handle with the explicit private-state layout
@@ -171,15 +180,58 @@ impl SessionApi {
     pub(crate) fn git_store_for_coordinator(
         &self,
     ) -> Result<Arc<lattice_session::GitSessionGraphStore>> {
-        let layout = self.layout.as_ref().ok_or_else(|| {
-            ApiError::Internal(
+        if self.layout.is_none() {
+            return Err(ApiError::Internal(
                 "TurnCoordinator requires an explicit StateLayout-backed SessionApi".to_string(),
+            ));
+        }
+        self.turn_store.clone().ok_or_else(|| {
+            ApiError::Internal(
+                "TurnCoordinator requires the authoritative Git Session store; a graph-only adapter cannot be reopened implicitly"
+                    .to_string(),
             )
-        })?;
-        Ok(Arc::new(
-            lattice_session::GitSessionGraphStore::open_layout(layout)
-                .map_err(map_session_error)?,
-        ))
+        })
+    }
+
+    /// Read and validate the Session/PendingTurn project binding from the
+    /// authoritative Session repository while the caller holds this Session's
+    /// execution lock. No project-keyed store is opened by this method.
+    pub(crate) fn turn_project_binding_locked(
+        &self,
+        session_id: &str,
+        execution_lock: &lattice_session::FlockGuard,
+    ) -> Result<(String, lattice_session::ProjectStoreKey)> {
+        let status = self.status_locked(session_id, execution_lock)?;
+        let key =
+            lattice_session::ProjectStoreKey::parse(&status.project_store_key).map_err(|err| {
+                ApiError::Internal(format!(
+                    "session '{}' has an invalid ProjectStoreKey binding: {err}",
+                    status.session_id
+                ))
+            })?;
+
+        let store = self.git_store_for_coordinator()?;
+        if let Some(tip) = store
+            .read_active_turn(&status.session_id)
+            .map_err(map_session_error)?
+        {
+            let started = match &tip.snapshot.stage {
+                lattice_session::pending::PendingStage::TurnStarted(facts) => facts,
+                _ => tip.snapshot.root.as_ref().ok_or_else(|| {
+                    ApiError::Internal(format!(
+                        "pending Turn {} has no persisted TurnStarted project binding",
+                        tip.snapshot.turn_id
+                    ))
+                })?,
+            };
+            if started.project_store_key != key {
+                return Err(ApiError::Internal(format!(
+                    "pending Turn {} is bound to project key {}, but session '{}' is bound to {key}",
+                    tip.snapshot.turn_id, started.project_store_key, status.session_id
+                )));
+            }
+        }
+        Ok((status.session_id, key))
     }
 
     #[cfg(test)]
@@ -596,6 +648,23 @@ mod session_graph {
             matches!(&err, ApiError::Internal(message) if message.contains("paired StateLayout")),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn injected_graph_store_is_not_replaced_by_the_layout_default() {
+        let root = temp_dir("injected_graph_store_not_reopened");
+        let layout = lattice_session::StateLayout::in_state_root(&root);
+        let custom = root.join("custom").join("sessions.git");
+        let api = SessionApi::new(Box::new(
+            GitSessionGraphStore::create(&custom).expect("custom session store"),
+        ))
+        .with_state_layout(layout.clone());
+
+        let err = api
+            .git_store_for_coordinator()
+            .expect_err("graph adapter must not be silently replaced");
+        assert!(err.to_string().contains("authoritative Git Session store"));
+        assert!(!layout.lattice_root().join("sessions.git").exists());
     }
 
     #[test]

@@ -1882,7 +1882,12 @@ mod tests {
             )
             .unwrap();
         let coordinator = TurnCoordinator::new(
-            super::super::coordinator::CoordinatorStoreIo::new(session, Arc::clone(&invocations)),
+            super::super::coordinator::CoordinatorStoreIo::new(
+                session,
+                Arc::clone(&invocations),
+                key,
+            )
+            .unwrap(),
             Arc::new(super::super::coordinator::RandomIdSource),
         );
         publish_not_executed(&coordinator, &binding, NotExecutedReason::BeforeDispatch)

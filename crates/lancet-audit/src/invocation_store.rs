@@ -472,6 +472,7 @@ struct DerivedCheckpoint {
 /// Non-production Git InvocationStore (#139-A).
 pub struct InvocationStore {
     pub(crate) repo: StoreRepo,
+    project_store_key: ProjectStoreKey,
     metrics: Arc<InvocationStoreMetrics>,
     validated_write_state: Mutex<Option<ValidatedWriteState>>,
 }
@@ -504,9 +505,16 @@ impl InvocationStore {
             StoreRepo::open_project(layout, key, REPO_NAME, STORE_KIND, STORE_SCHEMA_VERSION)?;
         Ok(Self {
             repo,
+            project_store_key: *key,
             metrics: Arc::new(InvocationStoreMetrics::default()),
             validated_write_state: Mutex::new(None),
         })
+    }
+
+    /// Exact project address this strictly-opened ledger was validated for.
+    #[must_use]
+    pub fn project_store_key(&self) -> ProjectStoreKey {
+        self.project_store_key
     }
 
     /// Read accumulated raw qualification instrumentation.

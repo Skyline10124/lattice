@@ -30,7 +30,7 @@ use lattice_store::{RefExpectation, RefTxnEdit, StoreRepo, TreeSpec};
 /// Domain store kind recorded in `refs/lattice/meta`.
 pub(crate) const SESSION_STORE_KIND: &str = "session";
 /// Domain schema version of the session store contents.
-pub(crate) const SESSION_STORE_SCHEMA_VERSION: u32 = 1;
+pub(crate) const SESSION_STORE_SCHEMA_VERSION: u32 = 2;
 
 /// File inside a state commit's tree carrying the canonical JSON payload.
 pub(crate) const STATE_TREE_FILE: &str = "state.json";

@@ -117,6 +117,7 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
     ReservedRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: root.to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,

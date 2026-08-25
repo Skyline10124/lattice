@@ -39,6 +39,8 @@ pub(crate) enum CoordinatorIoError {
     Blocking(#[from] tokio::task::JoinError),
     #[error("terminal evidence durability failed after {attempts} attempt(s)")]
     EvidenceDurabilityFailed { attempts: u32 },
+    #[error("project-store binding mismatch: {0}")]
+    ProjectBinding(String),
 }
 
 /// Injectable canonical identity source (ADR 0005 §1).
@@ -77,17 +79,26 @@ impl IdSource for RandomIdSource {
 pub(crate) struct CoordinatorStoreIo {
     session: Arc<GitSessionGraphStore>,
     invocations: Arc<InvocationStore>,
+    project_store_key: lattice_session::ProjectStoreKey,
 }
 
 impl CoordinatorStoreIo {
     pub(crate) fn new(
         session: Arc<GitSessionGraphStore>,
         invocations: Arc<InvocationStore>,
-    ) -> Self {
-        Self {
+        project_store_key: lattice_session::ProjectStoreKey,
+    ) -> Result<Self, CoordinatorIoError> {
+        if invocations.project_store_key() != project_store_key {
+            return Err(CoordinatorIoError::ProjectBinding(format!(
+                "InvocationStore key {} does not match Session key {project_store_key}",
+                invocations.project_store_key()
+            )));
+        }
+        Ok(Self {
             session,
             invocations,
-        }
+            project_store_key,
+        })
     }
 
     /// Read the current PendingTurn journal tip for one Session.
@@ -98,10 +109,20 @@ impl CoordinatorStoreIo {
         session_id: String,
     ) -> Result<Option<PendingTurnTip>, CoordinatorIoError> {
         let store = Arc::clone(&self.session);
-        tokio::task::spawn_blocking(move || store.read_active_turn(&session_id))
+        let tip = tokio::task::spawn_blocking(move || store.read_active_turn(&session_id))
             .await
             .map_err(CoordinatorIoError::Blocking)?
-            .map_err(CoordinatorIoError::Session)
+            .map_err(CoordinatorIoError::Session)?;
+        if let Some(tip) = &tip {
+            let pending_key = pending_project_store_key(tip)?;
+            if pending_key != self.project_store_key {
+                return Err(CoordinatorIoError::ProjectBinding(format!(
+                    "PendingTurn key {pending_key} does not match InvocationStore key {}",
+                    self.project_store_key
+                )));
+            }
+        }
+        Ok(tip)
     }
 
     #[cfg(feature = "test-crash-barriers")]
@@ -145,6 +166,12 @@ impl CoordinatorStoreIo {
         facts: lattice_session::pending::TurnStartedFacts,
         lock: Arc<lattice_session::FlockGuard>,
     ) -> Result<PendingTurnTip, CoordinatorIoError> {
+        if facts.project_store_key != self.project_store_key {
+            return Err(CoordinatorIoError::ProjectBinding(format!(
+                "TurnStarted key {} does not match InvocationStore key {}",
+                facts.project_store_key, self.project_store_key
+            )));
+        }
         let store = Arc::clone(&self.session);
         tokio::task::spawn_blocking(move || store.begin_pending_turn(facts, &lock))
             .await
@@ -260,6 +287,25 @@ impl CoordinatorStoreIo {
         .await
         .map_err(CoordinatorIoError::Blocking)?;
         pinned.map_err(CoordinatorIoError::InvocationStore)
+    }
+}
+
+fn pending_project_store_key(
+    tip: &PendingTurnTip,
+) -> Result<lattice_session::ProjectStoreKey, CoordinatorIoError> {
+    match &tip.snapshot.stage {
+        lattice_session::pending::PendingStage::TurnStarted(facts) => Ok(facts.project_store_key),
+        _ => tip
+            .snapshot
+            .root
+            .as_ref()
+            .map(|facts| facts.project_store_key)
+            .ok_or_else(|| {
+                CoordinatorIoError::ProjectBinding(format!(
+                    "pending Turn {} has no persisted TurnStarted project binding",
+                    tip.snapshot.turn_id
+                ))
+            }),
     }
 }
 
@@ -655,7 +701,7 @@ mod tests {
 
         let session = Arc::new(GitSessionGraphStore::create_layout(&layout).unwrap());
         let invocations = Arc::new(InvocationStore::create(&layout, &key).unwrap());
-        let io = CoordinatorStoreIo::new(session, invocations);
+        let io = CoordinatorStoreIo::new(session, invocations, key).unwrap();
 
         let session_id = "3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c".to_string();
         let plan_key = PlanKey {
@@ -683,6 +729,25 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_rejects_an_invocation_store_for_another_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let layout = StateLayout::in_state_root(tmp.path());
+        let key = ProjectStoreKey::derive(tmp.path()).unwrap();
+        let other_key = ProjectStoreKey::derive(other.path()).unwrap();
+        let session = Arc::new(GitSessionGraphStore::create_layout(&layout).unwrap());
+        let invocations = Arc::new(InvocationStore::create(&layout, &other_key).unwrap());
+        let before = invocations.pinned_view().unwrap().commit_oid;
+
+        let err = match CoordinatorStoreIo::new(session, Arc::clone(&invocations), key) {
+            Ok(_) => panic!("mismatched project stores must fail closed"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, CoordinatorIoError::ProjectBinding(_)));
+        assert_eq!(invocations.pinned_view().unwrap().commit_oid, before);
+    }
+
+    #[test]
     fn pin_invocation_facts_round_trips_a_real_reservation() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = StateLayout::in_state_root(tmp.path());
@@ -690,7 +755,7 @@ mod tests {
 
         let session = Arc::new(GitSessionGraphStore::create_layout(&layout).unwrap());
         let invocations = Arc::new(InvocationStore::create(&layout, &key).unwrap());
-        let io = CoordinatorStoreIo::new(session, Arc::clone(&invocations));
+        let io = CoordinatorStoreIo::new(session, Arc::clone(&invocations), key).unwrap();
         let turn_id = TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap();
         let plan_key = PlanKey {
             turn_id,

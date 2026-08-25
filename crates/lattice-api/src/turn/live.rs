@@ -150,6 +150,7 @@ async fn run_live_turn_task(
             lattice_session::pending::TurnStartedFacts {
                 turn_id,
                 session_id,
+                project_store_key: prepared.project_store_key,
                 parent_conversation_tip: prepared.parent_commit_id.clone(),
                 user_message: lattice_conversation::NativeMessage::new(
                     lattice_conversation::MessageRole::User,
@@ -299,7 +300,11 @@ pub(super) async fn stream_turn_live(
         super::coordinator::CoordinatorStoreIo::new(
             session.git_store_for_coordinator()?,
             invocations,
-        ),
+            key,
+        )
+        .map_err(|err| {
+            crate::session::ApiError::Internal(format!("compose TurnCoordinator: {err}"))
+        })?,
         Arc::new(super::coordinator::RandomIdSource),
     ));
     stream_turn_live_prepared(

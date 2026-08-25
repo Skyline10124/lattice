@@ -7494,3 +7494,37 @@ records remain historical rather than being rewritten.
 **Changed areas:** `lattice-llm` provider projection/parsers/contracts,
 `lattice-agent::model_step`, Turn test fixtures and startup wiring, Session public ancestry,
 typed black-box harness assertions, `FINDINGS.md`, and this append-only record.
+
+## GitHub #157: bind Turn recovery to the authoritative Session project stores — 2026-08-25
+
+**Severity:** P0 / BLOCKER
+
+**Problem:** Turn startup derived project stores from the request workspace and reopened the
+layout-default `sessions.git` before proving that those handles matched the persisted Session and
+PendingTurn project binding. A wrong workspace, custom Session repository, or mismatched
+InvocationStore/WorkspaceHistory backing could therefore reach reconciliation through the wrong
+repository authority.
+
+**Fix:** `TurnStartedFacts` now persists a strict typed `ProjectStoreKey`; PendingTurn and Session
+store schemas hard-cut to v2 and strict-open rejects old or malformed development state. Turn
+startup holds the authoritative Session execution lock, reads the Session/PendingTurn binding from
+the injected Git store, compares the canonical request root before opening project stores, and
+passes the same key into `TurnCoordinator`. Runtime composition independently verifies canonical
+Local Workspace containment plus matching InvocationStore/WorkspaceHistory keys and StateLayout
+roots before provider, reservation, dispatch, mutation, or reconciliation work. No compatibility
+reader, import, fallback, dual write, or reverse crate dependency was added.
+
+**Verification:**
+
+- `cargo test -p lattice-session -p lancet-audit -p lancet-runtime -p lancet-api -p lattice-api`
+  passed: Session 134 tests, LANCET runtime/API/audit suites, lattice-api 104 unit tests and every
+  integration including 19 Rewind cases.
+- `cargo clippy -p lattice-session -p lancet-audit -p lancet-runtime -p lancet-api -p lattice-api --all-targets -- -D warnings` — passed.
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` — passed.
+- `cargo fmt --all -- --check` / `git diff --check` — clean.
+- `cargo tree` checks confirmed no `lancet-audit -> lattice-session`,
+  `lattice-session -> lancet-audit`, or `lancet-api ->` LATTICE-layer edge.
+
+**Changed areas:** `lattice-session` PendingTurn/session-store contracts, `lattice-api` Session and
+Turn startup/coordinator wiring, `lancet-api` runtime store validation, InvocationStore key
+exposure, and focused unit/integration fixtures.

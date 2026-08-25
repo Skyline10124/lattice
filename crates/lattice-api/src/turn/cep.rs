@@ -376,13 +376,18 @@ pub(crate) async fn build_production_turn_deps(
         llm,
         lancet,
     } = input;
-    // Canonicalize the project root up front so the profile policy and the
-    // runtime share one canonical root. Falls back to the raw path on failure,
-    // matching `CepPolicyConfig::defaults_for_project_root`'s tolerance.
-    let canonical_root = std::fs::canonicalize(project_root)
-        .ok()
-        .and_then(|p| p.to_str().map(str::to_owned));
-    let project_root = canonical_root.as_deref().unwrap_or(project_root);
+    // Canonicalize the full Local Workspace before constructing either policy
+    // or project-store backing. Runtime composition revalidates this exact root.
+    let canonical_root = std::fs::canonicalize(project_root).map_err(|err| {
+        ApiError::BadRequest(format!(
+            "cannot canonicalize Local Workspace root '{project_root}': {err}"
+        ))
+    })?;
+    let project_root = canonical_root.to_str().ok_or_else(|| {
+        ApiError::BadRequest(
+            "Local Workspace root must be valid UTF-8 for the runtime policy path".into(),
+        )
+    })?;
 
     let policy = resolve_lancet_policy(lancet, project_root)?;
     let cep_mode = lancet
@@ -409,6 +414,7 @@ pub(crate) async fn build_production_turn_deps(
         .unwrap_or_default();
 
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: canonical_root,
         enabled_tools: enabled_tools.to_vec(),
         policy,
         capability_admission,

@@ -106,6 +106,7 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
     ReservedRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: root.to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
@@ -339,6 +340,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         ..Default::default()
     };
     let denied_runtime = ReservedRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: denied_root.path().to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: catalog()
             .iter()
@@ -381,6 +383,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         ..Default::default()
     };
     let effect_runtime = ReservedRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: effect_root.path().to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: catalog()
             .iter()
