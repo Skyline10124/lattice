@@ -5,7 +5,7 @@
 ![LATTICE banner](logo-banner.svg)
 
 ![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)
-![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)
+![Rust 1.94+](https://img.shields.io/badge/Rust-1.94%2B-orange.svg)
 ![Platform: Linux only](https://img.shields.io/badge/platform-Linux%20only-informational.svg)
 
 A session-centric LLM runtime in Rust: every turn commits to a **git-backed
@@ -67,19 +67,19 @@ lattice-system-harness (black-box tests; must not depend on product crates).
 | `lancet-catalog` | Typed CEP method contracts, descriptors, and the static production catalog. |
 | `lancet-dispatch` | Method registry, typed CEP dispatch, in-process transport, cancellation. |
 | `lancet-cep` | Public CEP facade; projects LLM-facing tool schemas from the catalog. |
-| `lancet-audit` | CEP audit persistence, query filters, typed operator reads, and versioned Cell evidence. |
+| `lancet-audit` | Authoritative project-keyed Git `InvocationStore` plus pinned-view operator query/tail/replay; terminal records carry typed Cell evidence under `InvocationId`. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger. |
-| `lancet-native` | Production native handlers, server lifecycle, and the concrete guarded Local Workspace (observation, mutation, fetch). |
-| `lancet-runtime` | ADR 0004 target: WASM Component engine, closed composition gate, Tool Host enforcement. Not yet the production path. |
-| `lancet-api` | Unified LANCET public API composing the CEP runtime (`LancetRuntime`/`LancetServer`). |
+| `lancet-native` | Remaining native `fetch.web` handler, CEP server lifecycle, reservation-gated dispatch, and the Component/native split. |
+| `lancet-runtime` | WASM Component engine, closed composition gate, Tool Host enforcement, and guarded Local Workspace/history. |
+| `lancet-api` | Unified LANCET facade for runtime composition and Git-ledger operator reads. |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, private/reserved IP checks. |
-| `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security, and the pure-data provider replay/projection seam. |
-| `lattice-conversation` | Provider-neutral data-only conversation contract: ordered `NativeMessage` with bound/unbound ToolCall typestates, semantic/replay digests, per-attempt usage, and the transcript types. No I/O, no stores, no ID generators. |
-| `lattice-session` | Session graph contract and the **git-backed** graph store (`GitSessionGraphStore`). |
+| `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security, and provider replay/projection. |
+| `lattice-conversation` | Provider-neutral data-only conversation contract: ordered `NativeMessage` with bound/unbound ToolCall typestates, semantic/replay digests, per-attempt usage, and interruption records. No I/O, stores, or ID generators. |
+| `lattice-session` | Git-backed Session graph plus the durable PendingTurn journal and typed `NativeMessage<BoundToolCall>` transcript. |
 | `lattice-store` | ADR 0005 domain-neutral private-Git/Linux durability kernel: XDG topology, `ProjectStoreKey`, typed create/open, ref CAS/transactions, flock, durability barriers, atomic first-create, capability probes. No domain schemas, no workspace deps. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, LANCET `[lancet]` policy sections. |
-| `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly. |
-| `lattice-api` | Thin public facade for session creation/opening and turn execution (`stream_turn`). |
+| `lattice-agent` | Store-free, one-attempt `ModelStepDriver`; it neither dispatches Tools nor commits Turns. |
+| `lattice-api` | Public Session/Turn facade and sole production `TurnCoordinator` saga over PendingTurn, InvocationStore, and LANCET. |
 | `lattice-tui` | Full-screen chat TUI over `lattice-api` via `ratatui`/`crossterm`: alternate screen, transcript / input / status regions. |
 | `lattice-cli` | The `lattice` binary: clap command surface and dispatch. |
 | `lattice-tool-prelude` | ADR 0004 guest SDK for Source Tools: generated WIT bindings, descriptor helpers. |
@@ -104,11 +104,12 @@ command execution is not an agent-visible capability.
 
 ## Installation
 
-Requires a Linux host and Rust **1.88+** (edition 2024). Build the workspace
-with cargo:
+Requires a Linux host and Rust **1.94+** (edition 2024; rustc 1.96.0 is pinned).
+Build the shipped Linux host binary explicitly; Source Tool crates are wasm32
+guest artifacts:
 
 ```sh
-cargo build --release
+cargo build --release -p lattice-cli
 ```
 
 The CLI binary is `lattice` (declared in `crates/lattice-cli/Cargo.toml`).
@@ -159,17 +160,19 @@ records the turn as a commit; `lancet status` shows recent CEP calls and the
 last guard verdict; `doctor` runs diagnostics. Add `--json` (global flag) to
 emit one `TurnEvent` JSON object per line on stdout instead of human output.
 
-Other `session` subcommands: `agent`, `status`, `list`, `checkout`, `diff`,
-`reset`, and `migrate` (one-shot SQLite→Git session graph migration for
-legacy stores). `resume` and `prune-snapshots` were removed with the Upper
-snapshot lifecycle (#59/#62, Codeberg #37/#40).
+Other `session` subcommands: `agent`, `status`, `list`, `checkout`, `diff`, and
+`reset`. Legacy Session/audit formats are not imported and there is no `migrate`
+command; disposable development state is rebuilt explicitly using
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#manual-development-state-rebuild).
+`resume` and `prune-snapshots` were removed with the Upper snapshot lifecycle
+(#59/#62, Codeberg #37/#40).
 
 ## Build, test, lint
 
 ```sh
-cargo build
-cargo test
-cargo clippy -- -D warnings
+cargo build -p lattice-cli
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 

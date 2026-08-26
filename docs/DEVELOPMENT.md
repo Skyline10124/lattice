@@ -27,17 +27,19 @@ host.
 ## Local setup
 
 1. **Fork and clone** the repository, then `cd lattice` into the workspace root.
-   The workspace root `Cargo.toml` declares all 16 members under `crates/`.
-2. **Install Rust 1.88+** (edition 2024). Toolchain pinning is via
-   `rust-version = "1.88"` in `[workspace.package]` (`Cargo.toml`).
-3. **Build the workspace in dev mode** (debug, unoptimized — fast incremental
-   feedback). This is the developer default; `--release` is for producing the
-   shipped binary:
+   The root `Cargo.toml` declares 28 workspace members: 21 product/support crates
+   under `crates/`, six Source Tool crates under `tools/`, and `xtask`.
+2. **Install Rust 1.94+** (edition 2024). The minimum is pinned by
+   `rust-version = "1.94"`; `rust-toolchain.toml` selects the build-verified
+   rustc 1.96.0 and the `wasm32-unknown-unknown` guest target.
+3. **Build the Linux host binary in dev mode** (debug, unoptimized):
 
    ```sh
-   cargo build
+   cargo build -p lattice-cli
    ```
 
+   Source Tool guests are wasm32 artifacts built through xtask/their explicit
+   targets, not host binaries.
 4. **Create an agent profile.** Profiles are discovered from
    `.lattice/agents/<name>/agent.toml` (project-local) and
    `~/.lattice/agents/<name>/agent.toml` (user-global) by
@@ -78,6 +80,80 @@ cargo run -p lattice-cli -- models --auth      # list authenticated models
 cargo run -p lattice-cli -- doctor             # run diagnostics
 ```
 
+## Manual development-state rebuild
+
+The #139-B hard cut intentionally does not import the retired Session outcome,
+numeric WorkspaceHistory, or SQLite audit/evidence formats. Rebuild only a
+maintainer-selected disposable development state root; never run broad glob
+deletion and never guess which `$XDG_STATE_HOME` another process uses.
+
+1. Stop every LATTICE process using the selected state root and back up anything
+   needed for forensic reference.
+2. Set explicit absolute roots, derive the exact project key using the same v1
+   formula as `lattice_store::ProjectStoreKey`, and print every candidate path:
+
+   ```bash
+   export STATE_ROOT=/absolute/disposable/xdg-state
+   export WORKSPACE=/absolute/local-workspace
+   test "${STATE_ROOT#/}" != "$STATE_ROOT"
+   test "${WORKSPACE#/}" != "$WORKSPACE"
+   CANON_WORKSPACE=$(realpath -e -- "$WORKSPACE")
+   PROJECT_KEY=$(python3 - "$CANON_WORKSPACE" <<'PY'
+   import hashlib, os, struct, sys
+   raw = os.fsencode(sys.argv[1])
+   digest = hashlib.sha256(
+       b"lattice-project-store-key-v1\0" + struct.pack(">Q", len(raw)) + raw
+   ).hexdigest()
+   print(digest)
+   PY
+   )
+   LATTICE_ROOT="$STATE_ROOT/lattice"
+   PROJECT_DIR="$LATTICE_ROOT/projects/$PROJECT_KEY"
+   SESSION_STORE="$LATTICE_ROOT/sessions.git"
+   INVOCATION_STORE="$PROJECT_DIR/invocations.git"
+   HISTORY_STORE="$PROJECT_DIR/workspace-history.git"
+   LEGACY_PROJECT_AUDIT="$PROJECT_DIR/cep_audit.db"
+   LEGACY_WORKSPACE_AUDIT="$CANON_WORKSPACE/.lattice/cep_audit.db"
+   printf '%s\n' \
+     "STATE_ROOT=$STATE_ROOT" \
+     "WORKSPACE=$CANON_WORKSPACE" \
+     "SESSION_STORE=$SESSION_STORE" \
+     "INVOCATION_STORE=$INVOCATION_STORE" \
+     "HISTORY_STORE=$HISTORY_STORE" \
+     "LEGACY_PROJECT_AUDIT=$LEGACY_PROJECT_AUDIT" \
+     "LEGACY_WORKSPACE_AUDIT=$LEGACY_WORKSPACE_AUDIT"
+   ```
+
+3. Inspect those exact paths. The global `sessions.git` contains every project in
+   this state root: leave it alone unless the maintainer explicitly declares the
+   entire root disposable. Prefer a fresh `STATE_ROOT` when existing Sessions
+   matter.
+4. After inspection, remove only the selected project's stores and retired audit
+   files:
+
+   ```bash
+   rm -rf -- "$INVOCATION_STORE" "$HISTORY_STORE"
+   rm -f -- "$LEGACY_PROJECT_AUDIT" "$LEGACY_WORKSPACE_AUDIT"
+   ```
+
+   There is no `lattice ... migrate` command, compatibility reader, automatic
+   deletion, or SQLite-to-Git import.
+5. Build and probe the exact state location, then create a new Session and run a
+   no-Tool Turn before any Tool-bearing smoke:
+
+   ```bash
+   cargo build -p lattice-store --bin lattice-store-probe -p lattice-cli
+   XDG_STATE_HOME="$STATE_ROOT" target/debug/lattice-store-probe "$LATTICE_ROOT"
+   XDG_STATE_HOME="$STATE_ROOT" target/debug/lattice session new \
+     --agent default --project-branch main
+   # Use the printed SessionId with a profile whose enabled Tool list is empty:
+   XDG_STATE_HOME="$STATE_ROOT" target/debug/lattice session send \
+     <session_id> "Reply with exactly: ready"
+   ```
+
+Strict open rejects incompatible stores; that failure is a signal to inspect or
+select a fresh development state root, not to add a migration fallback.
+
 ## Build commands
 
 The CI workflow (`.github/workflows/ci.yml`) and the local mirror
@@ -87,13 +163,13 @@ harness/lancet boundary checks). Reproduce CI locally with `cargo xtask ci`.
 
 | Command | Purpose |
 | --- | --- |
-| `cargo build` | Dev (debug) build of the whole workspace. Fast incremental feedback. |
-| `cargo build --release` | Optimized build; produces the shipped `lattice` binary. |
-| `cargo test` | Run the entire workspace test suite. |
+| `cargo build -p lattice-cli` | Dev build of the shipped Linux host binary. |
+| `cargo build --release -p lattice-cli` | Optimized host build; produces `target/release/lattice`. |
+| `cargo build -p <guest> --target wasm32-unknown-unknown` | Build one Source Tool guest for its supported artifact target. |
 | `cargo test -p <crate>` | Run tests for a single crate, e.g. `cargo test -p lattice-session`. |
 | `cargo test --workspace` | Run tests across all workspace members (what CI runs). |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Lint all crates and targets; warnings are hard errors. |
-| `cargo fmt --all --check` | Verify rustfmt formatting across the workspace (enforced by CI). |
+| `cargo fmt --all -- --check` | Verify rustfmt formatting across the workspace (enforced by CI). |
 | `cargo run -p lattice-cli -- <subcommand>` | Run the `lattice` binary without installing (e.g. `models --auth`, `doctor`, `session new ...`). |
 | `cargo install --path crates/lattice-cli` | Install the release binary to `$CARGO_HOME/bin`. |
 | `cargo xtask ci` | Local mirror of the CI lane (fmt, clippy, build `lattice`, harness boundary, `cargo test --workspace`). |

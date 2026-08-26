@@ -4,98 +4,8 @@
 //! These types define the direct wire contract for LATTICE LLM calls
 //! and are independent of `lattice-core`.
 
+use lattice_conversation::{BoundToolCall, NativeMessage, TokenUsage};
 use serde::{Deserialize, Serialize};
-
-/// The role of a message participant in a conversation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-    Tool,
-}
-
-/// Details of a function call invoked by the model.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FunctionCall {
-    pub name: String,
-    pub arguments: String,
-}
-
-impl FunctionCall {
-    pub fn new(name: impl Into<String>, arguments: impl Into<String>) -> Self {
-        FunctionCall {
-            name: name.into(),
-            arguments: arguments.into(),
-        }
-    }
-}
-
-/// A tool call made by the assistant, referencing a function to invoke.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolCall {
-    pub id: String,
-    pub function: FunctionCall,
-}
-
-impl ToolCall {
-    pub fn new(id: impl Into<String>, function: FunctionCall) -> Self {
-        ToolCall {
-            id: id.into(),
-            function,
-        }
-    }
-}
-
-/// A message in a conversation between user and assistant.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-}
-
-impl Message {
-    pub fn user(content: impl Into<String>) -> Self {
-        Message {
-            role: Role::User,
-            content: content.into(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Message {
-            role: Role::Assistant,
-            content: content.into(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    pub fn system(content: impl Into<String>) -> Self {
-        Message {
-            role: Role::System,
-            content: content.into(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-}
 
 /// A tool definition providing a function specification to the model.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,7 +33,9 @@ impl ToolDefinition {
 /// A chat completion request to be sent to an LLM.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ChatRequest {
-    pub messages: Vec<Message>,
+    /// Durable provider-neutral history. Provider wire is projected exactly once
+    /// by the selected provider builder.
+    pub messages: Vec<NativeMessage<BoundToolCall>>,
     pub tools: Vec<ToolDefinition>,
     pub target: ModelTarget,
     pub temperature: Option<f64>,
@@ -133,7 +45,10 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
-    pub fn new(messages: impl Into<Vec<Message>>, target: ModelTarget) -> Self {
+    pub fn new(
+        messages: impl Into<Vec<NativeMessage<BoundToolCall>>>,
+        target: ModelTarget,
+    ) -> Self {
         ChatRequest {
             messages: messages.into(),
             tools: Vec::new(),
@@ -143,20 +58,6 @@ impl ChatRequest {
             max_completion_tokens: None,
         }
     }
-}
-
-/// A chat completion response received from an LLM.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ChatResponse {
-    pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    pub finish_reason: String,
-    pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<TokenUsage>,
 }
 
 /// A streaming LLM event for the API.
@@ -170,15 +71,26 @@ pub enum LlmEvent {
         content: String,
     },
     ToolCallStart {
-        id: String,
+        /// Provider message-part/tool-call ordinal used only for stream assembly.
+        index: usize,
+        /// Provider-native correlation ID; never synthesized.
+        provider_call_id: Option<String>,
         name: String,
     },
     ToolCallDelta {
-        id: String,
+        index: usize,
         arguments_delta: String,
     },
     ToolCallEnd {
-        id: String,
+        index: usize,
+    },
+    /// Authoritative complete provider message projected from official wire.
+    MessageComplete {
+        message: NativeMessage<lattice_conversation::UnboundToolCall>,
+    },
+    /// Provider completed a whole message whose Tool batch failed validation.
+    MessageRejected {
+        rejection: lattice_conversation::AttemptRejection,
     },
     Done {
         finish_reason: String,
@@ -191,7 +103,9 @@ pub enum LlmEvent {
         index: usize,
         cite_text: String,
     },
+    /// Part-local opaque provider state observed while streaming.
     Signature {
+        index: usize,
         signature: String,
     },
     GroundingChunk {
@@ -229,171 +143,66 @@ impl ModelTarget {
     }
 }
 
-/// Token usage statistics returned by the provider in the final stream chunk.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TokenUsage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-}
-
 #[cfg(test)]
 mod tests {
+    use lattice_conversation::{
+        BoundToolCall, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+
     use super::*;
 
-    #[test]
-    fn role_serde_roundtrip() {
-        let cases = vec![Role::System, Role::User, Role::Assistant, Role::Tool];
-        for role in cases {
-            let json = serde_json::to_string(&role).unwrap();
-            let deserialized: Role = serde_json::from_str(&json).unwrap();
-            assert_eq!(role, deserialized);
-        }
+    fn user(text: &str) -> NativeMessage<BoundToolCall> {
+        NativeMessage::new(
+            MessageRole::User,
+            None,
+            vec![MessagePart::semantic_only(MessageSemantic::Text {
+                text: text.to_string(),
+            })],
+        )
     }
 
     #[test]
-    fn role_serialization_variants() {
-        assert_eq!(serde_json::to_string(&Role::System).unwrap(), "\"System\"");
-        assert_eq!(serde_json::to_string(&Role::User).unwrap(), "\"User\"");
-        assert_eq!(
-            serde_json::to_string(&Role::Assistant).unwrap(),
-            "\"Assistant\""
-        );
-        assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"Tool\"");
-    }
-
-    #[test]
-    fn function_call_roundtrip() {
-        let fc = FunctionCall::new("get_weather", r#"{"city": "Tokyo"}"#);
-        let json = serde_json::to_string(&fc).unwrap();
-        let deserialized: FunctionCall = serde_json::from_str(&json).unwrap();
-        assert_eq!(fc, deserialized);
-    }
-
-    #[test]
-    fn tool_call_roundtrip() {
-        let tc = ToolCall::new(
-            "call_abc123",
-            FunctionCall::new("get_weather", r#"{"city":"Paris"}"#),
-        );
-        let json = serde_json::to_string(&tc).unwrap();
-        let deserialized: ToolCall = serde_json::from_str(&json).unwrap();
-        assert_eq!(tc, deserialized);
-    }
-
-    #[test]
-    fn message_simple_roundtrip() {
-        let msg = Message::user("Hello, world!");
-        let json = serde_json::to_string(&msg).unwrap();
-        let deserialized: Message = serde_json::from_str(&json).unwrap();
-        assert_eq!(msg, deserialized);
-    }
-
-    #[test]
-    fn message_with_tool_calls_roundtrip() {
-        let msg = Message {
-            role: Role::Assistant,
-            content: String::new(),
-            reasoning_content: None,
-            tool_calls: Some(vec![ToolCall::new(
-                "call_1",
-                FunctionCall::new("search", r#"{"q": "rust"}"#),
-            )]),
-            tool_call_id: None,
-            name: None,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let deserialized: Message = serde_json::from_str(&json).unwrap();
-        assert_eq!(msg, deserialized);
-    }
-
-    #[test]
-    fn message_tool_result_roundtrip() {
-        let msg = Message {
-            role: Role::Tool,
-            content: r#"{"result": "sunny"}"#.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some("call_1".to_string()),
-            name: Some("get_weather".to_string()),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let deserialized: Message = serde_json::from_str(&json).unwrap();
-        assert_eq!(msg, deserialized);
-    }
-
-    #[test]
-    fn tool_definition_roundtrip() {
-        let td = ToolDefinition::new(
-            "get_weather",
-            "Get weather for a city",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string"}
-                },
-                "required": ["city"]
-            }),
-        );
-        let json = serde_json::to_string(&td).unwrap();
-        let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
-        assert_eq!(td, deserialized);
-    }
-
-    #[test]
-    fn chat_request_roundtrip() {
-        let req = ChatRequest {
-            messages: vec![Message::user("hello")],
-            tools: vec![],
+    fn chat_request_round_trips_native_history() {
+        let request = ChatRequest {
+            messages: vec![user("hello")],
+            tools: vec![ToolDefinition::new(
+                "get_weather",
+                "Get weather",
+                serde_json::json!({"type": "object"}),
+            )],
             target: ModelTarget::default(),
             temperature: Some(0.7),
             max_tokens: None,
             max_completion_tokens: None,
         };
-        let json = serde_json::to_string(&req).unwrap();
-        let deserialized: ChatRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(req.messages, deserialized.messages);
-        assert_eq!(req.target.model, deserialized.target.model);
+        let json = serde_json::to_string(&request).unwrap();
+        let decoded: ChatRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(request, decoded);
     }
 
     #[test]
-    fn chat_response_roundtrip() {
-        let resp = ChatResponse {
-            content: "Hello!".to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            finish_reason: "stop".to_string(),
-            model: "sonnet".to_string(),
-            usage: None,
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        let deserialized: ChatResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(resp, deserialized);
-    }
-
-    #[test]
-    fn llm_event_roundtrip() {
-        let events = vec![
+    fn events_round_trip() {
+        for event in [
             LlmEvent::Started,
-            LlmEvent::Token {
-                content: "hello".to_string(),
+            LlmEvent::ToolCallStart {
+                index: 0,
+                provider_call_id: None,
+                name: "observe.workspace".to_string(),
             },
             LlmEvent::Done {
                 finish_reason: "stop".to_string(),
                 usage: None,
             },
-        ];
-        for event in events {
-            let json = serde_json::to_string(&event).unwrap();
-            let deserialized: LlmEvent = serde_json::from_str(&json).unwrap();
-            assert_eq!(event, deserialized);
+        ] {
+            let encoded = serde_json::to_string(&event).unwrap();
+            assert_eq!(event, serde_json::from_str::<LlmEvent>(&encoded).unwrap());
         }
     }
 
     #[test]
-    fn model_target_default() {
-        let t = ModelTarget::default();
-        assert_eq!(t.model, "sonnet");
-        assert!(t.provider.is_none());
+    fn model_target_default_is_sonnet() {
+        let target = ModelTarget::default();
+        assert_eq!(target.model, "sonnet");
+        assert!(target.provider.is_none());
     }
 }

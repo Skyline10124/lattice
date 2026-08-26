@@ -32,12 +32,13 @@ fn fast_lancet_status_missing_audit_store_reports_empty_state_json() {
             .get("recent_calls")
             .and_then(Value::as_array)
             .is_some_and(Vec::is_empty);
-        let null_verdict = parsed.get("last_guard_verdict").is_some_and(Value::is_null);
-        if empty_calls && null_verdict {
+        let null_ledger = parsed.get("ledger_oid").is_some_and(Value::is_null);
+        let null_verdict = parsed.get("last_verdict").is_some_and(Value::is_null);
+        if empty_calls && null_ledger && null_verdict {
             Ok(())
         } else {
             Err(AssertError::StdoutMissing {
-                expected: "recent_calls=[] and last_guard_verdict=null".into(),
+                expected: "ledger_oid=null, recent_calls=[], and last_verdict=null".into(),
             })
         }
     });
@@ -56,9 +57,9 @@ fn fast_lancet_status_missing_audit_store_text_mode_smoke() {
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let out = run(&world, &spec, &["lancet", "status"]);
     let result = assert_exit_success(&out)
-        .and_then(|_| assert_stdout_contains(&out, "Recent CEP Calls:"))
+        .and_then(|_| assert_stdout_contains(&out, "Recent Invocations:"))
         .and_then(|_| assert_stdout_contains(&out, "none"))
-        .and_then(|_| assert_stdout_contains(&out, "Last Guard Verdict"));
+        .and_then(|_| assert_stdout_contains(&out, "Last Verdict"));
     ok_or_artifacts(
         &world,
         &spec.name,

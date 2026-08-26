@@ -78,13 +78,20 @@ fn build_auth_headers(resolved: &ResolvedModel, api_key: &str) -> Vec<(String, S
 }
 
 /// Build the request body JSON for a given provider kind.
-fn build_request_body(request: &ChatRequest, resolved: &ResolvedModel) -> serde_json::Value {
+fn build_request_body(
+    request: &ChatRequest,
+    resolved: &ResolvedModel,
+) -> Result<serde_json::Value, LlmError> {
     match resolved.provider {
         ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-            providers::openai::build_request_json(request, resolved)
+            providers::openai::build_request_json(request, resolved).map_err(Into::into)
         }
-        ProviderKind::Anthropic => providers::anthropic::build_request_json(request, resolved),
-        ProviderKind::Gemini => providers::gemini::build_request_json(request, resolved),
+        ProviderKind::Anthropic => {
+            providers::anthropic::build_request_json(request, resolved).map_err(Into::into)
+        }
+        ProviderKind::Gemini => {
+            providers::gemini::build_request_json(request, resolved).map_err(Into::into)
+        }
     }
 }
 
@@ -495,7 +502,7 @@ pub async fn dispatch_stream(
     let api_key = validate_and_read_key(&resolved)?;
 
     let url = build_endpoint_url(&resolved);
-    let body = build_request_body(&request, &resolved);
+    let body = build_request_body(&request, &resolved)?;
     let headers = build_auth_headers(&resolved, &api_key);
 
     let client = build_http_client_for_url(&url)?;
@@ -523,7 +530,7 @@ mod tests {
     use crate::endpoints::{ANTHROPIC_BASE_URL, GEMINI_BASE_URL, OPENAI_BASE_URL};
     use crate::router::{CredentialStatus, ModelRouter};
     use crate::test_env::with_env_vars;
-    use crate::types::{Message, ModelTarget};
+    use crate::types::ModelTarget;
 
     fn make_router() -> ModelRouter {
         ModelRouter::new()
@@ -618,9 +625,9 @@ mod tests {
         let target = ModelTarget::new("gpt-5.5");
         let resolved = router.resolve(&target).unwrap();
         assert_eq!(resolved.provider, ProviderKind::OpenAi);
-        let req = ChatRequest::new(vec![Message::user("hi")], target);
-        let json = build_request_body(&req, &resolved);
-        assert_eq!(json["model"], "gpt-5.5");
+        let request = ChatRequest::new(Vec::new(), target);
+        let body = build_request_body(&request, &resolved).expect("projection");
+        assert_eq!(body["model"], "gpt-5.5");
     }
 
     #[test]

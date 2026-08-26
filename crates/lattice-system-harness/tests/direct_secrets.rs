@@ -17,7 +17,8 @@ use lattice_system_harness::{
     AssertError, FAKE_API_KEY, SessionSendDriver, SseScript, failure_dir,
 };
 use support::{
-    assert_clean_send, cli, direct_world, driver, evidence, finish_scenario, require, wire_fake_llm,
+    assert_clean_send, cli, direct_world, driver, evidence, finish_scenario, require, sequence,
+    tool_call, tool_ok, wire_fake_llm,
 };
 
 /// A unique denied-content sentinel that must never leak into terminal output.
@@ -30,9 +31,14 @@ const DENIED_CONTENT_SENTINEL: &str = "sentinel-denied-content-0xDEADBEEF";
 #[test]
 fn direct_secrets_sentinels_never_leak_into_public_sinks() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-secrets", "dl-secret", "[]", "");
-    // Seed a file whose content carries the denied-content sentinel. The turn
-    // never reads it (no tools enabled), so it must not appear anywhere.
+    let (world, spec) = direct_world(
+        "direct-secrets",
+        "dl-secret",
+        "[\"session.todo_write\"]",
+        "",
+    );
+    // Seed denied content that must remain absent even though this scenario
+    // executes a real embedded Component Tool.
     world
         .write_project_file(
             "private.txt",
@@ -41,7 +47,18 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         .expect("write private");
     world.commit_all("seed").expect("commit");
 
-    let server = wire_fake_llm(&world, "dl-secret", SseScript::plain("hello"));
+    let server = wire_fake_llm(
+        &world,
+        "dl-secret",
+        sequence(vec![
+            tool_call(
+                "secret-safe-tool",
+                "session.todo_write",
+                r#"{"todos":[{"content":"safe public task","status":"pending"}]}"#,
+            ),
+            SseScript::plain("hello"),
+        ]),
+    );
     let scenario_evidence = evidence(&world, &spec);
     let send =
         SessionSendDriver::new(&driver, &world, &spec, "dl-secret", "main").expect("session");
@@ -53,7 +70,10 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&turn)?;
         require(turn.has_committed_completed(), "turn must complete")?;
-
+        require(
+            tool_ok(&turn.parsed, "session.todo_write"),
+            "Tool-bearing secret scenario must execute session.todo_write",
+        )?;
         // Collect all public outputs as one scan surface.
         let send_stdout = String::from_utf8_lossy(&turn.command.output.stdout);
         let send_stderr = String::from_utf8_lossy(&turn.command.output.stderr);
@@ -66,7 +86,10 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
             &["--json", "audit", "query", "--session", &sid],
         );
         let ls = cli(&world, &spec, &["--json", "lancet", "status"]);
-
+        require(
+            String::from_utf8_lossy(&aq.stdout).contains("session.todo_write"),
+            "Git operator query must include the Tool-bearing invocation",
+        )?;
         let sinks: Vec<(&str, String)> = vec![
             ("send stdout", send_stdout.to_string()),
             ("send stderr", send_stderr.to_string()),

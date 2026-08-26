@@ -22,8 +22,10 @@ fn cli_json(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Value 
     let s = String::from_utf8_lossy(&out.stdout);
     serde_json::from_str(s.trim()).unwrap_or_else(|e| {
         panic!(
-            "expected JSON from {args:?}, got {:?}: {e}",
-            String::from_utf8_lossy(&out.stdout)
+            "expected JSON from {args:?}, status={:?}, stdout={:?}, stderr={:?}: {e}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
         )
     })
 }

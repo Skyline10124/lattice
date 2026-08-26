@@ -12,9 +12,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lancet_dispatch::{Cancellation, EventSink};
-use lancet_protocol::CepErrorCode;
 use lancet_protocol::cell::Trust;
 use lancet_protocol::evidence::CapabilityAdmissionPolicy;
+use lancet_protocol::{CepErrorCode, InvocationId};
 use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool};
 use tokio::sync::{mpsc, watch};
 
@@ -39,10 +39,11 @@ fn call_ctx(
         },
     )
     .expect("noop.echo is admitted");
+    let invocation_id = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
     let ctx = ComponentCallContext {
-        call_id: 1,
+        invocation_id,
         turn_id: "test".into(),
-        events: EventSink::new(tx, 1),
+        events: EventSink::new(tx, invocation_id),
         cancellation: Cancellation::new(cancel_rx),
         evidence: CellEvidenceLedger::new(),
         admitted: Arc::new(admitted),

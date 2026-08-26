@@ -17,7 +17,7 @@
 //!
 //! # Exit codes
 //!
-//! - 0: Turn committed successfully (`RunTurnStatus::Completed`)
+//! - 0: Turn committed successfully (`TurnOutcome::Completed`)
 //! - 1:  Provider/API/tool failure, commit failure, terminal without commit, or protocol violation
 //! - 2: Input/configuration error (missing agent profile, missing credentials, missing session)
 
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time;
 
-use lattice_api::{LoadedAgentProfile, RunTurnRequest, RunTurnStatus, TurnEvent, TurnUsageSummary};
+use lattice_api::{LoadedAgentProfile, RunTurnRequest, TurnEvent, TurnOutcome, TurnUsageSummary};
 
 pub(crate) use lattice_api::STREAM_IDLE_TIMEOUT_SECS as STREAM_TIMEOUT_SECS;
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +54,7 @@ enum CommitSignal {
 struct RunRenderState {
     last_terminal: Option<TerminalSignal>,
     last_commit: Option<CommitSignal>,
-    last_status: Option<RunTurnStatus>,
+    last_outcome: Option<TurnOutcome>,
     tokens_emitted_without_newline: bool,
     mid_token_stderr_newline_applied: bool,
     session_id: Option<String>,
@@ -105,17 +105,22 @@ fn apply_event_to_state(event: &TurnEvent, state: &mut RunRenderState) {
         TurnEvent::TurnCommitted {
             session_id,
             commit_id,
-            status,
+            outcome,
             ..
         } => {
             state.last_commit = Some(CommitSignal::Committed);
             state.session_id = Some(session_id.clone());
             state.commit_id = Some(commit_id.clone());
-            state.last_status = Some(status.clone());
+            state.last_outcome = Some(outcome.clone());
         }
         TurnEvent::CommitFailed { reason } => {
             state.last_commit = Some(CommitSignal::Failed {
                 reason: reason.clone(),
+            });
+        }
+        TurnEvent::EvidenceDurabilityFailed { attempts } => {
+            state.last_commit = Some(CommitSignal::Failed {
+                reason: format!("terminal evidence durability failed after {attempts} attempt(s)"),
             });
         }
         // All other variants (ModelStarted, ReasoningDelta,
@@ -128,8 +133,17 @@ fn apply_event_to_state(event: &TurnEvent, state: &mut RunRenderState) {
 ///
 /// Row 8 (ApiError::NotFound -> exit 2) and Row 9 (ApiError::Internal -> exit 1)
 /// are handled in `run_inner` before the stream starts.
+fn outcome_label(outcome: &TurnOutcome) -> &'static str {
+    match outcome {
+        TurnOutcome::Completed { .. } => "completed",
+        TurnOutcome::Failed { .. } => "failed",
+        TurnOutcome::Interrupted { .. } => "interrupted",
+        TurnOutcome::Cancelled { .. } => "cancelled",
+    }
+}
+
 fn exit_code_from_state(state: &RunRenderState) -> std::process::ExitCode {
-    // Row 4: CommitFailed -> 1 (regardless of last_status)
+    // Row 4: CommitFailed -> 1 (regardless of last_outcome)
     if matches!(state.last_commit, Some(CommitSignal::Failed { .. })) {
         return std::process::ExitCode::from(1);
     }
@@ -138,13 +152,18 @@ fn exit_code_from_state(state: &RunRenderState) -> std::process::ExitCode {
         return std::process::ExitCode::from(1);
     }
     // Row 1: TurnCommitted{Completed} -> 0
-    if state.last_status == Some(RunTurnStatus::Completed) {
+    if matches!(state.last_outcome, Some(TurnOutcome::Completed { .. })) {
         return std::process::ExitCode::SUCCESS;
     }
     // Row 2/3: TurnCommitted{Error|Cancelled} -> 1
-    if state.last_status == Some(RunTurnStatus::Error)
-        || state.last_status == Some(RunTurnStatus::Cancelled)
-    {
+    if matches!(
+        state.last_outcome,
+        Some(
+            TurnOutcome::Failed { .. }
+                | TurnOutcome::Interrupted { .. }
+                | TurnOutcome::Cancelled { .. }
+        )
+    ) {
         return std::process::ExitCode::from(1);
     }
     // Row 7: Stream ended without any terminal/commit signal -> 1
@@ -278,19 +297,23 @@ fn render_human_event<WOut: Write, WErr: Write>(
             writeln!(err, "{} committing", "·".dimmed())?;
         }
         TurnEvent::TurnCommitted {
-            commit_id, status, ..
+            commit_id, outcome, ..
         } => {
             flush_before_status(out, err, state)?;
-            let status_str = match status {
-                RunTurnStatus::Completed => "completed",
-                RunTurnStatus::Error => "error",
-                RunTurnStatus::Cancelled => "cancelled",
-            };
-            writeln!(err, "{} committed {commit_id} {status_str}", "✓".green())?;
+            let outcome_str = outcome_label(outcome);
+            writeln!(err, "{} committed {commit_id} {outcome_str}", "✓".green())?;
         }
         TurnEvent::CommitFailed { reason } => {
             flush_before_status(out, err, state)?;
             writeln!(err, "{} commit failed: {reason}", "✗".red())?;
+        }
+        TurnEvent::EvidenceDurabilityFailed { attempts } => {
+            flush_before_status(out, err, state)?;
+            writeln!(
+                err,
+                "{} terminal evidence durability failed after {attempts} attempt(s)",
+                "✗".red()
+            )?;
         }
         TurnEvent::CepCallStarted { method, .. } => {
             if verbose {
@@ -343,13 +366,8 @@ fn render_verbose_epilogue<WErr: Write>(
     if let Some(ref commit_id) = state.commit_id {
         writeln!(err, "{}: {}", "commit".dimmed(), commit_id)?;
     }
-    if let Some(ref status) = state.last_status {
-        let status_str = match status {
-            RunTurnStatus::Completed => "completed",
-            RunTurnStatus::Error => "error",
-            RunTurnStatus::Cancelled => "cancelled",
-        };
-        writeln!(err, "{}: {}", "status".dimmed(), status_str)?;
+    if let Some(ref outcome) = state.last_outcome {
+        writeln!(err, "{}: {}", "outcome".dimmed(), outcome_label(outcome))?;
     }
     if let Some(ref usage) = state.usage_total {
         writeln!(
@@ -433,7 +451,6 @@ async fn run_inner(
         cancel_flag: Some(cancel_flag),
         test_llm: None,
         test_project_root: None,
-        test_persist_audit: None,
     };
 
     // drive stream_turn; lattice-api owns Cep runtime construction
@@ -457,6 +474,14 @@ async fn run_inner(
         }
         Err(lattice_api::ApiError::StoreUnavailable(msg)) => {
             eprintln!("{}: {}", "error".red(), msg);
+            return Ok(std::process::ExitCode::from(1));
+        }
+        Err(lattice_api::ApiError::EvidenceDurabilityFailed(err)) => {
+            eprintln!("{}: {}", "error".red(), err);
+            return Ok(std::process::ExitCode::from(1));
+        }
+        Err(lattice_api::ApiError::RecoveryRequired(err)) => {
+            eprintln!("{}: recovery required: {}", "error".red(), err);
             return Ok(std::process::ExitCode::from(1));
         }
         Err(lattice_api::ApiError::Internal(msg)) => {

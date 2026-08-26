@@ -3,10 +3,8 @@
 
 //! Typed Turn outcome and closure origin (ADR 0005 §15, GitHub #144).
 //!
-//! This is the journal's outcome authority. The legacy
-//! `TurnCommitStatus`/`WorkspaceDisposition`/`terminal_reason` fields on the
-//! conversation manifest are a projection for today's readers; #139-B deletes
-//! them in the production hard cut. Free text is never logic authority here:
+//! This is the sole durable and public Turn outcome authority. Free text is
+//! never logic authority here:
 //! every failure, cancellation, and interruption reason is typed, and bounded
 //! diagnostics live in the attempt records owned by `lattice-conversation`.
 
@@ -32,6 +30,63 @@ impl ClosureOrigin {
             Self::Live => "live",
             Self::Reconciled => "reconciled",
         }
+    }
+}
+
+/// Project-global WorkspaceHistory cut recorded by every committed Turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceHistoryCheckpoint {
+    /// No LATTICE mutation has ever been recorded for this project.
+    Empty,
+    /// The current project-global WorkspaceHistory object identifier.
+    Oid(String),
+}
+
+impl WorkspaceHistoryCheckpoint {
+    pub fn as_oid(&self) -> Option<&str> {
+        match self {
+            Self::Empty => None,
+            Self::Oid(oid) => Some(oid),
+        }
+    }
+
+    /// Convert the authoritative `WorkspaceHistory::current()` result into a
+    /// typed checkpoint. Empty is produced only for a genuinely absent ref;
+    /// malformed or non-canonical object ids fail closed.
+    pub fn from_current(current: Option<String>) -> crate::Result<Self> {
+        let checkpoint = current.map(Self::Oid).unwrap_or(Self::Empty);
+        checkpoint.validate()?;
+        Ok(checkpoint)
+    }
+
+    /// Validate a persisted checkpoint OID as canonical lowercase SHA-1 hex.
+    pub fn validate(&self) -> crate::Result<()> {
+        let Self::Oid(oid) = self else {
+            return Ok(());
+        };
+        if oid.len() != 40
+            || !oid
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(crate::SessionError::JournalCorruption {
+                detail:
+                    "workspace-history checkpoint OID must be exactly 40 lowercase hex characters"
+                        .into(),
+            });
+        }
+        let parsed = gix::ObjectId::from_hex(oid.as_bytes()).map_err(|error| {
+            crate::SessionError::JournalCorruption {
+                detail: format!("workspace-history checkpoint OID is invalid: {error}"),
+            }
+        })?;
+        if parsed.to_string() != *oid {
+            return Err(crate::SessionError::JournalCorruption {
+                detail: "workspace-history checkpoint OID failed its canonical round-trip".into(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -118,10 +173,7 @@ pub enum TurnInterruption {
     },
 }
 
-/// The typed outcome of one accepted Turn (ADR 0005 §15). This replaces
-/// `TurnCommitStatus + WorkspaceDisposition + terminal_reason` as the
-/// journal authority; a projection onto the legacy conversation manifest
-/// vocabulary exists only until the #139-B hard cut.
+/// The typed outcome of one accepted Turn (ADR 0005 §15).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOutcome {
@@ -146,21 +198,6 @@ pub enum TurnOutcome {
         /// Typed interruption reason.
         reason: TurnInterruption,
     },
-}
-
-impl TurnOutcome {
-    /// The legacy `TurnCommitStatus` projection used by today's
-    /// conversation manifest. Diagnostic only; the typed value remains the
-    /// authority. #139-B deletes this mapping together with the legacy
-    /// fields.
-    pub fn legacy_status(&self) -> crate::graph::TurnCommitStatus {
-        use crate::graph::TurnCommitStatus;
-        match self {
-            Self::Completed { .. } => TurnCommitStatus::Completed,
-            Self::Failed { .. } | Self::Interrupted { .. } => TurnCommitStatus::Error,
-            Self::Cancelled { .. } => TurnCommitStatus::Cancelled,
-        }
-    }
 }
 
 /// Derived per-Turn usage aggregate (ADR 0005 §10): the attempt facts remain
@@ -195,9 +232,7 @@ impl TurnUsageAggregate {
             total_tokens: 0,
         };
         for attempt in per_attempt.iter().flatten() {
-            usage.prompt_tokens += attempt.prompt_tokens;
-            usage.completion_tokens += attempt.completion_tokens;
-            usage.total_tokens += attempt.total_tokens;
+            usage = usage.saturating_add(*attempt);
         }
         Some(if complete {
             Self::Complete { usage }
@@ -229,43 +264,6 @@ mod tests {
         assert_eq!(ClosureOrigin::Reconciled.as_str(), "reconciled");
         let json = serde_json::to_string(&ClosureOrigin::Reconciled).unwrap();
         assert_eq!(json, "\"reconciled\"");
-    }
-
-    #[test]
-    fn legacy_status_projection_is_total_and_deterministic() {
-        let cases = [
-            (
-                TurnOutcome::Completed {
-                    finish_reason: TurnFinishReason::Stop,
-                },
-                crate::graph::TurnCommitStatus::Completed,
-            ),
-            (
-                TurnOutcome::Failed {
-                    reason: TurnFailure::ModelRequestFailed,
-                },
-                crate::graph::TurnCommitStatus::Error,
-            ),
-            (
-                TurnOutcome::Interrupted {
-                    reason: TurnInterruption::ProcessInterruptedBeforeModelAttempt,
-                },
-                crate::graph::TurnCommitStatus::Error,
-            ),
-            (
-                TurnOutcome::Cancelled {
-                    reason: TurnCancellation::UserCancelled,
-                },
-                crate::graph::TurnCommitStatus::Cancelled,
-            ),
-        ];
-        for (outcome, status) in cases {
-            assert_eq!(outcome.legacy_status(), status);
-            // Serde round-trip keeps the typed value intact.
-            let back: TurnOutcome =
-                serde_json::from_value(serde_json::to_value(&outcome).unwrap()).unwrap();
-            assert_eq!(back, outcome);
-        }
     }
 
     #[test]
@@ -312,7 +310,56 @@ mod tests {
     }
 
     #[test]
+    fn usage_aggregate_saturates_each_counter() {
+        let aggregate = TurnUsageAggregate::derive(&[
+            Some(TokenUsage {
+                prompt_tokens: u64::MAX,
+                completion_tokens: u64::MAX - 1,
+                total_tokens: u64::MAX - 2,
+            }),
+            Some(TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                total_tokens: 3,
+            }),
+        ])
+        .expect("non-empty");
+        assert_eq!(
+            aggregate.usage(),
+            TokenUsage {
+                prompt_tokens: u64::MAX,
+                completion_tokens: u64::MAX,
+                total_tokens: u64::MAX,
+            }
+        );
+    }
+
+    #[test]
     fn usage_aggregate_empty_is_none() {
         assert!(TurnUsageAggregate::derive(&[]).is_none());
+    }
+
+    #[test]
+    fn workspace_checkpoint_accepts_only_canonical_history_oids() {
+        assert_eq!(
+            WorkspaceHistoryCheckpoint::from_current(None).unwrap(),
+            WorkspaceHistoryCheckpoint::Empty
+        );
+        let oid = "0123456789abcdef0123456789abcdef01234567".to_string();
+        assert_eq!(
+            WorkspaceHistoryCheckpoint::from_current(Some(oid.clone())).unwrap(),
+            WorkspaceHistoryCheckpoint::Oid(oid)
+        );
+        for malformed in [
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            "g123456789abcdef0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef0123456",
+        ] {
+            assert!(
+                WorkspaceHistoryCheckpoint::from_current(Some(malformed.into())).is_err(),
+                "accepted malformed checkpoint {malformed}"
+            );
+        }
     }
 }

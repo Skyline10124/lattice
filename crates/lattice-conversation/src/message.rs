@@ -130,6 +130,9 @@ pub trait ToolCallState:
     fn arguments(&self) -> &serde_json::Value;
     /// The provider-native call ID, when the provider supplied one.
     fn provider_call_id(&self) -> Option<&str>;
+    /// Drop the provider-native call ID (cross-provider projection only;
+    /// ADR 0005 §7). Every other field is untouched.
+    fn clear_provider_call_id(&mut self);
 }
 
 pub(crate) mod sealed {
@@ -250,6 +253,39 @@ impl<S: ToolCallState> NativeMessage<S> {
                 MessageSemantic::ToolCall { call } => Some((ordinal, call)),
                 _ => None,
             })
+    }
+}
+
+impl NativeMessage<crate::UnboundToolCall> {
+    /// Convert a complete zero-Tool message into the durable bound typestate.
+    pub fn bind_zero_tool(self) -> Result<NativeMessage<crate::BoundToolCall>, Self> {
+        if self.tool_calls().next().is_some() {
+            return Err(self);
+        }
+        let parts = self
+            .parts
+            .into_iter()
+            .map(|part| MessagePart {
+                semantic: match part.semantic {
+                    MessageSemantic::Text { text } => MessageSemantic::Text { text },
+                    MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
+                    MessageSemantic::ToolResult {
+                        invocation_id,
+                        name,
+                        outcome,
+                        content,
+                    } => MessageSemantic::ToolResult {
+                        invocation_id,
+                        name,
+                        outcome,
+                        content,
+                    },
+                    MessageSemantic::ToolCall { .. } => unreachable!("checked above"),
+                },
+                replay_state: part.replay_state,
+            })
+            .collect();
+        Ok(NativeMessage::new(self.role, self.provider_origin, parts))
     }
 }
 

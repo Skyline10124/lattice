@@ -248,6 +248,9 @@ fn collect_unique_commits(
 
     let mut entries = Vec::new();
     for oid in walk {
+        if super::pending::is_journal_commit(store, oid)? {
+            continue;
+        }
         let manifest_bytes = store.read_tree_blob(oid, "turn/manifest.json")?;
         let manifest = parse_manifest(&manifest_bytes)?;
         let messages_bytes = store.read_tree_blob(oid, "turn/messages.jsonl")?;

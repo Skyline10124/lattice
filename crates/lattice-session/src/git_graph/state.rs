@@ -30,7 +30,7 @@ use lattice_store::{RefExpectation, RefTxnEdit, StoreRepo, TreeSpec};
 /// Domain store kind recorded in `refs/lattice/meta`.
 pub(crate) const SESSION_STORE_KIND: &str = "session";
 /// Domain schema version of the session store contents.
-pub(crate) const SESSION_STORE_SCHEMA_VERSION: u32 = 1;
+pub(crate) const SESSION_STORE_SCHEMA_VERSION: u32 = 3;
 
 /// File inside a state commit's tree carrying the canonical JSON payload.
 pub(crate) const STATE_TREE_FILE: &str = "state.json";
@@ -58,13 +58,6 @@ pub(crate) fn heads_prefix(session_id: &str) -> Result<String> {
 /// invariant validation).
 pub(crate) fn sessions_prefix() -> &'static str {
     "refs/lattice/sessions/"
-}
-
-/// Candidate reachability pin (unchanged pre-#143 namespace).
-pub(crate) fn candidate_ref_name(session_id: &str, turn_id: &str) -> Result<String> {
-    validate_session_ref_id(session_id)?;
-    validate_turn_ref_id(turn_id)?;
-    Ok(format!("refs/lattice/candidates/{session_id}/{turn_id}"))
 }
 
 pub(crate) fn validate_session_ref_id(session_id: &str) -> Result<()> {

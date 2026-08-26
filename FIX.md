@@ -7346,6 +7346,344 @@ removed `benchmarks/invocation-store/results/**`, and updated
   `docs/adr/0005-durable-turn-invocation-and-private-git-stores.md`,
   `docs/plans/2026-08-17-issue139a-decision-record.md`, `FIX.md`.
 
+## GitHub #139-B Commit 6: production durable Turn and invocation hard cut — 2026-08-24
+
+- **ID/severity:** #139-B / CRITICAL architecture and durability cutover.
+- **Problem:** production Turn execution still crossed legacy unbound/numeric CEP identity,
+  mutable PendingTurn/legacy Turn dual authority, SQLite audit/evidence authority, and
+  status/disposition outcome projections. Crash recovery could not close every invocation
+  from one durable Git ledger without compatibility paths.
+- **Fix:** made caller-supplied `InvocationBinding` and typed `InvocationId` mandatory;
+  added strict server-side durable admission; moved live execution to the journal-backed
+  `TurnCoordinator` saga; persisted typed bound conversation messages and typed
+  `TurnOutcome`/`ClosureOrigin`/workspace checkpoints; published ResultDraft, terminal
+  material, and Cell evidence under one finite finalize budget; terminalized every skipped
+  binding and stopped live continuation after cancellation/deadline/indeterminate outcomes;
+  switched query/tail/replay/status and CLI surfaces to `invocations.git`; deleted SQLite
+  stores/dependencies, numeric audit identity, legacy outcome schema, and the product
+  `CepExecutorAdapter`; migrated black-box operator, privacy, failure, rewind, and release
+  harnesses. Review follow-ups added exact uncertain-draft revalidation, typed durability and
+  recovery errors, UTF-8-safe bounded errors, fail-closed journal timestamps, and deadline
+  enforcement while the provider stream is still opening.
+- **Verification:** `cargo fmt --all -- --check`; `git diff --check`;
+  `cargo check -p lancet-protocol -p lancet-dispatch -p lancet-audit -p lancet-runtime
+  -p lancet-native -p lancet-api -p lattice-session -p lattice-api -p lattice-cli
+  -p lattice-tui --all-targets`; package suites for the same crates; `cargo test -p
+  lattice-api` (98 unit tests plus all integrations, including Rewind 19/19);
+  `cargo xtask lancet-boundary`; `cargo xtask harness-boundary`; pinned-binary system
+  harnesses including `direct_failures` 8/8, `direct_secrets` 2/2, direct Tool/operator/
+  mutation/workspace-history/turn-contract targets, and release operator 1/1.
+- **Changed files:** protocol binding/evidence/error contracts; LANCET dispatch/runtime/native/
+  API and Git operator surfaces; lattice conversation/session/agent/API/CLI/TUI; system
+  harnesses; boundary gate; workspace manifests and lockfile; AGENTS.md; FIX.md.
+
+## GitHub #139-B Commit 7: delete legacy orchestration and outcome residue — 2026-08-24
+
+- **ID/severity:** #139-B / HIGH architecture cleanup.
+- **Problem:** after the production hard cut, test-facing direct Turn commit methods,
+  obsolete `GraphMessage` DTOs, duplicate AgentTurn event/status projections, and the
+  temporary legacy-symbol allowlist still preserved alternate vocabulary and could
+  obscure a future bypass of the PendingTurn-only production path.
+- **Fix:** deleted `GraphMessage`/`GraphToolCall`, routed coordinator/model/CEP events
+  directly as public `TurnEvent`, derived diagnostics from typed `TurnOutcome`, removed
+  the allowlist mechanism and made the legacy scan permanently zero-hit across every
+  Rust target under `crates/` and `tools/`. Removed direct commit methods/types from the
+  default `SessionGraphStore`/crate API; CAS fixture helpers now compile only under
+  `test-utils`, with gates rejecting direct, forwarded, or default-enabled test features
+  from production dependencies. Closed M-GH100-01 with explicit UUID TurnId/operator
+  isolation coverage and L-GH144-02 with the typed v4 manifest as sole authority.
+- **Verification:** `cargo fmt --all -- --check`; `git diff --check`; `cargo test -p
+  lattice-conversation`; `cargo test -p lattice-session`; `cargo test -p lattice-agent
+  --features test-utils`; focused sibling-Turn operator isolation; `cargo test -p
+  lattice-api`; `cargo test -p lattice-cli`; `cargo test -p lattice-tui`; `cargo test -p
+  xtask lancet_boundary`; default-feature `cargo check -p lattice-session
+  --no-default-features --lib` and `cargo check -p lattice-api --lib`; `cargo xtask
+  lancet-boundary`.
+- **Changed files:** conversation/session/agent/API contracts and fixtures; operator
+  regressions; permanent boundary gates; AGENTS/ARCHITECTURE/FINDINGS/FIX records.
+
+
+## GitHub #139-B Commit 8：端到端崩溃、Rewind、身份与隐私门禁 — 2026-08-23
+
+**Severity:** HIGH
+
+补齐生产 durable Turn/Rewind hard cut 的真实进程崩溃证明与边界回归。新增仅由
+`test-crash-barriers` feature启用的fsynced acknowledged barriers，覆盖
+`TurnStarted`、model attempt、binding/reservation/Bound、`DispatchStarted`、
+candidate/draft/terminal、每个多Tool cursor、`StepClosed`、`TurnClosing` final
+transaction，以及 Rewind 的 workspace-history、Session ref、success-audit 三个窗口。
+Provider请求与Tool执行使用位于workspace/XDG之外的append-only fsynced日志；每个case
+在SIGKILL前验证非零计数、typed `InvocationId`和精确durable stage，strict reopen后验证
+provider不重放、Tool不重派发、`active-turn`仅在完整closure后删除。
+
+崩溃矩阵发现并修复四个真实恢复缺口：Tool-bearing assistant未进入reconciled transcript；
+已有pinned candidate恢复时错误重发cursor-0 baseline；已有exact terminal被重复发布；
+`StepClosed`未持久化完整post-user transcript delta。`StepClosingState`现以required
+`messages`作为单一provider transcript authority，validator逐cursor校验assistant、
+ToolResult身份/outcome/content与material digest/length，live/reconcile/TurnClosing复用同一
+bytes。另修Rewind workspace barrier原先误放在Session ref移动之后，并使workspace
+checkpoint lock在Session repo写入前释放，避免双repo lock重叠。
+
+同时收紧身份/隐私：public Tool started/finished事件统一使用durable `InvocationId`；native
+admission错误不回吐store path/detail；operator DTO隐私测试改为真实shape gate；duplicate
+admission断言ledger tip不变；同parent sibling Turn operator隔离回归落地。
+
+**Verification:**
+
+- `cargo test -p lattice-session` — 132 passed。
+- `cargo test -p lancet-audit` — 56 unit + contract/qualification suites passed。
+- `cargo test -p lancet-native` — all targets passed。
+- `cargo test -p lattice-api` — 99 unit + integrations passed；`release_e2e` passed。
+- feature binary Turn SIGKILL matrix — 4/4 targets passed，含multi-Tool cursor-1/cursor-2。
+- feature binary Rewind SIGKILL matrix — 3/3 action-to-audit windows passed。
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` — passed。
+- `cargo fmt --all -- --check` / `git diff --check` — clean。
+
+**Changed areas:** `lattice-session::pending`, `lattice-api::turn`/Rewind,
+`lancet-native` admission, `lancet-audit` operator regressions, and
+`lattice-system-harness` crash/provider/effect fixtures.
+
+## GitHub #139-B Commit 9: production provider codec hard cut and ledger closeout — 2026-08-24
+
+**Severity:** HIGH
+
+**Problem:** The durable Turn/Invocation cutover was complete, but production provider
+adapters still encoded request messages independently, the Agent still retained a parallel
+response assembler, Gemini synthesized `tc_*` Tool-call IDs, and wire usage had a second
+`u32` authority. That left replay identity, ToolResult joining, malformed-batch rejection,
+and provider-switch behavior dependent on adapter-local conventions. Current architecture
+and onboarding documents also still described transitional SQLite/audit and direct-loop
+surfaces.
+
+**Fix:** `ChatRequest.messages` now carries `NativeMessage<BoundToolCall>` directly.
+All three production request builders call the single `request_messages_to_wire` projector;
+all SSE parsers accumulate the provider-complete response and publish one typed
+`MessageComplete` through `wire_to_native`; all usage goes through `wire_usage` into the
+single `lattice-conversation::TokenUsage { u64 }` vocabulary. Same-provider opaque replay
+state is byte-preserved, cross-provider projection intentionally drops provider IDs and
+reasoning, ToolResults join by durable `InvocationId`, and a missing provider call ID fails
+closed without synthesis. The legacy request DTOs, buffered `chat`/`ChatResponse` surface,
+Agent-side assembler, duplicate usage type, and Gemini `tc_*` generation were deleted.
+Malformed arguments/usage, conflicting stream fragments, duplicate terminal frames, and
+multi-chunk OpenAI/Gemini responses now have production-seam regressions. A source boundary
+test requires every shipped provider to use the shared request, response, and usage
+projectors.
+
+Final-gate review also closed adjacent correctness gaps without compatibility paths: public
+Session diff ancestry now excludes PendingTurn journal commits; observation and operator
+harnesses assert the typed Git-ledger/error envelopes; native finished events derive status
+from the exact result; Turn startup fails closed if the persisted SessionId or frozen LANCET
+policy cannot be represented. `L-GH139B-01` moved to CLOSED, while historical ADR/plan
+records remain historical rather than being rewritten.
+
+**Verification:**
+
+- `cargo test -p lattice-llm` — 81 unit + 34 official-wire projection tests passed.
+- `cargo test -p lattice-agent --features test-utils` — 12 unit + 5 streaming-seam
+  tests passed.
+- `cargo test -p lattice-session` — 132 passed.
+- `cargo test -p lattice-api` — 99 unit plus every integration, including 19 Rewind
+  acceptance cases, passed.
+- `LATTICE_BIN=$PWD/target/debug/lattice cargo test --workspace` — passed, including
+  the complete ordinary black-box system-harness matrix.
+- `env -u LATTICE_BIN cargo xtask ci` — passed: format, Clippy `-D warnings`, debug
+  binary, system/LANCET boundaries, generated Tool artifacts, all 27 workspace-member
+  suites, black-box scenarios, Component identities, and performance regression gates.
+- Final specification and security reviews: PASS, no blocking findings.
+
+**Changed areas:** `lattice-llm` provider projection/parsers/contracts,
+`lattice-agent::model_step`, Turn test fixtures and startup wiring, Session public ancestry,
+typed black-box harness assertions, `FINDINGS.md`, and this append-only record.
+
+## GitHub #157: bind Turn recovery to the authoritative Session project stores — 2026-08-25
+
+**Severity:** P0 / BLOCKER
+
+**Problem:** Turn startup derived project stores from the request workspace and reopened the
+layout-default `sessions.git` before proving that those handles matched the persisted Session and
+PendingTurn project binding. A wrong workspace, custom Session repository, or mismatched
+InvocationStore/WorkspaceHistory backing could therefore reach reconciliation through the wrong
+repository authority.
+
+**Fix:** `TurnStartedFacts` now persists a strict typed `ProjectStoreKey`; PendingTurn and Session
+store schemas hard-cut to v2 and strict-open rejects old or malformed development state. Turn
+startup holds the authoritative Session execution lock, reads the Session/PendingTurn binding from
+the injected Git store, compares the canonical request root before opening project stores, and
+passes the same key into `TurnCoordinator`. Runtime composition independently verifies canonical
+Local Workspace containment plus matching InvocationStore/WorkspaceHistory keys and StateLayout
+roots before provider, reservation, dispatch, mutation, or reconciliation work. No compatibility
+reader, import, fallback, dual write, or reverse crate dependency was added.
+
+**Verification:**
+
+- `cargo test -p lattice-session -p lancet-audit -p lancet-runtime -p lancet-api -p lattice-api`
+  passed: Session 134 tests, LANCET runtime/API/audit suites, lattice-api 104 unit tests and every
+  integration including 19 Rewind cases.
+- `cargo clippy -p lattice-session -p lancet-audit -p lancet-runtime -p lancet-api -p lattice-api --all-targets -- -D warnings` — passed.
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` — passed.
+- `cargo fmt --all -- --check` / `git diff --check` — clean.
+- `cargo tree` checks confirmed no `lancet-audit -> lattice-session`,
+  `lattice-session -> lancet-audit`, or `lancet-api ->` LATTICE-layer edge.
+
+**Changed areas:** `lattice-session` PendingTurn/session-store contracts, `lattice-api` Session and
+Turn startup/coordinator wiring, `lancet-api` runtime store validation, InvocationStore key
+exposure, and focused unit/integration fixtures.
+
+## GitHub #158: isolate CEP requests and preserve post-dispatch uncertainty — 2026-08-25
+
+**Severity:** P0 / BLOCKER
+
+**Problem:** CEP transport used durable `InvocationId` as cancellation/task correlation and mapped a
+lost response channel to one generic transport failure. A caller drop could therefore leave stale
+cancellation state for another request, while a worker panic after durable `DispatchStarted` was
+reported as deterministic failure even though the Tool may already have executed.
+
+**Fix:** Transport now gives every request a private pointer-identity key while retaining
+`InvocationId` exclusively as the domain binding/event/ledger identity. All completion, panic,
+shutdown, queue-drop, and cancellation paths clean up the exact request entry. Native admission
+marks the shared response phase only after `InvocationStore::admit_reserved` has durably published
+`DispatchStarted`; response loss before that boundary is `ExecutionFailed`, while loss afterward is
+typed `OutcomeIndeterminate` and the saga persists `Indeterminate(MayHaveOccurred)` without
+redispatching later bindings. Async and sync EventSink paths overwrite payload-provided identity
+with the host-bound invocation. Admission/store/JoinError messages are stable, bounded, path-free
+classifications. No unsafe post-dispatch abort or observer-backpressure scope expansion was added.
+
+**Verification:**
+
+- `cargo test -p lancet-dispatch -p lancet-native -p lancet-api -p lattice-api` — passed: dispatch
+  7 tests, native 49 unit plus all integrations, LANCET API 10, lattice-api 105 unit plus every
+  integration including 19 Rewind cases.
+- `cargo clippy -p lancet-protocol -p lancet-dispatch -p lancet-native -p lancet-api -p lattice-api --all-targets -- -D warnings` — passed.
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` — passed.
+- `cargo fmt --all -- --check` / `git diff --check` / LSP diagnostics — clean.
+
+**Changed areas:** `lancet-dispatch` request transport and EventSink, `lancet-native` admission/error
+mapping and recovery regressions, `lattice-api` saga indeterminate/batch-stop coverage, and current
+crate-local architecture guidance.
+
+## GitHub #159: preserve cumulative Turn recovery and authoritative workspace checkpoints — 2026-08-26
+
+**Severity:** P0 / BLOCKER
+
+**Problem:** PendingTurn snapshots retained only the current model step's transcript delta and the
+reconciled candidate substituted an empty workspace-history checkpoint. A crash after a Tool-bearing
+step could therefore lose bound provider replay state or prior ToolResults, and a post-mutation
+reopen could commit a Turn without the WorkspaceHistory OID that the Tool actually produced.
+Strict reopen also lacked a finite lineage bound and exact authentication for several same-stage,
+step-closing, and Turn-closing fields.
+
+**Fix:** Pending snapshot/session-store schema v3 carries one mandatory cumulative post-user
+transcript authority. Every journal edge derives and validates its exact transcript prefix; candidate
+revision usage, ContinueModel closures/digest, TurnClosing basis, and Committed candidate are
+authenticated exactly. Provider batches are bounded at 32 calls, frozen attempts at 11, and the
+complete PendingTurn lineage at 2,979 snapshots; reopen retains only bounded OID metadata and two
+adjacent full snapshots. Live and reopen share one candidate-basis derivation. The composition layer
+samples a canonical 40-lowercase-SHA-1 WorkspaceHistory checkpoint while holding the shared
+WorkspaceOperationLock through TurnClosing and final Session publication. Strict Session
+constructors serialize cross-ref validation with repository writers, finalized manifests validate
+the same checkpoint shape, and usage aggregation saturates rather than wrapping. No compatibility
+reader, placeholder reconstruction, reverse dependency, or second transcript authority was added.
+
+**Verification:**
+
+- `cargo test -p lattice-conversation` — 32 passed.
+- `cargo test -p lattice-llm` — 81 unit + 34 provider-projection tests passed.
+- `cargo test -p lattice-session` — 152 passed, including strict lineage, edge-authentication,
+  constructor-lock, malformed-manifest, saturation, exact-retry, and cumulative-transcript cases.
+- `cargo test -p lattice-api` — run twice; each run passed 107 unit tests and every integration,
+  including all 19 Rewind acceptance cases.
+- `cargo clippy -p lattice-store -p lattice-conversation -p lattice-session -p lattice-api -p lancet-audit --all-targets -- -D warnings` — passed.
+- `cargo clippy -p lattice-system-harness --all-targets --features crash-barriers -- -D warnings` — passed.
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` — passed.
+- Worktree-local feature binary plus `direct_crash_barriers` — 7 real SIGSTOP/SIGKILL/reopen cases
+  passed, including next-model-attempt transcript recovery and both pre-/post-TurnClosing mutation
+  checkpoint windows without provider replay or Tool redispatch.
+- Final `gpt-5.6-sol:xhigh` risk re-review: PASS.
+- `cargo fmt --all -- --check` / `git diff --check` / LSP diagnostics — clean.
+
+**Changed areas:** `lattice-conversation` Tool batch contract, `lattice-session` PendingTurn
+contracts/store/strict-open validation, `lattice-api` live/reopen checkpoint composition, real crash
+barriers, focused durable corruption regressions, crate guidance, and this append-only record.
+
+## GitHub #160: make Rewind placement, locking, partial state, and crash recovery exact — 2026-08-26
+
+**Severity:** P0 / BLOCKER
+
+**Problem:** Rewind still parsed WorkspaceHistory ownership through the retired
+`<session>:<parent>` convention and fell back to timestamps, planned before acquiring the
+workspace operation lock, accepted a constructible unbound lock marker, filtered a globally bounded
+audit page after the bound, conflated target and actual durable refs in partial errors, accepted
+non-first-parent private chains, and wrote crash acknowledgements directly to the final path.
+Repeated execution after the post-audit crash window could append a duplicate audit record.
+
+**Fix:** Workspace mutation/audit records now carry typed `TurnId`/`SessionId`; history schema v3
+requires unique canonical trailers and strict single-parent structure. Full-unwind placement uses
+only the selected Session's typed lineage. Rewind acquires one opaque, exact-backing, exclusive
+`HeldWorkspaceOperation` before any plan or preflight and retains it through audit publication.
+Audit records use bounded completeness-aware per-Session first-parent refs, so foreign Sessions
+cannot displace records. Typed partial state separates attempted history target from fresh actual
+WorkspaceHistory, Session-head, and audit observations, and CLI JSON/text renders the complete
+contract. Exact completed retries replay a strictly validated success without restore, pin, ref
+movement, or audit append; a Session-moved/pre-audit crash appends one missing close record.
+Feature crash acknowledgements use same-directory unique temp files, complete write + file fsync,
+Linux `renameat2(RENAME_NOREPLACE)`, and parent-directory fsync before SIGSTOP.
+
+**Verification:**
+
+- `cargo test -p lancet-runtime` — 243 tests passed across all targets.
+- `cargo test -p lancet-api` — 10 tests passed.
+- `cargo test -p lattice-session` — 152 passed.
+- `cargo test -p lattice-api` — 109 unit tests plus every integration passed; Rewind acceptance
+  passed 32/32, including typed placement, token mismatch, partial-state, corruption, and exact-retry
+  regressions.
+- `cargo test -p lattice-cli` — 132 unit and 4 integration tests passed.
+- Worktree-local crash-feature binary plus `direct_rewind_crash_barriers` passed the real
+  workspace-applied, Session-moved, and audit-appended SIGSTOP/SIGKILL/retry windows; provider
+  requests stayed 4, Tool effects stayed 2, each audit page held exactly one success, and an armed
+  completed retry created no append acknowledgement.
+- Clippy with `-D warnings` passed for all affected crates under default and crash-barrier features.
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` passed; dependency inspection
+  preserved the layer graph and the no-two-repository-lock contract.
+- Final `gpt-5.6-sol:xhigh` read-only risk review: PASS.
+- `cargo fmt --all -- --check`, `git diff --check`, and primary LSP diagnostics were clean.
+
+**Changed areas:** WorkspaceHistory typed records/strict traversal, Rewind audit topology/schema,
+opaque operation-lock authority, product Rewind coordinator/partial/retry paths, CLI rendering,
+production-binary crash harness, current AGENTS guidance, and this append-only record.
+
+## GitHub #160 follow-up: restore full-CI wall-time margin without weakening coverage — 2026-08-26
+
+**Severity:** P0 / BLOCKER (acceptance infrastructure)
+
+**Problem:** The first combined P0 `cargo xtask ci` run exposed two wall-time failures. Twelve
+new #160 contracts had been expressed as separate full-runtime Rewind scenarios, making the Rewind
+target take 264 seconds and the complete `lattice-api` package exceed the fixed 300-second per-crate
+CI ceiling. The 18-call observation black-box scenario also took 29.80 seconds under a 30-second
+per-step budget, so normal four-way CI contention exhausted its margin.
+
+**Fix:** Pure lock-token, completed-replay corruption, typed placement, and partial-state contracts
+moved into fast crate-local test modules at their owning seams. Related product assertions remain in
+20 shared full-runtime Rewind scenarios, including the real audit-failure, unrelated-prior-Rewind,
+partial-state, lock-lifetime, and action-to-audit paths; no assertion was ignored or deleted without
+equivalent lower-level coverage. The observation scenario alone now has a 60-second step budget,
+with the 180-second total and every global harness/xtask timeout unchanged.
+
+**Verification:**
+
+- Timed `cargo test -p lattice-api` — 137.86 seconds, down from over 300 seconds; 112 unit tests
+  plus every integration passed. Rewind acceptance passed 20/20 in 20.76 seconds.
+- `direct_observation_visibility_and_bounds` — passed in 30.18 seconds under the scenario-local
+  60-second step budget; all 18 Tool calls and 19 provider captures remain asserted.
+- `cargo clippy -p lancet-api -p lattice-api -p lattice-system-harness --all-targets --
+  -D warnings`, formatting, diff checks, and primary LSP diagnostics — clean.
+- `env -u LATTICE_BIN cargo xtask ci` — passed from the final combined P0 tree: format, Clippy,
+  branch-local debug binary, both structural boundaries, generated Tool artifacts, 27-crate
+  four-way test matrix under the unchanged 300-second ceiling, black-box harness, Component
+  identities, and performance-regression gates.
+
+**Changed files:** `crates/lancet-api/src/rewind.rs`, `crates/lattice-api/src/rewind.rs`,
+`crates/lattice-api/tests/rewind_acceptance.rs`,
+`crates/lattice-system-harness/tests/direct_observation.rs`, and `FIX.md`.
 ## 2026-08-26 — GitHub #156 TUI mock backend and deterministic visual fixture
 
 - **ID/severity:** GitHub #156 / developer-experience enhancement.

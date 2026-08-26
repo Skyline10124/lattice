@@ -29,5 +29,4 @@ lancet-catalog = { workspace = true }
 # `test-utils` exposes `ComponentRuntime::noop_fixture()` for Component
 # lifecycle tests.
 lancet-runtime = { workspace = true, features = ["test-utils"] }
-rusqlite = { workspace = true }
 tempfile = { workspace = true }

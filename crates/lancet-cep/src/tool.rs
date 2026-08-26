@@ -9,6 +9,10 @@ use std::fmt;
 
 use lancet_catalog::{BaseAuthorityRequirement, MethodDescriptor, catalog};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Domain separator for native MethodDescriptor identity digests.
+const NATIVE_DESCRIPTOR_DOMAIN: &[u8] = b"lancet-native-descriptor-identity-v1\0";
 
 /// A CEP method projected as an LLM-facing tool definition.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -17,6 +21,12 @@ pub struct ToolDefinition {
     pub description: String,
     /// JSON schema for the tool parameters.
     pub parameters: serde_json::Value,
+    /// Stable descriptor identity (lowercase SHA-256 hex).
+    ///
+    /// Native methods digest the canonical MethodDescriptor bytes; Component
+    /// Tools carry the host-pinned `descriptor_sha256` of the embedded
+    /// descriptor JSON. Never a placeholder.
+    pub descriptor_identity: String,
 }
 
 impl ToolDefinition {
@@ -24,13 +34,47 @@ impl ToolDefinition {
         name: impl Into<String>,
         description: impl Into<String>,
         parameters: serde_json::Value,
+        descriptor_identity: impl Into<String>,
     ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
             parameters,
+            descriptor_identity: descriptor_identity.into(),
         }
     }
+}
+
+/// Digest hex of the canonical native MethodDescriptor bytes.
+pub fn native_descriptor_identity(descriptor: &MethodDescriptor) -> String {
+    let params = (descriptor.params_schema)();
+    let payload = serde_json::json!({
+        "name": descriptor.name,
+        "description": descriptor.description,
+        "impact": descriptor.impact,
+        "capability": descriptor.capability,
+        "effect": descriptor.effect,
+        "base_authority": {
+            "session_state": descriptor.base_authority.session_state,
+            "fetch_hosts": descriptor.base_authority.fetch_hosts,
+            "read_audit": descriptor.base_authority.read_audit,
+        },
+        "params_schema": params,
+    });
+    let canonical = lancet_protocol::canonical_json(&payload);
+    let mut hasher = Sha256::new();
+    hasher.update(NATIVE_DESCRIPTOR_DOMAIN);
+    hasher.update((canonical.len() as u64).to_be_bytes());
+    hasher.update(canonical.as_bytes());
+    hex_digest(hasher.finalize().into())
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 /// Catalog method exposure resolved for a turn or embedding.
@@ -72,6 +116,7 @@ impl ToolExposure {
                     descriptor.name,
                     descriptor.description,
                     (descriptor.params_schema)(),
+                    native_descriptor_identity(descriptor),
                 ));
             }
         }
@@ -102,7 +147,7 @@ impl ToolExposure {
         let definitions = inventory
             .iter()
             .filter(|d| requested.contains(&d.name))
-            .map(|d| ToolDefinition::new(&d.name, &d.description, d.parameters.clone()))
+            .cloned()
             .collect();
 
         Ok(Self {
@@ -122,24 +167,24 @@ impl ToolExposure {
         self.enabled_names.contains(name)
     }
 
-    /// Catalog-derived tool definitions filtered to the enabled set.
+    /// Agent-visible tool definitions for the enabled set.
     pub fn definitions(&self) -> &[ToolDefinition] {
         &self.definitions
     }
 
-    /// Union of base authority requirements declared by enabled catalog methods.
+    /// Base-envelope authority required by the enabled set.
     pub fn base_authority(&self) -> BaseAuthorityRequirement {
         self.base_authority
     }
 
-    /// Consume the exposure into its filtered tool definitions.
+    /// Consume into owned definitions.
     pub fn into_definitions(self) -> Vec<ToolDefinition> {
         self.definitions
     }
 }
 
-/// Enabled method names absent from the catalog inventory.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Unknown enabled-tool names against a known inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExposureError {
     pub unknown: Vec<String>,
     pub available: Vec<String>,
@@ -166,6 +211,7 @@ pub fn project_tool_definitions(catalog: &[MethodDescriptor]) -> Vec<ToolDefinit
                 descriptor.name,
                 descriptor.description,
                 (descriptor.params_schema)(),
+                native_descriptor_identity(descriptor),
             )
         })
         .collect()
@@ -196,10 +242,30 @@ mod tests {
             "observe.workspace",
             "Observe workspace",
             serde_json::json!({"type": "object"}),
+            "a".repeat(64),
         );
         let json = serde_json::to_string(&tool).unwrap();
         let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(tool, deserialized);
+    }
+
+    #[test]
+    fn native_descriptor_identity_is_stable_hex() {
+        let projected = project_tool_definitions(catalog());
+        assert!(!projected.is_empty());
+        for tool in &projected {
+            assert_eq!(tool.descriptor_identity.len(), 64);
+            assert!(
+                tool.descriptor_identity
+                    .chars()
+                    .all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+                "identity must be lowercase hex: {}",
+                tool.descriptor_identity
+            );
+        }
+        // Reprojection is byte-identical.
+        let again = project_tool_definitions(catalog());
+        assert_eq!(projected, again);
     }
 
     #[test]
@@ -236,11 +302,7 @@ mod tests {
         assert_eq!(exposure.definitions()[0].name, "fetch.web");
     }
 
-    /// A migrated method is not resolvable through the *catalog* exposure.
-    ///
-    /// Its LLM projection comes from the Component's descriptor instead
-    /// (`lancet_api::LancetRuntime::build` unions the two), so resolving it here
-    /// would mean two projections of one Tool with nothing keeping them in step.
+    /// Migrated Component Tools do not resolve through the native catalog.
     #[test]
     fn migrated_component_tools_do_not_resolve_through_the_catalog() {
         for migrated in [
@@ -257,8 +319,6 @@ mod tests {
 
     #[test]
     fn catalog_exposure_collects_base_authority_from_descriptors() {
-        // All other built-ins are Components, so the native catalog contributes
-        // only the `fetch.web` base-authority requirement.
         let exposure = ToolExposure::from_catalog_enabled(&["fetch.web".to_string()])
             .expect("known tool resolves");
         let authority = exposure.base_authority();
@@ -273,6 +333,7 @@ mod tests {
             "custom.tool",
             "Custom tool",
             serde_json::json!({"type": "object"}),
+            "a".repeat(64),
         )];
         let exposure =
             ToolExposure::resolve(&["custom.tool".to_string()], &inventory).expect("tool resolves");

@@ -22,18 +22,17 @@ mod support;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-use lancet_api::{
-    AuditBacking, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory, WorkspaceHistoryBacking,
-};
+use lancet_api::{LancetRuntimeConfig, WorkspaceHistory, WorkspaceHistoryBacking};
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
 use lancet_catalog::catalog;
 use lancet_protocol::CepErrorCode;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_api::{RunTurnRequest, RunTurnStatus, SessionApi};
+use lattice_api::{RunTurnRequest, SessionApi};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::StateLayout;
+use support::ReservedRuntime;
 use tempfile::TempDir;
 
 /// The embedded Component Tools of the default distribution. Literals, not
@@ -52,7 +51,7 @@ const COMPONENT_TOOLS: [&str; 4] = [
 /// A runtime rooted at a temp Local Workspace with its private history in a
 /// separate temp directory, so "outside the Local Workspace" is structural.
 struct HistoryRuntime {
-    runtime: LancetRuntime,
+    runtime: ReservedRuntime,
     root: TempDir,
     /// Held so the private history repository outlives the runtime.
     _state: TempDir,
@@ -92,7 +91,7 @@ fn history_backing(state_root: &Path, workspace_root: &Path) -> WorkspaceHistory
     backing
 }
 
-fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntime {
+fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRuntime {
     let mut policy = PolicyConfig::defaults_for_project_root(root.to_path_buf());
     policy.workspace = WorkspacePolicy {
         denied_write_patterns: Vec::new(),
@@ -106,12 +105,12 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntim
     // that used to arrive with the catalog.
     let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
     enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
-    LancetRuntime::build(LancetRuntimeConfig {
-        project_root: root.to_path_buf(),
+    ReservedRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: root.to_path_buf(),
+        invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        audit: AuditBacking::InMemory,
         // `enabled_tools` is the stage-1 capability grant, and Cell admission is
         // fail-closed: an omitted name here is a Tool the runtime exposes and
         // then refuses.
@@ -121,8 +120,6 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> LancetRuntim
             max_boundary: lancet_protocol::cell::Trust::In,
         },
         workspace_history: history.clone(),
-        model_id: "test".into(),
-        runtime_version: "test".into(),
     })
     .expect("runtime with private history builds")
 }
@@ -132,7 +129,7 @@ fn content_hash(bytes: &[u8]) -> String {
 }
 
 async fn create_file(
-    runtime: &LancetRuntime,
+    runtime: &ReservedRuntime,
     path: &str,
     content: &str,
 ) -> Result<(), CepErrorCode> {
@@ -148,7 +145,7 @@ async fn create_file(
 }
 
 async fn replace_text(
-    runtime: &LancetRuntime,
+    runtime: &ReservedRuntime,
     path: &str,
     expected_hash: &str,
     old: &str,
@@ -342,8 +339,9 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         denied_write_patterns: vec!["README.md".into()],
         ..Default::default()
     };
-    let denied_runtime = LancetRuntime::build(LancetRuntimeConfig {
-        project_root: denied_root.path().to_path_buf(),
+    let denied_runtime = ReservedRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: denied_root.path().to_path_buf(),
+        invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: catalog()
             .iter()
             .map(|d| d.name.to_string())
@@ -351,7 +349,6 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
             .collect(),
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        audit: AuditBacking::InMemory,
         // Admit mutate.create so Cell admission is not the denier — the write
         // Guard is (#31).
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
@@ -359,8 +356,6 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
             ..Default::default()
         },
         workspace_history: history_backing(denied_state.path(), denied_root.path()),
-        model_id: "test".into(),
-        runtime_version: "test".into(),
     })
     .expect("denied runtime builds");
     let denial = create_file(&denied_runtime, "README.md", "nope\n")
@@ -387,8 +382,9 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         denied_write_patterns: Vec::new(),
         ..Default::default()
     };
-    let effect_runtime = LancetRuntime::build(LancetRuntimeConfig {
-        project_root: effect_root.path().to_path_buf(),
+    let effect_runtime = ReservedRuntime::build(LancetRuntimeConfig {
+        local_workspace_root: effect_root.path().to_path_buf(),
+        invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: catalog()
             .iter()
             .map(|d| d.name.to_string())
@@ -396,15 +392,12 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
             .collect(),
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        audit: AuditBacking::InMemory,
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
             enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
             denied_capabilities: std::iter::once("workspace.mutation".to_string()).collect(),
             max_boundary: lancet_protocol::cell::Trust::In,
         },
         workspace_history: history_backing(effect_state.path(), effect_root.path()),
-        model_id: "test".into(),
-        runtime_version: "test".into(),
     })
     .expect("effect-deny runtime builds");
     create_file(&effect_runtime, "denied.txt", "nope\n")
@@ -866,14 +859,15 @@ fn usage() -> TokenUsage {
 fn tool_call(id: &str, name: &str, args: serde_json::Value) -> Vec<LlmEvent> {
     vec![
         LlmEvent::ToolCallStart {
-            id: id.into(),
+            index: 0,
+            provider_call_id: Some(id.into()),
             name: name.into(),
         },
         LlmEvent::ToolCallDelta {
-            id: id.into(),
+            index: 0,
             arguments_delta: args.to_string(),
         },
-        LlmEvent::ToolCallEnd { id: id.into() },
+        LlmEvent::ToolCallEnd { index: 0 },
         LlmEvent::Done {
             finish_reason: "tool_calls".into(),
             usage: Some(usage()),
@@ -908,7 +902,6 @@ fn turn_request(
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
         // Take the durable path: an external audit store and a real private
         // workspace history, both under the scoped state root.
-        test_persist_audit: Some(false),
     }
 }
 
@@ -917,12 +910,15 @@ fn test_state_layout() -> StateLayout {
     StateLayout::in_state_root(Path::new(&state_root))
 }
 
-fn open_session_store(sessions: &Path) -> SessionApi {
-    SessionApi::git_open_with_layout(sessions, &test_state_layout()).expect("open session store")
+fn open_session_store(_sessions: &Path) -> SessionApi {
+    let layout = test_state_layout();
+    SessionApi::git_open_with_layout(layout.lattice_root().join("sessions.git"), &layout)
+        .expect("open session store")
 }
 
-fn new_session(sessions: &Path, project_root: &Path) -> String {
-    SessionApi::git_create_with_layout(sessions, &test_state_layout())
+fn new_session(_sessions: &Path, project_root: &Path) -> String {
+    let layout = test_state_layout();
+    SessionApi::git_create_with_layout(layout.lattice_root().join("sessions.git"), &layout)
         .expect("create session store")
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
@@ -980,7 +976,10 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
     )
     .await
     .expect("turn 1 runs");
-    assert_eq!(first.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        first.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
 
     let history = history_for(scoped.path(), &ws.root);
     let recorded = history
@@ -994,7 +993,7 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
         .expect("get turn commit")
         .expect("turn 1 commit exists");
     assert_eq!(
-        commit.workspace_history_oid.as_deref(),
+        commit.workspace_history_checkpoint.as_oid(),
         Some(recorded.as_str()),
         "the completed TurnCommit must record the object id the Turn arrived at"
     );
@@ -1011,14 +1010,17 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
     )
     .await
     .expect("turn 2 runs");
-    assert_eq!(second.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        second.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
 
     let second_commit = open_session_store(&sessions)
         .get_turn_commit(&session_id, &second.commit_id)
         .expect("get turn 2 commit")
         .expect("turn 2 commit exists");
     assert_eq!(
-        second_commit.workspace_history_oid.as_deref(),
+        second_commit.workspace_history_checkpoint.as_oid(),
         Some(recorded.as_str()),
         "a Turn with no mutation records the inherited current identity"
     );
@@ -1044,7 +1046,7 @@ async fn turn_commits_record_the_history_identity_and_survive_reopen() {
             .expect("get after branch movement")
             .unwrap_or_else(|| panic!("{label} turn must stay resolvable"));
         assert_eq!(
-            found.workspace_history_oid.as_deref(),
+            found.workspace_history_checkpoint.as_oid(),
             Some(recorded.as_str()),
             "{label} turn must resolve to its workspace history after branch movement"
         );
@@ -1123,7 +1125,8 @@ async fn turn_whose_mutation_fails_before_install_records_no_history_identity() 
         .expect("get turn commit")
         .expect("turn is committed");
     assert_eq!(
-        commit.workspace_history_oid, None,
+        commit.workspace_history_checkpoint.as_oid(),
+        None,
         "a Turn that installed nothing has no history identity to inherit"
     );
 }
@@ -1178,9 +1181,8 @@ async fn multi_mutation_turn_records_order_and_survives_a_failed_turn() {
     )
     .await
     .expect("turn completes with a terminal status");
-    assert_eq!(
-        result.status,
-        RunTurnStatus::Error,
+    assert!(
+        matches!(result.outcome, lattice_session::TurnOutcome::Failed { .. }),
         "the Turn must end in failure for this acceptance case"
     );
 
@@ -1212,7 +1214,7 @@ async fn multi_mutation_turn_records_order_and_survives_a_failed_turn() {
         .expect("get turn commit")
         .expect("failed turn is still committed");
     assert_eq!(
-        commit.workspace_history_oid.as_deref(),
+        commit.workspace_history_checkpoint.as_oid(),
         Some(tip.as_str()),
         "a Turn that failed after installing still records the history it reached"
     );

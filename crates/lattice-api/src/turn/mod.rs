@@ -3,19 +3,24 @@
 
 //! Turn execution and streaming API.
 //!
-//! [`stream_turn`] is the single production execution core: it runs the agent
-//! loop live, emits public [`TurnEvent`] values through a bounded channel, and
-//! commits exactly one turn. [`run_turn`] is a synchronous facade that drains
-//! the same live stream via [`collector::RunTurnCollector`] and returns
-//! [`RunTurnResult`].
+//! [`stream_turn`] is the single production execution core: `TurnCoordinator`
+//! drives the durable saga, emits public [`TurnEvent`] values through a bounded
+//! channel, and finalizes exactly one typed Turn. [`run_turn`] drains that same
+//! stream via [`collector::RunTurnCollector`] into [`RunTurnResult`].
 
 mod cep;
 mod collector;
+mod coordinator;
+#[cfg(feature = "test-crash-barriers")]
+mod crash_barrier;
 mod execute;
-pub mod lifecycle;
+mod finalize;
+mod invocation_facts;
 mod live;
 mod llm;
 mod mapping;
+mod observer;
+mod saga;
 mod types;
 
 #[cfg(test)]
@@ -38,14 +43,10 @@ mod live_tests;
 
 pub use collector::collect_turn_result_from_events;
 pub use execute::{STREAM_IDLE_TIMEOUT_SECS, run_turn, stream_turn};
-pub use lifecycle::{
-    LifecycleFailureKind, ResourceAction, TurnLifecycleOutcome, UnfinalizedTurn,
-    classify_lifecycle_failure, finalize_turn, outcome_workspace_less,
-};
 pub use types::{
-    RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,
-    TurnEventStream, TurnUsageSummary,
+    RunTurnRequest, RunTurnResult, RunTurnStage, ToolResultSummary, TurnEvent, TurnEventStream,
+    TurnUsageSummary,
 };
 
 #[doc(hidden)]
-pub use cep::CepExecutorAdapter;
+pub use cep::{CepErrorPayload, ToolExecutionError};

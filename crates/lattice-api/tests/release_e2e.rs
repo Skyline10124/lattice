@@ -14,11 +14,10 @@ mod support;
 
 use std::sync::Arc;
 
-use lancet_api::audit_db_path_for_project_in;
-use lancet_native::{AuditQueryFilters, CepAuditStore};
+use lancet_api::{AuditRequest, query_audit};
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_api::{RunTurnRequest, RunTurnStatus};
+use lattice_api::RunTurnRequest;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{GitSessionGraphStore, SessionGraphStore, StateLayout};
@@ -29,14 +28,23 @@ fn store_key_hex(root: &std::path::Path) -> String {
         .store_key_hex()
 }
 
-fn create_session_store(path: &std::path::Path) -> lattice_api::SessionApi {
-    let layout = StateLayout::resolve().expect("resolve scoped test state layout");
-    lattice_api::SessionApi::git_create_with_layout(path, &layout).expect("create session store")
+fn sessions_path() -> std::path::PathBuf {
+    StateLayout::resolve()
+        .expect("resolve scoped test state layout")
+        .lattice_root()
+        .join("sessions.git")
 }
 
-fn open_session_store(path: &std::path::Path) -> lattice_api::SessionApi {
+fn create_session_store() -> lattice_api::SessionApi {
     let layout = StateLayout::resolve().expect("resolve scoped test state layout");
-    lattice_api::SessionApi::git_open_with_layout(path, &layout).expect("open session store")
+    lattice_api::SessionApi::git_create_with_layout(sessions_path(), &layout)
+        .expect("create session store")
+}
+
+fn open_session_store() -> lattice_api::SessionApi {
+    let layout = StateLayout::resolve().expect("resolve scoped test state layout");
+    lattice_api::SessionApi::git_open_with_layout(sessions_path(), &layout)
+        .expect("open session store")
 }
 
 // ── Streaming event helpers ──────────────────────────────────────────────────
@@ -52,14 +60,15 @@ fn usage_tokens() -> TokenUsage {
 fn tool_call_events(id: &str, name: &str, args: &str) -> Vec<LlmEvent> {
     vec![
         LlmEvent::ToolCallStart {
-            id: id.to_string(),
+            index: 0,
+            provider_call_id: Some(id.to_string()),
             name: name.to_string(),
         },
         LlmEvent::ToolCallDelta {
-            id: id.to_string(),
+            index: 0,
             arguments_delta: args.to_string(),
         },
-        LlmEvent::ToolCallEnd { id: id.to_string() },
+        LlmEvent::ToolCallEnd { index: 0 },
         LlmEvent::Done {
             finish_reason: "tool_calls".to_string(),
             usage: Some(usage_tokens()),
@@ -159,7 +168,6 @@ fn make_release_e2e_request(
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
         // Persist audit to disk so the finalized operator rows remain available
         // after run_turn.
-        test_persist_audit: Some(false),
     }
 }
 
@@ -262,9 +270,7 @@ async fn release_e2e_criterion_8() {
 
     // ── Execute the single turn ──────────────────────────────────────────
     let target = create_unattached_target_branch(&ws.root, "lattice-target-release");
-    let session_dir = tempfile::tempdir().unwrap();
-    let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_session_store(&sessions_path)
+    let session_id = create_session_store()
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
@@ -275,7 +281,7 @@ async fn release_e2e_criterion_8() {
         .session_id;
 
     let result = lattice_api::run_turn(
-        open_session_store(&sessions_path),
+        open_session_store(),
         make_release_e2e_request(
             &ws,
             "Run release criterion-8 sequence",
@@ -287,9 +293,11 @@ async fn release_e2e_criterion_8() {
     .expect("run_turn must succeed");
 
     // ── 1. Turn completed successfully ───────────────────────────────────
-    assert_eq!(
-        result.status,
-        RunTurnStatus::Completed,
+    assert!(
+        matches!(
+            result.outcome,
+            lattice_session::TurnOutcome::Completed { .. }
+        ),
         "turn must complete; output: {}",
         result.assistant_output
     );
@@ -303,57 +311,45 @@ async fn release_e2e_criterion_8() {
     // Verified via mutate.edit tool outcomes in section 6 below.
 
     // ── 3. Session has exactly one commit ────────────────────────────────
-    let store = GitSessionGraphStore::open(&sessions_path).expect("open session store");
+    let store = GitSessionGraphStore::open(sessions_path()).expect("open session store");
     let log = store
         .log(&result.session_id)
         .expect("session log must be readable");
     assert_eq!(log.len(), 1, "session must have exactly one commit");
 
-    // ── 4. Finalized audit rows: ordered Component calls ─────────────────
-    //
-    // The audit DB was persisted to disk (test_persist_audit: Some(false)).
-    let audit_path =
-        audit_db_path_for_project_in(ws._state.path(), &ws.canonical_root).expect("audit path");
+    // ── 4. Authoritative invocation ledger: ordered Component calls ─────────
+    let mut audit_request = AuditRequest::new(&ws.canonical_root);
+    audit_request.session_id = Some(result.session_id.clone());
+    let audit = query_audit(audit_request)
+        .await
+        .expect("query invocation ledger");
+    let rows = audit.rows;
+    let turn_id = rows
+        .first()
+        .map(|row| row.record.binding.turn_id)
+        .expect("at least one invocation row");
     assert!(
-        audit_path.exists(),
-        "on-disk audit DB must exist at {audit_path:?}"
+        rows.iter().all(|row| row.record.binding.turn_id == turn_id),
+        "all invocations from one production Turn share one typed TurnId"
     );
-    let audit = CepAuditStore::open(&audit_path).expect("open on-disk audit DB");
+    assert!(rows.len() >= 2, "must have at least two invocation rows");
 
-    let turn_id = format!("{}:root", result.session_id);
-    let rows = audit
-        .query_rows(&AuditQueryFilters {
-            turn_id: Some(turn_id.clone()),
-            ..Default::default()
-        })
-        .expect("query audit rows");
-
-    assert!(
-        rows.len() >= 2,
-        "must have at least 2 audit rows (2x edit); got: {}",
-        rows.len()
-    );
-
-    // Audit rows are returned in audit_id order (insertion order).
-    let methods: Vec<&str> = rows.iter().map(|r| r.method.as_str()).collect();
+    let methods: Vec<&str> = rows
+        .iter()
+        .map(|row| row.record.binding.method.as_str())
+        .collect();
     let edit_positions: Vec<usize> = methods
         .iter()
         .enumerate()
-        .filter(|&(_, &m)| m == "mutate.edit")
-        .map(|(i, _)| i)
+        .filter(|&(_, &method)| method == "mutate.edit")
+        .map(|(index, _)| index)
         .collect();
-
     assert_eq!(
         edit_positions.len(),
         2,
-        "must have exactly 2 mutate.edit audit rows; got {}: {methods:?}",
-        edit_positions.len()
+        "must have exactly two mutate.edit invocations: {methods:?}"
     );
-    assert!(
-        edit_positions[0] < edit_positions[1],
-        "first edit must precede second edit in audit; order: {methods:?}"
-    );
-
+    assert!(edit_positions[0] < edit_positions[1]);
     // ── 5. Tool results: both edits succeed without profile verify ─
     let edit_results: Vec<_> = result
         .tool_results

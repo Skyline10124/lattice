@@ -13,15 +13,8 @@
 //! is the predecessor snapshot; the `TurnStarted` snapshot's parent is the
 //! frozen parent conversation tip, grafting the chain onto the conversation
 //! graph at acceptance. Stage progression is one CAS per snapshot after
-//! pure [`validate_transition`]. `Committed` is constructed with the pinned
-//! TurnCommit candidate and published only by the final ref transaction,
-//! together with the branch/`state` advance and the `active-turn` deletion —
-//! so the journal chain stays reachable through `turns/<TurnId>` ->
-//! TurnCommit -> Committed -> predecessor after `active-turn` disappears.
-//!
-//! Locking: every journal publication holds the session execution lock and
-//! then the repository write lock, in that order (ADR 0005 §5). Reads pin
-//! the `active-turn` OID and read immutable objects without a lock.
+//! complete edge authentication. `Committed` is constructed with the pinned
+//! TurnCommit candidate and published only by the final ref transaction.
 
 use std::collections::BTreeSet;
 
@@ -34,8 +27,8 @@ use lancet_protocol::InvocationId;
 use super::GitSessionGraphStore;
 use super::commit::turn_commit_from_manifest_and_oid;
 use super::helpers::{
-    build_agent_json, build_audit_json, build_root_tree, build_turn_tree, messages_to_jsonl,
-    parse_oid, serialize_manifest,
+    build_agent_json, build_root_tree, build_turn_tree, messages_to_jsonl, parse_oid,
+    serialize_manifest,
 };
 use super::session::resolve_head_oid;
 use super::state::{self, SessionHead};
@@ -43,18 +36,30 @@ use super::validation;
 use crate::graph::prepare_turn_commit;
 use crate::pending::contract::{
     CommittedFacts, PENDING_SNAPSHOT_SCHEMA_VERSION, PendingSnapshot, PendingStage,
-    TurnClosingFacts, TurnCommitCandidate, validate_transition,
+    TurnClosingFacts, TurnCommitCandidate, is_candidate_revision_of, next_post_user_transcript,
+    validate_snapshot_transition,
 };
 use crate::pending::draft::{DraftClassification, DraftPublication, ResultDraft};
-use crate::pending::{BindingPlan, CandidateRevisionRequest, TurnStartedFacts};
+use crate::pending::{
+    BindingPlan, CandidateRevisionRequest, MAX_MODEL_ATTEMPTS, MAX_MODEL_STEPS, TurnStartedFacts,
+};
 use crate::{Result, SessionError};
 
 /// File inside a journal snapshot commit's tree carrying the payload.
 pub(crate) const PENDING_TREE_FILE: &str = "pending.json";
 
-/// The direct active-Turn authority ref. Existence and target are the only
-/// authority for "a Turn is pending"; there is no second pending ref and no
-/// active-Turn field in `SessionState`.
+const MAX_CANDIDATE_REVISION_SNAPSHOTS: usize = 128;
+
+/// Maximum snapshots in one PendingTurn lineage.
+pub(crate) const MAX_PENDING_TURN_LINEAGE_DEPTH: usize = 1
+    + MAX_MODEL_STEPS as usize
+        * (2 * MAX_MODEL_ATTEMPTS as usize
+            + 3
+            + 2 * lattice_conversation::MAX_TOOL_CALLS_PER_BATCH)
+    + MAX_CANDIDATE_REVISION_SNAPSHOTS
+    + 2;
+
+/// The direct active-Turn authority ref.
 pub(crate) fn active_turn_ref_name(session_id: &str) -> Result<String> {
     state::validate_session_ref_id(session_id)?;
     Ok(format!("refs/lattice/sessions/{session_id}/active-turn"))
@@ -69,18 +74,41 @@ pub(crate) fn turn_pin_ref_name(session_id: &str, turn_id: &str) -> Result<Strin
     ))
 }
 
-/// One published journal tip: the snapshot commit OID and the parsed
-/// snapshot (with `recorded_at` filled from the commit's committer time).
+/// One published journal tip.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingTurnTip {
     /// Journal commit OID of this snapshot.
     pub oid: gix::ObjectId,
     /// The parsed snapshot.
     pub snapshot: PendingSnapshot,
+    /// Validated root-through-tip snapshot count. Not persisted.
+    pub(crate) lineage_depth: usize,
 }
 
-/// Extract the Turn identity a stage carries, when it names one. `None`
-/// stages (`StepClosed`) inherit the predecessor tip's Turn.
+fn completed_attempt_usage(
+    stage: &PendingStage,
+) -> Option<Option<lattice_conversation::TokenUsage>> {
+    match stage {
+        PendingStage::ModelAttemptFailed { usage, .. }
+        | PendingStage::ModelAttemptInterrupted { usage, .. }
+        | PendingStage::ModelAttemptRejected { usage, .. }
+        | PendingStage::MessageComplete { usage, .. }
+        | PendingStage::BindingPlanned { usage, .. } => Some(*usage),
+        _ => None,
+    }
+}
+
+fn ensure_lineage_can_advance(tip: &PendingTurnTip) -> Result<()> {
+    if tip.lineage_depth >= MAX_PENDING_TURN_LINEAGE_DEPTH {
+        return Err(SessionError::JournalCorruption {
+            detail: format!(
+                "pending lineage reached the code-defined depth limit {MAX_PENDING_TURN_LINEAGE_DEPTH}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn stage_turn_id(stage: &PendingStage) -> Option<lancet_protocol::TurnId> {
     match stage {
         PendingStage::TurnStarted(facts) => Some(facts.turn_id),
@@ -99,52 +127,52 @@ fn stage_turn_id(stage: &PendingStage) -> Option<lancet_protocol::TurnId> {
     }
 }
 
-/// Whether `revised` is exactly a candidate revision of `original`.
-///
-/// One definition serves both directions: `revise_binding_candidates` admits a
-/// publication only when this holds, and `published_candidate_revision`
-/// recognizes an already-published revision by the same rule. Everything but
-/// the candidate ids and their derived binding digests must be byte-equal, and
-/// every candidate must be new and distinct.
-fn is_candidate_revision_of(original: &BindingPlan, revised: &BindingPlan) -> bool {
-    if original.plan_key != revised.plan_key
-        || original.message != revised.message
-        || original.bindings.len() != revised.bindings.len()
-    {
-        return false;
-    }
-    let original_ids: BTreeSet<_> = original
-        .bindings
-        .iter()
-        .map(|binding| binding.invocation_id)
-        .collect();
-    let mut revised_ids = BTreeSet::new();
-    for (before, after) in original.bindings.iter().zip(&revised.bindings) {
-        if original_ids.contains(&after.invocation_id)
-            || before.address != after.address
-            || before.method != after.method
-            || before.descriptor_identity != after.descriptor_identity
-            || before.arguments_digest != after.arguments_digest
-            || !revised_ids.insert(after.invocation_id)
-        {
-            return false;
-        }
-    }
-    true
-}
-
 impl GitSessionGraphStore {
     // ─── Reads (lock-free: pin the ref, read immutable objects) ────────
 
-    /// Read the current PendingTurn tip. `Ok(None)` when no Turn is
-    /// pending. A malformed or inconsistent snapshot is typed
-    /// [`SessionError::JournalCorruption`], never repaired.
+    /// Read the current PendingTurn tip.
     pub fn read_active_turn(&self, session_id: &str) -> Result<Option<PendingTurnTip>> {
         let ref_name = active_turn_ref_name(session_id)?;
         let Some(oid) = self.kernel().ref_target(&ref_name)? else {
             return Ok(None);
         };
-        Ok(Some(self.read_pending_snapshot_at(oid)?))
+        let tip = self.read_pending_snapshot_at(oid)?;
+        self.validate_pending_project_binding(session_id, &tip)?;
+        Ok(Some(tip))
+    }
+
+    fn validate_pending_project_binding(
+        &self,
+        session_id: &str,
+        tip: &PendingTurnTip,
+    ) -> Result<()> {
+        let (_, session_state) = state::read_state(self.kernel(), session_id)?;
+        let session_key = lattice_store::ProjectStoreKey::parse(&session_state.project_store_key)
+            .map_err(|err| SessionError::JournalCorruption {
+            detail: format!("session '{session_id}' has an invalid project-store binding: {err}"),
+        })?;
+        let started = match &tip.snapshot.stage {
+            PendingStage::TurnStarted(facts) => facts,
+            _ => tip
+                .snapshot
+                .root
+                .as_ref()
+                .ok_or_else(|| SessionError::JournalCorruption {
+                    detail: format!(
+                        "pending Turn {} has no TurnStarted root facts",
+                        tip.snapshot.turn_id
+                    ),
+                })?,
+        };
+        if started.project_store_key != session_key {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "pending Turn {} is bound to project key {}, but session '{session_id}' is bound to {session_key}",
+                    tip.snapshot.turn_id, started.project_store_key
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Read the permanent Turn pin of one committed Turn, when present.
@@ -157,18 +185,82 @@ impl GitSessionGraphStore {
     }
 
     pub(crate) fn read_pending_snapshot_at(&self, oid: gix::ObjectId) -> Result<PendingTurnTip> {
-        let recorded_at = self.kernel().commit_time(oid)?;
-        let mut tip = self.read_snapshot_raw(oid, recorded_at)?;
-        // Fill the chain-root facts for every non-root tip: reconciliation
-        // needs the frozen user message, parent tip, and limits, and the
-        // journal chain is their only authority.
-        if !matches!(tip.snapshot.stage, PendingStage::TurnStarted { .. }) {
-            let root = self.resolve_turn_started(&tip)?;
-            if let PendingStage::TurnStarted(facts) = root.snapshot.stage {
-                tip.snapshot.root = Some(facts);
+        let mut reverse_oids = Vec::new();
+        let mut cursor = oid;
+        loop {
+            if reverse_oids.len() == MAX_PENDING_TURN_LINEAGE_DEPTH {
+                return Err(SessionError::JournalCorruption {
+                    detail: format!(
+                        "pending lineage exceeds the code-defined depth limit {MAX_PENDING_TURN_LINEAGE_DEPTH}"
+                    ),
+                });
             }
+            let recorded_at = self.kernel().commit_time(cursor)?;
+            let tip = self.read_snapshot_raw(cursor, recorded_at)?;
+            let predecessor = tip.snapshot.predecessor.clone();
+            let is_root = matches!(tip.snapshot.stage, PendingStage::TurnStarted(_));
+            reverse_oids.push(cursor);
+            if is_root {
+                break;
+            }
+            cursor = parse_oid(predecessor.as_deref().ok_or_else(|| {
+                SessionError::JournalCorruption {
+                    detail: "pending lineage reached a non-TurnStarted root".into(),
+                }
+            })?)?;
         }
-        tip.snapshot.validate()?;
+
+        let lineage_depth = reverse_oids.len();
+        let mut root = None;
+        let mut attempt_usages = Vec::new();
+        let mut previous: Option<PendingTurnTip> = None;
+        for (index, cursor) in reverse_oids.into_iter().rev().enumerate() {
+            let recorded_at = self.kernel().commit_time(cursor)?;
+            let mut current = self.read_snapshot_raw(cursor, recorded_at)?;
+            if index == 0 {
+                let PendingStage::TurnStarted(facts) = &current.snapshot.stage else {
+                    return Err(SessionError::JournalCorruption {
+                        detail: "pending lineage has no TurnStarted root".into(),
+                    });
+                };
+                root = Some(facts.clone());
+            } else {
+                current.snapshot.root = root.clone();
+            }
+
+            if matches!(
+                current.snapshot.stage,
+                PendingStage::ModelAttemptStarted { .. }
+            ) {
+                attempt_usages.push(None);
+            } else if previous.as_ref().is_some_and(|prior| {
+                matches!(
+                    prior.snapshot.stage,
+                    PendingStage::ModelAttemptStarted { .. }
+                )
+            }) && let Some(usage) = completed_attempt_usage(&current.snapshot.stage)
+            {
+                let slot =
+                    attempt_usages
+                        .last_mut()
+                        .ok_or_else(|| SessionError::JournalCorruption {
+                            detail: "attempt outcome has no started usage slot".into(),
+                        })?;
+                *slot = usage;
+            }
+            current.snapshot.attempt_usages = attempt_usages.clone();
+            current.snapshot.validate()?;
+            if let Some(prior) = &previous {
+                validate_snapshot_transition(&prior.snapshot, &current.snapshot)?;
+            }
+            current.lineage_depth = index + 1;
+            previous = Some(current);
+        }
+
+        let mut tip = previous.ok_or_else(|| SessionError::JournalCorruption {
+            detail: "pending lineage is empty".into(),
+        })?;
+        tip.lineage_depth = lineage_depth;
         Ok(tip)
     }
 
@@ -193,15 +285,13 @@ impl GitSessionGraphStore {
         };
         snapshot.validate()?;
         self.validate_journal_lineage(oid, &snapshot)?;
-        Ok(PendingTurnTip { oid, snapshot })
+        Ok(PendingTurnTip {
+            oid,
+            snapshot,
+            lineage_depth: 0,
+        })
     }
 
-    /// The payload's `predecessor` and the commit's git parent are two
-    /// recordings of the same lineage fact; a chain where they disagree is
-    /// typed corruption, never a readable journal. The chain root has no
-    /// payload predecessor: its single git parent is the frozen parent
-    /// conversation tip it grafts onto (ADR 0005 §9), and a root frozen on
-    /// an empty branch has no parent at all.
     fn validate_journal_lineage(
         &self,
         oid: gix::ObjectId,
@@ -211,8 +301,6 @@ impl GitSessionGraphStore {
         let first = parents.first().map(|parent| parent.to_string());
         let expected = match (&snapshot.predecessor, &snapshot.stage) {
             (Some(predecessor), _) => Some(predecessor.clone()),
-            // `PendingSnapshot::validate` already rejects a non-`TurnStarted`
-            // stage without a predecessor, so this is the chain root.
             (None, PendingStage::TurnStarted(facts)) => facts.parent_conversation_tip.clone(),
             (None, other) => {
                 return Err(SessionError::JournalCorruption {
@@ -226,8 +314,7 @@ impl GitSessionGraphStore {
         if first != expected || parents.len() > 1 {
             return Err(SessionError::JournalCorruption {
                 detail: format!(
-                    "journal commit {oid} records predecessor {expected:?} but its git \
-                     parents are {:?}",
+                    "journal commit {oid} records predecessor {expected:?} but its git parents are {:?}",
                     parents
                         .iter()
                         .map(|parent| parent.to_string())
@@ -238,12 +325,10 @@ impl GitSessionGraphStore {
         Ok(())
     }
 
-    /// Walk the predecessor chain back to the `TurnStarted` snapshot of the
-    /// pending Turn. The chain root carries the frozen parent conversation
-    /// tip the final transaction CASes against.
+    /// Walk the predecessor chain back to `TurnStarted`.
     pub fn resolve_turn_started(&self, tip: &PendingTurnTip) -> Result<PendingTurnTip> {
         let mut cursor = tip.clone();
-        loop {
+        for _ in 0..MAX_PENDING_TURN_LINEAGE_DEPTH {
             if matches!(cursor.snapshot.stage, PendingStage::TurnStarted { .. }) {
                 return Ok(cursor);
             }
@@ -259,14 +344,14 @@ impl GitSessionGraphStore {
             let recorded_at = self.kernel().commit_time(oid)?;
             cursor = self.read_snapshot_raw(oid, recorded_at)?;
         }
+        Err(SessionError::JournalCorruption {
+            detail: format!(
+                "pending lineage exceeds the code-defined depth limit {MAX_PENDING_TURN_LINEAGE_DEPTH}"
+            ),
+        })
     }
 
-    /// Classify a pinned draft candidate against the object database
-    /// (reopen path, ADR 0005 §12): the content-addressed object either
-    /// survived (`Durable`, and its bytes must equal the candidate's
-    /// canonical form) or was never durably written (`CleanAbsent`). The
-    /// lookup is read-only — classification must never materialize the
-    /// object it is asking about.
+    /// Classify a pinned draft candidate against the object database.
     pub fn classify_draft(&self, candidate: &ResultDraft) -> Result<DraftClassification> {
         let bytes = canonical_draft_bytes(candidate)?;
         let oid = self.kernel().blob_id(&bytes)?;
@@ -286,11 +371,7 @@ impl GitSessionGraphStore {
 
     // ─── Publications (execution lock + repository write lock) ─────────
 
-    /// Publish the first journal snapshot of a Turn: `TurnStarted`
-    /// (ADR 0005 §8/§9). The frozen parent conversation tip must equal the
-    /// session's current head under the held locks; the snapshot commit's
-    /// git parent is that tip, grafting the journal chain onto the
-    /// conversation graph.
+    /// Publish the first journal snapshot of a Turn.
     pub fn begin_pending_turn(
         &self,
         facts: TurnStartedFacts,
@@ -301,17 +382,24 @@ impl GitSessionGraphStore {
         facts.validate()?;
         let _write = self.kernel().write_lock()?;
 
-        // The session must exist and be quiet: no active Turn may exist and
-        // the frozen tip must equal the resolved head.
         let (_, session_state) = state::read_state(self.kernel(), &session_id)?;
+        let session_key = lattice_store::ProjectStoreKey::parse(&session_state.project_store_key)
+            .map_err(|err| SessionError::JournalCorruption {
+            detail: format!("session '{session_id}' has an invalid project-store binding: {err}"),
+        })?;
+        if facts.project_store_key != session_key {
+            return Err(SessionError::InvalidInput(format!(
+                "TurnStarted project key {} does not match session '{session_id}' binding {session_key}",
+                facts.project_store_key
+            )));
+        }
         let head_oid = resolve_head_oid(self.kernel(), &session_state, &session_id)?;
         match (&facts.parent_conversation_tip, head_oid) {
             (Some(frozen), Some(actual)) if frozen == &actual.to_string() => {}
             (None, None) => {}
             (frozen, actual) => {
                 return Err(SessionError::Conflict(format!(
-                    "TurnStarted parent tip {:?} does not match the current head {:?}",
-                    frozen, actual
+                    "TurnStarted parent tip {frozen:?} does not match the current head {actual:?}"
                 )));
             }
         }
@@ -331,9 +419,11 @@ impl GitSessionGraphStore {
             session_id: facts.session_id,
             turn_id: facts.turn_id,
             predecessor: None,
+            post_user_transcript: Vec::new(),
             stage: PendingStage::TurnStarted(facts),
             recorded_at: None,
             root: None,
+            attempt_usages: Vec::new(),
         };
         snapshot.validate()?;
         let timestamp = parse_rfc3339_to_unix(
@@ -358,13 +448,7 @@ impl GitSessionGraphStore {
         self.read_pending_snapshot_at(oid)
     }
 
-    /// Advance the journal by one validated CAS snapshot. The transition
-    /// must satisfy [`validate_transition`] against the current tip, the
-    /// stage must belong to the same Turn, and `Committed` is rejected as
-    /// an `active-turn` target (the final ref transaction is its only
-    /// publication path). `recorded_at_unix` is the snapshot commit's
-    /// committer time; reconciliation callers pass the durable tip's own
-    /// time so recovery introduces no new clock.
+    /// Advance the journal by one fully authenticated CAS snapshot.
     pub fn advance_pending_turn(
         &self,
         session_id: &str,
@@ -401,16 +485,6 @@ impl GitSessionGraphStore {
             )));
         }
 
-        // Idempotent exact retry. `cas_ref` is the publication authority and
-        // already runs the post-publication ref barrier, so a barrier
-        // failure returns `Durability` on an already-published snapshot.
-        // The byte-identical retry of that exact transition must recognize
-        // its own snapshot instead of failing as an illegal edge, and must
-        // then re-attempt the barrier via `fsync_pending` (it does not call
-        // `cas_ref`). Confirmation is exact — the tip has to be the very
-        // commit this call would write, computed from the tip's own recorded
-        // predecessor — so a different candidate or a CAS race is never
-        // mistaken for success.
         if tip.snapshot.stage == next_stage
             && tip.snapshot.recorded_at == Some(recorded_at_unix)
             && let Some(predecessor) = tip.snapshot.predecessor.clone()
@@ -420,9 +494,11 @@ impl GitSessionGraphStore {
                 session_id: tip.snapshot.session_id,
                 turn_id,
                 predecessor: Some(predecessor.clone()),
+                post_user_transcript: tip.snapshot.post_user_transcript.clone(),
                 stage: next_stage.clone(),
                 recorded_at: None,
                 root: None,
+                attempt_usages: Vec::new(),
             };
             let candidate_oid = self.write_pending_commit(
                 &candidate,
@@ -435,19 +511,23 @@ impl GitSessionGraphStore {
             }
         }
 
-        validate_transition(&tip.snapshot.stage, &next_stage)
+        ensure_lineage_can_advance(&tip)?;
+        let post_user_transcript = next_post_user_transcript(&tip.snapshot, &next_stage)
             .map_err(|e| SessionError::Conflict(e.to_string()))?;
-
         let snapshot = PendingSnapshot {
             schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
             session_id: tip.snapshot.session_id,
             turn_id,
             predecessor: Some(tip.oid.to_string()),
+            post_user_transcript,
             stage: next_stage,
             recorded_at: None,
-            root: None,
+            root: tip.snapshot.root.clone(),
+            attempt_usages: tip.snapshot.attempt_usages.clone(),
         };
         snapshot.validate()?;
+        validate_snapshot_transition(&tip.snapshot, &snapshot)
+            .map_err(|e| SessionError::Conflict(e.to_string()))?;
         let oid = self.write_pending_commit(&snapshot, Some(tip_oid), recorded_at_unix)?;
         validation::publish_session_edits(
             self.kernel(),
@@ -462,23 +542,7 @@ impl GitSessionGraphStore {
         self.read_pending_snapshot_at(oid)
     }
 
-    /// Execute one [`CandidateRevisionRequest`] against the exact tip the
-    /// reducer's facts were pinned to (ADR 0005 §9, #139-A decision D-A2).
-    ///
-    /// The reducer performs no I/O, clock, store, or UUID work, so UUID
-    /// generation is injected here. The request is verified against the
-    /// pinned tip before any write: same session, same Turn, same durable
-    /// `BindingPlanned` plan. The CAS then pins `tip.oid`, so a concurrent
-    /// advance leaves the original `BindingPlanned` untouched.
-    ///
-    /// **Post-CAS recovery.** A revision may be CAS-published and then fail
-    /// its durability barrier. The generator is not required to be
-    /// reproducible, so recovery never depends on re-minting the same UUIDs:
-    /// this call first re-reads the durable `active-turn` and, if it already
-    /// holds a candidate revision of exactly `request.plan` grafted on
-    /// `tip.oid`, repeats that publication's durability barrier and returns
-    /// it without generating anything. Only a genuinely absent revision mints
-    /// fresh candidates.
+    /// Execute one candidate revision against the exact pinned tip.
     pub fn execute_candidate_revision(
         &self,
         request: &CandidateRevisionRequest,
@@ -504,8 +568,7 @@ impl GitSessionGraphStore {
             ));
         }
 
-        // Recover a published-but-undurable revision before minting anything.
-        if let Some(published) = self.published_candidate_revision(request, tip.oid)? {
+        if let Some(published) = self.published_candidate_revision(request, tip)? {
             self.validate_execution_lock(&request.session_id.to_string(), execution_lock)?;
             let ref_name = active_turn_ref_name(&request.session_id.to_string())?;
             self.kernel().fsync_pending(&[ref_name.as_str()])?;
@@ -545,48 +608,30 @@ impl GitSessionGraphStore {
         )
     }
 
-    /// The already-published candidate revision of `request.plan` grafted
-    /// directly on `expected_tip_oid`, if one exists.
-    ///
-    /// Recognition is structural, not by candidate value: the durable tip
-    /// must be `BindingPlanned`, name `expected_tip_oid` as its predecessor,
-    /// and carry exactly the revision shape `revise_binding_candidates`
-    /// admits — same plan key, same message, same binding count and order,
-    /// same address/method/descriptor/arguments per binding, every candidate
-    /// replaced by a distinct new id, and every binding digest recomputed.
-    /// Nothing else can be mistaken for this Turn's revision.
+    /// Recognize an already-published revision using the same complete edge
+    /// predicate as strict reopen and first publication.
     fn published_candidate_revision(
         &self,
         request: &CandidateRevisionRequest,
-        expected_tip_oid: gix::ObjectId,
+        expected_tip: &PendingTurnTip,
     ) -> Result<Option<PendingTurnTip>> {
         let session_id = request.session_id.to_string();
         let Some(current) = self.read_active_turn(&session_id)? else {
             return Ok(None);
         };
-        if current.oid == expected_tip_oid
+        if current.oid == expected_tip.oid
             || current.snapshot.predecessor.as_deref()
-                != Some(expected_tip_oid.to_string().as_str())
+                != Some(expected_tip.oid.to_string().as_str())
             || current.snapshot.session_id != request.session_id
             || current.snapshot.turn_id != request.turn_id
+            || !is_candidate_revision_of(&expected_tip.snapshot.stage, &current.snapshot.stage)
         {
             return Ok(None);
         }
-        let PendingStage::BindingPlanned { plan, .. } = &current.snapshot.stage else {
-            return Ok(None);
-        };
-        if is_candidate_revision_of(&request.plan, plan) {
-            Ok(Some(current))
-        } else {
-            Ok(None)
-        }
+        Ok(Some(current))
     }
 
     /// Replace every candidate UUID in the current `BindingPlanned` stage.
-    ///
-    /// This is the only legal same-stage journal revision. It preserves the
-    /// complete message, structural plan, binding order, Tool identities, and
-    /// arguments while CAS-publishing one full replacement plan.
     pub fn revise_binding_candidates(
         &self,
         session_id: &str,
@@ -607,23 +652,24 @@ impl GitSessionGraphStore {
         let tip = self.read_pending_snapshot_at(tip_oid)?;
 
         if tip_oid != expected_tip_oid {
+            let expected = self.read_pending_snapshot_at(expected_tip_oid)?;
             if tip.snapshot.recorded_at == Some(recorded_at_unix)
                 && tip.snapshot.predecessor.as_deref()
                     == Some(expected_tip_oid.to_string().as_str())
-                && let PendingStage::BindingPlanned { plan, usage } = &tip.snapshot.stage
+                && let PendingStage::BindingPlanned { plan, .. } = &tip.snapshot.stage
                 && plan == &revised_plan
+                && is_candidate_revision_of(&expected.snapshot.stage, &tip.snapshot.stage)
             {
                 let candidate = PendingSnapshot {
                     schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
                     session_id: tip.snapshot.session_id,
                     turn_id: tip.snapshot.turn_id,
                     predecessor: Some(expected_tip_oid.to_string()),
-                    stage: PendingStage::BindingPlanned {
-                        plan: revised_plan.clone(),
-                        usage: *usage,
-                    },
+                    post_user_transcript: tip.snapshot.post_user_transcript.clone(),
+                    stage: tip.snapshot.stage.clone(),
                     recorded_at: None,
                     root: None,
+                    attempt_usages: Vec::new(),
                 };
                 let candidate_oid = self.write_pending_commit(
                     &candidate,
@@ -640,32 +686,47 @@ impl GitSessionGraphStore {
             )));
         }
 
-        let PendingStage::BindingPlanned { plan, usage } = &tip.snapshot.stage else {
+        let PendingStage::BindingPlanned { usage, .. } = &tip.snapshot.stage else {
             return Err(SessionError::Conflict(
                 "candidate revision requires BindingPlanned".to_string(),
             ));
         };
-        if !is_candidate_revision_of(plan, &revised_plan) {
+        ensure_lineage_can_advance(&tip)?;
+        let next_stage = PendingStage::BindingPlanned {
+            plan: revised_plan,
+            usage: *usage,
+        };
+        if !is_candidate_revision_of(&tip.snapshot.stage, &next_stage) {
             return Err(SessionError::Conflict(
                 "candidate revision must replace only every invocation UUID and binding digest"
                     .to_string(),
             ));
         }
 
-        let next_stage = PendingStage::BindingPlanned {
-            plan: revised_plan,
-            usage: *usage,
+        let mut post_user_transcript = tip.snapshot.post_user_transcript.clone();
+        let last =
+            post_user_transcript
+                .last_mut()
+                .ok_or_else(|| SessionError::JournalCorruption {
+                    detail: "BindingPlanned candidate revision has no bound assistant".into(),
+                })?;
+        *last = match &next_stage {
+            PendingStage::BindingPlanned { plan, .. } => plan.bound_message()?,
+            _ => unreachable!(),
         };
         let snapshot = PendingSnapshot {
             schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
             session_id: tip.snapshot.session_id,
             turn_id: tip.snapshot.turn_id,
             predecessor: Some(tip_oid.to_string()),
+            post_user_transcript,
             stage: next_stage,
             recorded_at: None,
-            root: None,
+            root: tip.snapshot.root.clone(),
+            attempt_usages: tip.snapshot.attempt_usages.clone(),
         };
         snapshot.validate()?;
+        validate_snapshot_transition(&tip.snapshot, &snapshot)?;
         let oid = self.write_pending_commit(&snapshot, Some(tip_oid), recorded_at_unix)?;
         validation::publish_session_edits(
             self.kernel(),
@@ -680,12 +741,7 @@ impl GitSessionGraphStore {
         self.read_pending_snapshot_at(oid)
     }
 
-    /// Publish one `ResultDraft` as a content-addressed blob and classify
-    /// the publication (ADR 0005 §12). Success is `Durable`; a durability
-    /// barrier failure classifies as `Uncertain` carrying the exact
-    /// candidate — the live owner must revalidate during its finite
-    /// FinalizeBudget, and a mismatch is corruption. The draft carries no
-    /// outcome and can never upgrade itself into one.
+    /// Publish one `ResultDraft` as a content-addressed blob and classify it.
     pub fn publish_draft(
         &self,
         candidate: &ResultDraft,
@@ -703,7 +759,6 @@ impl GitSessionGraphStore {
                 draft_oid: oid.to_string(),
             }),
             Err(e @ lattice_store::StoreError::Durability { .. }) => {
-                // The write was attempted; durability is unproven.
                 let _ = e;
                 Ok(DraftPublication::Uncertain {
                     candidate: candidate.clone(),
@@ -713,15 +768,8 @@ impl GitSessionGraphStore {
         }
     }
 
-    /// The one final SessionStore ref transaction (ADR 0005 §6/§9):
-    /// advance the conversation branch (or detached state), create the
-    /// `turns/<TurnId>` pin, update `state`, and delete `active-turn` —
-    /// all-or-nothing. The `Committed` journal object (parent = the
-    /// `TurnClosing` tip) and the conversation TurnCommit (parents =
-    /// `[Committed] ++ candidate.parent_ids[1..]`) are constructed from the
-    /// pinned candidate so a retry after any failure republishes
-    /// byte-identical objects. Idempotent: if the transaction already
-    /// completed, the pinned TurnCommit is returned unchanged.
+    /// Publish the final conversation commit and delete `active-turn` in one
+    /// transaction.
     pub fn finalize_turn(
         &self,
         session_id: &str,
@@ -732,10 +780,8 @@ impl GitSessionGraphStore {
         let turn_id_str = turn_id.to_string();
         let pin_ref = turn_pin_ref_name(session_id, &turn_id_str)?;
 
-        // Idempotent completion: the pin exists exactly when the
-        // transaction committed (ref transactions are atomic).
         if let Some(pinned) = self.read_turn_pin(session_id, &turn_id_str)? {
-            return self.read_finalized_turn(session_id, &pinned);
+            return self.read_finalized_turn(session_id, turn_id, &pinned);
         }
 
         let _write = self.kernel().write_lock()?;
@@ -761,13 +807,15 @@ impl GitSessionGraphStore {
                 )));
             }
         };
+        ensure_lineage_can_advance(&tip)?;
 
-        // The frozen parent tip must still be the conversation head.
         let turn_started = self.resolve_turn_started(&tip)?;
-        let frozen_tip = match &turn_started.snapshot.stage {
-            PendingStage::TurnStarted(facts) => facts.parent_conversation_tip.clone(),
-            _ => unreachable!("resolve_turn_started returns a TurnStarted root"),
+        let PendingStage::TurnStarted(facts) = &turn_started.snapshot.stage else {
+            return Err(SessionError::JournalCorruption {
+                detail: "resolved PendingTurn root is not TurnStarted".into(),
+            });
         };
+        let frozen_tip = facts.parent_conversation_tip.clone();
         let (_, session_state) = state::read_state(self.kernel(), session_id)?;
         let head_oid = resolve_head_oid(self.kernel(), &session_state, session_id)?;
         match (&frozen_tip, head_oid) {
@@ -780,9 +828,6 @@ impl GitSessionGraphStore {
             }
         }
 
-        // Build the conversation TurnCommit from the pinned candidate: the
-        // deterministic identity machinery runs over pinned inputs plus the
-        // durable frozen tip (journal authority), never mutable input.
         let input = candidate_turn_commit_input(session_id, &candidate, &frozen_tip)?;
         let prepared = prepare_turn_commit(&input, &candidate.created_at);
         let manifest_bytes = serialize_manifest(&candidate_manifest(&prepared, &candidate))?;
@@ -793,23 +838,24 @@ impl GitSessionGraphStore {
             &messages_jsonl,
             &build_agent_json(&candidate.agent_name),
             &candidate.profile_snapshot_json,
-            &build_audit_json(&None),
         )?;
         let root_tree = build_root_tree(self.kernel(), turn_tree)?;
 
-        // The Committed journal object: parent is the TurnClosing tip.
         let committed_payload = PendingSnapshot {
             schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
             session_id: tip.snapshot.session_id,
             turn_id: tip.snapshot.turn_id,
             predecessor: Some(tip_oid.to_string()),
+            post_user_transcript: tip.snapshot.post_user_transcript.clone(),
             stage: PendingStage::Committed(CommittedFacts {
                 turn_id: tip.snapshot.turn_id,
                 candidate: candidate.clone(),
             }),
             recorded_at: None,
-            root: None,
+            root: tip.snapshot.root.clone(),
+            attempt_usages: tip.snapshot.attempt_usages.clone(),
         };
+        validate_snapshot_transition(&tip.snapshot, &committed_payload)?;
         let committed_bytes = canonical_snapshot_bytes(&committed_payload)?;
         let committed_blob = self.kernel().write_blob(&committed_bytes)?;
         let committed_tree = self.kernel().write_tree(TreeSpec::new().upsert(
@@ -825,8 +871,6 @@ impl GitSessionGraphStore {
             commit_ts,
         )?;
 
-        // Conversation parents: the frozen tip stays reachable through the
-        // journal chain root; merge side-parents keep their place.
         let mut parent_oids = vec![committed_oid];
         for extra in &candidate.side_parent_ids {
             parent_oids.push(parse_oid(extra)?);
@@ -838,7 +882,6 @@ impl GitSessionGraphStore {
             commit_ts,
         )?;
 
-        // New session state (timestamp; detached head follows the new tip).
         let (state_oid, _) = state::read_state(self.kernel(), session_id)?;
         let mut new_state = session_state.clone();
         new_state.updated_at = Utc::now().to_rfc3339();
@@ -851,7 +894,7 @@ impl GitSessionGraphStore {
         if let SessionHead::Attached { branch } = &session_state.head {
             let head_ref = state::head_ref_name(session_id, branch)?;
             edits.push(RefTxnEdit {
-                name: head_ref.clone(),
+                name: head_ref,
                 expect: match head_oid {
                     Some(expected) => RefExpectation::MustMatch(expected),
                     None => RefExpectation::MustNotExist,
@@ -875,7 +918,6 @@ impl GitSessionGraphStore {
             new: None,
         });
 
-        // Any CAS failure leaves the whole transaction unpublished.
         validation::publish_session_edits(self.kernel(), session_id, edits).map_err(
             |err| match err {
                 lattice_store::StoreError::CasConflict { detail, .. } => {
@@ -906,6 +948,7 @@ impl GitSessionGraphStore {
     fn read_finalized_turn(
         &self,
         session_id: &str,
+        expected_turn_id: &lancet_protocol::TurnId,
         commit_oid_hex: &str,
     ) -> Result<crate::graph::TurnCommit> {
         let oid = parse_oid(commit_oid_hex)?;
@@ -916,6 +959,14 @@ impl GitSessionGraphStore {
                 detail: format!(
                     "turn pin of '{session_id}' points at a commit of session '{}'",
                     manifest.session_id
+                ),
+            });
+        }
+        if manifest.turn_id != *expected_turn_id {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "turn pin for '{expected_turn_id}' points at turn '{}'",
+                    manifest.turn_id
                 ),
             });
         }
@@ -930,8 +981,6 @@ impl GitSessionGraphStore {
         Ok(turn_commit)
     }
 
-    /// Write one journal snapshot commit. Caller holds the execution lock
-    /// and the repository write lock.
     fn write_pending_commit(
         &self,
         snapshot: &PendingSnapshot,
@@ -978,19 +1027,12 @@ fn parse_rfc3339_to_unix(value: &str, field: &str) -> Result<i64> {
         .map_err(|e| SessionError::InvalidInput(format!("{field} is not RFC 3339: {e}")))
 }
 
-/// Project the pinned candidate onto today's conversation-commit input.
-/// The legacy status is a projection of the typed outcome (the journal
-/// chain remains the typed authority); `terminal_reason` stays empty
-/// because the typed reasons are the logic authority and free text is
-/// never logic-bearing. #139-B deletes the legacy fields.
 fn candidate_turn_commit_input(
     session_id: &str,
     candidate: &TurnCommitCandidate,
     frozen_tip: &Option<String>,
 ) -> Result<crate::graph::TurnCommitInput> {
-    use crate::graph::{TurnCommitInput, WorkspaceDisposition};
-    // Logical lineage: the frozen tip (journal authority) plus the
-    // candidate's durable side-parents.
+    use crate::graph::TurnCommitInput;
     let mut parent_ids = Vec::with_capacity(candidate.side_parent_ids.len() + 1);
     if let Some(tip) = frozen_tip {
         parent_ids.push(tip.clone());
@@ -998,6 +1040,7 @@ fn candidate_turn_commit_input(
     parent_ids.extend(candidate.side_parent_ids.iter().cloned());
     Ok(TurnCommitInput {
         session_id: session_id.to_string(),
+        turn_id: candidate.turn_id,
         parent_ids,
         messages: candidate.messages.clone(),
         agent_name: candidate.agent_name.clone(),
@@ -1005,32 +1048,25 @@ fn candidate_turn_commit_input(
         profile_snapshot_json: candidate.profile_snapshot_json.clone(),
         model: candidate.model.clone(),
         provider: candidate.provider.clone(),
-        status: candidate.outcome.legacy_status(),
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
+        outcome: candidate.outcome.clone(),
+        origin: candidate.origin,
         commit_message: candidate.commit_message.clone(),
         usage: candidate.usage_aggregate.map(|aggregate| aggregate.usage()),
-        terminal_reason: None,
-        workspace_history_oid: candidate.workspace_history_oid.clone(),
+        workspace_history_checkpoint: candidate.workspace_history_checkpoint.clone(),
     })
 }
 
-/// The conversation manifest of a journal-finalized Turn: the existing v2
-/// shape with the Turn's **explicit** TurnId (never derived from a seed,
-/// ADR 0005 §1) and the typed outcome projected into the legacy fields.
 fn candidate_manifest(
     prepared: &crate::graph::PreparedTurnCommit,
     candidate: &TurnCommitCandidate,
 ) -> super::helpers::GitSessionManifest {
-    let mut manifest = super::commit::build_manifest_from_prepared(prepared);
-    manifest.turn_id = candidate.turn_id.to_string();
+    let manifest = super::commit::build_manifest_from_prepared(prepared);
+    debug_assert_eq!(manifest.turn_id, candidate.turn_id);
     manifest
 }
 
-/// Whether one commit in a conversation-history walk is a PendingTurn
-/// journal snapshot (carries `pending.json` instead of the `turn/` tree).
-/// Transcript reconstruction skips these; the journal chain is reachable
-/// but is not conversation content.
+/// Whether one commit in a conversation-history walk is a PendingTurn journal
+/// snapshot.
 pub(crate) fn is_journal_commit(
     store: &lattice_store::StoreRepo,
     oid: gix::ObjectId,

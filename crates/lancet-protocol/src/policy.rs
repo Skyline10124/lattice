@@ -71,9 +71,9 @@ pub struct PolicyAuditContext {
     pub turn_id: String,
     /// Session identifier.
     pub session_id: String,
-    /// Call sequence number within the turn, if available.
+    /// Canonical invocation identity, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub call_id: Option<u64>,
+    pub invocation_id: Option<crate::InvocationId>,
     /// Immutable budget snapshot for policy evaluation.
     pub budget_snapshot: PolicyBudgetSnapshot,
 }
@@ -259,11 +259,16 @@ mod tests {
 
     // ── PolicyInput round-trip ───────────────────────────────────────
 
+    fn test_invocation_id(ordinal: u64) -> crate::InvocationId {
+        crate::InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
+            .expect("invocation id")
+    }
+
     fn audit_ctx() -> PolicyAuditContext {
         PolicyAuditContext {
             turn_id: "turn-abc".into(),
             session_id: "session-xyz".into(),
-            call_id: Some(3),
+            invocation_id: Some(test_invocation_id(3)),
             budget_snapshot: PolicyBudgetSnapshot {
                 turn_observation_bytes_used: 1024,
                 turn_observation_bytes_limit: 65536,
@@ -295,7 +300,7 @@ mod tests {
             audit_context: PolicyAuditContext {
                 turn_id: "turn-1".into(),
                 session_id: "session-1".into(),
-                call_id: None,
+                invocation_id: None,
                 budget_snapshot: PolicyBudgetSnapshot {
                     turn_observation_bytes_used: 0,
                     turn_observation_bytes_limit: 65536,
@@ -316,7 +321,7 @@ mod tests {
         let ctx = PolicyAuditContext {
             turn_id: "turn-1".into(),
             session_id: "session-1".into(),
-            call_id: Some(5),
+            invocation_id: Some(test_invocation_id(5)),
             budget_snapshot: PolicyBudgetSnapshot {
                 turn_observation_bytes_used: 4096,
                 turn_observation_bytes_limit: 65536,
@@ -394,7 +399,7 @@ mod tests {
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),
                 session_id: "s".into(),
-                call_id: None,
+                invocation_id: None,
                 budget_snapshot: PolicyBudgetSnapshot {
                     turn_observation_bytes_used: 0,
                     turn_observation_bytes_limit: 0,

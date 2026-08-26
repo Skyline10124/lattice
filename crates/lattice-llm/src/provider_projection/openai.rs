@@ -37,11 +37,11 @@
 
 use lattice_conversation::{
     AttemptAssembly, MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin,
-    RawToolCall, UnboundToolCall, validate_tool_call_batch,
+    RawToolCall, TokenUsage, ToolCallState, UnboundToolCall, validate_tool_call_batch,
 };
 use serde_json::{Value, json};
 
-use super::ProjectionError;
+use super::{ProjectionError, ToolResultClosure, closure_content};
 
 fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
     ProjectionError::OutputLimitExceeded {
@@ -112,7 +112,7 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
                     .map_err(limit_exceeded)?;
                 raw_calls.push(RawToolCall {
                     provider_call_id,
-                    name: name.to_string(),
+                    name: super::openai_canonical_tool_name(name),
                     arguments: arguments.to_string(),
                 });
             }
@@ -133,7 +133,9 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
     ))
 }
 
-pub fn native_to_wire(message: &NativeMessage<UnboundToolCall>) -> Result<Value, ProjectionError> {
+pub fn native_to_wire<S: ToolCallState>(
+    message: &NativeMessage<S>,
+) -> Result<Value, ProjectionError> {
     let mut reasoning = String::new();
     let mut saw_reasoning = false;
     let mut text = String::new();
@@ -161,11 +163,11 @@ pub fn native_to_wire(message: &NativeMessage<UnboundToolCall>) -> Result<Value,
                 let mut function_call = json!({
                     "type": "function",
                     "function": {
-                        "name": call.name,
-                        "arguments": lattice_conversation::canonical_json(&call.arguments),
+                        "name": super::openai_wire_tool_name(call.name()),
+                        "arguments": lattice_conversation::canonical_json(call.arguments()),
                     },
                 });
-                if let Some(id) = &call.provider_call_id {
+                if let Some(id) = call.provider_call_id() {
                     function_call["id"] = json!(id);
                 }
                 tool_calls.push(function_call);
@@ -190,4 +192,53 @@ pub fn native_to_wire(message: &NativeMessage<UnboundToolCall>) -> Result<Value,
         wire["tool_calls"] = Value::Array(tool_calls);
     }
     Ok(wire)
+}
+
+/// One `role: "tool"` request message per closure. The wire correlates a
+/// result to its call only through `tool_call_id`, so a closing call with no
+/// provider ID cannot be encoded — a typed error, never a synthesized ID.
+pub(crate) fn tool_result_messages(
+    closures: &[ToolResultClosure],
+) -> Result<Vec<Value>, ProjectionError> {
+    let mut messages = Vec::with_capacity(closures.len());
+    for closure in closures {
+        let Some(tool_call_id) = closure.provider_call_id.as_deref() else {
+            return Err(ProjectionError::ToolResultWithoutProviderCallId {
+                provider: ProviderOrigin::OpenAiCompatible,
+                invocation_id: closure.invocation_id,
+            });
+        };
+        messages.push(json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": closure_content(closure.outcome, &closure.content),
+        }));
+    }
+    Ok(messages)
+}
+
+/// `usage: {prompt_tokens, completion_tokens, total_tokens}` (all official
+/// fields; absent usage is unknown, not zero).
+pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {
+    let Some(usage) = wire.get("usage") else {
+        return Ok(None);
+    };
+    if usage.is_null() {
+        return Ok(None);
+    }
+    let malformed = |detail: String| ProjectionError::MalformedUsage {
+        provider: ProviderOrigin::OpenAiCompatible,
+        detail,
+    };
+    let field = |name: &str| -> Result<u64, ProjectionError> {
+        usage
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| malformed(format!("usage.{name} is not an integer")))
+    };
+    Ok(Some(TokenUsage {
+        prompt_tokens: field("prompt_tokens")?,
+        completion_tokens: field("completion_tokens")?,
+        total_tokens: field("total_tokens")?,
+    }))
 }

@@ -7,11 +7,10 @@ use std::sync::atomic::AtomicBool;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
-use lattice_session::TurnCommitStatus;
 
 use super::execute::run_turn;
 use super::test_support::*;
-use super::types::{RunTurnRequest, RunTurnStage, RunTurnStatus};
+use super::types::{RunTurnRequest, RunTurnStage};
 use crate::session::{CreateSessionRequest, SessionApi};
 
 #[tokio::test]
@@ -55,7 +54,10 @@ async fn run_turn_commits_exactly_one_turn() {
     .await
     .unwrap();
 
-    assert_eq!(result.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        result.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
     assert_eq!(fixture.store.log(&result.session_id).unwrap().len(), 1);
 }
 
@@ -109,7 +111,10 @@ async fn run_turn_result_contains_contract_fields() {
     assert!(!result.session_id.is_empty());
     assert!(!result.commit_id.is_empty());
     assert_eq!(result.assistant_output, "test response");
-    assert_eq!(result.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        result.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
     let usage = result.usage.as_ref().expect("usage should be present");
     assert_eq!(usage.prompt_tokens, 10);
     assert_eq!(usage.completion_tokens, 5);
@@ -147,17 +152,11 @@ async fn run_turn_failed_outcome_is_committed() {
     .await
     .unwrap();
 
-    assert_eq!(result.status, RunTurnStatus::Error);
+    assert!(matches!(
+        result.outcome,
+        lattice_session::TurnOutcome::Interrupted { .. }
+    ));
     assert_eq!(result.assistant_output, "");
-    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
-    assert_eq!(entry.status, TurnCommitStatus::Error);
-    assert!(
-        entry
-            .terminal_reason
-            .as_ref()
-            .unwrap()
-            .contains("provider unavailable")
-    );
 }
 
 #[tokio::test]
@@ -167,15 +166,32 @@ async fn run_turn_cancelled_outcome_is_committed() {
         cancel.clone(),
         vec![
             LlmEvent::ToolCallStart {
-                id: "call_1".to_string(),
+                index: 0,
+                provider_call_id: Some("call_1".to_string()),
                 name: "observe.workspace".to_string(),
             },
             LlmEvent::ToolCallDelta {
-                id: "call_1".to_string(),
+                index: 0,
                 arguments_delta: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
             },
-            LlmEvent::ToolCallEnd {
-                id: "call_1".to_string(),
+            LlmEvent::ToolCallEnd { index: 0 },
+            LlmEvent::MessageComplete {
+                message: lattice_conversation::NativeMessage::new(
+                    lattice_conversation::MessageRole::Assistant,
+                    Some(lattice_conversation::ProviderOrigin::OpenAiCompatible),
+                    vec![lattice_conversation::MessagePart::semantic_only(
+                        lattice_conversation::MessageSemantic::ToolCall {
+                            call: lattice_conversation::UnboundToolCall {
+                                provider_call_id: Some("call_1".to_string()),
+                                name: "observe.workspace".to_string(),
+                                arguments: serde_json::json!({
+                                    "mode": "read_file",
+                                    "path": "src/lib.rs",
+                                }),
+                            },
+                        },
+                    )],
+                ),
             },
         ],
         "tool_calls",
@@ -201,17 +217,20 @@ async fn run_turn_cancelled_outcome_is_committed() {
     .await
     .unwrap();
 
-    assert_eq!(result.status, RunTurnStatus::Cancelled);
+    assert!(matches!(
+        result.outcome,
+        lattice_session::TurnOutcome::Cancelled { .. }
+    ));
     let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
-    assert_eq!(entry.status, TurnCommitStatus::Cancelled);
-    assert!(
-        entry
-            .terminal_reason
-            .as_ref()
-            .unwrap()
-            .contains("cancelled")
+    assert_eq!(
+        entry.usage,
+        Some(lattice_session::TurnUsage {
+            prompt_tokens: 5,
+            completion_tokens: 2,
+            total_tokens: 7,
+        }),
+        "completed model attempt usage remains durable when cancellation wins before dispatch"
     );
-    assert_eq!(entry.usage.as_ref().unwrap().total_tokens, 7);
 }
 
 #[tokio::test]
@@ -225,7 +244,6 @@ async fn run_cutover_uses_loaded_profile_model() {
             cancel_flag: None,
             test_llm: None,
             test_project_root: None,
-            test_persist_audit: None,
         },
         fixture.llm.clone(),
         &fixture.enabled_tools,
@@ -233,7 +251,10 @@ async fn run_cutover_uses_loaded_profile_model() {
     );
 
     let result = run_turn(fixture.session_api, request).await.unwrap();
-    assert_eq!(result.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        result.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
 
     let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
     assert_eq!(entry.model, "profile-model");
@@ -253,7 +274,6 @@ async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() 
             cancel_flag: None,
             test_llm: None,
             test_project_root: None,
-            test_persist_audit: None,
         },
         fixture.llm.clone(),
         &fixture.enabled_tools,
@@ -261,7 +281,10 @@ async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() 
     );
 
     let result = run_turn(fixture.session_api, request).await.unwrap();
-    assert_eq!(result.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        result.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
 
     let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
     assert_eq!(entry.provider, "openai_compatible");
@@ -300,7 +323,10 @@ async fn run_turn_commits_parent_from_initial_transcript() {
 
     let result = run_turn(session_api, request).await.unwrap();
 
-    assert_eq!(result.status, RunTurnStatus::Completed);
+    assert!(matches!(
+        result.outcome,
+        lattice_session::TurnOutcome::Completed { .. }
+    ));
     let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
     assert_eq!(entry.parent_ids, vec![first_commit_id]);
 }

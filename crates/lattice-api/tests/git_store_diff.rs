@@ -9,10 +9,7 @@
 //! as `common_ancestor_id`.
 
 use lattice_session::test_helpers::{assistant_msg, user_msg};
-use lattice_session::{
-    GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
-    WorkspaceDisposition,
-};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore, TurnCommitInput};
 use tempfile::TempDir;
 
 fn test_store_key() -> lattice_session::ProjectStoreKey {
@@ -21,7 +18,9 @@ fn test_store_key() -> lattice_session::ProjectStoreKey {
 
 fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCommitInput {
     TurnCommitInput {
-        workspace_history_oid: None,
+        turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .expect("valid test TurnId"),
+        workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
         session_id: session_id.to_string(),
         parent_ids,
         messages: vec![
@@ -33,12 +32,12 @@ fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCom
         profile_snapshot_json: "{}".to_string(),
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
-        status: TurnCommitStatus::Completed,
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
+        outcome: lattice_session::TurnOutcome::Completed {
+            finish_reason: lattice_session::TurnFinishReason::Stop,
+        },
+        origin: lattice_session::ClosureOrigin::Live,
         commit_message: label.to_string(),
         usage: None,
-        terminal_reason: None,
     }
 }
 
@@ -62,13 +61,13 @@ fn git_store_diff_reports_unique_commits_per_side() {
 
     // 1. Base commit on main.
     let base = store
-        .commit_turn(turn_input(&session_id, vec![], "base"))
+        .test_commit_turn(turn_input(&session_id, vec![], "base"))
         .expect("base commit");
     let base_oid = base.commit_id.clone();
 
     // 2. One more commit on main (main-only).
     let main_only = store
-        .commit_turn(turn_input(&session_id, vec![base_oid.clone()], "main-only"))
+        .test_commit_turn(turn_input(&session_id, vec![base_oid.clone()], "main-only"))
         .expect("main-only commit");
     let main_only_oid = main_only.commit_id.clone();
 
@@ -82,7 +81,7 @@ fn git_store_diff_reports_unique_commits_per_side() {
         .checkout(&session_id, "feature")
         .expect("checkout feature");
     let feature_only = store
-        .commit_turn(turn_input(
+        .test_commit_turn(turn_input(
             &session_id,
             vec![base_oid.clone()],
             "feature-only",

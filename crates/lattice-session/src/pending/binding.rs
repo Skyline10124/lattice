@@ -17,7 +17,10 @@
 use sha2::{Digest, Sha256};
 
 use lancet_protocol::{InvocationId, PlanKey, ToolCallAddress};
-use lattice_conversation::{NativeMessage, UnboundToolCall, arguments_digest};
+use lattice_conversation::{
+    BoundToolCall, MAX_TOOL_CALLS_PER_BATCH, MessagePart, MessageSemantic, NativeMessage,
+    UnboundToolCall, arguments_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -152,6 +155,13 @@ impl BindingPlan {
                 detail: "binding plan must carry at least one binding".to_string(),
             });
         }
+        if self.bindings.len() > MAX_TOOL_CALLS_PER_BATCH {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "binding plan exceeds the {MAX_TOOL_CALLS_PER_BATCH}-ToolCall batch limit"
+                ),
+            });
+        }
         let mut last_ordinal = None;
         for binding in &self.bindings {
             let ordinal = binding.address.part_ordinal;
@@ -211,6 +221,51 @@ impl BindingPlan {
             });
         }
         Ok(())
+    }
+
+    /// Project the durable unbound assistant message into its exact bound
+    /// transcript form without dropping provider IDs or opaque replay state.
+    pub fn bound_message(&self) -> Result<NativeMessage<BoundToolCall>> {
+        self.validate()?;
+        let mut parts = Vec::with_capacity(self.message.parts.len());
+        for (ordinal, part) in self.message.parts.iter().enumerate() {
+            let semantic = match &part.semantic {
+                MessageSemantic::Text { text } => MessageSemantic::Text { text: text.clone() },
+                MessageSemantic::Reasoning { text } => {
+                    MessageSemantic::Reasoning { text: text.clone() }
+                }
+                MessageSemantic::ToolResult {
+                    invocation_id,
+                    name,
+                    outcome,
+                    content,
+                } => MessageSemantic::ToolResult {
+                    invocation_id: *invocation_id,
+                    name: name.clone(),
+                    outcome: *outcome,
+                    content: content.clone(),
+                },
+                MessageSemantic::ToolCall { call } => {
+                    let binding = self
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.address.part_ordinal as usize == ordinal)
+                        .expect("validated plan binds every ToolCall");
+                    MessageSemantic::ToolCall {
+                        call: call.clone().bind(binding.invocation_id, binding.address),
+                    }
+                }
+            };
+            parts.push(MessagePart {
+                semantic,
+                replay_state: part.replay_state.clone(),
+            });
+        }
+        Ok(NativeMessage::new(
+            self.message.role,
+            self.message.provider_origin,
+            parts,
+        ))
     }
 }
 
@@ -299,6 +354,28 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&exact).unwrap()).unwrap();
         assert_eq!(back, exact);
         back.validate().expect("round-tripped plan");
+    }
+
+    #[test]
+    fn plan_rejects_more_than_the_tool_call_batch_limit() {
+        let arguments = serde_json::json!({});
+        let calls: Vec<_> = (0..=MAX_TOOL_CALLS_PER_BATCH)
+            .map(|ordinal| (format!("tool_{ordinal}"), arguments.clone()))
+            .collect();
+        let message_calls: Vec<_> = calls
+            .iter()
+            .map(|(name, arguments)| (name.as_str(), arguments.clone()))
+            .collect();
+        let bindings = calls
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (name, arguments))| binding(ordinal as u32, name, arguments))
+            .collect();
+        assert!(matches!(
+            plan(bindings, tool_message(&message_calls)).validate(),
+            Err(SessionError::JournalCorruption { detail })
+                if detail.contains("batch limit")
+        ));
     }
 
     #[test]

@@ -11,13 +11,12 @@
 //! `BindingPlanned`, `InvocationId`, or transcript content — this validator is
 //! the fail-closed gate that decision is built from.
 
-use lancet_protocol::{InvocationId, ToolCallAddress};
+use lancet_protocol::{InvocationId, ToolCallAddress, arguments_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::digest::arguments_digest;
-use crate::limits::MAX_TOOL_CALL_ARGUMENTS_BYTES;
+use crate::limits::{MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH};
 use crate::message::{ToolCallState, sealed};
 
 /// A Tool call as produced by a provider before binding: the optional
@@ -47,6 +46,10 @@ impl ToolCallState for UnboundToolCall {
 
     fn provider_call_id(&self) -> Option<&str> {
         self.provider_call_id.as_deref()
+    }
+
+    fn clear_provider_call_id(&mut self) {
+        self.provider_call_id = None;
     }
 }
 /// A Tool call bound to its canonical `InvocationId` and structural address.
@@ -127,6 +130,10 @@ impl ToolCallState for BoundToolCall {
     fn provider_call_id(&self) -> Option<&str> {
         self.provider_call_id.as_deref()
     }
+
+    fn clear_provider_call_id(&mut self) {
+        self.provider_call_id = None;
+    }
 }
 
 impl UnboundToolCall {
@@ -160,6 +167,14 @@ pub struct RawToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallValidation {
+    /// The batch exceeds the code-defined per-step ToolCall count.
+    #[error("tool call batch too large: limit {limit}, got {actual}")]
+    TooManyCalls {
+        /// Maximum accepted calls in one batch.
+        limit: usize,
+        /// Actual calls in the completed batch.
+        actual: usize,
+    },
     /// The textual arguments are not well-formed JSON (including the empty
     /// string; there is no empty-to-`{}` normalization).
     #[error("tool call at part ordinal {call_ordinal} has malformed JSON arguments")]
@@ -216,6 +231,12 @@ pub enum ToolCallValidation {
 pub fn validate_tool_call_batch(
     calls: &[RawToolCall],
 ) -> Result<Vec<UnboundToolCall>, ToolCallValidation> {
+    if calls.len() > MAX_TOOL_CALLS_PER_BATCH {
+        return Err(ToolCallValidation::TooManyCalls {
+            limit: MAX_TOOL_CALLS_PER_BATCH,
+            actual: calls.len(),
+        });
+    }
     let mut validated = Vec::with_capacity(calls.len());
     for (ordinal, call) in calls.iter().enumerate() {
         if call.arguments.len() > MAX_TOOL_CALL_ARGUMENTS_BYTES {
@@ -328,6 +349,29 @@ mod tests {
             },
             part_ordinal: 0,
         }
+    }
+
+    #[test]
+    fn tool_call_count_exact_boundary_passes_plus_one_fails() {
+        let exact: Vec<_> = (0..MAX_TOOL_CALLS_PER_BATCH)
+            .map(|ordinal| raw(&format!("tool_{ordinal}"), "{}"))
+            .collect();
+        assert_eq!(
+            validate_tool_call_batch(&exact)
+                .expect("exact batch boundary")
+                .len(),
+            MAX_TOOL_CALLS_PER_BATCH
+        );
+
+        let mut over = exact;
+        over.push(raw("one_too_many", "{}"));
+        assert!(matches!(
+            validate_tool_call_batch(&over),
+            Err(ToolCallValidation::TooManyCalls {
+                limit: MAX_TOOL_CALLS_PER_BATCH,
+                actual,
+            }) if actual == MAX_TOOL_CALLS_PER_BATCH + 1
+        ));
     }
 
     #[test]

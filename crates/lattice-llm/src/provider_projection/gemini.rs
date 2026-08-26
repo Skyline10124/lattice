@@ -25,11 +25,12 @@
 
 use lattice_conversation::{
     AttemptAssembly, MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState,
-    ProviderOrigin, RawToolCall, UnboundToolCall, validate_tool_call_batch,
+    ProviderOrigin, RawToolCall, TokenUsage, ToolCallState, ToolResultOutcome, UnboundToolCall,
+    validate_tool_call_batch,
 };
 use serde_json::{Value, json};
 
-use super::ProjectionError;
+use super::{ProjectionError, ToolResultClosure, closure_content};
 
 fn limit_exceeded(interruption: lattice_conversation::AttemptInterruption) -> ProjectionError {
     ProjectionError::OutputLimitExceeded {
@@ -90,9 +91,9 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
             let arguments = match function_call.get("args") {
                 Some(args) => serde_json::to_string(args)
                     .map_err(|_| malformed("functionCall args not serializable"))?,
-                // An absent `args` object is not an empty-object spelling;
-                // there is no empty-to-`{}` normalization.
-                None => return Err(malformed("functionCall missing args")),
+                // Gemini may omit `args` for a parameterless function call; its
+                // documented meaning is the empty input object.
+                None => "{}".to_string(),
             };
             let provider_call_id = match function_call.get("id") {
                 Some(Value::String(id)) => Some(id.to_string()),
@@ -164,7 +165,9 @@ pub fn wire_to_native(wire: &Value) -> Result<NativeMessage<UnboundToolCall>, Pr
     ))
 }
 
-pub fn native_to_wire(message: &NativeMessage<UnboundToolCall>) -> Result<Value, ProjectionError> {
+pub fn native_to_wire<S: ToolCallState>(
+    message: &NativeMessage<S>,
+) -> Result<Value, ProjectionError> {
     let mut wire_parts: Vec<Value> = Vec::new();
     for (ordinal, part) in message.parts.iter().enumerate() {
         let thought_signature = part.replay_state.as_ref().map(|state| state.as_str());
@@ -185,10 +188,10 @@ pub fn native_to_wire(message: &NativeMessage<UnboundToolCall>) -> Result<Value,
             }
             MessageSemantic::ToolCall { call } => {
                 let mut function_call = json!({
-                    "name": call.name,
-                    "args": call.arguments,
+                    "name": call.name(),
+                    "args": call.arguments(),
                 });
-                if let Some(id) = &call.provider_call_id {
+                if let Some(id) = call.provider_call_id() {
                     function_call["id"] = json!(id);
                 }
                 let mut wire_part = json!({ "functionCall": function_call });
@@ -208,5 +211,73 @@ pub fn native_to_wire(message: &NativeMessage<UnboundToolCall>) -> Result<Value,
     Ok(json!({
         "role": "model",
         "parts": wire_parts,
+    }))
+}
+
+/// One user turn whose parts carry every `functionResponse`, in closure
+/// order. The Gemini result shape correlates by Tool name and carries no
+/// provider call ID, so closures whose calls have no provider ID encode
+/// normally. `Failed`/`Rejected` closures use the conventional
+/// `response: {"error": …}` spelling; other outcomes pass an object content
+/// through and wrap everything else as `{"result": …}`.
+pub(crate) fn tool_result_messages(
+    closures: &[ToolResultClosure],
+) -> Result<Vec<Value>, ProjectionError> {
+    let mut parts: Vec<Value> = Vec::with_capacity(closures.len());
+    for closure in closures {
+        let content = closure_content(closure.outcome, &closure.content);
+        let response = match closure.outcome {
+            ToolResultOutcome::Failed | ToolResultOutcome::Rejected => {
+                json!({ "error": content })
+            }
+            _ => match serde_json::from_str::<Value>(&content) {
+                Ok(Value::Object(object)) => Value::Object(object),
+                _ => json!({ "result": content }),
+            },
+        };
+        parts.push(json!({
+            "functionResponse": {
+                "name": closure.name,
+                "response": response,
+            }
+        }));
+    }
+    Ok(vec![json!({
+        "role": "user",
+        "parts": parts,
+    })])
+}
+
+/// `usageMetadata: {promptTokenCount, candidatesTokenCount, totalTokenCount}`;
+/// the neutral total is the sum when the body omits `totalTokenCount`.
+pub(crate) fn usage(wire: &Value) -> Result<Option<TokenUsage>, ProjectionError> {
+    let Some(usage) = wire.get("usageMetadata") else {
+        return Ok(None);
+    };
+    if usage.is_null() {
+        return Ok(None);
+    }
+    let malformed = |detail: String| ProjectionError::MalformedUsage {
+        provider: ProviderOrigin::Gemini,
+        detail,
+    };
+    let field = |name: &str| -> Result<u64, ProjectionError> {
+        usage
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| malformed(format!("usageMetadata.{name} is not an integer")))
+    };
+    let prompt_tokens = field("promptTokenCount")?;
+    let completion_tokens = field("candidatesTokenCount")?;
+    let total_tokens = match usage.get("totalTokenCount") {
+        Some(total) => total.as_u64().ok_or_else(|| {
+            malformed("usageMetadata.totalTokenCount is not an integer".to_string())
+        })?,
+        None => prompt_tokens.saturating_add(completion_tokens),
+    };
+    Ok(Some(TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
     }))
 }

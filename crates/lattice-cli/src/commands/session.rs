@@ -476,11 +476,19 @@ fn render_turn_log_entry(index: usize, entry: &lattice_api::TurnLogEntry) -> Str
     let mut lines = vec![
         format!("{}", format!("turn {index}").bold()),
         format!("  {} {}", "commit:".green(), display_id(&entry.commit_id)),
-        format!("  {} {}", "status:".green(), entry.status.as_str()),
         format!(
             "  {} {}",
-            "disposition:".green(),
-            entry.disposition.as_str()
+            "outcome:".green(),
+            serde_json::to_string(&entry.outcome).expect("serialize outcome")
+        ),
+        format!("  {} {}", "origin:".green(), entry.origin.as_str()),
+        format!(
+            "  {} {}",
+            "workspace history:".green(),
+            entry
+                .workspace_history_checkpoint
+                .as_oid()
+                .unwrap_or("empty")
         ),
         format!("  {} {}", "agent:".green(), entry.agent_name),
         format!("  {} {}", "model:".green(), entry.model),
@@ -677,13 +685,25 @@ async fn cmd_rewind_api(
     .await
     {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(
+        Ok(Err(lattice_api::RewindError::Api(
             err @ (lattice_api::ApiError::NotFound(_) | lattice_api::ApiError::BadRequest(_)),
-        )) => {
+        ))) => {
             eprintln!("{}: {:#}", "error".red(), err);
             return Ok(std::process::ExitCode::from(2));
         }
-        Ok(Err(err)) => return Err(err.into()),
+        Ok(Err(lattice_api::RewindError::AuditPublicationFailed { detail, partial })) => {
+            eprintln!(
+                "{}: rewind actions completed but the audit record could not be published: {detail}",
+                "error".red()
+            );
+            if json {
+                println!("{}", serde_json::to_string_pretty(&partial)?);
+            } else {
+                eprint!("{}", render_rewind_partial_text(&partial));
+            }
+            return Ok(std::process::ExitCode::from(1));
+        }
+        Ok(Err(lattice_api::RewindError::Api(err))) => return Err(err.into()),
         Err(err) => return Err(anyhow::anyhow!("rewind worker failed: {err}")),
     };
 
@@ -727,6 +747,56 @@ async fn cmd_rewind_api(
             Ok(std::process::ExitCode::from(1))
         }
     }
+}
+
+fn render_rewind_ref_observation(observation: &lattice_api::RewindRefObservation) -> String {
+    match observation {
+        lattice_api::RewindRefObservation::Present { value } => format!("present ({value})"),
+        lattice_api::RewindRefObservation::Empty => "empty".to_string(),
+        lattice_api::RewindRefObservation::Unavailable => "unavailable".to_string(),
+    }
+}
+
+fn render_rewind_audit_observation(
+    observation: lattice_api::RewindAuditRecordObservation,
+) -> &'static str {
+    match observation {
+        lattice_api::RewindAuditRecordObservation::VisibleDurabilityUnconfirmed => {
+            "visible (append durability unconfirmed)"
+        }
+        lattice_api::RewindAuditRecordObservation::NotVisible => "not visible",
+        lattice_api::RewindAuditRecordObservation::Uncertain => "uncertain (outside bounded page)",
+        lattice_api::RewindAuditRecordObservation::Unavailable => "unavailable",
+    }
+}
+
+fn render_rewind_partial_text(partial: &lattice_api::RewindPartialState) -> String {
+    format!(
+        "partial state:\n  session_id: {}\n  target_turn_id: {}\n  target_commit_id: {}\n  \\
+         outcome: {}\n  started_from_history_oid: {}\n  attempted_target_history_oid: {}\n  \\
+         actual_workspace_history_oid: {}\n  actual_session_head_commit_id: {}\n  \\
+         audit_record_observation: {}\n  steps: {}\n  preflight: {}\n  restored: {}\n  \\
+         conflicts: {}\n",
+        partial.session_id,
+        partial.target_turn_id,
+        partial.target_commit_id,
+        partial.outcome,
+        partial
+            .started_from_history_oid
+            .as_deref()
+            .unwrap_or("<empty>"),
+        partial
+            .attempted_target_history_oid
+            .as_deref()
+            .unwrap_or("<empty>"),
+        render_rewind_ref_observation(&partial.actual_workspace_history_oid),
+        render_rewind_ref_observation(&partial.actual_session_head_commit_id),
+        render_rewind_audit_observation(partial.audit_record_observation),
+        serde_json::to_string(&partial.steps).unwrap_or_else(|_| "<unavailable>".to_string()),
+        serde_json::to_string(&partial.preflight).unwrap_or_else(|_| "<unavailable>".to_string()),
+        serde_json::to_string(&partial.restored).unwrap_or_else(|_| "<unavailable>".to_string()),
+        serde_json::to_string(&partial.conflicts).unwrap_or_else(|_| "<unavailable>".to_string()),
+    )
 }
 
 fn display_id(id: &str) -> String {
@@ -831,12 +901,17 @@ mod session_cli {
     }
 
     #[test]
-    fn human_turn_log_renders_disposition_next_to_status() {
+    fn human_turn_log_renders_typed_terminal_facts() {
         let entry = lattice_session::TurnLogEntry {
             commit_id: "abc123".to_string(),
+            turn_id: lattice_session::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .expect("valid test TurnId"),
             parent_ids: vec![],
-            status: lattice_session::TurnCommitStatus::Completed,
-            disposition: lattice_session::WorkspaceDisposition::PendingWorktree,
+            outcome: lattice_session::TurnOutcome::Completed {
+                finish_reason: lattice_session::TurnFinishReason::Stop,
+            },
+            origin: lattice_session::ClosureOrigin::Live,
+            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
             agent_name: "coder".to_string(),
             profile_snapshot_hash: "profile".to_string(),
             model: "test-model".to_string(),
@@ -845,15 +920,14 @@ mod session_cli {
             message_count: 2,
             tool_message_count: 0,
             usage: None,
-            terminal_reason: None,
             created_at: "2026-06-22T00:00:00Z".to_string(),
         };
 
         let rendered = render_turn_log_entry(0, &entry);
-        assert!(rendered.contains("status:"));
+        assert!(rendered.contains("outcome:"));
         assert!(rendered.contains("completed"));
-        assert!(rendered.contains("disposition:"));
-        assert!(rendered.contains("pending_worktree"));
+        assert!(rendered.contains("origin:"));
+        assert!(rendered.contains("live"));
     }
 
     #[test]
@@ -995,6 +1069,51 @@ mod session_cli {
     fn parse_rewind_requires_session_and_target() {
         assert!(try_parse(&["rewind"]).is_err());
         assert!(try_parse(&["rewind", "sess-abc"]).is_err());
+    }
+
+    #[test]
+    fn rewind_partial_text_renders_all_typed_observations_and_ids() {
+        let partial: lattice_api::RewindPartialState = serde_json::from_value(serde_json::json!({
+            "session_id": "0123456789abcdef0123456789abcdef",
+            "target_turn_id": "10000000-0000-4000-8000-000000000001",
+            "target_commit_id": "target-commit",
+            "outcome": "history_ref_failure",
+            "started_from_history_oid": "started-history",
+            "attempted_target_history_oid": "target-history",
+            "actual_workspace_history_oid": {
+                "state": "present",
+                "value": "actual-history"
+            },
+            "actual_session_head_commit_id": { "state": "empty" },
+            "audit_record_observation": { "state": "uncertain" },
+            "steps": [],
+            "preflight": [],
+            "restored": [],
+            "conflicts": []
+        }))
+        .expect("typed partial state");
+
+        let rendered = render_rewind_partial_text(&partial);
+        for expected in [
+            "session_id: 0123456789abcdef0123456789abcdef",
+            "target_turn_id: 10000000-0000-4000-8000-000000000001",
+            "target_commit_id: target-commit",
+            "outcome: history_ref_failure",
+            "started_from_history_oid: started-history",
+            "attempted_target_history_oid: target-history",
+            "actual_workspace_history_oid: present (actual-history)",
+            "actual_session_head_commit_id: empty",
+            "audit_record_observation: uncertain (outside bounded page)",
+            "steps: []",
+            "preflight: []",
+            "restored: []",
+            "conflicts: []",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?} in {rendered:?}"
+            );
+        }
     }
 
     #[test]

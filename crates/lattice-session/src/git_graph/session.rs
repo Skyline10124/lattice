@@ -78,10 +78,7 @@ impl GitSessionGraphStore {
 
         let branches = enumerate_session_branches(self.kernel(), session_id)?;
         let head_oid = resolve_head_oid(self.kernel(), &session_state, session_id)?;
-        let commit_count = match head_oid {
-            Some(oid) => self.kernel().rev_walk(&[oid], &[])?.len(),
-            None => 0,
-        };
+        let commit_count = count_turn_commits(self.kernel(), head_oid)?;
 
         Ok(SessionStatus {
             session_id: session_id.to_string(),
@@ -106,10 +103,7 @@ impl GitSessionGraphStore {
             };
             let (_, session_state) = state::read_state(self.kernel(), session_id)?;
             let head_oid = resolve_head_oid(self.kernel(), &session_state, session_id)?;
-            let commit_count = match head_oid {
-                Some(head) => self.kernel().rev_walk(&[head], &[])?.len(),
-                None => 0,
-            };
+            let commit_count = count_turn_commits(self.kernel(), head_oid)?;
             let _ = oid;
             summaries.push(SessionGraphSummary {
                 session_id: session_state.session_id.clone(),
@@ -146,6 +140,21 @@ impl GitSessionGraphStore {
     }
 }
 
+fn count_turn_commits(
+    store: &lattice_store::StoreRepo,
+    head: Option<gix::ObjectId>,
+) -> Result<usize> {
+    let Some(head) = head else {
+        return Ok(0);
+    };
+    let mut count = 0;
+    for oid in store.rev_walk(&[head], &[])? {
+        if !super::pending::is_journal_commit(store, oid)? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
 pub(super) fn enumerate_session_branches(
     store: &lattice_store::StoreRepo,
     session_id: &str,

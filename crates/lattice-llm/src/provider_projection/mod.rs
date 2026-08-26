@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider replay/projection seam (GitHub #142, grill §5).
+//! Provider replay/projection seam (GitHub #142, grill §5; #139-B Commit 2).
 //!
 //! Pure data functions mapping official provider wire JSON to and from the
 //! provider-neutral [`NativeMessage`] contract. This module owns the
@@ -10,21 +10,40 @@
 //! 1. validate and preserve provider-native assistant message state
 //!    (provider call IDs, signatures, thought state) as part-local opaque
 //!    replay state;
-//! 2. replay it exactly for the same provider;
+//! 2. replay it exactly for the same provider — the persisted closure
+//!    vocabulary is `NativeMessage<BoundToolCall>`, so replay and projection
+//!    are generic over the [`ToolCallState`] typestate;
 //! 3. project it to plain provider-neutral semantics across providers;
-//! 4. restore the original native state when switching back.
+//! 4. restore the original native state when switching back;
+//! 5. encode conversation ToolResult closures into the next request's wire
+//!    shape, joining each closure to its closing bound ToolCall, and extract
+//!    provider-reported usage from official response bodies.
 //!
 //! It never generates, encodes, or rewrites a provider Tool Call ID, and
-//! never fabricates target-provider identity. No HTTP, no streaming, no
-//! runtime: the production codecs in [`crate::providers`] stay untouched and
-//! adopt this seam when the production path switches (#139-B).
+//! never fabricates target-provider identity. A missing provider call ID is
+//! a valid conversation fact: when the target provider cannot encode a
+//! recorded closure without one, the projection fails with a typed
+//! [`ProjectionError::ToolResultWithoutProviderCallId`] rather than
+//! synthesizing an ID. The production adapters in [`crate::providers`] own
+//! HTTP/SSE envelopes but delegate every request-message and completed-response
+//! projection to this seam.
 
 mod anthropic;
 mod gemini;
 mod openai;
 
+pub(crate) fn openai_wire_tool_name(canonical: &str) -> String {
+    canonical.replace('.', "__")
+}
+
+pub(crate) fn openai_canonical_tool_name(wire: &str) -> String {
+    wire.replace("__", ".")
+}
+use std::collections::BTreeMap;
+
 use lattice_conversation::{
-    AttemptInterruption, MessageSemantic, NativeMessage, ProviderOrigin, ToolCallValidation,
+    AttemptInterruption, BoundToolCall, InvocationId, MessageRole, MessageSemantic, NativeMessage,
+    ProviderOrigin, TokenUsage, ToolCallState, ToolCallValidation, ToolResultOutcome,
     UnboundToolCall,
 };
 use serde_json::Value;
@@ -32,7 +51,7 @@ use thiserror::Error;
 
 /// Why a projection failed. Every failure is fail-closed: no partial
 /// message, no fabricated identity, no guessed replay state.
-#[derive(Debug, Clone, PartialEq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProjectionError {
     /// The wire JSON does not match the provider's official shape.
     #[error("malformed {provider} wire: {detail}")]
@@ -82,6 +101,35 @@ pub enum ProjectionError {
         /// The typed interruption recording which limit was crossed.
         interruption: AttemptInterruption,
     },
+    /// A ToolResult closure names an invocation the assistant message never
+    /// bound.
+    #[error("{provider} tool result closes unknown invocation {invocation_id}")]
+    UnmatchedToolResult {
+        /// The provider being projected.
+        provider: ProviderOrigin,
+        /// The invocation the closure claimed to close.
+        invocation_id: InvocationId,
+    },
+    /// The target provider's wire cannot encode a recorded closure without a
+    /// provider call ID, and the closing ToolCall legitimately carries none
+    /// (ADR 0005 §1: provider IDs are optional facts, never synthesized).
+    #[error(
+        "{provider} wire cannot encode the tool result for {invocation_id} without a provider call id"
+    )]
+    ToolResultWithoutProviderCallId {
+        /// The provider being projected.
+        provider: ProviderOrigin,
+        /// The invocation whose closure cannot be encoded.
+        invocation_id: InvocationId,
+    },
+    /// The usage block on an otherwise accepted body is malformed.
+    #[error("malformed {provider} usage block: {detail}")]
+    MalformedUsage {
+        /// The provider being projected.
+        provider: ProviderOrigin,
+        /// What was missing or mistyped.
+        detail: String,
+    },
 }
 
 /// Extract a provider-neutral unbound message from an official wire
@@ -100,9 +148,13 @@ pub fn wire_to_native(
 /// Replay a native message back to its origin provider's assistant wire
 /// message object. Requires `message.provider_origin == Some(origin)` and
 /// every protocol-required replay state to be present.
-pub fn native_to_wire(
+///
+/// Generic over the binding typestate: unbound pre-binding messages and the
+/// persisted `NativeMessage<BoundToolCall>` closure vocabulary replay
+/// through the same rules.
+pub fn native_to_wire<S: ToolCallState>(
     origin: ProviderOrigin,
-    message: &NativeMessage<UnboundToolCall>,
+    message: &NativeMessage<S>,
 ) -> Result<Value, ProjectionError> {
     if message.provider_origin != Some(origin) {
         return Err(ProjectionError::WrongOrigin {
@@ -133,10 +185,10 @@ pub fn native_to_wire(
 ///
 /// Remaining parts keep their relative order. Switching back to the source
 /// provider must use the retained original message, not this projection.
-pub fn project_cross_provider(
-    message: &NativeMessage<UnboundToolCall>,
+pub fn project_cross_provider<S: ToolCallState>(
+    message: &NativeMessage<S>,
     target: ProviderOrigin,
-) -> NativeMessage<UnboundToolCall> {
+) -> NativeMessage<S> {
     let mut projected = message.clone();
     projected.provider_origin = Some(target);
     projected
@@ -145,8 +197,236 @@ pub fn project_cross_provider(
     for part in &mut projected.parts {
         part.replay_state = None;
         if let MessageSemantic::ToolCall { call } = &mut part.semantic {
-            call.provider_call_id = None;
+            call.clear_provider_call_id();
         }
     }
     projected
+}
+
+/// Provider request messages projected from durable bound conversation history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestMessages {
+    /// Provider system-instruction text, merged in source order.
+    pub system: Option<String>,
+    /// Provider-native non-system message objects in conversation order.
+    pub messages: Vec<Value>,
+}
+
+/// Project durable bound history into one provider's request-message vocabulary.
+///
+/// This is the only production ToolCall/ToolResult request encoder. Same-provider
+/// assistant messages replay their retained native state exactly. A provider
+/// switch applies [`project_cross_provider`] once; no caller may flatten the
+/// message through a second DTO or invent a missing provider call ID.
+pub fn request_messages_to_wire(
+    origin: ProviderOrigin,
+    history: &[NativeMessage<BoundToolCall>],
+) -> Result<RequestMessages, ProjectionError> {
+    let mut system = None;
+    let mut messages = Vec::new();
+    let mut last_assistant: Option<NativeMessage<BoundToolCall>> = None;
+    let mut index = 0;
+
+    while index < history.len() {
+        let message = &history[index];
+        match message.role {
+            MessageRole::System => {
+                push_system_text(&mut system, &plain_text(origin, message)?);
+                last_assistant = None;
+                index += 1;
+            }
+            MessageRole::User => {
+                messages.push(user_to_wire(origin, &plain_text(origin, message)?));
+                last_assistant = None;
+                index += 1;
+            }
+            MessageRole::Assistant => {
+                let projected = if message.provider_origin == Some(origin) {
+                    message.clone()
+                } else {
+                    project_cross_provider(message, origin)
+                };
+                messages.push(native_to_wire(origin, &projected)?);
+                last_assistant = Some(projected);
+                index += 1;
+            }
+            MessageRole::Tool => {
+                let assistant = last_assistant.as_ref().ok_or_else(|| {
+                    ProjectionError::MalformedWire {
+                        provider: origin,
+                        detail: format!(
+                            "tool message at history ordinal {index} has no preceding assistant message"
+                        ),
+                    }
+                })?;
+                let mut parts = Vec::new();
+                while index < history.len() && history[index].role == MessageRole::Tool {
+                    parts.extend(history[index].parts.clone());
+                    index += 1;
+                }
+                let tool = NativeMessage::new(MessageRole::Tool, None, parts);
+                messages.extend(tool_results_to_wire(origin, assistant, &tool)?);
+                last_assistant = None;
+            }
+        }
+    }
+
+    Ok(RequestMessages { system, messages })
+}
+
+fn plain_text(
+    origin: ProviderOrigin,
+    message: &NativeMessage<BoundToolCall>,
+) -> Result<String, ProjectionError> {
+    let mut text = String::new();
+    for (ordinal, part) in message.parts.iter().enumerate() {
+        if part.replay_state.is_some() {
+            return Err(ProjectionError::UnsupportedPart {
+                provider: origin,
+                part_ordinal: ordinal,
+            });
+        }
+        match &part.semantic {
+            MessageSemantic::Text { text: delta } => text.push_str(delta),
+            _ => {
+                return Err(ProjectionError::UnsupportedPart {
+                    provider: origin,
+                    part_ordinal: ordinal,
+                });
+            }
+        }
+    }
+    Ok(text)
+}
+
+fn push_system_text(system: &mut Option<String>, text: &str) {
+    match system {
+        Some(existing) => {
+            existing.push_str("\n\n");
+            existing.push_str(text);
+        }
+        None => *system = Some(text.to_string()),
+    }
+}
+
+fn user_to_wire(origin: ProviderOrigin, text: &str) -> Value {
+    match origin {
+        ProviderOrigin::OpenAiCompatible => serde_json::json!({
+            "role": "user",
+            "content": text,
+        }),
+        ProviderOrigin::Anthropic => serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": if text.is_empty() { "(empty message)" } else { text },
+            }],
+        }),
+        ProviderOrigin::Gemini => serde_json::json!({
+            "role": "user",
+            "parts": [{"text": text}],
+        }),
+    }
+}
+
+/// One conversation ToolResult closure joined to its closing bound ToolCall.
+struct ToolResultClosure {
+    invocation_id: InvocationId,
+    provider_call_id: Option<String>,
+    name: String,
+    outcome: ToolResultOutcome,
+    content: Option<String>,
+}
+
+/// The model-facing wire content of one closure.
+///
+/// Available material is passed through verbatim. A closure whose material is
+/// unavailable carries the true outcome spelled in a self-describing JSON
+/// object instead — the outcome stays honest without inventing Tool output.
+fn closure_content(outcome: ToolResultOutcome, content: &Option<String>) -> String {
+    match content {
+        Some(text) => text.clone(),
+        None => format!("{{\"outcome\":\"{}\"}}", outcome.as_str()),
+    }
+}
+
+/// Encode one conversation ToolResult closure message into the origin
+/// provider's next-request wire shape (ADR 0005 §7, #139-B Commit 2).
+///
+/// `assistant` is the bound Tool-bearing message the closures belong to; each
+/// closure is joined to its closing ToolCall by canonical `InvocationId`, and
+/// the provider call ID required by the OpenAI/Anthropic wire is taken from
+/// that call — never synthesized. Providers with no ID-bearing result shape
+/// (Gemini `functionResponse`) encode closures whose calls carry no provider
+/// ID.
+///
+/// Returns the request messages to append, in closure order: one message per
+/// closure for the OpenAI wire, one merged user turn for the Anthropic and
+/// Gemini wires.
+pub fn tool_results_to_wire(
+    origin: ProviderOrigin,
+    assistant: &NativeMessage<BoundToolCall>,
+    tool: &NativeMessage<BoundToolCall>,
+) -> Result<Vec<Value>, ProjectionError> {
+    let mut closing_ids: BTreeMap<InvocationId, Option<String>> = BTreeMap::new();
+    for (_, call) in assistant.tool_calls() {
+        closing_ids.insert(call.invocation_id, call.provider_call_id.clone());
+    }
+
+    let mut closures = Vec::new();
+    for (ordinal, part) in tool.parts.iter().enumerate() {
+        let MessageSemantic::ToolResult {
+            invocation_id,
+            name,
+            outcome,
+            content,
+        } = &part.semantic
+        else {
+            return Err(ProjectionError::MalformedWire {
+                provider: origin,
+                detail: format!("tool message part ordinal {ordinal} is not a ToolResult closure"),
+            });
+        };
+        // No provider result shape has a slot for part-local replay state.
+        if part.replay_state.is_some() {
+            return Err(ProjectionError::UnsupportedPart {
+                provider: origin,
+                part_ordinal: ordinal,
+            });
+        }
+        let Some(provider_call_id) = closing_ids.get(invocation_id).cloned() else {
+            return Err(ProjectionError::UnmatchedToolResult {
+                provider: origin,
+                invocation_id: *invocation_id,
+            });
+        };
+        closures.push(ToolResultClosure {
+            invocation_id: *invocation_id,
+            provider_call_id,
+            name: name.clone(),
+            outcome: *outcome,
+            content: content.clone(),
+        });
+    }
+
+    match origin {
+        ProviderOrigin::OpenAiCompatible => openai::tool_result_messages(&closures),
+        ProviderOrigin::Anthropic => anthropic::tool_result_messages(&closures),
+        ProviderOrigin::Gemini => gemini::tool_result_messages(&closures),
+    }
+}
+
+/// Extract the provider-reported usage from an official response body.
+///
+/// `Ok(None)` when the body carries no usage block: missing usage is unknown,
+/// never zero. A present but malformed block fails closed.
+pub fn wire_usage(
+    origin: ProviderOrigin,
+    wire: &Value,
+) -> Result<Option<TokenUsage>, ProjectionError> {
+    match origin {
+        ProviderOrigin::OpenAiCompatible => openai::usage(wire),
+        ProviderOrigin::Anthropic => anthropic::usage(wire),
+        ProviderOrigin::Gemini => gemini::usage(wire),
+    }
 }

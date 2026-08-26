@@ -217,7 +217,6 @@ async fn emit_success_metadata(
         "policy_enforced": true,
         "budget_charged": bytes_returned,
     });
-    ctx.record_durable_metadata(metadata.clone());
     ctx.events
         .emit(
             "cep.native_external_metadata",
@@ -238,7 +237,6 @@ async fn emit_denial_metadata(
         "denial_source": if network_attempted { "network" } else { "cep_policy" },
         "policy_enforced": true,
     });
-    ctx.record_durable_metadata(metadata.clone());
     ctx.events
         .emit(
             "cep.native_external_metadata",
@@ -262,7 +260,6 @@ async fn emit_budget_denial_metadata(
         "budget_requested": budget_err.requested,
         "budget_remaining": budget_err.remaining,
     });
-    ctx.record_durable_metadata(metadata.clone());
     ctx.events
         .emit(
             "cep.native_external_metadata",
@@ -306,23 +303,25 @@ mod tests {
         ));
         (
             HandlerContext {
-                call_id: 7,
-                events: EventSink::new(event_tx, 7),
+                invocation_id: lancet_protocol::InvocationId::parse(
+                    "00000000-0000-4000-8000-000000000007",
+                )
+                .unwrap(),
+                events: EventSink::new(
+                    event_tx,
+                    lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000007")
+                        .unwrap(),
+                ),
                 cancellation: Cancellation::new(cancel_rx),
                 cep_context: Arc::clone(&cep_context),
-                turn_id: "test-turn".into(),
-                durable_metadata:
-                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                session_id: lancet_protocol::SessionId::parse("00000000000000000000000000000001")
+                    .expect("session id"),
+                turn_id: lancet_protocol::TurnId::parse("00000000-0000-4000-8000-000000000001")
+                    .expect("turn id"),
                 effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
                 authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
-                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                    turn_id: "test-turn".into(),
-                    session_id: "test-session".into(),
-                    ..Default::default()
-                })),
-                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
             },
             event_rx,

@@ -5,7 +5,9 @@
 
 use lancet_catalog::CatalogMethod;
 use lancet_protocol::error::{StateErrorData, invalid_params, method_not_found, to_jsonrpc_error};
-use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, ToolEvent};
+use lancet_protocol::{
+    CepError, CepErrorCode, CepErrorData, InvocationId, Retriability, ToolEvent,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -52,25 +54,28 @@ impl Cancellation {
 #[derive(Clone, Debug)]
 pub struct EventSink {
     tx: mpsc::Sender<ToolEvent>,
-    call_id: u64,
+    invocation_id: InvocationId,
 }
 
 impl EventSink {
-    /// Create an event sink for one call.
-    pub fn new(tx: mpsc::Sender<ToolEvent>, call_id: u64) -> Self {
-        Self { tx, call_id }
+    /// Create an event sink for one invocation.
+    pub fn new(tx: mpsc::Sender<ToolEvent>, invocation_id: InvocationId) -> Self {
+        Self { tx, invocation_id }
     }
 
-    /// Emit a CEP notification tagged with this call's id.
+    /// Emit a CEP notification tagged with this invocation's host-bound id.
+    /// Any payload-supplied `invocation_id` is overwritten.
     ///
     /// Progress events are best-effort: a closed or full client channel does not fail the handler.
     pub async fn emit(&self, method: impl Into<String>, mut params: Value) {
         if let Some(obj) = params.as_object_mut() {
-            obj.entry("call_id".to_string())
-                .or_insert_with(|| Value::from(self.call_id));
+            obj.insert(
+                "invocation_id".to_string(),
+                Value::from(self.invocation_id.to_string()),
+            );
         } else {
             params = serde_json::json!({
-                "call_id": self.call_id,
+                "invocation_id": self.invocation_id,
                 "payload": params,
             });
         }
@@ -79,17 +84,19 @@ impl EventSink {
         let _ = self.tx.try_send(event);
     }
 
-    /// Emit a CEP notification synchronously, without the `&self` async
-    /// context required by `emit`. Used by Component Tool Host imports
-    /// (#27 (Codeberg #5) slice C), which run inside a synchronous wasmtime
-    /// call.
+    /// Emit a CEP notification synchronously with the same host-bound identity
+    /// overwrite as [`Self::emit`], without the `&self` async context. Used by
+    /// Component Tool Host imports (#27 (Codeberg #5) slice C), which run
+    /// inside a synchronous wasmtime call.
     pub fn emit_sync(&self, method: impl Into<String>, mut params: Value) {
         if let Some(obj) = params.as_object_mut() {
-            obj.entry("call_id".to_string())
-                .or_insert_with(|| Value::from(self.call_id));
+            obj.insert(
+                "invocation_id".to_string(),
+                Value::from(self.invocation_id.to_string()),
+            );
         } else {
             params = serde_json::json!({
-                "call_id": self.call_id,
+                "invocation_id": self.invocation_id,
                 "payload": params,
             });
         }
@@ -238,6 +245,11 @@ mod tests {
         events: EventSink,
     }
 
+    fn invocation_id(ordinal: u64) -> InvocationId {
+        InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
+            .expect("test invocation id")
+    }
+
     fn sample_registry() -> MethodRegistry<TestContext> {
         let mut registry = MethodRegistry::new();
         registry
@@ -258,7 +270,7 @@ mod tests {
         let registry = sample_registry();
         let (event_tx, _event_rx) = mpsc::channel(8);
         let ctx = TestContext {
-            events: EventSink::new(event_tx, 1),
+            events: EventSink::new(event_tx, invocation_id(1)),
         };
 
         let params = serde_json::to_value(TestEchoParams {
@@ -282,7 +294,7 @@ mod tests {
         let registry = sample_registry();
         let (event_tx, _event_rx) = mpsc::channel(8);
         let ctx = TestContext {
-            events: EventSink::new(event_tx, 2),
+            events: EventSink::new(event_tx, invocation_id(2)),
         };
 
         let err = registry
@@ -297,7 +309,7 @@ mod tests {
         let registry = sample_registry();
         let (event_tx, _event_rx) = mpsc::channel(8);
         let ctx = TestContext {
-            events: EventSink::new(event_tx, 3),
+            events: EventSink::new(event_tx, invocation_id(3)),
         };
 
         let err = registry
@@ -305,6 +317,40 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(wire_code_for_error(&err), jsonrpc::METHOD_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn event_sink_overwrites_spoofed_invocation_identity() {
+        let bound = invocation_id(9);
+        let spoofed = invocation_id(99);
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let sink = EventSink::new(event_tx, bound);
+
+        sink.emit(
+            "test.async",
+            serde_json::json!({
+                "invocation_id": spoofed,
+                "method": "observe.workspace",
+                "ok": true,
+            }),
+        )
+        .await;
+        sink.emit_sync(
+            "test.sync",
+            serde_json::json!({
+                "invocation_id": spoofed,
+                "semantic_stage": "guest",
+            }),
+        );
+
+        for expected_method in ["test.async", "test.sync"] {
+            let event = event_rx.recv().await.expect("bound event");
+            assert_eq!(event.method, expected_method);
+            assert_eq!(
+                event.params["invocation_id"],
+                serde_json::Value::String(bound.to_string())
+            );
+        }
     }
 
     #[test]

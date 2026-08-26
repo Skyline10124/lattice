@@ -21,11 +21,15 @@ use lattice_conversation::{NativeMessage, UnboundToolCall};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Result, SessionError};
+use crate::{ProjectStoreKey, Result, SessionError};
 
 /// Code-defined model-step safety limit; not profile-configurable
 /// (ADR 0005 §10).
 pub const MAX_MODEL_STEPS: u32 = 32;
+
+/// Code-defined per-step model-attempt limit: one initial attempt plus the
+/// profile contract's at-most ten retries.
+pub const MAX_MODEL_ATTEMPTS: u32 = 11;
 
 /// Canonical catalog snapshot byte limit (1 MiB, ADR 0005 §8). A snapshot of
 /// exactly this length is legal; one byte more fails closed.
@@ -80,8 +84,8 @@ pub struct TurnExecutionLimits {
 }
 
 impl TurnExecutionLimits {
-    /// Validate the frozen limits: the model-step limit is the code-defined
-    /// constant and the attempt budget is at least one.
+    /// Validate the frozen limits: the model-step limit is code-defined and
+    /// the attempt budget is between one and [`MAX_MODEL_ATTEMPTS`].
     pub fn validate(&self) -> Result<()> {
         if self.max_model_steps != MAX_MODEL_STEPS {
             return Err(SessionError::InvalidInput(format!(
@@ -89,10 +93,11 @@ impl TurnExecutionLimits {
                 self.max_model_steps
             )));
         }
-        if self.max_model_attempts == 0 {
-            return Err(SessionError::InvalidInput(
-                "max_model_attempts must be at least 1".to_string(),
-            ));
+        if !(1..=MAX_MODEL_ATTEMPTS).contains(&self.max_model_attempts) {
+            return Err(SessionError::InvalidInput(format!(
+                "max_model_attempts must be between 1 and {MAX_MODEL_ATTEMPTS}, got {}",
+                self.max_model_attempts
+            )));
         }
         Ok(())
     }
@@ -286,6 +291,9 @@ pub struct TurnStartedFacts {
     pub turn_id: TurnId,
     /// Owning session identity.
     pub session_id: SessionId,
+    /// Exact project-store address persisted by the owning Session. Recovery
+    /// uses this binding before it opens any project-keyed store.
+    pub project_store_key: ProjectStoreKey,
     /// Conversation tip (commit oid hex) the Turn started from; `None` for
     /// the first Turn of an empty branch. The final publication transaction
     /// CASes the conversation head against exactly this value.
@@ -467,8 +475,10 @@ mod tests {
         limits.max_model_steps = MAX_MODEL_STEPS;
         limits.max_model_attempts = 0;
         assert!(limits.validate().is_err());
-        limits.max_model_attempts = 1;
-        limits.validate().expect("valid limits");
+        limits.max_model_attempts = MAX_MODEL_ATTEMPTS + 1;
+        assert!(limits.validate().is_err());
+        limits.max_model_attempts = MAX_MODEL_ATTEMPTS;
+        limits.validate().expect("last valid attempt budget");
     }
 
     #[test]
@@ -476,6 +486,7 @@ mod tests {
         let facts = |message: NativeMessage<UnboundToolCall>| TurnStartedFacts {
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+            project_store_key: ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
             parent_conversation_tip: None,
             user_message: message,
             config: config(),
@@ -511,6 +522,7 @@ mod tests {
         let mut facts = TurnStartedFacts {
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+            project_store_key: ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
             parent_conversation_tip: None,
             user_message: user_message(&"x".repeat(MAX_USER_INPUT_BYTES)),
             config: config(),

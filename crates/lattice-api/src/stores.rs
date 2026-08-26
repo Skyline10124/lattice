@@ -10,10 +10,11 @@
 //! that is permanently bound to that key. Every other path strictly opens:
 //! an expected-missing store fails closed.
 //!
-//! `invocations.git` is deliberately absent — #139-A owns its creation, and
-//! this ticket does not leave a placeholder behind.
+//! `invocations.git` is created here alongside workspace history so every
+//! production Turn can strictly open both project-scoped stores.
 
 use lancet_api::{WorkspaceHistory, WorkspaceHistoryBacking};
+use lancet_audit::invocation_store::InvocationStore;
 use lattice_session::{ProjectStoreKey, StateLayout};
 
 use crate::session::{ApiError, Result};
@@ -26,5 +27,7 @@ pub fn create_project_stores(layout: &StateLayout, key: ProjectStoreKey) -> Resu
     WorkspaceHistory::create(WorkspaceHistoryBacking::for_key(layout.clone(), key)).map_err(
         |err| ApiError::Internal(format!("create project workspace-history store: {err}")),
     )?;
+    InvocationStore::create(layout, &key)
+        .map_err(|err| ApiError::Internal(format!("create project invocation store: {err}")))?;
     Ok(())
 }

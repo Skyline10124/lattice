@@ -33,6 +33,11 @@ cancellation, and server runtime plumbing. ADR 0004 absorbs this behavior into
 
 ## Recent Issues
 
+- FIXED #158: transport task/cancellation tracking uses a private per-request
+  key rather than `InvocationId`; every terminal task path removes it, and
+  response loss after the server marks durable `DispatchStarted` returns typed
+  `OutcomeIndeterminate`. `EventSink` always overwrites payload identity with
+  the host-bound invocation.
 - CHANGED #70 (Codeberg #48): after cancellation the client call future
   resolves with the server-mapped structured outcome (the server observes the
   same watch and is the outcome authority); the client-synthesized
@@ -57,8 +62,8 @@ cancellation, and server runtime plumbing. ADR 0004 absorbs this behavior into
 
 ## Next Actions
 
-- Keep cancellation keyed by call id and test shutdown with out-of-order handler
-  completion.
+- Keep cancellation keyed by the private per-request transport key and test
+  shutdown with duplicate InvocationIds and out-of-order handler completion.
 - Keep progress/event sends best-effort where backpressure would block call
   completion.
 - If transport lifecycle changes, run native policy/evidence and API

@@ -65,7 +65,7 @@ async fn emit_scaffold_metadata(ctx: &HandlerContext, method: &str, result: &Sca
 #[cfg(all(test, feature = "inspect-scaffold"))]
 mod scaffold_tests {
     use super::*;
-    use crate::audit::{CepAuditContext, CepAuditStore, SEMANTIC_STAGE_SCAFFOLD};
+    use crate::audit::SEMANTIC_STAGE_SCAFFOLD;
     use crate::server::registry::{Cancellation, EventSink};
     use crate::wire_code_for_error;
     use crate::{CepServerNativeExt, CepTransport, ServerRunConfig};
@@ -78,12 +78,17 @@ mod scaffold_tests {
     use lancet_protocol::policy::PolicyHook;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::{RwLock, mpsc, watch};
+    use tokio::sync::{mpsc, watch};
 
     fn scaffold_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
         register_inspect_scaffold_methods(&mut registry).expect("register scaffold");
         registry
+    }
+
+    fn test_invocation_id() -> lancet_protocol::InvocationId {
+        lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
+            .expect("invocation id")
     }
 
     fn make_test_ctx(root: &str, event_tx: mpsc::Sender<ToolEvent>) -> HandlerContext {
@@ -92,25 +97,54 @@ mod scaffold_tests {
             PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(root)),
         ));
         let cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
+        let invocation_id = test_invocation_id();
         HandlerContext {
-            call_id: 1,
-            events: EventSink::new(event_tx, 1),
+            invocation_id,
+            events: EventSink::new(event_tx, invocation_id),
             cancellation: Cancellation::new(cancel_rx),
             cep_context,
-            turn_id: "test-turn".into(),
-            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            session_id: lancet_protocol::SessionId::parse("00000000000000000000000000000001")
+                .expect("session id"),
+            turn_id: lancet_protocol::TurnId::parse("00000000-0000-4000-8000-000000000001")
+                .expect("turn id"),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
             authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: default_hook.clone() as Arc<dyn PolicyHook>,
             default_policy_hook: Some(default_hook),
-            audit_context: Arc::new(RwLock::new(CepAuditContext {
-                turn_id: "test-turn".into(),
-                session_id: "test-session".into(),
-                ..Default::default()
-            })),
-            audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
             cep_mode: CepMode::Off,
         }
+    }
+
+    fn reserve_inspect(
+        config: &ServerRunConfig,
+        params: &InspectParams,
+    ) -> lancet_protocol::InvocationBinding {
+        let value = serde_json::to_value(params).expect("serialize");
+        let binding = lancet_protocol::InvocationBinding {
+            invocation_id: test_invocation_id(),
+            identity: lancet_protocol::BindingIdentity {
+                session_id: lancet_protocol::SessionId::parse("00000000000000000000000000000001")
+                    .expect("session"),
+                turn_id: lancet_protocol::TurnId::parse("00000000-0000-4000-8000-000000000001")
+                    .expect("turn"),
+                model_step_ordinal: 0,
+                part_ordinal: 0,
+                method: Inspect::NAME.to_string(),
+                descriptor_identity: "scaffold".to_string(),
+                arguments_digest: lancet_protocol::arguments_digest(&value),
+            },
+        };
+        config
+            .invocations
+            .reserve_batch(
+                lancet_protocol::PlanKey {
+                    turn_id: binding.identity.turn_id,
+                    model_step_ordinal: 0,
+                },
+                std::slice::from_ref(&binding),
+            )
+            .expect("reserve");
+        binding
     }
 
     #[test]
@@ -162,37 +196,24 @@ mod scaffold_tests {
     }
 
     #[tokio::test]
-    async fn scaffold_transport_audit_uses_scaffold_stage_and_zero_budget() {
+    async fn scaffold_transport_returns_scaffold_stage_and_zero_budget() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = scaffold_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
+        let params = InspectParams { path: None };
+        let binding = reserve_inspect(&config, &params);
 
         let (client, server) = CepTransport::pair(8);
-        let audit = Arc::clone(&config.audit);
         let server_task = tokio::spawn(async move {
             server.run_native(registry, config).await.unwrap();
         });
 
-        let result = client
-            .call::<Inspect>(InspectParams { path: None })
-            .await
-            .unwrap();
+        let result = client.call::<Inspect>(binding, params).await.unwrap();
         assert_eq!(result.status, "not_yet_routed");
         assert_eq!(result.semantic_stage, SEMANTIC_STAGE_SCAFFOLD);
         assert!(!result.routed);
-
-        let row = audit.row_by_audit_id(1).unwrap();
-        assert_eq!(row.method, Inspect::NAME);
-        assert_eq!(row.semantic_stage, SEMANTIC_STAGE_SCAFFOLD);
-        assert!(row.policy_enforced);
-        let metadata = row.metadata_json.expect("scaffold metadata");
-        let metadata: serde_json::Value =
-            serde_json::from_str(&metadata).expect("metadata should be JSON");
-        assert_eq!(metadata["routed"], false);
-        assert_eq!(metadata["budget_charged"], 0);
-        assert_eq!(metadata["observation_payload_bytes"], 0);
 
         drop(client);
         server_task.abort();

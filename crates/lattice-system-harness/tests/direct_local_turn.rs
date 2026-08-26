@@ -108,7 +108,8 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
             log_output.status.success()
                 && !commit_id.is_empty()
                 && log_stdout.contains(commit_id)
-                && log_stdout.contains("\"status\": \"completed\""),
+                && log_stdout.contains("\"outcome\": {")
+                && log_stdout.contains("\"completed\": {"),
             "session log --json did not reflect the new commit",
         )?;
         require(

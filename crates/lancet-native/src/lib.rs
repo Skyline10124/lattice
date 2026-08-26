@@ -6,17 +6,6 @@
 //! Low-level executor helpers stay crate-private and are reachable only through
 //! native catalog handlers. `lattice-agent` cannot reach them at compile time.
 
-pub mod audit {
-    //! Audit *persistence* surface only.
-    //!
-    //! Deliberately re-exports `lancet_audit::audit`, not the `lancet_audit`
-    //! crate root: since GitHub #39 the root also carries the operator read
-    //! path (`query_audit` / `tail_audit` / `replay_audit` and their DTOs) and
-    //! the project-keyed store-path helpers. Those are operator-only and have
-    //! no business widening this crate's public API — a glob over the root
-    //! would republish them here as `lancet_native::audit::query_audit`.
-    pub use lancet_audit::audit::*;
-}
 // The retired native HashLine engine remains only as a regression-test asset.
 // Production mutation execution lives in the embedded Components and
 // `lancet-runtime`'s `workspace-mutate` host.
@@ -55,12 +44,6 @@ pub mod rewind {
 
 #[cfg(feature = "inspect-scaffold")]
 pub use handlers::register_inspect_scaffold_methods;
-pub use lancet_audit::{
-    AuditQueryFilters, CallAuditMetadata, CallEvidence, CepAuditContext, CepAuditStore,
-    EvidenceError, EvidenceId, EvidenceOutcome, RejectionRecord, RejectionStage,
-    SEMANTIC_STAGE_NATIVE, StoredCallEvidence, impact_kind_for_method, impact_kind_from_label,
-    impact_kind_label,
-};
 pub use lancet_dispatch::{CepClient, CepServer, CepTransport, wire_code_for_error};
 pub use server::{
     CepServerNativeExt, HandlerContext, MethodRegistry, ServerRunConfig,

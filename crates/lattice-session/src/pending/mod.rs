@@ -50,12 +50,13 @@ pub mod step;
 
 pub use binding::{BindingPlan, PlannedBinding, binding_digest};
 pub use config::{
-    FrozenTurnConfig, MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_STEPS, MAX_USER_INPUT_BYTES,
-    ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits, TurnStartedFacts,
+    FrozenTurnConfig, MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_ATTEMPTS, MAX_MODEL_STEPS,
+    MAX_USER_INPUT_BYTES, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
+    TurnStartedFacts,
 };
 pub use contract::{
     CommittedFacts, PENDING_SNAPSHOT_SCHEMA_VERSION, PendingSnapshot, PendingStage,
-    TurnClosingFacts, TurnCommitCandidate, validate_transition,
+    TurnClosingFacts, TurnCommitCandidate, TurnCommitCandidateBasis, validate_transition,
 };
 pub use draft::{
     DraftClassification, DraftPublication, MAX_TOOL_CONTENT_BYTES, ResultDraft, ToolContentError,
@@ -67,13 +68,15 @@ pub use facts::{
 };
 pub use outcome::{
     ClosureOrigin, TurnCancellation, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
-    TurnUsageAggregate,
+    TurnUsageAggregate, WorkspaceHistoryCheckpoint,
 };
 pub use reconcile::{
     CandidateRevisionRequest, ReconciliationAction, ReconciliationDecision, ReconciliationPlan,
     reconcile,
 };
-pub use step::{ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState};
+pub use step::{
+    ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState, step_conversation_digest,
+};
 
 /// SHA-256 hex serde for fixed 32-byte digests in journal payloads. Same
 /// convention as `lattice-conversation`'s digest serde: 64 lowercase hex
@@ -161,6 +164,7 @@ pub(crate) mod tests_support {
         TurnStartedFacts {
             turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
             session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
+            project_store_key: crate::ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
             parent_conversation_tip: None,
             user_message: NativeMessage::new(
                 MessageRole::User,
@@ -213,7 +217,7 @@ pub(crate) mod tests_support {
             origin: ClosureOrigin::Live,
             commit_message: "please continue".to_string(),
             usage_aggregate: None,
-            workspace_history_oid: None,
+            workspace_history_checkpoint: crate::pending::WorkspaceHistoryCheckpoint::Empty,
             created_at: "2026-08-16T12:00:00Z".to_string(),
         }
     }

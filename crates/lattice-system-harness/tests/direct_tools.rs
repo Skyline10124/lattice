@@ -153,18 +153,13 @@ fn direct_tools_fetch_disabled_no_dispatch() {
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&outcome)?;
-        // Either tool_call_finished ok=false, or the model tool call is rejected
-        // without a finished event that looks successful.
-        let ok_fetch = tool_ok(&outcome.parsed, "fetch.web");
-        require(!ok_fetch, "disabled fetch.web must not succeed")?;
-        if outcome.events.iter().any(
-            |e| matches!(e, TurnEventLine::ToolCallStarted { name, .. } if name == "fetch.web"),
-        ) {
-            require(
-                tool_failed(&outcome.parsed, "fetch.web"),
-                "started fetch.web must finish failed when disabled",
-            )?;
-        }
+        // The provider event announces the requested ToolCall, but disabled
+        // methods fail closed before binding/CEP dispatch and need not emit a
+        // synthetic ToolCallFinished event.
+        require(
+            !tool_ok(&outcome.parsed, "fetch.web"),
+            "disabled fetch.web must not succeed",
+        )?;
         require(
             web.captured_requests().is_empty(),
             format!(
@@ -303,11 +298,15 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
         });
         require(
             cep_started_raw.is_some_and(|raw| {
-                raw.get("impact_kind").and_then(Value::as_str) == Some("external_observation")
+                raw.get("invocation_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.len() == 36)
                     && raw.get("semantic_stage").and_then(Value::as_str) == Some("cep_native")
+                    && raw.get("guard_stage").and_then(Value::as_str)
+                        == Some("cep_policy_lifecycle")
             }),
             format!(
-                "fetch.web cep_call_started must carry external_observation/cep_native: {cep_started_raw:?}"
+                "fetch.web cep_call_started must carry typed identity and native stages: {cep_started_raw:?}"
             ),
         )?;
         // Enforce-mode empty FetchUrl hosts deny before outbound I/O. The tool
@@ -333,7 +332,7 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
             outcome.events.iter().any(|event| {
                 matches!(
                     event,
-                    TurnEventLine::TurnCommitted { status, .. } if status == "completed"
+                    TurnEventLine::TurnCommitted { outcome, .. } if outcome == "completed"
                 )
             }),
             format!(
@@ -441,24 +440,44 @@ fn direct_tools_todo_write_success() {
             }
             _ => None,
         });
+        let public_started_id = outcome.events.iter().find_map(|event| match event {
+            TurnEventLine::ToolCallStarted { id, name } if name == "session.todo_write" => {
+                Some(id.as_str())
+            }
+            _ => None,
+        });
+        let public_finished_id = outcome.events.iter().find_map(|event| match event {
+            TurnEventLine::ToolCallFinished { id, name, .. } if name == "session.todo_write" => {
+                Some(id.as_str())
+            }
+            _ => None,
+        });
+        let cep_invocation_id = cep_started_raw
+            .and_then(|raw| raw.get("invocation_id"))
+            .and_then(Value::as_str);
+        require(
+            cep_invocation_id.is_some()
+                && public_started_id == cep_invocation_id
+                && public_finished_id == cep_invocation_id,
+            format!(
+                "public Tool events must use the typed InvocationId: \
+                 started={public_started_id:?} finished={public_finished_id:?} \
+                 cep={cep_invocation_id:?}"
+            ),
+        )?;
+
         require(
             cep_started_raw.is_some_and(|raw| {
-                raw.get("semantic_stage").and_then(Value::as_str) == Some("cell_component")
+                raw.get("invocation_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.len() == 36)
+                    && raw.get("semantic_stage").and_then(Value::as_str) == Some("cell_component")
                     && raw.get("guard_stage").and_then(Value::as_str) == Some("cell_admission")
             }),
             format!(
                 "todo_write must be dispatched to the embedded Component \
                  (cell_component/cell_admission), got: {cep_started_raw:?}"
             ),
-        )?;
-        // A Cell-governed row carries no legacy impact kind: its authorization
-        // vocabulary is the Cell. `unknown` here is the *positive* signal that
-        // the native method-impact path did not run.
-        require(
-            cep_started_raw.is_some_and(|raw| {
-                raw.get("impact_kind").and_then(Value::as_str) != Some("session_state_mutation")
-            }),
-            format!("a Component row must not claim a native impact kind: {cep_started_raw:?}"),
         )?;
         require(captures.len() >= 2, "need tool result in next request")?;
         let todos = tool_result_value(&captures[1]).expect("todo result JSON");
@@ -501,11 +520,15 @@ fn direct_tools_todo_write_success() {
             .unwrap_or_default();
         require(
             recent_calls.iter().any(|call| {
-                call.get("method").and_then(Value::as_str) == Some("session.todo_write")
-            }) && status_json
-                .get("last_guard_verdict")
-                .is_some_and(|value| !value.is_null()),
-            format!("lancet status omitted todo/verdict: {status_json}"),
+                call.pointer("/record/binding/method")
+                    .and_then(Value::as_str)
+                    == Some("session.todo_write")
+                    && call
+                        .pointer("/record/state/terminal/outcome")
+                        .and_then(Value::as_str)
+                        == Some("succeeded")
+            }) && status_json.get("last_verdict").and_then(Value::as_str) == Some("succeeded"),
+            format!("lancet status omitted typed todo terminal: {status_json}"),
         )?;
         Ok(())
     })();

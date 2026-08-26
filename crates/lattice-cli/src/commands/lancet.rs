@@ -3,9 +3,8 @@
 
 //! `lattice lancet` — LANCET inspection and self-check subcommands.
 //!
-//! - `lancet status`: reads the external project-keyed audit store via
-//!   `audit_db_path_for_project` (no CEP server) and shows recent calls and
-//!   the last guard verdict.
+//! - `lancet status`: reads the project InvocationStore without composing a
+//!   CEP server and shows recent typed invocation states.
 //! - `lancet doctor`: catalog count, transport smoke, and invariant-card parse.
 
 use anyhow::{Context, Result};
@@ -20,7 +19,7 @@ use std::path::Path;
 /// `lattice lancet` subcommand group.
 #[derive(Subcommand)]
 pub enum LancetAction {
-    /// Show audit-derived CEP status: recent calls and last guard verdict.
+    /// Show recent typed invocation states from the project ledger.
     Status {
         /// Emit JSON instead of human-readable output.
         #[arg(long)]
@@ -47,26 +46,11 @@ fn run_status(json: bool) -> Result<()> {
     let output = collect_status(&project_root)?;
 
     if json {
-        let value = status_json_value(&output);
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         render_status_text(&output);
     }
     Ok(())
-}
-
-fn status_json_value(output: &LancetStatusOutput) -> serde_json::Value {
-    serde_json::json!({
-        "recent_calls": output.recent_calls.iter().map(|c| serde_json::json!({
-            "audit_id": c.audit_id,
-            "method": c.method,
-            "impact": c.impact,
-            "verdict": c.verdict,
-            "duration_ms": c.duration_ms,
-            "evidence": c.evidence,
-        })).collect::<Vec<_>>(),
-        "last_guard_verdict": output.last_guard_verdict,
-    })
 }
 
 fn render_status_text(output: &LancetStatusOutput) {
@@ -77,32 +61,28 @@ fn render_status_text(output: &LancetStatusOutput) {
 
 fn status_text_lines(output: &LancetStatusOutput) -> Vec<String> {
     let mut lines = vec!["lancet status".dimmed().to_string()];
-    lines.push("Recent CEP Calls:".bold().to_string());
+    lines.push(format!(
+        "Ledger: {}",
+        output.ledger_oid.as_deref().unwrap_or("none")
+    ));
+    lines.push("Recent Invocations:".bold().to_string());
     if output.recent_calls.is_empty() {
         lines.push(format!("  {}", "none".dimmed()));
     } else {
         for call in &output.recent_calls {
-            let verdict = call.verdict.as_deref().unwrap_or("?");
-            let dur = call
-                .duration_ms
-                .map(|d| format!("{}ms", d))
-                .unwrap_or_default();
             lines.push(format!(
-                "  [{}] {} {} {} {}",
-                call.audit_id,
-                call.method.cyan(),
-                call.impact.dimmed(),
-                verdict,
-                dur
+                "  {} {} {:?}",
+                call.invocation_id,
+                call.record.binding.method.cyan(),
+                call.record.state
             ));
         }
     }
-    let verdict_str = output.last_guard_verdict.as_deref().unwrap_or("none");
     lines.push(String::new());
     lines.push(format!(
         "{}: {}",
-        "Last Guard Verdict".bold(),
-        verdict_str.dimmed()
+        "Last Verdict".bold(),
+        output.last_verdict.as_deref().unwrap_or("none").dimmed()
     ));
     lines
 }

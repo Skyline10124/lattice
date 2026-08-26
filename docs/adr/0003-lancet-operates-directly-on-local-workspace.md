@@ -150,9 +150,12 @@ gix objects retain file history and mutable refs identify the selected state.
 - `lancet-api::LancetRuntime` composes native execution from a project root and
   policy. `LancetRuntimeConfig` no longer receives `ExecutionRouting` or an
   externally supplied workspace backend.
-- `lattice-api` resolves profile policy and project root, builds the LANCET
-  runtime, and injects the resulting CEP client into `AgentLoop`. It does not
-  allocate, retain, restore, or destroy an Upper.
+- **Ownership amended by ADR 0005/#139-B:** `lattice-api` still resolves profile
+  policy and project root and builds the LANCET runtime, but
+  `TurnCoordinator` now owns binding, reservation, dispatch, durable closure, and
+  the final Session transaction. `lattice-agent::ModelStepDriver` performs one
+  provider attempt and receives no CEP client or store. No layer allocates,
+  retains, restores, or destroys an Upper.
 - `lancet-native` owns the private gix workspace-history implementation alongside
   the concrete Local Workspace module. `lattice-api` coordinates explicit
   `/rewind` with `lattice-session`; neither layer writes the user's project

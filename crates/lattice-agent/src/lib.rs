@@ -1,14 +1,18 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! AgentLoop-only agent crate.
+//! One-attempt model step driver (ADR 0005 §10, #139-B Commit 4).
+//!
+//! This crate drives exactly one provider attempt per call and owns no
+//! persistence, invocation allocation, Tool execution, retry policy,
+//! reconciliation, or Turn lifecycle. Multi-step sequencing is owned by
+//! `lattice-api::TurnCoordinator`.
 
-pub mod agent_loop;
+pub mod model_step;
 
-pub use agent_loop::{
-    AgentLoop, AgentLoopConfig, AgentToolResultSummary, AgentTurnEvent, AgentTurnRequest,
-    AgentTurnResult, AgentTurnStatus, CepErrorPayload, LlmClient, LlmRetryConfig,
-    ProvisionalCompletionHook, ProvisionalDecision, ToolCallExecutor, ToolExecutionError,
+pub use model_step::{
+    LlmClient, ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
+    ModelStepStatus,
 };
 
 #[cfg(feature = "test-utils")]

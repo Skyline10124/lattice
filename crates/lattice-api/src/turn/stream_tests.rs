@@ -2,11 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 use futures::StreamExt;
 use lattice_llm::LlmEvent;
-use lattice_session::TurnCommitStatus;
 
 use super::execute::stream_turn;
 use super::test_support::*;
-use super::types::{RunTurnStatus, TurnEvent};
+use super::types::TurnEvent;
 #[tokio::test]
 async fn stream_turn_error_after_partial_commits_error() {
     let events = vec![
@@ -49,25 +48,25 @@ async fn stream_turn_error_after_partial_commits_error() {
         .find(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
         .expect("should have TurnCommitted event");
     if let TurnEvent::TurnCommitted {
-        status, session_id, ..
+        outcome,
+        session_id,
+        ..
     } = committed
     {
-        assert_eq!(*status, RunTurnStatus::Error);
+        assert!(matches!(
+            outcome,
+            lattice_session::TurnOutcome::Interrupted { .. }
+        ));
         let transcript = fixture.store.as_ref().head_transcript(session_id).unwrap();
-        let assistant = transcript
-            .messages
-            .iter()
-            .find(|m| m.role == "assistant")
-            .expect("assistant message in commit");
-        assert_eq!(assistant.content, "partial output before error");
-        let entry = last_log_entry(fixture.store.as_ref(), session_id);
-        assert_eq!(entry.status, TurnCommitStatus::Error);
+        // ADR 0005 §7 (#139-B Commit 4): partial assistant output from an
+        // interrupted attempt is diagnostic state, never committed
+        // conversation. The turn still commits with the typed error reason.
         assert!(
-            entry
-                .terminal_reason
-                .as_ref()
-                .unwrap()
-                .contains("connection reset")
+            !transcript
+                .messages
+                .iter()
+                .any(|m| m.role == lattice_conversation::MessageRole::Assistant),
+            "interrupted partial output must not be committed"
         );
     }
 }

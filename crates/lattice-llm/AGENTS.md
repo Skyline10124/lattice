@@ -10,19 +10,22 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 
 ## Sub-Architecture
 
-- `src/types.rs` owns messages, tool calls, tool definitions, events, requests,
-  responses, roles, targets, and token usage.
+- `src/types.rs` owns provider request envelopes, tool definitions, streaming
+  events, and targets; durable message and usage semantics come directly from
+  `lattice-conversation::{NativeMessage, TokenUsage}`.
 - `src/client.rs` owns HTTP client behavior and request-time security hooks.
-- `src/providers/` owns provider-specific protocol adapters.
-- `src/provider_projection/` owns the pure-data provider replay/projection
-  seam (#142): official wire JSON ↔ `lattice-conversation` `NativeMessage`,
-  with official-wire fixtures in `tests/fixtures/projection/`. It is not
-  wired into the production codecs until #139-B. `wire_to_native` meters every
-  body through `lattice_conversation::AttemptAssembly`, so an over-limit wire
-  fails closed with `ProjectionError::OutputLimitExceeded` instead of yielding
-  a partial message. `project_cross_provider` drops replay state, provider
-  call IDs, **and** reasoning parts: ADR 0005 §7 forbids replaying source
-  reasoning into another provider.
+- `src/providers/` owns provider envelopes, auth, and SSE accumulation. It must
+  not implement a second ToolCall/ToolResult codec.
+- `src/provider_projection/` is the sole production provider message codec: all
+  three request builders call `request_messages_to_wire`, and all three SSE
+  parsers publish their authoritative `MessageComplete` through
+  `wire_to_native`; all three parse usage through `wire_usage`. Official-wire
+  `tests/fixtures/projection/`. The seam meters assembled bodies through
+  `lattice_conversation::AttemptAssembly`, so an over-limit wire fails closed
+  with `ProjectionError::OutputLimitExceeded` instead of yielding a partial
+  message. `project_cross_provider` drops replay state, provider call IDs, and
+  reasoning parts: ADR 0005 §7 forbids replaying source reasoning into another
+  provider.
 - `src/sse.rs` owns streaming parser behavior.
 - `src/router.rs` and `src/endpoints.rs` own model alias/provider resolution.
 - `net-guard` owns shared URL validation, DNS checks, private-address
@@ -52,8 +55,8 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 - FIXED #100-A/C: `logging.rs` writes to stderr (`fmt()` defaults to stdout,
   which is the `--json` JSONL contract) and derives ANSI from an interactive
   stderr plus `NO_COLOR`; the Anthropic default output ceiling moved off 4096
-  to `DEFAULT_MAX_OUTPUT_TOKENS`. #100-B (`turn_id` uniqueness) is not this
-  crate's and stays open — see `FINDINGS.md` M-GH100-01.
+  to `DEFAULT_MAX_OUTPUT_TOKENS`. #100-B (`TurnId` uniqueness) closed in #139-B;
+  `lattice-llm` continues to consume caller-supplied typed identity only.
 - FIXED #90: `http_client_builder` sets `redirect::Policy::none()`. Pinning and
   URL validation bind the first hop only, so a followed redirect reached an
   unvalidated host and replayed the body plus `x-api-key`/`x-goog-api-key`.

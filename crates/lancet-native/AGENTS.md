@@ -20,10 +20,12 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   `workspace-observe` / `workspace-mutate` host imports. There is no native
   fallback: a runtime whose composition does not embed the Component reports
   the method as unrouted.
-- `src/server/` owns registry setup, transport lifecycle, and durable call
-  metadata. `transport.rs` also builds the per-call
+- `src/server/` owns registry setup, transport lifecycle, exact durable
+  reservation admission, `DispatchStarted` publication, and per-call typed
+  `InvocationId` events. `transport.rs` also builds the per-call
   `WorkspaceObservationHost` and `WorkspaceMutationHost` handed into
-  `ComponentCallContext`.
+  `ComponentCallContext`; terminal/evidence durability belongs to the
+  `lattice-api` coordinator and `lancet-audit::InvocationStore`.
 - `src/enforcement/` owns Guard L1 bridging and preflight metadata.
 - `src/edit/` retains the residual hashline apply engine (parser/apply/storage)
   as a `#[cfg(test)]` regression asset and aliases `limits::WriteLimits` to
@@ -65,6 +67,10 @@ WASM Component and absorbs the remaining concrete host responsibilities into
 
 ## Recent Issues
 
+- FIXED #158: queued caller cancellation is rejected before invocation
+  admission; successful durable admission marks the private transport request
+  as `DispatchStarted` before executor handoff. Admission store/task failures
+  expose only stable typed, path-free public errors.
 - ADDED #30: `observe.workspace` migrated to the embedded
   `tools/observe-workspace` Component Tool. The native observation handler,
   its registration, the executor render helpers, and the authority's
@@ -82,27 +88,17 @@ WASM Component and absorbs the remaining concrete host responsibilities into
   normalize the same denial to `GuardDenied`), not the guest's paraphrase.
   The concrete `LocalWorkspace` moved to `lancet-runtime::workspace` with
   it; `lib.rs` re-exports the module and `rewind` under their old names.
-- ADDED #28 (Codeberg #6): the Component branch of `transport.rs` runs `admit_tool` against
-  `cep_context.policy.capability_admission` before `rt.call`. A denial answers
-  `CapabilityNotGranted` and still finalizes the audit row with its
-  `AdmissionEvidence` — a Component call never finalizes with absent metadata.
-  An admitted call carries the admitted set into `ComponentCallContext`, and
-  finalize merges admission evidence, observed effects, and denied operations.
-  `ServerRunConfig::validate_capability_admission` makes an unknown deny name a
-  startup error at `run_native`. Admission is unconditional: `CepMode` is not
-  consulted. The legacy pre-dispatch deny and all native handlers are untouched.
-  The dispatch split also picks the audit vocabulary:
-  `CallAuditMetadata::for_component_dispatch` for a catalogued Component (never
-  the legacy `unrouted` labeling), finalizing as `component_handler` or
-  `component_denied` — a Component refusal is a Cell policy denial, never
-  `method_not_found`. Every finalize arm, cancellation included, persists the
-  merged evidence metadata: an outcome ends the call, it does not unmake the
-  evidence the call already produced. Nothing forbids a Component name that
-  collides with a native catalog method: the legacy pre-dispatch effect-kind
-  deny runs for any method `lancet_catalog` knows, before the split, so a
-  collision would arm both vocabularies in one call. Unreachable while the
-  Component catalog is empty — read #28 design §11 before migrating a native
-  method.
+- ADDED #28 / HARD-CUT #139-B: Component dispatch runs capability admission
+  before `rt.call`. A denial returns `CapabilityNotGranted` with typed admission
+  evidence; an admitted call carries the admitted set into
+  `ComponentCallContext`. The server accepts a request only when its exact
+  `InvocationBinding` is durably `Reserved`, publishes `DispatchStarted` before
+  executor handoff, and rejects duplicate dispatch. Execution returns one
+  content-free `CellEvidenceTriple`; the `lattice-api` TurnCoordinator publishes
+  the terminal record and evidence atomically to InvocationStore. Component/native
+  method-name collision fails server composition closed
+  (`validate_no_component_native_collision`); there is no mixed audit vocabulary
+  or SQLite row finalization path.
 - ADDED #64: `workspace::rewind::preflight_and_restore` (re-exported as
   `lancet_native::rewind`) applies an explicit Rewind's per-path restores.
   It is a host-side operator surface, not a CEP method — the catalog gains

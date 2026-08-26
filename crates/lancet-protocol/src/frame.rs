@@ -29,7 +29,7 @@ mod tests {
     #[test]
     fn tool_call_is_jsonrpc_request() {
         let call: ToolCall = crate::jsonrpc::Request::new(
-            Id::Number(1),
+            Id::parse("11111111-1111-4111-8111-111111111111").expect("valid InvocationId"),
             "read_file".into(),
             json!({"path": "/etc/hosts"}),
         );
@@ -53,7 +53,7 @@ mod tests {
     fn tool_result_success() {
         let result: ToolResult = crate::jsonrpc::Response::Success {
             result: json!({"content": "hello"}),
-            id: Id::Number(1),
+            id: Id::parse("11111111-1111-4111-8111-111111111111").expect("valid InvocationId"),
         };
         let serialized = serde_json::to_string(&result).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();

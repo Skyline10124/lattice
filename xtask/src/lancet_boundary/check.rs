@@ -133,18 +133,59 @@ pub fn production_test_feature_hits(repo_root: &Path) -> anyhow::Result<Vec<Line
         .exec()
         .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))?;
 
+    let packages: std::collections::BTreeMap<_, _> = metadata
+        .packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect();
     let mut parts = Vec::new();
     for pkg in &metadata.packages {
+        for feature in pkg
+            .features
+            .keys()
+            .filter(|name| !name.starts_with("test-"))
+        {
+            if feature_reaches_test_only(
+                &pkg.features,
+                feature,
+                &mut std::collections::BTreeSet::new(),
+            ) {
+                parts.push(format!(
+                    "{}: production feature '{feature}' forwards to a test-only feature",
+                    pkg.name
+                ));
+            }
+        }
         for dep in &pkg.dependencies {
             if dep.kind != DependencyKind::Normal {
                 continue;
             }
-            let flagged: Vec<&str> = dep
-                .features
-                .iter()
-                .map(String::as_str)
-                .filter(|feature| feature.starts_with("test-"))
-                .collect();
+            let target = packages.get(dep.name.as_str()).copied();
+            let mut flagged = Vec::new();
+            for feature in &dep.features {
+                if feature.starts_with("test-")
+                    || target.is_some_and(|package| {
+                        feature_reaches_test_only(
+                            &package.features,
+                            feature,
+                            &mut std::collections::BTreeSet::new(),
+                        )
+                    })
+                {
+                    flagged.push(feature.as_str());
+                }
+            }
+            if dep.uses_default_features
+                && target.is_some_and(|package| {
+                    feature_reaches_test_only(
+                        &package.features,
+                        "default",
+                        &mut std::collections::BTreeSet::new(),
+                    )
+                })
+            {
+                flagged.push("default");
+            }
             if !flagged.is_empty() {
                 parts.push(format!(
                     "{}: [dependencies] {} enables test-only feature(s) {}; move the feature to the [dev-dependencies] entry",
@@ -158,6 +199,32 @@ pub fn production_test_feature_hits(repo_root: &Path) -> anyhow::Result<Vec<Line
     Ok(parts)
 }
 
+fn feature_reaches_test_only(
+    features: &std::collections::BTreeMap<String, Vec<String>>,
+    feature: &str,
+    visiting: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    if feature.starts_with("test-") {
+        return true;
+    }
+    if !visiting.insert(feature.to_string()) {
+        return false;
+    }
+    let reaches = features.get(feature).is_some_and(|members| {
+        members.iter().any(|member| {
+            if let Some((_, dependency_feature)) = member.split_once('/') {
+                dependency_feature.starts_with("test-")
+            } else if member.starts_with("dep:") {
+                false
+            } else {
+                feature_reaches_test_only(features, member, visiting)
+            }
+        })
+    });
+    visiting.remove(feature);
+    reaches
+}
+
 pub fn scan_with_allowlist(
     repo_root: &Path,
     needle: &str,
@@ -165,6 +232,85 @@ pub fn scan_with_allowlist(
 ) -> anyhow::Result<Vec<LineHit>> {
     let hits = scan_crates_source_and_tests(repo_root, needle)?;
     Ok(filter_allowlist(&hits, allowlist))
+}
+
+/// Symbols the #139-B hard cut deletes (plan §5 Commit 1 / §5 Commit 9).
+///
+/// The needles deliberately include comments and doc text: after the cut,
+/// even a mention of the retired vocabulary in production code is residue,
+/// because a reader cannot tell a stale comment from a live path without
+/// opening every hit.
+pub const ISSUE139B_LEGACY_NEEDLES: &[&str] = &[
+    "AgentLoop",
+    "CepAuditStore",
+    "AuditBacking",
+    "ProvisionalCompletionHook",
+    "ToolCallExecutor",
+    "legacy_status",
+    "call_id: u64",
+    "evidence_id",
+    // The numeric JSON-RPC request-id allocator in `lancet-dispatch`
+    // transport, replaced by caller-allocated `InvocationId`.
+    "next_id",
+];
+
+/// Forbidden normal/dev dependency edges of the #139-B composition (plan
+/// §2.1). `lancet-audit -> lattice-session` as a *dev*-dependency is the
+/// documented #139-A qualification seam and stays legal until that harness
+/// is deleted; a normal edge would make LATTICE session types nameable from
+/// the audit production surface and break LANCET's independent
+/// embeddability.
+pub fn issue139b_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<Vec<String>> {
+    let metadata = MetadataCommand::new()
+        .current_dir(repo_root)
+        .no_deps()
+        .exec()
+        .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))?;
+
+    let mut parts = Vec::new();
+    for pkg in &metadata.packages {
+        for dep in &pkg.dependencies {
+            let forbidden = match (pkg.name.as_str(), dep.name.as_str()) {
+                ("lancet-audit", "lattice-session") => dep.kind == DependencyKind::Normal,
+                ("lattice-session", "lancet-audit") => true,
+                _ => false,
+            };
+            if forbidden {
+                parts.push(format!(
+                    "{} -> {} ({:?}) is a forbidden #139-B edge",
+                    pkg.name, dep.name, dep.kind
+                ));
+            }
+        }
+    }
+    Ok(parts)
+}
+
+/// Every legacy-symbol hit fails permanently after the Commit 7 hard cut.
+pub fn issue139b_legacy_residue_hits(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
+    let mut hits = Vec::new();
+    for needle in ISSUE139B_LEGACY_NEEDLES {
+        hits.extend(scan_workspace_rust_targets(repo_root, needle)?);
+    }
+    hits.sort();
+    hits.dedup();
+    Ok(hits)
+}
+
+fn scan_workspace_rust_targets(repo_root: &Path, needle: &str) -> anyhow::Result<Vec<LineHit>> {
+    let mut hits = Vec::new();
+    for root in ["crates", "tools"] {
+        let path = repo_root.join(root);
+        if path.is_dir() {
+            hits.extend(collect_rs_line_hits(
+                &path,
+                repo_root,
+                |_| false,
+                |line| line.contains(needle),
+            )?);
+        }
+    }
+    Ok(hits)
 }
 
 pub fn tool_executor_reexport_hits(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
@@ -271,6 +417,49 @@ mod tests {
         assert!(!text.contains("lancet-native/src/lib.rs"));
     }
 
+    #[test]
+    fn issue139b_needles_cover_the_plan_residue_set() {
+        for required in [
+            "AgentLoop",
+            "CepAuditStore",
+            "AuditBacking",
+            "ProvisionalCompletionHook",
+            "ToolCallExecutor",
+            "legacy_status",
+            "call_id: u64",
+            "evidence_id",
+            "next_id",
+        ] {
+            assert!(
+                ISSUE139B_LEGACY_NEEDLES.contains(&required),
+                "missing plan §5 Commit 9 needle: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue139b_residue_scan_reports_every_hit() {
+        let dir = TempDir::new().unwrap();
+        let hit = dir.path().join("crates/lattice-api/src/turn/fresh.rs");
+        fs::create_dir_all(hit.parent().unwrap()).unwrap();
+        fs::write(&hit, "fn x() { let _ = AgentLoop; }\n").unwrap();
+        let hits = issue139b_legacy_residue_hits(dir.path()).unwrap();
+        assert!(joined(&hits).contains("fresh.rs"));
+    }
+
+    #[test]
+    fn issue139b_residue_scan_covers_build_scripts_and_tools() {
+        let dir = TempDir::new().unwrap();
+        let build = dir.path().join("crates/example/build.rs");
+        let guest = dir.path().join("tools/example/src/lib.rs");
+        fs::create_dir_all(build.parent().unwrap()).unwrap();
+        fs::create_dir_all(guest.parent().unwrap()).unwrap();
+        fs::write(&build, "fn main() { let _ = AgentLoop; }\n").unwrap();
+        fs::write(&guest, "fn x() { let _ = next_id; }\n").unwrap();
+        let text = joined(&issue139b_legacy_residue_hits(dir.path()).unwrap());
+        assert!(text.contains("build.rs"));
+        assert!(text.contains("tools/example/src/lib.rs"));
+    }
     #[test]
     fn cli_scan_skips_tests_dir_and_inline_test_files() {
         let dir = TempDir::new().unwrap();
@@ -397,6 +586,31 @@ mod tests {
         assert!(hits.is_empty(), "dev-only test-utils flagged: {hits:?}");
     }
 
+    #[test]
+    fn production_feature_forwarding_to_test_utils_is_flagged() {
+        let dir = TempDir::new().unwrap();
+        write_test_feature_workspace(dir.path(), "");
+        let manifest = dir.path().join("crates/consumer/Cargo.toml");
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        text.push_str("[features]\nrelease = [\"helper/test-utils\"]\n");
+        fs::write(&manifest, text).unwrap();
+        let hits = production_test_feature_hits(dir.path()).unwrap();
+        assert!(joined(&hits).contains("production feature 'release'"));
+    }
+
+    #[test]
+    fn dependency_default_forwarding_to_test_utils_is_flagged() {
+        let dir = TempDir::new().unwrap();
+        write_test_feature_workspace(dir.path(), "");
+        let manifest = dir.path().join("crates/helper/Cargo.toml");
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        text.push_str("default = [\"test-utils\"]\n");
+        fs::write(&manifest, text).unwrap();
+        let hits = production_test_feature_hits(dir.path()).unwrap();
+        let text = joined(&hits);
+        assert!(text.contains("consumer: [dependencies] helper"));
+        assert!(text.contains("default"));
+    }
     #[test]
     fn default_tool_definitions_allowlist_only_fixture() {
         let dir = TempDir::new().unwrap();

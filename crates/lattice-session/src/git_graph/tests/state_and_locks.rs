@@ -96,6 +96,88 @@ fn project_binding_is_persisted_and_survives_reopen() {
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ExistingStoreConstructor {
+    Open,
+    Create,
+}
+
+impl ExistingStoreConstructor {
+    fn construct(self, path: &std::path::Path) -> crate::Result<GitSessionGraphStore> {
+        match self {
+            Self::Open => GitSessionGraphStore::open(path),
+            Self::Create => GitSessionGraphStore::create(path),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Create => "create",
+        }
+    }
+}
+
+fn assert_existing_constructor_waits_for_repository_writer(constructor: ExistingStoreConstructor) {
+    let dir = temp_dir(&format!("{}_existing_writer", constructor.name()));
+    let path = dir.path().join("sessions.git");
+    let store = GitSessionGraphStore::create(&path).expect("create");
+    store
+        .create_session(
+            "sess-constructor-lock",
+            None,
+            "coder",
+            "main",
+            &test_project_key(),
+        )
+        .expect("create session");
+    let writer = store.kernel().write_lock().expect("hold repository writer");
+
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let constructor_thread = std::thread::spawn(move || {
+        started_tx.send(()).expect("signal constructor start");
+        let result = constructor
+            .construct(&path)
+            .and_then(|reopened| reopened.open_session("sess-constructor-lock"))
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        result_tx.send(result).expect("send constructor result");
+    });
+
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("constructor thread started");
+    let while_writer_held = result_rx.recv_timeout(std::time::Duration::from_millis(250));
+    if !matches!(
+        while_writer_held,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ) {
+        drop(writer);
+        constructor_thread.join().expect("join constructor thread");
+        panic!(
+            "{constructor:?}(existing) completed while repository writer was held: {while_writer_held:?}"
+        );
+    }
+
+    drop(writer);
+    result_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("constructor completed after writer release")
+        .expect("constructor validated the existing store");
+    constructor_thread.join().expect("join constructor thread");
+}
+
+#[test]
+fn existing_store_constructors_wait_for_the_repository_writer_before_validating() {
+    for constructor in [
+        ExistingStoreConstructor::Open,
+        ExistingStoreConstructor::Create,
+    ] {
+        assert_existing_constructor_waits_for_repository_writer(constructor);
+    }
+}
+
 /// SC2: a state mutation writes a NEW immutable state commit whose parent is
 /// the previous one — the ref moves, the old object stays readable.
 #[test]
@@ -143,8 +225,8 @@ fn commit_publishes_head_and_state_together() {
 
     let ids = {
         let messages = vec![user_msg("hello"), assistant_msg("hi")];
-        let input = commit_input("sess-txn", vec![], messages, TurnCommitStatus::Completed);
-        store.commit_turn(input).expect("commit")
+        let input = commit_input("sess-txn", vec![], messages, ());
+        store.test_commit_turn(input).expect("commit")
     };
 
     let head_ref = state::head_ref_name("sess-txn", "main").expect("head ref");
@@ -254,12 +336,12 @@ fn locked_apis_require_the_exact_exclusive_session_guard() {
     assert_invalid_lock(store.branch_locked("sess-guard-b", "wrong", None, &guard_a));
     assert_invalid_lock(store.checkout_locked("sess-guard-b", "main", &guard_a));
     assert_invalid_lock(store.reset_locked("sess-guard-b", &ids_b[0], &guard_a));
-    assert_invalid_lock(store.commit_turn_locked(
+    assert_invalid_lock(store.test_commit_turn_locked(
         commit_input(
             "sess-guard-b",
             vec![ids_b[0].clone()],
             vec![user_msg("wrong guard")],
-            TurnCommitStatus::Completed,
+            (),
         ),
         &guard_a,
     ));
@@ -274,12 +356,12 @@ fn locked_apis_require_the_exact_exclusive_session_guard() {
         "sess-guard-b"
     );
     store
-        .commit_turn_locked(
+        .test_commit_turn_locked(
             commit_input(
                 "sess-guard-b",
                 vec![ids_b[0].clone()],
                 vec![user_msg("correct guard")],
-                TurnCommitStatus::Completed,
+                (),
             ),
             &guard_b,
         )
@@ -297,12 +379,12 @@ fn locked_apis_require_the_exact_exclusive_session_guard() {
     assert_invalid_lock(store.branch_locked("sess-guard-a", "wrong", None, &shared));
     assert_invalid_lock(store.checkout_locked("sess-guard-a", "main", &shared));
     assert_invalid_lock(store.reset_locked("sess-guard-a", &ids_a[0], &shared));
-    assert_invalid_lock(store.commit_turn_locked(
+    assert_invalid_lock(store.test_commit_turn_locked(
         commit_input(
             "sess-guard-a",
             vec![ids_a[0].clone()],
             vec![user_msg("shared guard")],
-            TurnCommitStatus::Completed,
+            (),
         ),
         &shared,
     ));

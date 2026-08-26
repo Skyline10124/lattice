@@ -25,6 +25,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -75,6 +76,10 @@ pub enum SseScript {
         call_id: String,
         tool_name: String,
         arguments_json: String,
+    },
+    /// Multiple ToolCalls in one assistant message, preserving binding order.
+    ToolCalls {
+        calls: Vec<(String, String, String)>,
     },
     /// Return a non-SSE HTTP response with a non-2xx status and a JSON error
     /// body (no `text/event-stream`). Simulates a provider startup failure
@@ -190,18 +195,27 @@ impl FakeLlmServer {
     /// and re-checks `shutdown`, so `Drop` setting the flag is observed
     /// within that granularity and the thread can be joined promptly.
     pub fn start(script: SseScript) -> Result<Self, ServeError> {
-        Self::start_inner(script, None)
+        Self::start_inner(script, None, None)
+    }
+
+    /// Start with a crash-surviving append-only request counter.
+    pub fn start_logged(script: SseScript, path: &Path) -> Result<Self, ServeError> {
+        Self::start_inner(script, None, Some(Arc::new(path.to_path_buf())))
     }
 
     pub fn start_gated(script: SseScript) -> Result<(Self, ResponseGate), ServeError> {
         let gate = ResponseGate {
             state: Arc::new((Mutex::new(GateState::default()), Condvar::new())),
         };
-        let server = Self::start_inner(script, Some(gate.clone()))?;
+        let server = Self::start_inner(script, Some(gate.clone()), None)?;
         Ok((server, gate))
     }
 
-    fn start_inner(script: SseScript, gate: Option<ResponseGate>) -> Result<Self, ServeError> {
+    fn start_inner(
+        script: SseScript,
+        gate: Option<ResponseGate>,
+        request_log: Option<Arc<PathBuf>>,
+    ) -> Result<Self, ServeError> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let state = Arc::new(Mutex::new(ScriptState { script, next: 0 }));
@@ -215,6 +229,7 @@ impl FakeLlmServer {
             let handlers = Arc::clone(&handlers);
             let shutdown = Arc::clone(&shutdown);
             let handler_gate = gate.clone();
+            let request_log_for_thread = request_log.clone();
             thread::spawn(move || {
                 serve_loop(
                     listener_clone,
@@ -223,6 +238,7 @@ impl FakeLlmServer {
                     handlers,
                     shutdown,
                     handler_gate,
+                    request_log_for_thread,
                 )
             })
         };
@@ -320,6 +336,7 @@ fn serve_loop(
     handlers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     shutdown: Arc<Mutex<bool>>,
     gate: Option<ResponseGate>,
+    request_log: Option<Arc<PathBuf>>,
 ) {
     while !*shutdown.lock().unwrap() {
         match listener.accept() {
@@ -327,8 +344,15 @@ fn serve_loop(
                 let state = Arc::clone(&state);
                 let captures = Arc::clone(&captures);
                 let gate = gate.clone();
+                let request_log = request_log.clone();
                 let handle = thread::spawn(move || {
-                    if let Err(e) = handle_request(stream, &state, &captures, gate.as_ref()) {
+                    if let Err(e) = handle_request(
+                        stream,
+                        &state,
+                        &captures,
+                        gate.as_ref(),
+                        request_log.as_deref().map(PathBuf::as_path),
+                    ) {
                         eprintln!("fake_llm: serve error: {e}");
                     }
                 });
@@ -347,11 +371,22 @@ fn serve_loop(
     }
 }
 
+fn append_fsynced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn handle_request(
     mut stream: TcpStream,
     state: &Mutex<ScriptState>,
     captures: &(Mutex<CaptureState>, Condvar),
     gate: Option<&ResponseGate>,
+    request_log: Option<&Path>,
 ) -> Result<(), ServeError> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -386,6 +421,9 @@ fn handle_request(
     let captured = parse_chat_completions_body(&body);
     captures.0.lock().unwrap().requests.push(captured);
     captures.1.notify_all();
+    if let Some(path) = request_log {
+        append_fsynced(path, b"request\n")?;
+    }
     if let Some(gate) = gate
         && !gate.wait()
     {
@@ -574,6 +612,63 @@ fn render_script(script: &SseScript) -> String {
                 ]
             });
             push_data(&mut out, &done);
+            out.push_str("data: [DONE]\n\n");
+        }
+        SseScript::ToolCalls { calls } => {
+            let starts: Vec<Value> = calls
+                .iter()
+                .enumerate()
+                .map(|(index, (id, name, _))| {
+                    serde_json::json!({
+                        "index": index,
+                        "id": id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": ""}
+                    })
+                })
+                .collect();
+            push_data(
+                &mut out,
+                &serde_json::json!({
+                    "id": "chatcmpl-fake",
+                    "object": "chat.completion.chunk",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"tool_calls": starts},
+                        "finish_reason": null
+                    }]
+                }),
+            );
+            let arguments: Vec<Value> = calls
+                .iter()
+                .enumerate()
+                .map(|(index, (_, _, args))| {
+                    serde_json::json!({
+                        "index": index,
+                        "function": {"arguments": args}
+                    })
+                })
+                .collect();
+            push_data(
+                &mut out,
+                &serde_json::json!({
+                    "id": "chatcmpl-fake",
+                    "object": "chat.completion.chunk",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"tool_calls": arguments},
+                        "finish_reason": null
+                    }]
+                }),
+            );
+            push_data(
+                &mut out,
+                &serde_json::json!({
+                    "id": "chatcmpl-fake",
+                    "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+                }),
+            );
             out.push_str("data: [DONE]\n\n");
         }
         SseScript::Disconnect { chunks_before_drop } => {

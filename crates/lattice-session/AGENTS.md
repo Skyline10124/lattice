@@ -7,11 +7,9 @@ Crate-local guidance for `lattice-session`.
 This crate owns the conversation graph contract: sessions, transcript messages,
 immutable turn commits, branch refs, detached HEAD state, graph diffs, usage
 records, and the **git-backed** session graph store (`GitSessionGraphStore`).
-The previous SQLite-backed store and its one-shot SQLite→Git migration path
-were retired; the git-backed store is the only production path (gix).
+The previous SQLite-backed store and migration path are deleted; the Git store is the only production path.
 
-Since #142 the pure-data transcript types (`GraphMessage`, `GraphToolCall`,
-`HeadTranscript`) and the usage contract (`TurnUsage`, a rename of
+Since #142 the pure-data transcript types (`NativeMessage<BoundToolCall>` and `HeadTranscript`) and the usage contract (`TurnUsage`, a rename of
 `lattice_conversation::TokenUsage`) are owned by `lattice-conversation` and
 re-exported here unchanged; this crate remains the persistence owner. Do not
 edit the re-exported serde shapes in place — they are frozen for committed
@@ -63,8 +61,7 @@ payload compatibility.
 - No LLM provider logic, profile discovery, CLI rendering, or native LANCET
   execution here.
 - Keep branch/ref validation strict and deterministic.
-- The session graph is git-backed and separate from CEP audit SQLite in
-  `lancet-audit`. Do not reintroduce a SQLite session graph store.
+- The session graph is Git-backed and separate from the project-keyed Git InvocationStore in `lancet-audit`.
 - Treat commit IDs and canonical JSON hashing as durable graph contracts.
 - Session refs live in the global `$XDG_STATE_HOME/lattice/sessions.git`:
   `refs/lattice/sessions/<id>/state`, `refs/lattice/sessions/<id>/heads/<branch>`,
@@ -85,7 +82,9 @@ payload compatibility.
 - Every mutation takes the per-session execution lock
   (`locks/sessions/<id>.lock`) and then the repository write lock, in that
   order. `status` takes a non-blocking shared hold and reports `SessionBusy`.
-  Never open two repository write locks together.
+  Strict open takes only the repository lock while validating cross-ref
+  invariants, then releases it before returning the handle; ordinary reads
+  remain lock-free. Never open two repository write locks together.
 - Publication is one multi-ref transaction plus one `fsync_pending` barrier:
   conversation head, session state, and any candidate pin advance together or
   not at all.
@@ -98,17 +97,22 @@ payload compatibility.
   object-then-CAS-then-ref barriers; callers must not add a second
   `fsync_pending` after success. Exact retry of a published-but-undurable
   snapshot still calls `fsync_pending` because it does not call `cas_ref`.
-  Do not put InvocationStore/evidence semantics
-  here (that is #139-A/#139-B), wire the journal into the production turn
-  loop, or redispatch model/Tool work while reopening a PendingTurn. The
-  journal's typed `TurnOutcome`/`ClosureOrigin` is the outcome authority;
-  the conversation manifest's status/disposition/terminal_reason are a
-  legacy projection until #139-B deletes them.
+  InvocationStore/evidence semantics remain in `lancet-audit`; production
+  composition and reconciliation live in `lattice-api`. Reopen never redispatches
+  model or Tool work. Typed `TurnOutcome`/`ClosureOrigin` and the explicit workspace
+  checkpoint are the sole v4 manifest authority; legacy projections are deleted.
 
 ## Recent Issues
 
-- APPROVED #139-A: the non-production InvocationStore integration contract is
-  accepted and #139-B may wire the production `TurnCoordinator`. The existing
+- FIXED #159: Pending snapshot schema v3 has one mandatory cumulative
+  `post_user_transcript` authority. `StepClosing` keeps only structural cursor
+  facts; every journal edge derives and validates exact transcript bytes, and
+  strict reopen authenticates the full lineage. Candidate construction is
+  shared by live/reopen and emits an uncheckpointed pure basis so the
+  composition layer must sample WorkspaceHistory under its operation lock.
+  Strict open also holds the Session repository lock across cross-ref invariant
+  validation, excluding the final transaction's `active-turn` deletion race.
+- LANDED #139-B Commit 6: the production `TurnCoordinator` drives the PendingTurn journal against the Git InvocationStore. The existing
   PendingTurn correctness and structural regression tests remain mandatory.
   `session_journal_pin_ns` growth and durability performance qualification move
   to non-blocking follow-up #153; do not move invocation-ledger I/O into this
@@ -152,13 +156,11 @@ payload compatibility.
   `create_session` takes a `ProjectStoreKey`; `SessionGraphStore` gained
   `lock_execution`; `SessionError` gained `SessionBusy` and `Store`.
   Acceptance lives in `src/git_graph/tests/state_and_locks.rs`.
-- ADDED #63: `TurnCommitInput`/`TurnCommit` carry `workspace_history_oid` and
-  the git manifest persists it (`skip_serializing_if`, so history-less turns
-  stay byte-identical to pre-#63 manifests). It is manifest-only — no
-  canonical seed or turn-id derivation changed — and `get_turn_commit`
-  re-reads it from the commit tree, so it survives session reopen, branch
-  movement, and process restart. The private history itself lives in
-  `lancet-runtime`, never in this store and never in the project `.git`.
+- LANDED #139-B Commit 6/7: every final Turn carries explicit typed
+  `WorkspaceHistoryCheckpoint::{Empty, Oid}` in the v4 manifest and canonical
+  identity. Final publication runs only through the PendingTurn transaction;
+  direct commit builders and methods are available only under `test-utils`.
+  Workspace history itself remains owned by `lancet-runtime`.
 - FIXED M-11: `head_transcript_impl` now traverses reachable commits
   topologically so merge-side messages are not dropped.
 - FIXED M-12: graph JSON hashing now canonicalizes object keys.
@@ -176,9 +178,7 @@ payload compatibility.
 - Do not reintroduce sidecar metadata, a sidecar importer, SQLite session
   storage, or a git2 dependency; durability primitives belong to
   `lattice-store`, and this crate must not hand-roll them.
-- Keep `workspace_history_oid` manifest-only and optional; adding it to the
-  canonical seed would move every turn id. Note `deny_unknown_fields`: an
-  older binary cannot read a manifest that carries the field.
+- Keep `workspace_history_checkpoint` explicit and typed (`Empty | Oid`) in the v4 manifest and canonical Turn identity. `Empty` is constructed only from an absent authoritative history ref; persisted OIDs validate canonically.
 
 ## Record Maintenance
 

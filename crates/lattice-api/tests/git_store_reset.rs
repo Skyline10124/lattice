@@ -8,10 +8,7 @@
 //! (2nd and 3rd) are still reachable by OID in the git object database.
 
 use lattice_session::test_helpers::{assistant_msg, user_msg};
-use lattice_session::{
-    GitSessionGraphStore, GraphHead, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
-    WorkspaceDisposition,
-};
+use lattice_session::{GitSessionGraphStore, GraphHead, SessionGraphStore, TurnCommitInput};
 use tempfile::TempDir;
 
 fn test_store_key() -> lattice_session::ProjectStoreKey {
@@ -20,7 +17,9 @@ fn test_store_key() -> lattice_session::ProjectStoreKey {
 
 fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCommitInput {
     TurnCommitInput {
-        workspace_history_oid: None,
+        turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .expect("valid test TurnId"),
+        workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
         session_id: session_id.to_string(),
         parent_ids,
         messages: vec![
@@ -32,12 +31,12 @@ fn turn_input(session_id: &str, parent_ids: Vec<String>, label: &str) -> TurnCom
         profile_snapshot_json: "{}".to_string(),
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
-        status: TurnCommitStatus::Completed,
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
+        outcome: lattice_session::TurnOutcome::Completed {
+            finish_reason: lattice_session::TurnFinishReason::Stop,
+        },
+        origin: lattice_session::ClosureOrigin::Live,
         commit_message: label.to_string(),
         usage: None,
-        terminal_reason: None,
     }
 }
 
@@ -64,7 +63,7 @@ fn git_store_reset_moves_branch_pointer() {
     let mut parent_ids: Vec<String> = vec![];
     for i in 0..3 {
         let commit = store
-            .commit_turn(turn_input(
+            .test_commit_turn(turn_input(
                 &session_id,
                 parent_ids.clone(),
                 &format!("turn-{i}"),

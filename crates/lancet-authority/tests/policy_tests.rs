@@ -27,7 +27,10 @@ fn policy_input(method: &str, params: serde_json::Value) -> PolicyInput {
         audit_context: PolicyAuditContext {
             turn_id: "turn-1".into(),
             session_id: "session-1".into(),
-            call_id: Some(1),
+            invocation_id: Some(
+                lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
+                    .expect("invocation id"),
+            ),
             budget_snapshot: PolicyBudgetSnapshot {
                 turn_observation_bytes_used: 0,
                 turn_observation_bytes_limit: 65536,

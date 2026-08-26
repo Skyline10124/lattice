@@ -108,9 +108,9 @@ Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
 Layer 3.5:       lancet-api(->protocol,catalog,dispatch,cep,audit,
                             authority,native,runtime)
 Layer 4:         lattice-api(->lancet-api,lancet-protocol,lancet-catalog,
-                             lancet-authority,lancet-native,
-                             lattice-agent,lattice-llm,lattice-profile,
-                             lattice-session)
+                             lancet-audit,lancet-authority,lancet-native,
+                             lattice-agent,lattice-conversation,lattice-llm,
+                             lattice-profile,lattice-session)
 Layer 5:         lattice-tui(->lattice-api + presentation dependencies)
                  lattice-cli(->lattice-api,lattice-session,lattice-tui,
                               lancet-api + presentation dependencies)
@@ -132,18 +132,20 @@ from the remaining #139-B delta:
 # in #143, and lattice-session -> lancet-protocol landed in #144; all are
 # already in the graph above
 # lancet-audit -> lattice-store landed in #139-A
-ADD lattice-api -> lancet-audit,lattice-conversation      # #139-B
+# lattice-api -> lancet-audit,lattice-conversation landed with the #139-B
+# program (Commit 1); both edges are already in the graph above
 # lattice-api -> lancet-native remains through #139-B and is deleted by #34
 ```
 
 There is no `lancet-audit -> lattice-session` edge, and none may be added.
-`lancet-audit` owns the invocation ledger and returns audit-domain types only;
-projecting a pinned ledger view into
-`lattice_session::pending::InvocationFactsSnapshot` is cross-domain composition
-and lives in the #139-A non-production integration seam
+`lancet-audit` owns the invocation ledger and returns audit-domain types only.
+Projecting a pinned ledger view into
+`lattice_session::pending::InvocationFactsSnapshot` is cross-domain composition:
+the production projection lives in `lattice-api/src/turn/invocation_facts.rs`,
+while the #139-A qualification projection remains in the non-production seam
 (`crates/lancet-audit/tests/invocation_qualification.rs`, backed by a
-dev-dependency). Putting that projection in the production surface would make
-`lancet-api -> lancet-audit -> lattice-session` real and break LANCET's
+dev-dependency). Putting either projection in the `lancet-audit` production
+surface would make `lancet-api -> lancet-audit -> lattice-session` real and break LANCET's
 independent embeddability. `lattice-session` must not depend on `lancet-audit`
 either; applying a candidate revision is session-domain I/O
 (`GitSessionGraphStore::execute_candidate_revision`) over a session-domain
@@ -178,10 +180,12 @@ mapping (`lancet-native`) that `lancet-api` does not re-export, and
 Prefer naming a type through `lancet-api` when it re-exports it; do not add new
 crates to these edge sets without a reason recorded here.
 
-Note that only one edge in this graph is machine-checked today
-(`lattice-agent -> lancet-native`, by `cargo xtask lancet-boundary`). GitHub
-#108 tracks turning this diagram into gate data so drift fails CI instead of
-accumulating.
+`cargo xtask lancet-boundary` now machine-checks the forbidden dependency and
+legacy-surface set required by the hard cut, including the absence of
+`lattice-agent -> lancet-native` and production test-only feature reachability.
+GitHub #108 still tracks turning the complete positive edge diagram into gate
+data; `cargo metadata` and this diagram remain the authority for edges not yet
+encoded there.
 
 ## Crate Roles
 
@@ -191,7 +195,7 @@ accumulating.
 | `lancet-catalog` | Legacy central Tool-contract authority scheduled for removal by ADR 0004 after source manifests and generated descriptors take over. |
 | `lancet-dispatch` | Current generic registry/transport surface scheduled for absorption into `lancet-runtime`. |
 | `lancet-cep` | Current CEP/catalog projection facade scheduled for absorption or retirement after descriptor-generated projection lands. |
-| `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, typed operator query/tail/replay DTOs, versioned Cell evidence, and the #139-A non-production Git `InvocationStore` on the `lattice-store` kernel. Its public surface is audit-domain only: projecting a pinned ledger view into `lattice-session` reconciliation facts happens in the non-production integration seam, not here. The production operator path remains SQLite until #139-B. |
+| `lancet-audit` | Production project-keyed Git `InvocationStore`, exact reservation/admission lifecycle, terminal material and Cell evidence, pinned views, and typed operator query/tail/replay DTOs. Its public surface is audit-domain only; `lattice-api` projects pinned ledger facts into Session reconciliation types. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger, and effect-region checks. |
 | `lancet-native` | Current native handler/server surface for the method still native (`fetch.web`), plus the CEP server lifecycle and the Component/native dispatch split. ADR 0004 moves the remaining built-ins to Components and absorbs the rest into `lancet-runtime`. |
 | `lancet-runtime` | Component engine, generated descriptor inventory, Tool Host enforcement, the concrete Local Workspace and its Policy-Visible visibility engine (moved down here in #30), audit/effect integration, and private gix history. The production Component path since #29; #31/#32 finish absorbing dispatch/transport. |
@@ -199,12 +203,12 @@ accumulating.
 | `lancet-api` | Unified public API. During migration it composes native CEP pieces; the target composes `lancet-runtime` without depending on LATTICE session/agent/profile layers. |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, public-address resolution, private/reserved IP checks, and rebinding-domain checks. Depends only on `url` and `std`. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, HTTP request pinning, logging, and (since #142) the pure-data provider replay/projection seam over `lattice-conversation`. |
-| `lattice-conversation` | ADR 0005 §7 data-only provider-neutral conversation contract: ordered `NativeMessage`/`MessagePart` with `UnboundToolCall`/`BoundToolCall` typestates, ToolResult closure, semantic/replay digests, per-attempt usage and interruption/rejection records, and (since #142) the migrated `GraphMessage` transcript family. Depends only on `lancet-protocol`; no I/O, stores, runtimes, or ID generators. |
-| `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and the git-backed graph store (`GitSessionGraphStore`) over the `lattice-store` kernel: immutable `SessionState` objects in the global `sessions.git`, plus the per-session execution lock. Since #144 also owns the durable PendingTurn journal: the `src/pending` contract (twelve CAS stages, ResultDraft, typed `TurnOutcome`/`ClosureOrigin`) and the pure `reconcile` reducer over synthetic Invocation facts, persisted through `git_graph/pending.rs` under `active-turn`/`turns/<TurnId>`. Re-exports the `lattice-conversation` transcript types (`GraphMessage` family, `TurnUsage`); persistence stays here. |
+| `lattice-conversation` | ADR 0005 §7 data-only provider-neutral conversation contract: ordered `NativeMessage`/`MessagePart` with `UnboundToolCall`/`BoundToolCall` typestates, ToolResult closure, typed `HeadTranscript`, semantic/replay digests, and per-attempt usage/interruption/rejection records. Depends only on `lancet-protocol`; no I/O, stores, runtimes, or ID generators. |
+| `lattice-session` | Git-backed Session graph, immutable typed Turn commits, branch/HEAD state, full-Turn execution lock, and durable PendingTurn journal/reducer under `active-turn` and permanent `turns/<TurnId>` pins. Final Turn publication is reachable only through the journal transaction; direct commit helpers compile only under `test-utils`. |
 | `lattice-store` | ADR 0005 domain-neutral private-Git/Linux durability kernel (landed in #143): XDG state topology, `ProjectStoreKey` derivation, typed create/open with `refs/lattice/meta` identity, canonical bytes, object/commit mechanics, ref CAS and multi-ref transactions, per-repository flock, fsync/rename durability barriers, atomic first-create, retention primitives, and per-location capability probes. No domain schemas and no workspace-internal dependencies by contract. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
-| `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
-| `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
+| `lattice-agent` | One-attempt `ModelStepDriver` over the injectable `LlmClient` seam (since #139-B Commit 4): frozen request assembly, protocol-ceiling metering, typed attempt outcomes. No loop, Tool execution, retry policy, or store authority. |
+| `lattice-api` | Public Session/Turn facade and production `TurnCoordinator` saga. Translates profile policy, owns binding/reservation/dispatch/ResultDraft/terminal/reconciliation/final commit composition over `lancet-api`, `lancet-audit`, and `lattice-session`. |
 | `lattice-tui` | Full-screen TUI shell over `lattice-api` sessions and `stream_turn` (ratatui/crossterm, alternate screen). Owns terminal lifecycle, input state, transcript/status rendering, and the forthcoming transcript card renderer (#116) as this crate's `render/` module; `lattice-cli` consumes it through the existing `lattice-cli -> lattice-tui` edge. |
 | `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
 
@@ -279,24 +283,16 @@ store migrations. `lattice-conversation` landed in #142.
   project root, observation, network, effects, workspace policy, and external
   policy file pointers. Sandbox `[workspace]`, command, isolation, and verify
   configuration are retired surface; do not reintroduce them.
-- Cell evidence is persisted in `lancet-audit`'s versioned evidence tables
-  (`evidence_calls` / `evidence_effects` / `evidence_denials`), keyed by a
-  store-generated `evidence_id` that a CEP audit row merely points at. After
-  #114 this is explicitly a transitional SQLite lookup key, not a public
-  invocation identity. ADR 0005/#139-B replaces public call/audit/evidence IDs
-  with one `InvocationId` and deletes the SQLite identity/path in the same hard
-  cut; #139-A's Git Adapter stays non-production until then. Do not put
-  structured evidence back into `metadata_json`, expose `evidence_id` as a
-  domain identity, or add a second record shape beside
+- Cell evidence is persisted directly in each terminal `InvocationStore` record
+  under the typed `InvocationId`. SQLite evidence tables, `evidence_id`, numeric
+  call/audit IDs, metadata pointers, and compatibility import paths are deleted;
+  do not recreate them or add a second record shape beside
   `lancet_protocol::evidence`.
-- SQLite for CEP audit records belongs in `lancet-audit`; the conversation
-  graph is git-backed (git refs under `refs/lattice/sessions/<id>/**` in
-  `$XDG_STATE_HOME/lattice/sessions.git`) and lives in `lattice-session`;
-  since #143 there are no mutable `.lattice/sessions/**` sidecars and every
-  store is strictly opened. SQLite session graph storage was retired. This is
-  the current state: #139-B atomically switches the operator Adapter to
-  `invocations.git` and deletes the SQLite audit/evidence backend rather than
-  dual-writing or importing it.
+- Conversation state lives in global `sessions.git`; invocation lifecycle/evidence
+  lives in project-keyed `invocations.git`; workspace history lives in its own
+  project-keyed Git store. They have separate locks, refs, schemas, and failure
+  domains. All stores open strictly; there are no SQLite or mutable sidecar
+  production paths, dual writes, or legacy importers.
 - Operator audit read (query/tail/replay) is implemented in `lancet-audit`
   and only re-exported by `lancet-api`; it is never an Agent Tool. Keep
   `lancet-audit` free of `lancet-native`/`lancet-dispatch`/`lancet-cep`/
@@ -333,6 +329,15 @@ store migrations. `lattice-conversation` landed in #142.
   History ref move. A same-path divergence is a structured conflict with nothing
   moved; a ref durability failure is never reported as success. The user-facing
   surface is exactly one command, `lattice session rewind`.
+- Since #139-B Commit 3 Rewind audit records live on append-only Git chains,
+  not SQLite rows: `lancet_runtime::rewind_audit` owns `RewindAuditRecord`, each
+  typed Session's `refs/lattice/rewind-audit/sessions/<canonical-id>` first-parent
+  chain inside `workspace-history.git`, and bounded completeness-aware reads. The exclusive
+  `WorkspaceOperationLock` is acquired exactly once by
+  `lattice_api::rewind_to_turn_with_barriers` (the RewindCoordinator) and passed
+  down as `HeldWorkspaceOperation`; lower layers never reacquire it. A failed
+  audit append returns the typed `RewindError::AuditPublicationFailed` partial
+  state and is never reported as success.
 
 ## Turn Execution
 
@@ -340,11 +345,11 @@ store migrations. `lattice-conversation` landed in #142.
 2. `run_turn` drains the same stream through `RunTurnCollector`.
 3. `turn/cep.rs` translates profile `[lancet]` policy into LANCET-native config
    rooted at the canonical Local Workspace and delegates runtime composition to
-   `lancet_api::LancetRuntime::build` (native Local operations, server
-   lifecycle, dispatch client, audit), then wraps the returned `CepClient` in a
-   `CepExecutorAdapter`.
-4. `AgentLoop` reads session state, assembles messages, calls the LLM through
-   `LlmClient`, and sends requested tool calls through the injected executor.
+   `lancet_api::LancetRuntime::build`, which returns the bound `CepClient` and
+   frozen Tool catalog.
+4. `TurnCoordinator` and `turn/saga.rs` own the durable live path: one model
+   attempt at a time, binding and reservation, sequential Tool dispatch, exact
+   ResultDraft/terminal publication, typed closure, and final Turn commit.
 5. During migration native handlers execute typed CEP methods. The ADR 0004
    target executes embedded Tool Components behind WIT Tool Host imports;
    host-side policy, Guard L1, effect, audit and concrete Local Workspace checks
@@ -428,15 +433,14 @@ notification cannot create an invocation.
   to substitute.
 - Keep LANCET runtime composition and its public surface in `lancet-api`; it
   takes LANCET-native policy types and must not depend on LATTICE
-  session/agent/profile crates. During the current transition, callers that
-  drive CEP must spawn through `lancet_api::LancetServer`/`LancetRuntime`, not
-  hand-roll the registry/transport/server dance. ADR 0005/#139-B removes the
-  Standalone/direct-embedder product contract: only `lattice-api` may initiate
-  a production invocation, while lower-level transport/runtime tests remain
-  internal and must supply explicit typed binding facts.
-- Keep public session and turn API contracts in `lattice-api`; it owns the
-  profile→policy translation and the agent-loop wiring over `lancet-api`. Keep
-  TUI terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
+  session/agent/profile crates. Callers that drive lower-level CEP tests must use
+  `lancet_api::LancetServer`/`LancetRuntime` with explicit durable bindings; only
+  `lattice-api` initiates production invocations.
+- Keep public session and Turn API contracts in `lattice-api`; it owns
+  profile→policy translation and the `TurnCoordinator` saga over PendingTurn,
+  InvocationStore, and LANCET. `lattice-agent::ModelStepDriver` performs one
+  provider attempt and owns no store, Tool dispatch, or Turn commit. Keep TUI
+  terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
   output, non-interactive rendering, and argument parsing in `lattice-cli`.
   Exception: shared transcript rendering sinks into `lattice-tui` (as the
   `render/` module, #116), because `lattice-tui` cannot depend on `lattice-cli`

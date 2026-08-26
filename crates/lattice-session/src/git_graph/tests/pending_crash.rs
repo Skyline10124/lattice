@@ -17,7 +17,7 @@ use lattice_store::{Blocking, LockMode};
 use crate::SessionError;
 use crate::git_graph::GitSessionGraphStore;
 use crate::git_graph::tests::{Fixture, temp_dir};
-use crate::graph::{SessionGraphStore, TurnCommitStatus};
+use crate::graph::SessionGraphStore;
 use crate::pending::PendingSnapshot;
 use crate::pending::ResultDraft;
 use crate::pending::contract::{PendingStage, TurnClosingFacts};
@@ -67,6 +67,26 @@ impl<'a> JournalDriver<'a> {
             .expect("tip")
             .expect("active turn");
         let recorded_at = tip.snapshot.recorded_at.unwrap_or(0);
+        let stage = match stage {
+            PendingStage::TurnClosing(facts) => {
+                let candidate = tip
+                    .snapshot
+                    .turn_commit_candidate_basis(
+                        facts.candidate.outcome.clone(),
+                        facts.candidate.origin,
+                    )
+                    .expect("derive exact closing basis")
+                    .with_workspace_history_checkpoint(
+                        facts.candidate.workspace_history_checkpoint.clone(),
+                    )
+                    .expect("attach checkpoint");
+                PendingStage::TurnClosing(TurnClosingFacts {
+                    turn_id: tip.snapshot.turn_id,
+                    candidate,
+                })
+            }
+            other => other,
+        };
         self.store
             .advance_pending_turn(self.session, stage, recorded_at, &self.lock)
             .expect("advance")
@@ -165,6 +185,7 @@ fn execute_plan(
                 invocation,
                 outcome,
                 material,
+                ..
             } => {
                 let owner = facts.plan.as_ref().expect("plan set").plan_key;
                 facts.invocations.insert(
@@ -203,11 +224,14 @@ fn execute_plan(
                 )?;
             }
             ReconciliationAction::PublishTurnClosing { candidate } => {
+                let candidate = candidate.clone().with_workspace_history_checkpoint(
+                    crate::pending::WorkspaceHistoryCheckpoint::Empty,
+                )?;
                 let _ = store.advance_pending_turn(
                     session,
                     PendingStage::TurnClosing(TurnClosingFacts {
                         turn_id: tip.snapshot.turn_id,
-                        candidate: candidate.clone(),
+                        candidate,
                     }),
                     recorded_at,
                     lock,
@@ -530,6 +554,7 @@ fn step_closing_candidate_pin_object_barrier_failure_does_not_publish_the_candid
         &session,
         PendingStage::StepClosing(StepClosingState {
             plan_key: plan.plan_key,
+
             bindings: plan.bindings.clone(),
             closure_cursor: 0,
             closures: Vec::new(),
@@ -587,6 +612,7 @@ fn step_closing_candidate_pin_uses_one_object_barrier_and_one_ref_barrier() {
             &session,
             PendingStage::StepClosing(StepClosingState {
                 plan_key: plan.plan_key,
+
                 bindings: plan.bindings.clone(),
                 closure_cursor: 0,
                 closures: Vec::new(),
@@ -775,6 +801,7 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
     });
     driver.advance(PendingStage::StepClosing(StepClosingState {
         plan_key: plan_one.plan_key,
+
         bindings: plan_one.bindings.clone(),
         closure_cursor: 0,
         closures: vec![],
@@ -799,6 +826,7 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
             &session,
             PendingStage::StepClosing(StepClosingState {
                 plan_key: plan_one.plan_key,
+
                 bindings: plan_one.bindings.clone(),
                 closure_cursor: 0,
                 closures: vec![],
@@ -958,10 +986,8 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
         .get_turn_commit(&session, &pinned)
         .expect("commit")
         .expect("found");
-    // Interrupted closes as legacy `error` with no logic-bearing terminal
-    // string; the typed outcome lives in the journal chain.
-    assert_eq!(commit.status, TurnCommitStatus::Error);
-    assert_eq!(commit.terminal_reason, None);
+    assert_eq!(commit.outcome, plan.outcome);
+    assert_eq!(commit.origin, ClosureOrigin::Reconciled);
 
     // The journal chain stays reachable from the pin: TurnCommit ->
     // Committed -> ... -> TurnStarted, and the Committed object carries the
@@ -990,12 +1016,21 @@ fn executed_reconciliation_commits_the_recovered_turn_with_reachable_journal() {
         .expect("chain root");
     assert!(root.snapshot.predecessor.is_none());
 
-    // The transcript keeps the user message and the explicit closure
-    // framing; the branch head is the recovered TurnCommit.
+    // The transcript keeps user, exact bound assistant, and closure framing.
     let transcript = reopened.head_transcript(&session).expect("transcript");
-    assert_eq!(transcript.messages.len(), 2);
-    assert_eq!(transcript.messages[0].content, "please continue");
-    assert_eq!(transcript.messages[1].role, "tool");
+    assert_eq!(transcript.messages.len(), 3);
+    assert_eq!(
+        crate::test_helpers::text(&transcript.messages[0]),
+        Some("please continue")
+    );
+    assert_eq!(
+        transcript.messages[1].role,
+        lattice_conversation::MessageRole::Assistant
+    );
+    assert_eq!(
+        transcript.messages[2].role,
+        lattice_conversation::MessageRole::Tool
+    );
     let head = reopened
         .kernel()
         .ref_target(&format!("refs/lattice/sessions/{session}/heads/main"))

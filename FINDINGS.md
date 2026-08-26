@@ -67,11 +67,8 @@
 
 
 
-### M-GH100-01: `turn_id` 由 `(session_id, 父 commit)` 决定，同父回合在审计里串成一条 — `correctness` / `lattice-api` / GitHub #100
-- **位置**: `crates/lattice-api/src/turn/live.rs`（`turn_id = format!("{session_id}:{parent_commit_id}")`）；消费侧 `cep_audit_entries` 与 `store_turn_attestation`。
-- **问题**: `turn_id` 不含任何回合维度，所以任何两个从同一父 commit 出发的回合都拿到相同 id：`session branch` 后从同父再发一轮、上一轮失败/取消未提交后重发、空会话（`parent = "root"`）首轮重试。后果是两个不同回合的调用行在同一 `turn_id` 下累加，operator 审计读取无法区分，attestation 也写到同一标识下。不需要崩溃或并发即可复现。
-- **当前状态**: OPEN。GitHub #100 的 A（tracing 写 stdout）与 C（Anthropic 4096 硬顶）已于 2026-08-22 修复并记入 `FIX.md`；B 未动，本票因此保持 open。
-- **计划**: 改为回合唯一标识（ULID，或在现格式上追加单调计数/`turn_seed`）。不要在本轮之外顺手改：ADR 0005 的 `TurnCoordinator`（#139-B）会重写这条 Turn 身份链路，而 #139-B 同时删除 SQLite audit 后端——两者应共用同一个 id 决定，避免先定一个马上被替换的格式。验收按 issue 原文：harness 断言 `session branch` 后同父两回合的 `turn_id` 不同且调用行不混。
+### M-GH100-01: ~~same-parent Turns shared one derived `turn_id`~~ — CLOSED by #139-B
+- **Resolution:** `TurnCoordinator::IdSource` now allocates one canonical UUID `TurnId` per accepted Turn; the typed ID is stored in PendingTurn, every binding, the v4 Turn manifest, permanent `turns/<TurnId>` pin, operator records, and public events. Canonical identity includes that explicit TurnId, so otherwise-identical siblings remain distinct. Regression coverage includes `random_id_source_emits_strictly_parsable_ids`, `explicit_turn_id_distinguishes_identical_siblings`, and the Commit 7 same-parent operator isolation test.
 
 ## LOW
 
@@ -96,11 +93,8 @@
 - **Problem**: (original) `InvocationFactsSnapshot.invocations` was a flat `InvocationId -> InvocationFact` map with no plan ownership, so clean collisions were indistinguishable from corruption.
 - **Resolution**: #139-A adds `InvocationRecordFact { owner: PlanKey, lifecycle }` with mandatory owner and exact candidate key-set validation, `PlanValidation::Collision`, and a typed `ReconciliationDecision` whose `ReviseCandidates(CandidateRevisionRequest)` variant carries no `TurnOutcome`, plus a non-production `InvocationStore` on the `lattice-store` kernel and `GitSessionGraphStore::execute_candidate_revision`. The boundary test `a_different_durable_reservation_stays_fail_closed` is replaced by truth-table tests (`collision_at_binding_planned_requests_candidate_revision`, `collision_at_bound_is_corruption_not_a_revision`, `different_durable_reservation_is_corruption`, `exact_durable_reservation_does_not_re_reserve`) **and** by a real store-backed end-to-end test, `lancet-audit`'s `clean_collision_revises_candidates_end_to_end_over_real_stores`: foreign owner in a real `InvocationStore` → pinned facts → projection → pure reconcile → fresh UUIDs → real SessionStore CAS → reopen → complete revised plan → re-projection/reconcile, including CAS mismatch and post-CAS durability retry. Decision record: `docs/plans/2026-08-17-issue139a-decision-record.md`.
 
-### L-GH144-02: legacy outcome projection is still shipped and only test-guarded — `architecture` / `lattice-session` / GitHub #144 → #139-B
-- **Location**: `crates/lattice-session/src/graph.rs` (`WorkspaceDisposition`, `TurnLifecycleEvidence`, `TurnCommit::terminal_reason`); `crates/lattice-session/src/git_graph/pending.rs` (`candidate_turn_commit_input`); ADR 0005 §15/§20.
-- **Problem**: ADR 0005 §15 deletes `WorkspaceDisposition` and `TurnLifecycleEvidence`; #144's AC#8 asks for the *target migration tests*, and the deletion itself belongs to #139-B's production hard cut. Until then a journal-finalized Turn still writes a legacy manifest projection, so a reader could mistake those fields for authority.
-- **Current status**: PARTIAL, contract-guarded. The typed `TurnOutcome`/`ClosureOrigin` on the pinned candidate is the authority; `git_graph::tests::pending_journal::journal_finalized_turns_keep_no_legacy_outcome_authority` asserts across all four outcome variants that `disposition` is always `not_applicable`, `turn/audit.json` carries no lifecycle evidence, `terminal_reason` is always absent, and `execution_status` is exactly `TurnOutcome::legacy_status()`; `the_journal_outcome_contract_never_grows_legacy_outcome_fields` prevents the journal contract from re-growing them.
-- **Plan**: #139-B deletes the legacy fields, `TurnOutcome::legacy_status()`, and the projection in `candidate_turn_commit_input` in the same hard cut. Do not delete them earlier — the pre-#144 conversation manifest readers still depend on them, and a partial deletion would create a second outcome authority instead of removing one.
+### L-GH144-02: ~~legacy outcome projection remained shipped~~ — CLOSED by #139-B
+- **Resolution:** the v4 Turn manifest stores only typed `TurnOutcome`, `ClosureOrigin`, explicit `TurnId`, aggregate usage, and `WorkspaceHistoryCheckpoint`. `WorkspaceDisposition`, lifecycle evidence, `terminal_reason`, `legacy_status()`, and `turn/audit.json` are deleted; structural and serde regressions reject their return.
 
 ### L-GH139A-03: ~~the RESULT_FINALIZE_STRESS qualification and the FinalizeBudget it fixed are withdrawn~~ — CLOSED by the 2026-08-18 requalification
 - **Location**: `crates/lancet-audit/tests/invocation_qualification.rs` (`result_finalize_stress`); `docs/plans/2026-08-18-issue139a-qualification-approval.md`; ADR 0005 §12; `target/invocation-store-bundles/20260817T214110Z-7c64a4f3ec34/result-finalize.jsonl` (local ignored historical artifact).
@@ -326,6 +320,10 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### L-GH139B-01: ~~production provider adapters bypassed `provider_projection`~~ — CLOSED by #139-B
+- **Resolution:** `ChatRequest.messages` now carries `NativeMessage<BoundToolCall>` directly. Every production provider request builder delegates message and ToolResult encoding to `request_messages_to_wire`; every SSE parser accumulates one provider-complete response and publishes `MessageComplete` through `wire_to_native`, while all usage is parsed through `wire_usage` into the single `lattice-conversation::TokenUsage`. `ModelStepDriver` no longer assembles protocol messages, Tool IDs, or wire usage. Provider call IDs remain optional; Gemini `tc_*` synthesis, the legacy `Message`/`Role` request DTOs, and the buffered response assembler are deleted. A production-source boundary regression requires all three adapters to call the shared request, response, and usage projectors.
+- **Verification:** `cargo test -p lattice-llm` (81 unit + 34 official-wire projection tests), `cargo test -p lattice-agent` (12 unit + 5 streaming-seam tests), `cargo test -p lattice-api`, workspace all-target compilation, and the #139-B black-box privacy/replay/crash gates. Official OpenAI finish→usage-only→`[DONE]`, malformed usage/arguments, OpenAI and Gemini multi-chunk accumulation, Anthropic/Gemini opaque replay state, optional/missing IDs, parameterless Gemini calls, same-provider exact replay, and cross-provider non-leakage are pinned on the production seam.
 
 ### L-47-01: harness SIGINT 广播到测试进程自身的进程组，使 ubuntu CI 以 exit 130 中断 — `robustness` / harness / #47 / #105
 - **当前状态**: 2026-07-27 closed — 由 **#105** 修复。`driver.rs` 现在用 `libc::getpgid(child_pid)` 从内核回读实际 pgid（不再假定等于 `child.id()`），任何组信号发送前先用 `libc::getpgrp()` 比对并在命中自身组时 fail-closed，且改用 `libc::killpg` 直接投递而非 spawn `kill(1)`（消除负号参数在不同 `kill` 实现间的解释差异）。新增两条回归测试锁定该契约；`direct_failure_sigint_while_stalled_commits_cancelled` 保留并通过，SIGINT 协作取消覆盖未削弱。**CI 实跑确认（2026-07-27）**：ubuntu lane 已转绿。同一对上游提交（`44ceabc1` + `38af35bb`）在 PR #104 上 ubuntu-latest 仍以 exit 130 失败（run 30222133081，macos 通过），而叠加本修复的 PR #107 ubuntu-latest 与 macos-latest 双双通过（run 30257981171）；两次运行只差这一个提交，坐实信号源在 harness 内且已消除，无需启用 #105 计划第 4 步的 `#[ignore]` + serial lane 退路。完整记录见 FIX.md `#105 / #106`。

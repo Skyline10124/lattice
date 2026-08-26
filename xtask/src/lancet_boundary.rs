@@ -22,6 +22,14 @@ pub fn run() -> anyhow::Result<()> {
                 check::lancet_audit_forbidden_dependency_graph(&root)?,
             ),
             (
+                "#139-B forbidden composition edges",
+                check::issue139b_forbidden_dependency_graph(&root)?,
+            ),
+            (
+                "#139-B legacy hard-cut residue",
+                check::issue139b_legacy_residue_hits(&root)?,
+            ),
+            (
                 "DefaultToolExecutor outside allowlisted internals",
                 check::scan_with_allowlist(
                     &root,
@@ -54,7 +62,7 @@ pub fn run() -> anyhow::Result<()> {
                 check::cli_production_bypass_hits(&root)?,
             ),
             (
-                "test-only features enabled from production [dependencies]",
+                "test-only features reachable from production features/dependencies",
                 check::production_test_feature_hits(&root)?,
             ),
         ],

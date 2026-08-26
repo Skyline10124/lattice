@@ -3,28 +3,31 @@
 
 //! In-process Tokio channel transport for CEP JSON-RPC frames.
 
+use crate::receipt::{ExecutionReceipt, InternalCallResponse};
 use crate::registry::{Cancellation, EventSink, MethodRegistry};
 use lancet_catalog::CatalogMethod;
-use lancet_protocol::{CepError, ErrorObject, Id, ToolEvent, ToolResult, error::to_jsonrpc_error};
+use lancet_protocol::error::{ExecutionErrorData, to_jsonrpc_error};
+use lancet_protocol::{
+    CellEvidenceTriple, CepError, CepErrorCode, CepErrorData, ErrorObject, InvocationBinding,
+    InvocationId, Retriability, ToolEvent, ToolResult,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 type BoxCallFuture<T> = Pin<Box<dyn Future<Output = Result<T, CepError>> + Send>>;
 type BoxValueCallFuture = BoxCallFuture<Value>;
+type BoxReceiptCallFuture = BoxCallFuture<ExecutionReceipt>;
 type BoxServerFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Runtime-specific server lifecycle used by [`CepServer::run`].
-///
-/// Implementations own policy, audit, effect checks, native context construction,
-/// and any other production-specific behavior. The dispatch crate only provides
-/// typed dispatch and transport plumbing.
 pub trait ServerRuntime<C>: Clone + Send + Sync + 'static
 where
     C: Send + 'static,
@@ -45,29 +48,56 @@ impl CepTransport {
         let (request_tx, request_rx) = mpsc::channel(buffer);
         let (event_tx, event_rx) = mpsc::channel(buffer);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
         let client = CepClient {
             request_tx,
             event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
-            next_id: Arc::new(AtomicU64::new(1)),
         };
-
         let server = CepServer {
             request_rx,
             event_tx,
             shutdown_rx,
             shutdown_tx,
         };
-
         (client, server)
     }
 }
 
+struct TransportRequestMarker {
+    _private: bool,
+}
+
+/// Private per-request transport identity. Pointer identity keeps correlation
+/// and cancellation separate from the durable domain InvocationId.
+#[derive(Clone)]
+struct TransportRequestKey(Arc<TransportRequestMarker>);
+
+impl TransportRequestKey {
+    fn new() -> Self {
+        Self(Arc::new(TransportRequestMarker { _private: true }))
+    }
+}
+
+impl PartialEq for TransportRequestKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for TransportRequestKey {}
+
+impl Hash for TransportRequestKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
 struct ServerRequest {
-    id: u64,
+    request_key: TransportRequestKey,
+    dispatch_started: Arc<AtomicBool>,
+    binding: InvocationBinding,
     method: String,
     params: Value,
-    response_tx: oneshot::Sender<Result<ToolResult, CepError>>,
+    response_tx: oneshot::Sender<Result<InternalCallResponse, CepError>>,
     cancel_tx: watch::Sender<bool>,
 }
 
@@ -76,36 +106,30 @@ struct ServerRequest {
 pub struct CepClient {
     request_tx: mpsc::Sender<ServerRequest>,
     event_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<ToolEvent>>>,
-    next_id: Arc<AtomicU64>,
 }
 
 impl CepClient {
     /// Issue a typed catalog method call.
-    ///
-    /// Delegates to [`CepClient::call_named`]: serializes `M::Params`, sends
-    /// a raw JSON-RPC call for `M::NAME`, and deserializes the result into
-    /// `M::Result`. The helper carries no JSON Schema — Component
-    /// params/result validation is enforced by generated descriptor
-    /// validators, not by this transport layer.
-    pub async fn call<M>(&self, params: M::Params) -> Result<M::Result, CepError>
+    pub async fn call<M>(
+        &self,
+        binding: InvocationBinding,
+        params: M::Params,
+    ) -> Result<M::Result, CepError>
     where
         M: CatalogMethod,
         M::Params: Serialize,
         M::Result: DeserializeOwned,
     {
-        self.call_named(M::NAME, params).await
+        self.call_named(binding, M::NAME, params).await
     }
 
     /// Name-dynamic, type-static transport helper.
-    ///
-    /// Serializes `params` to a JSON value, sends a raw JSON-RPC call for
-    /// `method`, and deserializes the result into `R`. Unlike [`call`], the
-    /// method name is a runtime string — this is the path Component Tools
-    /// use (their method names come from generated descriptors, not from
-    /// `CatalogMethod::NAME`). The helper carries no JSON Schema; Component
-    /// params/result validation is done by generated descriptor validators
-    /// on the server side.
-    pub async fn call_named<P, R>(&self, method: &str, params: P) -> Result<R, CepError>
+    pub async fn call_named<P, R>(
+        &self,
+        binding: InvocationBinding,
+        method: &str,
+        params: P,
+    ) -> Result<R, CepError>
     where
         P: Serialize,
         R: DeserializeOwned,
@@ -113,25 +137,28 @@ impl CepClient {
         let raw_params = serde_json::to_value(params).map_err(|e| {
             CepError::invalid_params(format!("failed to serialize {method} params: {e}"))
         })?;
-        let raw = self.call_raw(method.to_owned(), raw_params).await?;
+        let raw = self
+            .call_raw(binding, method.to_owned(), raw_params)
+            .await?;
         serde_json::from_value(raw).map_err(|e| {
             CepError::internal_error(format!("failed to deserialize {method} result: {e}"))
         })
     }
 
-    /// Begin a typed call. Dropping the future or calling [`CallControl::cancel`]
-    /// signals cancellation; a pending call then resolves with the server-mapped
-    /// structured outcome (the server observes the same cancellation watch), not
-    /// a client-synthesized error (#70, Codeberg #48).
+    /// Begin a typed call.
     #[doc(hidden)]
-    pub fn start_call<M>(&self, params: M::Params) -> (BoxCallFuture<M::Result>, CallControl)
+    pub fn start_call<M>(
+        &self,
+        binding: InvocationBinding,
+        params: M::Params,
+    ) -> (BoxCallFuture<M::Result>, CallControl)
     where
         M: CatalogMethod,
         M::Params: Serialize,
         M::Result: DeserializeOwned,
     {
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        let (raw, control) = self.start_call_raw(M::NAME.to_string(), params);
+        let (raw, control) = self.start_call_raw(binding, M::NAME.to_string(), params);
         let typed = async move {
             let value = raw.await?;
             serde_json::from_value(value).map_err(|err| {
@@ -141,90 +168,97 @@ impl CepClient {
         (Box::pin(typed), control)
     }
 
-    /// Raw JSON-RPC call for test/support scenarios (unknown method probing).
+    /// Raw JSON-RPC call for ordinary callers (result only).
     #[doc(hidden)]
     pub async fn call_raw(
         &self,
+        binding: InvocationBinding,
         method: impl Into<String>,
         params: Value,
     ) -> Result<Value, CepError> {
-        let (call, control) = self.start_call_raw(method.into(), params);
-        match call.await {
-            Ok(value) => {
-                control.disarm();
-                Ok(value)
-            }
-            Err(err) => Err(err),
-        }
+        let receipt = self
+            .call_raw_with_receipt(binding, method.into(), params)
+            .await?;
+        receipt.result
     }
 
-    /// Begin a raw JSON call, returning the pending future and its cancellation
-    /// control. After cancellation the future resolves with the server-mapped
-    /// structured outcome (#70).
+    /// Coordinator-facing call: result plus content-free Cell evidence.
+    #[doc(hidden)]
+    pub async fn call_raw_with_receipt(
+        &self,
+        binding: InvocationBinding,
+        method: impl Into<String>,
+        params: Value,
+    ) -> Result<ExecutionReceipt, CepError> {
+        let (call, control) = self.start_call_raw_with_receipt(binding, method.into(), params);
+        let result = call.await;
+        control.disarm();
+        result
+    }
+
+    /// Begin a raw JSON call, returning the pending future and its cancellation control.
     #[doc(hidden)]
     pub fn start_call_raw(
         &self,
+        binding: InvocationBinding,
         method: String,
         params: Value,
     ) -> (BoxValueCallFuture, CallControl) {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (receipt_fut, control) = self.start_call_raw_with_receipt(binding, method, params);
+        let fut = async move { receipt_fut.await?.result };
+        (Box::pin(fut), control)
+    }
+
+    fn start_call_raw_with_receipt(
+        &self,
+        binding: InvocationBinding,
+        method: String,
+        params: Value,
+    ) -> (BoxReceiptCallFuture, CallControl) {
         let (response_tx, response_rx) = oneshot::channel();
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
-        let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let armed = Arc::new(AtomicBool::new(true));
         let control = CallControl {
             cancel_tx: cancel_tx.clone(),
             armed: Arc::clone(&armed),
         };
-
+        let request_key = TransportRequestKey::new();
+        let dispatch_started = Arc::new(AtomicBool::new(false));
+        let response_state = Arc::clone(&dispatch_started);
         let request = ServerRequest {
-            id,
+            request_key,
+            dispatch_started,
+            binding,
             method,
             params,
             response_tx,
             cancel_tx: cancel_tx.clone(),
         };
-
         let request_tx = self.request_tx.clone();
         let guard_cancel = cancel_tx;
-
         let fut = async move {
             let mut guard = CancelGuard {
                 cancel_tx: Some(guard_cancel),
+                armed,
             };
-
-            request_tx
-                .send(request)
-                .await
-                .map_err(|_| CepError::internal_error("transport request channel closed"))?;
-
+            if request_tx.send(request).await.is_err() {
+                guard.complete();
+                return Err(transport_request_unavailable());
+            }
             let mut response_rx = response_rx;
             let response = tokio::select! {
                 res = &mut response_rx => {
                     guard.complete();
-                    res.map_err(|_| CepError::internal_error("response channel closed"))??
+                    res.map_err(|_| transport_response_unavailable(&response_state))??
                 }
                 _ = wait_cancelled(&mut cancel_rx) => {
-                    // Cancellation requested: the server observes the same
-                    // watch and maps the call outcome authoritatively (#70, Codeberg #48).
-                    // Await its structured response instead of synthesizing
-                    // a client-side error.
-                    response_rx
-                        .await
-                        .map_err(|_| CepError::internal_error("response channel closed"))??
+                    let response = response_rx.await;
+                    guard.complete();
+                    response.map_err(|_| transport_response_unavailable(&response_state))??
                 }
             };
-
-            match response {
-                ToolResult::Success { result, .. } => Ok(result),
-                ToolResult::Error { error, .. } => {
-                    let cep = error.data.unwrap_or_else(|| {
-                        CepError::internal_error(format!("{} ({})", error.message, error.code))
-                    });
-                    Err(cep)
-                }
-            }
+            Ok(response.into_receipt())
         };
-
         (Box::pin(fut), control)
     }
 
@@ -243,24 +277,25 @@ impl CepClient {
 #[derive(Clone, Debug)]
 pub struct CallControl {
     cancel_tx: watch::Sender<bool>,
-    armed: Arc<std::sync::atomic::AtomicBool>,
+    armed: Arc<AtomicBool>,
 }
 
 impl CallControl {
     /// Signal cancellation to the server-side handler.
     pub fn cancel(&self) {
-        let _ = self.cancel_tx.send(true);
+        if self.armed.swap(false, Ordering::AcqRel) {
+            let _ = self.cancel_tx.send(true);
+        }
     }
 
     fn disarm(&self) {
-        self.armed
-            .store(false, std::sync::atomic::Ordering::Release);
+        self.armed.store(false, Ordering::Release);
     }
 }
 
 impl Drop for CallControl {
     fn drop(&mut self) {
-        if self.armed.load(std::sync::atomic::Ordering::Acquire) {
+        if self.armed.swap(false, Ordering::AcqRel) {
             let _ = self.cancel_tx.send(true);
         }
     }
@@ -274,23 +309,46 @@ async fn wait_cancelled(rx: &mut watch::Receiver<bool>) {
     }
 }
 
-/// Sends cancellation when dropped unless explicitly completed.
 struct CancelGuard {
     cancel_tx: Option<watch::Sender<bool>>,
+    armed: Arc<AtomicBool>,
 }
 
 impl CancelGuard {
     fn complete(&mut self) {
+        self.armed.store(false, Ordering::Release);
         self.cancel_tx = None;
     }
 }
 
 impl Drop for CancelGuard {
     fn drop(&mut self) {
-        if let Some(tx) = self.cancel_tx.take() {
+        if let Some(tx) = self.cancel_tx.take()
+            && self.armed.swap(false, Ordering::AcqRel)
+        {
             let _ = tx.send(true);
         }
     }
+}
+
+fn transport_request_unavailable() -> CepError {
+    CepError::internal_error("transport request unavailable before dispatch")
+}
+
+fn transport_response_unavailable(dispatch_started: &AtomicBool) -> CepError {
+    if !dispatch_started.load(Ordering::Acquire) {
+        return CepError::internal_error("transport response unavailable before dispatch");
+    }
+    CepError::new(
+        CepErrorCode::OutcomeIndeterminate,
+        "transport response unavailable after dispatch started",
+        CepErrorData::Execution(ExecutionErrorData {
+            command: String::new(),
+            exit_code: None,
+            stderr: None,
+        }),
+        Retriability::Permanent,
+    )
 }
 
 /// A server-side call delivered by [`CepServer::run_with_handler`].
@@ -300,8 +358,12 @@ pub struct ServerCall {
 }
 
 impl ServerCall {
-    pub fn id(&self) -> u64 {
-        self.request.id
+    pub fn id(&self) -> InvocationId {
+        self.request.binding.invocation_id
+    }
+
+    pub fn binding(&self) -> &InvocationBinding {
+        &self.request.binding
     }
 
     pub fn method(&self) -> &str {
@@ -313,20 +375,35 @@ impl ServerCall {
     }
 
     pub fn event_sink(&self) -> EventSink {
-        EventSink::new(self.event_tx.clone(), self.request.id)
+        EventSink::new(self.event_tx.clone(), self.id())
     }
 
     pub fn cancellation(&self) -> Cancellation {
         Cancellation::new(self.request.cancel_tx.subscribe())
     }
 
+    /// Record that authoritative admission durably crossed DispatchStarted.
+    /// Response loss after this point is classified as outcome-indeterminate.
+    /// Call only after the invocation store confirms the durable transition.
+    pub fn mark_dispatch_started(&self) {
+        self.request.dispatch_started.store(true, Ordering::Release);
+    }
+
     /// Send a raw JSON dispatch result back to the client.
     pub fn respond(self, result: Result<Value, CepError>) {
-        let response = match result {
-            Ok(result) => ToolResult::Success {
-                result,
-                id: Id::Number(self.request.id as i64),
-            },
+        let method = self.request.method.clone();
+        self.respond_with_evidence(result, CellEvidenceTriple::native_method(method));
+    }
+
+    /// Send a JSON-RPC result plus content-free Cell evidence.
+    pub fn respond_with_evidence(
+        self,
+        result: Result<Value, CepError>,
+        evidence: CellEvidenceTriple,
+    ) {
+        let id = self.request.binding.invocation_id;
+        let tool_result = match result {
+            Ok(result) => ToolResult::Success { result, id },
             Err(err) => {
                 let (code, message, data) = to_jsonrpc_error(&err);
                 ToolResult::Error {
@@ -335,14 +412,15 @@ impl ServerCall {
                         message,
                         data: Some(data),
                     },
-                    id: Id::Number(self.request.id as i64),
+                    id,
                 }
             }
         };
-
-        if self.request.response_tx.send(Ok(response)).is_err() {
-            let _ = self.request.cancel_tx.send(true);
-        }
+        let response = InternalCallResponse {
+            tool_result,
+            evidence,
+        };
+        let _ = self.request.response_tx.send(Ok(response));
     }
 }
 
@@ -382,16 +460,17 @@ impl CepServer {
     }
 
     /// Run the server loop until the request channel closes or shutdown is signaled.
-    ///
-    /// The provided handler owns policy, audit, effect, and any other runtime-specific
-    /// lifecycle. Dispatch does not depend on those native implementations.
     pub async fn run_with_handler<H, Fut>(mut self, handler: H) -> Result<(), CepError>
     where
         H: Fn(ServerCall) -> Fut + Clone + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let mut join_set: JoinSet<u64> = JoinSet::new();
-        let mut cancel_senders: std::collections::HashMap<u64, watch::Sender<bool>> =
+        let mut join_set: JoinSet<TransportRequestKey> = JoinSet::new();
+        let mut cancel_senders: std::collections::HashMap<
+            TransportRequestKey,
+            watch::Sender<bool>,
+        > = std::collections::HashMap::new();
+        let mut task_requests: std::collections::HashMap<tokio::task::Id, TransportRequestKey> =
             std::collections::HashMap::new();
         let mut shutdown = false;
 
@@ -412,17 +491,19 @@ impl CepServer {
                 msg = self.request_rx.recv(), if !shutdown => {
                     match msg {
                         Some(request) => {
-                            let request_id = request.id;
-                            cancel_senders.insert(request_id, request.cancel_tx.clone());
+                            let request_key = request.request_key.clone();
+                            cancel_senders.insert(request_key.clone(), request.cancel_tx.clone());
                             let call = ServerCall {
                                 request,
                                 event_tx: self.event_tx.clone(),
                             };
                             let handler = handler.clone();
-                            join_set.spawn(async move {
+                            let completed_key = request_key.clone();
+                            let task = join_set.spawn(async move {
                                 handler(call).await;
-                                request_id
+                                completed_key
                             });
+                            task_requests.insert(task.id(), request_key);
                         }
                         None => {
                             shutdown = true;
@@ -432,9 +513,17 @@ impl CepServer {
                         }
                     }
                 }
-                Some(res) = join_set.join_next(), if !join_set.is_empty() => {
-                    if let Ok(request_id) = res {
-                        cancel_senders.remove(&request_id);
+                Some(res) = join_set.join_next_with_id(), if !join_set.is_empty() => {
+                    match res {
+                        Ok((task_id, request_key)) => {
+                            task_requests.remove(&task_id);
+                            cancel_senders.remove(&request_key);
+                        }
+                        Err(join_error) => {
+                            if let Some(request_key) = task_requests.remove(&join_error.id()) {
+                                cancel_senders.remove(&request_key);
+                            }
+                        }
                     }
                 }
                 else => {
@@ -446,10 +535,8 @@ impl CepServer {
             }
         }
 
-        while let Some(res) = join_set.join_next().await {
-            let _ = res;
-        }
-
+        debug_assert!(cancel_senders.is_empty());
+        debug_assert!(task_requests.is_empty());
         Ok(())
     }
 }
@@ -457,245 +544,197 @@ impl CepServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::MethodRegistry;
-    use lancet_catalog::CepMethod;
-    use lancet_catalog::test_method::{
-        TestEcho, TestEchoItem, TestEchoParams, TestEchoResult, TestEchoStatus,
-    };
-    use lancet_protocol::error::jsonrpc;
+    use lancet_protocol::{BindingIdentity, SessionId, TurnId, arguments_digest};
+    use std::time::Duration;
+
+    fn binding(ordinal: u64, method: &str, params: &Value) -> InvocationBinding {
+        InvocationBinding {
+            invocation_id: InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
+                .expect("invocation id"),
+            identity: BindingIdentity {
+                session_id: SessionId::parse("00000000000000000000000000000001")
+                    .expect("session id"),
+                turn_id: TurnId::parse("00000000-0000-4000-8000-000000000001").expect("turn id"),
+                model_step_ordinal: ordinal as u32,
+                part_ordinal: 0,
+                method: method.to_string(),
+                descriptor_identity: "test-descriptor".into(),
+                arguments_digest: arguments_digest(params),
+            },
+        }
+    }
+
+    fn cancelled(method: &str) -> CepError {
+        CepError::tool_execution(
+            CepErrorCode::CallCancelled,
+            method,
+            "cancelled",
+            None,
+            Retriability::Permanent,
+        )
+    }
 
     #[tokio::test]
-    async fn transport_round_trip_returns_typed_result() {
+    async fn caller_drop_and_shutdown_cancel_only_exact_transport_requests() {
         let (client, server) = CepTransport::pair(8);
-        let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
-        registry
-            .register_method::<TestEcho, _, _>(|params, _ctx| async move {
-                Ok(TestEchoResult {
-                    items: params.items,
-                })
-            })
-            .unwrap();
-
+        let shutdown = server.shutdown_handle();
+        let (arrived_tx, mut arrived_rx) = mpsc::channel::<String>(4);
+        let (cancelled_tx, mut cancelled_rx) = mpsc::channel::<String>(4);
         let server_task = tokio::spawn(async move {
             server
                 .run_with_handler(move |call| {
-                    let registry = registry.clone();
+                    let arrived_tx = arrived_tx.clone();
+                    let cancelled_tx = cancelled_tx.clone();
                     async move {
-                        let ctx = (call.event_sink(), call.cancellation());
-                        let result = registry
-                            .dispatch(call.method(), call.params().clone(), ctx)
-                            .await;
-                        call.respond(result);
+                        let label = call.params()["label"]
+                            .as_str()
+                            .expect("test label")
+                            .to_string();
+                        let mut cancellation = call.cancellation();
+                        arrived_tx.send(label.clone()).await.expect("arrival");
+                        cancellation.cancelled().await;
+                        cancelled_tx
+                            .send(label)
+                            .await
+                            .expect("cancellation observation");
+                        let method = call.method().to_string();
+                        call.respond(Err(cancelled(&method)));
                     }
                 })
                 .await
-                .unwrap()
+                .expect("server run")
         });
 
-        let result = client
-            .call::<TestEcho>(TestEchoParams {
-                items: vec![TestEchoItem {
-                    content: "ship".into(),
-                    status: TestEchoStatus::InProgress,
-                }],
-            })
+        let shared = binding(1, "test.wait", &serde_json::json!({}));
+        let (first, _first_control) = client.start_call_raw(
+            shared.clone(),
+            "test.wait".into(),
+            serde_json::json!({"label": "first"}),
+        );
+        let (second, _second_control) = client.start_call_raw(
+            shared,
+            "test.wait".into(),
+            serde_json::json!({"label": "second"}),
+        );
+        let first_task = tokio::spawn(first);
+        let second_task = tokio::spawn(second);
+
+        let mut arrivals = [
+            arrived_rx.recv().await.expect("first arrival"),
+            arrived_rx.recv().await.expect("second arrival"),
+        ];
+        arrivals.sort();
+        assert_eq!(arrivals, ["first", "second"]);
+
+        first_task.abort();
+        assert!(first_task.await.expect_err("caller dropped").is_cancelled());
+        assert_eq!(cancelled_rx.recv().await.as_deref(), Some("first"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), cancelled_rx.recv())
+                .await
+                .is_err(),
+            "dropping the first caller must not cancel the same-InvocationId peer"
+        );
+
+        shutdown.send(true).expect("shutdown");
+        let second_err = tokio::time::timeout(Duration::from_secs(1), second_task)
             .await
-            .unwrap();
-
-        assert_eq!(result.items[0].content, "ship");
-        drop(client);
-        server_task.abort();
+            .expect("second request cancelled on shutdown")
+            .expect("second caller task")
+            .expect_err("shutdown is authoritative cancellation");
+        assert_eq!(second_err.code, CepErrorCode::CallCancelled);
+        assert_eq!(cancelled_rx.recv().await.as_deref(), Some("second"));
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server drains all private request keys")
+            .expect("server task");
     }
 
-    // `call_named` is the name-dynamic, type-static transport helper that
-    // `call<M>` delegates to. It serializes params, calls `call_raw`, and
-    // deserializes the result — without carrying a JSON Schema (Component
-    // params/result validation is done by generated descriptor validators).
-
-    fn echo_registry() -> MethodRegistry<(EventSink, Cancellation)> {
-        let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
-        registry
-            .register_method::<TestEcho, _, _>(|params, _ctx| async move {
-                Ok(TestEchoResult {
-                    items: params.items,
-                })
-            })
-            .unwrap();
-        registry
-    }
-
-    fn spawn_echo_server(
-        registry: MethodRegistry<(EventSink, Cancellation)>,
-    ) -> (CepClient, tokio::task::JoinHandle<()>) {
+    #[tokio::test]
+    async fn response_loss_is_typed_by_dispatch_boundary_and_join_errors_are_redacted() {
         let (client, server) = CepTransport::pair(8);
-        let task = tokio::spawn(async move {
-            let _ = server
-                .run_with_handler(move |call| {
-                    let registry = registry.clone();
-                    async move {
-                        let ctx = (call.event_sink(), call.cancellation());
-                        let result = registry
-                            .dispatch(call.method(), call.params().clone(), ctx)
-                            .await;
-                        call.respond(result);
+        let shutdown = server.shutdown_handle();
+        let server_task = tokio::spawn(async move {
+            server
+                .run_with_handler(|call| async move {
+                    match call.params()["phase"].as_str().expect("phase") {
+                        "before" => panic!("pre-admission /private/repository secret"),
+                        "after" => {
+                            call.mark_dispatch_started();
+                            panic!("post-admission /private/repository secret");
+                        }
+                        "ok" => call.respond(Ok(serde_json::json!({"ok": true}))),
+                        other => panic!("unexpected phase: {other}"),
                     }
                 })
-                .await;
+                .await
+                .expect("server run")
         });
-        (client, task)
-    }
 
-    #[tokio::test]
-    async fn call_named_round_trips_typed_result() {
-        let (client, task) = spawn_echo_server(echo_registry());
-
-        let result: TestEchoResult = client
-            .call_named(
-                TestEcho::NAME,
-                TestEchoParams {
-                    items: vec![TestEchoItem {
-                        content: "named".into(),
-                        status: TestEchoStatus::Pending,
-                    }],
-                },
+        let before_params = serde_json::json!({"phase": "before"});
+        let before = client
+            .call_raw(
+                binding(2, "test.response", &before_params),
+                "test.response",
+                before_params,
             )
             .await
-            .expect("call_named succeeds");
-
-        assert_eq!(result.items[0].content, "named");
-        drop(client);
-        task.abort();
-    }
-
-    #[tokio::test]
-    async fn call_named_returns_invalid_params_when_params_fail_to_serialize() {
-        // A type that cannot be serialized as JSON must produce a
-        // structured invalid_params error, not a panic.
-        let (client, task) = spawn_echo_server(echo_registry());
-
-        // Serialize a map with a non-string key — serde_json rejects it.
-        #[derive(Debug)]
-        struct Unserializable;
-        impl Serialize for Unserializable {
-            fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("synthetic serialize failure"))
-            }
-        }
-
-        let err = client
-            .call_named::<Unserializable, TestEchoResult>(TestEcho::NAME, Unserializable)
-            .await
-            .expect_err("serialize failure must error");
+            .expect_err("sender loss before admission is deterministic");
+        assert_eq!(before.code, CepErrorCode::ExecutionFailed);
         assert_eq!(
-            lancet_protocol::error::to_jsonrpc_error(&err).0,
-            jsonrpc::INVALID_PARAMS
+            before.message,
+            "transport response unavailable before dispatch"
         );
-        drop(client);
-        task.abort();
-    }
+        let public_before = serde_json::to_string(&before).expect("serialize public error");
+        assert!(!public_before.contains("private"));
+        assert!(!public_before.contains("secret"));
 
-    #[tokio::test]
-    async fn call_named_returns_internal_error_when_result_fails_to_deserialize() {
-        // The server returns a valid TestEchoResult, but we ask for a
-        // different type — the deserialize step must fail with an
-        // ExecutionFailed (internal_error) CepError.
-        let (client, task) = spawn_echo_server(echo_registry());
-
-        let err = client
-            .call_named::<TestEchoParams, String>(TestEcho::NAME, TestEchoParams { items: vec![] })
-            .await
-            .expect_err("deserialize failure must error");
-        assert_eq!(err.code, lancet_protocol::CepErrorCode::ExecutionFailed);
-        assert!(err.message.contains("failed to deserialize"));
-        drop(client);
-        task.abort();
-    }
-
-    /// #70: after cancellation the pending call resolves with the
-    /// server-mapped structured error, not a client-synthesized one. The
-    /// server observes the same cancellation watch and is the authority
-    /// for the call outcome.
-    #[tokio::test]
-    async fn cancel_resolves_with_server_structured_error() {
-        let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
-        registry
-            .register_method::<TestEcho, _, _>(|_params, mut ctx| async move {
-                // Simulate the Component path: wait until cancellation is
-                // observed, then return the host-mapped `CallCancelled`.
-                ctx.1.cancelled().await;
-                Err(lancet_protocol::CepError::tool_execution(
-                    lancet_protocol::CepErrorCode::CallCancelled,
-                    "session.todo_write",
-                    "cancelled",
-                    None,
-                    lancet_protocol::Retriability::Permanent,
-                ))
-            })
-            .unwrap();
-        let (client, task) = spawn_echo_server(registry);
-
-        let (call, control) = client.start_call::<TestEcho>(TestEchoParams {
-            items: vec![TestEchoItem {
-                content: "cancel-me".into(),
-                status: TestEchoStatus::Pending,
-            }],
-        });
-        control.cancel();
-
-        let err = call.await.expect_err("cancelled call must fail");
+        let ok_params = serde_json::json!({"phase": "ok"});
         assert_eq!(
-            err.code,
-            lancet_protocol::CepErrorCode::CallCancelled,
-            "client must see the server-mapped error code"
+            client
+                .call_raw(
+                    binding(3, "test.response", &ok_params),
+                    "test.response",
+                    ok_params,
+                )
+                .await
+                .expect("server survives pre-admission worker panic"),
+            serde_json::json!({"ok": true})
         );
-        assert_eq!(err.message, "tool session.todo_write failed: cancelled");
-        drop(client);
-        task.abort();
-    }
 
-    /// #70: dropping the call future still signals cancellation to the
-    /// server-side handler through `CancelGuard` (unchanged semantics).
-    #[tokio::test]
-    async fn drop_future_signals_cancellation_to_server() {
-        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
-        let (observed_tx, mut observed_rx) = tokio::sync::mpsc::channel::<bool>(1);
-        let mut registry = MethodRegistry::<(EventSink, Cancellation)>::new();
-        registry
-            .register_method::<TestEcho, _, _>(move |params, mut ctx| {
-                let started_tx = started_tx.clone();
-                let observed_tx = observed_tx.clone();
-                async move {
-                    let _ = started_tx.send(()).await;
-                    ctx.1.cancelled().await;
-                    let _ = observed_tx.send(true).await;
-                    Ok(TestEchoResult {
-                        items: params.items,
-                    })
-                }
-            })
-            .unwrap();
-        let (client, task) = spawn_echo_server(registry);
-
-        let (mut call, control) = client.start_call::<TestEcho>(TestEchoParams {
-            items: vec![TestEchoItem {
-                content: "drop-me".into(),
-                status: TestEchoStatus::Pending,
-            }],
-        });
-        // Poll the call until the request reaches the server handler.
-        tokio::select! {
-            _ = &mut call => panic!("call cannot complete before the handler runs"),
-            _ = started_rx.recv() => {}
-        }
-        drop(call);
-
-        let observed = tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx.recv())
+        let after_params = serde_json::json!({"phase": "after"});
+        let after = client
+            .call_raw(
+                binding(4, "test.response", &after_params),
+                "test.response",
+                after_params,
+            )
             .await
-            .expect("server observes cancellation")
-            .expect("observation channel open");
-        assert!(observed);
-        drop(control);
-        drop(client);
-        task.abort();
+            .expect_err("sender loss after DispatchStarted is indeterminate");
+        assert_eq!(after.code, CepErrorCode::OutcomeIndeterminate);
+        assert_eq!(
+            after.message,
+            "transport response unavailable after dispatch started"
+        );
+        assert_eq!(after.retriability, Retriability::Permanent);
+        let public_after = serde_json::to_string(&after).expect("serialize public error");
+        assert!(!public_after.contains("private"));
+        assert!(!public_after.contains("secret"));
+
+        let final_params = serde_json::json!({"phase": "ok"});
+        client
+            .call_raw(
+                binding(5, "test.response", &final_params),
+                "test.response",
+                final_params,
+            )
+            .await
+            .expect("server survives post-admission worker panic");
+
+        shutdown.send(true).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server shutdown")
+            .expect("server task");
     }
 }

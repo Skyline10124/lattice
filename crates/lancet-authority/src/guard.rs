@@ -952,7 +952,10 @@ mod policy_tests {
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),
                 session_id: "s".into(),
-                call_id: Some(1),
+                invocation_id: Some(
+                    lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
+                        .expect("invocation id"),
+                ),
                 budget_snapshot: PolicyBudgetSnapshot {
                     turn_observation_bytes_used: 0,
                     turn_observation_bytes_limit: 65536,
@@ -984,7 +987,7 @@ mod policy_tests {
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),
                 session_id: "s".into(),
-                call_id: None,
+                invocation_id: None,
                 budget_snapshot: PolicyBudgetSnapshot {
                     turn_observation_bytes_used: 0,
                     turn_observation_bytes_limit: 0,

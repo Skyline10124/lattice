@@ -7,11 +7,9 @@
 //! `head_transcript` and verifies all 6 messages are returned in commit order
 //! — first turn's messages first, last turn's messages last.
 
+use lattice_conversation::MessageRole;
 use lattice_session::test_helpers::{assistant_msg, user_msg};
-use lattice_session::{
-    GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
-    WorkspaceDisposition,
-};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore, TurnCommitInput};
 use tempfile::TempDir;
 
 fn test_store_key() -> lattice_session::ProjectStoreKey {
@@ -25,7 +23,9 @@ fn turn_input(
     assistant_text: &str,
 ) -> TurnCommitInput {
     TurnCommitInput {
-        workspace_history_oid: None,
+        turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .expect("valid test TurnId"),
+        workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
         session_id: session_id.to_string(),
         parent_ids,
         messages: vec![user_msg(user_text), assistant_msg(assistant_text)],
@@ -34,12 +34,12 @@ fn turn_input(
         profile_snapshot_json: "{}".to_string(),
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
-        status: TurnCommitStatus::Completed,
-        disposition: WorkspaceDisposition::NotApplicable,
-        lifecycle: None,
+        outcome: lattice_session::TurnOutcome::Completed {
+            finish_reason: lattice_session::TurnFinishReason::Stop,
+        },
+        origin: lattice_session::ClosureOrigin::Live,
         commit_message: "turn".to_string(),
         usage: None,
-        terminal_reason: None,
     }
 }
 
@@ -70,7 +70,7 @@ fn git_store_head_transcript_reads_ordered_messages() {
     ];
     for (user_text, assistant_text) in expected_texts.iter() {
         let commit = store
-            .commit_turn(turn_input(
+            .test_commit_turn(turn_input(
                 &session_id,
                 parent_ids.clone(),
                 user_text,
@@ -97,7 +97,10 @@ fn git_store_head_transcript_reads_ordered_messages() {
     );
 
     // Verify ordering: first turn's messages first, last turn's messages last.
-    let contents: Vec<&str> = messages.iter().map(|m| m.content.as_str()).collect();
+    let contents: Vec<&str> = messages
+        .iter()
+        .map(|message| lattice_session::test_helpers::text(message).expect("text message"))
+        .collect();
     assert_eq!(
         contents,
         vec![
@@ -113,16 +116,16 @@ fn git_store_head_transcript_reads_ordered_messages() {
     );
 
     // Also verify roles alternate user/assistant per turn.
-    let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+    let roles: Vec<_> = messages.iter().map(|message| message.role).collect();
     assert_eq!(
         roles,
         vec![
-            "user",
-            "assistant",
-            "user",
-            "assistant",
-            "user",
-            "assistant"
+            MessageRole::User,
+            MessageRole::Assistant,
+            MessageRole::User,
+            MessageRole::Assistant,
+            MessageRole::User,
+            MessageRole::Assistant,
         ],
         "roles must alternate per message in commit order, got: {:?}",
         roles,

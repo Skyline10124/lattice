@@ -36,7 +36,7 @@ use crate::world::ScenarioWorld;
 /// Exit code contract for `lattice --json session send` (public, documented
 /// in `run.rs` and the issue #41 (Codeberg #19) RFC decision three).
 ///
-/// - `0` — turn committed (`RunTurnStatus::Completed`).
+/// - `0` — turn committed (`TurnOutcome::Completed`).
 /// - `1` — provider/tool/commit/runtime failure, or stream ended without a
 ///   terminal/commit signal.
 /// - `2` — input/config error: session not found, profile load failure, or
@@ -117,7 +117,7 @@ pub enum TurnEventLine {
     TurnCommitted {
         session_id: String,
         commit_id: String,
-        status: String,
+        outcome: String,
     },
     CommitFailed {
         reason: String,
@@ -226,11 +226,20 @@ fn parse_event_line_checked(line: &str) -> Result<Option<TurnEventLine>, String>
         },
         "turn_committing" => TurnEventLine::TurnCommitting,
         "turn_committed" => {
-            required_string(&value, "disposition")?;
+            let outcome = value
+                .get("outcome")
+                .and_then(Value::as_object)
+                .and_then(|object| object.keys().next())
+                .cloned()
+                .ok_or_else(|| "field 'outcome' must be a tagged object".to_string())?;
+            required_string(&value, "origin")?;
+            if value.get("workspace_history_checkpoint").is_none() {
+                return Err("missing field 'workspace_history_checkpoint'".to_string());
+            }
             TurnEventLine::TurnCommitted {
                 session_id: required_string(&value, "session_id")?,
                 commit_id: required_string(&value, "commit_id")?,
-                status: required_string(&value, "status")?,
+                outcome,
             }
         }
         "commit_failed" => TurnEventLine::CommitFailed {
@@ -289,13 +298,6 @@ fn required_u64(value: &Value, field: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("`{field}` must be an unsigned integer"))
 }
 
-fn required_i64(value: &Value, field: &str) -> Result<i64, String> {
-    value
-        .get(field)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| format!("`{field}` must be an integer"))
-}
-
 fn required_nullable_u64(value: &Value, field: &str) -> Result<Option<u64>, String> {
     match value.get(field) {
         Some(Value::Null) => Ok(None),
@@ -322,10 +324,8 @@ fn required_nullable_usage(value: &Value, field: &str) -> Result<(), String> {
 }
 
 fn validate_cep_fields(value: &Value, finished: bool) -> Result<(), String> {
-    required_u64(value, "call_id")?;
+    required_string(value, "invocation_id")?;
     required_string(value, "method")?;
-    required_string(value, "impact_kind")?;
-    required_i64(value, "audit_id")?;
     required_string(value, "semantic_stage")?;
     required_string(value, "guard_stage")?;
     if finished {
@@ -374,12 +374,12 @@ impl std::ops::Deref for SendExecution {
 }
 
 impl SendOutcome {
-    /// True iff a `turn_committed` event with `status == "completed"` was
+    /// True iff a `turn_committed` event with `outcome == "completed"` was
     /// observed. This is the public success signal regardless of exit code
     /// (the product also derives exit 0 from exactly this state).
     pub fn has_committed_completed(&self) -> bool {
         self.events.iter().any(|e| match e {
-            TurnEventLine::TurnCommitted { status, .. } => status == "completed",
+            TurnEventLine::TurnCommitted { outcome, .. } => outcome == "completed",
             _ => false,
         })
     }
@@ -419,8 +419,8 @@ pub fn classify_exit(code: Option<i32>) -> SendExitCode {
 ///
 /// - `CommitFailed` seen → `Failed` (1).
 /// - Any terminal (`turn_failed` / `turn_cancelled`) seen → `Failed` (1).
-/// - `turn_committed` with `status == "completed"` → `Committed` (0).
-/// - `turn_committed` with `status == "error"` or `"cancelled"` → `Failed` (1).
+/// - `turn_committed` with `outcome == "completed"` → `Committed` (0).
+/// - `turn_committed` with `outcome == "failed"` or `"cancelled"` → `Failed` (1).
 /// - Stream ended with no terminal/commit signal → `Failed` (1).
 pub fn derive_send_exit_code(events: &[TurnEventLine]) -> SendExitCode {
     if events
@@ -438,8 +438,8 @@ pub fn derive_send_exit_code(events: &[TurnEventLine]) -> SendExitCode {
         return SendExitCode::Failed;
     }
     for e in events {
-        if let TurnEventLine::TurnCommitted { status, .. } = e {
-            return if status == "completed" {
+        if let TurnEventLine::TurnCommitted { outcome, .. } = e {
+            return if outcome == "completed" {
                 SendExitCode::Committed
             } else {
                 SendExitCode::Failed
@@ -718,14 +718,14 @@ mod tests {
     #[test]
     fn parse_turn_committed_completed() {
         let e = line(
-            r#"{"type":"turn_committed","session_id":"s1","commit_id":"c1","status":"completed","disposition":"not_applicable"}"#,
+            r#"{"type":"turn_committed","session_id":"s1","commit_id":"c1","outcome":{"completed":{"finish_reason":"stop"}},"origin":"live","workspace_history_checkpoint":"empty"}"#,
         );
         assert_eq!(
             e,
             TurnEventLine::TurnCommitted {
                 session_id: "s1".into(),
                 commit_id: "c1".into(),
-                status: "completed".into()
+                outcome: "completed".into()
             }
         );
     }
@@ -756,7 +756,7 @@ mod tests {
             r#"{"type":"turn_started","session_id":"s","turn_id":"s:root","branch":null}"#,
             r#"{"type":"tool_call_finished","id":"c","name":"x","ok":true,"error_summary":null}"#,
             r#"{"type":"model_finished","finish_reason":"stop"}"#,
-            r#"{"type":"turn_committed","session_id":"s","commit_id":"c","status":"completed"}"#,
+            r#"{"type":"turn_committed","session_id":"s","commit_id":"c","outcome":{"completed":{"finish_reason":"stop"}},"workspace_history_checkpoint":"empty"}"#,
             r#"{"type":"cep_call_started","call_id":1,"method":"x"}"#,
         ];
         for line in lines {
@@ -794,7 +794,7 @@ mod tests {
             line(r#"{"type":"model_finished","finish_reason":"stop","usage":null}"#),
             line(r#"{"type":"turn_committing"}"#),
             line(
-                r#"{"type":"turn_committed","session_id":"s","commit_id":"c","status":"completed","disposition":"not_applicable"}"#,
+                r#"{"type":"turn_committed","session_id":"s","commit_id":"c","outcome":{"completed":{"finish_reason":"stop"}},"origin":"live","workspace_history_checkpoint":"empty"}"#,
             ),
         ];
         assert_eq!(derive_send_exit_code(&events), SendExitCode::Committed);
@@ -825,7 +825,7 @@ mod tests {
     #[test]
     fn derive_exit_committed_error_status_is_one() {
         let events = vec![line(
-            r#"{"type":"turn_committed","session_id":"s","commit_id":"c","status":"error","disposition":"aborted"}"#,
+            r#"{"type":"turn_committed","session_id":"s","commit_id":"c","outcome":{"failed":{"reason":"model_request_failed"}},"origin":"live","workspace_history_checkpoint":"empty"}"#,
         )];
         assert_eq!(derive_send_exit_code(&events), SendExitCode::Failed);
     }
@@ -849,7 +849,7 @@ mod tests {
 {\"type\":\"token_delta\",\"content\":\"Hello\"}\n\
 {\"type\":\"token_delta\",\"content\":\" world\"}\n\
 {\"type\":\"model_finished\",\"finish_reason\":\"stop\",\"usage\":null}\n\
-{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":\"not_applicable\"}\n";
+{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"outcome\":{\"completed\":{\"finish_reason\":\"stop\"}},\"origin\":\"live\",\"workspace_history_checkpoint\":\"empty\"}\n";
         let outcome = parse_send_stdout(stdout, Some(0));
         assert_eq!(outcome.exit_code, Some(SendExitCode::Committed));
         assert!(outcome.has_committed_completed());
@@ -877,7 +877,7 @@ mod tests {
         let stdout = b"\
 {\"type\":\"turn_started\",\"session_id\":\"s\",\"turn_id\":\"s:root\",\"parent_commit_id\":null,\"branch\":null}\n\
 {\"type\":\"some_future_event\",\"x\":1}\n\
-{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":\"not_applicable\"}\n";
+{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"outcome\":{\"completed\":{\"finish_reason\":\"stop\"}},\"origin\":\"live\",\"workspace_history_checkpoint\":\"empty\"}\n";
         let outcome = parse_send_stdout(stdout, Some(0));
         assert_eq!(outcome.events.len(), 3);
         assert!(matches!(
@@ -894,7 +894,7 @@ mod tests {
 {\"type\":\"model_started\",\"provider\":null,\"model\":\"m\"}\n\
 {\"type\":\"token_delta\",\"content\":\"x\"}\n\
 {\"type\":\"model_finished\",\"finish_reason\":\"stop\",\"usage\":null}\n\
-{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"status\":\"completed\",\"disposition\":\"not_applicable\"}\n",
+{\"type\":\"turn_committed\",\"session_id\":\"s\",\"commit_id\":\"c\",\"outcome\":{\"completed\":{\"finish_reason\":\"stop\"}},\"origin\":\"live\",\"workspace_history_checkpoint\":\"empty\"}\n",
             Some(0),
         );
         let required = [

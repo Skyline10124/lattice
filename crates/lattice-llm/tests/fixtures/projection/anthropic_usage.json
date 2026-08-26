@@ -1,0 +1,17 @@
+{
+  "id": "msg_usage01",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-official",
+  "content": [
+    {
+      "type": "text",
+      "text": "Done."
+    }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 517,
+    "output_tokens": 62
+  }
+}

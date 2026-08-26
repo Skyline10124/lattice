@@ -47,11 +47,11 @@ evidence types. It has no I/O and no Tokio dependency.
   GitHub #114. Preserve artifact identity and bundle provenance contracts where
   they are owned; do not recreate a second operator projection vocabulary here.
 - ADR 0005 assigns the shared `InvocationId` and `TurnId` data types here.
-  GitHub #142 adds strict lowercase hyphenated UUID-v4
+  GitHub #142 added strict lowercase hyphenated UUID-v4
   parse/display/serde/schema and tests; this crate validates but does not
-  generate IDs. Until #139-B, do not thread InvocationId into production
-  JSON-RPC, transport, events, evidence, or operator DTOs, and never add a
-  second String/newtype identity.
+  generate IDs. #139-B threads `InvocationId` through production JSON-RPC,
+  transport, events, evidence, and operator DTOs. Do not add a second
+  String/newtype identity.
 
 ## Recent Issues
 

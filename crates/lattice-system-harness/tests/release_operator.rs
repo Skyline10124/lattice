@@ -1,14 +1,13 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Release-binary operator audit matrix for GitHub #114.
+//! Release-binary operator matrix over the authoritative Git InvocationStore.
 //!
 //! This target is feature-gated and executed only by `cargo xtask rollout`.
-//! It owns fixtures and assertions independent of `direct_operator`, while
-//! sharing only the harness's generic process/world/fake-provider plumbing.
 
 mod support;
 
+use std::collections::HashSet;
 use std::process::Output;
 use std::time::Duration;
 
@@ -44,10 +43,46 @@ fn replay_calls(value: &Value) -> &[Value] {
         .unwrap_or_else(|| panic!("expected trace.calls: {value}"))
 }
 
-fn row_for_method<'a>(rows: &'a [Value], method: &str) -> &'a Value {
-    rows.iter()
-        .find(|row| row.get("method").and_then(Value::as_str) == Some(method))
-        .unwrap_or_else(|| panic!("missing {method}: {rows:?}"))
+fn method(row: &Value) -> Option<&str> {
+    row.pointer("/record/binding/method")
+        .and_then(Value::as_str)
+}
+
+fn invocation_id(row: &Value) -> Option<&str> {
+    row.get("invocation_id").and_then(Value::as_str)
+}
+
+fn terminal_succeeded(row: &Value) -> bool {
+    row.pointer("/record/state/terminal/outcome")
+        .and_then(Value::as_str)
+        == Some("succeeded")
+}
+
+fn row_matches(row: &Value, session_id: &str, turn_id: &str, expected_method: &str) -> bool {
+    invocation_id(row).is_some_and(|id| id.len() == 36)
+        && method(row) == Some(expected_method)
+        && row
+            .pointer("/record/binding/session_id")
+            .and_then(Value::as_str)
+            == Some(session_id)
+        && row
+            .pointer("/record/binding/turn_id")
+            .and_then(Value::as_str)
+            == Some(turn_id)
+        && row
+            .pointer("/record/binding/descriptor_identity")
+            .and_then(Value::as_str)
+            .is_some_and(|digest| digest.len() == 64)
+        && row
+            .pointer("/record/binding/arguments_digest")
+            .and_then(Value::as_str)
+            .is_some_and(|digest| digest.len() == 64)
+        && terminal_succeeded(row)
+        && row
+            .pointer("/record/state/terminal/evidence/admission/tool")
+            .and_then(Value::as_str)
+            == Some(expected_method)
+        && row.get("metadata_json").is_none()
 }
 
 fn turn_id_of(turn: &SendExecution) -> String {
@@ -64,81 +99,14 @@ fn fetch_network_profile() -> String {
     "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n".to_string()
 }
 
-fn expected_evidence(row: &Value, present: bool) -> bool {
-    if present {
-        row.pointer("/evidence/outcome").and_then(Value::as_str) == Some("completed")
-    } else {
-        row.get("evidence").is_some_and(Value::is_null)
-    }
-}
-
-struct SingleReleaseExpectation<'a> {
-    session_id: &'a str,
-    turn_id: &'a str,
-    method: &'a str,
-    impact: &'a str,
-    capability: Option<&'a str>,
-    verdict: &'a str,
-    evidence_present: bool,
-}
-
 fn assert_single_release_case(
     world: &lattice_system_harness::ScenarioWorld,
     spec: &lattice_system_harness::ScenarioSpec,
-    expectation: SingleReleaseExpectation<'_>,
+    session_id: &str,
+    turn_id: &str,
+    expected_method: &str,
 ) -> Result<(), AssertError> {
-    let SingleReleaseExpectation {
-        session_id,
-        turn_id,
-        method,
-        impact,
-        capability,
-        verdict,
-        evidence_present,
-    } = expectation;
-    let mut filtered_args = vec![
-        "--json",
-        "audit",
-        "query",
-        "--session",
-        session_id,
-        "--turn",
-        turn_id,
-        "--method",
-        method,
-        "--impact",
-        impact,
-        "--verdict",
-        "success",
-    ];
-    if let Some(capability) = capability {
-        filtered_args.extend(["--capability", capability]);
-    }
-    let query = cli(world, spec, &filtered_args);
-    require(
-        query.status.success(),
-        format!(
-            "release {method} query failed: {}",
-            String::from_utf8_lossy(&query.stderr)
-        ),
-    )?;
-    let query_json = parse_json(&query);
-    let query_rows = rows(&query_json);
-    require(
-        query_json.get("row_count").and_then(Value::as_u64) == Some(1)
-            && query_rows.len() == 1
-            && query_rows[0].get("method").and_then(Value::as_str) == Some(method)
-            && expected_evidence(&query_rows[0], evidence_present)
-            && query_rows[0].get("metadata_json").is_none(),
-        format!("release {method} query mismatch: {query_json}"),
-    )?;
-    let audit_id = query_rows[0]
-        .get("audit_id")
-        .and_then(Value::as_i64)
-        .expect("audit id");
-    let cursor = audit_id.to_string();
-
-    let page = cli(
+    let query = cli(
         world,
         spec,
         &[
@@ -147,23 +115,55 @@ fn assert_single_release_case(
             "query",
             "--session",
             session_id,
-            "--since",
-            &cursor,
+            "--turn",
+            turn_id,
+            "--method",
+            expected_method,
+            "--verdict",
+            "succeeded",
         ],
     );
     require(
-        page.status.success(),
-        format!("release {method} page failed"),
+        query.status.success(),
+        format!(
+            "release {expected_method} query failed: {}",
+            String::from_utf8_lossy(&query.stderr)
+        ),
     )?;
-    let page_json = parse_json(&page);
+    let query_json = parse_json(&query);
+    let current = rows(&query_json);
     require(
-        page_json.get("row_count").and_then(Value::as_u64) == Some(1)
-            && rows(&page_json)
+        current.len() == 1 && row_matches(&current[0], session_id, turn_id, expected_method),
+        format!("release {expected_method} query mismatch: {query_json}"),
+    )?;
+    let invocation = invocation_id(&current[0]).expect("invocation id");
+    let tip = query_json
+        .get("ledger_oid")
+        .and_then(Value::as_str)
+        .expect("ledger oid");
+
+    let pinned = cli(
+        world,
+        spec,
+        &[
+            "--json",
+            "audit",
+            "query",
+            "--session",
+            session_id,
+            "--at",
+            tip,
+        ],
+    );
+    require(pinned.status.success(), "release pinned query failed")?;
+    let pinned_json = parse_json(&pinned);
+    require(
+        pinned_json.get("ledger_oid").and_then(Value::as_str) == Some(tip)
+            && rows(&pinned_json)
                 .first()
-                .and_then(|row| row.get("audit_id"))
-                .and_then(Value::as_i64)
-                == Some(audit_id),
-        format!("release {method} query pagination/limit mismatch: {page_json}"),
+                .and_then(|row| invocation_id(row))
+                == Some(invocation),
+        format!("release pinned query mismatch: {pinned_json}"),
     )?;
 
     let tail = cli(
@@ -175,22 +175,33 @@ fn assert_single_release_case(
             "query",
             "--session",
             session_id,
+            "--turn",
+            turn_id,
+            "--method",
+            expected_method,
             "--tail",
-            "--since",
-            "0",
         ],
     );
-    require(
-        tail.status.success(),
-        format!("release {method} tail failed"),
-    )?;
+    require(tail.status.success(), "release tail failed")?;
     let tail_json = parse_json(&tail);
+    let transitions = rows(&tail_json);
     require(
-        rows(&tail_json).len() == 1
-            && rows(&tail_json)[0].get("method").and_then(Value::as_str) == Some(method)
-            && expected_evidence(&rows(&tail_json)[0], evidence_present),
-        format!("release {method} tail mismatch: {tail_json}"),
+        transitions.len() == 3
+            && transitions.iter().all(|row| {
+                invocation_id(row) == Some(invocation)
+                    && method(row) == Some(expected_method)
+                    && row
+                        .get("ledger_oid")
+                        .and_then(Value::as_str)
+                        .is_some_and(|oid| oid.len() == 40)
+            })
+            && terminal_succeeded(&transitions[2]),
+        format!("release {expected_method} tail mismatch: {tail_json}"),
     )?;
+    let cursor = tail_json
+        .get("last_cursor")
+        .and_then(Value::as_str)
+        .expect("last cursor");
     let continuation = cli(
         world,
         spec,
@@ -202,21 +213,19 @@ fn assert_single_release_case(
             session_id,
             "--tail",
             "--since",
-            &cursor,
+            cursor,
         ],
     );
     require(
         continuation.status.success(),
-        format!("release {method} tail continuation failed"),
+        "release tail continuation failed",
     )?;
     let continuation_json = parse_json(&continuation);
     require(
         rows(&continuation_json).is_empty()
-            && continuation_json
-                .get("last_audit_id")
-                .and_then(Value::as_i64)
-                == Some(audit_id),
-        format!("release {method} exclusive tail mismatch: {continuation_json}"),
+            && continuation_json.get("last_cursor").and_then(Value::as_str) == Some(cursor)
+            && continuation_json.get("done").and_then(Value::as_bool) == Some(true),
+        format!("release tail continuation mismatch: {continuation_json}"),
     )?;
 
     let replay = cli(
@@ -232,46 +241,37 @@ fn assert_single_release_case(
             turn_id,
         ],
     );
-    require(
-        replay.status.success(),
-        format!("release {method} replay failed"),
-    )?;
+    require(replay.status.success(), "release replay failed")?;
     let replay_json = parse_json(&replay);
     let calls = replay_calls(&replay_json);
     require(
         replay_json
-            .pointer("/trace/turn_id")
+            .pointer("/trace/ledger_oid")
             .and_then(Value::as_str)
-            == Some(turn_id)
+            == Some(tip)
             && calls.len() == 1
-            && calls[0].get("method").and_then(Value::as_str) == Some(method)
-            && expected_evidence(&calls[0], evidence_present),
-        format!("release {method} replay mismatch: {replay_json}"),
+            && invocation_id(&calls[0]) == Some(invocation)
+            && row_matches(&calls[0], session_id, turn_id, expected_method),
+        format!("release replay mismatch: {replay_json}"),
     )?;
 
     let status = cli(world, spec, &["--json", "lancet", "status"]);
-    require(
-        status.status.success(),
-        format!("release {method} status failed"),
-    )?;
+    require(status.status.success(), "release status failed")?;
     let status_json = parse_json(&status);
     let recent = status_json
         .get("recent_calls")
         .and_then(Value::as_array)
-        .unwrap_or_else(|| panic!("recent_calls: {status_json}"));
-    let entry = row_for_method(recent, method);
+        .expect("recent calls");
     require(
-        recent.len() <= 20
-            && entry.get("verdict").and_then(Value::as_str) == Some(verdict)
-            && entry.get("duration_ms").and_then(Value::as_i64).is_some()
-            && expected_evidence(entry, evidence_present)
-            && status_json
-                .get("last_guard_verdict")
-                .and_then(Value::as_str)
-                == Some(verdict),
-        format!("release {method} status mismatch: {status_json}"),
+        status_json.get("ledger_oid").and_then(Value::as_str) == Some(tip)
+            && status_json.get("last_verdict").and_then(Value::as_str) == Some("succeeded")
+            && recent.len() <= 20
+            && recent
+                .iter()
+                .find(|row| method(row) == Some(expected_method))
+                .is_some_and(|row| row_matches(row, session_id, turn_id, expected_method)),
+        format!("release status mismatch: {status_json}"),
     )?;
-
     Ok(())
 }
 
@@ -280,13 +280,13 @@ fn release_native_case() {
     let web = FixtureHttpServer::start(HttpFixture::plain("release native fixture"))
         .expect("fixture HTTP server");
     let fetch_url = web.url_path("/release-native");
+    let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
     let (world, spec) = direct_world(
         "release-operator-native",
         "release-op-native",
         "[\"fetch.web\"]",
         &fetch_network_profile(),
     );
-    let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
     let server = wire_fake_llm(
         &world,
         "release-op-native",
@@ -302,7 +302,6 @@ fn release_native_case() {
     let turn = send.send("release native matrix").expect("native turn");
     let turn_id = turn_id_of(&turn);
     let captures = server.captured_requests();
-
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&turn)?;
         require(
@@ -313,21 +312,8 @@ fn release_native_case() {
             .map_err(|error| AssertError::StdoutMissing {
                 expected: format!("release native fetch missing: {error}"),
             })?;
-        assert_single_release_case(
-            &world,
-            &spec,
-            SingleReleaseExpectation {
-                session_id: &session_id,
-                turn_id: &turn_id,
-                method: "fetch.web",
-                impact: "external_observation",
-                capability: Some("fetch_url"),
-                verdict: "native_handler",
-                evidence_present: false,
-            },
-        )
+        assert_single_release_case(&world, &spec, &session_id, &turn_id, "fetch.web")
     })();
-
     finish_scenario(
         scenario_evidence,
         &[("release native matrix", &turn.command)],
@@ -365,28 +351,14 @@ fn release_component_case() {
         .expect("Component turn");
     let turn_id = turn_id_of(&turn);
     let captures = server.captured_requests();
-
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&turn)?;
         require(
             turn.has_committed_completed(),
             "release Component turn must complete",
         )?;
-        assert_single_release_case(
-            &world,
-            &spec,
-            SingleReleaseExpectation {
-                session_id: &session_id,
-                turn_id: &turn_id,
-                method: "session.todo_write",
-                impact: "unknown",
-                capability: None,
-                verdict: "component_handler",
-                evidence_present: true,
-            },
-        )
+        assert_single_release_case(&world, &spec, &session_id, &turn_id, "session.todo_write")
     })();
-
     finish_scenario(
         scenario_evidence,
         &[("release Component matrix", &turn.command)],
@@ -428,11 +400,11 @@ fn release_mixed_case() {
     let session_id = send.session_id().to_string();
     let turns: Vec<_> = (0..11)
         .map(|index| {
-            send.send(&format!("release mixed matrix turn {index}"))
+            send.send(&format!("release mixed turn {index}"))
                 .expect("mixed turn")
         })
         .collect();
-    let last_turn_id = turn_id_of(turns.last().expect("last mixed turn"));
+    let last_turn_id = turn_id_of(turns.last().expect("last turn"));
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
@@ -455,80 +427,23 @@ fn release_mixed_case() {
         );
         require(query.status.success(), "release mixed query failed")?;
         let query_json = parse_json(&query);
-        let query_rows = rows(&query_json);
+        let current = rows(&query_json);
         require(
-            query_json.get("row_count").and_then(Value::as_u64) == Some(22)
-                && query_rows.len() == 22,
-            format!("release mixed query must expose 22 rows: {query_json}"),
+            current.len() == 22,
+            format!("expected 22 rows: {query_json}"),
         )?;
-        let last_native = &query_rows[20];
-        let last_component = &query_rows[21];
+        let all_ids: HashSet<&str> = current.iter().filter_map(invocation_id).collect();
         require(
-            last_native.get("method").and_then(Value::as_str) == Some("fetch.web")
-                && expected_evidence(last_native, false)
-                && last_component.get("method").and_then(Value::as_str)
-                    == Some("session.todo_write")
-                && expected_evidence(last_component, true),
-            format!("release mixed query N/C shape mismatch: {query_json}"),
-        )?;
-        let native_audit_id = last_native
-            .get("audit_id")
-            .and_then(Value::as_i64)
-            .expect("native audit id");
-        let component_audit_id = last_component
-            .get("audit_id")
-            .and_then(Value::as_i64)
-            .expect("Component audit id");
-
-        let page_cursor = component_audit_id.to_string();
-        let page = cli(
-            &world,
-            &spec,
-            &[
-                "--json",
-                "audit",
-                "query",
-                "--session",
-                &session_id,
-                "--since",
-                &page_cursor,
-            ],
-        );
-        require(page.status.success(), "release mixed query page failed")?;
-        let page_json = parse_json(&page);
-        require(
-            page_json.get("row_count").and_then(Value::as_u64) == Some(1)
-                && rows(&page_json)
-                    .first()
-                    .and_then(|row| row.get("audit_id"))
-                    .and_then(Value::as_i64)
-                    == Some(component_audit_id),
-            format!("release mixed query pagination/limit mismatch: {page_json}"),
-        )?;
-
-        let tail_cursor = native_audit_id.to_string();
-        let tail = cli(
-            &world,
-            &spec,
-            &[
-                "--json",
-                "audit",
-                "query",
-                "--session",
-                &session_id,
-                "--tail",
-                "--since",
-                &tail_cursor,
-            ],
-        );
-        require(tail.status.success(), "release mixed tail failed")?;
-        let tail_json = parse_json(&tail);
-        require(
-            rows(&tail_json).len() == 1
-                && rows(&tail_json)[0].get("audit_id").and_then(Value::as_i64)
-                    == Some(component_audit_id)
-                && expected_evidence(&rows(&tail_json)[0], true),
-            format!("release mixed exclusive tail mismatch: {tail_json}"),
+            all_ids.len() == 22
+                && current.iter().all(|row| {
+                    let row_method = method(row).expect("method");
+                    terminal_succeeded(row)
+                        && row
+                            .pointer("/record/state/terminal/evidence/admission/tool")
+                            .and_then(Value::as_str)
+                            == Some(row_method)
+                }),
+            format!("release mixed row mismatch: {query_json}"),
         )?;
 
         let replay = cli(
@@ -546,14 +461,13 @@ fn release_mixed_case() {
         );
         require(replay.status.success(), "release mixed replay failed")?;
         let replay_json = parse_json(&replay);
-        let calls = replay_calls(&replay_json);
         require(
-            calls.len() == 2
-                && calls[0].get("audit_id").and_then(Value::as_i64) == Some(native_audit_id)
-                && calls[1].get("audit_id").and_then(Value::as_i64) == Some(component_audit_id)
-                && expected_evidence(&calls[0], false)
-                && expected_evidence(&calls[1], true),
-            format!("release mixed replay order/evidence mismatch: {replay_json}"),
+            replay_calls(&replay_json)
+                .iter()
+                .filter_map(method)
+                .collect::<Vec<_>>()
+                == vec!["fetch.web", "session.todo_write"],
+            format!("release mixed replay order mismatch: {replay_json}"),
         )?;
 
         let status = cli(&world, &spec, &["--json", "lancet", "status"]);
@@ -562,64 +476,27 @@ fn release_mixed_case() {
         let recent = status_json
             .get("recent_calls")
             .and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("recent calls: {status_json}"));
-        let recent_ids: Vec<i64> = recent
-            .iter()
-            .map(|row| {
-                row.get("audit_id")
-                    .and_then(Value::as_i64)
-                    .expect("recent audit id")
-            })
-            .collect();
-        let omitted_ids: Vec<i64> = query_rows[..2]
-            .iter()
-            .map(|row| {
-                row.get("audit_id")
-                    .and_then(Value::as_i64)
-                    .expect("audit id")
-            })
-            .collect();
+            .expect("recent calls");
+        let recent_ids: HashSet<&str> = recent.iter().filter_map(invocation_id).collect();
         require(
             recent.len() == 20
-                && recent_ids.windows(2).all(|pair| pair[0] > pair[1])
-                && omitted_ids.iter().all(|id| !recent_ids.contains(id))
+                && recent_ids.len() == 20
+                && recent_ids.is_subset(&all_ids)
+                && all_ids.difference(&recent_ids).count() == 2
                 && recent
                     .iter()
-                    .filter(|row| row.get("method").and_then(Value::as_str) == Some("fetch.web"))
+                    .filter(|row| method(row) == Some("fetch.web"))
                     .count()
                     == 10
                 && recent
                     .iter()
-                    .filter(|row| {
-                        row.get("method").and_then(Value::as_str) == Some("session.todo_write")
-                    })
+                    .filter(|row| method(row) == Some("session.todo_write"))
                     .count()
                     == 10
-                && recent.iter().all(|row| {
-                    let method = row.get("method").and_then(Value::as_str);
-                    let verdict = row.get("verdict").and_then(Value::as_str);
-                    let duration = row.get("duration_ms").and_then(Value::as_i64);
-                    match method {
-                        Some("fetch.web") => {
-                            verdict == Some("native_handler")
-                                && duration.is_some()
-                                && expected_evidence(row, false)
-                        }
-                        Some("session.todo_write") => {
-                            verdict == Some("component_handler")
-                                && duration.is_some()
-                                && expected_evidence(row, true)
-                        }
-                        _ => false,
-                    }
-                })
-                && status_json
-                    .get("last_guard_verdict")
-                    .and_then(Value::as_str)
-                    == Some("component_handler"),
+                && recent.iter().all(terminal_succeeded)
+                && status_json.get("last_verdict").and_then(Value::as_str) == Some("succeeded"),
             format!("release mixed bounded status mismatch: {status_json}"),
         )?;
-
         Ok(())
     })();
 

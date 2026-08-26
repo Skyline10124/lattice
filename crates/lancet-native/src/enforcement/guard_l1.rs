@@ -12,9 +12,7 @@ pub use lancet_authority::guard::{
     evaluate_policy, map_decision_to_cep_error, normalize_write_path_pattern,
 };
 
-use crate::enforcement::preflight::{
-    approval_request_metadata, policy_denial_preflight_metadata, policy_metadata,
-};
+use crate::enforcement::preflight::approval_request_metadata;
 use crate::server::registry::HandlerContext;
 use lancet_protocol::CepError;
 use lancet_protocol::policy::{
@@ -33,7 +31,6 @@ pub async fn build_policy_input(
 ) -> Result<PolicyInput, CepError> {
     let authority = PolicyAuthorityInput;
 
-    let audit_snapshot = ctx.audit_context.read().await;
     let budget = ctx.cep_context.budget.snapshot();
     let budget_snapshot = PolicyBudgetSnapshot {
         turn_observation_bytes_used: budget.turn_observation_bytes_used as u64,
@@ -43,9 +40,9 @@ pub async fn build_policy_input(
     };
 
     let audit_context = PolicyAuditContext {
-        turn_id: audit_snapshot.turn_id.clone(),
-        session_id: audit_snapshot.session_id.clone(),
-        call_id: Some(ctx.call_id),
+        turn_id: ctx.turn_id.to_string(),
+        session_id: ctx.session_id.to_string(),
+        invocation_id: Some(ctx.invocation_id),
         budget_snapshot,
     };
 
@@ -59,8 +56,7 @@ pub async fn build_policy_input(
     })
 }
 
-/// Evaluate policy, emit guard verdict event, record metadata, and enforce the decision.
-///
+/// Evaluate policy, emit the guard verdict event, and enforce the decision.
 /// This is the single native entry point for handlers to route through the
 /// authority policy system.
 pub async fn evaluate_and_enforce_policy(
@@ -84,8 +80,7 @@ pub async fn evaluate_and_enforce_policy(
 
     match &evaluation.decision {
         PolicyDecision::Allowed => {
-            let mut authorized_region = None;
-            if let Some(_evidence) = &evaluation.evidence {
+            if evaluation.evidence.is_some() {
                 let hook = ctx
                     .default_policy_hook
                     .as_ref()
@@ -95,42 +90,11 @@ pub async fn evaluate_and_enforce_policy(
                     .workspace
                     .authorized_region_for(method, &ctx.cep_context.policy);
                 ctx.authorized_region.set(region);
-                authorized_region = ctx.authorized_region.get();
             }
-            ctx.record_durable_metadata(policy_metadata(
-                method,
-                &evaluation,
-                authorized_region.as_ref(),
-            ));
         }
-        PolicyDecision::Denied { reason_code, .. } => {
-            ctx.record_durable_metadata(policy_metadata(method, &evaluation, None));
-            use lancet_audit::RejectionRecord;
-            use lancet_audit::RejectionStage;
-            ctx.record_rejection(RejectionRecord {
-                rejection_stage: RejectionStage::PolicyGate,
-                denial_source: "cep_policy".into(),
-            });
-            if let Some(metadata) = policy_denial_preflight_metadata(method, &input, &evaluation) {
-                ctx.record_durable_metadata(metadata);
-            }
-            ctx.record_durable_metadata(serde_json::json!({
-                "method": method,
-                "denial_source": "cep_policy",
-                "policy_enforced": true,
-                "reason_code": format!("{:?}", reason_code),
-            }));
-        }
-        PolicyDecision::HumanReview { reason_code, .. } => {
+        PolicyDecision::Denied { .. } => {}
+        PolicyDecision::HumanReview { .. } => {
             let approval_request = approval_request_metadata(method, &input, &evaluation);
-            ctx.record_durable_metadata(policy_metadata(method, &evaluation, None));
-            ctx.record_durable_metadata(serde_json::json!({
-                "method": method,
-                "denial_source": "cep_policy",
-                "policy_enforced": true,
-                "reason_code": format!("{:?}", reason_code),
-                "approval_request": approval_request.clone(),
-            }));
             if let Some(request) = approval_request {
                 ctx.events
                     .emit(
@@ -167,23 +131,25 @@ mod tests {
         ));
         (
             HandlerContext {
-                call_id: 1,
-                events: EventSink::new(event_tx, 1),
+                invocation_id: lancet_protocol::InvocationId::parse(
+                    "00000000-0000-4000-8000-000000000001",
+                )
+                .expect("invocation id"),
+                events: EventSink::new(
+                    event_tx,
+                    lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
+                        .expect("invocation id"),
+                ),
                 cancellation: Cancellation::new(cancel_rx),
                 cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-                turn_id: "test-turn".into(),
-                durable_metadata:
-                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                session_id: lancet_protocol::SessionId::parse("00000000000000000000000000000001")
+                    .expect("session id"),
+                turn_id: lancet_protocol::TurnId::parse("00000000-0000-4000-8000-000000000001")
+                    .expect("turn id"),
                 effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
                 authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
-                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                    turn_id: "test-turn".into(),
-                    session_id: "test-session".into(),
-                    ..Default::default()
-                })),
-                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
             },
             event_rx,
@@ -203,8 +169,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(input.method, "observe.workspace");
-        assert_eq!(input.audit_context.turn_id, "test-turn");
-        assert_eq!(input.audit_context.session_id, "test-session");
+        assert_eq!(
+            input.audit_context.turn_id,
+            "00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(
+            input.audit_context.session_id,
+            "00000000000000000000000000000001"
+        );
         assert!(
             input
                 .audit_context
@@ -232,8 +204,6 @@ mod tests {
         let (mut ctx, mut events) = test_handler_context(root);
         ctx.policy_hook = Arc::new(HumanReviewHook);
         ctx.default_policy_hook = None;
-        let durable = ctx.durable_metadata.clone();
-
         let err = match evaluate_and_enforce_policy(
             &ctx,
             "observe.workspace",
@@ -246,18 +216,6 @@ mod tests {
         };
 
         assert_eq!(err.code, lancet_protocol::CepErrorCode::GuardDenied);
-        let metadata: serde_json::Value =
-            serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
-        assert!(metadata.get("backend_invoked").is_none());
-        assert_eq!(metadata["cep_policy"]["decision"], "human_review");
-        assert_eq!(
-            metadata["approval_request"]["status"],
-            serde_json::json!("required")
-        );
-        assert_eq!(
-            metadata["approval_request"]["retry_hint"],
-            serde_json::json!("obtain_human_approval_or_replan")
-        );
 
         let guard_event = events.recv().await.expect("guard verdict event");
         assert_eq!(guard_event.method, "cep.guard_verdict");

@@ -150,6 +150,13 @@ impl App {
             TurnEvent::CommitFailed { reason } => {
                 self.push_status(StatusKind::CommitFailed { reason });
             }
+            TurnEvent::EvidenceDurabilityFailed { attempts } => {
+                self.push_status(StatusKind::CommitFailed {
+                    reason: format!(
+                        "terminal evidence durability failed after {attempts} attempt(s)"
+                    ),
+                });
+            }
             TurnEvent::TurnFailed { reason } => {
                 self.push_status(StatusKind::TurnFailed { reason });
             }
@@ -486,7 +493,6 @@ async fn begin_turn(
         cancel_flag: Some(flag),
         test_llm: None,
         test_project_root: None,
-        test_persist_audit: None,
     };
     match lattice_api::stream_turn(session_api, request).await {
         Ok(s) => *turn_stream = Some(s),

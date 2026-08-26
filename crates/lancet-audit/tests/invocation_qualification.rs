@@ -32,7 +32,7 @@ use lancet_protocol::{
 };
 use lattice_conversation::{
     MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, ToolResultOutcome,
-    UnboundToolCall, arguments_digest, semantic_digest,
+    UnboundToolCall, arguments_digest,
 };
 use lattice_session::pending::{
     BindingPlan, ClosedBinding, DraftClassification, DraftPublication, ExecutionOutcome,
@@ -40,7 +40,7 @@ use lattice_session::pending::{
     InvocationRecordFact, MaterialAvailability, NotExecutedReason, PendingStage, PlanFacts,
     PlannedBinding, ReconciliationAction, ResultDraft, ResultMaterial, StepClosedKind,
     StepClosingState, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits, TurnStartedFacts,
-    binding_digest, reconcile,
+    binding_digest, reconcile, step_conversation_digest,
 };
 use lattice_session::{GitSessionGraphStore, SessionGraphStore};
 use lattice_store::{Blocking, LockMode, ProjectStoreKey, REPO_LOCK_FILE, StateLayout};
@@ -352,7 +352,10 @@ fn terminal_evidence() -> TerminalEvidence {
 }
 
 /// One real PendingTurn journal plus the matching exact ledger reservation.
-fn result_journal(step: u32) -> (TurnStartedFacts, BindingPlan, Vec<ReservationBinding>) {
+fn result_journal(
+    step: u32,
+    project_store_key: ProjectStoreKey,
+) -> (TurnStartedFacts, BindingPlan, Vec<ReservationBinding>) {
     let session_number = 0x100 + step;
     let session_id = SessionId::parse(&format!(
         "00000000{session_number:04x}40008000{session_number:012x}"
@@ -434,6 +437,7 @@ fn result_journal(step: u32) -> (TurnStartedFacts, BindingPlan, Vec<ReservationB
     let facts = TurnStartedFacts {
         turn_id,
         session_id,
+        project_store_key,
         parent_conversation_tip: None,
         user_message,
         config: FrozenTurnConfig {
@@ -537,7 +541,7 @@ fn clean_collision_revises_candidates_end_to_end_over_real_stores() {
     let sessions = GitSessionGraphStore::create(&sessions_dir).unwrap();
 
     // Step 0: another plan already owns every candidate ID this Turn planned.
-    let (facts, plan, reservations) = result_journal(0);
+    let (facts, plan, reservations) = result_journal(0, key);
     let foreign_key = PlanKey {
         turn_id: stress_turn_id(0xfff),
         model_step_ordinal: 3,
@@ -910,7 +914,9 @@ fn prepare_result_finalize_fixture() -> ResultFinalizeFixture {
     let (tmp, layout, key) = test_env();
     let store = InvocationStore::create(&layout, &key).unwrap();
     let session_store = GitSessionGraphStore::create_layout(&layout).unwrap();
-    let journals: Vec<_> = (0..STRESS_STEPS).map(result_journal).collect();
+    let journals: Vec<_> = (0..STRESS_STEPS)
+        .map(|step| result_journal(step, key))
+        .collect();
     for (facts, _, _) in &journals {
         session_store
             .create_session(&facts.session_id.to_string(), None, "stress", "main", &key)
@@ -1674,7 +1680,10 @@ fn result_finalize_stress() {
                     kind: StepClosedKind::ContinueModel {
                         model_step_ordinal: plan.plan_key.model_step_ordinal,
                         ordered_tool_results: state.closures.clone(),
-                        conversation_digest: semantic_digest(&plan.message),
+                        conversation_digest: step_conversation_digest(
+                            &plan.bound_message().unwrap(),
+                            &state.closures,
+                        ),
                     },
                 },
                 recorded_at,

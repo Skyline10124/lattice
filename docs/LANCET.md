@@ -1,38 +1,31 @@
 # LANCET runtime-enforced surface
 
-> **TRANSITION NOTICE - 2026-07-16 (updated 2026-07-17):** This document mostly
-> describes the current v1.4-alpha migration implementation, not the accepted
-> target architecture. ADR 0003 replaces MSB/Upper with one guarded Direct-Local
-> Workspace path - **landed in #59-#62 (Codeberg #37-#40)**: production turns
-> now operate directly on the canonical Local Workspace, and the MSB/Upper
-> path, `[workspace]` profile section, and `lattice-workspace` crate are
-> deleted. ADR 0004 replaces the permanent native/central-catalog boundary
-> with a per-build closed catalog of embedded WASM Component Tools whose
-> Source manifests own their descriptors.
-> The default distribution still has the five methods shown below, but operators
-> may add verified precompiled Tool Bundles before building another closed
-> runtime; running processes cannot load code. Components receive no ambient
-> WASI filesystem, network, or process authority and can act only through Tool
-> Host imports. Until #27-#36 land, production still uses the
-> `lancet-catalog`/CEP/dispatch and native-handler path documented below. Treat
-> those surfaces as migration residue, not extension points. Command execution,
-> post-mutation verify, agent-visible audit, and SQLite session storage remain
-> retired. Final line-by-line synchronization is tracked by #36.
+> **CURRENT BOUNDARY - 2026-08-23:** ADR 0003's guarded Direct-Local Workspace
+> path is production; the MSB/Upper path, `[workspace]` profile section, and
+> `lattice-workspace` crate are deleted. ADR 0004's manifest-owned Component
+> composition is production for `observe.workspace`, `mutate.create`,
+> `mutate.edit`, and `session.todo_write`; `fetch.web` remains the sole native
+> catalog method while #32 completes transport/runtime absorption. A built
+> runtime has a closed catalog and Components have no ambient WASI filesystem,
+> network, or process authority.
 >
-> ADR 0005 additionally fixes the durable invocation target. Provider Tool Call
-> IDs remain provider replay metadata; one typed InvocationId eventually spans
-> transcript binding, CEP execution, Host context, history, terminal Cell
-> evidence, and operator output. GitHub #141–#144 establish the architecture,
-> data contracts, generic private-Git kernel, and PendingTurn journal. #139-A
-> then builds a non-production InvocationStore; only #139-B switches the live
-> path and deletes the transitional SQLite audit/evidence identity. There is no
-> dual write, legacy reader/import, Standalone invocation, or direct CEP product
-> caller in that target.
-> The JSON-RPC request object remains during migration; its canonical string
-> `id` becomes the already-reserved InvocationId in #139-B. This is unrelated to
-> the deleted `session.envelope` Tool.
+> ADR 0005's durable invocation hard cut is also production. One typed
+> `InvocationId` spans binding, CEP execution, Host context, history, terminal
+> Cell evidence, events, cancellation, and operator output. `lattice-api`'s
+> `TurnCoordinator` is the sole product invocation owner; lower LANCET APIs exist
+> for composition/internal tests only and require an exact durable binding. The
+> project-keyed Git `InvocationStore` is invocation/evidence/operator authority.
+> SQLite audit/evidence stores, numeric call/audit/evidence identities, dual
+> writes, imports, fallback readers, Standalone invocation, and direct CEP product
+> callers are deleted. Provider Tool Call IDs remain optional replay metadata.
+> The JSON-RPC request `id` is the already-reserved `InvocationId`; inbound
+> notifications cannot create or dispatch an invocation.
 
-LATTICE agents execute tools through **LANCET**, the controlled execution and failure-learning subsystem. LANCET uses **CEP** (Controlled Execution Protocol) internally: JSON-RPC methods with capability envelopes, policy gating, path guards, and a flat append-only audit store.
+LATTICE executes Tools through **LANCET**, its controlled execution subsystem.
+CEP (Controlled Execution Protocol) is the typed JSON-RPC method protocol behind
+the runtime; admission combines exact durable binding state, capability/policy
+gates, path guards, effect checks, and the authoritative append-only Git
+InvocationStore ledger.
 
 ## Public surface (v1.4-alpha boundary contract)
 
@@ -45,18 +38,18 @@ plus base-authority planning. The underlying contract remains split across
 | ----------- | ------------- |
 | `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
 | `lancet-catalog::CATALOG` | The **native** CEP catalog plus descriptor metadata for methods that still use typed native handlers. Since GitHub #31 it is `fetch.web` only. The Agent-visible five-Tool distribution (`observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`, `session.todo_write`) is closed composition: four embedded Components plus this one native method. (`session.envelope`, `exec.command_run`, `mutate.batch`, post-mutation verify, and agent-visible audit CEP methods were removed - catalog and tests assert their absence.) |
-| `lancet-api::audit` | Stable operator entry points for audit query/tail/replay over the project-keyed audit store (`query_audit`, `tail_audit`, `replay_audit`); a thin facade that delegates to `lancet-audit::operator`, which owns typed DTOs, pagination, filters, and Cell-evidence materialization. Not agent CEP methods. |
-| Method params/results | Typed `*Params` / `*Result` structs per catalog method in `lancet-catalog` |
+| `lancet-api::audit` | Stable operator query/tail/replay entry points over project-keyed `invocations.git`; a thin facade over `lancet-audit::operator` typed DTOs, pinned views, OID cursors, filters, and Cell-evidence projection. Not Agent Tools. |
+| Method params/results | Typed `*Params` / `*Result` structs per native catalog method in `lancet-catalog`; Component descriptors come from Source Tool manifests. |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
-| `PolicyHook` / `PolicyDecision` | Pluggable policy hook interface in `lancet-protocol` |
-| Audit/evidence schemas | Versioned Cell-evidence shapes in `lancet-protocol`; audit rows, filters, typed operator read DTOs, and project-keyed store-path resolution in `lancet-audit` |
+| `PolicyHook` / `PolicyDecision` | Pluggable external policy hook interface in `lancet-protocol` |
+| Invocation/evidence schemas | Typed bindings and versioned Cell-evidence shapes in `lancet-protocol`; authoritative records, pinned operator DTOs, and project store opening in `lancet-audit` |
 
 Internal implementation is split across `lancet-authority` (default policy, Guard L1, active envelope, effect-region semantics) and `lancet-native` (production handlers, transport lifecycle, edit/web integration).
 
 **Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
 
-Pre-v1.3.1 method names are removed. They are not accepted by the adapter or
+Pre-v1.3.1 method names are removed. They are not accepted by the runtime or
 native registry, and LLM-facing tool definitions are projected from the closed
 five-Tool distribution (native catalog + embedded Component descriptors). Tool exposure is separate from base authority:
 enabled methods filter the model-visible catalog projection, while
@@ -186,9 +179,10 @@ subsystems". Git history retains the metadata schema narrative.
 
 ## LANCET CLI inspection and self-check
 
-- `lattice lancet status` reads the external project-keyed audit store via
-  `audit_db_path_for_project` (no CEP server) and shows recent CEP calls plus
-  the last guard verdict. `--json` emits the same data as JSON.
+- `lattice lancet status` opens the authoritative project-keyed
+  `invocations.git` directly (no CEP server), pins one ledger view, and shows its
+  `ledger_oid`, newest 20 current invocation records, and last lifecycle verdict.
+  `--json` emits the same typed data.
 - `lattice lancet doctor` runs LANCET self-checks: the production registry
   fully registers the CATALOG, in-process transport smoke-tests, base envelope
   constructs, and mode policy parses cleanly. It exits nonzero if any check
@@ -208,71 +202,50 @@ the retired `exec.command_run` command-isolation subsystem and were removed
 with it - see [docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed subsystems".
 Git history retains the non-claims narrative.
 
-## Operator Audit
+## Operator Invocation Ledger
 
-### Flat Store and Cell Evidence
+### Git store and Cell evidence
 
-Audit rows live in SQLite (`cep_audit_entries`). Production persistence uses the
-**external project-keyed path** under the Linux XDG state directory
-(`$XDG_STATE_HOME/lattice/projects/<sha256-canonical-root>/cep_audit.db` via
-`audit_db_path_for_project`, defined in `lancet_audit::store_path` and
-re-exported as `lancet_api::audit_db_path_for_project`). Each finalized CEP call
-is one append-only row. The row carries `session_id`, `turn_id`, nullable
-`model_id` / `runtime_version`, lifecycle labels, and a compact result summary.
+Every accepted production invocation is keyed by one typed `InvocationId` in the
+project's authoritative Git ledger:
 
-The database carries its schema version in `PRAGMA user_version`. A newer
-version, or an unversioned database whose required `cep_audit_entries` shape
-cannot be adopted, fails the open with an actionable error without rewriting
-audit history. The former turn-attestation table, `attestation_records`, is
-retired and is dropped on store open; no attestation migration is retained.
+```text
+$XDG_STATE_HOME/lattice/projects/<ProjectStoreKey>/invocations.git
+```
 
-Handler and transport layers may keep compact query keys in `metadata_json`,
-including native `required_capability`, observed capability labels, and a
-Component row's internal `evidence_id`. The field is not an operator response
-surface and never serializes through audit query, tail, replay, or status.
+The store owns exact ordered batch reservation, durable `DispatchStarted`, atomic
+terminal-state plus versioned `CellEvidenceTriple` publication, an ordered
+high-water witness, and pinned linear-ancestry views. Current records include
+`Reserved` and `DispatchStarted`, not only terminal calls. Terminal material is
+represented by outcome-independent digest/length/availability metadata; evidence
+contains admission, observed-effect, and denial facts without Tool content.
 
-Component Tool calls persist the existing versioned Cell-evidence records in
-`evidence_calls`, `evidence_effects`, and `evidence_denials`. The records carry
-why admission succeeded or failed, observed effects, and denied operations;
-their versions are checked before a reader interprets them. A Component audit
-row may point at those records through its internal `evidence_id`. A missing
-pointer is valid for native and Component rows alike and exposes
-`evidence: null`; the row remains visible. A present but dangling, malformed,
-unsupported, corrupt, or row-mismatched pointer is an operator read error, not
-a no-evidence value.
+Arguments, result/fetched content, provider payload or opaque replay state,
+credentials, provider IDs as correlation identity, and internal metadata blobs are
+not operator fields. SQLite tables, `metadata_json`, pointer IDs, numeric
+call/audit/evidence IDs, schema adoption, import, dual read/write, and fallback
+opening are deleted. Old disposable development state is rebuilt explicitly; see
+[DEVELOPMENT.md](./DEVELOPMENT.md#manual-development-state-rebuild).
 
-This SQLite shape is the complete transitional operator authority after #114,
-not the ADR 0005 target. Its `audit_id`, numeric `call_id`, and `evidence_id`
-are private/transitional storage values rather than invocation identity. #139-B
-replaces them with the `lancet-audit` Git InvocationStore Adapter in one hard
-cut; #139-A must not expose its parallel foundation as a second production
-read path.
+### Query, tail, replay, and status
 
-### Operator audit reads
+Operator reads are host-only. `lattice audit` delegates to
+`lancet-api::{query_audit, tail_audit, replay_audit}` and never composes a CEP
+server or takes a project operation lock. Agents receive no audit Tool.
 
-Audit store reads are **host/operator only**. `lattice audit` calls
-`lancet-api::{query_audit, tail_audit, replay_audit}` against the project-keyed
-store, with no CEP server. `CepAuditStore::query_rows` returns only **finalized**
-rows (`ended_at` and `result_or_error` set), ordered by `audit_id`. Agents do not
-receive `ReadAudit` or audit methods in `[tools].enabled`.
+- Query pins the requested `--at <ledger-oid>` view, or the current tip, and
+  returns at most 1,000 current records filtered by typed Session/Turn identity,
+  method, and lifecycle verdict.
+- Tail uses `--since <ledger-oid>` as an exclusive reachable commit cursor, returns
+  lifecycle transitions in commit order, and never splits one atomic reservation
+  commit at the page boundary.
+- Replay pins one view and returns every invocation for the typed Session/Turn in
+  structural model-step/part order.
+- Status pins one view and returns that `ledger_oid`, the newest 20 current records,
+  and the latest lifecycle verdict.
 
-`query_audit` emits `{ session_id, row_count, rows }`, where each row contains
-the full finalized audit fact set plus `evidence`; its database query remains
-capped at 10,000 rows and supports the inclusive `since` lower bound.
-`tail_audit` emits compact rows and uses an exclusive `audit_id` cursor.
-`replay_audit` returns every finalized row for the selected turn in audit-id
-order, without inheriting the query cap; it does not rebuild a graph, statement,
-source range, or attestation comparison. Status asks SQLite for
-`audit_id DESC LIMIT 20`, then exposes those newest rows in that order. Query
-and tail retain the session, turn, method, impact, capability, verdict, and
-cursor filters.
-
-Since GitHub #39 the `lancet-api` entry points are one-line delegations and the
-behavior — request DTOs, the `AUDIT_TAIL_MAX_ROWS` / `AUDIT_TAIL_MAX_BATCHES`
-pagination loop, filter construction, typed evidence materialization, and
-contract tests — lives in `lancet-audit::operator`. "No CEP server" is enforced
-structurally: `lancet-audit` depends on none of `lancet-native`,
-`lancet-dispatch`, `lancet-cep`, or `lancet-runtime`, so the read path cannot
-name a server, transport, or registry type. The tail cancellation contract
-(L-11-01) and the synthetic-writer concurrency contract (L-11-02) are documented
-in that module's doc comment.
+The owning behavior and contract tests live in `lancet-audit::operator`;
+`lancet-api` is a thin error-mapping facade. Structural dependencies keep
+`lancet-audit` free of `lancet-native`, `lancet-dispatch`, `lancet-cep`, and
+`lancet-runtime`, so the read path cannot name a server, transport, or registry
+type.

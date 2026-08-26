@@ -151,4 +151,33 @@ mod tests {
             assert_eq!(record, back);
         }
     }
+
+    #[test]
+    fn interrupted_and_cancelled_attempts_retain_supplied_usage() {
+        // ADR 0005 §10: failed/interrupted attempts retain usage when the
+        // provider supplied it; a provider that reports usage alongside a
+        // cancellation must not have that fact dropped by the record.
+        for interruption in [
+            AttemptInterruption::Cancelled,
+            AttemptInterruption::StreamError,
+            AttemptInterruption::Timeout,
+        ] {
+            let record = ModelAttemptRecord {
+                key: key(0),
+                origin: ProviderOrigin::OpenAiCompatible,
+                usage: Some(TokenUsage {
+                    prompt_tokens: 41,
+                    completion_tokens: 7,
+                    total_tokens: 48,
+                }),
+                outcome: AttemptOutcome::Interrupted(interruption),
+            };
+            let json = serde_json::to_string(&record).expect("serialize");
+            let back: ModelAttemptRecord = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                back.usage.as_ref().map(|usage| usage.total_tokens),
+                Some(48)
+            );
+        }
+    }
 }

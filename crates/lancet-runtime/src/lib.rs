@@ -59,6 +59,7 @@ pub mod host;
 pub mod host_mutate;
 pub mod host_workspace;
 pub mod limits;
+pub mod rewind_audit;
 pub mod runtime;
 pub mod workspace;
 

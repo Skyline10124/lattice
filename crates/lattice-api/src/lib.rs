@@ -22,6 +22,9 @@ pub mod stores;
 pub mod turn;
 
 pub use lattice_session::{
+    ClosureOrigin, TurnFinishReason, TurnOutcome, WorkspaceHistoryCheckpoint,
+};
+pub use lattice_session::{
     GraphDiff, GraphHead, GraphRef, GraphSession, ResetResult, SessionGraphSummary, SessionStatus,
     TurnLogEntry,
 };
@@ -31,17 +34,20 @@ pub use lattice_session::{ProjectStoreKey, StateLayout};
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
 pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
 pub use rewind::{
-    RewindConflict, RewindOutcome, RewindPathConflict, RewindPathPreflight, RewindRestoredPath,
-    RewindStep, RewindSuccess, SessionHeadMove, rewind_to_turn,
+    RewindAuditRecordObservation, RewindBarrierFacts, RewindBarriers, RewindConflict, RewindError,
+    RewindOutcome, RewindPartialState, RewindPathConflict, RewindPathPreflight,
+    RewindRefObservation, RewindRestoredPath, RewindStep, RewindSuccess, SessionHeadMove,
+    rewind_to_turn, rewind_to_turn_with_barriers,
 };
 pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
-pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
-pub use turn::{
-    LifecycleFailureKind, RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus,
-    STREAM_IDLE_TIMEOUT_SECS, ToolResultSummary, TurnEvent, TurnEventStream, TurnLifecycleOutcome,
-    TurnUsageSummary, UnfinalizedTurn, collect_turn_result_from_events, finalize_turn,
-    outcome_workspace_less, run_turn, stream_turn,
+pub use session::{
+    ApiError, CreateSessionRequest, EvidenceDurabilityFailed, OpenSessionRequest, RecoveryRequired,
+    SessionApi,
 };
-
 #[doc(hidden)]
-pub use turn::CepExecutorAdapter;
+pub use turn::{CepErrorPayload, ToolExecutionError};
+pub use turn::{
+    RunTurnRequest, RunTurnResult, RunTurnStage, STREAM_IDLE_TIMEOUT_SECS, ToolResultSummary,
+    TurnEvent, TurnEventStream, TurnUsageSummary, collect_turn_result_from_events, run_turn,
+    stream_turn,
+};

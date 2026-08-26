@@ -19,11 +19,12 @@ make WASM, macOS, Windows, BSD, or generic Unix a supported host platform.
 
 - **Linux host** — LATTICE is Linux-only. The commands in this guide are not
   portability instructions for another operating system.
-- **Rust >= 1.88** (edition 2024). The workspace pins `rust-version = "1.88"`
-  and `edition = "2024"` in the root `Cargo.toml` (`[workspace.package]`). Use
-  [rustup](https://rustup.rs/) to install or update a compatible toolchain.
-- **git** — the session graph is git-backed, and the workspace builds against
-  `git2`.
+- **Rust >= 1.94** (edition 2024). The workspace pins `rust-version = "1.94"`
+  and `rust-toolchain.toml` selects the build-verified rustc 1.96.0 plus the
+  `wasm32-unknown-unknown` guest target. Use
+  [rustup](https://rustup.rs/) to install the pinned toolchain.
+- **git** — required to clone the repository. Runtime private Git stores use the
+  embedded gix implementation, not Git subprocesses.
 - **A provider API key** — at least one of the LLM provider credentials below
   must be set in your environment (or a `.env` file at the repo root, which the
   CLI loads on startup; note that `OPENAI_COMPATIBLE_BASE_URL` is one of the
@@ -42,8 +43,8 @@ make WASM, macOS, Windows, BSD, or generic Unix a supported host platform.
 
 ## 2. Installation
 
-LATTICE is a Cargo workspace of 21 crates. Clone the repository and build it
-with cargo.
+LATTICE contains 21 crates under `crates/`, plus six Source Tool guests and
+`xtask`. Clone the repository and build the Linux host binary explicitly.
 
 1. Clone the repo:
 
@@ -56,16 +57,16 @@ with cargo.
    cd lattice
    ```
 
-2. Build the workspace (debug):
+2. Build the host binary (debug):
 
    ```bash
-   cargo build
+   cargo build -p lattice-cli
    ```
 
    For an optimized release build:
 
    ```bash
-   cargo build --release
+   cargo build --release -p lattice-cli
    ```
 
 3. (Optional) Install the `lattice` binary to `$CARGO_HOME/bin`:
@@ -238,12 +239,17 @@ file, and line numbers. The LANCET self-check is also useful:
 cargo run -p lattice-cli -- lancet status
 ```
 
-Operator audit reads (not agent CEP tools) use `lattice audit` after at least
-one turn has written the project-keyed audit store:
+Operator audit reads (not Agent Tools) query the authoritative project-keyed Git
+`invocations.git` ledger after at least one Turn has reserved an invocation:
 
 ```bash
 cargo run -p lattice-cli -- audit --session <session_id>
 ```
+
+Pre-#139-B development formats are not imported. If strict open finds old local
+state, follow the explicit printed-path rebuild procedure in
+[docs/DEVELOPMENT.md](DEVELOPMENT.md#manual-development-state-rebuild); there is
+no runtime migration command.
 
 ## 5. Next steps
 
@@ -259,8 +265,8 @@ cargo run -p lattice-cli -- audit --session <session_id>
 Build, test, and lint commands for contributors:
 
 ```bash
-cargo build
-cargo test
-cargo clippy -- -D warnings
-cargo fmt --all --check
+cargo build -p lattice-cli
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```

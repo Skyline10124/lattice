@@ -37,6 +37,7 @@ pub enum Termination {
     Exited(Option<i32>),
     TimedOut(Duration),
     Interrupted,
+    Killed,
 }
 
 #[derive(Debug)]
@@ -108,6 +109,24 @@ impl RunningCommand {
         Ok(())
     }
 
+    /// SIGKILL the whole process group and retain bytes drained before death.
+    pub fn kill_and_wait(mut self) -> Result<CommandOutcome, DriverError> {
+        kill_process_group(self.pgid);
+        let child = self.child.as_mut().expect("running child");
+        let _ = child.kill();
+        let status = child.wait()?;
+        self.child.take();
+        let stdout = join_drain(self.stdout.take())?;
+        let stderr = join_drain(self.stderr.take())?;
+        Ok(CommandOutcome {
+            output: Output {
+                status,
+                stdout,
+                stderr,
+            },
+            termination: Termination::Killed,
+        })
+    }
     /// Wait for completion while retaining all bytes drained before cleanup.
     /// Timeout and interrupt are outcomes, not I/O errors.
     pub fn wait(mut self, timeout: Option<Duration>) -> Result<CommandOutcome, DriverError> {

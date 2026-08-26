@@ -7,8 +7,7 @@ Crate-local guidance for `lattice-api`.
 This crate owns the public facade for session creation/opening and turn
 execution. It exposes `SessionApi`, `stream_turn`, `run_turn`, and public turn
 events/results. LANCET runtime composition now lives in `lancet-api`; this crate
-translates profile `[lancet]` policy into LANCET-native config and wires the
-agent loop over `lancet-api`'s CEP runtime.
+translates profile `[lancet]` policy into LANCET-native config and drives the journal-backed `TurnCoordinator` over `lancet-api`'s bound CEP runtime.
 
 ## Sub-Architecture
 
@@ -17,14 +16,22 @@ agent loop over `lancet-api`'s CEP runtime.
 - `src/turn/live.rs` owns the live streaming turn core.
 - `src/turn/execute.rs` owns the `run_turn` entrypoint.
 - `src/turn/collector.rs` drains live streams into `RunTurnResult`.
-- `src/turn/cep.rs` is the LATTICE↔LANCET seam: profile→policy translation,
-  `CepExecutorAdapter` (LLM tool calls → typed CEP), CEP-event→agent-event
-  mapping, and `build_production_turn_deps` (delegates composition to
-  `lancet_api::LancetRuntime::build`). Runtime assembly itself is in `lancet-api`.
-- `src/turn/mapping.rs` and `src/turn/types.rs` own public event/result mapping.
+- `src/turn/cep.rs` owns profile→policy translation, CEP-event→public-event
+  mapping, and `build_production_turn_deps` over `lancet_api::LancetRuntime::build`.
+  Runtime assembly itself remains in `lancet-api`.
+- `src/turn/coordinator.rs` owns the production #139-B `TurnCoordinator`:
+  blocking store adapters (`spawn_blocking` over `GitSessionGraphStore` and the
+  Git `InvocationStore`), the injectable `IdSource`, durable reconciliation,
+  and terminal/evidence publication.
+- `src/turn/saga.rs` drives each live Turn through the durable journal, binding,
+  reservation, sequential dispatch, ResultDraft, terminal, and finalization stages.
+- `src/turn/invocation_facts.rs` is the #139-B cross-domain projection
+  (`lancet_audit::PinnedLedgerView` ->
+  `lattice_session::pending::InvocationFactsSnapshot`). This crate owns that
+  composition because `lancet-audit -> lattice-session` must not exist.
 - Integration tests cover CEP round trips, typed operator audit reads, release flows, and
   consistency.
-- Audit-path tests serialise `XDG_STATE_HOME` through
+- Project-store tests serialise `XDG_STATE_HOME` through
   `lancet_audit::ScopedXdgStateHome`, pulled in via
   `[dev-dependencies] lancet-audit = { features = ["test-support"] }`. The
   crate-local `src/test_env.rs` copy was deleted in GitHub #39; there is exactly one
@@ -38,14 +45,11 @@ agent loop over `lancet-api`'s CEP runtime.
 - Keep LANCET execution implementation below this crate. It currently lives in
   `lancet-native`; after ADR 0004 convergence it lives in `lancet-runtime`.
   Neither path belongs in the session/turn facade.
-- ADR 0005 assigns the future cross-store saga here. In #139-B,
-  `TurnCoordinator` owns the full-Turn session execution lock, PendingTurn,
+- ADR 0005 assigns the production cross-store saga here. `TurnCoordinator` owns the full-Turn session execution lock, PendingTurn,
   exact binding plan, InvocationStore reservation/finalization, Tool dispatch,
   ResultDraft, reconciliation, and final Turn commit through narrow domain
   interfaces. It must never hold two repository write locks, invent a
   cross-store transaction, or expose a Standalone/direct CEP product caller.
-  Until #139-B, keep `stream_turn` as the one live core and do not add a
-  parallel coordinator path.
 - `TurnCoordinator` is the only Turn saga owner, but not the only cross-store
   workflow in this crate: explicit rewind is owned by a separate
   `RewindCoordinator`. Both obey SessionExecutionLock -> project
@@ -54,6 +58,11 @@ agent loop over `lancet-api`'s CEP runtime.
 
 ## Recent Issues
 
+- FIXED #159: live and reopen finalization consume the same journal-derived
+  cumulative transcript/candidate basis. Reconciliation terminal evidence uses
+  the frozen binding method. One shared WorkspaceOperationLock now covers the
+  authoritative history `current()` read, TurnClosing publication, and final
+  Session ref transaction; a reopened pinned/current mismatch fails closed.
 - ADDED #28 (Codeberg #6): `build_production_turn_deps` lowers the loaded
   profile into `CapabilityAdmissionPolicy` via
   `AgentProfile::capability_admission_policy` (`[tools].enabled` is the stage-1
@@ -71,34 +80,14 @@ agent loop over `lancet-api`'s CEP runtime.
   durability failure is an error carrying the partial state, never a
   success. It is a free function, not a `SessionApi` method: the session
   facade stays pointer-movement only.
-- ADDED #63: `build_production_turn_deps` resolves the private workspace
-  history alongside the external audit store — an ephemeral (in-memory audit)
-  run records no durable history, so it never touches the user's state
-  directory. The live turn path reads `WorkspaceHistory::current` after the
-  server has drained and passes it to `build_commit_input`, which now requires
-  `workspace_history_oid` explicitly. `SessionApi::get_turn_commit` resolves a
-  Turn's history object id by commit id, so it is unaffected by branch
-  movement or reopen.
 - FIXED #39: the crate-local `src/test_env.rs` XDG helper was deleted; this
   crate now consumes the single workspace-wide `lancet_audit::ScopedXdgStateHome`
   through the `test-support` dev-dependency feature. Do not reintroduce a local
   copy — the helper owns a process-global env mutex, and a second copy
   reintroduces the `XDG_STATE_HOME` race that ENV-OOM-02 closed.
-- ADDED #27 (Codeberg #5) slice D: `CepExecutorAdapter` now takes
-  `definitions: &[ToolDefinition]` + `enabled_names` instead of deriving the
-  available set from `catalog()`. The hardcoded five-arm
-  `dispatch_typed`/`call_typed`/`schema_mismatch_for_method` and the five
-  method type imports are deleted; all methods go through
-  `CepClient::call_raw`, so Component Tools are no longer blocked by central
-  catalog membership. Params/result validation is done server-side (native
-  typed registry or generated descriptor validators).
-- FIXED M-24-05: turn/LANCET runtime composition extracted into the new
-  `lancet-api` crate. `cep.rs` is now only the LATTICE↔LANCET seam (profile→policy
-  translation, `CepExecutorAdapter`, event mapping); `enabled_tools.rs` moved to
-  `lancet-api`.
 - FIXED #46 (Codeberg #24): public `TurnStarted` includes `turn_id` for audit
-  replay, and `[llm].timeout_secs` lowers to the agent turn deadline in
-  `turn/mapping.rs`.
+  replay, and `[llm].timeout_secs` lowers to the Turn deadline in `turn/saga.rs`
+  (with the frozen live request prepared in `turn/live.rs`).
 - FIXED H-06: `stream_turn` now streams live instead of replaying buffered
   events after full turn completion.
 - FIXED M-19b: observer backpressure no longer blocks live task drain/commit.
@@ -113,16 +102,17 @@ agent loop over `lancet-api`'s CEP runtime.
 ## Next Actions
 
 - Keep runtime composition in `lancet-api`; this crate should only translate
-  profile policy and wire the agent loop. Do not reintroduce server/transport
+  profile policy and drive `TurnCoordinator`. Do not reintroduce server/transport
   assembly here.
 - Consume Tool definitions projected by the LANCET public facade; do not add a
   LATTICE-owned schema or native/Component dispatch switch during migration.
 - Keep `run_turn` implemented through `stream_turn` and `RunTurnCollector`.
 - Add focused tests whenever public `TurnEvent` mapping or commit semantics
   change.
-- Read the workspace-history identity after the LANCET server has drained,
-  and keep `build_commit_input`'s parameters explicit so a new call site
-  cannot silently commit a Turn with no history identity.
+- Read the workspace-history identity after the LANCET server has drained;
+  the pure reducer emits `TurnCommitCandidateBasis`, and only the composition
+  layer may complete it with a validated checkpoint sampled under the shared
+  operation lock. Never substitute `Empty` for an error or malformed OID.
 
 ## Record Maintenance
 
