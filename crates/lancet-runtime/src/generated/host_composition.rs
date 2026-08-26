@@ -105,7 +105,7 @@ pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
     ExpectedToolIdentity {
         name: "session.todo_write",
         descriptor_sha256: parse_hex_digest(
-            "e4216ac3faada82645a0190398eb0fa7a5e3664adc613017978a00861495620c",
+            "20286e5b2960c56aed8b175f0c03b7b97a386fa9024eda86a0413dd568ac220d",
         ),
         artifact_sha256: parse_hex_digest(
             "dc63bded21194acbc693edf7fed9fec8efee395329402a867826b5bff3e676f4",

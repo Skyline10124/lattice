@@ -7780,3 +7780,32 @@ with the 180-second total and every global harness/xtask timeout unchanged.
 - **Changed files:** `crates/net-guard/src/lib.rs`,
   `crates/lattice-system-harness/src/fake_llm.rs`,
   `crates/lattice-llm/AGENTS.md`, `FINDINGS.md`, and `FIX.md`.
+
+## 2026-08-27 — make `session.todo_write` schema OpenAI-compatible
+
+- **ID/severity:** OpenAI-compatible Tool schema / HIGH functional compatibility.
+- **Problem:** the default Tool catalog projected `session.todo_write` content with
+  `pattern: "[^\\p{White_Space}]"`. The host validator accepted that Unicode
+  property escape, but OpenAI Responses rejected it as
+  `invalid_function_parameters` (`is not a 'regex'`). OpenCodex's Chat translator
+  masked the upstream 400 as a stream-internal truncated-response error, so every
+  default-agent Turn stopped before producing assistant output.
+- **Fix:** replaced the unsupported property escape in the sole source manifest's
+  params and result schemas with the exact explicit Unicode `White_Space` code-point
+  ranges. This preserves `content.trim().is_empty()` parity without weakening to
+  `\S`. Regenerated the descriptor, LLM projection, expected identity, and host
+  composition through `cargo xtask tool-codegen`; no generated file was hand-edited.
+- **Verification:**
+  - Before the fix, the captured Lattice request failed deterministically; removing
+    only this pattern succeeded, and direct Responses exposed the exact upstream 400.
+  - The provider-compatible explicit range succeeded through OpenCodex Chat streaming.
+  - `blank_content_rejection_matches_trim_over_all_unicode_whitespace` passed across
+    the complete Rust Unicode whitespace set; descriptor params/result remained equal.
+  - Rebuilt `lattice` completed a fresh real OpenCodex Turn with all five default
+    Tools and reported 1,292 prompt plus 13 completion tokens.
+  - `cargo xtask tool-codegen --check`; 69 focused tool-codegen tests; formatting,
+    Clippy, all workspace/harness/Component identity checks, and
+    `env -u LATTICE_BIN cargo xtask ci` — passed.
+- **Changed files:** `tools/todo-write/manifest.toml`,
+  `tools/todo-write/generated/{descriptor.json,llm-projection.json,expected-identity.json}`,
+  `crates/lancet-runtime/src/generated/host_composition.rs`, and `FIX.md`.

@@ -20,13 +20,14 @@ distribution = "builtin"
 # refuses a bad call *before* the Component is entered, with one structured
 # error, instead of the guest returning an opaque string:
 #
-# - `pattern: "[^\\p{White_Space}]"` rejects blank and whitespace-only content,
-#   matching the native handler's `content.trim().is_empty()` check exactly.
-#   `\\S` would NOT: Rust's `char::is_whitespace` (what `trim` uses) follows the
-#   Unicode `White_Space` property, while the regex `\\s` class is narrower, so
-#   `\\S` accepts 16 whitespace-only strings `trim` rejects — U+0085, U+1680,
-#   U+2000..U+200A, U+2028, U+202F, U+205F and U+3000 among them. Verified by
-#   enumerating every `is_whitespace()` char against the compiled schema.
+# - the explicit Unicode `White_Space` code-point ranges reject blank and
+#   whitespace-only content, matching the native handler's
+#   `content.trim().is_empty()` check exactly. OpenAI Responses rejects the
+#   equivalent `\p{White_Space}` property escape in function schemas, so keep
+#   the ranges expanded in this provider-compatible form.
+#   `\S` would NOT be equivalent: Rust's `char::is_whitespace` (what `trim`
+#   uses) includes 16 whitespace characters outside the regex `\s` class —
+#   U+0085, U+1680, U+2000..U+200A, U+2028, U+202F, U+205F and U+3000.
 # - the `not/contains/minContains: 2` clause rejects two or more `in_progress`
 #   todos (the native handler's "at most one in_progress" rule).
 # - `maxItems` is the compiled ceiling on one call's todo count. See the note in
@@ -43,7 +44,7 @@ schema = '''
       "items": {
         "type": "object",
         "properties": {
-          "content": { "type": "string", "minLength": 1, "pattern": "[^\\p{White_Space}]" },
+          "content": { "type": "string", "minLength": 1, "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]" },
           "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
         },
         "required": ["content", "status"],
@@ -83,7 +84,7 @@ schema = '''
       "items": {
         "type": "object",
         "properties": {
-          "content": { "type": "string", "minLength": 1, "pattern": "[^\\p{White_Space}]" },
+          "content": { "type": "string", "minLength": 1, "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]" },
           "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
         },
         "required": ["content", "status"],
