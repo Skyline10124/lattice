@@ -126,3 +126,12 @@ proptest = "1"
 
 [profile.bench]
 lto = true
+
+# Keep workspace crates fast to rebuild while optimizing dependencies: an unoptimized
+# Wasmtime Component compiler added about six seconds before every mock response.
+[profile.tui-mock]
+inherits = "dev"
+opt-level = 0
+
+[profile.tui-mock.package."*"]
+opt-level = 1
