@@ -191,7 +191,7 @@ pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
             message: "base_url has scheme but no host".to_string(),
         })?;
 
-    if parsed.scheme() == "http" && !matches!(host, "localhost" | "127.0.0.1" | "::1") {
+    if parsed.scheme() == "http" && !is_localhost_host(host) {
         return Err(NetGuardError::Config {
             message: "HTTP is only allowed for localhost — use HTTPS for remote hosts".to_string(),
         });
@@ -205,6 +205,7 @@ pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
 
     let host_clean = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_clean.parse::<IpAddr>()
+        && !is_localhost_host(host)
         && is_private_or_reserved(ip)
     {
         return Err(NetGuardError::Config {
@@ -263,13 +264,15 @@ mod tests {
     }
 
     #[test]
-    fn reject_https_loopback_ipv4() {
-        assert!(validate_base_url("https://127.0.0.1/v1").is_err());
+    fn allow_loopback_ipv4() {
+        assert!(validate_base_url("http://127.0.0.1/v1").is_ok());
+        assert!(validate_base_url("https://127.0.0.1/v1").is_ok());
     }
 
     #[test]
-    fn reject_https_loopback_ipv6() {
-        assert!(validate_base_url("https://[::1]/v1").is_err());
+    fn allow_loopback_ipv6() {
+        assert!(validate_base_url("http://[::1]/v1").is_ok());
+        assert!(validate_base_url("https://[::1]/v1").is_ok());
     }
 
     #[test]

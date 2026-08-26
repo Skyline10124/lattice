@@ -52,6 +52,9 @@ endpoint metadata, request-time DNS pinning, and logging setup.
 
 - PARTIAL M-04: `validate_base_url` DNS checks are best-effort; authoritative
   protection is request-time resolved IP pinning in `client.rs`.
+- FIXED L-21-03: `validate_base_url` now treats `localhost`, `127.0.0.1`, and
+  `::1` consistently with the request-time loopback exemption; other private or
+  reserved IP literals remain rejected.
 - FIXED #100-A/C: `logging.rs` writes to stderr (`fmt()` defaults to stdout,
   which is the `--json` JSONL contract) and derives ANSI from an interactive
   stderr plus `NO_COLOR`; the Anthropic default output ceiling moved off 4096

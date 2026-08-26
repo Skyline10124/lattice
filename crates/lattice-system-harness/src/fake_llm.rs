@@ -254,21 +254,8 @@ impl FakeLlmServer {
 
     /// The base URL the product should connect to
     /// (`OPENAI_COMPATIBLE_BASE_URL`), without a trailing slash.
-    ///
-    /// Uses the **hostname `localhost`**, not the IP `127.0.0.1`, even though
-    /// the server binds `127.0.0.1`. This is deliberate: the product's
-    /// `net_guard::validate_base_url` (`net-guard/src/lib.rs:206-213`) rejects
-    /// any private/reserved IP literal — including loopback `127.0.0.1` — with
-    /// `base_url targets private/reserved IP`, and there is no localhost
-    /// exemption in that IP check (the :194 localhost check only covers the
-    /// HTTP-scheme restriction, not the private-IP check). A `localhost`
-    /// hostname parses as a non-IP host, skips the `is_private_or_reserved`
-    /// branch, and is accepted; the product's `build_http_client_for_url`
-    /// (`client.rs:369`) also has a `localhost`/`127.0.0.1`/`::1` exemption for
-    /// request-time DNS pinning. The OS resolves `localhost` → `127.0.0.1`
-    /// so the connection still reaches this server.
     pub fn base_url(&self) -> String {
-        format!("http://localhost:{}", self.local_addr().port())
+        format!("http://127.0.0.1:{}", self.local_addr().port())
     }
 
     /// A snapshot of every request captured so far, in arrival order.

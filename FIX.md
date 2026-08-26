@@ -7729,3 +7729,29 @@ with the 180-second total and every global harness/xtask timeout unchanged.
   `cargo test -p xtask` passed 116 tests; the custom-profile build and PTY smoke
   passed; `env -u LATTICE_BIN cargo xtask ci` passed all gates.
 - **Changed files:** `Cargo.toml`, `xtask/src/tui_mock.rs`, `FIX.md`.
+
+## 2026-08-27 — L-21-03 allow explicit loopback LLM endpoints
+
+- **ID/severity:** L-21-03 / MEDIUM configuration correctness.
+- **Problem:** `net_guard::validate_base_url` admitted `localhost` but rejected the
+  equivalent `127.0.0.1` and `::1` literals as private addresses, even though
+  its HTTP-scheme check and the provider request client treated all three as
+  loopback. A locally hosted OpenAI-compatible provider therefore failed before
+  dispatch with `base_url targets private/reserved IP 127.0.0.1`.
+- **Fix:** reuse the shared localhost predicate for both the HTTP-scheme and IP
+  checks, exempting only loopback literals while retaining rejection of every
+  other private/reserved IP. The fake provider now returns its bound loopback
+  address directly so the PTY product path permanently exercises the regression.
+- **Verification:**
+  - `cargo test -p net-guard`; `cargo test -p lattice-llm`;
+    `cargo test -p lattice-system-harness --lib`.
+  - Rebuilt `lattice`, then ran the product-level PTY smoke with the fake
+    provider's explicit `127.0.0.1` endpoint; passed.
+  - `cargo test -p lancet-authority`;
+    `cargo test -p lancet-native -- --skip fetch_effect_contract_negative`.
+  - Relevant all-target Clippy with `-D warnings`, formatting, and primary LSP
+    diagnostics — clean.
+  - `env -u LATTICE_BIN cargo xtask ci` — passed every full-workspace gate.
+- **Changed files:** `crates/net-guard/src/lib.rs`,
+  `crates/lattice-system-harness/src/fake_llm.rs`,
+  `crates/lattice-llm/AGENTS.md`, `FINDINGS.md`, and `FIX.md`.
