@@ -20,7 +20,10 @@ xtask CI tests (wasm-tools pins, `ordered_test_crates`, tool-manifest
 fingerprint) unchanged. Do not restore the deleted docs. Historical `FIX.md`
 entries that mention the old test are left as-is.
 
-**Verification:** `cargo test -p xtask` (remaining tests in `xtask/src/ci.rs`).
+**Verification:** `cargo test -p xtask` — 120 passed, 0 failed. Remaining
+`ci::tests` still run: wasm-tools parse/pin, tool-manifest fingerprint,
+`ordered_test_crates` (deterministic + dependency order). The deleted test
+name is absent from the run.
 
 **Changed files:** `xtask/src/ci.rs`, `AGENTS.md`, `FIX.md`.
 
