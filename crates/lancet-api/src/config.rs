@@ -48,6 +48,13 @@ pub struct LancetRuntimeConfig {
     pub invocations: WorkspaceHistoryBacking,
     /// Private workspace mutation history backing.
     pub workspace_history: WorkspaceHistoryBacking,
+    /// Pre-composed Component runtime to reuse across Turns.
+    ///
+    /// When `Some`, `LancetRuntime::build` skips `ComponentRuntime::from_embedded()`
+    /// and uses the supplied instance directly. The caller is responsible for
+    /// sharing one `Arc<ComponentRuntime>` across the process (typically via
+    /// [`ComponentRuntime::shared()`]).
+    pub components: Option<std::sync::Arc<lancet_runtime::ComponentRuntime>>,
 }
 
 impl LancetRuntimeConfig {
@@ -63,6 +70,7 @@ impl LancetRuntimeConfig {
             cep_mode: CepMode::Enforce,
             invocations: WorkspaceHistoryBacking::Disabled,
             workspace_history: WorkspaceHistoryBacking::Disabled,
+            components: None,
         }
     }
 }

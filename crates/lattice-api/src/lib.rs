@@ -51,3 +51,15 @@ pub use turn::{
     TurnEvent, TurnEventStream, TurnUsageSummary, collect_turn_result_from_events, run_turn,
     stream_turn,
 };
+
+/// Eagerly compose the process-level shared Component runtime (#171).
+///
+/// Call this during application startup (before the first Turn) so the
+/// Wasmtime compilation cost is paid once at init rather than on the first
+/// prompt. Returns `Err` if composition fails; the error is latched and
+/// every subsequent `stream_turn` / `run_turn` will observe the same failure.
+pub fn warmup_component_runtime() -> Result<(), String> {
+    lancet_api::ComponentRuntime::shared()
+        .map(|_| ())
+        .map_err(|err| format!("component runtime warmup failed: {err}"))
+}

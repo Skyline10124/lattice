@@ -81,6 +81,17 @@ pub(crate) struct StoreState {
 
 /// The Component runtime. Composed once at startup; immutable after.
 ///
+/// Three lifecycle tiers:
+///
+/// 1. **Process-level (built runtime):** `Arc<ComponentRuntime>` via [`Self::shared()`],
+///    holding the Wasmtime Engine, compiled Components, sealed `ClosedCatalog`,
+///    and linker. Shared for the lifetime of the host process.
+/// 2. **Per-Turn:** frozen profile/policy, enabled catalog snapshot, workspace
+///    authorities, audit context, budget, and cancellation. Created by
+///    `LancetRuntime::build`.
+/// 3. **Per-Tool-Call:** fresh `Store` with per-call fuel, deadline, limits,
+///    admission, cancellation, and Cell evidence.
+///
 /// `call` takes `&self`: the epoch ticker is lazily spawned on the first
 /// call via a [`OnceLock`], so an `Arc<ComponentRuntime>` can be shared
 /// across the projection and server dispatch paths (D.2/D.3).
@@ -120,6 +131,29 @@ impl ComponentRuntime {
         let regs: Vec<&'static EmbeddedTool> =
             inventory::iter::<&EmbeddedTool>().copied().collect();
         Self::compose_private(&regs, generated::host_composition::EXPECTED_COMPONENTS)
+    }
+
+    /// Process-level shared instance of the embedded Component runtime.
+    ///
+    /// The embedded catalog, Wasmtime Engine, compiled Components, and linker
+    /// depend only on the current host binary's static bytes and host-pinned
+    /// identities. They do not change across Sessions, Projects, Profiles, or
+    /// Turns, so a single composition is shared for the lifetime of the process.
+    ///
+    /// Concurrent first callers race on `OnceLock::get_or_init`; exactly one
+    /// runs `from_embedded()` and the rest observe the same result. A
+    /// composition failure is latched: every subsequent call returns the same
+    /// error without retrying.
+    pub fn shared() -> Result<Arc<Self>, CompositionError> {
+        static INSTANCE: OnceLock<Result<Arc<ComponentRuntime>, String>> = OnceLock::new();
+        INSTANCE
+            .get_or_init(|| {
+                ComponentRuntime::from_embedded()
+                    .map(Arc::new)
+                    .map_err(|err| err.to_string())
+            })
+            .clone()
+            .map_err(CompositionError::Latched)
     }
 
     /// Fixed no-op fixture for integration tests. No caller-controlled
@@ -799,5 +833,17 @@ mod tests {
                 .expect("ok passes through");
             assert_eq!(out.value_json, "{}");
         }
+    }
+
+    /// #171: `shared()` composes exactly once; subsequent calls return the same
+    /// `Arc` without re-running `Component::new`.
+    #[test]
+    fn shared_returns_same_instance_across_calls() {
+        let a = ComponentRuntime::shared().expect("first shared()");
+        let b = ComponentRuntime::shared().expect("second shared()");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "shared() must return the same Arc on consecutive calls"
+        );
     }
 }

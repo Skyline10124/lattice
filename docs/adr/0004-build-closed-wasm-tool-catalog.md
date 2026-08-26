@@ -97,3 +97,13 @@ starts because build scripts and procedural macros execute as host code.
   `lattice-conversation`, `lancet-audit`, and `lattice-api`. LANCET has no
   Standalone/direct CEP product invocation contract; #32 waits for the #139-B
   InvocationId hard cut before the remaining native Tool migration.
+- The `ComponentRuntime` has three runtime lifecycle tiers (#171):
+  1. **Process-level (built runtime):** `ComponentRuntime::shared()` returns a
+     process-singleton `Arc<ComponentRuntime>` holding the Wasmtime Engine,
+     compiled Components, sealed `ClosedCatalog`, and linker. Composed exactly
+     once via `OnceLock`; concurrent first callers see one composition.
+  2. **Per-Turn:** `LancetRuntime::build` creates the frozen profile/policy,
+     enabled catalog snapshot, workspace authorities, audit context, budget,
+     and server lifecycle. Reuses the process-level `ComponentRuntime`.
+  3. **Per-Tool-Call:** fresh `Store` with independent fuel, deadline, count
+     limits, admission result, cancellation, and Cell evidence.

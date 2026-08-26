@@ -72,6 +72,7 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
             max_boundary: lancet_protocol::cell::Trust::In,
         },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
+        components: None,
     })
     .expect("direct-local runtime builds")
 }
@@ -263,6 +264,7 @@ async fn policy_deny_blocks_create_on_direct_local() {
             ..Default::default()
         },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
+        components: None,
     })
     .expect("runtime");
     let client = runtime.client();
