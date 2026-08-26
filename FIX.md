@@ -7370,3 +7370,24 @@ removed `benchmarks/invocation-store/results/**`, and updated
 - **Changed files:** `crates/lattice-system-harness/src/{lib.rs,tui_mock.rs,bin/tui_mock.rs}`,
   `crates/lattice-system-harness/tests/pty_tui_smoke.rs`,
   `crates/lattice-tui/src/view.rs`, `xtask/src/{main.rs,tui_mock.rs}`, `FIX.md`.
+
+## 2026-08-26 — GitHub #156 follow-up: remove mock prompt startup stall
+
+- **ID/severity:** GitHub #156 / developer-experience performance regression.
+- **Problem:** after the TUI was visibly ready, Enter still took about 6.3 seconds
+  to show deterministic mock content. Boundary timing proved the fake provider
+  read and wrote its response in under 1 ms; the delay occurred before dispatch,
+  where the unoptimized dev binary spent about 6.2 seconds compiling the closed
+  embedded Component catalog on every Turn.
+- **Fix:** the mock xtask now builds `lattice` with a dedicated `tui-mock` Cargo
+  profile and selects that profile's binary. Workspace crates remain unoptimized
+  for quick TUI iteration, while dependencies use `opt-level=1`, accelerating
+  Wasmtime without changing or bypassing production Turn composition, closed-
+  catalog validation, policy, audit, or the formal fake-provider route.
+- **Verification:** red regression first observed the xtask still selecting
+  `target/debug/lattice`; the focused xtask test now passes and pins the profile
+  plus artifact path. A PTY timing loop measured 6.299 seconds before the fix and
+  0.727/0.727/0.694 seconds after it (about 9× faster).
+  `cargo test -p xtask` passed 116 tests; the custom-profile build and PTY smoke
+  passed; `env -u LATTICE_BIN cargo xtask ci` passed all gates.
+- **Changed files:** `Cargo.toml`, `xtask/src/tui_mock.rs`, `FIX.md`.

@@ -8,11 +8,29 @@ use clap::Args;
 
 use crate::repo_root;
 
+const TUI_MOCK_PROFILE: &str = "tui-mock";
+
 #[derive(Args, Debug)]
 pub struct TuiMockArgs {
     /// Scenario: long-text, tool-call, disconnect, slow, or error.
     #[arg(long, default_value = "long-text")]
     scenario: String,
+}
+
+fn build_args() -> [&'static str; 7] {
+    [
+        "build",
+        "--profile",
+        TUI_MOCK_PROFILE,
+        "-p",
+        "lattice-cli",
+        "--bin",
+        "lattice",
+    ]
+}
+
+fn lattice_binary(target_dir: &std::path::Path) -> std::path::PathBuf {
+    target_dir.join(TUI_MOCK_PROFILE).join("lattice")
 }
 
 pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {
@@ -24,17 +42,17 @@ pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {
         .context("resolve Cargo target directory")?
         .target_directory
         .into_std_path_buf();
-    let lattice_bin = target_dir.join("debug/lattice");
+    let lattice_bin = lattice_binary(&target_dir);
 
     let build = Command::new("cargo")
         .current_dir(&root)
-        .args(["build", "-p", "lattice-cli", "--bin", "lattice"])
+        .args(build_args())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
         .context("build lattice binary")?;
     if !build.success() {
-        bail!("cargo build -p lattice-cli --bin lattice failed");
+        bail!("cargo build --profile {TUI_MOCK_PROFILE} -p lattice-cli --bin lattice failed");
     }
 
     let status = Command::new("cargo")
@@ -58,4 +76,29 @@ pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {
         bail!("TUI mock exited with {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_build_uses_the_optimized_profile() {
+        assert_eq!(
+            build_args(),
+            [
+                "build",
+                "--profile",
+                "tui-mock",
+                "-p",
+                "lattice-cli",
+                "--bin",
+                "lattice",
+            ]
+        );
+        assert_eq!(
+            lattice_binary(std::path::Path::new("/target")),
+            std::path::Path::new("/target/tui-mock/lattice")
+        );
+    }
 }
