@@ -7560,3 +7560,47 @@ classifications. No unsafe post-dispatch abort or observer-backpressure scope ex
 **Changed areas:** `lancet-dispatch` request transport and EventSink, `lancet-native` admission/error
 mapping and recovery regressions, `lattice-api` saga indeterminate/batch-stop coverage, and current
 crate-local architecture guidance.
+
+## GitHub #159: preserve cumulative Turn recovery and authoritative workspace checkpoints — 2026-08-26
+
+**Severity:** P0 / BLOCKER
+
+**Problem:** PendingTurn snapshots retained only the current model step's transcript delta and the
+reconciled candidate substituted an empty workspace-history checkpoint. A crash after a Tool-bearing
+step could therefore lose bound provider replay state or prior ToolResults, and a post-mutation
+reopen could commit a Turn without the WorkspaceHistory OID that the Tool actually produced.
+Strict reopen also lacked a finite lineage bound and exact authentication for several same-stage,
+step-closing, and Turn-closing fields.
+
+**Fix:** Pending snapshot/session-store schema v3 carries one mandatory cumulative post-user
+transcript authority. Every journal edge derives and validates its exact transcript prefix; candidate
+revision usage, ContinueModel closures/digest, TurnClosing basis, and Committed candidate are
+authenticated exactly. Provider batches are bounded at 32 calls, frozen attempts at 11, and the
+complete PendingTurn lineage at 2,979 snapshots; reopen retains only bounded OID metadata and two
+adjacent full snapshots. Live and reopen share one candidate-basis derivation. The composition layer
+samples a canonical 40-lowercase-SHA-1 WorkspaceHistory checkpoint while holding the shared
+WorkspaceOperationLock through TurnClosing and final Session publication. Strict Session
+constructors serialize cross-ref validation with repository writers, finalized manifests validate
+the same checkpoint shape, and usage aggregation saturates rather than wrapping. No compatibility
+reader, placeholder reconstruction, reverse dependency, or second transcript authority was added.
+
+**Verification:**
+
+- `cargo test -p lattice-conversation` — 32 passed.
+- `cargo test -p lattice-llm` — 81 unit + 34 provider-projection tests passed.
+- `cargo test -p lattice-session` — 152 passed, including strict lineage, edge-authentication,
+  constructor-lock, malformed-manifest, saturation, exact-retry, and cumulative-transcript cases.
+- `cargo test -p lattice-api` — run twice; each run passed 107 unit tests and every integration,
+  including all 19 Rewind acceptance cases.
+- `cargo clippy -p lattice-store -p lattice-conversation -p lattice-session -p lattice-api -p lancet-audit --all-targets -- -D warnings` — passed.
+- `cargo clippy -p lattice-system-harness --all-targets --features crash-barriers -- -D warnings` — passed.
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` — passed.
+- Worktree-local feature binary plus `direct_crash_barriers` — 7 real SIGSTOP/SIGKILL/reopen cases
+  passed, including next-model-attempt transcript recovery and both pre-/post-TurnClosing mutation
+  checkpoint windows without provider replay or Tool redispatch.
+- Final `gpt-5.6-sol:xhigh` risk re-review: PASS.
+- `cargo fmt --all -- --check` / `git diff --check` / LSP diagnostics — clean.
+
+**Changed areas:** `lattice-conversation` Tool batch contract, `lattice-session` PendingTurn
+contracts/store/strict-open validation, `lattice-api` live/reopen checkpoint composition, real crash
+barriers, focused durable corruption regressions, crate guidance, and this append-only record.

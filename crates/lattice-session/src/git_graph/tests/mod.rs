@@ -4,7 +4,9 @@
 //! Internal Git graph store tests, split by concern.
 
 mod commit_turn;
+mod edge_authentication;
 mod head_transcript;
+mod manifest_checkpoint;
 mod pending_crash;
 mod pending_fixtures;
 mod pending_journal;
@@ -20,6 +22,7 @@ use crate::graph::{SessionGraphStore, TurnCommitInput, derive_commit_message};
 use crate::pending::{ClosureOrigin, TurnFinishReason, TurnOutcome, WorkspaceHistoryCheckpoint};
 use crate::test_helpers::{assistant_msg, user_msg};
 use lattice_conversation::{BoundToolCall, NativeMessage};
+
 /// A fixture directory that lives only as long as the test holds it.
 ///
 /// Earlier revisions built a host-global path
@@ -77,6 +80,7 @@ pub(crate) fn commit_input(
         workspace_history_checkpoint: WorkspaceHistoryCheckpoint::Empty,
     }
 }
+
 /// A fixed test project key: session-store tests have no real workspace, so
 /// they bind sessions to one well-known storage address.
 pub(crate) fn test_project_key() -> lattice_store::ProjectStoreKey {

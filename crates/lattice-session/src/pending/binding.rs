@@ -18,7 +18,8 @@ use sha2::{Digest, Sha256};
 
 use lancet_protocol::{InvocationId, PlanKey, ToolCallAddress};
 use lattice_conversation::{
-    BoundToolCall, MessagePart, MessageSemantic, NativeMessage, UnboundToolCall, arguments_digest,
+    BoundToolCall, MAX_TOOL_CALLS_PER_BATCH, MessagePart, MessageSemantic, NativeMessage,
+    UnboundToolCall, arguments_digest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -152,6 +153,13 @@ impl BindingPlan {
         if self.bindings.is_empty() {
             return Err(SessionError::JournalCorruption {
                 detail: "binding plan must carry at least one binding".to_string(),
+            });
+        }
+        if self.bindings.len() > MAX_TOOL_CALLS_PER_BATCH {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "binding plan exceeds the {MAX_TOOL_CALLS_PER_BATCH}-ToolCall batch limit"
+                ),
             });
         }
         let mut last_ordinal = None;
@@ -346,6 +354,28 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&exact).unwrap()).unwrap();
         assert_eq!(back, exact);
         back.validate().expect("round-tripped plan");
+    }
+
+    #[test]
+    fn plan_rejects_more_than_the_tool_call_batch_limit() {
+        let arguments = serde_json::json!({});
+        let calls: Vec<_> = (0..=MAX_TOOL_CALLS_PER_BATCH)
+            .map(|ordinal| (format!("tool_{ordinal}"), arguments.clone()))
+            .collect();
+        let message_calls: Vec<_> = calls
+            .iter()
+            .map(|(name, arguments)| (name.as_str(), arguments.clone()))
+            .collect();
+        let bindings = calls
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (name, arguments))| binding(ordinal as u32, name, arguments))
+            .collect();
+        assert!(matches!(
+            plan(bindings, tool_message(&message_calls)).validate(),
+            Err(SessionError::JournalCorruption { detail })
+                if detail.contains("batch limit")
+        ));
     }
 
     #[test]

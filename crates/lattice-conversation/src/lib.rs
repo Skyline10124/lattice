@@ -42,7 +42,7 @@ pub use graph_types::HeadTranscript;
 pub use history::ConversationHistory;
 pub use limits::{
     AttemptAssembly, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
-    MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES,
+    MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH,
 };
 pub use message::{
     MAX_OPAQUE_REPLAY_STATE_BYTES, MessagePart, MessageRole, MessageSemantic, NativeMessage,

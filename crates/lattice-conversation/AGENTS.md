@@ -28,6 +28,10 @@ ADR 0005 §7 (landed in GitHub #142):
   `TurnId`; generation belongs to `lattice-api::TurnCoordinator` (#139-B).
 - Tool arguments must be one JSON object; there is no empty-to-`{}`
   normalization. One invalid call rejects the whole batch.
+- `MAX_TOOL_CALLS_PER_BATCH = 32` is the exported provider-neutral ceiling.
+  Every completed provider batch must pass through `validate_tool_call_batch`;
+  plus one rejects the whole attempt, never truncates it. Durable
+  `BindingPlan` validation rechecks the same ceiling.
 - `semantic_digest` excludes provider origin, provider call IDs, and replay
   state; `replay_state_digest` covers exactly those. Provider metadata must
   never cross into the semantic digest.

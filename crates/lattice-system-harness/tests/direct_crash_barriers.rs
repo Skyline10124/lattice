@@ -122,6 +122,303 @@ fn turn_started_sigkill_reopens_without_replaying_the_provider() {
 }
 
 #[test]
+fn next_model_attempt_sigkill_recovers_the_byte_exact_cumulative_transcript() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-crash-cumulative-transcript",
+        "dl-crash-transcript",
+        "[\"session.todo_write\"]",
+        "",
+    );
+    let outside = tempfile::tempdir().expect("external crash-surviving counters");
+    let provider_log = outside.path().join("provider.log");
+    let effect_log = outside.path().join("effects.log");
+    world.set_env(
+        "LATTICE_TEST_TOOL_EFFECT_LOG",
+        effect_log.display().to_string(),
+    );
+    let _server = wire_logged_fake_llm(
+        &world,
+        "dl-crash-transcript",
+        sequence(vec![
+            tool_call(
+                "provider-private-call-id",
+                "session.todo_write",
+                r#"{"todos":[{"content":"persist me","status":"pending"}]}"#,
+            ),
+            SseScript::plain("new prompt after closure"),
+        ]),
+        &provider_log,
+    );
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-crash-transcript", "main")
+        .expect("session");
+    let ack = outside.path().join("model-attempt-1.json");
+    world.set_env(BARRIER_ENV, "model_attempt_started_1");
+    world.set_env(ACK_ENV, ack.display().to_string());
+    let running = send
+        .spawn("kill after second attempt starts")
+        .expect("spawn");
+    let facts = wait_for_ack(&ack, Duration::from_secs(20));
+    assert_eq!(facts["barrier"], "model_attempt_started_1");
+    assert_eq!(
+        facts
+            .pointer("/snapshot/stage/stage")
+            .and_then(Value::as_str),
+        Some("model_attempt_started")
+    );
+    let durable = facts["snapshot"]["post_user_transcript"]
+        .as_array()
+        .expect("cumulative transcript");
+    assert_eq!(durable.len(), 2, "bound assistant + ToolResult: {facts}");
+    assert_eq!(durable[0]["role"], "assistant");
+    assert_eq!(durable[1]["role"], "tool");
+    assert!(durable[0].to_string().contains("provider-private-call-id"));
+    assert_eq!(fsynced_count(&provider_log), 1);
+    assert_eq!(fsynced_count(&effect_log), 1);
+
+    assert_eq!(
+        running.kill_and_wait().expect("kill").termination,
+        Termination::Killed
+    );
+    world.unset_env(BARRIER_ENV);
+    world.unset_env(ACK_ENV);
+    let recovery = send.send("close then run new prompt").expect("recovery");
+    assert_clean_send(&recovery).expect("clean recovery");
+    assert_eq!(fsynced_count(&provider_log), 2, "no provider replay");
+    assert_eq!(fsynced_count(&effect_log), 1, "no Tool redispatch");
+    assert!(!active_turn_exists(&world, send.session_id()));
+
+    let log = send
+        .run_command(&["--json", "session", "log", send.session_id()])
+        .expect("session log");
+    let log_json: Value = serde_json::from_slice(&log.stdout).expect("log JSON");
+    let recovered = log_json["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["origin"].as_str() == Some("reconciled"))
+        .expect("reconciled Turn");
+    let messages = committed_messages(&world, recovered["commit_id"].as_str().expect("commit id"));
+    assert_eq!(messages.len(), 3, "user + exact durable transcript");
+    assert_eq!(&messages[1..], durable.as_slice());
+}
+
+#[test]
+fn post_mutation_step_closed_sigkill_reconciles_with_current_history_checkpoint() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-crash-mutation-step-closed",
+        "dl-crash-step-checkpoint",
+        "[\"mutate.create\"]",
+        "",
+    );
+    let outside = tempfile::tempdir().expect("external crash-surviving counters");
+    let provider_log = outside.path().join("provider.log");
+    let effect_log = outside.path().join("effects.log");
+    world.set_env(
+        "LATTICE_TEST_TOOL_EFFECT_LOG",
+        effect_log.display().to_string(),
+    );
+    let _server = wire_logged_fake_llm(
+        &world,
+        "dl-crash-step-checkpoint",
+        sequence(vec![
+            tool_call(
+                "mutation-step-call",
+                "mutate.create",
+                r#"{"path":"reconciled-checkpoint.txt","content":"durable\n","create_parents":false}"#,
+            ),
+            SseScript::plain("fresh turn after reconciled closure"),
+        ]),
+        &provider_log,
+    );
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-crash-step-checkpoint", "main")
+        .expect("session");
+    let ack = outside.path().join("mutation-step-closed.json");
+    world.set_env(BARRIER_ENV, "step_closed");
+    world.set_env(ACK_ENV, ack.display().to_string());
+    let running = send
+        .spawn("mutate then stop before TurnClosing")
+        .expect("spawn");
+    let facts = wait_for_ack(&ack, Duration::from_secs(20));
+    assert_eq!(facts["barrier"], "step_closed");
+    assert_eq!(
+        facts
+            .pointer("/snapshot/stage/stage")
+            .and_then(Value::as_str),
+        Some("step_closed")
+    );
+    assert!(
+        facts
+            .pointer("/snapshot/stage/kind/continue_model")
+            .is_some(),
+        "the crash must precede TurnClosing at StepClosed(ContinueModel): {facts}"
+    );
+    let checkpoint = workspace_history_tip(&world);
+    assert_eq!(checkpoint.len(), 40);
+    assert_eq!(fsynced_count(&provider_log), 1);
+    assert_eq!(fsynced_count(&effect_log), 1);
+    assert_eq!(
+        std::fs::read_to_string(world.project_dir().join("reconciled-checkpoint.txt")).unwrap(),
+        "durable\n"
+    );
+
+    assert_eq!(
+        running.kill_and_wait().expect("kill").termination,
+        Termination::Killed
+    );
+    world.unset_env(BARRIER_ENV);
+    world.unset_env(ACK_ENV);
+    let recovery = send
+        .send("fresh turn after closure")
+        .expect("reconcile and run fresh Turn");
+    assert_clean_send(&recovery).expect("clean recovery");
+    assert_eq!(
+        fsynced_count(&provider_log),
+        2,
+        "reconciliation must not call the provider; only the fresh Turn may do so"
+    );
+    assert_eq!(
+        fsynced_count(&effect_log),
+        1,
+        "reconciliation must not redispatch the mutation"
+    );
+    assert!(!active_turn_exists(&world, send.session_id()));
+    assert_eq!(
+        std::fs::read_to_string(world.project_dir().join("reconciled-checkpoint.txt")).unwrap(),
+        "durable\n"
+    );
+
+    let log = send
+        .run_command(&["--json", "session", "log", send.session_id()])
+        .expect("session log");
+    let log_json: Value = serde_json::from_slice(&log.stdout).expect("log JSON");
+    let reconciled: Vec<_> = log_json["turns"]
+        .as_array()
+        .expect("turns")
+        .iter()
+        .filter(|turn| turn["origin"].as_str() == Some("reconciled"))
+        .collect();
+    assert_eq!(
+        reconciled.len(),
+        1,
+        "exactly one reconciled Turn: {log_json}"
+    );
+    assert!(reconciled[0]["outcome"].get("interrupted").is_some());
+    assert_eq!(
+        reconciled[0]
+            .pointer("/workspace_history_checkpoint/oid")
+            .and_then(Value::as_str),
+        Some(checkpoint.as_str()),
+        "the reconciler must sample and attach the current non-empty history OID"
+    );
+}
+
+#[test]
+fn post_mutation_turn_closing_sigkill_preserves_the_current_history_checkpoint() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-crash-mutation-checkpoint",
+        "dl-crash-checkpoint",
+        "[\"mutate.create\"]",
+        "",
+    );
+    let outside = tempfile::tempdir().expect("external crash-surviving counters");
+    let provider_log = outside.path().join("provider.log");
+    let effect_log = outside.path().join("effects.log");
+    world.set_env(
+        "LATTICE_TEST_TOOL_EFFECT_LOG",
+        effect_log.display().to_string(),
+    );
+    let _server = wire_logged_fake_llm(
+        &world,
+        "dl-crash-checkpoint",
+        sequence(vec![
+            tool_call(
+                "mutation-call",
+                "mutate.create",
+                r#"{"path":"checkpoint.txt","content":"durable\n","create_parents":false}"#,
+            ),
+            SseScript::plain("mutation complete"),
+        ]),
+        &provider_log,
+    );
+    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-crash-checkpoint", "main")
+        .expect("session");
+    let ack = outside.path().join("mutation-turn-closing.json");
+    world.set_env(BARRIER_ENV, "turn_closing");
+    world.set_env(ACK_ENV, ack.display().to_string());
+    let running = send
+        .spawn("mutate then stop before final refs")
+        .expect("spawn");
+    let facts = wait_for_ack(&ack, Duration::from_secs(20));
+    assert_eq!(facts["barrier"], "turn_closing");
+    assert_eq!(
+        facts
+            .pointer("/snapshot/stage/stage")
+            .and_then(Value::as_str),
+        Some("turn_closing"),
+        "the crash must follow TurnClosing publication: {facts}"
+    );
+    let crashed_turn_id = facts
+        .pointer("/snapshot/turn_id")
+        .and_then(Value::as_str)
+        .expect("crashed TurnId")
+        .to_string();
+    let checkpoint = facts
+        .pointer("/snapshot/stage/candidate/workspace_history_checkpoint/oid")
+        .and_then(Value::as_str)
+        .expect("TurnClosing pins a non-empty history OID")
+        .to_string();
+    assert_eq!(checkpoint.len(), 40);
+    assert_eq!(
+        workspace_history_tip(&world),
+        checkpoint,
+        "TurnClosing must pin the exact current history OID"
+    );
+    assert_eq!(fsynced_count(&provider_log), 2);
+    assert_eq!(fsynced_count(&effect_log), 1);
+    assert_eq!(
+        std::fs::read_to_string(world.project_dir().join("checkpoint.txt")).unwrap(),
+        "durable\n"
+    );
+
+    assert_eq!(
+        running.kill_and_wait().expect("kill").termination,
+        Termination::Killed
+    );
+    world.unset_env(BARRIER_ENV);
+    world.unset_env(ACK_ENV);
+    let recovery = send.send("close then continue").expect("recovery");
+    assert_clean_send(&recovery).expect("clean recovery");
+    assert_eq!(fsynced_count(&provider_log), 3, "no provider replay");
+    assert_eq!(fsynced_count(&effect_log), 1, "no mutation redispatch");
+    assert!(!active_turn_exists(&world, send.session_id()));
+
+    let log = send
+        .run_command(&["--json", "session", "log", send.session_id()])
+        .expect("session log");
+    let log_json: Value = serde_json::from_slice(&log.stdout).expect("log JSON");
+    let recovered = log_json["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["turn_id"].as_str() == Some(crashed_turn_id.as_str()))
+        .expect("exact crashed Turn");
+    assert_eq!(
+        recovered["origin"].as_str(),
+        Some("live"),
+        "post-TurnClosing recovery finalizes the pinned live candidate"
+    );
+    assert_eq!(
+        recovered
+            .pointer("/workspace_history_checkpoint/oid")
+            .and_then(Value::as_str),
+        Some(checkpoint.as_str())
+    );
+}
+
+#[test]
 fn model_and_binding_windows_recover_without_provider_replay() {
     for case in [
         BarrierCase::plain("model_attempt_started", "model_attempt_started", 0, None),
@@ -468,6 +765,79 @@ fn fsynced_count(path: &std::path::Path) -> usize {
     std::fs::read_to_string(path)
         .map(|content| content.lines().count())
         .unwrap_or(0)
+}
+
+fn workspace_history_tip(world: &lattice_system_harness::ScenarioWorld) -> String {
+    let projects = world.home().join(".local/state/lattice/projects");
+    let repos: Vec<_> = std::fs::read_dir(projects)
+        .expect("project stores")
+        .map(|entry| {
+            entry
+                .expect("project store entry")
+                .path()
+                .join("workspace-history.git")
+        })
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(repos.len(), 1, "one project workspace-history store");
+    let repo =
+        gix::open_opts(&repos[0], gix::open::Options::isolated()).expect("open workspace history");
+    repo.find_reference("refs/lattice/workspace-history/current")
+        .expect("current workspace-history ref")
+        .target()
+        .try_id()
+        .expect("direct current workspace-history ref")
+        .to_string()
+}
+
+fn committed_messages(
+    world: &lattice_system_harness::ScenarioWorld,
+    commit_id: &str,
+) -> Vec<Value> {
+    let repo = gix::open_opts(
+        world.session_store_dir().join("sessions.git"),
+        gix::open::Options::isolated(),
+    )
+    .expect("open Session store");
+    let oid = gix::ObjectId::from_hex(commit_id.as_bytes()).expect("parse commit id");
+    let tree = repo
+        .find_commit(oid)
+        .expect("find Turn commit")
+        .tree()
+        .expect("Turn tree");
+    let mut files = Vec::new();
+    collect_tree_files(&tree, "", &mut files);
+    let bytes = files
+        .into_iter()
+        .find_map(|(path, bytes)| (path == "turn/messages.jsonl").then_some(bytes))
+        .expect("turn/messages.jsonl");
+    String::from_utf8(bytes)
+        .expect("messages UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("typed message JSON"))
+        .collect()
+}
+
+fn collect_tree_files(tree: &gix::Tree<'_>, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
+    for entry in tree.iter() {
+        let entry = entry.expect("tree entry");
+        let name = entry.filename().to_string();
+        let path = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let object = entry.object().expect("tree object");
+        match object.kind {
+            gix::object::Kind::Tree => {
+                collect_tree_files(&object.try_into_tree().expect("subtree"), &path, out)
+            }
+            gix::object::Kind::Blob => {
+                out.push((path, object.try_into_blob().expect("blob").data.clone()))
+            }
+            _ => {}
+        }
+    }
 }
 
 fn wait_for_ack(path: &std::path::Path, timeout: Duration) -> Value {

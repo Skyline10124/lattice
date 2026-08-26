@@ -34,7 +34,6 @@ pub(crate) struct PreparedTurn {
     pub system_prompt: Option<String>,
     pub transcript: lattice_session::HeadTranscript,
     pub agent_name: String,
-    pub profile_snapshot_hash: String,
     pub profile_snapshot_json: String,
     pub project_store_key: ProjectStoreKey,
 }
@@ -90,7 +89,6 @@ pub(crate) fn prepare_live_turn_locked(
         system_prompt,
         transcript,
         agent_name: profile_snapshot.agent_name,
-        profile_snapshot_hash: profile_snapshot.profile_snapshot_hash,
         profile_snapshot_json: profile_snapshot.profile_snapshot_json,
         project_store_key: expected_key,
     })

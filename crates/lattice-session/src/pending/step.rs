@@ -12,7 +12,8 @@
 
 use lancet_protocol::PlanKey;
 use lattice_conversation::{
-    BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome, UnboundToolCall,
+    BoundToolCall, MessagePart, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome,
+    UnboundToolCall, semantic_digest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -67,9 +68,11 @@ pub struct ClosedBinding {
 pub struct StepClosingState {
     /// The plan being closed.
     pub plan_key: PlanKey,
-    /// Complete bound assistant message for durable transcript replay.
-    pub messages: Vec<NativeMessage<BoundToolCall>>,
     /// The complete ordered bindings of the plan.
+    ///
+    /// Transcript bytes live only in `PendingSnapshot::post_user_transcript`;
+    /// this cursor carries structural closure facts, never a second message
+    /// representation.
     pub bindings: Vec<PlannedBinding>,
     /// Monotonic closure cursor: bindings at ordinals `< closure_cursor`
     /// are durably closed; `closures.len() == closure_cursor`.
@@ -86,56 +89,6 @@ impl StepClosingState {
     /// ordinals in order, candidate points at the unclosed binding, and
     /// every closure's binding matches the plan's binding at that ordinal.
     pub fn validate(&self) -> Result<()> {
-        let Some(assistant_message) = self.messages.first() else {
-            return Err(SessionError::JournalCorruption {
-                detail: "step closing transcript omits the bound assistant".to_string(),
-            });
-        };
-        if assistant_message.role != MessageRole::Assistant {
-            return Err(SessionError::JournalCorruption {
-                detail: "step closing transcript must start with an assistant message".to_string(),
-            });
-        }
-        let mut bound_calls = 0usize;
-        for binding in &self.bindings {
-            let Some(part) = assistant_message
-                .parts
-                .get(binding.address.part_ordinal as usize)
-            else {
-                return Err(SessionError::JournalCorruption {
-                    detail: "step closing message omits a bound ToolCall".to_string(),
-                });
-            };
-            let MessageSemantic::ToolCall { call } = &part.semantic else {
-                return Err(SessionError::JournalCorruption {
-                    detail: "step closing binding points at a non-ToolCall part".to_string(),
-                });
-            };
-            if call.invocation_id != binding.invocation_id
-                || call.address != binding.address
-                || call.name != binding.method
-                || call.arguments_digest != binding.arguments_digest
-            {
-                return Err(SessionError::JournalCorruption {
-                    detail: "step closing bound ToolCall differs from its binding".to_string(),
-                });
-            }
-            bound_calls += 1;
-        }
-        if assistant_message.tool_calls().count() != bound_calls {
-            return Err(SessionError::JournalCorruption {
-                detail: "step closing message contains an unplanned ToolCall".to_string(),
-            });
-        }
-        if self.messages.len() != self.closure_cursor as usize + 1 {
-            return Err(SessionError::JournalCorruption {
-                detail: format!(
-                    "step closing transcript has {} messages at closure cursor {}",
-                    self.messages.len(),
-                    self.closure_cursor
-                ),
-            });
-        }
         if self.closures.len() != self.closure_cursor as usize {
             return Err(SessionError::JournalCorruption {
                 detail: format!(
@@ -155,7 +108,13 @@ impl StepClosingState {
             });
         }
         for (index, closure) in self.closures.iter().enumerate() {
-            if closure.binding != self.bindings[index] {
+            let binding =
+                self.bindings
+                    .get(index)
+                    .ok_or_else(|| SessionError::JournalCorruption {
+                        detail: format!("closure {index} has no plan binding"),
+                    })?;
+            if closure.binding != *binding {
                 return Err(SessionError::JournalCorruption {
                     detail: format!(
                         "closure {index} does not close the plan binding at that ordinal"
@@ -163,49 +122,6 @@ impl StepClosingState {
                 });
             }
             closure.binding.validate()?;
-            let message = &self.messages[index + 1];
-            if message.role != MessageRole::Tool || message.parts.len() != 1 {
-                return Err(SessionError::JournalCorruption {
-                    detail: format!("closure {index} has no exact ToolResult message"),
-                });
-            }
-            let MessageSemantic::ToolResult {
-                invocation_id,
-                name,
-                outcome,
-                content,
-            } = &message.parts[0].semantic
-            else {
-                return Err(SessionError::JournalCorruption {
-                    detail: format!("closure {index} transcript part is not a ToolResult"),
-                });
-            };
-            if *invocation_id != closure.binding.invocation_id
-                || *name != closure.binding.method
-                || *outcome != closure.outcome
-            {
-                return Err(SessionError::JournalCorruption {
-                    detail: format!("closure {index} ToolResult differs from its binding"),
-                });
-            }
-            match (&closure.material, content) {
-                (
-                    MaterialAvailability::Available {
-                        digest,
-                        byte_length,
-                    },
-                    Some(content),
-                ) if super::draft::tool_content_digest(content) == *digest
-                    && content.len() as u64 == *byte_length => {}
-                (MaterialAvailability::Unavailable { .. }, None) => {}
-                _ => {
-                    return Err(SessionError::JournalCorruption {
-                        detail: format!(
-                            "closure {index} ToolResult content differs from material availability"
-                        ),
-                    });
-                }
-            }
         }
         if let Some(candidate) = &self.current_candidate {
             let index = self.closure_cursor as usize;
@@ -227,10 +143,174 @@ impl StepClosingState {
         Ok(())
     }
 
+    /// Validate this cursor against the snapshot's sole cumulative transcript
+    /// authority. The exact suffix is one bound assistant followed by one
+    /// ToolResult per closed binding; any earlier completed steps remain an
+    /// opaque, transition-validated prefix.
+    pub fn validate_transcript(
+        &self,
+        post_user_transcript: &[NativeMessage<BoundToolCall>],
+    ) -> Result<()> {
+        self.validate()?;
+        let suffix_len = self.closures.len() + 1;
+        if post_user_transcript.len() < suffix_len {
+            return Err(SessionError::JournalCorruption {
+                detail: "step closing transcript omits the bound assistant or ToolResults".into(),
+            });
+        }
+        let suffix_start = post_user_transcript.len() - suffix_len;
+        let suffix = &post_user_transcript[suffix_start..];
+        let (assistant, results) =
+            suffix
+                .split_first()
+                .ok_or_else(|| SessionError::JournalCorruption {
+                    detail: "step closing transcript has an empty suffix".into(),
+                })?;
+        validate_bound_assistant(assistant, &self.bindings)?;
+        for (index, (message, closure)) in results.iter().zip(&self.closures).enumerate() {
+            validate_tool_result(message, closure, index)?;
+        }
+        Ok(())
+    }
+
     /// Whether every binding is closed (the precondition for `StepClosed`).
     pub fn all_closed(&self) -> bool {
         self.closure_cursor == self.bindings.len() as u32
     }
+}
+
+fn validate_bound_assistant(
+    assistant_message: &NativeMessage<BoundToolCall>,
+    bindings: &[PlannedBinding],
+) -> Result<()> {
+    if assistant_message.role != MessageRole::Assistant {
+        return Err(SessionError::JournalCorruption {
+            detail: "step transcript must start with an assistant message".into(),
+        });
+    }
+    for binding in bindings {
+        let Some(part) = assistant_message
+            .parts
+            .get(binding.address.part_ordinal as usize)
+        else {
+            return Err(SessionError::JournalCorruption {
+                detail: "step transcript omits a bound ToolCall".into(),
+            });
+        };
+        let MessageSemantic::ToolCall { call } = &part.semantic else {
+            return Err(SessionError::JournalCorruption {
+                detail: "step binding points at a non-ToolCall part".into(),
+            });
+        };
+        if call.invocation_id != binding.invocation_id
+            || call.address != binding.address
+            || call.name != binding.method
+            || call.arguments_digest != binding.arguments_digest
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: "step bound ToolCall differs from its binding".into(),
+            });
+        }
+    }
+    if assistant_message.tool_calls().count() != bindings.len() {
+        return Err(SessionError::JournalCorruption {
+            detail: "step assistant contains an unplanned ToolCall".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_tool_result(
+    message: &NativeMessage<BoundToolCall>,
+    closure: &ClosedBinding,
+    index: usize,
+) -> Result<()> {
+    let [part] = message.parts.as_slice() else {
+        return Err(SessionError::JournalCorruption {
+            detail: format!("closure {index} has no exact ToolResult message"),
+        });
+    };
+    if message.role != MessageRole::Tool {
+        return Err(SessionError::JournalCorruption {
+            detail: format!("closure {index} has no exact ToolResult message"),
+        });
+    }
+    let MessageSemantic::ToolResult {
+        invocation_id,
+        name,
+        outcome,
+        content,
+    } = &part.semantic
+    else {
+        return Err(SessionError::JournalCorruption {
+            detail: format!("closure {index} transcript part is not a ToolResult"),
+        });
+    };
+    if *invocation_id != closure.binding.invocation_id
+        || *name != closure.binding.method
+        || *outcome != closure.outcome
+    {
+        return Err(SessionError::JournalCorruption {
+            detail: format!("closure {index} ToolResult differs from its binding"),
+        });
+    }
+    match (&closure.material, content) {
+        (
+            MaterialAvailability::Available {
+                digest,
+                byte_length,
+            },
+            Some(content),
+        ) if super::draft::tool_content_digest(content) == *digest
+            && content.len() as u64 == *byte_length =>
+        {
+            Ok(())
+        }
+        (MaterialAvailability::Unavailable { .. }, None) => Ok(()),
+        _ => Err(SessionError::JournalCorruption {
+            detail: format!(
+                "closure {index} ToolResult content differs from material availability"
+            ),
+        }),
+    }
+}
+
+/// Build the exact ToolResult transcript message for one closure. Available
+/// material must come from the pinned ResultDraft; unavailable material never
+/// fabricates content.
+pub(crate) fn closure_transcript(
+    closure: &ClosedBinding,
+    content: Option<String>,
+) -> NativeMessage<BoundToolCall> {
+    NativeMessage::new(
+        MessageRole::Tool,
+        None,
+        vec![MessagePart::semantic_only(MessageSemantic::ToolResult {
+            invocation_id: closure.binding.invocation_id,
+            name: closure.binding.method.clone(),
+            outcome: closure.outcome,
+            content,
+        })],
+    )
+}
+
+/// Digest authority for a completed Tool-bearing step. Provider replay state
+/// remains on the bound assistant; the semantic digest uses content-free
+/// ToolResult closures exactly as the live path historically did.
+pub fn step_conversation_digest(
+    assistant: &NativeMessage<BoundToolCall>,
+    closures: &[ClosedBinding],
+) -> [u8; 32] {
+    let mut parts = assistant.parts.clone();
+    for closure in closures {
+        parts.push(MessagePart::semantic_only(MessageSemantic::ToolResult {
+            invocation_id: closure.binding.invocation_id,
+            name: closure.binding.method.clone(),
+            outcome: closure.outcome,
+            content: None,
+        }));
+    }
+    semantic_digest(&NativeMessage::new(MessageRole::Assistant, None, parts))
 }
 
 /// The closed `StepClosed` sum (ADR 0005 §14). Only a live owner may advance
@@ -391,14 +471,18 @@ mod tests {
                 turn_id: turn_id(),
                 model_step_ordinal: 0,
             },
-            messages: vec![assistant_message(&bindings)],
             bindings: bindings.clone(),
             closure_cursor: 1,
             closures: vec![closure(&bindings[0])],
             current_candidate: None,
         };
-        state.messages.push(tool_result(&state.closures[0], None));
-        state.validate().expect("one closed in order");
+        let mut transcript = vec![
+            assistant_message(&bindings),
+            tool_result(&state.closures[0], None),
+        ];
+        state
+            .validate_transcript(&transcript)
+            .expect("one closed in order");
         assert!(!state.all_closed());
 
         state.closures = vec![closure(&bindings[1])];
@@ -410,8 +494,8 @@ mod tests {
 
         state.closure_cursor = 2;
         state.closures = vec![closure(&bindings[0]), closure(&bindings[1])];
-        state.messages.push(tool_result(&state.closures[1], None));
-        state.validate().expect("all closed");
+        transcript.push(tool_result(&state.closures[1], None));
+        state.validate_transcript(&transcript).expect("all closed");
         assert!(state.all_closed());
     }
 
@@ -423,7 +507,6 @@ mod tests {
                 turn_id: turn_id(),
                 model_step_ordinal: 0,
             },
-            messages: vec![assistant_message(&bindings)],
             bindings: bindings.clone(),
             closure_cursor: 0,
             closures: vec![],

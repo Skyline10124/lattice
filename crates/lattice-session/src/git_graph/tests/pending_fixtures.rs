@@ -13,7 +13,7 @@ use lattice_conversation::{
 };
 
 use crate::pending::config::TurnStartedFacts;
-use crate::pending::outcome::{ClosureOrigin, TurnFinishReason};
+use crate::pending::outcome::{ClosureOrigin, TurnFinishReason, WorkspaceHistoryCheckpoint};
 use crate::pending::{
     FrozenTurnConfig, PlannedBinding, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
     TurnUsageAggregate,
@@ -186,6 +186,43 @@ pub(crate) fn completed_candidate(parent: Option<String>) -> TurnCommitCandidate
         workspace_history_checkpoint: crate::pending::WorkspaceHistoryCheckpoint::Empty,
         created_at: CREATED_AT.to_string(),
     }
+}
+pub(crate) fn turn_closing_from_active(
+    store: &crate::git_graph::GitSessionGraphStore,
+    session: &str,
+    outcome: TurnOutcome,
+    origin: ClosureOrigin,
+    checkpoint: WorkspaceHistoryCheckpoint,
+) -> TurnClosingFacts {
+    let tip = store
+        .read_active_turn(session)
+        .expect("read active Turn")
+        .expect("active Turn");
+    let candidate = tip
+        .snapshot
+        .turn_commit_candidate_basis(outcome, origin)
+        .expect("derive candidate basis")
+        .with_workspace_history_checkpoint(checkpoint)
+        .expect("attach workspace checkpoint");
+    TurnClosingFacts {
+        turn_id: tip.snapshot.turn_id,
+        candidate,
+    }
+}
+
+pub(crate) fn completed_turn_closing_from_active(
+    store: &crate::git_graph::GitSessionGraphStore,
+    session: &str,
+) -> TurnClosingFacts {
+    turn_closing_from_active(
+        store,
+        session,
+        TurnOutcome::Completed {
+            finish_reason: TurnFinishReason::Stop,
+        },
+        ClosureOrigin::Live,
+        WorkspaceHistoryCheckpoint::Empty,
+    )
 }
 
 pub(crate) fn turn_closing(candidate: TurnCommitCandidate) -> TurnClosingFacts {

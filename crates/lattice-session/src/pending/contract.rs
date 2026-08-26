@@ -1,17 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! The versioned PendingTurn snapshot contract and pure stage-transition
-//! validation (ADR 0005 §9, GitHub #144).
-//!
-//! Every snapshot is one immutable journal commit whose payload is the
-//! canonical JSON of [`PendingSnapshot`] at `pending.json`, whose git parent
-//! is the predecessor snapshot (for `TurnStarted`: the frozen parent
-//! conversation tip), and whose publication under
-//! `refs/lattice/sessions/<SessionId>/active-turn` is one validated CAS.
-//! `Committed` is a journal object vocabulary member but is never published
-//! through `active-turn`; the final SessionStore ref transaction is its only
-//! publication path.
+//! Versioned PendingTurn snapshots and pure edge validation (ADR 0005 §9).
 
 use lancet_protocol::{ModelAttemptKey, SessionId, TurnId};
 use lattice_conversation::{
@@ -21,34 +11,32 @@ use lattice_conversation::{
 use serde::{Deserialize, Serialize};
 
 use super::binding::{BindingPlan, PlannedBinding};
-use super::config::{MAX_MODEL_STEPS, TurnStartedFacts};
+use super::config::{MAX_MODEL_ATTEMPTS, MAX_MODEL_STEPS, TurnStartedFacts};
 use super::outcome::{ClosureOrigin, TurnOutcome, TurnUsageAggregate};
-use super::step::{StepClosedKind, StepClosingState};
+use super::step::{StepClosedKind, StepClosingState, closure_transcript, step_conversation_digest};
 use crate::{Result, SessionError};
 
 /// Schema version of the `pending.json` payload.
-pub const PENDING_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub const PENDING_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
-/// The twelve durable states of one pending Turn (ADR 0005 §9).
+/// The twelve durable states of one pending Turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "stage")]
 pub enum PendingStage {
-    /// The durable request-acceptance boundary: parent tip, user message,
-    /// explicit `TurnId`, complete frozen configuration.
+    /// The durable request-acceptance boundary.
     TurnStarted(TurnStartedFacts),
     /// An outbound provider request was about to start.
     ModelAttemptStarted {
         /// Which attempt of which step of which Turn.
         key: ModelAttemptKey,
     },
-    /// A failure before any stream event; retryable classification is
-    /// recorded (ADR 0005 §10).
+    /// A failure before any stream event.
     ModelAttemptFailed {
         /// Which attempt failed.
         key: ModelAttemptKey,
         /// The adapter's pre-stream retryability classification.
         retryable: bool,
-        /// Provider-reported usage of the failed attempt, when supplied.
+        /// Provider-reported usage, when supplied.
         usage: Option<TokenUsage>,
     },
     /// Partial stream, limit, cancellation, timeout, or crash.
@@ -69,19 +57,16 @@ pub enum PendingStage {
         /// Provider-reported usage, when supplied.
         usage: Option<TokenUsage>,
     },
-    /// A valid complete zero-Tool message. A Tool-bearing valid message is
-    /// published atomically as `BindingPlanned`; there is no Tool-bearing
-    /// `MessageComplete` gap.
+    /// A valid complete zero-Tool message.
     MessageComplete {
         /// Which attempt completed.
         key: ModelAttemptKey,
-        /// The complete valid message (validated zero-Tool).
+        /// The complete valid message.
         message: NativeMessage<UnboundToolCall>,
         /// Usage of the completing attempt, when reported.
         usage: Option<TokenUsage>,
     },
-    /// The exact ordered binding plan with the embedded complete unbound
-    /// Tool-bearing message.
+    /// The exact ordered binding plan and completing-attempt usage.
     BindingPlanned {
         /// The plan.
         plan: BindingPlan,
@@ -90,7 +75,7 @@ pub enum PendingStage {
     },
     /// The entire exact plan is durably reserved.
     Bound {
-        /// The plan, byte-equal to the `BindingPlanned` predecessor.
+        /// The plan, byte-equal to `BindingPlanned`.
         plan: BindingPlan,
     },
     /// The ordered closing loop over the plan's bindings.
@@ -99,20 +84,15 @@ pub enum PendingStage {
     StepClosed {
         /// The closed sum kind.
         kind: StepClosedKind,
-        /// Post-user typed transcript delta required for finalization/reopen.
-        messages: Vec<NativeMessage<lattice_conversation::BoundToolCall>>,
     },
-    /// The exact canonical `Committed` and TurnCommit candidate identities
-    /// are pinned (including every commit-time field); the final ref
-    /// transaction has not necessarily run.
+    /// The exact final TurnCommit candidate is pinned.
     TurnClosing(TurnClosingFacts),
-    /// The immutable final journal object constructed with the TurnCommit
-    /// candidate. Never published through `active-turn`.
+    /// The immutable final journal object.
     Committed(CommittedFacts),
 }
 
 impl PendingStage {
-    /// The stable stage name (wire spelling of the serde tag).
+    /// Stable wire name of this stage.
     pub fn stage_name(&self) -> &'static str {
         match self {
             Self::TurnStarted(_) => "turn_started",
@@ -130,8 +110,7 @@ impl PendingStage {
         }
     }
 
-    /// Validate this stage's own payload invariants (identity consistency is
-    /// checked against the snapshot envelope by [`PendingSnapshot::validate`]).
+    /// Validate this stage's local payload invariants.
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::TurnStarted(facts) => facts.validate(),
@@ -143,27 +122,14 @@ impl PendingStage {
                 validate_attempt_key(key)?;
                 if message.tool_calls().next().is_some() {
                     return Err(SessionError::JournalCorruption {
-                        detail: "MessageComplete must be zero-Tool; a Tool-bearing valid \
-                                 message is BindingPlanned"
-                            .to_string(),
+                        detail: "MessageComplete must be zero-Tool; a Tool-bearing valid message is BindingPlanned".into(),
                     });
                 }
                 Ok(())
             }
-            Self::BindingPlanned { plan, .. } => plan.validate(),
-            Self::Bound { plan } => plan.validate(),
+            Self::BindingPlanned { plan, .. } | Self::Bound { plan } => plan.validate(),
             Self::StepClosing(state) => state.validate(),
-            Self::StepClosed { kind, messages } => {
-                validate_step_closed(kind)?;
-                for message in messages {
-                    if message.role == MessageRole::System || message.role == MessageRole::User {
-                        return Err(SessionError::JournalCorruption {
-                            detail: "StepClosed transcript delta contains a root message".into(),
-                        });
-                    }
-                }
-                Ok(())
-            }
+            Self::StepClosed { kind } => validate_step_closed(kind),
             Self::TurnClosing(facts) => facts.validate(),
             Self::Committed(facts) => facts.validate(),
         }
@@ -179,14 +145,17 @@ fn validate_attempt_key(key: &ModelAttemptKey) -> Result<()> {
             ),
         });
     }
+    if key.attempt_ordinal >= MAX_MODEL_ATTEMPTS {
+        return Err(SessionError::JournalCorruption {
+            detail: format!(
+                "model attempt ordinal {} reaches the code-defined limit {MAX_MODEL_ATTEMPTS}",
+                key.attempt_ordinal
+            ),
+        });
+    }
     Ok(())
 }
 
-/// Every structural Tool-call address in a journal snapshot must name the
-/// session that owns the journal. A binding digest is self-consistent over
-/// its own tuple (including the session), so the binding cannot detect a
-/// foreign session by itself; the snapshot is the nearest contract layer
-/// that knows the expected `SessionId` (ADR 0005 §9/§11).
 fn validate_binding_sessions<'a>(
     bindings: impl IntoIterator<Item = &'a PlannedBinding>,
     session_id: &SessionId,
@@ -204,8 +173,6 @@ fn validate_binding_sessions<'a>(
     Ok(())
 }
 
-/// The pinned candidate is the final publication input; it must name the
-/// journal's own session (ADR 0005 §6/§9).
 fn validate_candidate_session(
     candidate: &TurnCommitCandidate,
     session_id: &SessionId,
@@ -227,15 +194,17 @@ fn validate_step_closed(kind: &StepClosedKind) -> Result<()> {
         StepClosedKind::FinishTurn { final_message } => {
             if final_message.tool_calls().next().is_some() {
                 return Err(SessionError::JournalCorruption {
-                    detail: "FinishTurn final message must be zero-Tool".to_string(),
+                    detail: "FinishTurn final message must be zero-Tool".into(),
                 });
             }
-            for part in &final_message.parts {
-                if let MessageSemantic::ToolResult { .. } = part.semantic {
-                    return Err(SessionError::JournalCorruption {
-                        detail: "FinishTurn final message must not carry tool results".to_string(),
-                    });
-                }
+            if final_message
+                .parts
+                .iter()
+                .any(|part| matches!(part.semantic, MessageSemantic::ToolResult { .. }))
+            {
+                return Err(SessionError::JournalCorruption {
+                    detail: "FinishTurn final message must not carry tool results".into(),
+                });
             }
             Ok(())
         }
@@ -247,19 +216,14 @@ fn validate_step_closed(kind: &StepClosedKind) -> Result<()> {
             if *model_step_ordinal >= MAX_MODEL_STEPS {
                 return Err(SessionError::JournalCorruption {
                     detail: format!(
-                        "closed model step {model_step_ordinal} reaches the code-defined \
-                         limit {MAX_MODEL_STEPS}"
+                        "closed model step {model_step_ordinal} reaches the code-defined limit {MAX_MODEL_STEPS}"
                     ),
                 });
             }
-            // A ContinueModel closes a binding plan, and a plan carries at
-            // least one binding, so the closure set is never empty. Its
-            // binding addresses are the durable witness that the recorded
-            // step ordinal is not a caller's assertion (ADR 0005 §9).
             if ordered_tool_results.is_empty() {
                 return Err(SessionError::JournalCorruption {
                     detail: "ContinueModel closes a binding plan and must carry its closures"
-                        .to_string(),
+                        .into(),
                 });
             }
             for closure in ordered_tool_results {
@@ -267,8 +231,7 @@ fn validate_step_closed(kind: &StepClosedKind) -> Result<()> {
                 if closure.binding.address.message.model_step_ordinal != *model_step_ordinal {
                     return Err(SessionError::JournalCorruption {
                         detail: format!(
-                            "ContinueModel names step {model_step_ordinal} but closes a \
-                             binding of step {}",
+                            "ContinueModel names step {model_step_ordinal} but closes a binding of step {}",
                             closure.binding.address.message.model_step_ordinal
                         ),
                     });
@@ -282,46 +245,100 @@ fn validate_step_closed(kind: &StepClosedKind) -> Result<()> {
     }
 }
 
-/// The exact pinned TurnCommit candidate: every identity- and commit-time
-/// field of the final conversation commit, frozen before the final ref
-/// transaction is attempted. Recovery never reconstructs these from a new
-/// clock or mutable input (ADR 0005 §6/§9).
+/// Every immutable TurnCommit input except the workspace-history checkpoint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TurnCommitCandidate {
-    /// Owning session (store id form).
+pub struct TurnCommitCandidateBasis {
+    /// Owning session.
     pub session_id: String,
-    /// The Turn's explicit identity.
+    /// Turn identity.
     pub turn_id: TurnId,
-    /// Logical conversation side-parents beyond the frozen tip (merge
-    /// topologies). The frozen parent tip itself is journal authority — the
-    /// chain root's `parent_conversation_tip` — and never a candidate
-    /// input, so recovery cannot misstate lineage from mutable input.
+    /// Logical conversation side parents.
     pub side_parent_ids: Vec<String>,
-    /// Transcript content in order (user message, closures, final message).
+    /// Exact Turn transcript.
     pub messages: Vec<NativeMessage<BoundToolCall>>,
-    /// Agent name for the commit projection.
+    /// Agent projection.
     pub agent_name: String,
-    /// Frozen profile snapshot hash.
+    /// Frozen profile digest.
     pub profile_snapshot_hash: String,
-    /// Frozen canonical profile snapshot JSON.
+    /// Frozen profile JSON.
     pub profile_snapshot_json: String,
-    /// Frozen model selection.
+    /// Frozen model.
     pub model: String,
-    /// Frozen provider selection.
+    /// Frozen provider.
     pub provider: String,
-    /// The typed Turn outcome authority.
+    /// Typed Turn outcome.
     pub outcome: TurnOutcome,
-    /// Whether this outcome was decided live or by reconciliation.
+    /// Live or reconciled closure authority.
     pub origin: ClosureOrigin,
     /// Commit message.
     pub commit_message: String,
-    /// Derived per-Turn usage aggregate, when any attempt reported usage.
+    /// Derived usage aggregate.
     pub usage_aggregate: Option<TurnUsageAggregate>,
-    /// Project-global workspace-history checkpoint (ADR 0005 §15).
+    /// Pinned RFC 3339 commit time.
+    pub created_at: String,
+}
+
+impl TurnCommitCandidateBasis {
+    /// Add the authoritative workspace-history checkpoint.
+    pub fn with_workspace_history_checkpoint(
+        self,
+        workspace_history_checkpoint: super::outcome::WorkspaceHistoryCheckpoint,
+    ) -> Result<TurnCommitCandidate> {
+        workspace_history_checkpoint.validate()?;
+        let candidate = TurnCommitCandidate {
+            session_id: self.session_id,
+            turn_id: self.turn_id,
+            side_parent_ids: self.side_parent_ids,
+            messages: self.messages,
+            agent_name: self.agent_name,
+            profile_snapshot_hash: self.profile_snapshot_hash,
+            profile_snapshot_json: self.profile_snapshot_json,
+            model: self.model,
+            provider: self.provider,
+            outcome: self.outcome,
+            origin: self.origin,
+            commit_message: self.commit_message,
+            usage_aggregate: self.usage_aggregate,
+            workspace_history_checkpoint,
+            created_at: self.created_at,
+        };
+        candidate.validate()?;
+        Ok(candidate)
+    }
+}
+
+/// Exact pinned TurnCommit candidate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnCommitCandidate {
+    /// Owning session.
+    pub session_id: String,
+    /// Turn identity.
+    pub turn_id: TurnId,
+    /// Logical conversation side parents.
+    pub side_parent_ids: Vec<String>,
+    /// Exact Turn transcript.
+    pub messages: Vec<NativeMessage<BoundToolCall>>,
+    /// Agent projection.
+    pub agent_name: String,
+    /// Frozen profile digest.
+    pub profile_snapshot_hash: String,
+    /// Frozen profile JSON.
+    pub profile_snapshot_json: String,
+    /// Frozen model.
+    pub model: String,
+    /// Frozen provider.
+    pub provider: String,
+    /// Typed Turn outcome.
+    pub outcome: TurnOutcome,
+    /// Live or reconciled closure authority.
+    pub origin: ClosureOrigin,
+    /// Commit message.
+    pub commit_message: String,
+    /// Derived usage aggregate.
+    pub usage_aggregate: Option<TurnUsageAggregate>,
+    /// Project-global workspace-history checkpoint.
     pub workspace_history_checkpoint: super::outcome::WorkspaceHistoryCheckpoint,
-    /// Pinned commit-time timestamp (RFC 3339). Reconciled closures pin the
-    /// durable journal tip's commit time; a live owner pins its own clock at
-    /// pinning time. Either way the value is frozen here before publication.
+    /// Pinned RFC 3339 commit time.
     pub created_at: String,
 }
 
@@ -329,28 +346,48 @@ impl TurnCommitCandidate {
     fn validate(&self) -> Result<()> {
         if self.session_id.is_empty() || self.agent_name.is_empty() {
             return Err(SessionError::JournalCorruption {
-                detail: "candidate session/agent must not be empty".to_string(),
+                detail: "candidate session/agent must not be empty".into(),
             });
         }
         if self.messages.is_empty() {
             return Err(SessionError::JournalCorruption {
-                detail: "candidate must carry the user message".to_string(),
+                detail: "candidate must carry the user message".into(),
             });
         }
-        chrono::DateTime::parse_from_rfc3339(&self.created_at)
-            .map_err(|e| SessionError::JournalCorruption {
-                detail: format!("candidate created_at is not RFC 3339: {e}"),
-            })
-            .map(|_| ())
+        chrono::DateTime::parse_from_rfc3339(&self.created_at).map_err(|error| {
+            SessionError::JournalCorruption {
+                detail: format!("candidate created_at is not RFC 3339: {error}"),
+            }
+        })?;
+        self.workspace_history_checkpoint.validate()
+    }
+
+    fn basis(&self) -> TurnCommitCandidateBasis {
+        TurnCommitCandidateBasis {
+            session_id: self.session_id.clone(),
+            turn_id: self.turn_id,
+            side_parent_ids: self.side_parent_ids.clone(),
+            messages: self.messages.clone(),
+            agent_name: self.agent_name.clone(),
+            profile_snapshot_hash: self.profile_snapshot_hash.clone(),
+            profile_snapshot_json: self.profile_snapshot_json.clone(),
+            model: self.model.clone(),
+            provider: self.provider.clone(),
+            outcome: self.outcome.clone(),
+            origin: self.origin,
+            commit_message: self.commit_message.clone(),
+            usage_aggregate: self.usage_aggregate,
+            created_at: self.created_at.clone(),
+        }
     }
 }
 
-/// The facts pinned by `TurnClosing`.
+/// Facts pinned by `TurnClosing`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnClosingFacts {
-    /// The Turn being closed.
+    /// Turn being closed.
     pub turn_id: TurnId,
-    /// The pinned TurnCommit candidate.
+    /// Exact pinned candidate.
     pub candidate: TurnCommitCandidate,
 }
 
@@ -358,20 +395,19 @@ impl TurnClosingFacts {
     fn validate(&self) -> Result<()> {
         if self.candidate.turn_id != self.turn_id {
             return Err(SessionError::JournalCorruption {
-                detail: "TurnClosing candidate names a different Turn".to_string(),
+                detail: "TurnClosing candidate names a different Turn".into(),
             });
         }
         self.candidate.validate()
     }
 }
 
-/// The payload of the final `Committed` journal object: the data used to
-/// construct the TurnCommit, never its OID (ADR 0005 §9).
+/// Payload of the final `Committed` journal object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommittedFacts {
-    /// The Turn being committed.
+    /// Turn being committed.
     pub turn_id: TurnId,
-    /// The exact candidate the TurnCommit was constructed from.
+    /// Exact candidate used to construct the TurnCommit.
     pub candidate: TurnCommitCandidate,
 }
 
@@ -379,46 +415,41 @@ impl CommittedFacts {
     fn validate(&self) -> Result<()> {
         if self.candidate.turn_id != self.turn_id {
             return Err(SessionError::JournalCorruption {
-                detail: "Committed candidate names a different Turn".to_string(),
+                detail: "Committed candidate names a different Turn".into(),
             });
         }
         self.candidate.validate()
     }
 }
 
-/// One immutable PendingTurn journal snapshot. `recorded_at` carries the
-/// journal commit's own committer time and `root` the chain's `TurnStarted`
-/// facts; both are durable metadata filled by the store on read, never part
-/// of the canonical payload bytes.
+/// One immutable PendingTurn journal snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSnapshot {
-    /// Payload schema version; must equal
-    /// [`PENDING_SNAPSHOT_SCHEMA_VERSION`].
+    /// Payload schema version.
     pub schema_version: u32,
     /// Owning session.
     pub session_id: SessionId,
-    /// The pending Turn's identity; identical across the whole chain.
+    /// Turn identity.
     pub turn_id: TurnId,
-    /// Predecessor snapshot commit oid hex; `None` only for `TurnStarted`.
+    /// Predecessor snapshot object id.
     pub predecessor: Option<String>,
-    /// The durable state this snapshot records.
+    /// Sole cumulative post-user transcript authority.
+    pub post_user_transcript: Vec<NativeMessage<BoundToolCall>>,
+    /// Durable state.
     pub stage: PendingStage,
-    /// Committer time of the journal commit this snapshot was read from
-    /// (unix seconds); filled by the store, skipped on the wire.
+    /// Committer time, populated by the store on read.
     #[serde(skip)]
     pub recorded_at: Option<i64>,
-    /// The chain root's `TurnStarted` facts (user message, frozen parent
-    /// tip, frozen limits), filled by the store for every non-`TurnStarted`
-    /// tip; a `TurnStarted` tip is its own root. Reconciliation needs the
-    /// frozen facts and the journal chain is the only authority for them.
+    /// Chain-root facts, populated by the store on read.
     #[serde(skip)]
     pub root: Option<TurnStartedFacts>,
+    /// Per-attempt usage derived from the validated lineage.
+    #[serde(skip)]
+    pub attempt_usages: Vec<Option<TokenUsage>>,
 }
 
 impl PendingSnapshot {
-    /// Validate the envelope: schema version, identity presence, the
-    /// stage's own payload, stage/turn consistency, and root consistency
-    /// when the store filled it.
+    /// Validate envelope and stage-local invariants.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != PENDING_SNAPSHOT_SCHEMA_VERSION {
             return Err(SessionError::JournalCorruption {
@@ -432,46 +463,65 @@ impl PendingSnapshot {
             && (root.turn_id != self.turn_id || root.session_id != self.session_id)
         {
             return Err(SessionError::JournalCorruption {
-                detail: "chain root facts do not match the snapshot identity".to_string(),
+                detail: "chain root facts do not match the snapshot identity".into(),
             });
         }
+        validate_post_user_transcript(&self.post_user_transcript)?;
         self.stage.validate()?;
         match &self.stage {
             PendingStage::TurnStarted(facts) => {
+                if !self.post_user_transcript.is_empty() {
+                    return Err(SessionError::JournalCorruption {
+                        detail: "TurnStarted must have an empty post-user transcript".into(),
+                    });
+                }
                 if self.predecessor.is_some() {
                     return Err(SessionError::JournalCorruption {
-                        detail: "TurnStarted must be the first journal snapshot".to_string(),
+                        detail: "TurnStarted must be the first journal snapshot".into(),
                     });
                 }
                 if facts.turn_id != self.turn_id || facts.session_id != self.session_id {
                     return Err(SessionError::JournalCorruption {
-                        detail: "TurnStarted facts do not match the snapshot identity".to_string(),
+                        detail: "TurnStarted facts do not match the snapshot identity".into(),
                     });
                 }
             }
             PendingStage::ModelAttemptStarted { key }
             | PendingStage::ModelAttemptFailed { key, .. }
             | PendingStage::ModelAttemptInterrupted { key, .. }
-            | PendingStage::ModelAttemptRejected { key, .. }
-            | PendingStage::MessageComplete { key, .. } => {
-                if key.turn_id != self.turn_id {
+            | PendingStage::ModelAttemptRejected { key, .. } => self.validate_attempt(key)?,
+            PendingStage::MessageComplete { key, message, .. } => {
+                self.validate_attempt(key)?;
+                let expected = message.clone().bind_zero_tool().map_err(|_| {
+                    SessionError::JournalCorruption {
+                        detail: "MessageComplete contains a ToolCall".into(),
+                    }
+                })?;
+                if self.post_user_transcript.last() != Some(&expected) {
                     return Err(SessionError::JournalCorruption {
-                        detail: "attempt key does not match the snapshot Turn".to_string(),
+                        detail: "MessageComplete transcript does not end in its message".into(),
                     });
                 }
             }
             PendingStage::BindingPlanned { plan, .. } | PendingStage::Bound { plan } => {
+                if self.post_user_transcript.last() != Some(&plan.bound_message()?) {
+                    return Err(SessionError::JournalCorruption {
+                        detail: "binding stage transcript does not end in its bound assistant"
+                            .into(),
+                    });
+                }
                 if plan.plan_key.turn_id != self.turn_id {
                     return Err(SessionError::JournalCorruption {
-                        detail: "plan key does not match the snapshot Turn".to_string(),
+                        detail: "plan key does not match the snapshot Turn".into(),
                     });
                 }
                 validate_binding_sessions(&plan.bindings, &self.session_id)?;
             }
             PendingStage::StepClosing(state) => {
+                state.validate_transcript(&self.post_user_transcript)?;
                 if state.plan_key.turn_id != self.turn_id {
                     return Err(SessionError::JournalCorruption {
-                        detail: "step closing plan does not match the snapshot Turn".to_string(),
+                        detail: "step closing plan does not match the snapshot Turn".into(),
                     });
                 }
                 validate_binding_sessions(&state.bindings, &self.session_id)?;
@@ -486,7 +536,8 @@ impl PendingSnapshot {
                     });
                 }
             }
-            PendingStage::StepClosed { kind, .. } => {
+            PendingStage::StepClosed { kind } => {
+                validate_step_closed_transcript(kind, &self.post_user_transcript)?;
                 if let StepClosedKind::ContinueModel {
                     ordered_tool_results,
                     ..
@@ -501,57 +552,499 @@ impl PendingSnapshot {
             PendingStage::TurnClosing(facts) => {
                 if facts.turn_id != self.turn_id {
                     return Err(SessionError::JournalCorruption {
-                        detail: "TurnClosing facts do not match the snapshot Turn".to_string(),
+                        detail: "TurnClosing facts do not match the snapshot Turn".into(),
                     });
                 }
                 validate_candidate_session(&facts.candidate, &self.session_id)?;
+                self.validate_candidate_transcript(&facts.candidate)?;
             }
             PendingStage::Committed(facts) => {
                 if facts.turn_id != self.turn_id {
                     return Err(SessionError::JournalCorruption {
-                        detail: "Committed facts do not match the snapshot Turn".to_string(),
+                        detail: "Committed facts do not match the snapshot Turn".into(),
                     });
                 }
                 validate_candidate_session(&facts.candidate, &self.session_id)?;
+                self.validate_candidate_transcript(&facts.candidate)?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_attempt(&self, key: &ModelAttemptKey) -> Result<()> {
+        validate_attempt_key(key)?;
+        if key.turn_id != self.turn_id {
+            return Err(SessionError::JournalCorruption {
+                detail: "attempt key does not match the snapshot Turn".into(),
+            });
+        }
+        if let Some(root) = &self.root
+            && key.attempt_ordinal >= root.config.limits.max_model_attempts
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "model attempt ordinal {} reaches the frozen per-step limit {}",
+                    key.attempt_ordinal, root.config.limits.max_model_attempts
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Exact full Turn transcript.
+    pub fn turn_messages(&self) -> Result<Vec<NativeMessage<BoundToolCall>>> {
+        let root = self.turn_started_facts()?;
+        let mut messages = vec![root.user_message.clone().bind_zero_tool().map_err(|_| {
+            SessionError::JournalCorruption {
+                detail: "TurnStarted user message contains a ToolCall".into(),
+            }
+        })?];
+        messages.extend(self.post_user_transcript.clone());
+        Ok(messages)
+    }
+
+    /// Derive all journal-owned candidate fields from one authoritative seam.
+    pub fn turn_commit_candidate_basis(
+        &self,
+        outcome: TurnOutcome,
+        origin: ClosureOrigin,
+    ) -> Result<TurnCommitCandidateBasis> {
+        let root = self.turn_started_facts()?;
+        let recorded_at = self
+            .recorded_at
+            .ok_or_else(|| SessionError::JournalCorruption {
+                detail: "snapshot carries no journal committer time".into(),
+            })?;
+        let created_at = chrono::DateTime::from_timestamp(recorded_at, 0)
+            .ok_or_else(|| SessionError::JournalCorruption {
+                detail: format!("journal committer time {recorded_at} is not representable"),
+            })?
+            .to_rfc3339();
+        let messages = self.turn_messages()?;
+        Ok(TurnCommitCandidateBasis {
+            session_id: self.session_id.to_string(),
+            turn_id: self.turn_id,
+            side_parent_ids: Vec::new(),
+            commit_message: crate::graph::derive_commit_message(&messages),
+            messages,
+            agent_name: root.config.agent_name.clone(),
+            profile_snapshot_hash: super::encode_hex(&root.config.digest()?),
+            profile_snapshot_json: root.config.profile_snapshot_json.clone(),
+            model: root.config.model.clone(),
+            provider: root.config.provider.clone(),
+            outcome,
+            origin,
+            usage_aggregate: TurnUsageAggregate::derive(&self.attempt_usages),
+            created_at,
+        })
+    }
+
+    fn turn_started_facts(&self) -> Result<&TurnStartedFacts> {
+        match &self.stage {
+            PendingStage::TurnStarted(facts) => Ok(facts),
+            _ => self
+                .root
+                .as_ref()
+                .ok_or_else(|| SessionError::JournalCorruption {
+                    detail: "snapshot carries no chain-root TurnStarted facts".into(),
+                }),
+        }
+    }
+
+    fn validate_candidate_transcript(&self, candidate: &TurnCommitCandidate) -> Result<()> {
+        if (self.root.is_some() || matches!(self.stage, PendingStage::TurnStarted(_)))
+            && candidate.messages != self.turn_messages()?
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: "pinned candidate transcript differs from the journal authority".into(),
+            });
         }
         Ok(())
     }
 }
 
-fn step_closing_messages(state: &StepClosingState) -> Vec<NativeMessage<BoundToolCall>> {
-    state.messages.clone()
+fn validate_post_user_transcript(messages: &[NativeMessage<BoundToolCall>]) -> Result<()> {
+    for (index, message) in messages.iter().enumerate() {
+        match message.role {
+            MessageRole::Assistant => {
+                if message.parts.iter().any(|part| {
+                    matches!(
+                        part.semantic,
+                        lattice_conversation::MessageSemantic::ToolResult { .. }
+                    )
+                }) {
+                    return Err(SessionError::JournalCorruption {
+                        detail: format!("assistant transcript message {index} contains ToolResult"),
+                    });
+                }
+            }
+            MessageRole::Tool => {
+                let [part] = message.parts.as_slice() else {
+                    return Err(SessionError::JournalCorruption {
+                        detail: format!(
+                            "tool transcript message {index} is not one exact ToolResult"
+                        ),
+                    });
+                };
+                if message.provider_origin.is_some()
+                    || !matches!(
+                        part.semantic,
+                        lattice_conversation::MessageSemantic::ToolResult { .. }
+                    )
+                {
+                    return Err(SessionError::JournalCorruption {
+                        detail: format!(
+                            "tool transcript message {index} is not one exact ToolResult"
+                        ),
+                    });
+                }
+            }
+            MessageRole::System | MessageRole::User => {
+                return Err(SessionError::JournalCorruption {
+                    detail: format!("post-user transcript contains root role at message {index}"),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
-/// Pure stage-transition validation: may `next` legally follow `prev` in one
-/// Turn's journal (ADR 0005 §9/§10)? Structural stage-shape rules; the
-/// publication CAS remains the authority for race safety.
-///
-/// Rules:
-///
-/// - `TurnStarted` is only legal as the first snapshot (no predecessor).
-/// - A model step starts from `TurnStarted` (step 0) or
-///   `StepClosed(ContinueModel)` (the next ordinal), or a retry attempt
-///   starts from a retryable `ModelAttemptFailed` of the same step.
-/// - `ModelAttemptFailed`/`Interrupted`/`Rejected`/`MessageComplete`/
-///   `BindingPlanned` follow `ModelAttemptStarted` of the same attempt key.
-/// - `MessageComplete` must be zero-Tool; `BindingPlanned` must carry at
-///   least one binding.
-/// - `Bound` follows `BindingPlanned` with the byte-equal exact plan.
-/// - `StepClosing` follows `Bound` (cursor 0) or `StepClosing` (advance the
-///   lowest unclosed ordinal only: pin the current candidate, then extend
-///   closures by exactly one, never both at once).
-/// - `StepClosed` follows `StepClosing` with every binding closed, or closes
-///   the Turn early from `TurnStarted`/attempt stages/`MessageComplete`/
-///   `BindingPlanned`/`Bound` (reopen closure paths).
-/// - `TurnClosing` follows `StepClosed`.
-/// - `Committed` never follows anything through `active-turn`.
+fn validate_step_closed_transcript(
+    kind: &StepClosedKind,
+    transcript: &[NativeMessage<BoundToolCall>],
+) -> Result<()> {
+    match kind {
+        StepClosedKind::FinishTurn { final_message } => {
+            let expected = final_message.clone().bind_zero_tool().map_err(|_| {
+                SessionError::JournalCorruption {
+                    detail: "FinishTurn message contains a ToolCall".into(),
+                }
+            })?;
+            if transcript.last() == Some(&expected) {
+                Ok(())
+            } else {
+                Err(SessionError::JournalCorruption {
+                    detail: "FinishTurn transcript does not end in its final message".into(),
+                })
+            }
+        }
+        StepClosedKind::ContinueModel {
+            model_step_ordinal,
+            ordered_tool_results,
+            conversation_digest,
+        } => {
+            let first =
+                ordered_tool_results
+                    .first()
+                    .ok_or_else(|| SessionError::JournalCorruption {
+                        detail: "ContinueModel carries no ToolResult closures".into(),
+                    })?;
+            let state = StepClosingState {
+                plan_key: lancet_protocol::PlanKey {
+                    turn_id: first.binding.address.message.turn_id,
+                    model_step_ordinal: *model_step_ordinal,
+                },
+                bindings: ordered_tool_results
+                    .iter()
+                    .map(|closure| closure.binding.clone())
+                    .collect(),
+                closure_cursor: ordered_tool_results.len() as u32,
+                closures: ordered_tool_results.clone(),
+                current_candidate: None,
+            };
+            state.validate_transcript(transcript)?;
+            let suffix_len = ordered_tool_results.len().checked_add(1).ok_or_else(|| {
+                SessionError::JournalCorruption {
+                    detail: "ContinueModel transcript suffix length overflowed".into(),
+                }
+            })?;
+            let assistant_index = transcript.len().checked_sub(suffix_len).ok_or_else(|| {
+                SessionError::JournalCorruption {
+                    detail: "ContinueModel transcript omits its bound assistant".into(),
+                }
+            })?;
+            let assistant =
+                transcript
+                    .get(assistant_index)
+                    .ok_or_else(|| SessionError::JournalCorruption {
+                        detail: "ContinueModel transcript omits its bound assistant".into(),
+                    })?;
+            if step_conversation_digest(assistant, ordered_tool_results) != *conversation_digest {
+                return Err(SessionError::JournalCorruption {
+                    detail: "ContinueModel conversation digest differs from its transcript".into(),
+                });
+            }
+            Ok(())
+        }
+        StepClosedKind::FailTurn { .. }
+        | StepClosedKind::CancelTurn { .. }
+        | StepClosedKind::InterruptTurn { .. } => Ok(()),
+    }
+}
+
+/// Derive the sole transcript bytes for a legal next stage.
+pub(crate) fn next_post_user_transcript(
+    prev: &PendingSnapshot,
+    next: &PendingStage,
+) -> Result<Vec<NativeMessage<BoundToolCall>>> {
+    validate_transition(&prev.stage, next)?;
+    let mut transcript = prev.post_user_transcript.clone();
+    match next {
+        PendingStage::MessageComplete { message, .. } => {
+            transcript.push(message.clone().bind_zero_tool().map_err(|_| {
+                SessionError::InvalidInput("MessageComplete contains a ToolCall".into())
+            })?);
+        }
+        PendingStage::BindingPlanned { plan, .. } => transcript.push(plan.bound_message()?),
+        PendingStage::StepClosed {
+            kind: StepClosedKind::FinishTurn { final_message },
+        } => {
+            let message = final_message.clone().bind_zero_tool().map_err(|_| {
+                SessionError::InvalidInput("FinishTurn message contains a ToolCall".into())
+            })?;
+            if transcript.last() != Some(&message) {
+                transcript.push(message);
+            }
+        }
+        PendingStage::StepClosing(next_state) => {
+            if let PendingStage::StepClosing(prev_state) = &prev.stage
+                && next_state.closure_cursor == prev_state.closure_cursor + 1
+            {
+                let closure = next_state.closures.last().ok_or_else(|| {
+                    SessionError::InvalidInput("cursor advance omitted its closure".into())
+                })?;
+                let content = match &closure.material {
+                    super::step::MaterialAvailability::Available { .. } => Some(
+                        prev_state
+                            .current_candidate
+                            .as_ref()
+                            .ok_or_else(|| {
+                                SessionError::InvalidInput(
+                                    "available closure has no pinned ResultDraft".into(),
+                                )
+                            })?
+                            .canonical_tool_content
+                            .clone(),
+                    ),
+                    super::step::MaterialAvailability::Unavailable { .. } => None,
+                };
+                transcript.push(closure_transcript(closure, content));
+            }
+        }
+        _ => {}
+    }
+    Ok(transcript)
+}
+
+/// Map a closed step to its only legal Turn outcome.
+pub(crate) fn step_closed_turn_outcome(kind: &StepClosedKind) -> TurnOutcome {
+    match kind {
+        StepClosedKind::FinishTurn { .. } => TurnOutcome::Completed {
+            finish_reason: super::outcome::TurnFinishReason::Stop,
+        },
+        StepClosedKind::ContinueModel { .. } => TurnOutcome::Interrupted {
+            reason: super::outcome::TurnInterruption::WhileAwaitingModelContinuation,
+        },
+        StepClosedKind::FailTurn { reason } => TurnOutcome::Failed {
+            reason: reason.clone(),
+        },
+        StepClosedKind::CancelTurn { reason } => TurnOutcome::Cancelled { reason: *reason },
+        StepClosedKind::InterruptTurn { reason } => TurnOutcome::Interrupted {
+            reason: reason.clone(),
+        },
+    }
+}
+
+fn authenticate_snapshot_edge(prev: &PendingSnapshot, next: &PendingSnapshot) -> Result<()> {
+    match (&prev.stage, &next.stage) {
+        (
+            PendingStage::StepClosing(state),
+            PendingStage::StepClosed {
+                kind:
+                    StepClosedKind::ContinueModel {
+                        ordered_tool_results,
+                        conversation_digest,
+                        ..
+                    },
+            },
+        ) => {
+            if ordered_tool_results != &state.closures {
+                return Err(SessionError::JournalCorruption {
+                    detail: "ContinueModel closures differ from the preceding StepClosing state"
+                        .into(),
+                });
+            }
+            let suffix_len = state.closures.len().checked_add(1).ok_or_else(|| {
+                SessionError::JournalCorruption {
+                    detail: "StepClosing transcript suffix length overflowed".into(),
+                }
+            })?;
+            let assistant_index = prev
+                .post_user_transcript
+                .len()
+                .checked_sub(suffix_len)
+                .ok_or_else(|| SessionError::JournalCorruption {
+                    detail: "StepClosing transcript omits its bound assistant".into(),
+                })?;
+            let assistant = prev
+                .post_user_transcript
+                .get(assistant_index)
+                .ok_or_else(|| SessionError::JournalCorruption {
+                    detail: "StepClosing transcript omits its bound assistant".into(),
+                })?;
+            if *conversation_digest != step_conversation_digest(assistant, &state.closures) {
+                return Err(SessionError::JournalCorruption {
+                    detail:
+                        "ContinueModel digest is not derived from the preceding StepClosing state"
+                            .into(),
+                });
+            }
+        }
+        (
+            PendingStage::StepClosed { kind },
+            PendingStage::TurnClosing(TurnClosingFacts { candidate, .. }),
+        ) => {
+            candidate.workspace_history_checkpoint.validate()?;
+            let expected =
+                prev.turn_commit_candidate_basis(step_closed_turn_outcome(kind), candidate.origin)?;
+            if candidate.basis() != expected {
+                return Err(SessionError::JournalCorruption {
+                    detail: "TurnClosing candidate differs from the preceding journal authority"
+                        .into(),
+                });
+            }
+        }
+        (PendingStage::TurnClosing(previous), PendingStage::Committed(committed))
+            if previous.turn_id != committed.turn_id
+                || previous.candidate != committed.candidate =>
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: "Committed must preserve the exact TurnClosing candidate".into(),
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validate one complete persisted journal edge.
+pub(crate) fn validate_snapshot_transition(
+    prev: &PendingSnapshot,
+    next: &PendingSnapshot,
+) -> Result<()> {
+    prev.validate()?;
+    next.validate()?;
+    if prev.session_id != next.session_id || prev.turn_id != next.turn_id {
+        return Err(SessionError::JournalCorruption {
+            detail: "journal edge changes SessionId or TurnId".into(),
+        });
+    }
+    authenticate_snapshot_edge(prev, next)?;
+    let expected = match (&prev.stage, &next.stage) {
+        (PendingStage::TurnClosing(previous), PendingStage::Committed(committed))
+            if previous.turn_id == committed.turn_id
+                && previous.candidate == committed.candidate =>
+        {
+            prev.post_user_transcript.clone()
+        }
+        (
+            PendingStage::BindingPlanned { plan: original, .. },
+            PendingStage::BindingPlanned { plan: revised, .. },
+        ) if is_candidate_revision_of(&prev.stage, &next.stage) => {
+            let mut transcript = prev.post_user_transcript.clone();
+            let last = transcript
+                .last_mut()
+                .ok_or_else(|| SessionError::JournalCorruption {
+                    detail: "candidate revision has no bound assistant to replace".into(),
+                })?;
+            if *last != original.bound_message()? {
+                return Err(SessionError::JournalCorruption {
+                    detail: "candidate revision predecessor transcript differs from its plan"
+                        .into(),
+                });
+            }
+            *last = revised.bound_message()?;
+            transcript
+        }
+        (PendingStage::BindingPlanned { .. }, PendingStage::BindingPlanned { .. }) => {
+            return Err(SessionError::JournalCorruption {
+                detail: "BindingPlanned revision changed more than candidate identities and derived bindings"
+                    .into(),
+            });
+        }
+        _ => next_post_user_transcript(prev, &next.stage).map_err(|error| {
+            SessionError::JournalCorruption {
+                detail: format!("illegal journal transition: {error}"),
+            }
+        })?,
+    };
+    if next.post_user_transcript != expected {
+        return Err(SessionError::JournalCorruption {
+            detail: "cumulative transcript is omitted, duplicated, forged, reordered, or prefix-divergent"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether `revised` is the sole legal same-stage candidate revision.
+pub(crate) fn is_candidate_revision_of(original: &PendingStage, revised: &PendingStage) -> bool {
+    let (
+        PendingStage::BindingPlanned {
+            plan: original,
+            usage: original_usage,
+        },
+        PendingStage::BindingPlanned {
+            plan: revised,
+            usage: revised_usage,
+        },
+    ) = (original, revised)
+    else {
+        return false;
+    };
+    if original_usage != revised_usage {
+        return false;
+    }
+    use std::collections::BTreeSet;
+    if original.plan_key != revised.plan_key
+        || original.message != revised.message
+        || original.bindings.len() != revised.bindings.len()
+    {
+        return false;
+    }
+    let original_ids: BTreeSet<_> = original
+        .bindings
+        .iter()
+        .map(|binding| binding.invocation_id)
+        .collect();
+    let mut revised_ids = BTreeSet::new();
+    original
+        .bindings
+        .iter()
+        .zip(&revised.bindings)
+        .all(|(before, after)| {
+            !original_ids.contains(&after.invocation_id)
+                && before.address == after.address
+                && before.method == after.method
+                && before.descriptor_identity == after.descriptor_identity
+                && before.arguments_digest == after.arguments_digest
+                && after.binding_digest
+                    == PlannedBinding::compute_binding_digest(
+                        &after.invocation_id,
+                        &after.address,
+                        &after.method,
+                        &after.descriptor_identity,
+                        &after.arguments_digest,
+                    )
+                && revised_ids.insert(after.invocation_id)
+        })
+}
+
+/// Pure structural stage-transition validation.
 pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<()> {
     use PendingStage::*;
     let mismatch = |detail: String| Err(SessionError::InvalidInput(detail));
-    let same_attempt = |started: &lancet_protocol::ModelAttemptKey,
-                        done: &lancet_protocol::ModelAttemptKey|
-     -> Result<()> {
+    let same_attempt = |started: &ModelAttemptKey, done: &ModelAttemptKey| -> Result<()> {
         if started == done {
             Ok(())
         } else {
@@ -561,8 +1054,6 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
         }
     };
     match (prev, next) {
-        // A retry attempt after a pre-stream retryable failure of the same
-        // step (ADR 0005 §10): new attempt ordinal, no new model step.
         (
             ModelAttemptFailed {
                 key: failed,
@@ -582,9 +1073,6 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                 ))
             }
         }
-        // The next model step after a ContinueModel step closure: the closed
-        // step names itself, so continuity is decided from the two snapshots
-        // alone — the next ordinal, first attempt (ADR 0005 §9/§10).
         (
             StepClosed {
                 kind:
@@ -600,13 +1088,11 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                 Ok(())
             } else {
                 mismatch(format!(
-                    "the step after closing step {model_step_ordinal} must be step {} \
-                     attempt 0, got {key:?}",
+                    "the step after closing step {model_step_ordinal} must be step {} attempt 0, got {key:?}",
                     model_step_ordinal + 1
                 ))
             }
         }
-        // The first model step starts from TurnStarted.
         (TurnStarted(_), ModelAttemptStarted { key }) => {
             if key.model_step_ordinal == 0 && key.attempt_ordinal == 0 {
                 Ok(())
@@ -616,17 +1102,10 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                 ))
             }
         }
-        // Attempt outcomes follow the started attempt of the same key.
-        (ModelAttemptStarted { key: started }, ModelAttemptFailed { key: done, .. }) => {
-            same_attempt(started, done)
-        }
-        (ModelAttemptStarted { key: started }, ModelAttemptInterrupted { key: done, .. }) => {
-            same_attempt(started, done)
-        }
-        (ModelAttemptStarted { key: started }, ModelAttemptRejected { key: done, .. }) => {
-            same_attempt(started, done)
-        }
-        (ModelAttemptStarted { key: started }, MessageComplete { key: done, .. }) => {
+        (ModelAttemptStarted { key: started }, ModelAttemptFailed { key: done, .. })
+        | (ModelAttemptStarted { key: started }, ModelAttemptInterrupted { key: done, .. })
+        | (ModelAttemptStarted { key: started }, ModelAttemptRejected { key: done, .. })
+        | (ModelAttemptStarted { key: started }, MessageComplete { key: done, .. }) => {
             same_attempt(started, done)
         }
         (ModelAttemptStarted { key: started }, BindingPlanned { plan, .. }) => {
@@ -635,56 +1114,48 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
             {
                 Ok(())
             } else {
-                mismatch("BindingPlanned step does not match the completing attempt".to_string())
+                mismatch("BindingPlanned step does not match the completing attempt".into())
             }
         }
-        // Bound follows the byte-equal exact plan.
         (BindingPlanned { plan: planned, .. }, Bound { plan: bound }) => {
             if planned == bound {
                 Ok(())
             } else {
-                mismatch("Bound must carry the byte-equal exact planned plan".to_string())
+                mismatch("Bound must carry the byte-equal exact planned plan".into())
             }
         }
-        // The closing loop starts at cursor 0 over the bound plan.
         (Bound { plan }, StepClosing(state)) => {
             if state.closure_cursor == 0
                 && state.closures.is_empty()
                 && state.current_candidate.is_none()
                 && state.plan_key == plan.plan_key
                 && state.bindings == plan.bindings
-                && state.messages == vec![plan.bound_message()?]
             {
                 Ok(())
             } else {
-                mismatch("StepClosing must start at cursor 0 over the bound plan".to_string())
+                mismatch("StepClosing must start at cursor 0 over the bound plan".into())
             }
         }
-        // Within StepClosing: pin the current candidate, then close exactly
-        // that binding; never both in one transition, never a skip.
         (StepClosing(prev_state), StepClosing(next_state)) => {
             if prev_state.plan_key != next_state.plan_key
                 || prev_state.bindings != next_state.bindings
             {
-                return mismatch("StepClosing must keep the same plan and bindings".to_string());
+                return mismatch("StepClosing must keep the same plan and bindings".into());
             }
             match (&prev_state.current_candidate, &next_state.current_candidate) {
                 (None, Some(candidate)) => {
                     if prev_state.closure_cursor == next_state.closure_cursor
                         && prev_state.closures == next_state.closures
-                        && prev_state.messages == next_state.messages
                     {
                         let index = next_state.closure_cursor as usize;
                         match next_state.bindings.get(index) {
                             Some(binding) if binding.invocation_id == candidate.invocation_id => {
                                 Ok(())
                             }
-                            _ => mismatch(
-                                "candidate must pin the lowest unclosed binding".to_string(),
-                            ),
+                            _ => mismatch("candidate must pin the lowest unclosed binding".into()),
                         }
                     } else {
-                        mismatch("pinning a candidate must not move the cursor".to_string())
+                        mismatch("pinning a candidate must not move the cursor".into())
                     }
                 }
                 (Some(candidate), None) => {
@@ -692,17 +1163,11 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                         || next_state.closures.len() != prev_state.closures.len() + 1
                         || next_state.closures[..prev_state.closures.len()]
                             != prev_state.closures[..]
-                        || next_state.messages.len() != prev_state.messages.len() + 1
-                        || next_state.messages[..prev_state.messages.len()]
-                            != prev_state.messages[..]
                     {
                         return mismatch(
-                            "only the lowest unclosed ordinal may advance, by exactly one"
-                                .to_string(),
+                            "only the lowest unclosed ordinal may advance, by exactly one".into(),
                         );
                     }
-                    // Closing the pinned binding: available material must be
-                    // the pinned candidate's exact content.
                     let closure = next_state.closures.last().expect("extended by one");
                     if let super::step::MaterialAvailability::Available {
                         digest,
@@ -712,23 +1177,16 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                             || *byte_length != candidate.byte_length)
                     {
                         return mismatch(
-                            "closure material does not match the pinned candidate".to_string(),
+                            "closure material does not match the pinned candidate".into(),
                         );
                     }
                     Ok(())
                 }
                 (None, None) => {
-                    // Without a pinned ResultDraft, exactly two conservative
-                    // closures are legal: a never-dispatched binding is
-                    // NotExecuted, while durable DispatchStarted with no terminal
-                    // is Indeterminate(MayHaveOccurred).
                     if next_state.closure_cursor == prev_state.closure_cursor + 1
                         && next_state.closures.len() == prev_state.closures.len() + 1
                         && next_state.closures[..prev_state.closures.len()]
                             == prev_state.closures[..]
-                        && next_state.messages.len() == prev_state.messages.len() + 1
-                        && next_state.messages[..prev_state.messages.len()]
-                            == prev_state.messages[..]
                     {
                         let closure = next_state.closures.last().expect("extended by one");
                         match (&closure.outcome, &closure.material) {
@@ -750,29 +1208,23 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                             ) => Ok(()),
                             _ => mismatch(
                                 "closing without a pinned candidate requires exact conservative material"
-                                    .to_string(),
+                                    .into(),
                             ),
                         }
                     } else {
                         mismatch(
-                            "only the lowest unclosed ordinal may advance, by exactly one"
-                                .to_string(),
+                            "only the lowest unclosed ordinal may advance, by exactly one".into(),
                         )
                     }
                 }
                 (Some(_), Some(_)) => mismatch(
-                    "cursor advance must publish the pinned candidate's closure and clear it"
-                        .to_string(),
+                    "cursor advance must publish the pinned candidate's closure and clear it".into(),
                 ),
             }
         }
-        // StepClosed after every binding is closed. The durable transcript
-        // delta must be the exact bound assistant followed by its closures.
-        // must name the step whose plan it just finished closing, so the
-        // ordinal the next attempt is validated against is durable fact.
-        (StepClosing(state), StepClosed { kind, messages }) => {
+        (StepClosing(state), StepClosed { kind }) => {
             if !state.all_closed() {
-                return mismatch("StepClosed requires every binding closed".to_string());
+                return mismatch("StepClosed requires every binding closed".into());
             }
             if let StepClosedKind::ContinueModel {
                 model_step_ordinal, ..
@@ -784,31 +1236,20 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                     state.plan_key.model_step_ordinal
                 ));
             }
-            if *messages != step_closing_messages(state) {
-                return mismatch("StepClosed transcript differs from the closed plan".to_string());
-            }
             Ok(())
         }
         (
             MessageComplete { message, .. },
             StepClosed {
                 kind: StepClosedKind::FinishTurn { final_message },
-                messages,
             },
         ) => {
-            let expected = message.clone().bind_zero_tool().map_err(|_| {
-                SessionError::InvalidInput("FinishTurn message has ToolCalls".into())
-            })?;
-            if message == final_message && messages == &vec![expected] {
+            if message == final_message {
                 Ok(())
             } else {
-                mismatch("FinishTurn transcript differs from MessageComplete".to_string())
+                mismatch("FinishTurn message differs from MessageComplete".into())
             }
         }
-        // Reopen closure paths close the step directly from pre-execution
-        // stages; they have no post-user transcript delta.
-        // stages; a live coordinator also closes failed/cancelled/interrupted
-        // turns this way.
         (
             TurnStarted(_)
             | ModelAttemptStarted { .. }
@@ -817,19 +1258,12 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
             | ModelAttemptRejected { .. }
             | BindingPlanned { .. }
             | Bound { .. },
-            StepClosed { messages, .. },
-        ) => {
-            if messages.is_empty() {
-                Ok(())
-            } else {
-                mismatch("early StepClosed must have an empty transcript delta".to_string())
-            }
-        }
+            StepClosed { .. },
+        ) => Ok(()),
         (StepClosed { .. }, TurnClosing(_)) => Ok(()),
         (_, Committed(_)) => mismatch(
-            "Committed is never published through active-turn; the final ref \
-             transaction is its only publication path"
-                .to_string(),
+            "Committed is never published through active-turn; the final ref transaction is its only publication path"
+                .into(),
         ),
         (prev, next) => mismatch(format!(
             "illegal stage transition {} -> {}",
@@ -841,712 +1275,5 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::super::config::{
-        FrozenTurnConfig, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
-    };
-    use super::*;
-    use lancet_protocol::{ModelMessageAddress, PlanKey, SessionId, ToolCallAddress};
-    use lattice_conversation::{MessagePart, MessageRole, MessageSemantic, ProviderOrigin};
-
-    const TURN: &str = "3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c";
-    const SESSION: &str = "3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c";
-    const INVOCATION: &str = "00000000-0000-4000-8000-000000000001";
-
-    fn turn_id() -> TurnId {
-        TurnId::parse(TURN).unwrap()
-    }
-
-    fn session_id() -> SessionId {
-        SessionId::parse(SESSION).unwrap()
-    }
-
-    fn attempt_key(step: u32, attempt: u32) -> ModelAttemptKey {
-        ModelAttemptKey {
-            turn_id: turn_id(),
-            model_step_ordinal: step,
-            attempt_ordinal: attempt,
-        }
-    }
-
-    fn turn_started() -> PendingStage {
-        PendingStage::TurnStarted(TurnStartedFacts {
-            turn_id: turn_id(),
-            session_id: session_id(),
-            project_store_key: crate::ProjectStoreKey::from_canonical_path_bytes(b"/test/project"),
-            parent_conversation_tip: None,
-            user_message: NativeMessage::new(
-                MessageRole::User,
-                None,
-                vec![MessagePart::semantic_only(MessageSemantic::Text {
-                    text: "hello".to_string(),
-                })],
-            ),
-            config: FrozenTurnConfig {
-                agent_name: "coder".to_string(),
-                model: "m".to_string(),
-                provider: "p".to_string(),
-                system_prompt: None,
-                profile_snapshot_json: "{}".to_string(),
-                policy_snapshot_json: "{}".to_string(),
-                catalog: ToolCatalogSnapshot::new(
-                    "b".to_string(),
-                    vec![ToolCatalogEntry {
-                        name: "t".to_string(),
-                        descriptor_identity: "d".to_string(),
-                        description: "t".to_string(),
-                        input_schema: serde_json::json!({}),
-                    }],
-                )
-                .unwrap(),
-                limits: TurnExecutionLimits {
-                    timeout_secs: 30,
-                    max_model_steps: MAX_MODEL_STEPS,
-                    max_model_attempts: 2,
-                },
-            },
-            accepted_at: "2026-08-16T00:00:00Z".to_string(),
-        })
-    }
-
-    fn zero_tool_message() -> NativeMessage<UnboundToolCall> {
-        NativeMessage::new(
-            MessageRole::Assistant,
-            Some(ProviderOrigin::Anthropic),
-            vec![MessagePart::semantic_only(MessageSemantic::Text {
-                text: "done".to_string(),
-            })],
-        )
-    }
-
-    fn one_call_plan() -> BindingPlan {
-        let invocation = lancet_protocol::InvocationId::parse(INVOCATION).unwrap();
-        let address = ToolCallAddress {
-            message: ModelMessageAddress {
-                session_id: session_id(),
-                turn_id: turn_id(),
-                model_step_ordinal: 0,
-            },
-            part_ordinal: 0,
-        };
-        let arguments = serde_json::json!({"a": 1});
-        let args_digest = lattice_conversation::arguments_digest(&arguments);
-        let binding = super::super::binding::PlannedBinding {
-            binding_digest: super::super::binding::PlannedBinding::compute_binding_digest(
-                &invocation,
-                &address,
-                "t",
-                "d",
-                &args_digest,
-            ),
-            invocation_id: invocation,
-            address,
-            method: "t".to_string(),
-            descriptor_identity: "d".to_string(),
-            arguments_digest: args_digest,
-        };
-        BindingPlan {
-            plan_key: PlanKey {
-                turn_id: turn_id(),
-                model_step_ordinal: 0,
-            },
-            message: NativeMessage::new(
-                MessageRole::Assistant,
-                Some(ProviderOrigin::Anthropic),
-                vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
-                    call: UnboundToolCall {
-                        provider_call_id: None,
-                        name: "t".to_string(),
-                        arguments,
-                    },
-                })],
-            ),
-            bindings: vec![binding],
-        }
-    }
-
-    fn step_closing_cursor_0(plan: &BindingPlan) -> super::super::step::StepClosingState {
-        super::super::step::StepClosingState {
-            plan_key: plan.plan_key,
-
-            messages: vec![plan.bound_message().unwrap()],
-            bindings: plan.bindings.clone(),
-            closure_cursor: 0,
-            closures: vec![],
-            current_candidate: None,
-        }
-    }
-
-    fn append_last_closure_message(state: &mut super::super::step::StepClosingState) {
-        let closure = state.closures.last().unwrap();
-        state.messages.push(NativeMessage::new(
-            MessageRole::Tool,
-            None,
-            vec![lattice_conversation::MessagePart::semantic_only(
-                lattice_conversation::MessageSemantic::ToolResult {
-                    invocation_id: closure.binding.invocation_id,
-                    name: closure.binding.method.clone(),
-                    outcome: closure.outcome,
-                    content: None,
-                },
-            )],
-        ));
-    }
-
-    #[test]
-    fn unpinned_dispatch_started_closes_as_exact_indeterminate() {
-        let plan = one_call_plan();
-        let previous = step_closing_cursor_0(&plan);
-        let mut next = previous.clone();
-        next.closure_cursor = 1;
-        next.closures.push(super::super::step::ClosedBinding {
-            binding: plan.bindings[0].clone(),
-            outcome: lattice_conversation::ToolResultOutcome::Indeterminate,
-            material: super::super::step::MaterialAvailability::Unavailable {
-                reason: super::super::facts::UnavailableMaterialReason::DraftPublicationFailed,
-                digest: None,
-                byte_length: None,
-            },
-        });
-        append_last_closure_message(&mut next);
-        validate_transition(
-            &PendingStage::StepClosing(previous.clone()),
-            &PendingStage::StepClosing(next.clone()),
-        )
-        .expect("DispatchStarted before candidate pin is conservatively indeterminate");
-
-        next.closures[0].material = super::super::step::MaterialAvailability::Unavailable {
-            reason: super::super::facts::UnavailableMaterialReason::DraftPublicationFailed,
-            digest: Some([7; 32]),
-            byte_length: None,
-        };
-        assert!(
-            validate_transition(
-                &PendingStage::StepClosing(previous),
-                &PendingStage::StepClosing(next),
-            )
-            .is_err(),
-            "unpinned indeterminate material must not invent a digest",
-        );
-    }
-    #[test]
-    fn turn_started_must_be_first() {
-        let started = turn_started();
-        assert!(matches!(
-            validate_transition(
-                &started,
-                &PendingStage::ModelAttemptStarted {
-                    key: attempt_key(0, 0)
-                }
-            ),
-            Ok(())
-        ));
-        // A second TurnStarted after anything is illegal.
-        assert!(validate_transition(&started, &turn_started()).is_err());
-        // The first attempt must be step 0 attempt 0.
-        assert!(
-            validate_transition(
-                &started,
-                &PendingStage::ModelAttemptStarted {
-                    key: attempt_key(1, 0)
-                }
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn retry_only_after_retryable_pre_stream_failure_of_next_ordinal() {
-        let started = PendingStage::ModelAttemptStarted {
-            key: attempt_key(0, 0),
-        };
-        let retryable = PendingStage::ModelAttemptFailed {
-            key: attempt_key(0, 0),
-            retryable: true,
-            usage: None,
-        };
-        let terminal = PendingStage::ModelAttemptFailed {
-            key: attempt_key(0, 0),
-            retryable: false,
-            usage: None,
-        };
-        assert!(
-            validate_transition(
-                &retryable,
-                &PendingStage::ModelAttemptStarted {
-                    key: attempt_key(0, 1)
-                }
-            )
-            .is_ok()
-        );
-        // Non-retryable failures never continue.
-        assert!(
-            validate_transition(
-                &terminal,
-                &PendingStage::ModelAttemptStarted {
-                    key: attempt_key(0, 1)
-                }
-            )
-            .is_err()
-        );
-        // Retry must not skip an ordinal or change step.
-        assert!(
-            validate_transition(
-                &retryable,
-                &PendingStage::ModelAttemptStarted {
-                    key: attempt_key(0, 2)
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            validate_transition(
-                &retryable,
-                &PendingStage::ModelAttemptStarted {
-                    key: attempt_key(1, 1)
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            validate_transition(
-                &started,
-                &PendingStage::ModelAttemptFailed {
-                    key: attempt_key(0, 1),
-                    retryable: true,
-                    usage: None
-                }
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn attempt_outcomes_must_follow_the_same_started_attempt() {
-        let started = PendingStage::ModelAttemptStarted {
-            key: attempt_key(0, 0),
-        };
-        for stage in [
-            PendingStage::ModelAttemptFailed {
-                key: attempt_key(0, 0),
-                retryable: false,
-                usage: None,
-            },
-            PendingStage::ModelAttemptInterrupted {
-                key: attempt_key(0, 0),
-                reason: AttemptInterruption::StreamError,
-                usage: None,
-            },
-            PendingStage::ModelAttemptRejected {
-                key: attempt_key(0, 0),
-                rejection: AttemptRejection::InvalidToolCall {
-                    validation: lattice_conversation::ToolCallValidation::MalformedArguments {
-                        call_ordinal: 0,
-                    },
-                },
-                usage: None,
-            },
-            PendingStage::MessageComplete {
-                key: attempt_key(0, 0),
-                message: zero_tool_message(),
-                usage: None,
-            },
-        ] {
-            assert!(validate_transition(&started, &stage).is_ok(), "{stage:?}");
-        }
-        assert!(
-            validate_transition(
-                &started,
-                &PendingStage::MessageComplete {
-                    key: attempt_key(0, 1),
-                    message: zero_tool_message(),
-                    usage: None
-                }
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn bound_requires_the_byte_equal_plan_and_closing_starts_at_cursor_zero() {
-        let planned = PendingStage::BindingPlanned {
-            plan: one_call_plan(),
-            usage: None,
-        };
-        let bound = PendingStage::Bound {
-            plan: one_call_plan(),
-        };
-        assert!(validate_transition(&planned, &bound).is_ok());
-        let mut drifted = one_call_plan();
-        drifted.bindings[0].descriptor_identity = "other".to_string();
-        assert!(validate_transition(&planned, &PendingStage::Bound { plan: drifted }).is_err());
-
-        let closing = PendingStage::StepClosing(step_closing_cursor_0(&one_call_plan()));
-        assert!(validate_transition(&bound, &closing).is_ok());
-        let mut jumped = step_closing_cursor_0(&one_call_plan());
-        jumped.closure_cursor = 1;
-        assert!(validate_transition(&bound, &PendingStage::StepClosing(jumped)).is_err());
-    }
-
-    #[test]
-    fn committed_is_never_publishable_through_active_turn() {
-        let started = turn_started();
-        let facts = CommittedFacts {
-            turn_id: turn_id(),
-            candidate: candidate(),
-        };
-        assert!(validate_transition(&started, &PendingStage::Committed(facts)).is_err());
-    }
-
-    #[test]
-    fn message_complete_must_be_zero_tool() {
-        let mut snapshot = PendingSnapshot {
-            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
-            session_id: session_id(),
-            turn_id: turn_id(),
-            predecessor: None,
-            stage: PendingStage::MessageComplete {
-                key: attempt_key(0, 0),
-                message: one_call_plan().message,
-                usage: None,
-            },
-            recorded_at: None,
-            root: None,
-        };
-        assert!(snapshot.validate().is_err());
-        snapshot.stage = PendingStage::MessageComplete {
-            key: attempt_key(0, 0),
-            message: zero_tool_message(),
-            usage: None,
-        };
-        snapshot.validate().expect("zero-tool message completes");
-    }
-
-    #[test]
-    fn step_limit_is_enforced_on_attempt_keys() {
-        let mut snapshot = PendingSnapshot {
-            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
-            session_id: session_id(),
-            turn_id: turn_id(),
-            predecessor: None,
-            stage: PendingStage::ModelAttemptStarted {
-                key: attempt_key(MAX_MODEL_STEPS, 0),
-            },
-            recorded_at: None,
-            root: None,
-        };
-        assert!(
-            snapshot.validate().is_err(),
-            "a model step ordinal at the code-defined limit is corruption"
-        );
-        snapshot.stage = PendingStage::ModelAttemptStarted {
-            key: attempt_key(MAX_MODEL_STEPS - 1, 0),
-        };
-        snapshot.validate().expect("the last legal step ordinal");
-    }
-
-    fn candidate() -> TurnCommitCandidate {
-        TurnCommitCandidate {
-            session_id: SESSION.to_string(),
-            turn_id: turn_id(),
-            side_parent_ids: vec![],
-            messages: vec![crate::test_helpers::user_msg("hello")],
-            agent_name: "coder".to_string(),
-            profile_snapshot_hash: "h".to_string(),
-            profile_snapshot_json: "{}".to_string(),
-            model: "m".to_string(),
-            provider: "p".to_string(),
-            outcome: TurnOutcome::Interrupted {
-                reason:
-                    super::super::outcome::TurnInterruption::ProcessInterruptedBeforeModelAttempt,
-            },
-            origin: ClosureOrigin::Reconciled,
-            commit_message: "hello".to_string(),
-            usage_aggregate: None,
-            workspace_history_checkpoint: crate::pending::WorkspaceHistoryCheckpoint::Empty,
-            created_at: "2026-08-16T00:00:00Z".to_string(),
-        }
-    }
-
-    #[test]
-    fn turn_closing_and_committed_facts_validates() {
-        let closing = PendingStage::TurnClosing(TurnClosingFacts {
-            turn_id: turn_id(),
-            candidate: candidate(),
-        });
-        closing.validate().expect("valid closing");
-        let committed = PendingStage::Committed(CommittedFacts {
-            turn_id: turn_id(),
-            candidate: candidate(),
-        });
-        committed.validate().expect("valid committed");
-        assert!(validate_transition(&PendingStage::StepClosed {
-            kind: super::super::step::StepClosedKind::InterruptTurn {
-                reason: super::super::outcome::TurnInterruption::ProcessInterruptedBeforeModelAttempt,
-            },
-            messages: Vec::new(),
-        }, &closing)
-        .is_ok());
-    }
-
-    #[test]
-    fn snapshot_serde_round_trip_preserves_stage() {
-        let snapshot = PendingSnapshot {
-            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
-            session_id: session_id(),
-            turn_id: turn_id(),
-            predecessor: None,
-            stage: turn_started(),
-            recorded_at: None,
-            root: None,
-        };
-        let value = serde_json::to_value(&snapshot).unwrap();
-        assert!(
-            value.get("recorded_at").is_none(),
-            "recorded_at stays off the wire"
-        );
-        let back: PendingSnapshot = serde_json::from_value(value).unwrap();
-        assert_eq!(back, snapshot);
-        back.validate().expect("round-tripped");
-    }
-
-    #[test]
-    fn turn_started_project_binding_is_required_and_strictly_typed() {
-        let snapshot = PendingSnapshot {
-            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
-            session_id: session_id(),
-            turn_id: turn_id(),
-            predecessor: None,
-            stage: turn_started(),
-            recorded_at: None,
-            root: None,
-        };
-        let mut missing = serde_json::to_value(&snapshot).unwrap();
-        missing["stage"]
-            .as_object_mut()
-            .unwrap()
-            .remove("project_store_key");
-        assert!(serde_json::from_value::<PendingSnapshot>(missing).is_err());
-
-        let mut corrupt = serde_json::to_value(snapshot).unwrap();
-        corrupt["stage"]["project_store_key"] = serde_json::json!("not-a-project-key");
-        assert!(serde_json::from_value::<PendingSnapshot>(corrupt).is_err());
-    }
-
-    // ─── Review-round contract depth (F3/F4) ────────────────────────────
-
-    fn snapshot_of(stage: PendingStage) -> PendingSnapshot {
-        PendingSnapshot {
-            schema_version: PENDING_SNAPSHOT_SCHEMA_VERSION,
-            session_id: session_id(),
-            turn_id: turn_id(),
-            predecessor: Some("0".repeat(40)),
-            stage,
-            recorded_at: None,
-            root: None,
-        }
-    }
-
-    fn continue_model(step: u32) -> StepClosedKind {
-        let plan = one_call_plan();
-        StepClosedKind::ContinueModel {
-            model_step_ordinal: step,
-            ordered_tool_results: vec![super::super::step::ClosedBinding {
-                binding: plan.bindings[0].clone(),
-                outcome: lattice_conversation::ToolResultOutcome::NotExecuted,
-                material: super::super::step::MaterialAvailability::Unavailable {
-                    reason: super::super::facts::UnavailableMaterialReason::NotExecuted,
-                    digest: None,
-                    byte_length: None,
-                },
-            }],
-            conversation_digest: [0u8; 32],
-        }
-    }
-
-    #[test]
-    fn continue_model_names_the_step_it_closed() {
-        // F3: the closed-step contract must carry the step ordinal, and it
-        // must agree with the durable binding addresses it closes.
-        let ok = PendingStage::StepClosed {
-            kind: continue_model(0),
-            messages: Vec::new(),
-        };
-        ok.validate().expect("ordinal agrees with the closures");
-
-        let StepClosedKind::ContinueModel {
-            ordered_tool_results,
-            conversation_digest,
-            ..
-        } = continue_model(0)
-        else {
-            unreachable!()
-        };
-        let lying = PendingStage::StepClosed {
-            kind: StepClosedKind::ContinueModel {
-                model_step_ordinal: 3,
-                ordered_tool_results: ordered_tool_results.clone(),
-                conversation_digest,
-            },
-            messages: Vec::new(),
-        };
-        assert!(
-            matches!(
-                lying.validate(),
-                Err(SessionError::JournalCorruption { .. })
-            ),
-            "a ContinueModel ordinal must not contradict its closures"
-        );
-
-        let empty = PendingStage::StepClosed {
-            kind: StepClosedKind::ContinueModel {
-                model_step_ordinal: 0,
-                ordered_tool_results: vec![],
-                conversation_digest,
-            },
-            messages: Vec::new(),
-        };
-        assert!(
-            matches!(
-                empty.validate(),
-                Err(SessionError::JournalCorruption { .. })
-            ),
-            "ContinueModel closes a plan, so it always carries closures"
-        );
-    }
-
-    #[test]
-    fn the_step_after_continue_model_is_contiguous_and_starts_at_attempt_zero() {
-        // F3: `StepClosed(ContinueModel) -> ModelAttemptStarted` must pin the
-        // next ordinal and a fresh attempt, not merely a legal attempt key.
-        let closed = PendingStage::StepClosed {
-            kind: continue_model(0),
-            messages: Vec::new(),
-        };
-        validate_transition(
-            &closed,
-            &PendingStage::ModelAttemptStarted {
-                key: attempt_key(1, 0),
-            },
-        )
-        .expect("step 0 continues into step 1 attempt 0");
-
-        for illegal in [attempt_key(0, 0), attempt_key(2, 0), attempt_key(1, 1)] {
-            assert!(
-                validate_transition(&closed, &PendingStage::ModelAttemptStarted { key: illegal })
-                    .is_err(),
-                "non-contiguous step or non-zero first attempt must be rejected: {illegal:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn continue_model_must_name_the_plan_step_it_closes() {
-        // F3: the recorded ordinal is tied to the closing loop it ends.
-        let plan = one_call_plan();
-        let mut closing = step_closing_cursor_0(&plan);
-        closing.closure_cursor = 1;
-        closing.closures = vec![super::super::step::ClosedBinding {
-            binding: plan.bindings[0].clone(),
-            outcome: lattice_conversation::ToolResultOutcome::NotExecuted,
-            material: super::super::step::MaterialAvailability::Unavailable {
-                reason: super::super::facts::UnavailableMaterialReason::NotExecuted,
-                digest: None,
-                byte_length: None,
-            },
-        }];
-        append_last_closure_message(&mut closing);
-        validate_transition(
-            &PendingStage::StepClosing(closing.clone()),
-            &PendingStage::StepClosed {
-                kind: continue_model(0),
-                messages: closing.messages.clone(),
-            },
-        )
-        .expect("the plan's own step");
-        assert!(
-            validate_transition(
-                &PendingStage::StepClosing(closing.clone()),
-                &PendingStage::StepClosed {
-                    kind: continue_model(1),
-                    messages: closing.messages.clone(),
-                },
-            )
-            .is_err(),
-            "a ContinueModel must close the step it names"
-        );
-    }
-
-    #[test]
-    fn snapshot_rejects_addresses_from_another_session() {
-        // F4: a binding digest is self-consistent over its own tuple, so a
-        // cross-session address survives `BindingPlan::validate`. The
-        // aggregate contract — the snapshot that knows the expected
-        // SessionId — must fail closed on it.
-        let other = SessionId::parse("00000000000000000000000000000001").unwrap();
-        let mut plan = one_call_plan();
-        plan.bindings[0].address.message.session_id = other;
-        plan.bindings[0].binding_digest =
-            super::super::binding::PlannedBinding::compute_binding_digest(
-                &plan.bindings[0].invocation_id,
-                &plan.bindings[0].address,
-                &plan.bindings[0].method,
-                &plan.bindings[0].descriptor_identity,
-                &plan.bindings[0].arguments_digest,
-            );
-        plan.validate().expect("the tuple is internally consistent");
-
-        for stage in [
-            PendingStage::BindingPlanned {
-                plan: plan.clone(),
-                usage: None,
-            },
-            PendingStage::Bound { plan: plan.clone() },
-            PendingStage::StepClosing(step_closing_cursor_0(&plan)),
-        ] {
-            let snapshot = snapshot_of(stage);
-            assert!(
-                matches!(
-                    snapshot.validate(),
-                    Err(SessionError::JournalCorruption { .. })
-                ),
-                "a cross-session binding address must fail closed"
-            );
-        }
-    }
-
-    #[test]
-    fn snapshot_rejects_a_candidate_naming_another_session() {
-        // F4: the pinned candidate is the final publication input; its
-        // session must be this journal's session.
-        let candidate = TurnCommitCandidate {
-            session_id: "00000000000000000000000000000001".to_string(),
-            turn_id: turn_id(),
-            side_parent_ids: vec![],
-            messages: vec![crate::test_helpers::user_msg("hi")],
-            agent_name: "coder".to_string(),
-            profile_snapshot_hash: "h".to_string(),
-            profile_snapshot_json: "{}".to_string(),
-            model: "m".to_string(),
-            provider: "p".to_string(),
-            outcome: TurnOutcome::Completed {
-                finish_reason: super::super::outcome::TurnFinishReason::Stop,
-            },
-            origin: ClosureOrigin::Reconciled,
-            commit_message: "hi".to_string(),
-            usage_aggregate: None,
-            workspace_history_checkpoint: crate::pending::WorkspaceHistoryCheckpoint::Empty,
-            created_at: "2026-08-16T00:00:00Z".to_string(),
-        };
-        let snapshot = snapshot_of(PendingStage::TurnClosing(TurnClosingFacts {
-            turn_id: turn_id(),
-            candidate,
-        }));
-        assert!(
-            matches!(
-                snapshot.validate(),
-                Err(SessionError::JournalCorruption { .. })
-            ),
-            "a candidate from another session must fail closed"
-        );
-    }
+    include!("contract_tests.rs");
 }

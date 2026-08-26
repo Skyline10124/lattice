@@ -10,6 +10,12 @@
 
 use crate::attempt::AttemptInterruption;
 
+/// Maximum number of ToolCalls in one complete provider batch.
+///
+/// This code-defined bound keeps one model step's durable binding/closure
+/// journal finite independently of argument byte sizes.
+pub const MAX_TOOL_CALLS_PER_BATCH: usize = 32;
+
 /// Maximum byte length of one ToolCall's textual arguments (8 MiB).
 pub const MAX_TOOL_CALL_ARGUMENTS_BYTES: usize = 8 * 1024 * 1024;
 

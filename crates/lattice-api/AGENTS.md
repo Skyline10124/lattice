@@ -58,6 +58,11 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
 
 ## Recent Issues
 
+- FIXED #159: live and reopen finalization consume the same journal-derived
+  cumulative transcript/candidate basis. Reconciliation terminal evidence uses
+  the frozen binding method. One shared WorkspaceOperationLock now covers the
+  authoritative history `current()` read, TurnClosing publication, and final
+  Session ref transaction; a reopened pinned/current mismatch fails closed.
 - ADDED #28 (Codeberg #6): `build_production_turn_deps` lowers the loaded
   profile into `CapabilityAdmissionPolicy` via
   `AgentProfile::capability_admission_policy` (`[tools].enabled` is the stage-1
@@ -105,8 +110,9 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
 - Add focused tests whenever public `TurnEvent` mapping or commit semantics
   change.
 - Read the workspace-history identity after the LANCET server has drained;
-  `TurnCommitCandidate.workspace_history_checkpoint` is required and finalization
-  must never substitute `Empty` for an unknown checkpoint.
+  the pure reducer emits `TurnCommitCandidateBasis`, and only the composition
+  layer may complete it with a validated checkpoint sampled under the shared
+  operation lock. Never substitute `Empty` for an error or malformed OID.
 
 ## Record Maintenance
 

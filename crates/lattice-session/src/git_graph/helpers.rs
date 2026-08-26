@@ -94,6 +94,7 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<GitSessionManifest> {
             manifest.schema_version
         )));
     }
+    manifest.workspace_history_checkpoint.validate()?;
     Ok(manifest)
 }
 

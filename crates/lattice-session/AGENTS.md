@@ -82,7 +82,9 @@ payload compatibility.
 - Every mutation takes the per-session execution lock
   (`locks/sessions/<id>.lock`) and then the repository write lock, in that
   order. `status` takes a non-blocking shared hold and reports `SessionBusy`.
-  Never open two repository write locks together.
+  Strict open takes only the repository lock while validating cross-ref
+  invariants, then releases it before returning the handle; ordinary reads
+  remain lock-free. Never open two repository write locks together.
 - Publication is one multi-ref transaction plus one `fsync_pending` barrier:
   conversation head, session state, and any candidate pin advance together or
   not at all.
@@ -102,6 +104,14 @@ payload compatibility.
 
 ## Recent Issues
 
+- FIXED #159: Pending snapshot schema v3 has one mandatory cumulative
+  `post_user_transcript` authority. `StepClosing` keeps only structural cursor
+  facts; every journal edge derives and validates exact transcript bytes, and
+  strict reopen authenticates the full lineage. Candidate construction is
+  shared by live/reopen and emits an uncheckpointed pure basis so the
+  composition layer must sample WorkspaceHistory under its operation lock.
+  Strict open also holds the Session repository lock across cross-ref invariant
+  validation, excluding the final transaction's `active-turn` deletion race.
 - LANDED #139-B Commit 6: the production `TurnCoordinator` drives the PendingTurn journal against the Git InvocationStore. The existing
   PendingTurn correctness and structural regression tests remain mandatory.
   `session_journal_pin_ns` growth and durability performance qualification move
@@ -168,7 +178,7 @@ payload compatibility.
 - Do not reintroduce sidecar metadata, a sidecar importer, SQLite session
   storage, or a git2 dependency; durability primitives belong to
   `lattice-store`, and this crate must not hand-roll them.
-- Keep `workspace_history_checkpoint` explicit and typed (`Empty | Oid`) in the v4 manifest and canonical Turn identity.
+- Keep `workspace_history_checkpoint` explicit and typed (`Empty | Oid`) in the v4 manifest and canonical Turn identity. `Empty` is constructed only from an absent authoritative history ref; persisted OIDs validate canonically.
 
 ## Record Maintenance
 

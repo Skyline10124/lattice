@@ -110,8 +110,16 @@ async fn stream_turn_live_with_agent(
             )
         })
         .collect();
+    let layout = session.state_layout().expect("test StateLayout");
+    let key = crate::root::LocalWorkspaceRoot::resolve()
+        .expect("resolve cwd")
+        .store_key();
+    let workspace_history = lancet_api::WorkspaceHistory::open(
+        lancet_api::WorkspaceHistoryBacking::for_key(layout, key),
+    )
+    .expect("open test workspace history");
     let deps = super::cep::ProductionTurnDeps {
-        workspace_history: Arc::new(lancet_api::WorkspaceHistory::disabled()),
+        workspace_history: Arc::new(workspace_history),
         model_driver,
         tool_catalog,
         runtime: lancet_api::ServerLifecycle::noop(),
@@ -332,7 +340,149 @@ async fn valid_recovery_closes_the_pending_turn_then_runs_the_new_turn() {
     let log = session.log(TEST_SESSION_ID).unwrap();
     assert_eq!(log.len(), 2, "reconciled Turn plus new live Turn");
     assert_eq!(log[0].origin, lattice_session::ClosureOrigin::Reconciled);
+    assert_eq!(
+        log[0].workspace_history_checkpoint,
+        lattice_session::WorkspaceHistoryCheckpoint::Empty,
+        "a genuinely empty history remains typed Empty on recovery"
+    );
     assert_eq!(log[1].origin, lattice_session::ClosureOrigin::Live);
+}
+
+#[tokio::test]
+async fn recovery_rejects_a_turn_closing_checkpoint_that_no_longer_matches_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = make_session(dir.path());
+    let layout = session.state_layout().unwrap();
+    let workspace = crate::root::LocalWorkspaceRoot::resolve().unwrap();
+    let key = workspace.store_key();
+    let turn = lancet_protocol::TurnId::parse("11111111-1111-4111-8111-111111111111").unwrap();
+    begin_pending_turn(&session, key);
+    let store = session.git_store_for_coordinator().unwrap();
+    let (_, lock) = session.lock_execution(TEST_SESSION_ID).unwrap();
+    store
+        .advance_pending_turn(
+            TEST_SESSION_ID,
+            lattice_session::pending::PendingStage::ModelAttemptStarted {
+                key: lancet_protocol::ModelAttemptKey {
+                    turn_id: turn,
+                    model_step_ordinal: 0,
+                    attempt_ordinal: 0,
+                },
+            },
+            1_800_000_000,
+            &lock,
+        )
+        .unwrap();
+    let message = lattice_conversation::NativeMessage::new(
+        lattice_conversation::MessageRole::Assistant,
+        None,
+        vec![lattice_conversation::MessagePart::semantic_only(
+            lattice_conversation::MessageSemantic::Text {
+                text: "done".into(),
+            },
+        )],
+    );
+    store
+        .advance_pending_turn(
+            TEST_SESSION_ID,
+            lattice_session::pending::PendingStage::MessageComplete {
+                key: lancet_protocol::ModelAttemptKey {
+                    turn_id: turn,
+                    model_step_ordinal: 0,
+                    attempt_ordinal: 0,
+                },
+                message: message.clone(),
+                usage: None,
+            },
+            1_800_000_001,
+            &lock,
+        )
+        .unwrap();
+    let closed = store
+        .advance_pending_turn(
+            TEST_SESSION_ID,
+            lattice_session::pending::PendingStage::StepClosed {
+                kind: lattice_session::pending::StepClosedKind::FinishTurn {
+                    final_message: message,
+                },
+            },
+            1_800_000_002,
+            &lock,
+        )
+        .unwrap();
+    let candidate = closed
+        .snapshot
+        .turn_commit_candidate_basis(
+            lattice_session::TurnOutcome::Completed {
+                finish_reason: lattice_session::TurnFinishReason::Stop,
+            },
+            lattice_session::ClosureOrigin::Live,
+        )
+        .unwrap()
+        .with_workspace_history_checkpoint(lattice_session::WorkspaceHistoryCheckpoint::Empty)
+        .unwrap();
+    let closing = store
+        .advance_pending_turn(
+            TEST_SESSION_ID,
+            lattice_session::pending::PendingStage::TurnClosing(
+                lattice_session::pending::TurnClosingFacts {
+                    turn_id: turn,
+                    candidate,
+                },
+            ),
+            1_800_000_003,
+            &lock,
+        )
+        .unwrap();
+    drop(lock);
+
+    let history = lancet_runtime::WorkspaceHistory::open(
+        lancet_runtime::WorkspaceHistoryBacking::for_key(layout.clone(), key),
+    )
+    .unwrap();
+    history
+        .record(&lancet_runtime::MutationRecord {
+            method: "mutate.create".into(),
+            turn_id: turn.to_string(),
+            invocation_id: lancet_protocol::InvocationId::parse(
+                "22222222-2222-4222-8222-222222222222",
+            )
+            .unwrap(),
+            path: "checkpoint.txt".into(),
+            before: None,
+            after: b"changed".to_vec(),
+            content_hash: "test-revision".into(),
+            recorded_at: 1_800_000_004,
+        })
+        .unwrap();
+    assert!(history.current().unwrap().is_some());
+
+    let client = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
+    );
+    let mut request = make_request("must not run");
+    request.test_llm = Some(client.clone());
+    request.test_project_root = Some(workspace.canonical_path().to_string_lossy().into_owned());
+    let error = match super::execute::stream_turn(session.clone(), request).await {
+        Ok(_) => panic!("mismatched pinned checkpoint must fail closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("differs from current"),
+        "{error}"
+    );
+    assert_eq!(client.call_count(), 0);
+    assert_eq!(
+        store
+            .read_active_turn(TEST_SESSION_ID)
+            .unwrap()
+            .unwrap()
+            .oid,
+        closing.oid,
+        "rejection must not delete or advance active-turn"
+    );
 }
 
 #[tokio::test]

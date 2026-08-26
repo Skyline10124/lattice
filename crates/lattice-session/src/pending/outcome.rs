@@ -50,6 +50,44 @@ impl WorkspaceHistoryCheckpoint {
             Self::Oid(oid) => Some(oid),
         }
     }
+
+    /// Convert the authoritative `WorkspaceHistory::current()` result into a
+    /// typed checkpoint. Empty is produced only for a genuinely absent ref;
+    /// malformed or non-canonical object ids fail closed.
+    pub fn from_current(current: Option<String>) -> crate::Result<Self> {
+        let checkpoint = current.map(Self::Oid).unwrap_or(Self::Empty);
+        checkpoint.validate()?;
+        Ok(checkpoint)
+    }
+
+    /// Validate a persisted checkpoint OID as canonical lowercase SHA-1 hex.
+    pub fn validate(&self) -> crate::Result<()> {
+        let Self::Oid(oid) = self else {
+            return Ok(());
+        };
+        if oid.len() != 40
+            || !oid
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(crate::SessionError::JournalCorruption {
+                detail:
+                    "workspace-history checkpoint OID must be exactly 40 lowercase hex characters"
+                        .into(),
+            });
+        }
+        let parsed = gix::ObjectId::from_hex(oid.as_bytes()).map_err(|error| {
+            crate::SessionError::JournalCorruption {
+                detail: format!("workspace-history checkpoint OID is invalid: {error}"),
+            }
+        })?;
+        if parsed.to_string() != *oid {
+            return Err(crate::SessionError::JournalCorruption {
+                detail: "workspace-history checkpoint OID failed its canonical round-trip".into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Why a completed Turn finished (ADR 0005 §15 `Completed { finish_reason }`).
@@ -194,9 +232,7 @@ impl TurnUsageAggregate {
             total_tokens: 0,
         };
         for attempt in per_attempt.iter().flatten() {
-            usage.prompt_tokens += attempt.prompt_tokens;
-            usage.completion_tokens += attempt.completion_tokens;
-            usage.total_tokens += attempt.total_tokens;
+            usage = usage.saturating_add(*attempt);
         }
         Some(if complete {
             Self::Complete { usage }
@@ -274,7 +310,56 @@ mod tests {
     }
 
     #[test]
+    fn usage_aggregate_saturates_each_counter() {
+        let aggregate = TurnUsageAggregate::derive(&[
+            Some(TokenUsage {
+                prompt_tokens: u64::MAX,
+                completion_tokens: u64::MAX - 1,
+                total_tokens: u64::MAX - 2,
+            }),
+            Some(TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                total_tokens: 3,
+            }),
+        ])
+        .expect("non-empty");
+        assert_eq!(
+            aggregate.usage(),
+            TokenUsage {
+                prompt_tokens: u64::MAX,
+                completion_tokens: u64::MAX,
+                total_tokens: u64::MAX,
+            }
+        );
+    }
+
+    #[test]
     fn usage_aggregate_empty_is_none() {
         assert!(TurnUsageAggregate::derive(&[]).is_none());
+    }
+
+    #[test]
+    fn workspace_checkpoint_accepts_only_canonical_history_oids() {
+        assert_eq!(
+            WorkspaceHistoryCheckpoint::from_current(None).unwrap(),
+            WorkspaceHistoryCheckpoint::Empty
+        );
+        let oid = "0123456789abcdef0123456789abcdef01234567".to_string();
+        assert_eq!(
+            WorkspaceHistoryCheckpoint::from_current(Some(oid.clone())).unwrap(),
+            WorkspaceHistoryCheckpoint::Oid(oid)
+        );
+        for malformed in [
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            "g123456789abcdef0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef0123456",
+        ] {
+            assert!(
+                WorkspaceHistoryCheckpoint::from_current(Some(malformed.into())).is_err(),
+                "accepted malformed checkpoint {malformed}"
+            );
+        }
     }
 }

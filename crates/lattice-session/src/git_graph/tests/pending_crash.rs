@@ -67,6 +67,26 @@ impl<'a> JournalDriver<'a> {
             .expect("tip")
             .expect("active turn");
         let recorded_at = tip.snapshot.recorded_at.unwrap_or(0);
+        let stage = match stage {
+            PendingStage::TurnClosing(facts) => {
+                let candidate = tip
+                    .snapshot
+                    .turn_commit_candidate_basis(
+                        facts.candidate.outcome.clone(),
+                        facts.candidate.origin,
+                    )
+                    .expect("derive exact closing basis")
+                    .with_workspace_history_checkpoint(
+                        facts.candidate.workspace_history_checkpoint.clone(),
+                    )
+                    .expect("attach checkpoint");
+                PendingStage::TurnClosing(TurnClosingFacts {
+                    turn_id: tip.snapshot.turn_id,
+                    candidate,
+                })
+            }
+            other => other,
+        };
         self.store
             .advance_pending_turn(self.session, stage, recorded_at, &self.lock)
             .expect("advance")
@@ -90,8 +110,6 @@ fn drive_to_empty_step_closing(
     driver.advance(PendingStage::Bound { plan: plan.clone() });
     driver.advance(PendingStage::StepClosing(StepClosingState {
         plan_key: plan.plan_key,
-
-        messages: vec![plan.bound_message().unwrap()],
         bindings: plan.bindings.clone(),
         closure_cursor: 0,
         closures: Vec::new(),
@@ -167,6 +185,7 @@ fn execute_plan(
                 invocation,
                 outcome,
                 material,
+                ..
             } => {
                 let owner = facts.plan.as_ref().expect("plan set").plan_key;
                 facts.invocations.insert(
@@ -196,23 +215,23 @@ fn execute_plan(
                     lock,
                 )?;
             }
-            ReconciliationAction::PublishStepClosed { kind, messages } => {
+            ReconciliationAction::PublishStepClosed { kind } => {
                 let _ = store.advance_pending_turn(
                     session,
-                    PendingStage::StepClosed {
-                        kind: kind.clone(),
-                        messages: messages.clone(),
-                    },
+                    PendingStage::StepClosed { kind: kind.clone() },
                     recorded_at,
                     lock,
                 )?;
             }
             ReconciliationAction::PublishTurnClosing { candidate } => {
+                let candidate = candidate.clone().with_workspace_history_checkpoint(
+                    crate::pending::WorkspaceHistoryCheckpoint::Empty,
+                )?;
                 let _ = store.advance_pending_turn(
                     session,
                     PendingStage::TurnClosing(TurnClosingFacts {
                         turn_id: tip.snapshot.turn_id,
-                        candidate: candidate.clone(),
+                        candidate,
                     }),
                     recorded_at,
                     lock,
@@ -420,7 +439,6 @@ fn stage_cases() -> Vec<StageCase> {
                     kind: crate::pending::StepClosedKind::FinishTurn {
                         final_message: assistant_text("done"),
                     },
-                    messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
                 },
                 PendingStage::TurnClosing(turn_closing(completed_candidate(None))),
             ],
@@ -537,7 +555,6 @@ fn step_closing_candidate_pin_object_barrier_failure_does_not_publish_the_candid
         PendingStage::StepClosing(StepClosingState {
             plan_key: plan.plan_key,
 
-            messages: vec![plan.bound_message().unwrap()],
             bindings: plan.bindings.clone(),
             closure_cursor: 0,
             closures: Vec::new(),
@@ -596,7 +613,6 @@ fn step_closing_candidate_pin_uses_one_object_barrier_and_one_ref_barrier() {
             PendingStage::StepClosing(StepClosingState {
                 plan_key: plan.plan_key,
 
-                messages: vec![plan.bound_message().unwrap()],
                 bindings: plan.bindings.clone(),
                 closure_cursor: 0,
                 closures: Vec::new(),
@@ -657,7 +673,6 @@ fn unwritable_finalization_keeps_step_closing_and_active_turn() {
         kind: crate::pending::StepClosedKind::FinishTurn {
             final_message: assistant_text("done"),
         },
-        messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
     });
     driver.advance(PendingStage::TurnClosing(turn_closing(
         completed_candidate(None),
@@ -727,7 +742,6 @@ fn crash_after_final_publication_reports_failure_but_is_idempotent() {
         kind: crate::pending::StepClosedKind::FinishTurn {
             final_message: assistant_text("done"),
         },
-        messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
     });
     driver.advance(PendingStage::TurnClosing(turn_closing(
         completed_candidate(None),
@@ -788,7 +802,6 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
     driver.advance(PendingStage::StepClosing(StepClosingState {
         plan_key: plan_one.plan_key,
 
-        messages: vec![plan_one.bound_message().unwrap()],
         bindings: plan_one.bindings.clone(),
         closure_cursor: 0,
         closures: vec![],
@@ -814,7 +827,6 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
             PendingStage::StepClosing(StepClosingState {
                 plan_key: plan_one.plan_key,
 
-                messages: vec![plan_one.bound_message().unwrap()],
                 bindings: plan_one.bindings.clone(),
                 closure_cursor: 0,
                 closures: vec![],
@@ -1231,7 +1243,6 @@ fn sigkill_child_loop(root: &std::path::Path) {
                     kind: crate::pending::StepClosedKind::FinishTurn {
                         final_message: assistant_text("done"),
                     },
-                    messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
                 },
                 101,
                 &lock,

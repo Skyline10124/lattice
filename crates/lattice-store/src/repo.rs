@@ -411,7 +411,9 @@ impl StoreRepo {
 
     /// The standard per-repository write lock: one exclusive strict `flock`
     /// inside the git directory, held across old-tip read, object creation,
-    /// CAS/transaction, and durability barriers. Readers do not take it.
+    /// CAS/transaction, and durability barriers. Ordinary single-ref reads do
+    /// not take it; domain strict-open validation may use it for a coherent
+    /// cross-ref view.
     pub fn write_lock(&self) -> Result<FlockGuard> {
         acquire_flock_strict(&self.git_dir.join(REPO_LOCK_FILE), Blocking::Block)
     }

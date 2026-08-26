@@ -50,12 +50,13 @@ pub mod step;
 
 pub use binding::{BindingPlan, PlannedBinding, binding_digest};
 pub use config::{
-    FrozenTurnConfig, MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_STEPS, MAX_USER_INPUT_BYTES,
-    ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits, TurnStartedFacts,
+    FrozenTurnConfig, MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_ATTEMPTS, MAX_MODEL_STEPS,
+    MAX_USER_INPUT_BYTES, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
+    TurnStartedFacts,
 };
 pub use contract::{
     CommittedFacts, PENDING_SNAPSHOT_SCHEMA_VERSION, PendingSnapshot, PendingStage,
-    TurnClosingFacts, TurnCommitCandidate, validate_transition,
+    TurnClosingFacts, TurnCommitCandidate, TurnCommitCandidateBasis, validate_transition,
 };
 pub use draft::{
     DraftClassification, DraftPublication, MAX_TOOL_CONTENT_BYTES, ResultDraft, ToolContentError,
@@ -73,7 +74,9 @@ pub use reconcile::{
     CandidateRevisionRequest, ReconciliationAction, ReconciliationDecision, ReconciliationPlan,
     reconcile,
 };
-pub use step::{ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState};
+pub use step::{
+    ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState, step_conversation_digest,
+};
 
 /// SHA-256 hex serde for fixed 32-byte digests in journal payloads. Same
 /// convention as `lattice-conversation`'s digest serde: 64 lowercase hex

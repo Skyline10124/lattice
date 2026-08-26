@@ -32,7 +32,7 @@ use lancet_protocol::{
 };
 use lattice_conversation::{
     MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, ToolResultOutcome,
-    UnboundToolCall, arguments_digest, semantic_digest,
+    UnboundToolCall, arguments_digest,
 };
 use lattice_session::pending::{
     BindingPlan, ClosedBinding, DraftClassification, DraftPublication, ExecutionOutcome,
@@ -40,7 +40,7 @@ use lattice_session::pending::{
     InvocationRecordFact, MaterialAvailability, NotExecutedReason, PendingStage, PlanFacts,
     PlannedBinding, ReconciliationAction, ResultDraft, ResultMaterial, StepClosedKind,
     StepClosingState, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits, TurnStartedFacts,
-    binding_digest, reconcile,
+    binding_digest, reconcile, step_conversation_digest,
 };
 use lattice_session::{GitSessionGraphStore, SessionGraphStore};
 use lattice_store::{Blocking, LockMode, ProjectStoreKey, REPO_LOCK_FILE, StateLayout};
@@ -1414,8 +1414,6 @@ fn result_finalize_stress() {
         // The closing loop starts at cursor 0 with nothing pinned.
         let mut state = StepClosingState {
             plan_key: plan.plan_key,
-
-            messages: vec![plan.bound_message().unwrap()],
             bindings: plan.bindings.clone(),
             closure_cursor: 0,
             closures: Vec::new(),
@@ -1682,9 +1680,11 @@ fn result_finalize_stress() {
                     kind: StepClosedKind::ContinueModel {
                         model_step_ordinal: plan.plan_key.model_step_ordinal,
                         ordered_tool_results: state.closures.clone(),
-                        conversation_digest: semantic_digest(&plan.message),
+                        conversation_digest: step_conversation_digest(
+                            &plan.bound_message().unwrap(),
+                            &state.closures,
+                        ),
                     },
-                    messages: state.messages.clone(),
                 },
                 recorded_at,
                 &execution_lock,

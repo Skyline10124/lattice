@@ -19,8 +19,9 @@
 //! `SessionExecutionLock` (a `flock` at `locks/sessions/<SessionId>.lock`)
 //! and then the repository write lock; `status` takes a non-blocking shared
 //! hold and reports `SessionBusy` instead of misreporting a live Turn as
-//! corruption. Snapshot reads (`open`/`list`/`log`/`diff`/`head_transcript`)
-//! pin committed refs and take no lock.
+//! corruption. Session store construction holds the repository lock while
+//! validating cross-ref invariants; ordinary reads (`list`/`log`/`diff`/
+//! `head_transcript`) remain lock-free and pin committed refs.
 
 #[cfg(test)]
 use std::cell::RefCell;
@@ -81,7 +82,7 @@ pub(crate) fn last_strict_open_work() -> StrictOpenWork {
 ///
 /// Holds the validated kernel repository and the directory of per-session
 /// execution lock files. The repository identity (`refs/lattice/meta`) is
-/// validated at construction: kind `session`, schema version 1, global
+/// validated at construction: kind `session`, schema version 3, global
 /// scope.
 #[derive(Debug)]
 pub struct GitSessionGraphStore {
@@ -107,12 +108,7 @@ impl GitSessionGraphStore {
                 scope: lattice_store::StoreScope::Global,
             },
         )?;
-        let this = Self {
-            session_locks_dir: default_locks_dir(&dir),
-            store,
-        };
-        this.validate_domain_invariants()?;
-        Ok(this)
+        Self::from_store(store, default_locks_dir(&dir))
     }
 
     /// First-create the store at `dir` (or validate the existing one), with
@@ -130,12 +126,7 @@ impl GitSessionGraphStore {
             },
             |_| Ok(()),
         )?;
-        let this = Self {
-            session_locks_dir: default_locks_dir(&dir),
-            store,
-        };
-        this.validate_domain_invariants()?;
-        Ok(this)
+        Self::from_store(store, default_locks_dir(&dir))
     }
 
     /// Strictly open the global `sessions.git` from the standard XDG state
@@ -147,12 +138,7 @@ impl GitSessionGraphStore {
             state::SESSION_STORE_KIND,
             state::SESSION_STORE_SCHEMA_VERSION,
         )?;
-        let this = Self {
-            session_locks_dir: layout.session_locks_dir(),
-            store,
-        };
-        this.validate_domain_invariants()?;
-        Ok(this)
+        Self::from_store(store, layout.session_locks_dir())
     }
 
     /// First-create the global `sessions.git` in the standard XDG state
@@ -168,11 +154,25 @@ impl GitSessionGraphStore {
             },
             |_| Ok(()),
         )?;
+        Self::from_store(store, layout.session_locks_dir())
+    }
+
+    /// Build a handle after the kernel constructor has returned, then validate
+    /// the cross-ref snapshot while excluding repository writers.
+    ///
+    /// `StoreRepo::create` releases its first-create lock before returning, so
+    /// this acquires only the Session repository lock. It takes no
+    /// SessionExecutionLock, preserving the sole writer ordering
+    /// `SessionExecutionLock -> repository lock` without inversion.
+    fn from_store(store: StoreRepo, session_locks_dir: PathBuf) -> Result<Self> {
         let this = Self {
-            session_locks_dir: layout.session_locks_dir(),
             store,
+            session_locks_dir,
         };
-        this.validate_domain_invariants()?;
+        {
+            let _write = this.store.write_lock()?;
+            this.validate_domain_invariants()?;
+        }
         Ok(this)
     }
 
@@ -380,32 +380,16 @@ impl GitSessionGraphStore {
                         }
                     }
                     "active-turn" => {
-                        let bytes = self
-                            .store
-                            .read_tree_blob(*oid, pending::PENDING_TREE_FILE)
-                            .map_err(|_| SessionError::JournalCorruption {
-                                detail: format!(
-                                    "active-turn ref '{name}' has no {}",
-                                    pending::PENDING_TREE_FILE
-                                ),
-                            })?;
-                        let snapshot: crate::pending::PendingSnapshot =
-                            serde_json::from_slice(&bytes).map_err(|e| {
-                                SessionError::JournalCorruption {
-                                    detail: format!(
-                                        "parse pending.json at active-turn '{name}': {e}"
-                                    ),
-                                }
-                            })?;
-                        if snapshot.session_id.as_str() != session_id.as_str() {
+                        let tip = self.read_active_turn(session_id)?.ok_or_else(|| {
+                            SessionError::JournalCorruption {
+                                detail: format!("active-turn ref '{name}' disappeared during open"),
+                            }
+                        })?;
+                        if tip.oid != *oid {
                             return Err(SessionError::JournalCorruption {
-                                detail: format!(
-                                    "active-turn of '{session_id}' names session '{}'",
-                                    snapshot.session_id
-                                ),
+                                detail: format!("active-turn ref '{name}' changed during open"),
                             });
                         }
-                        snapshot.validate()?;
                         #[cfg(test)]
                         {
                             work.active_turns_parsed += 1;

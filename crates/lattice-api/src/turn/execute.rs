@@ -3,9 +3,6 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
-use sha2::{Digest, Sha256};
-
 use super::cep::{ProductionTurnDepsInput, build_production_turn_deps};
 use super::collector::RunTurnCollector;
 use super::coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator};
@@ -13,11 +10,11 @@ use super::llm::RealLlmClient;
 use super::mapping::resolve_project_root;
 use super::types::{RunTurnRequest, RunTurnResult, TurnEventStream};
 use crate::session::{Result, SessionApi};
+use futures::StreamExt;
 
 #[derive(Debug, Clone)]
 pub(super) struct ProfileSnapshotMetadata {
     pub agent_name: String,
-    pub profile_snapshot_hash: String,
     pub profile_snapshot_json: String,
 }
 
@@ -31,17 +28,8 @@ pub(super) fn build_profile_snapshot_metadata(
     let profile_snapshot_json = serde_json::to_string(&value).map_err(|err| {
         crate::session::ApiError::Internal(format!("failed to serialize profile snapshot: {err}"))
     })?;
-    let mut hasher = Sha256::new();
-    hasher.update(profile_snapshot_json.as_bytes());
-    let profile_snapshot_hash = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-
     Ok(ProfileSnapshotMetadata {
         agent_name: loaded.profile.agent.name.clone(),
-        profile_snapshot_hash,
         profile_snapshot_json,
     })
 }
@@ -154,7 +142,11 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
     .await?;
 
     coordinator
-        .reconcile_pending(session_id, Arc::clone(&execution_lock))
+        .reconcile_pending(
+            session_id,
+            Arc::clone(&execution_lock),
+            Arc::clone(&deps.workspace_history),
+        )
         .await
         .map_err(|err| match err {
             super::coordinator::CoordinatorIoError::EvidenceDurabilityFailed { attempts } => {

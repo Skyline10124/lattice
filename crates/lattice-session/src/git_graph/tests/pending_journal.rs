@@ -13,7 +13,10 @@ use crate::git_graph::tests::{Fixture, temp_dir};
 use crate::graph::SessionGraphStore;
 use crate::pending::contract::PendingStage;
 use crate::pending::draft::ResultDraft;
-use crate::pending::{DraftClassification, DraftPublication};
+use crate::pending::{
+    ClosedBinding, DraftClassification, DraftPublication, MaterialAvailability, StepClosedKind,
+    StepClosingState, TurnFinishReason, TurnOutcome, step_conversation_digest,
+};
 
 use super::pending_fixtures::*;
 
@@ -32,6 +35,204 @@ fn head_oid(store: &GitSessionGraphStore) -> Option<String> {
         .ref_target(&format!("refs/lattice/sessions/{SESSION}/heads/main"))
         .expect("head")
         .map(|oid| oid.to_string())
+}
+
+#[test]
+fn cumulative_transcript_survives_continue_model_and_the_next_attempt() {
+    use lattice_conversation::{MessagePart, MessageSemantic, OpaqueProviderState, TokenUsage};
+
+    let (_f, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(0, 0),
+            },
+            100,
+            &lock,
+        )
+        .expect("attempt 0");
+
+    let mut plan = one_binding_plan();
+    plan.message.parts[0].replay_state =
+        Some(OpaqueProviderState::new("opaque-tool-signature").unwrap());
+    plan.message
+        .parts
+        .push(MessagePart::semantic_only(MessageSemantic::Reasoning {
+            text: "private complete reasoning".into(),
+        }));
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::BindingPlanned {
+                plan: plan.clone(),
+                usage: Some(TokenUsage {
+                    prompt_tokens: 3,
+                    completion_tokens: 2,
+                    total_tokens: 5,
+                }),
+            },
+            101,
+            &lock,
+        )
+        .expect("planned");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::Bound { plan: plan.clone() },
+            102,
+            &lock,
+        )
+        .expect("bound");
+    let baseline = StepClosingState {
+        plan_key: plan.plan_key,
+        bindings: plan.bindings.clone(),
+        closure_cursor: 0,
+        closures: Vec::new(),
+        current_candidate: None,
+    };
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::StepClosing(baseline.clone()),
+            103,
+            &lock,
+        )
+        .expect("closing");
+    let closure = ClosedBinding {
+        binding: plan.bindings[0].clone(),
+        outcome: lattice_conversation::ToolResultOutcome::NotExecuted,
+        material: MaterialAvailability::Unavailable {
+            reason: crate::pending::UnavailableMaterialReason::NotExecuted,
+            digest: None,
+            byte_length: None,
+        },
+    };
+    let closed = StepClosingState {
+        closure_cursor: 1,
+        closures: vec![closure.clone()],
+        ..baseline
+    };
+    store
+        .advance_pending_turn(&session, PendingStage::StepClosing(closed), 104, &lock)
+        .expect("cursor");
+    let bound = plan.bound_message().unwrap();
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::StepClosed {
+                kind: StepClosedKind::ContinueModel {
+                    model_step_ordinal: 0,
+                    ordered_tool_results: vec![closure.clone()],
+                    conversation_digest: step_conversation_digest(
+                        &bound,
+                        std::slice::from_ref(&closure),
+                    ),
+                },
+            },
+            105,
+            &lock,
+        )
+        .expect("step closed");
+    let attempt_1 = store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(1, 0),
+            },
+            106,
+            &lock,
+        )
+        .expect("attempt 1");
+
+    let expected = vec![
+        bound.clone(),
+        crate::pending::step::closure_transcript(&closure, None),
+    ];
+    assert_eq!(attempt_1.snapshot.post_user_transcript, expected);
+    assert_eq!(
+        attempt_1.snapshot.root.as_ref().unwrap().config,
+        frozen_config(),
+        "profile, policy, and catalog remain the exact TurnStarted snapshot",
+    );
+    let recovery = crate::pending::reconcile(
+        &attempt_1.snapshot,
+        &crate::pending::InvocationFactsSnapshot::empty(),
+    )
+    .expect("reconcile")
+    .closure()
+    .expect("closure")
+    .clone();
+    let recovered = recovery
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            crate::pending::ReconciliationAction::PublishTurnClosing { candidate } => {
+                Some(candidate)
+            }
+            _ => None,
+        })
+        .expect("candidate");
+    assert_eq!(&recovered.messages[1..], expected.as_slice());
+    assert_eq!(
+        recovered.profile_snapshot_json,
+        frozen_config().profile_snapshot_json
+    );
+    assert_eq!(recovered.origin, crate::pending::ClosureOrigin::Reconciled);
+    assert!(matches!(
+        recovered.usage_aggregate,
+        Some(crate::pending::TurnUsageAggregate::Partial { .. })
+    ));
+
+    let final_message = assistant_text("plain continuation");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::MessageComplete {
+                key: attempt_key(1, 0),
+                message: final_message.clone(),
+                usage: Some(TokenUsage {
+                    prompt_tokens: 5,
+                    completion_tokens: 1,
+                    total_tokens: 6,
+                }),
+            },
+            107,
+            &lock,
+        )
+        .expect("message complete");
+    let finished = store
+        .advance_pending_turn(
+            &session,
+            PendingStage::StepClosed {
+                kind: StepClosedKind::FinishTurn {
+                    final_message: final_message.clone(),
+                },
+            },
+            108,
+            &lock,
+        )
+        .expect("finish");
+    let mut expected_complete = expected;
+    expected_complete.push(final_message.bind_zero_tool().unwrap());
+    assert_eq!(finished.snapshot.post_user_transcript, expected_complete);
+    let live = finished
+        .snapshot
+        .turn_commit_candidate_basis(
+            TurnOutcome::Completed {
+                finish_reason: TurnFinishReason::Stop,
+            },
+            crate::pending::ClosureOrigin::Live,
+        )
+        .expect("live candidate");
+    assert_eq!(&live.messages[1..], expected_complete.as_slice());
+    assert_eq!(live.usage_aggregate.unwrap().usage().total_tokens, 11);
 }
 
 #[test]
@@ -361,7 +562,6 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
                 kind: crate::pending::StepClosedKind::FinishTurn {
                     final_message: assistant_text("done"),
                 },
-                messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
             },
             102,
             &lock,
@@ -371,7 +571,7 @@ fn finalize_publishes_head_pin_state_and_deletes_active_turn_atomically() {
         .advance_pending_turn(
             &session,
             // The frozen tip is journal authority; the candidate carries only side parents.
-            PendingStage::TurnClosing(turn_closing(completed_candidate(None))),
+            PendingStage::TurnClosing(completed_turn_closing_from_active(&store, &session)),
             103,
             &lock,
         )
@@ -506,7 +706,6 @@ fn finalize_conflict_publishes_nothing() {
                 kind: crate::pending::StepClosedKind::FinishTurn {
                     final_message: assistant_text("done"),
                 },
-                messages: vec![assistant_text("done").bind_zero_tool().unwrap()],
             },
             102,
             &lock,
@@ -515,7 +714,7 @@ fn finalize_conflict_publishes_nothing() {
     store
         .advance_pending_turn(
             &session,
-            PendingStage::TurnClosing(turn_closing(completed_candidate(None))),
+            PendingStage::TurnClosing(completed_turn_closing_from_active(&store, &session)),
             103,
             &lock,
         )
@@ -620,6 +819,128 @@ fn strict_open_validates_the_active_turn_snapshot_in_depth() {
 }
 
 #[test]
+fn strict_open_rejects_a_prefix_divergent_cumulative_transcript() {
+    let (fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    let attempt = store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(0, 0),
+            },
+            100,
+            &lock,
+        )
+        .expect("attempt");
+    drop(lock);
+
+    let mut payload = serde_json::to_value(&attempt.snapshot).expect("payload");
+    payload["predecessor"] = serde_json::Value::String(attempt.oid.to_string());
+    payload["stage"] = serde_json::to_value(PendingStage::ModelAttemptInterrupted {
+        key: attempt_key(0, 0),
+        reason: lattice_conversation::AttemptInterruption::ProcessInterrupted,
+        usage: None,
+    })
+    .unwrap();
+    payload["post_user_transcript"] = serde_json::json!([crate::test_helpers::assistant_msg(
+        "forged cumulative prefix"
+    )]);
+    let forged = forge_journal_commit(&store, &payload, &[attempt.oid]);
+    force_active_turn(&store, &session, forged);
+    drop(store);
+
+    let err = GitSessionGraphStore::open(fixture.path().join("sessions.git"))
+        .expect_err("strict open must reject transcript lineage divergence");
+    assert!(matches!(err, SessionError::JournalCorruption { .. }));
+}
+
+#[test]
+fn strict_open_refuses_a_forged_lineage_beyond_the_depth_limit() {
+    let (fixture, store, session) = setup();
+    let lock = store
+        .lock_execution(&session, LockMode::Exclusive, Blocking::Block)
+        .expect("lock");
+    store
+        .begin_pending_turn(turn_started_facts(None), &lock)
+        .expect("begin");
+    store
+        .advance_pending_turn(
+            &session,
+            PendingStage::ModelAttemptStarted {
+                key: attempt_key(0, 0),
+            },
+            100,
+            &lock,
+        )
+        .expect("attempt");
+    let mut plan = one_binding_plan();
+    let planned = store
+        .advance_pending_turn(
+            &session,
+            PendingStage::BindingPlanned {
+                plan: plan.clone(),
+                usage: None,
+            },
+            101,
+            &lock,
+        )
+        .expect("planned");
+    drop(lock);
+
+    // Forge individually legal same-stage candidate revisions without using
+    // publication APIs. The final chain is exactly one snapshot over the
+    // code-defined maximum and must be rejected before strict reopen can
+    // continue reading backwards without bound.
+    let additional =
+        crate::git_graph::pending::MAX_PENDING_TURN_LINEAGE_DEPTH - planned.lineage_depth + 1;
+    let mut parent = planned.oid;
+    for revision in 0..additional {
+        let binding = &mut plan.bindings[0];
+        binding.invocation_id = invocation_id(revision as u32 + 2);
+        binding.binding_digest = crate::pending::binding_digest(
+            &binding.invocation_id,
+            &binding.address,
+            &binding.method,
+            &binding.descriptor_identity,
+            &binding.arguments_digest,
+        );
+        let snapshot = crate::pending::PendingSnapshot {
+            schema_version: crate::pending::PENDING_SNAPSHOT_SCHEMA_VERSION,
+            session_id: session_id(),
+            turn_id: turn_id(),
+            predecessor: Some(parent.to_string()),
+            post_user_transcript: vec![plan.bound_message().expect("bound message")],
+            stage: PendingStage::BindingPlanned {
+                plan: plan.clone(),
+                usage: None,
+            },
+            recorded_at: None,
+            root: None,
+            attempt_usages: Vec::new(),
+        };
+        let payload = serde_json::to_value(snapshot).expect("payload");
+        parent = forge_journal_commit(&store, &payload, &[parent]);
+    }
+    force_active_turn(&store, &session, parent);
+    drop(store);
+
+    let err = GitSessionGraphStore::open(fixture.path().join("sessions.git"))
+        .expect_err("strict open must reject an over-depth lineage");
+    assert!(
+        matches!(
+            err,
+            SessionError::JournalCorruption { ref detail } if detail.contains("depth limit")
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
 fn strict_open_validates_the_turn_pin_identity() {
     // F5.2: a `turns/<TurnId>` pin must point at the conversation commit of
     // *that* Turn of *this* session, not merely at some commit carrying a
@@ -638,7 +959,6 @@ fn strict_open_validates_the_turn_pin_identity() {
                 kind: crate::pending::StepClosedKind::FinishTurn {
                     final_message: assistant_text("done"),
                 },
-                messages: Vec::new(),
             },
             99,
             &lock,
@@ -647,7 +967,7 @@ fn strict_open_validates_the_turn_pin_identity() {
     store
         .advance_pending_turn(
             &session,
-            PendingStage::TurnClosing(turn_closing(completed_candidate(None))),
+            PendingStage::TurnClosing(completed_turn_closing_from_active(&store, &session)),
             100,
             &lock,
         )
@@ -703,24 +1023,26 @@ fn journal_read_rejects_a_predecessor_that_diverges_from_the_git_parent() {
         .expect("attempt");
     drop(lock);
 
-    // Same payload (predecessor = the attempt snapshot), but the git parent
-    // is grafted back onto the chain root.
-    let payload = serde_json::json!({
-        "schema_version": 1,
-        "session_id": SESSION,
-        "turn_id": TURN,
-        "predecessor": attempt.oid.to_string(),
-        "stage": {
-            "stage": "message_complete",
-            "key": {
-                "turn_id": TURN,
-                "model_step_ordinal": 0,
-                "attempt_ordinal": 0,
-            },
-            "message": serde_json::to_value(assistant_text("done")).expect("message"),
-            "usage": serde_json::Value::Null,
+    // The payload is current-schema and individually valid, with predecessor
+    // = the attempt snapshot, but the git parent is grafted onto the chain
+    // root. This isolates edge authentication from schema validation.
+    let message = assistant_text("done");
+    let payload = serde_json::to_value(crate::pending::PendingSnapshot {
+        schema_version: crate::pending::PENDING_SNAPSHOT_SCHEMA_VERSION,
+        session_id: session_id(),
+        turn_id: turn_id(),
+        predecessor: Some(attempt.oid.to_string()),
+        post_user_transcript: vec![message.clone().bind_zero_tool().expect("zero-Tool")],
+        stage: PendingStage::MessageComplete {
+            key: attempt_key(0, 0),
+            message,
+            usage: None,
         },
-    });
+        recorded_at: None,
+        root: None,
+        attempt_usages: Vec::new(),
+    })
+    .expect("payload");
     let forged = forge_journal_commit(&store, &payload, &[started.oid]);
     force_active_turn(&store, &session, forged);
 
@@ -728,7 +1050,11 @@ fn journal_read_rejects_a_predecessor_that_diverges_from_the_git_parent() {
         .read_active_turn(&session)
         .expect_err("divergent predecessor must fail closed");
     assert!(
-        matches!(err, SessionError::JournalCorruption { .. }),
+        matches!(
+            err,
+            SessionError::JournalCorruption { ref detail }
+                if detail.contains("git parents")
+        ),
         "got {err:?}"
     );
 }
@@ -753,13 +1079,15 @@ fn turn_started_root_rejects_a_graft_onto_a_foreign_parent() {
 
     // Facts freeze the real tip, but the commit is grafted onto nothing.
     let payload = serde_json::to_value(crate::pending::contract::PendingSnapshot {
-        schema_version: 1,
+        schema_version: crate::pending::PENDING_SNAPSHOT_SCHEMA_VERSION,
         session_id: session_id(),
         turn_id: turn_id(),
         predecessor: None,
+        post_user_transcript: Vec::new(),
         stage: PendingStage::TurnStarted(turn_started_facts(Some(first.commit_id.clone()))),
         recorded_at: None,
         root: None,
+        attempt_usages: Vec::new(),
     })
     .expect("payload");
     let forged = forge_journal_commit(&store, &payload, &[]);
@@ -769,7 +1097,11 @@ fn turn_started_root_rejects_a_graft_onto_a_foreign_parent() {
         .read_active_turn(&session)
         .expect_err("ungrafted root must fail closed");
     assert!(
-        matches!(err, SessionError::JournalCorruption { .. }),
+        matches!(
+            err,
+            SessionError::JournalCorruption { ref detail }
+                if detail.contains("git parents")
+        ),
         "got {err:?}"
     );
 }
@@ -778,7 +1110,8 @@ fn turn_started_root_rejects_a_graft_onto_a_foreign_parent() {
 fn journal_finalized_turns_keep_no_legacy_outcome_authority() {
     // Typed outcome/origin/checkpoint are the only terminal facts in schema v4.
     use crate::pending::outcome::{
-        TurnCancellation, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
+        ClosureOrigin, TurnCancellation, TurnFailure, TurnFinishReason, TurnInterruption,
+        TurnOutcome, WorkspaceHistoryCheckpoint,
     };
 
     let outcomes = [
@@ -804,25 +1137,31 @@ fn journal_finalized_turns_keep_no_legacy_outcome_authority() {
         store
             .begin_pending_turn(turn_started_facts(None), &lock)
             .expect("begin");
-        let mut candidate = completed_candidate(None);
-        candidate.outcome = outcome.clone();
+        let kind = match &outcome {
+            TurnOutcome::Completed { .. } => StepClosedKind::FinishTurn {
+                final_message: assistant_text("done"),
+            },
+            TurnOutcome::Failed { reason } => StepClosedKind::FailTurn {
+                reason: reason.clone(),
+            },
+            TurnOutcome::Cancelled { reason } => StepClosedKind::CancelTurn { reason: *reason },
+            TurnOutcome::Interrupted { reason } => StepClosedKind::InterruptTurn {
+                reason: reason.clone(),
+            },
+        };
         store
-            .advance_pending_turn(
-                &session,
-                PendingStage::StepClosed {
-                    kind: crate::pending::StepClosedKind::FinishTurn {
-                        final_message: assistant_text("done"),
-                    },
-                    messages: Vec::new(),
-                },
-                99,
-                &lock,
-            )
+            .advance_pending_turn(&session, PendingStage::StepClosed { kind }, 99, &lock)
             .expect("closed");
         store
             .advance_pending_turn(
                 &session,
-                PendingStage::TurnClosing(turn_closing(candidate)),
+                PendingStage::TurnClosing(turn_closing_from_active(
+                    &store,
+                    &session,
+                    outcome.clone(),
+                    ClosureOrigin::Live,
+                    WorkspaceHistoryCheckpoint::Empty,
+                )),
                 100,
                 &lock,
             )

@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use lancet_api::WorkspaceHistory;
 use lancet_audit::invocation_store::InvocationStore;
 use lancet_protocol::{InvocationId, PlanKey, TurnId};
 use lattice_session::pending::InvocationFactsSnapshot;
@@ -41,6 +42,8 @@ pub(crate) enum CoordinatorIoError {
     EvidenceDurabilityFailed { attempts: u32 },
     #[error("project-store binding mismatch: {0}")]
     ProjectBinding(String),
+    #[error("workspace history error: {0}")]
+    WorkspaceHistory(String),
 }
 
 /// Injectable canonical identity source (ADR 0005 §1).
@@ -443,6 +446,7 @@ impl TurnCoordinator {
         &self,
         session_id: String,
         lock: Arc<lattice_session::FlockGuard>,
+        workspace_history: Arc<WorkspaceHistory>,
     ) -> Result<Option<lattice_session::TurnCommit>, CoordinatorIoError> {
         loop {
             let Some(tip) = self.io.read_active_turn(session_id.clone()).await? else {
@@ -502,6 +506,7 @@ impl TurnCoordinator {
                 }
                 lattice_session::pending::ReconciliationDecision::Closure(plan) => {
                     let mut finalized = None;
+                    let mut workspace_guard = None;
                     for action in plan.actions {
                         let current = self
                             .io
@@ -527,12 +532,12 @@ impl TurnCoordinator {
                                 };
                                 self.io.reserve_plan(plan).await?;
                             }
-                            lattice_session::pending::ReconciliationAction::TerminalizeInvocation { invocation, outcome, material } => {
+                            lattice_session::pending::ReconciliationAction::TerminalizeInvocation { invocation, method, outcome, material } => {
                                 match self.io.publish_terminal_under_budget(
                                     invocation,
                                     map_outcome(outcome),
                                     map_material(material),
-                                    empty_terminal_evidence("reconcile"),
+                                    empty_terminal_evidence(&method),
                                 ).await {
                                     Ok(()) => {}
                                     Err(FinalizeFailure::EvidenceDurabilityFailed { attempts }) => {
@@ -549,13 +554,30 @@ impl TurnCoordinator {
                             lattice_session::pending::ReconciliationAction::AdvanceStepClosing { state } => {
                                 self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::StepClosing(state), recorded_at, Arc::clone(&lock)).await?;
                             }
-                            lattice_session::pending::ReconciliationAction::PublishStepClosed { kind, messages } => {
-                                self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::StepClosed { kind, messages }, recorded_at, Arc::clone(&lock)).await?;
+                            lattice_session::pending::ReconciliationAction::PublishStepClosed { kind } => {
+                                self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::StepClosed { kind }, recorded_at, Arc::clone(&lock)).await?;
                             }
                             lattice_session::pending::ReconciliationAction::PublishTurnClosing { candidate } => {
+                                let (guard, checkpoint) = acquire_workspace_checkpoint(Arc::clone(&workspace_history)).await?;
+                                let candidate = candidate
+                                    .with_workspace_history_checkpoint(checkpoint)
+                                    .map_err(CoordinatorIoError::Session)?;
                                 self.io.advance_turn(session_id.clone(), lattice_session::pending::PendingStage::TurnClosing(lattice_session::pending::TurnClosingFacts { turn_id: current.snapshot.turn_id, candidate }), recorded_at, Arc::clone(&lock)).await?;
+                                workspace_guard = Some(guard);
                             }
                             lattice_session::pending::ReconciliationAction::FinalizeTurn => {
+                                if workspace_guard.is_none() {
+                                    let (guard, current_checkpoint) = acquire_workspace_checkpoint(Arc::clone(&workspace_history)).await?;
+                                    let pinned = match &current.snapshot.stage {
+                                        lattice_session::pending::PendingStage::TurnClosing(facts) => &facts.candidate.workspace_history_checkpoint,
+                                        lattice_session::pending::PendingStage::Committed(facts) => &facts.candidate.workspace_history_checkpoint,
+                                        other => return Err(SessionError::JournalCorruption { detail: format!("finalize action at {} has no pinned checkpoint", other.stage_name()) }.into()),
+                                    };
+                                    if pinned != &current_checkpoint {
+                                        return Err(SessionError::JournalCorruption { detail: format!("pinned workspace checkpoint {pinned:?} differs from current {current_checkpoint:?}") }.into());
+                                    }
+                                    workspace_guard = Some(guard);
+                                }
                                 finalized = Some(self.io.finalize_turn(session_id.clone(), current.snapshot.turn_id, Arc::clone(&lock)).await?);
                             }
                         }
@@ -565,6 +587,39 @@ impl TurnCoordinator {
             }
         }
     }
+}
+
+async fn acquire_workspace_checkpoint(
+    workspace_history: Arc<WorkspaceHistory>,
+) -> Result<
+    (
+        lattice_session::FlockGuard,
+        lattice_session::pending::WorkspaceHistoryCheckpoint,
+    ),
+    CoordinatorIoError,
+> {
+    tokio::task::spawn_blocking(move || {
+        let guard = workspace_history
+            .lock_workspace_operation(
+                lattice_session::LockMode::Shared,
+                lattice_session::Blocking::Block,
+            )
+            .map_err(|error| CoordinatorIoError::WorkspaceHistory(error.to_string()))?
+            .ok_or_else(|| {
+                CoordinatorIoError::WorkspaceHistory(
+                    "production Turn has disabled workspace history".into(),
+                )
+            })?;
+        let current = workspace_history
+            .current()
+            .map_err(|error| CoordinatorIoError::WorkspaceHistory(error.to_string()))?;
+        let checkpoint =
+            lattice_session::pending::WorkspaceHistoryCheckpoint::from_current(current)
+                .map_err(CoordinatorIoError::Session)?;
+        Ok((guard, checkpoint))
+    })
+    .await
+    .map_err(CoordinatorIoError::Blocking)?
 }
 
 fn require_recorded_at(
@@ -725,6 +780,46 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(facts, InvocationFactsSnapshot::empty());
+        });
+    }
+
+    #[test]
+    fn workspace_checkpoint_guard_excludes_mutation_until_session_finalization_releases_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = StateLayout::in_state_root(tmp.path());
+        let key = ProjectStoreKey::derive(tmp.path()).unwrap();
+        let history = Arc::new(
+            WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(layout, key))
+                .unwrap(),
+        );
+
+        tokio_runtime().block_on(async {
+            let (guard, checkpoint) = acquire_workspace_checkpoint(Arc::clone(&history))
+                .await
+                .unwrap();
+            assert_eq!(
+                checkpoint,
+                lattice_session::WorkspaceHistoryCheckpoint::Empty
+            );
+            assert!(
+                history
+                    .lock_workspace_operation(
+                        lattice_session::LockMode::Exclusive,
+                        lattice_session::Blocking::NonBlocking,
+                    )
+                    .is_err(),
+                "the shared closing guard must exclude a mutation"
+            );
+            drop(guard);
+            assert!(
+                history
+                    .lock_workspace_operation(
+                        lattice_session::LockMode::Exclusive,
+                        lattice_session::Blocking::NonBlocking,
+                    )
+                    .is_ok(),
+                "the mutation lock is available only after finalization drops the guard"
+            );
         });
     }
 
