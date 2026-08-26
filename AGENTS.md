@@ -403,12 +403,8 @@ notification cannot create an invocation.
   paths into commits. If a path appears to need tracking despite ignore rules,
   stop and ask a human maintainer to change the policy explicitly.
 - Adding or removing a crate also updates the prose crate count in `README.md`,
-  `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, and `docs/GETTING-STARTED.md`,
-  plus the README layer graph and crate table. `cargo xtask ci` cannot catch a
-  stale count: its per-crate test loop deliberately excludes `xtask`, and the
-  assertion that pins these counts to the filesystem lives in
-  `xtask/src/ci.rs`. Run `cargo test --workspace` — what GitHub CI runs — before
-  pushing any change that touches the crate set.
+  plus the README layer graph and crate table. Run `cargo test --workspace` —
+  what GitHub CI runs — before pushing any change that touches the crate set.
 
 ## Ownership Rules
 

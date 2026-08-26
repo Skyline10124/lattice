@@ -2,6 +2,31 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## CI: remove crate-count prose pin after docs deletion — 2026-08-26
+
+**Severity:** LOW (CI red on `main`; test was not a real architecture gate)
+
+**Problem:** `xtask/src/ci.rs::documented_crate_counts_match_the_crates_directory`
+substring-checked that four files contained `"{n} crates"` against the
+`crates/` directory count. After the 2026-08-26 docs deletion
+(`docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `docs/GETTING-STARTED.md`),
+GitHub CI (`cargo test --workspace`) panicked on the missing files before
+asserting anything. The pin was added for #102 and is not a dependency-graph
+or catalog-boundary check.
+
+**Fix:** Delete the test and its #102 comment. Drop the matching pin claim and
+deleted-doc list from the root `AGENTS.md` hygiene bullet. Leave remaining
+xtask CI tests (wasm-tools pins, `ordered_test_crates`, tool-manifest
+fingerprint) unchanged. Do not restore the deleted docs. Historical `FIX.md`
+entries that mention the old test are left as-is.
+
+**Verification:** `cargo test -p xtask` — 120 passed, 0 failed. Remaining
+`ci::tests` still run: wasm-tools parse/pin, tool-manifest fingerprint,
+`ordered_test_crates` (deterministic + dependency order). The deleted test
+name is absent from the run.
+
+**Changed files:** `xtask/src/ci.rs`, `AGENTS.md`, `FIX.md`.
+
 ## GitHub #98（部分）：符号链接拒绝不再回吐宿主路径；字面量 `..` 文件名不再拖垮整次搜索 — 2026-08-22
 
 **Severity:** 两项均 LOW
