@@ -129,6 +129,7 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
             max_boundary: lancet_protocol::cell::Trust::In,
         },
         workspace_history: history.clone(),
+        components: None,
     })
     .expect("runtime with private history builds")
 }

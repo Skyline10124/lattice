@@ -177,6 +177,7 @@ impl LancetRuntime {
             cep_mode,
             invocations,
             workspace_history,
+            components: precomposed,
         } = config;
 
         policy.project_root = validate_project_store_bindings(
@@ -187,14 +188,15 @@ impl LancetRuntime {
         )?;
 
         // D.2: compose the Component runtime once from embedded inventory +
-        // the generated `EXPECTED_COMPONENTS`. Since #29 that is non-empty: it
-        // embeds `session.todo_write` (#30–#32 add the rest). The same instance
-        // serves dispatch (D.3) and LLM projection (D.4).
-        let components = Arc::new(
-            ComponentRuntime::from_embedded()
-                .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?,
-        );
-
+        // the generated `EXPECTED_COMPONENTS`. When a pre-composed instance is
+        // supplied (process-level shared), skip recompilation entirely.
+        let components =
+            match precomposed {
+                Some(shared) => shared,
+                None => Arc::new(ComponentRuntime::from_embedded().map_err(|err| {
+                    LancetError::Internal(format!("component composition: {err}"))
+                })?),
+            };
         // D.4: project Component descriptors into LLM tool definitions.
         // The available set is native catalog methods + Component Tools;
         // enabled_tools is resolved against the combined set (spec D.4:
