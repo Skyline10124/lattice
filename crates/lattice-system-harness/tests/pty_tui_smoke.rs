@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use lattice_system_harness::processes_in_pgid;
 use lattice_system_harness::{
-    LatticeDriver, PtyTuiDriver, ScenarioLayer, ScenarioSpec, ScenarioWorld, SseScript,
+    LatticeDriver, PtyTuiDriver, ScenarioLayer, ScenarioSpec, ScenarioWorld, TuiMockScenario,
 };
 
 /// Minimal project-local agent profile for the TUI smoke: the Direct-Local
@@ -72,7 +72,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     world.init_git_project().expect("init git project");
     budget.check(&spec.name);
 
-    let server = lattice_system_harness::FakeLlmServer::start(SseScript::plain("pong"))
+    let server = lattice_system_harness::FakeLlmServer::start(TuiMockScenario::LongText.script())
         .expect("start fake llm");
     world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
     world.set_env("OPENAI_COMPATIBLE_MODEL", "tui-smoke");
@@ -91,10 +91,10 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         .expect("tui entered alternate screen");
 
     // Send a prompt and wait for the assistant token text. The fake LLM
-    // returns "pong", so the TUI's token rendering must surface it.
+    // uses the shared long-text mock, so the final deterministic line must surface.
     budget.check(&spec.name);
     tui.send_line("ping").expect("send prompt");
-    tui.wait_for(Duration::from_secs(60), |s| s.contains("pong"))
+    tui.wait_for(Duration::from_secs(60), |s| s.contains("mock line 32"))
         .expect("assistant token text appeared");
 
     let caps = server.captured_requests();

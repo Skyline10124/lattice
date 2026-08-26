@@ -7684,3 +7684,48 @@ with the 180-second total and every global harness/xtask timeout unchanged.
 **Changed files:** `crates/lancet-api/src/rewind.rs`, `crates/lattice-api/src/rewind.rs`,
 `crates/lattice-api/tests/rewind_acceptance.rs`,
 `crates/lattice-system-harness/tests/direct_observation.rs`, and `FIX.md`.
+## 2026-08-26 — GitHub #156 TUI mock backend and deterministic visual fixture
+
+- **ID/severity:** GitHub #156 / developer-experience enhancement.
+- **Problem:** exercising the real full-screen TUI required a paid provider and
+  hard-to-repeat live conversations; the existing fake SSE server, PTY driver, and
+  `TestBackend` checks had no reusable scenario catalog or one-command interactive
+  entry, and rendering was only checked for non-panicking output.
+- **Fix:** added `cargo xtask tui-mock --scenario <name>`, which builds the current
+  `lattice` binary and launches its real TUI in an isolated harness world against
+  the existing fake provider. The reusable catalog supplies `long-text`,
+  `tool-call`, `disconnect`, `slow`, and `error`; the slow case uses the existing
+  response gate so Esc exercises cooperative cancellation. The existing PTY smoke
+  now consumes the shared long-text scenario, and the TUI has an exact 40×8 raw
+  buffer regression without a snapshot framework.
+- **Verification:** `cargo test -p lattice-tui` (25 passed);
+  `cargo test -p lattice-system-harness --lib` (63 passed);
+  `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness --test pty_tui_smoke`
+  (1 passed); `cargo test -p xtask` (115 passed);
+  `cargo xtask harness-boundary` passed; one-command entry smoke entered the
+  alternate screen and exited cleanly through `/quit`;
+  `env -u LATTICE_BIN cargo xtask ci` passed all gates.
+- **Changed files:** `crates/lattice-system-harness/src/{lib.rs,tui_mock.rs,bin/tui_mock.rs}`,
+  `crates/lattice-system-harness/tests/pty_tui_smoke.rs`,
+  `crates/lattice-tui/src/view.rs`, `xtask/src/{main.rs,tui_mock.rs}`, `FIX.md`.
+
+## 2026-08-26 — GitHub #156 follow-up: remove mock prompt startup stall
+
+- **ID/severity:** GitHub #156 / developer-experience performance regression.
+- **Problem:** after the TUI was visibly ready, Enter still took about 6.3 seconds
+  to show deterministic mock content. Boundary timing proved the fake provider
+  read and wrote its response in under 1 ms; the delay occurred before dispatch,
+  where the unoptimized dev binary spent about 6.2 seconds compiling the closed
+  embedded Component catalog on every Turn.
+- **Fix:** the mock xtask now builds `lattice` with a dedicated `tui-mock` Cargo
+  profile and selects that profile's binary. Workspace crates remain unoptimized
+  for quick TUI iteration, while dependencies use `opt-level=1`, accelerating
+  Wasmtime without changing or bypassing production Turn composition, closed-
+  catalog validation, policy, audit, or the formal fake-provider route.
+- **Verification:** red regression first observed the xtask still selecting
+  `target/debug/lattice`; the focused xtask test now passes and pins the profile
+  plus artifact path. A PTY timing loop measured 6.299 seconds before the fix and
+  0.727/0.727/0.694 seconds after it (about 9× faster).
+  `cargo test -p xtask` passed 116 tests; the custom-profile build and PTY smoke
+  passed; `env -u LATTICE_BIN cargo xtask ci` passed all gates.
+- **Changed files:** `Cargo.toml`, `xtask/src/tui_mock.rs`, `FIX.md`.

@@ -406,4 +406,34 @@ mod tests {
         assert!(row_has(22), "input region should be drawn");
         assert!(row_has(23), "status region should be drawn");
     }
+
+    #[test]
+    fn draw_matches_deterministic_text_fixture() {
+        let mut app = test_app();
+        app.blocks.extend([
+            Block::User("mock prompt".into()),
+            Block::Assistant("mock line 01\nmock line 02".into()),
+            Block::Status(StatusKind::Notice(vec!["mock notice".into()])),
+        ]);
+        app.input.set_text("follow-up");
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..8u16)
+            .map(|y| {
+                (0..40u16)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            screen,
+            "mock prompt\nmock line 01\nmock line 02\nmock notice\n\n\nfollow-up\nsess  agent  idle  Alt+Enter 换 行"
+        );
+    }
 }
