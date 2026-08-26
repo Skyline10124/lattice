@@ -1,8 +1,4 @@
-<!-- generated-by: gsd-doc-writer -->
-
 # LATTICE
-
-![LATTICE banner](logo-banner.svg)
 
 ![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)
 ![Rust 1.94+](https://img.shields.io/badge/Rust-1.94%2B-orange.svg)
@@ -160,13 +156,6 @@ records the turn as a commit; `lancet status` shows recent CEP calls and the
 last guard verdict; `doctor` runs diagnostics. Add `--json` (global flag) to
 emit one `TurnEvent` JSON object per line on stdout instead of human output.
 
-Other `session` subcommands: `agent`, `status`, `list`, `checkout`, `diff`, and
-`reset`. Legacy Session/audit formats are not imported and there is no `migrate`
-command; disposable development state is rebuilt explicitly using
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#manual-development-state-rebuild).
-`resume` and `prune-snapshots` were removed with the Upper snapshot lifecycle
-(#59/#62, Codeberg #37/#40).
-
 ## Build, test, lint
 
 ```sh
@@ -175,12 +164,6 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. For workspace
-architecture guidance, see [AGENTS.md](AGENTS.md); for crate-local ownership,
-read the `AGENTS.md` in the relevant `crates/<crate>/` directory.
 
 ## License
 
