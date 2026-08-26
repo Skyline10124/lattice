@@ -7604,3 +7604,49 @@ reader, placeholder reconstruction, reverse dependency, or second transcript aut
 **Changed areas:** `lattice-conversation` Tool batch contract, `lattice-session` PendingTurn
 contracts/store/strict-open validation, `lattice-api` live/reopen checkpoint composition, real crash
 barriers, focused durable corruption regressions, crate guidance, and this append-only record.
+
+## GitHub #160: make Rewind placement, locking, partial state, and crash recovery exact — 2026-08-26
+
+**Severity:** P0 / BLOCKER
+
+**Problem:** Rewind still parsed WorkspaceHistory ownership through the retired
+`<session>:<parent>` convention and fell back to timestamps, planned before acquiring the
+workspace operation lock, accepted a constructible unbound lock marker, filtered a globally bounded
+audit page after the bound, conflated target and actual durable refs in partial errors, accepted
+non-first-parent private chains, and wrote crash acknowledgements directly to the final path.
+Repeated execution after the post-audit crash window could append a duplicate audit record.
+
+**Fix:** Workspace mutation/audit records now carry typed `TurnId`/`SessionId`; history schema v3
+requires unique canonical trailers and strict single-parent structure. Full-unwind placement uses
+only the selected Session's typed lineage. Rewind acquires one opaque, exact-backing, exclusive
+`HeldWorkspaceOperation` before any plan or preflight and retains it through audit publication.
+Audit records use bounded completeness-aware per-Session first-parent refs, so foreign Sessions
+cannot displace records. Typed partial state separates attempted history target from fresh actual
+WorkspaceHistory, Session-head, and audit observations, and CLI JSON/text renders the complete
+contract. Exact completed retries replay a strictly validated success without restore, pin, ref
+movement, or audit append; a Session-moved/pre-audit crash appends one missing close record.
+Feature crash acknowledgements use same-directory unique temp files, complete write + file fsync,
+Linux `renameat2(RENAME_NOREPLACE)`, and parent-directory fsync before SIGSTOP.
+
+**Verification:**
+
+- `cargo test -p lancet-runtime` — 243 tests passed across all targets.
+- `cargo test -p lancet-api` — 10 tests passed.
+- `cargo test -p lattice-session` — 152 passed.
+- `cargo test -p lattice-api` — 109 unit tests plus every integration passed; Rewind acceptance
+  passed 32/32, including typed placement, token mismatch, partial-state, corruption, and exact-retry
+  regressions.
+- `cargo test -p lattice-cli` — 132 unit and 4 integration tests passed.
+- Worktree-local crash-feature binary plus `direct_rewind_crash_barriers` passed the real
+  workspace-applied, Session-moved, and audit-appended SIGSTOP/SIGKILL/retry windows; provider
+  requests stayed 4, Tool effects stayed 2, each audit page held exactly one success, and an armed
+  completed retry created no append acknowledgement.
+- Clippy with `-D warnings` passed for all affected crates under default and crash-barrier features.
+- `cargo xtask lancet-boundary` / `cargo xtask harness-boundary` passed; dependency inspection
+  preserved the layer graph and the no-two-repository-lock contract.
+- Final `gpt-5.6-sol:xhigh` read-only risk review: PASS.
+- `cargo fmt --all -- --check`, `git diff --check`, and primary LSP diagnostics were clean.
+
+**Changed areas:** WorkspaceHistory typed records/strict traversal, Rewind audit topology/schema,
+opaque operation-lock authority, product Rewind coordinator/partial/retry paths, CLI rendering,
+production-binary crash harness, current AGENTS guidance, and this append-only record.

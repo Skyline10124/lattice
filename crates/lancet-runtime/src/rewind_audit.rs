@@ -6,15 +6,17 @@
 //!
 //! Every explicit Rewind — success, structured conflict, restore/history
 //! partial failure, and Session-ref failure — is recorded on the independent
-//! chain at [`REWIND_AUDIT_REF`]. The chain is deliberately separate from the
-//! mutation `current` chain:
+//! first-parent ref for its typed SessionId. These per-session chains are
+//! deliberately separate from mutation `current`:
 //!
-//! - its commits are never ancestors of mutation `current`, so rewinding the
+//! - filtering is structural, so another session can never consume a bounded
+//!   read window;
+//! - their commits are never ancestors of mutation `current`, so rewinding the
 //!   workspace can never make an audit record unreachable;
 //! - publication is one CAS fast-forward append under the repository write
 //!   lock (never two repository locks at once);
-//! - Rewind itself never moves or deletes the ref, and kernel retention never
-//!   expires it;
+//! - Rewind itself never moves or deletes the refs, and kernel retention never
+//!   expires them;
 //! - records hold hashes, paths, and object ids only — never file content.
 //!
 //! Ownership moved here from the transitional SQLite audit store in
@@ -29,14 +31,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::history::{HISTORY_REPO_DIR, HISTORY_STORE_KIND, HISTORY_STORE_SCHEMA_VERSION};
 
-/// The independent append-only Rewind audit ref.
-pub const REWIND_AUDIT_REF: &str = "refs/lattice/rewind-audit/log";
+/// Prefix for the independent per-session Rewind audit refs.
+const REWIND_AUDIT_REF_PREFIX: &str = "refs/lattice/rewind-audit/sessions";
+
+fn session_audit_ref(session_id: lancet_protocol::SessionId) -> String {
+    format!("{REWIND_AUDIT_REF_PREFIX}/{session_id}")
+}
 
 /// Tree path of the record inside each audit commit.
 const RECORD_BLOB: &str = "rewind-audit.json";
 
 /// Schema version of the recorded payload; bump on any record-shape change.
-pub const REWIND_AUDIT_SCHEMA_VERSION: u32 = 1;
+pub const REWIND_AUDIT_SCHEMA_VERSION: u32 = 3;
 
 /// Upper bound on records returned by one bounded read.
 pub const MAX_REWIND_AUDIT_READ: usize = 500;
@@ -54,9 +60,11 @@ pub struct RewindAuditRecord {
     /// Payload schema version.
     pub schema_version: u32,
     /// Session the Rewind ran in.
-    pub session_id: String,
-    /// The selected target Turn's commit id.
-    pub target_turn_id: String,
+    pub session_id: lancet_protocol::SessionId,
+    /// The selected target Turn identity.
+    pub target_turn_id: lancet_protocol::TurnId,
+    /// Immutable Session commit selected as the Rewind target.
+    pub target_commit_id: String,
     /// Workspace-history identity the Rewind moved to (`None` = empty).
     pub target_history_oid: Option<String>,
     /// Workspace-history identity the Rewind started from (`None` = empty).
@@ -74,8 +82,24 @@ pub struct RewindAuditRecord {
     /// JSON array of divergent paths when the outcome is a conflict.
     #[serde(default)]
     pub conflicts_json: Option<String>,
+    /// Exact `SessionHeadMove` replay payload for `success`.
+    ///
+    /// Kept as strict JSON because this lower layer cannot depend on `lattice-api`;
+    /// the product coordinator owns deserialization and semantic validation.
+    #[serde(default)]
+    pub session_head_json: Option<String>,
     /// RFC 3339 timestamp supplied by the writer.
     pub recorded_at: String,
+}
+
+/// One newest-first bounded window from a session's Rewind audit chain.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RewindAuditPage {
+    /// Newest records, capped by the requested and hard limits.
+    pub records: Vec<RewindAuditRecord>,
+    /// Whether at least one older record exists beyond `records`.
+    pub has_older: bool,
 }
 
 /// Errors of the Rewind audit chain.
@@ -87,9 +111,6 @@ pub enum RewindAuditError {
     /// Repository/kernel failure.
     #[error(transparent)]
     Repo(#[from] crate::history::WorkspaceHistoryError),
-    /// Payload serialization failure.
-    #[error("serialize rewind audit record: {0}")]
-    Serde(#[from] serde_json::Error),
     /// The on-disk chain holds a record this build cannot interpret.
     #[error("corrupt rewind audit chain: {detail}")]
     Corruption { detail: String },
@@ -136,7 +157,7 @@ impl RewindAuditLog {
         self.store.is_some()
     }
 
-    /// Append one record as a new fast-forward commit on the audit chain.
+    /// Append one record as a new fast-forward commit on its session's audit chain.
     ///
     /// One repository write lock spans read-tip, object creation, the
     /// compare-and-set, and the durability barrier. A concurrent append
@@ -150,12 +171,13 @@ impl RewindAuditLog {
         };
         let mut record = record.clone();
         record.schema_version = REWIND_AUDIT_SCHEMA_VERSION;
+        let ref_name = session_audit_ref(record.session_id);
 
         let _write = store
             .write_lock()
             .map_err(crate::history::WorkspaceHistoryError::from)?;
         let tip = store
-            .ref_target(REWIND_AUDIT_REF)
+            .ref_target(&ref_name)
             .map_err(crate::history::WorkspaceHistoryError::from)?;
 
         let bytes = lattice_store::canon::canonical_json_bytes(&record)
@@ -183,29 +205,38 @@ impl RewindAuditLog {
         };
         store
             .ref_transaction(&[RefTxnEdit {
-                name: REWIND_AUDIT_REF.to_string(),
+                name: ref_name.clone(),
                 expect: expectation,
                 new: Some(commit),
             }])
             .map_err(crate::history::WorkspaceHistoryError::from)?;
         store
-            .fsync_pending(&[REWIND_AUDIT_REF])
+            .fsync_pending(&[ref_name.as_str()])
             .map_err(crate::history::WorkspaceHistoryError::from)?;
         Ok(())
     }
 
-    /// Read up to `limit` (bounded by [`MAX_REWIND_AUDIT_READ`]) records,
-    /// newest first.
-    pub fn latest(&self, limit: usize) -> Result<Vec<RewindAuditRecord>, RewindAuditError> {
+    /// Read one bounded newest-first page from a session's private chain.
+    ///
+    /// The traversal reads at most `limit + 1` commits (after applying the hard
+    /// ceiling). The extra record supplies [`RewindAuditPage::has_older`]; no
+    /// capped traversal is ever presented as an exact chain length.
+    pub fn records_for_session(
+        &self,
+        session_id: &lancet_protocol::SessionId,
+        limit: usize,
+    ) -> Result<RewindAuditPage, RewindAuditError> {
         let Some(store) = self.store.as_ref() else {
-            return Ok(Vec::new());
+            return Ok(RewindAuditPage::default());
         };
         let limit = limit.min(MAX_REWIND_AUDIT_READ);
-        let mut records = Vec::new();
+        let read_limit = limit.saturating_add(1);
+        let ref_name = session_audit_ref(*session_id);
+        let mut records = Vec::with_capacity(read_limit);
         let mut cursor = store
-            .ref_target(REWIND_AUDIT_REF)
+            .ref_target(&ref_name)
             .map_err(crate::history::WorkspaceHistoryError::from)?;
-        while records.len() < limit
+        while records.len() < read_limit
             && let Some(oid) = cursor
         {
             let tree = store
@@ -217,7 +248,10 @@ impl RewindAuditLog {
                 .ok_or_else(|| RewindAuditError::Corruption {
                     detail: format!("audit commit {oid} carries no {RECORD_BLOB}"),
                 })?;
-            let record: RewindAuditRecord = serde_json::from_slice(&blob)?;
+            let record: RewindAuditRecord =
+                serde_json::from_slice(&blob).map_err(|err| RewindAuditError::Corruption {
+                    detail: format!("audit commit {oid} carries a malformed record: {err}"),
+                })?;
             if record.schema_version != REWIND_AUDIT_SCHEMA_VERSION {
                 return Err(RewindAuditError::Corruption {
                     detail: format!(
@@ -226,27 +260,34 @@ impl RewindAuditLog {
                     ),
                 });
             }
-            cursor = store
+            if record.session_id != *session_id {
+                return Err(RewindAuditError::Corruption {
+                    detail: format!(
+                        "audit commit {oid} records session {} but ref {ref_name} belongs to {session_id}",
+                        record.session_id
+                    ),
+                });
+            }
+            let parents = store
                 .commit_parents(oid)
-                .map_err(crate::history::WorkspaceHistoryError::from)?
-                .into_iter()
-                .next();
+                .map_err(crate::history::WorkspaceHistoryError::from)?;
+            cursor = match parents.as_slice() {
+                [] => None,
+                [parent] => Some(*parent),
+                _ => {
+                    return Err(RewindAuditError::Corruption {
+                        detail: format!(
+                            "audit commit {oid} has {} parents; expected a first-parent chain",
+                            parents.len()
+                        ),
+                    });
+                }
+            };
             records.push(record);
         }
-        Ok(records)
-    }
-
-    /// Read up to `limit` records for one session, newest first.
-    pub fn records_for_session(
-        &self,
-        session_id: &str,
-        limit: usize,
-    ) -> Result<Vec<RewindAuditRecord>, RewindAuditError> {
-        Ok(self
-            .latest(limit)?
-            .into_iter()
-            .filter(|record| record.session_id == session_id)
-            .collect())
+        let has_older = records.len() > limit;
+        records.truncate(limit);
+        Ok(RewindAuditPage { records, has_older })
     }
 }
 
@@ -291,11 +332,20 @@ mod tests {
         (tmp, backing)
     }
 
-    fn record(outcome: &str, session: &str) -> RewindAuditRecord {
+    fn session(index: u128) -> lancet_protocol::SessionId {
+        lancet_protocol::SessionId::parse(&format!("{index:032x}")).expect("session id")
+    }
+
+    fn target_turn() -> lancet_protocol::TurnId {
+        lancet_protocol::TurnId::parse("10000000-0000-4000-8000-000000000001").expect("turn id")
+    }
+
+    fn record(outcome: &str, session_id: lancet_protocol::SessionId) -> RewindAuditRecord {
         RewindAuditRecord {
             schema_version: REWIND_AUDIT_SCHEMA_VERSION,
-            session_id: session.to_string(),
-            target_turn_id: "turn-1".to_string(),
+            session_id,
+            target_turn_id: target_turn(),
+            target_commit_id: "b".repeat(40),
             target_history_oid: None,
             from_history_oid: Some("a".repeat(40)),
             outcome: outcome.to_string(),
@@ -303,6 +353,7 @@ mod tests {
             preflight_json: "[]".to_string(),
             restored_json: None,
             conflicts_json: None,
+            session_head_json: None,
             recorded_at: "2026-08-23T12:00:00Z".to_string(),
         }
     }
@@ -312,44 +363,71 @@ mod tests {
         let log = RewindAuditLog::open(&WorkspaceHistoryBacking::Disabled).unwrap();
         assert!(!log.is_enabled());
         assert!(matches!(
-            log.append(&record("success", "s")),
+            log.append(&record("success", session(1))),
             Err(RewindAuditError::Disabled)
         ));
-        assert!(log.latest(10).unwrap().is_empty());
+        assert_eq!(
+            log.records_for_session(&session(1), 10).unwrap(),
+            RewindAuditPage::default()
+        );
     }
 
     #[test]
-    fn append_builds_a_fast_forward_chain_that_survives_reopen() {
+    fn append_builds_per_session_fast_forward_chains_that_survive_reopen() {
         let (_tmp, backing) = backing();
         let log = RewindAuditLog::open(&backing).unwrap();
-        log.append(&record("conflict", "s1")).unwrap();
-        log.append(&record("success", "s1")).unwrap();
-        log.append(&record("success", "s2")).unwrap();
+        log.append(&record("conflict", session(1))).unwrap();
+        log.append(&record("success", session(1))).unwrap();
+        log.append(&record("success", session(2))).unwrap();
 
         let reopened = RewindAuditLog::open(&backing).unwrap();
-        let latest = reopened.latest(10).unwrap();
-        assert_eq!(latest.len(), 3);
-        // Newest first.
-        assert_eq!(latest[0].session_id, "s2");
-        assert_eq!(latest[1].outcome, "success");
-        assert_eq!(latest[2].outcome, "conflict");
+        let first = reopened.records_for_session(&session(1), 10).unwrap();
+        assert_eq!(first.records.len(), 2);
+        assert!(!first.has_older);
+        assert_eq!(first.records[0].outcome, "success");
+        assert_eq!(first.records[1].outcome, "conflict");
+        assert!(
+            first
+                .records
+                .iter()
+                .all(|record| record.session_id == session(1))
+        );
 
-        let session = reopened.records_for_session("s1", 10).unwrap();
-        assert_eq!(session.len(), 2);
-        assert!(session.iter().all(|r| r.session_id == "s1"));
+        let second = reopened.records_for_session(&session(2), 10).unwrap();
+        assert_eq!(second.records.len(), 1);
+        assert!(!second.has_older);
+        assert_eq!(second.records[0].session_id, session(2));
     }
 
     #[test]
-    fn reads_are_bounded() {
+    fn same_session_page_reports_when_older_records_exist() {
         let (_tmp, backing) = backing();
         let log = RewindAuditLog::open(&backing).unwrap();
-        for index in 0..5 {
-            log.append(&record("success", &format!("s{index}")))
-                .unwrap();
+        for _ in 0..5 {
+            log.append(&record("success", session(1))).unwrap();
         }
-        assert_eq!(log.latest(3).unwrap().len(), 3);
-        // The hard ceiling applies even above it.
-        assert_eq!(log.latest(MAX_REWIND_AUDIT_READ + 5).unwrap().len(), 5);
+
+        let page = log.records_for_session(&session(1), 3).unwrap();
+        assert_eq!(page.records.len(), 3);
+        assert!(page.has_older);
+        let complete = log.records_for_session(&session(1), 5).unwrap();
+        assert_eq!(complete.records.len(), 5);
+        assert!(!complete.has_older);
+    }
+
+    #[test]
+    fn newer_foreign_session_records_cannot_displace_an_older_session_page() {
+        let (_tmp, backing) = backing();
+        let log = RewindAuditLog::open(&backing).unwrap();
+        log.append(&record("target", session(1))).unwrap();
+        for index in 2..8 {
+            log.append(&record("foreign", session(index))).unwrap();
+        }
+
+        let page = log.records_for_session(&session(1), 3).unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].outcome, "target");
+        assert!(!page.has_older);
     }
 
     #[test]
@@ -358,7 +436,8 @@ mod tests {
         let history = crate::history::WorkspaceHistory::open(backing.clone()).unwrap();
         history
             .record(&crate::history::MutationRecord {
-                turn_id: "s0:root".to_string(),
+                turn_id: lancet_protocol::TurnId::parse("10000000-0000-4000-8000-000000000001")
+                    .expect("turn id"),
                 invocation_id: lancet_protocol::InvocationId::parse(
                     "00000000-0000-4000-8000-000000000001",
                 )
@@ -372,7 +451,7 @@ mod tests {
             })
             .unwrap();
         let log = RewindAuditLog::open(&backing).unwrap();
-        log.append(&record("success", "s0")).unwrap();
+        log.append(&record("success", session(1))).unwrap();
 
         let store = StoreRepo::open_project(
             &StateLayout::in_state_root(tmp.path()),
@@ -383,7 +462,10 @@ mod tests {
         )
         .unwrap();
         let mutation_tip = store.ref_target(crate::history::CURRENT_REF).unwrap();
-        let audit_tip = store.ref_target(REWIND_AUDIT_REF).unwrap().unwrap();
+        let audit_tip = store
+            .ref_target(&session_audit_ref(session(1)))
+            .unwrap()
+            .unwrap();
         // The audit commit is not the mutation tip and not its ancestor: the
         // chains only share the empty root at most.
         let walk = store.rev_walk(&[mutation_tip.unwrap()], &[]).unwrap();
@@ -394,13 +476,14 @@ mod tests {
     fn tampered_payload_fails_closed_on_read() {
         let (_tmp, backing) = backing();
         let log = RewindAuditLog::open(&backing).unwrap();
-        log.append(&record("success", "s1")).unwrap();
+        log.append(&record("success", session(1))).unwrap();
 
         // Overwrite the record blob with a future-schema payload by forging
         // a direct commit through the same kernel; the read path must fail
         // closed on the schema mismatch.
         let store = log.store.as_ref().unwrap();
-        let tip = store.ref_target(REWIND_AUDIT_REF).unwrap().unwrap();
+        let ref_name = session_audit_ref(session(1));
+        let tip = store.ref_target(&ref_name).unwrap().unwrap();
         let tree = store.commit_tree(tip).unwrap();
         let blob = store.read_tree_path(tree, RECORD_BLOB).unwrap().unwrap();
         let mut payload: serde_json::Value = serde_json::from_slice(&blob).unwrap();
@@ -415,7 +498,7 @@ mod tests {
             .unwrap();
         store
             .ref_transaction(&[RefTxnEdit {
-                name: REWIND_AUDIT_REF.to_string(),
+                name: ref_name,
                 expect: RefExpectation::MustMatch(tip),
                 new: Some(commit),
             }])
@@ -423,7 +506,89 @@ mod tests {
 
         let reopened = RewindAuditLog::open(&backing).unwrap();
         assert!(matches!(
-            reopened.latest(10),
+            reopened.records_for_session(&session(1), 10),
+            Err(RewindAuditError::Corruption { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_record_blob_fails_closed_on_read() {
+        let (_tmp, backing) = backing();
+        let log = RewindAuditLog::open(&backing).unwrap();
+        log.append(&record("success", session(1))).unwrap();
+        let store = log.store.as_ref().unwrap();
+        let ref_name = session_audit_ref(session(1));
+        let tip = store.ref_target(&ref_name).unwrap().unwrap();
+        let blob = store.write_blob(b"not json").unwrap();
+        let mut tree = TreeSpec::new();
+        tree.upsert(RECORD_BLOB, EntryKind::Blob, blob);
+        let tree = store.write_tree(&tree).unwrap();
+        let forged = store.write_commit_at(tree, &[tip], "forged", 0).unwrap();
+        store
+            .ref_transaction(&[RefTxnEdit {
+                name: ref_name,
+                expect: RefExpectation::MustMatch(tip),
+                new: Some(forged),
+            }])
+            .unwrap();
+
+        assert!(matches!(
+            log.records_for_session(&session(1), 10),
+            Err(RewindAuditError::Corruption { .. })
+        ));
+    }
+
+    #[test]
+    fn record_and_ref_session_mismatch_fails_closed() {
+        let (_tmp, backing) = backing();
+        let log = RewindAuditLog::open(&backing).unwrap();
+        log.append(&record("first", session(1))).unwrap();
+        log.append(&record("foreign", session(2))).unwrap();
+        let store = log.store.as_ref().unwrap();
+        let first_ref = session_audit_ref(session(1));
+        let first_tip = store.ref_target(&first_ref).unwrap().unwrap();
+        let foreign_tip = store
+            .ref_target(&session_audit_ref(session(2)))
+            .unwrap()
+            .unwrap();
+        store
+            .ref_transaction(&[RefTxnEdit {
+                name: first_ref,
+                expect: RefExpectation::MustMatch(first_tip),
+                new: Some(foreign_tip),
+            }])
+            .unwrap();
+
+        assert!(matches!(
+            log.records_for_session(&session(1), 10),
+            Err(RewindAuditError::Corruption { .. })
+        ));
+    }
+
+    #[test]
+    fn merge_commit_on_session_chain_fails_closed() {
+        let (_tmp, backing) = backing();
+        let log = RewindAuditLog::open(&backing).unwrap();
+        log.append(&record("root", session(1))).unwrap();
+        log.append(&record("tip", session(1))).unwrap();
+        let store = log.store.as_ref().unwrap();
+        let ref_name = session_audit_ref(session(1));
+        let tip = store.ref_target(&ref_name).unwrap().unwrap();
+        let parent = store.commit_parents(tip).unwrap()[0];
+        let tree = store.commit_tree(tip).unwrap();
+        let merge = store
+            .write_commit_at(tree, &[tip, parent], "forged merge", 0)
+            .unwrap();
+        store
+            .ref_transaction(&[RefTxnEdit {
+                name: ref_name,
+                expect: RefExpectation::MustMatch(tip),
+                new: Some(merge),
+            }])
+            .unwrap();
+
+        assert!(matches!(
+            log.records_for_session(&session(1), 10),
             Err(RewindAuditError::Corruption { .. })
         ));
     }

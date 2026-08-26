@@ -21,7 +21,6 @@ use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::validate_path_facts;
 use lancet_authority::under_system_exclusion;
 use lancet_dispatch::Cancellation;
-use lancet_protocol::InvocationId;
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact};
 use lancet_protocol::error::{
     CepError, CepErrorCode, CepErrorData, ExecutionErrorData, GuardErrorData, Retriability,
@@ -30,6 +29,7 @@ use lancet_protocol::error::{
 use lancet_protocol::evidence::{
     MutationEvidence, MutationInstallation, MutationPrecondition, ObservedTarget,
 };
+use lancet_protocol::{InvocationId, TurnId};
 
 use lattice_store::{Blocking, LockMode};
 
@@ -817,7 +817,10 @@ impl WorkspaceMutationHost {
         };
         let record = MutationRecord {
             method: ctx.method.to_string(),
-            turn_id: ctx.turn_id.to_string(),
+            turn_id: TurnId::parse(ctx.turn_id).map_err(|err| MutateError::History {
+                requested: path.to_string(),
+                detail: format!("invalid turn id: {err}"),
+            })?,
             invocation_id: ctx.invocation_id,
             path: path.to_string(),
             before: before.map(<[u8]>::to_vec),
@@ -1171,7 +1174,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         MutationCallContext {
             invocation_id: test_invocation_id(7),
-            turn_id: "turn-1",
+            turn_id: "10000000-0000-4000-8000-000000000007",
             method,
             admitted: tool,
             evidence,
@@ -1187,7 +1190,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(true);
         MutationCallContext {
             invocation_id: test_invocation_id(7),
-            turn_id: "turn-1",
+            turn_id: "10000000-0000-4000-8000-000000000007",
             method,
             admitted: tool,
             evidence,

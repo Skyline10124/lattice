@@ -38,6 +38,7 @@ libc = { workspace = true, optional = true }
 lancet-catalog = { workspace = true, features = ["test-method"] }
 gix = { workspace = true }
 lattice-session = { workspace = true, features = ["test-utils"] }
+lattice-store = { workspace = true, features = ["test-fault-injection"] }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 lancet-audit = { workspace = true, features = ["test-support"] }

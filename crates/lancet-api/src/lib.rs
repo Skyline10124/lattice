@@ -72,7 +72,8 @@ pub use lancet_native::rewind::{
 pub use lancet_native::{MethodRegistry, ServerRunConfig, register_production_method_registry};
 pub use lancet_protocol::{CapabilityAdmissionPolicy, CepError};
 pub use lancet_runtime::rewind_audit::{
-    MAX_REWIND_AUDIT_READ, REWIND_AUDIT_SCHEMA_VERSION, RewindAuditLog, RewindAuditRecord,
+    MAX_REWIND_AUDIT_READ, REWIND_AUDIT_SCHEMA_VERSION, RewindAuditLog, RewindAuditPage,
+    RewindAuditRecord,
 };
 pub use lancet_runtime::{
     HistorySnapshot, RewindPlan, RewindStep, WorkspaceHistory, WorkspaceHistoryBacking,

@@ -53,9 +53,10 @@ composition into `lancet-runtime`.
 
 ## Rewind audit + operation-lock ownership (#139-B Commit 3)
 
-- `rewind_workspace` takes the caller-held `HeldWorkspaceOperation` guard and
-  never acquires the project operation lock itself; a project backing without
-  the held guard fails with `WorkspaceRewindError::MissingOperationLock`.
+- `plan_workspace_rewind` and `rewind_workspace` take an opaque, acquire-produced
+  `HeldWorkspaceOperation`; both validate its exact project/store/lock binding
+  before history access, and apply also validates the canonical project root.
+  Neither lower-level operation reacquires the project lock.
 - `record_rewind_audit`/`rewind_audit_records` append to and read the
   independent Git chain owned by `lancet_runtime::rewind_audit` (re-exported
   here). The SQLite rewind store in `lancet-audit` was deleted in the same

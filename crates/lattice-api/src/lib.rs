@@ -34,9 +34,10 @@ pub use lattice_session::{ProjectStoreKey, StateLayout};
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
 pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
 pub use rewind::{
-    RewindBarrierFacts, RewindBarriers, RewindConflict, RewindError, RewindOutcome,
-    RewindPartialState, RewindPathConflict, RewindPathPreflight, RewindRestoredPath, RewindStep,
-    RewindSuccess, SessionHeadMove, rewind_to_turn, rewind_to_turn_with_barriers,
+    RewindAuditRecordObservation, RewindBarrierFacts, RewindBarriers, RewindConflict, RewindError,
+    RewindOutcome, RewindPartialState, RewindPathConflict, RewindPathPreflight,
+    RewindRefObservation, RewindRestoredPath, RewindStep, RewindSuccess, SessionHeadMove,
+    rewind_to_turn, rewind_to_turn_with_barriers,
 };
 pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
 pub use session::{

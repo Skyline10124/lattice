@@ -77,7 +77,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gix::objs::tree::EntryKind;
-use lancet_protocol::InvocationId;
+use lancet_protocol::{InvocationId, TurnId};
 
 use lattice_store::{
     Blocking, LockMode, ProjectStoreKey, RefExpectation, StateLayout, StoreError, StoreRepo,
@@ -94,7 +94,7 @@ pub const HISTORY_REPO_DIR: &str = "workspace-history.git";
 pub const HISTORY_STORE_KIND: &str = "workspace-history";
 
 /// Domain schema version of this store's contents.
-pub const HISTORY_STORE_SCHEMA_VERSION: u32 = 2;
+pub const HISTORY_STORE_SCHEMA_VERSION: u32 = 3;
 
 /// Lock file name of the per-project `WorkspaceOperationLock` (ADR 0005 §5).
 pub const WORKSPACE_OPERATION_LOCK: &str = "workspace.lock";
@@ -110,6 +110,14 @@ pub enum WorkspaceHistoryError {
     /// The private repository could not be opened, created, or written.
     #[error("private workspace history repository: {0}")]
     Repo(String),
+    /// A published history commit violates the closed domain schema.
+    #[error("workspace history commit '{commit_id}' is malformed: {reason}")]
+    Corruption {
+        /// The malformed commit.
+        commit_id: String,
+        /// The violated history invariant.
+        reason: String,
+    },
     /// The kernel error, taxonomy preserved (ADR 0005 §4 typed failures).
     ///
     /// `From<StoreError>` keeps `NotInitialized`/`Corruption`/`Busy`/
@@ -215,7 +223,7 @@ pub struct MutationRecord {
     /// CEP method that installed the mutation (`mutate.create` / `mutate.edit`).
     pub method: String,
     /// Turn this mutation belongs to.
-    pub turn_id: String,
+    pub turn_id: TurnId,
     /// CEP call id within the turn.
     pub invocation_id: InvocationId,
     /// Workspace-relative path of the mutated file.
@@ -474,18 +482,13 @@ pub struct RewindStep {
     /// CEP method that installed the mutation.
     pub method: String,
     /// Turn the mutation belonged to.
-    pub turn_id: String,
-    /// CEP call id within the turn, when the trailer parses.
+    pub turn_id: TurnId,
+    /// Invocation within the turn.
     pub invocation_id: InvocationId,
     /// Workspace-relative path the mutation touched.
     pub path: String,
     /// Post-install Local Revision recorded for the mutation.
     pub recorded_content_hash: Option<String>,
-    /// When the mutation was recorded, in unix seconds.
-    ///
-    /// Written by the recorder from the installer's clock, so it orders
-    /// mutations against Turn timestamps from the same machine.
-    pub recorded_at: Option<i64>,
 }
 
 /// The final on-disk state one path must reach for a Rewind to complete.
@@ -647,39 +650,107 @@ fn plan_rewind_locked(
     let mut restores: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
 
     let mut cursor = from;
-    loop {
-        match (cursor, target_oid) {
-            (None, None) => break,
-            (None, Some(_)) => {
-                return Err(RewindError::TargetUnreachable {
-                    target: target.unwrap_or("<none>").to_string(),
-                });
-            }
-            (Some(oid), Some(t)) if oid == t => break,
-            (Some(oid), _) => {
-                let message = store
-                    .commit_message(oid)
-                    .map_err(WorkspaceHistoryError::from)?;
-                let parent = store
-                    .commit_parents(oid)
-                    .map_err(WorkspaceHistoryError::from)?
-                    .into_iter()
-                    .next();
-                let parent_tree = match parent {
-                    Some(parent_oid) => Some(commit_tree_id(store, parent_oid)?),
-                    None => None,
-                };
-                let recorded_at = store
-                    .commit_time(oid)
-                    .map_err(WorkspaceHistoryError::from)?;
-                if let Some(step) = parse_mutation_step(&oid, &message, recorded_at) {
-                    let before = tree_blob(store, parent_tree, &step.path)?;
-                    restores.insert(step.path.clone(), before);
-                    steps.push(step);
-                }
-                cursor = parent;
-            }
+    let mut is_tip = true;
+    let mut newer_was_baseline = false;
+    while let Some(oid) = cursor {
+        let message = store
+            .commit_message(oid)
+            .map_err(WorkspaceHistoryError::from)?;
+        let parents = store
+            .commit_parents(oid)
+            .map_err(WorkspaceHistoryError::from)?;
+        if parents.len() > 1 {
+            return Err(history_corruption(
+                &oid,
+                format!(
+                    "history commits must have at most one parent, found {}",
+                    parents.len()
+                ),
+            )
+            .into());
         }
+        let parent = parents.into_iter().next();
+        let parent_tree = match parent {
+            Some(parent_oid) => Some(commit_tree_id(store, parent_oid)?),
+            None => None,
+        };
+        let parsed = parse_history_commit(&oid, &message)?;
+        let is_baseline = matches!(&parsed, ParsedHistoryCommit::Baseline);
+        let mutation_before = match &parsed {
+            ParsedHistoryCommit::Baseline => None,
+            ParsedHistoryCommit::Mutation(step) => {
+                let before = tree_blob(store, parent_tree, &step.path)?;
+                match (step.method.as_str(), before.is_some()) {
+                    ("mutate.create", true) => {
+                        return Err(history_corruption(
+                            &oid,
+                            "mutate.create parent state must not contain the target path",
+                        )
+                        .into());
+                    }
+                    ("mutate.edit", false) => {
+                        return Err(history_corruption(
+                            &oid,
+                            "mutate.edit parent state must contain the target path",
+                        )
+                        .into());
+                    }
+                    _ => {}
+                }
+                let after = tree_blob(store, Some(commit_tree_id(store, oid)?), &step.path)?
+                    .ok_or_else(|| {
+                        history_corruption(&oid, "mutation tree must contain the target path")
+                    })?;
+                let actual_hash = crate::workspace::content_hash(&after);
+                if step.recorded_content_hash.as_deref() != Some(actual_hash.as_str()) {
+                    return Err(history_corruption(
+                        &oid,
+                        format!(
+                            "'lattice-content-hash' trailer does not match the mutation tree ({actual_hash})"
+                        ),
+                    )
+                    .into());
+                }
+                Some(before)
+            }
+        };
+
+        if is_tip && is_baseline {
+            return Err(history_corruption(&oid, "history tip must be a mutation commit").into());
+        }
+        if newer_was_baseline && is_baseline {
+            return Err(history_corruption(
+                &oid,
+                "baseline commits must be followed by exactly one mutation commit",
+            )
+            .into());
+        }
+        if target_oid == Some(oid) {
+            if is_baseline {
+                return Err(
+                    history_corruption(&oid, "rewind target must be a mutation commit").into(),
+                );
+            }
+            break;
+        }
+
+        if let ParsedHistoryCommit::Mutation(step) = parsed {
+            let before = mutation_before.ok_or_else(|| {
+                history_corruption(&oid, "mutation parent state was not validated")
+            })?;
+            restores.insert(step.path.clone(), before);
+            steps.push(step);
+        }
+
+        newer_was_baseline = is_baseline;
+        cursor = parent;
+        is_tip = false;
+    }
+
+    if cursor.is_none() && target_oid.is_some() {
+        return Err(RewindError::TargetUnreachable {
+            target: target.unwrap_or("<none>").to_string(),
+        });
     }
 
     // Preflight expectation per path: the state at `from` — the recorded
@@ -759,15 +830,60 @@ fn tree_files(
     }
 }
 
-/// Parse a history commit message into a rewind step.
-///
-/// Returns `None` for baseline commits (chain plumbing, never reversed on
-/// their own) and for messages without the mutation trailer.
-fn parse_mutation_step(
+/// One recognized commit in the closed WorkspaceHistory chain.
+enum ParsedHistoryCommit {
+    /// Chain plumbing that captures external before-state drift.
+    Baseline,
+    /// One installed LATTICE mutation.
+    Mutation(RewindStep),
+}
+
+fn history_corruption(oid: &gix::ObjectId, reason: impl Into<String>) -> WorkspaceHistoryError {
+    WorkspaceHistoryError::Corruption {
+        commit_id: oid.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn set_history_trailer(
+    oid: &gix::ObjectId,
+    key: &str,
+    slot: &mut Option<String>,
+    value: String,
+) -> Result<(), WorkspaceHistoryError> {
+    if slot.replace(value).is_some() {
+        return Err(history_corruption(
+            oid,
+            format!("duplicate '{key}' trailer"),
+        ));
+    }
+    Ok(())
+}
+
+fn required_history_trailer<'a>(
+    oid: &gix::ObjectId,
+    key: &'static str,
+    value: &'a Option<String>,
+) -> Result<&'a str, WorkspaceHistoryError> {
+    value
+        .as_deref()
+        .ok_or_else(|| history_corruption(oid, format!("missing '{key}' trailer")))
+}
+
+fn is_canonical_content_hash(value: &str) -> bool {
+    value.strip_prefix("blake3:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// Parse and validate one commit in the closed WorkspaceHistory schema.
+fn parse_history_commit(
     oid: &gix::ObjectId,
     message: &str,
-    recorded_at: Option<i64>,
-) -> Option<RewindStep> {
+) -> Result<ParsedHistoryCommit, WorkspaceHistoryError> {
     let mut kind = None;
     let mut method = None;
     let mut turn_id = None;
@@ -775,39 +891,88 @@ fn parse_mutation_step(
     let mut path = None;
     let mut content_hash = None;
     for line in message.lines() {
-        let Some((key, raw_value)) = line.split_once(':') else {
+        let Some((raw_key, raw_value)) = line.split_once(':') else {
             continue;
         };
-        let value = raw_value.trim();
-        match key.trim() {
-            KIND_TRAILER => kind = Some(value.to_string()),
-            "lattice-method" => method = Some(value.to_string()),
-            "lattice-turn-id" => turn_id = Some(value.to_string()),
-            "lattice-invocation-id" => invocation_id = value.parse::<InvocationId>().ok(),
+        let key = raw_key.trim();
+        let (slot, value) = match key {
+            KIND_TRAILER => (&mut kind, raw_value.trim().to_string()),
+            "lattice-method" => (&mut method, raw_value.trim().to_string()),
+            "lattice-turn-id" => (&mut turn_id, raw_value.trim().to_string()),
+            "lattice-invocation-id" => (&mut invocation_id, raw_value.trim().to_string()),
             // The path must round-trip byte-exactly: a workspace-relative
             // path can legitimately begin or end with a space (`./ a.txt`
-            // normalizes to ` a.txt`), and trimming it here would plan a
-            // restore for a path LATTICE never touched while leaving the real
-            // one unverified. Only the single separator space is removed.
-            "lattice-path" => {
-                path = Some(raw_value.strip_prefix(' ').unwrap_or(raw_value).to_string())
-            }
-            "lattice-content-hash" => content_hash = Some(value.to_string()),
-            _ => {}
+            // normalizes to ` a.txt`). Only the one separator space is removed.
+            "lattice-path" => (
+                &mut path,
+                raw_value.strip_prefix(' ').unwrap_or(raw_value).to_string(),
+            ),
+            "lattice-content-hash" => (&mut content_hash, raw_value.trim().to_string()),
+            _ => continue,
+        };
+        set_history_trailer(oid, key, slot, value)?;
+    }
+
+    match required_history_trailer(oid, KIND_TRAILER, &kind)? {
+        KIND_BASELINE => return Ok(ParsedHistoryCommit::Baseline),
+        KIND_MUTATION => {}
+        other => {
+            return Err(history_corruption(
+                oid,
+                format!("unknown '{KIND_TRAILER}' value '{other}'"),
+            ));
         }
     }
-    if kind.as_deref() != Some(KIND_MUTATION) {
-        return None;
+
+    let method = required_history_trailer(oid, "lattice-method", &method)?.to_string();
+    if !matches!(method.as_str(), "mutate.create" | "mutate.edit") {
+        return Err(history_corruption(
+            oid,
+            format!("invalid 'lattice-method' trailer '{method}'"),
+        ));
     }
-    Some(RewindStep {
+
+    let turn_raw = required_history_trailer(oid, "lattice-turn-id", &turn_id)?;
+    let turn_id = TurnId::parse(turn_raw).map_err(|err| {
+        history_corruption(
+            oid,
+            format!("invalid 'lattice-turn-id' trailer '{turn_raw}': {err}"),
+        )
+    })?;
+
+    let invocation_raw = required_history_trailer(oid, "lattice-invocation-id", &invocation_id)?;
+    let invocation_id = invocation_raw.parse::<InvocationId>().map_err(|err| {
+        history_corruption(
+            oid,
+            format!("invalid 'lattice-invocation-id' trailer '{invocation_raw}': {err}"),
+        )
+    })?;
+
+    let path = required_history_trailer(oid, "lattice-path", &path)?.to_string();
+    normalize_history_path(&path).map_err(|err| {
+        history_corruption(
+            oid,
+            format!("invalid 'lattice-path' trailer '{path}': {err}"),
+        )
+    })?;
+
+    let content_hash =
+        required_history_trailer(oid, "lattice-content-hash", &content_hash)?.to_string();
+    if !is_canonical_content_hash(&content_hash) {
+        return Err(history_corruption(
+            oid,
+            format!("invalid 'lattice-content-hash' trailer '{content_hash}'"),
+        ));
+    }
+
+    Ok(ParsedHistoryCommit::Mutation(RewindStep {
         commit_id: oid.to_string(),
-        method: method.unwrap_or_default(),
-        turn_id: turn_id.unwrap_or_default(),
-        invocation_id: invocation_id?,
-        path: path?,
-        recorded_content_hash: content_hash,
-        recorded_at,
-    })
+        method,
+        turn_id,
+        invocation_id,
+        path,
+        recorded_content_hash: Some(content_hash),
+    }))
 }
 
 /// Move `current` backwards to `target`, or delete it for an empty target.
@@ -1093,6 +1258,10 @@ mod tests {
             .expect("invocation id")
     }
 
+    fn test_turn_id(ordinal: u64) -> TurnId {
+        TurnId::parse(&format!("10000000-0000-4000-8000-{ordinal:012x}")).expect("turn id")
+    }
+
     use super::*;
     use gix::refs::transaction::PreviousValue;
     use tempfile::TempDir;
@@ -1125,12 +1294,12 @@ mod tests {
     fn create(path: &str, after: &str) -> MutationRecord {
         MutationRecord {
             method: "mutate.create".into(),
-            turn_id: "turn-1".into(),
+            turn_id: test_turn_id(1),
             invocation_id: test_invocation_id(1),
             path: path.into(),
             before: None,
             after: after.as_bytes().to_vec(),
-            content_hash: format!("blake3:{}", blake3_hex(after.as_bytes())),
+            content_hash: crate::workspace::content_hash(after.as_bytes()),
             recorded_at: 1_700_000_000,
         }
     }
@@ -1138,23 +1307,26 @@ mod tests {
     fn edit(path: &str, before: &str, after: &str) -> MutationRecord {
         MutationRecord {
             method: "mutate.edit".into(),
-            turn_id: "turn-1".into(),
+            turn_id: test_turn_id(1),
             invocation_id: test_invocation_id(2),
             path: path.into(),
             before: Some(before.as_bytes().to_vec()),
             after: after.as_bytes().to_vec(),
-            content_hash: format!("blake3:{}", blake3_hex(after.as_bytes())),
+            content_hash: crate::workspace::content_hash(after.as_bytes()),
             recorded_at: 1_700_000_001,
         }
     }
 
-    // Tiny stand-in so the module's tests do not pull a hashing dependency in
-    // just to build a plausible Local Revision string.
-    fn blake3_hex(bytes: &[u8]) -> String {
-        use std::hash::{DefaultHasher, Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+    fn parse_corruption_reason(message: &str) -> String {
+        let oid = parse_oid(&"f".repeat(40)).expect("object id");
+        match parse_history_commit(&oid, message) {
+            Err(WorkspaceHistoryError::Corruption { commit_id, reason }) => {
+                assert_eq!(commit_id, oid.to_string());
+                reason
+            }
+            Err(other) => panic!("expected history corruption, got {other:?}"),
+            Ok(_) => panic!("expected malformed history commit to fail closed"),
+        }
     }
 
     #[test]
@@ -1163,6 +1335,112 @@ mod tests {
         assert!(!history.is_enabled());
         assert_eq!(history.current().unwrap(), None);
         assert_eq!(history.record(&create("a.txt", "x")).unwrap(), None);
+    }
+
+    #[test]
+    fn mutation_message_emits_canonical_turn_id_trailer() {
+        let message = mutation_message(&create("a.txt", "x"), "a.txt");
+        assert!(
+            message
+                .lines()
+                .any(|line| line == "lattice-turn-id: 10000000-0000-4000-8000-000000000001")
+        );
+    }
+
+    #[test]
+    fn mutation_parser_rejects_missing_required_trailers() {
+        let canonical = mutation_message(&create("a.txt", "x"), "a.txt");
+        for key in [
+            "lattice-method",
+            "lattice-turn-id",
+            "lattice-invocation-id",
+            "lattice-path",
+            "lattice-content-hash",
+        ] {
+            let prefix = format!("{key}:");
+            let message = canonical
+                .lines()
+                .filter(|line| !line.starts_with(&prefix))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                parse_corruption_reason(&message),
+                format!("missing '{key}' trailer"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_parser_rejects_duplicate_required_trailers() {
+        let canonical = mutation_message(&create("a.txt", "x"), "a.txt");
+        for key in [
+            "lattice-method",
+            "lattice-turn-id",
+            "lattice-invocation-id",
+            "lattice-path",
+            "lattice-content-hash",
+        ] {
+            let prefix = format!("{key}:");
+            let line = canonical
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .expect("canonical trailer");
+            assert_eq!(
+                parse_corruption_reason(&format!("{canonical}{line}\n")),
+                format!("duplicate '{key}' trailer"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_parser_rejects_malformed_required_trailers() {
+        let canonical = mutation_message(&create("a.txt", "x"), "a.txt");
+        for (key, value) in [
+            ("lattice-method", "fetch.web"),
+            ("lattice-turn-id", "turn-1"),
+            ("lattice-invocation-id", "invocation-1"),
+            ("lattice-path", "../escape.txt"),
+            ("lattice-content-hash", "sha256:not-a-local-revision"),
+        ] {
+            let prefix = format!("{key}:");
+            let message = canonical
+                .lines()
+                .map(|line| {
+                    if line.starts_with(&prefix) {
+                        format!("{key}: {value}")
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                parse_corruption_reason(&message).starts_with(&format!("invalid '{key}' trailer")),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_parser_recognizes_baselines_and_rejects_unknown_kinds() {
+        let record = edit("a.txt", "old", "new");
+        let baseline = baseline_message(&record, "a.txt");
+        let oid = parse_oid(&"f".repeat(40)).expect("object id");
+        assert!(matches!(
+            parse_history_commit(&oid, &baseline),
+            Ok(ParsedHistoryCommit::Baseline)
+        ));
+
+        let unknown = mutation_message(&record, "a.txt").replace(
+            "lattice-history-kind: mutation",
+            "lattice-history-kind: future",
+        );
+        assert_eq!(
+            parse_corruption_reason(&unknown),
+            "unknown 'lattice-history-kind' value 'future'"
+        );
     }
 
     #[test]
@@ -1424,6 +1702,155 @@ mod tests {
         .expect("open private repo")
     }
 
+    fn assert_history_corruption(error: RewindError<std::convert::Infallible>, expected: &str) {
+        match error {
+            RewindError::History(WorkspaceHistoryError::Corruption { reason, .. }) => {
+                assert!(
+                    reason.contains(expected),
+                    "expected corruption containing '{expected}', got '{reason}'"
+                );
+            }
+            other => panic!("expected history corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewind_rejects_a_forged_merge_commit() {
+        let state = TempDir::new().unwrap();
+        let history = history_at(&state);
+        let first = history.record(&create("a.txt", "1")).unwrap().unwrap();
+        let second = history.record(&create("b.txt", "2")).unwrap().unwrap();
+        let repo = raw_repo(&history);
+        let tree = repo
+            .find_commit(parse_oid(&second.commit_id).unwrap())
+            .unwrap()
+            .tree_id()
+            .unwrap()
+            .detach();
+        let signature = gix::actor::Signature {
+            name: "LATTICE".into(),
+            email: "lattice@localhost".into(),
+            time: gix::date::Time::new(1_700_000_010, 0),
+        };
+        let mut time_buf = gix::date::parse::TimeBuf::default();
+        let signature_ref = signature.to_ref(&mut time_buf);
+        let merge = repo
+            .new_commit_as(
+                signature_ref,
+                signature_ref,
+                mutation_message(&create("c.txt", "3"), "c.txt"),
+                tree,
+                [
+                    parse_oid(&second.commit_id).unwrap(),
+                    parse_oid(&first.commit_id).unwrap(),
+                ],
+            )
+            .unwrap()
+            .id;
+        repo.reference(CURRENT_REF, merge, PreviousValue::Any, "test forged merge")
+            .unwrap();
+
+        assert_history_corruption(history.plan_rewind(None).unwrap_err(), "at most one parent");
+    }
+
+    #[test]
+    fn rewind_rejects_baseline_tip_and_target_shapes() {
+        let state = TempDir::new().unwrap();
+        let history = history_at(&state);
+        let recorded = history
+            .record(&edit("existing.txt", "old", "new"))
+            .unwrap()
+            .unwrap();
+        let baseline = recorded.baseline_commit_id.expect("baseline commit");
+
+        assert_history_corruption(
+            history.plan_rewind(Some(&baseline)).unwrap_err(),
+            "rewind target must be a mutation commit",
+        );
+
+        let repo = raw_repo(&history);
+        repo.reference(
+            CURRENT_REF,
+            parse_oid(&baseline).unwrap(),
+            PreviousValue::Any,
+            "test forged baseline tip",
+        )
+        .unwrap();
+        assert_history_corruption(
+            history.plan_rewind(None).unwrap_err(),
+            "history tip must be a mutation commit",
+        );
+    }
+
+    #[test]
+    fn rewind_rejects_forged_root_edit_and_mismatched_content_hash() {
+        let state = TempDir::new().unwrap();
+        let history = history_at(&state);
+        let record = edit("existing.txt", "old", "new");
+        let recorded = history.record(&record).unwrap().unwrap();
+        let baseline = recorded.baseline_commit_id.expect("baseline commit");
+        let repo = raw_repo(&history);
+        let tree = repo
+            .find_commit(parse_oid(&recorded.commit_id).unwrap())
+            .unwrap()
+            .tree_id()
+            .unwrap()
+            .detach();
+        let signature = gix::actor::Signature {
+            name: "LATTICE".into(),
+            email: "lattice@localhost".into(),
+            time: gix::date::Time::new(1_700_000_010, 0),
+        };
+        let mut time_buf = gix::date::parse::TimeBuf::default();
+        let signature_ref = signature.to_ref(&mut time_buf);
+
+        let root_edit = repo
+            .new_commit_as(
+                signature_ref,
+                signature_ref,
+                mutation_message(&record, "existing.txt"),
+                tree,
+                std::iter::empty::<gix::ObjectId>(),
+            )
+            .unwrap()
+            .id;
+        repo.reference(
+            CURRENT_REF,
+            root_edit,
+            PreviousValue::Any,
+            "test forged root edit",
+        )
+        .unwrap();
+        assert_history_corruption(
+            history.plan_rewind(None).unwrap_err(),
+            "mutate.edit parent state must contain the target path",
+        );
+
+        let wrong_hash = mutation_message(&record, "existing.txt")
+            .replace(&record.content_hash, &format!("blake3:{}", "0".repeat(64)));
+        let bad_hash = repo
+            .new_commit_as(
+                signature_ref,
+                signature_ref,
+                wrong_hash,
+                tree,
+                [parse_oid(&baseline).unwrap()],
+            )
+            .unwrap()
+            .id;
+        repo.reference(
+            CURRENT_REF,
+            bad_hash,
+            PreviousValue::Any,
+            "test forged content hash",
+        )
+        .unwrap();
+        assert_history_corruption(
+            history.plan_rewind(None).unwrap_err(),
+            "does not match the mutation tree",
+        );
+    }
+
     #[test]
     fn rewind_plan_collects_only_mutations_after_target_in_reverse_order() {
         let state = TempDir::new().unwrap();
@@ -1443,7 +1870,7 @@ mod tests {
         );
         assert_eq!(plan.steps[0].method, "mutate.edit");
         assert_eq!(plan.steps[0].path, "a.txt");
-        assert_eq!(plan.steps[0].turn_id, "turn-1");
+        assert_eq!(plan.steps[0].turn_id, test_turn_id(1));
         assert_eq!(plan.steps[0].invocation_id, test_invocation_id(2));
         assert!(
             plan.steps[0]
@@ -1774,11 +2201,10 @@ mod tests {
         assert_eq!(plan.restores[0].restore, None);
     }
 
-    /// The plan must cover every path the reversed range changed. A commit
-    /// whose mutation trailer cannot be read is not a licence to move
-    /// `current` over an unverified path.
+    /// An out-of-band commit with no recognized history kind must fail before
+    /// a Rewind can move `current` over its unverified tree.
     #[test]
-    fn a_plan_that_misses_a_changed_path_fails_closed() {
+    fn a_forged_commit_without_a_history_kind_fails_closed() {
         let state = TempDir::new().unwrap();
         let history = history_at(&state);
         let target = history.record(&create("a.txt", "a")).unwrap().unwrap();
@@ -1807,11 +2233,10 @@ mod tests {
         repo.reference(CURRENT_REF, opaque, PreviousValue::Any, "test rewrite")
             .unwrap();
 
-        let err = history.plan_rewind(Some(&target.commit_id)).unwrap_err();
-        match err {
-            RewindError::PlanIncomplete { paths } => assert_eq!(paths, vec!["b.txt".to_string()]),
-            other => panic!("expected PlanIncomplete, got {other:?}"),
-        }
+        assert_history_corruption(
+            history.plan_rewind(Some(&target.commit_id)).unwrap_err(),
+            "missing 'lattice-history-kind' trailer",
+        );
         assert_eq!(
             history.current().unwrap().as_deref(),
             Some(opaque.to_string().as_str()),

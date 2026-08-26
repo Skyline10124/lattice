@@ -443,7 +443,7 @@ async fn recovery_rejects_a_turn_closing_checkpoint_that_no_longer_matches_curre
     history
         .record(&lancet_runtime::MutationRecord {
             method: "mutate.create".into(),
-            turn_id: turn.to_string(),
+            turn_id: turn,
             invocation_id: lancet_protocol::InvocationId::parse(
                 "22222222-2222-4222-8222-222222222222",
             )
