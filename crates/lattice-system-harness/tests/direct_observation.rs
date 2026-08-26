@@ -28,7 +28,11 @@ use support::{
 /// Build the observation fixture world with the full visibility matrix and
 /// bounded observation policy.
 fn observation_world(prefix: &str) -> (ScenarioWorld, ScenarioSpec) {
-    let spec = ScenarioSpec::direct_local(prefix);
+    let mut spec = ScenarioSpec::direct_local(prefix);
+    // This scenario performs 18 sequential Tool calls and captures 19 provider
+    // requests; its 29.80-second passing runtime leaves no useful margin under
+    // the 30-second per-step default. Keep the 180-second total timeout.
+    spec.step_timeout_secs = 60;
     let world = ScenarioWorld::new(&spec.name).expect("world");
 
     // Tracked files (committed by init_git_project).

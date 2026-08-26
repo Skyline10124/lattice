@@ -456,3 +456,186 @@ pub fn rewind_audit_records(
     )
     .map_err(|err| LancetError::Internal(format!("read rewind audit records: {err}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lancet_protocol::{InvocationId, TurnId};
+    use lancet_runtime::MutationRecord;
+    use tempfile::TempDir;
+
+    struct DomainFixture {
+        root: TempDir,
+        _state: TempDir,
+        backing: WorkspaceHistoryBacking,
+    }
+
+    impl DomainFixture {
+        fn new() -> Self {
+            let root = TempDir::new().expect("project root");
+            let state = TempDir::new().expect("state root");
+            let backing = WorkspaceHistoryBacking::for_project_in(state.path(), root.path())
+                .expect("derive backing");
+            WorkspaceHistory::create(backing.clone()).expect("create history store");
+            Self {
+                root,
+                _state: state,
+                backing,
+            }
+        }
+
+        fn record(
+            &self,
+            turn: &str,
+            invocation: &str,
+            before: Option<&[u8]>,
+            after: &[u8],
+        ) -> String {
+            WorkspaceHistory::open(self.backing.clone())
+                .expect("open history")
+                .record(&MutationRecord {
+                    method: if before.is_some() {
+                        "mutate.edit".to_string()
+                    } else {
+                        "mutate.create".to_string()
+                    },
+                    turn_id: TurnId::parse(turn).expect("TurnId"),
+                    invocation_id: InvocationId::parse(invocation).expect("InvocationId"),
+                    path: "held.txt".to_string(),
+                    before: before.map(<[u8]>::to_vec),
+                    after: after.to_vec(),
+                    content_hash: lancet_runtime::workspace::content_hash(after),
+                    recorded_at: 1_700_000_000,
+                })
+                .expect("record mutation")
+                .expect("history enabled")
+                .commit_id
+        }
+    }
+
+    #[test]
+    fn held_token_is_bound_to_the_exact_backing_before_history_read() {
+        let fixture = DomainFixture::new();
+        let held = HeldWorkspaceOperation::acquire(&fixture.backing).expect("operation lock");
+        let other_state = TempDir::new().expect("other state root");
+        let other_backing =
+            WorkspaceHistoryBacking::for_project_in(other_state.path(), fixture.root.path())
+                .expect("other backing");
+        WorkspaceHistory::create(other_backing.clone()).expect("create other history store");
+        std::fs::remove_dir_all(other_backing.store_path().expect("history store path"))
+            .expect("remove other history store");
+
+        assert!(matches!(
+            plan_workspace_rewind(other_backing.clone(), None, &held),
+            Err(WorkspaceRewindError::OperationLockMismatch)
+        ));
+        assert!(matches!(
+            rewind_workspace(fixture.root.path(), other_backing, None, &held),
+            Err(WorkspaceRewindError::OperationLockMismatch)
+        ));
+    }
+
+    #[test]
+    fn apply_rejects_a_mismatched_project_root_before_history_read() {
+        let fixture = DomainFixture::new();
+        let held = HeldWorkspaceOperation::acquire(&fixture.backing).expect("operation lock");
+        std::fs::remove_dir_all(fixture.backing.store_path().expect("history store path"))
+            .expect("remove history store");
+        let other_root = TempDir::new().expect("other project root");
+
+        assert!(matches!(
+            rewind_workspace(other_root.path(), fixture.backing, None, &held),
+            Err(WorkspaceRewindError::ProjectRootMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn disabled_backing_accepts_only_its_own_token() {
+        let root = TempDir::new().expect("project root");
+        let disabled = WorkspaceHistoryBacking::Disabled;
+        let held = HeldWorkspaceOperation::acquire(&disabled).expect("disabled token");
+
+        let outcome = rewind_workspace(root.path(), disabled.clone(), None, &held)
+            .expect("disabled empty rewind");
+        let WorkspaceRewindOutcome::Applied(report) = outcome else {
+            panic!("expected disabled no-op apply, got {outcome:?}");
+        };
+        assert!(report.steps.is_empty());
+        assert!(report.preflight.is_empty());
+        assert!(report.restored.is_empty());
+        assert!(matches!(
+            plan_workspace_rewind(disabled, None, &held),
+            Err(WorkspaceRewindError::Disabled { .. })
+        ));
+
+        let project = DomainFixture::new();
+        assert!(matches!(
+            plan_workspace_rewind(project.backing, None, &held),
+            Err(WorkspaceRewindError::OperationLockMismatch)
+        ));
+    }
+
+    #[test]
+    fn planning_and_apply_keep_the_exclusive_operation_hold() {
+        let fixture = DomainFixture::new();
+        let target = fixture.record(
+            "10000000-0000-4000-8000-000000000001",
+            "20000000-0000-4000-8000-000000000001",
+            None,
+            b"one\n",
+        );
+        fixture.record(
+            "10000000-0000-4000-8000-000000000002",
+            "20000000-0000-4000-8000-000000000002",
+            Some(b"one\n"),
+            b"two\n",
+        );
+        std::fs::write(fixture.root.path().join("held.txt"), b"two\n")
+            .expect("install current state");
+        let held = HeldWorkspaceOperation::acquire(&fixture.backing).expect("operation lock");
+        let assert_contended = || {
+            let history = WorkspaceHistory::open(fixture.backing.clone()).expect("open history");
+            assert!(
+                history
+                    .lock_workspace_operation(
+                        lancet_runtime::LockMode::Exclusive,
+                        lancet_runtime::Blocking::NonBlocking,
+                    )
+                    .is_err(),
+                "a competing exclusive operation must be refused"
+            );
+        };
+
+        let plan = plan_workspace_rewind(fixture.backing.clone(), Some(&target), &held)
+            .expect("plan under held token");
+        assert_eq!(plan.steps.len(), 1);
+        assert_contended();
+
+        let outcome = rewind_workspace(
+            fixture.root.path(),
+            fixture.backing.clone(),
+            Some(&target),
+            &held,
+        )
+        .expect("apply under held token");
+        assert!(matches!(outcome, WorkspaceRewindOutcome::Applied(_)));
+        assert_eq!(
+            std::fs::read(fixture.root.path().join("held.txt")).expect("restored file"),
+            b"one\n"
+        );
+        assert_contended();
+
+        drop(held);
+        assert!(
+            WorkspaceHistory::open(fixture.backing)
+                .expect("open history after rewind")
+                .lock_workspace_operation(
+                    lancet_runtime::LockMode::Exclusive,
+                    lancet_runtime::Blocking::NonBlocking,
+                )
+                .expect("acquire after token drop")
+                .is_some(),
+            "the operation lock must be released with the token"
+        );
+    }
+}

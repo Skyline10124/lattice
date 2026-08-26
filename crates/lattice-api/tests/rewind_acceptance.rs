@@ -660,40 +660,8 @@ fn history_for(state_root: &Path, project_root: &Path) -> WorkspaceHistory {
     WorkspaceHistory::open(backing).expect("open history")
 }
 
-fn commit_empty_history_turn(
-    store: &GitSessionGraphStore,
-    session_id: &str,
-    turn_id: lancet_protocol::TurnId,
-    parent_ids: Vec<String>,
-    label: &str,
-) -> TurnCommit {
-    store
-        .test_commit_turn(TurnCommitInput {
-            turn_id,
-            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
-            session_id: session_id.to_string(),
-            parent_ids,
-            messages: vec![
-                lattice_session::test_helpers::user_msg(label),
-                lattice_session::test_helpers::assistant_msg("no mutation"),
-            ],
-            agent_name: "default".to_string(),
-            profile_snapshot_hash: "test-profile".to_string(),
-            profile_snapshot_json: "{}".to_string(),
-            model: "sonnet".to_string(),
-            provider: "anthropic".to_string(),
-            outcome: lattice_session::TurnOutcome::Completed {
-                finish_reason: lattice_session::TurnFinishReason::Stop,
-            },
-            origin: lattice_session::ClosureOrigin::Live,
-            commit_message: format!("{label} turn"),
-            usage: None,
-        })
-        .expect("commit identity-less Turn")
-}
-
-/// Run one Turn that creates `path` with `content`.
-async fn turn_creating(
+/// Run one full production Turn that creates `path` with `content`.
+async fn turn_creating_through_product(
     ws: &TurnWorkspace,
     sessions: &Path,
     session_id: &str,
@@ -737,8 +705,8 @@ async fn turn_creating(
     result.commit_id
 }
 
-/// Run one Turn that replaces `old` with `new` in `path`.
-async fn turn_editing(
+/// Run one full production Turn that replaces `old` with `new` in `path`.
+async fn turn_editing_through_product(
     ws: &TurnWorkspace,
     sessions: &Path,
     session_id: &str,
@@ -784,6 +752,119 @@ async fn turn_editing(
     result.commit_id
 }
 
+/// Seed the exact Session/WorkspaceHistory facts a completed mutating Turn
+/// would publish, without rebuilding the runtime/provider for reducer-only
+/// Rewind scenarios. The product-path acceptance below still uses `run_turn`.
+fn seed_mutating_turn(
+    ws: &TurnWorkspace,
+    session_id: &str,
+    method: &str,
+    path: &str,
+    before: Option<Vec<u8>>,
+    after: Vec<u8>,
+) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let turn_id =
+        lancet_protocol::TurnId::parse(&format!("10000000-0000-4000-8000-{sequence:012x}"))
+            .expect("seeded TurnId");
+    let invocation_id =
+        lancet_protocol::InvocationId::parse(&format!("20000000-0000-4000-8000-{sequence:012x}"))
+            .expect("seeded InvocationId");
+
+    if let Some(parent) = ws.root.join(path).parent() {
+        std::fs::create_dir_all(parent).expect("create mutation parent");
+    }
+    std::fs::write(ws.root.join(path), &after).expect("install seeded mutation");
+    let state_root = std::env::var_os("XDG_STATE_HOME").expect("ScopedState sets XDG_STATE_HOME");
+    let recorded = history_for(Path::new(&state_root), &ws.root)
+        .record(&lancet_runtime::MutationRecord {
+            method: method.to_string(),
+            turn_id,
+            invocation_id,
+            path: path.to_string(),
+            before,
+            after: after.clone(),
+            content_hash: content_hash(&after),
+            recorded_at: 1_700_000_000 + sequence as i64,
+        })
+        .expect("record seeded mutation")
+        .expect("workspace history enabled");
+
+    let layout = test_state_layout();
+    let store = GitSessionGraphStore::open(layout.lattice_root().join("sessions.git"))
+        .expect("open session store");
+    let parent_ids = store
+        .status(session_id)
+        .expect("read seeded Session head")
+        .current_commit_id
+        .into_iter()
+        .collect();
+    store
+        .test_commit_turn(TurnCommitInput {
+            turn_id,
+            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Oid(
+                recorded.commit_id,
+            ),
+            session_id: session_id.to_string(),
+            parent_ids,
+            messages: vec![
+                lattice_session::test_helpers::user_msg(&format!("{method} {path}")),
+                lattice_session::test_helpers::assistant_msg("seeded mutation"),
+            ],
+            agent_name: "default".to_string(),
+            profile_snapshot_hash: "test-profile".to_string(),
+            profile_snapshot_json: "{}".to_string(),
+            model: "sonnet".to_string(),
+            provider: "anthropic".to_string(),
+            outcome: lattice_session::TurnOutcome::Completed {
+                finish_reason: lattice_session::TurnFinishReason::Stop,
+            },
+            origin: lattice_session::ClosureOrigin::Live,
+            commit_message: format!("seeded {method} turn"),
+            usage: None,
+        })
+        .expect("commit seeded Turn")
+        .commit_id
+}
+
+async fn turn_creating(
+    ws: &TurnWorkspace,
+    _sessions: &Path,
+    session_id: &str,
+    path: &str,
+    content: &str,
+) -> String {
+    assert!(!ws.root.join(path).exists(), "seeded create target exists");
+    seed_mutating_turn(
+        ws,
+        session_id,
+        "mutate.create",
+        path,
+        None,
+        content.as_bytes().to_vec(),
+    )
+}
+
+async fn turn_editing(
+    ws: &TurnWorkspace,
+    _sessions: &Path,
+    session_id: &str,
+    path: &str,
+    expected: &str,
+    old: &str,
+    new: &str,
+) -> String {
+    let before = std::fs::read(ws.root.join(path)).expect("seeded edit target");
+    assert_eq!(content_hash(&before), expected);
+    let before_text = String::from_utf8(before.clone()).expect("utf8 edit target");
+    let after = before_text.replacen(old, new, 1).into_bytes();
+    assert_ne!(after, before, "seeded edit must replace text");
+    seed_mutating_turn(ws, session_id, "mutate.edit", path, Some(before), after)
+}
+
 fn rewind_page(project_root: &Path, session_id: &str) -> lancet_api::RewindAuditPage {
     let state_root = std::env::var_os("XDG_STATE_HOME").expect("ScopedState sets XDG_STATE_HOME");
     let backing = lancet_api::workspace_history_backing_in(Path::new(&state_root), project_root)
@@ -799,13 +880,6 @@ fn rewind_records(project_root: &Path, session_id: &str) -> Vec<lancet_api::Rewi
         "acceptance fixture expected a complete Rewind audit page"
     );
     page.records
-}
-
-fn append_rewind_record(project_root: &Path, record: &lancet_api::RewindAuditRecord) {
-    let state_root = std::env::var_os("XDG_STATE_HOME").expect("ScopedState sets XDG_STATE_HOME");
-    let backing = lancet_api::workspace_history_backing_in(Path::new(&state_root), project_root)
-        .expect("project backing");
-    lancet_api::record_rewind_audit(&backing, record).expect("append Rewind audit record");
 }
 
 fn audit_ref_path(project_root: &Path, session_id: &str) -> std::path::PathBuf {
@@ -857,8 +931,11 @@ async fn rewind_aligns_the_conversation_target_and_the_local_workspace() {
     let sessions = sessions_dir.path().join("sessions");
     let session_id = new_session(&sessions, &ws.root);
 
-    let first = turn_creating(&ws, &sessions, &session_id, "notes.md", "v1\n").await;
-    let _second = turn_editing(
+    // Keep one real provider -> runtime -> history -> Session product path;
+    // the remaining Rewind cases seed only the durable domain facts they test.
+    let first =
+        turn_creating_through_product(&ws, &sessions, &session_id, "notes.md", "v1\n").await;
+    let _second = turn_editing_through_product(
         &ws,
         &sessions,
         &session_id,
@@ -868,7 +945,8 @@ async fn rewind_aligns_the_conversation_target_and_the_local_workspace() {
         "v2",
     )
     .await;
-    let third = turn_creating(&ws, &sessions, &session_id, "extra.md", "extra\n").await;
+    let third =
+        turn_creating_through_product(&ws, &sessions, &session_id, "extra.md", "extra\n").await;
 
     // External change LATTICE never touched.
     std::fs::write(ws.root.join("untouched.txt"), "mine\n").unwrap();
@@ -1010,47 +1088,6 @@ async fn rewind_aligns_the_conversation_target_and_the_local_workspace() {
 }
 
 #[tokio::test]
-async fn completed_rewind_rejects_same_target_with_conflicting_history() {
-    let ws = setup_turn_workspace(&["mutate.create"]);
-    let _scoped = ScopedState::new(&ws.root);
-    let sessions_dir = TempDir::new().unwrap();
-    let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions, &ws.root);
-    let first = turn_creating(&ws, &sessions, &session_id, "one.md", "one\n").await;
-    turn_creating(&ws, &sessions, &session_id, "two.md", "two\n").await;
-    let api = open_session_store(&sessions);
-
-    lattice_api::rewind_to_turn(&api, &session_id, &first, &ws.root)
-        .expect("initial Rewind succeeds");
-    let mut mismatched = rewind_records(&ws.root, &session_id)
-        .into_iter()
-        .next()
-        .expect("success record");
-    mismatched.target_history_oid = Some("f".repeat(40));
-    mismatched.recorded_at = chrono::Utc::now().to_rfc3339();
-    append_rewind_record(&ws.root, &mismatched);
-
-    let error = lattice_api::rewind_to_turn(&api, &session_id, &first, &ws.root)
-        .expect_err("same-target history mismatch must fail closed");
-    assert!(
-        matches!(
-            &error,
-            lattice_api::RewindError::Api(lattice_api::ApiError::Conflict(_))
-        ) && error.to_string().contains("does not exactly match"),
-        "got {error:?}"
-    );
-    assert_eq!(
-        api.status(&session_id)
-            .unwrap()
-            .current_commit_id
-            .as_deref(),
-        Some(first.as_str())
-    );
-    assert!(!ws.root.join("two.md").exists());
-    assert_eq!(rewind_records(&ws.root, &session_id).len(), 2);
-}
-
-#[tokio::test]
 async fn completed_rewind_appends_once_after_an_unrelated_prior_rewind() {
     let ws = setup_turn_workspace(&["mutate.create"]);
     let _scoped = ScopedState::new(&ws.root);
@@ -1112,125 +1149,6 @@ async fn completed_rewind_appends_once_after_an_unrelated_prior_rewind() {
         .expect("repeat strictly replays the appended success");
     assert_eq!(replayed, closed);
     assert_eq!(rewind_records(&ws.root, &session_id).len(), 2);
-}
-
-#[tokio::test]
-async fn completed_rewind_rejects_a_corrupt_strict_replay_payload() {
-    let ws = setup_turn_workspace(&["mutate.create"]);
-    let _scoped = ScopedState::new(&ws.root);
-    let sessions_dir = TempDir::new().unwrap();
-    let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions, &ws.root);
-    let first = turn_creating(&ws, &sessions, &session_id, "one.md", "one\n").await;
-    turn_creating(&ws, &sessions, &session_id, "two.md", "two\n").await;
-    let api = open_session_store(&sessions);
-
-    lattice_api::rewind_to_turn(&api, &session_id, &first, &ws.root)
-        .expect("initial Rewind succeeds");
-    let success_record = rewind_records(&ws.root, &session_id)
-        .into_iter()
-        .next()
-        .expect("success record");
-    let mut corrupt = success_record.clone();
-    let mut steps: serde_json::Value =
-        serde_json::from_str(&corrupt.steps_json).expect("stored steps JSON");
-    steps
-        .as_array_mut()
-        .and_then(|entries| entries.first_mut())
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("at least one step")
-        .insert("unexpected".to_string(), serde_json::Value::Bool(true));
-    corrupt.steps_json = steps.to_string();
-    corrupt.recorded_at = chrono::Utc::now().to_rfc3339();
-    append_rewind_record(&ws.root, &corrupt);
-
-    let error = lattice_api::rewind_to_turn(&api, &session_id, &first, &ws.root)
-        .expect_err("unknown replay fields must fail closed");
-    assert!(
-        matches!(
-            &error,
-            lattice_api::RewindError::Api(lattice_api::ApiError::Internal(_))
-        ) && error.to_string().contains("steps payload")
-            && error.to_string().contains("unknown field"),
-        "got {error:?}"
-    );
-    assert_eq!(
-        api.status(&session_id)
-            .unwrap()
-            .current_commit_id
-            .as_deref(),
-        Some(first.as_str())
-    );
-    assert!(!ws.root.join("two.md").exists());
-    assert_eq!(rewind_records(&ws.root, &session_id).len(), 2);
-
-    let mut extra_paths = success_record.clone();
-    let mut preflight: serde_json::Value =
-        serde_json::from_str(&extra_paths.preflight_json).expect("stored preflight JSON");
-    preflight
-        .as_array_mut()
-        .expect("preflight array")
-        .push(serde_json::json!({
-            "path": "extra.md",
-            "expected_revision": null,
-            "observed_revision": null,
-            "diverged": false
-        }));
-    extra_paths.preflight_json = preflight.to_string();
-    let mut restored: serde_json::Value = serde_json::from_str(
-        extra_paths
-            .restored_json
-            .as_deref()
-            .expect("stored restored JSON"),
-    )
-    .expect("stored restored payload");
-    restored
-        .as_array_mut()
-        .expect("restored array")
-        .push(serde_json::json!({
-            "path": "extra.md",
-            "restored_revision": null
-        }));
-    extra_paths.restored_json = Some(restored.to_string());
-    extra_paths.recorded_at = chrono::Utc::now().to_rfc3339();
-    append_rewind_record(&ws.root, &extra_paths);
-
-    let error = lattice_api::rewind_to_turn(&api, &session_id, &first, &ws.root)
-        .expect_err("preflight/restored paths without a Rewind step must fail closed");
-    assert!(
-        matches!(
-            &error,
-            lattice_api::RewindError::Api(lattice_api::ApiError::Internal(_))
-        ) && error.to_string().contains("payloads are inconsistent"),
-        "got {error:?}"
-    );
-
-    let mut invalid_hash = success_record;
-    let mut steps: serde_json::Value =
-        serde_json::from_str(&invalid_hash.steps_json).expect("stored steps JSON");
-    steps
-        .as_array_mut()
-        .and_then(|entries| entries.first_mut())
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("at least one step")
-        .insert(
-            "recorded_content_hash".to_string(),
-            serde_json::Value::String("blake3:not-canonical".to_string()),
-        );
-    invalid_hash.steps_json = steps.to_string();
-    invalid_hash.recorded_at = chrono::Utc::now().to_rfc3339();
-    append_rewind_record(&ws.root, &invalid_hash);
-
-    let error = lattice_api::rewind_to_turn(&api, &session_id, &first, &ws.root)
-        .expect_err("non-canonical replay hashes must fail closed");
-    assert!(
-        matches!(
-            &error,
-            lattice_api::RewindError::Api(lattice_api::ApiError::Internal(_))
-        ) && error.to_string().contains("payloads are inconsistent"),
-        "got {error:?}"
-    );
-    assert_eq!(rewind_records(&ws.root, &session_id).len(), 4);
 }
 
 /// AC4/AC11: a conflicting Rewind moves neither the conversation target nor
@@ -1639,11 +1557,10 @@ impl SessionGraphStore for FailingResetStore {
     }
 }
 
-/// AC7: when the Session History ref cannot be moved after the workspace was
-/// restored, the Rewind fails loudly and records the partial state — it is
-/// never reported as a success.
+/// AC7/AC10: branch and detached Session ref failures after workspace restore
+/// are both recorded and never reported as success.
 #[tokio::test]
-async fn a_session_ref_failure_is_not_reported_as_success() {
+async fn session_ref_failures_are_not_reported_as_success() {
     let ws = setup_turn_workspace(&["mutate.create"]);
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
@@ -1694,6 +1611,40 @@ async fn a_session_ref_failure_is_not_reported_as_success() {
             .as_ref()
             .expect("restored paths recorded")
             .contains("two.md")
+    );
+
+    // Reuse the split state: append one later mutation, detach onto that Turn,
+    // then prove the detached checkout arm has the same partial-state contract.
+    let third = turn_creating(&ws, &sessions, &session_id, "three.md", "3\n").await;
+    let store = FailingResetStore::new(&sessions);
+    let detached_failing = {
+        let api = open_session_store(&sessions);
+        api.checkout(&session_id, &third).expect("detach");
+        store
+            .allow_checkout
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        SessionApi::new(Box::new(store)).with_state_layout(test_state_layout())
+    };
+    let err = lattice_api::rewind_to_turn(&detached_failing, &session_id, &first, &ws.root)
+        .expect_err("a detached ref failure must surface");
+    assert!(
+        err.to_string()
+            .contains("detached session HEAD did not move"),
+        "the error must name the partial state: {err}"
+    );
+    assert!(!ws.root.join("three.md").exists());
+    assert_eq!(history.current().unwrap(), target_oid);
+    let status = open_session_store(&sessions).status(&session_id).unwrap();
+    assert!(matches!(
+        status.head,
+        GraphHead::Detached { ref commit_id } if commit_id == &third
+    ));
+    let records = rewind_records(&ws.root, &status.session_id);
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .all(|record| record.outcome == "session_ref_failure")
     );
 }
 
@@ -1920,107 +1871,6 @@ async fn a_full_unwind_is_refused_when_this_session_installed_work_before_the_ta
     );
 }
 
-/// Duplicate typed Turn ids make the selected log itself ambiguous, even when
-/// the private history is empty.
-#[test]
-fn a_full_unwind_rejects_duplicate_turn_ids_in_the_selected_log() {
-    let ws = setup_turn_workspace(&[]);
-    let _scoped = ScopedState::new(&ws.root);
-    let sessions_dir = TempDir::new().unwrap();
-    let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions, &ws.root);
-    let api = open_session_store(&sessions);
-    let resolved = api.status(&session_id).unwrap().session_id;
-    let store = GitSessionGraphStore::open(test_state_layout().lattice_root().join("sessions.git"))
-        .expect("open session store");
-    let duplicate = lancet_protocol::TurnId::parse("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
-        .expect("duplicate TurnId");
-    let first = commit_empty_history_turn(&store, &resolved, duplicate, Vec::new(), "first");
-    let second = commit_empty_history_turn(
-        &store,
-        &resolved,
-        duplicate,
-        vec![first.commit_id.clone()],
-        "second",
-    );
-
-    let err = lattice_api::rewind_to_turn(&api, &session_id, &first.commit_id, &ws.root)
-        .expect_err("duplicate TurnIds must make full-unwind placement fail closed");
-    assert!(
-        matches!(
-            err,
-            lattice_api::RewindError::Api(lattice_api::ApiError::Conflict(_))
-        ),
-        "got {err:?}"
-    );
-    assert!(
-        err.to_string().contains("repeats TurnId")
-            && err.to_string().contains(&duplicate.to_string()),
-        "the refusal names the duplicate TurnId: {err}"
-    );
-    assert_eq!(
-        api.status(&session_id)
-            .unwrap()
-            .current_commit_id
-            .as_deref(),
-        Some(second.commit_id.as_str()),
-        "the refusal must not move Session HEAD"
-    );
-}
-
-/// AC7/AC10, detached arm: the same ordering guarantee holds when HEAD is
-/// detached — a Session History ref that will not move is an error carrying
-/// the partial state, not a success.
-#[tokio::test]
-async fn a_detached_session_ref_failure_is_not_reported_as_success() {
-    let ws = setup_turn_workspace(&["mutate.create"]);
-    let scoped = ScopedState::new(&ws.root);
-    let sessions_dir = TempDir::new().unwrap();
-    let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions, &ws.root);
-
-    let first = turn_creating(&ws, &sessions, &session_id, "d1.md", "1\n").await;
-    let second = turn_creating(&ws, &sessions, &session_id, "d2.md", "2\n").await;
-
-    let store = FailingResetStore::new(&sessions);
-    let failing = {
-        // Detach onto the newest Turn first, then arm the failure so the
-        // rewind takes the detached arm and cannot move HEAD back.
-        let api = open_session_store(&sessions);
-        api.checkout(&session_id, &second).expect("detach");
-        store
-            .allow_checkout
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        SessionApi::new(Box::new(store)).with_state_layout(test_state_layout())
-    };
-
-    let err = lattice_api::rewind_to_turn(&failing, &session_id, &first, &ws.root)
-        .expect_err("a detached ref failure must surface");
-    assert!(
-        err.to_string()
-            .contains("detached session HEAD did not move"),
-        "the error must name the partial state: {err}"
-    );
-
-    // The workspace half really happened, which is why this is not a success.
-    assert!(!ws.root.join("d2.md").exists());
-    let history = history_for(scoped.path(), &ws.root);
-    let target_oid = open_session_store(&sessions)
-        .get_turn_commit(&session_id, &first)
-        .unwrap()
-        .unwrap()
-        .workspace_history_checkpoint
-        .as_oid()
-        .map(str::to_owned);
-    assert_eq!(history.current().unwrap(), target_oid);
-
-    let status = open_session_store(&sessions).status(&session_id).unwrap();
-    assert!(matches!(status.head, GraphHead::Detached { ref commit_id } if commit_id == &second));
-    let records = rewind_records(&ws.root, &status.session_id);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].outcome, "session_ref_failure");
-}
-
 /// AC9/AC10, restore-failure arm: a Rewind whose restore cannot run at all
 /// still leaves a durable record naming the target and the planned steps.
 /// A recorded path under a System Path Exclusion is the reachable trigger:
@@ -2079,151 +1929,6 @@ async fn a_restore_failure_is_recorded_and_never_reported_as_success() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].outcome, "restore_failure");
     assert!(records[0].steps_json.contains(".lattice/private.toml"));
-}
-
-/// AC2 defence, cross-session shape: a full unwind must place every mutation
-/// exactly in the selected Session log. A mutation owned by another Session is
-/// foreign to that log and must fail closed rather than being ordered by time.
-#[tokio::test]
-async fn a_full_unwind_is_refused_when_another_session_installed_work_before_the_target() {
-    let ws = setup_turn_workspace(&["mutate.create"]);
-    let scoped = ScopedState::new(&ws.root);
-    let sessions_dir = TempDir::new().unwrap();
-    let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions, &ws.root);
-    let other_session = new_session(&sessions, &ws.root);
-    let api = open_session_store(&sessions);
-
-    // Another session installs the only mutation in the project history.
-    let other_commit = turn_creating(&ws, &sessions, &other_session, "theirs.md", "theirs\n").await;
-    let foreign_turn_id = api
-        .get_turn_commit(&other_session, &other_commit)
-        .expect("read foreign Turn")
-        .expect("foreign Turn exists")
-        .turn_id;
-    let history = history_for(scoped.path(), &ws.root);
-    let tip = history.current().unwrap();
-
-    // Our session's target Turn records no identity — the shape a swallowed
-    // end-of-turn read produces — and has no same-session ancestor to catch.
-    let store = GitSessionGraphStore::open(test_state_layout().lattice_root().join("sessions.git"))
-        .expect("open session store");
-    let resolved = api.status(&session_id).unwrap().session_id;
-    let target = store
-        .test_commit_turn(TurnCommitInput {
-            turn_id: lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-                .expect("valid test TurnId"),
-            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
-            session_id: resolved.clone(),
-            parent_ids: Vec::new(),
-            messages: vec![
-                lattice_session::test_helpers::user_msg("no identity"),
-                lattice_session::test_helpers::assistant_msg("none"),
-            ],
-            agent_name: "default".to_string(),
-            profile_snapshot_hash: "test-profile".to_string(),
-            profile_snapshot_json: "{}".to_string(),
-            model: "sonnet".to_string(),
-            provider: "anthropic".to_string(),
-            outcome: lattice_session::TurnOutcome::Completed {
-                finish_reason: lattice_session::TurnFinishReason::Stop,
-            },
-            origin: lattice_session::ClosureOrigin::Live,
-            commit_message: "anomalous turn".to_string(),
-            usage: None,
-        })
-        .expect("commit target turn");
-
-    let err = lattice_api::rewind_to_turn(&api, &session_id, &target.commit_id, &ws.root)
-        .expect_err("a full unwind over another session's earlier work must be refused");
-    assert!(
-        matches!(
-            err,
-            lattice_api::RewindError::Api(lattice_api::ApiError::Conflict(_))
-        ),
-        "got {err:?}"
-    );
-    assert!(
-        err.to_string().contains("theirs.md")
-            && err.to_string().contains(&foreign_turn_id.to_string()),
-        "the refusal names the foreign work it could not place: {err}"
-    );
-    assert_eq!(history.current().unwrap(), tip);
-    assert_eq!(
-        std::fs::read(ws.root.join("theirs.md")).unwrap(),
-        b"theirs\n",
-        "another session's earlier work must survive"
-    );
-}
-
-/// A sibling Turn can share the target parent while carrying a different UUID.
-/// Parent identity therefore cannot place its mutation in the selected log.
-#[tokio::test]
-async fn a_full_unwind_rejects_a_same_parent_sibling_turn_id() {
-    let ws = setup_turn_workspace(&["mutate.create"]);
-    let scoped = ScopedState::new(&ws.root);
-    let sessions_dir = TempDir::new().unwrap();
-    let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions, &ws.root);
-    let api = open_session_store(&sessions);
-    let resolved = api.status(&session_id).unwrap().session_id;
-    let store = GitSessionGraphStore::open(test_state_layout().lattice_root().join("sessions.git"))
-        .expect("open session store");
-    let target = commit_empty_history_turn(
-        &store,
-        &resolved,
-        lancet_protocol::TurnId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-            .expect("target TurnId"),
-        Vec::new(),
-        "target",
-    );
-
-    api.branch(&session_id, "sibling", Some(&target.commit_id))
-        .expect("create sibling branch");
-    api.checkout(&session_id, "sibling")
-        .expect("checkout sibling branch");
-    let sibling_commit =
-        turn_creating(&ws, &sessions, &session_id, "sibling.md", "sibling\n").await;
-    let sibling = api
-        .get_turn_commit(&session_id, &sibling_commit)
-        .expect("read sibling Turn")
-        .expect("sibling Turn exists");
-    let history = history_for(scoped.path(), &ws.root);
-    let tip = history.current().unwrap();
-
-    api.branch(&session_id, "selected", Some(&target.commit_id))
-        .expect("create selected branch");
-    api.checkout(&session_id, "selected")
-        .expect("checkout selected branch");
-    let selected = commit_empty_history_turn(
-        &store,
-        &resolved,
-        lancet_protocol::TurnId::parse("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
-            .expect("selected TurnId"),
-        vec![target.commit_id.clone()],
-        "selected",
-    );
-    assert_eq!(sibling.parent_ids, selected.parent_ids);
-    assert_ne!(sibling.turn_id, selected.turn_id);
-
-    let err = lattice_api::rewind_to_turn(&api, &session_id, &target.commit_id, &ws.root)
-        .expect_err("a mutation from an unselected sibling must fail closed");
-    assert!(
-        matches!(
-            err,
-            lattice_api::RewindError::Api(lattice_api::ApiError::Conflict(_))
-        ),
-        "got {err:?}"
-    );
-    assert!(
-        err.to_string().contains(&sibling.turn_id.to_string()),
-        "the refusal names the unplaced sibling TurnId: {err}"
-    );
-    assert_eq!(history.current().unwrap(), tip);
-    assert_eq!(
-        std::fs::read(ws.root.join("sibling.md")).unwrap(),
-        b"sibling\n"
-    );
 }
 
 /// The full-unwind guard must refuse only what is unsafe. A Turn that really
@@ -2302,11 +2007,10 @@ async fn a_legitimate_full_unwind_still_succeeds() {
     assert_eq!(api.log(&session_id).unwrap().len(), 1);
 }
 
-/// An attempted target is planning data, not evidence that either ref moved.
-/// A conflict followed by audit publication failure must report the still-current
-/// workspace-history and Session refs from fresh reads.
+/// Partial state reports fresh authoritative refs both before movement (a
+/// conflict) and when history-ref publication itself fails.
 #[tokio::test]
-async fn partial_state_keeps_attempted_target_distinct_before_ref_moves() {
+async fn partial_state_distinguishes_planned_and_observed_history_refs() {
     let ws = setup_turn_workspace(&["mutate.create"]);
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
@@ -2340,16 +2044,21 @@ async fn partial_state_keeps_attempted_target_distinct_before_ref_moves() {
     assert_eq!(partial.target_commit_id, first);
     assert_eq!(partial.outcome, "conflict");
     assert_eq!(partial.started_from_history_oid, Some(started_from.clone()));
-    assert_eq!(partial.attempted_target_history_oid, Some(attempted_target));
+    assert_eq!(
+        partial.attempted_target_history_oid,
+        Some(attempted_target.clone())
+    );
     assert_eq!(
         partial.actual_workspace_history_oid,
         lattice_api::RewindRefObservation::Present {
-            value: started_from
+            value: started_from.clone()
         }
     );
     assert_eq!(
         partial.actual_session_head_commit_id,
-        lattice_api::RewindRefObservation::Present { value: second }
+        lattice_api::RewindRefObservation::Present {
+            value: second.clone()
+        }
     );
     assert_eq!(
         partial.audit_record_observation,
@@ -2360,35 +2069,10 @@ async fn partial_state_keeps_attempted_target_distinct_before_ref_moves() {
         std::fs::read(ws.root.join("later.md")).unwrap(),
         b"external\n"
     );
-}
 
-/// A history-ref durability error can leave a newly visible ref. The partial
-/// state must report the fresh current value rather than infer movement from the
-/// attempted target or from the error.
-#[tokio::test]
-async fn history_ref_and_audit_failures_report_fresh_authoritative_refs() {
-    let ws = setup_turn_workspace(&["mutate.create"]);
-    let scoped = ScopedState::new(&ws.root);
-    let sessions_dir = TempDir::new().unwrap();
-    let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions, &ws.root);
-    let first = turn_creating(&ws, &sessions, &session_id, "one.md", "one\n").await;
-    let second = turn_creating(&ws, &sessions, &session_id, "two.md", "two\n").await;
-    let api = open_session_store(&sessions);
-    let target = api
-        .get_turn_commit(&session_id, &first)
-        .unwrap()
-        .expect("target Turn");
-    let attempted_target = target
-        .workspace_history_checkpoint
-        .as_oid()
-        .expect("target history oid")
-        .to_string();
-    let started_from = history_for(scoped.path(), &ws.root)
-        .current()
-        .unwrap()
-        .expect("history tip");
-
+    // Restore the expected post-mutation bytes and reuse the same durable
+    // state for the history-ref -> audit partial window.
+    std::fs::write(ws.root.join("later.md"), "later\n").unwrap();
     let fail_audit_after_history_ref = |_facts: &lattice_api::RewindBarrierFacts| {
         fail_audit_ref_fsync(&ws.root, &session_id);
     };
@@ -2481,10 +2165,10 @@ async fn session_ref_and_audit_failures_report_split_authoritative_state() {
     assert_eq!(partial.restored.len(), 1);
 }
 
-/// An audit object-barrier error happens before its ref transaction. The actions
-/// are complete, but the exact record must be classified as not visible.
+/// Audit publication failures distinguish an absent record from a visible but
+/// durability-unconfirmed record; both retry paths close exactly once.
 #[tokio::test]
-async fn audit_append_failure_reports_completed_refs_and_absent_record() {
+async fn audit_append_failures_retry_idempotently_from_observed_record_state() {
     let ws = setup_turn_workspace(&["mutate.create"]);
     let scoped = ScopedState::new(&ws.root);
     let sessions_dir = TempDir::new().unwrap();
@@ -2573,20 +2257,11 @@ async fn audit_append_failure_reports_completed_refs_and_absent_record() {
         .expect("closed retry replays exactly");
     assert_eq!(replayed, RewindOutcome::Success(closed));
     assert_eq!(rewind_records(&ws.root, &session_id).len(), 1);
-}
 
-#[tokio::test]
-async fn retry_recognizes_an_exact_visible_success_after_append_error() {
-    let ws = setup_turn_workspace(&["mutate.create"]);
-    let _scoped = ScopedState::new(&ws.root);
-    let sessions_dir = TempDir::new().unwrap();
-    let sessions = sessions_dir.path().join("sessions");
-    let session_id = new_session(&sessions, &ws.root);
-    let first = turn_creating(&ws, &sessions, &session_id, "one.md", "one\n").await;
-    let second = turn_creating(&ws, &sessions, &session_id, "two.md", "two\n").await;
-    let api = open_session_store(&sessions);
+    // Reuse the now-aligned Session/workspace to exercise the later failure
+    // window where the audit ref is visible but its fsync was not confirmed.
+    let third = turn_creating(&ws, &sessions, &session_id, "three.md", "three\n").await;
     fail_audit_ref_fsync(&ws.root, &session_id);
-
     let error = lattice_api::rewind_to_turn(&api, &session_id, &first, &ws.root)
         .expect_err("audit ref fsync failure must not report success");
     let partial = expect_audit_publication_failure(error);
@@ -2595,7 +2270,7 @@ async fn retry_recognizes_an_exact_visible_success_after_append_error() {
         partial.audit_record_observation,
         lattice_api::RewindAuditRecordObservation::VisibleDurabilityUnconfirmed
     );
-    assert_eq!(rewind_records(&ws.root, &session_id).len(), 1);
+    assert_eq!(rewind_records(&ws.root, &session_id).len(), 2);
 
     let replayed = lattice_api::rewind_to_turn(&api, &session_id, &first, &ws.root)
         .expect("retry recognizes the exact visible record without appending");
@@ -2605,11 +2280,11 @@ async fn retry_recognizes_an_exact_visible_success_after_append_error() {
     assert_eq!(replayed.target_commit_id, first);
     assert_eq!(
         replayed.session_head.previous_commit_id.as_deref(),
-        Some(second.as_str())
+        Some(third.as_str())
     );
     assert!(!replayed.steps.is_empty());
     assert!(!replayed.restored.is_empty());
-    assert_eq!(rewind_records(&ws.root, &session_id).len(), 1);
+    assert_eq!(rewind_records(&ws.root, &session_id).len(), 2);
 }
 
 // ─── #139-B Commit 3: coordinator lock ownership, barriers, Git audit ──────
@@ -2706,136 +2381,4 @@ async fn barriers_observe_each_action_to_audit_window_and_the_chain_survives_lat
     let records = rewind_records(&ws.root, &session_id);
     assert_eq!(records.len(), 1, "completed retry does not append");
     assert_eq!(records[0].outcome, "success");
-}
-
-/// A token is bound to the exact project key, history-store path, and operation
-/// lock path it acquired; the same project key under another state layout is
-/// rejected before that history store is opened.
-#[tokio::test]
-async fn rewind_operations_reject_a_token_for_another_backing_before_history_read() {
-    let env = RewindRuntime::build();
-    let held = HeldWorkspaceOperation::acquire(&env.backing()).expect("operation lock");
-    let other_state = TempDir::new().expect("other state root");
-    let other_backing = backing(other_state.path(), env.path());
-    std::fs::remove_dir_all(other_backing.store_path().expect("history store path"))
-        .expect("remove other history store");
-
-    let err = lancet_api::plan_workspace_rewind(other_backing.clone(), None, &held)
-        .expect_err("a token for another backing must be refused before open");
-    assert!(
-        matches!(err, WorkspaceRewindError::OperationLockMismatch),
-        "got {err:?}"
-    );
-
-    let err = rewind_workspace(env.path(), other_backing, None, &held)
-        .expect_err("apply must also reject a token for another backing before open");
-    assert!(
-        matches!(err, WorkspaceRewindError::OperationLockMismatch),
-        "got {err:?}"
-    );
-}
-
-/// Apply derives the canonical Local Workspace project key and rejects a root
-/// that does not match the held backing before reopening or reading history.
-#[tokio::test]
-async fn rewind_rejects_a_mismatched_project_root_before_history_read() {
-    let env = RewindRuntime::build();
-    let backing = env.backing();
-    let held = HeldWorkspaceOperation::acquire(&backing).expect("operation lock");
-    std::fs::remove_dir_all(backing.store_path().expect("history store path"))
-        .expect("remove history store");
-    let other_root = TempDir::new().expect("other project root");
-
-    let err = rewind_workspace(other_root.path(), backing, None, &held)
-        .expect_err("a mismatched Local Workspace root must be refused before open");
-    assert!(
-        matches!(err, WorkspaceRewindError::ProjectRootMismatch { .. }),
-        "got {err:?}"
-    );
-}
-
-/// Disabled history still requires an acquire-produced disabled token. That
-/// token is accepted only by the disabled backing and preserves the no-op apply
-/// semantics for an empty target.
-#[tokio::test]
-async fn disabled_backing_uses_its_own_acquired_token() {
-    let root = TempDir::new().expect("project root");
-    let disabled = WorkspaceHistoryBacking::Disabled;
-    let held = HeldWorkspaceOperation::acquire(&disabled).expect("disabled token");
-
-    let outcome = rewind_workspace(root.path(), disabled.clone(), None, &held)
-        .expect("disabled empty rewind is a no-op");
-    let WorkspaceRewindOutcome::Applied(report) = outcome else {
-        panic!("expected disabled no-op apply, got {outcome:?}");
-    };
-    assert!(report.steps.is_empty());
-    assert!(report.preflight.is_empty());
-    assert!(report.restored.is_empty());
-
-    let err = lancet_api::plan_workspace_rewind(disabled, None, &held)
-        .expect_err("disabled history has no plan");
-    assert!(matches!(err, WorkspaceRewindError::Disabled { .. }));
-
-    let project = RewindRuntime::build();
-    let err = lancet_api::plan_workspace_rewind(project.backing(), None, &held)
-        .expect_err("a disabled token must not authorize a project backing");
-    assert!(matches!(err, WorkspaceRewindError::OperationLockMismatch));
-}
-
-/// Planning and preflight/apply accept only the opaque exclusive token. A
-/// competing exclusive acquisition is deterministically refused throughout
-/// both operations and succeeds as soon as the token is dropped.
-#[tokio::test]
-async fn planning_and_preflight_run_under_the_exclusive_operation_hold() {
-    let env = RewindRuntime::build();
-    create_file(&env.runtime, "held.txt", "one\n")
-        .await
-        .expect("create held.txt");
-    let target = env.current().expect("target history identity");
-    replace_text(
-        &env.runtime,
-        "held.txt",
-        &content_hash(b"one\n"),
-        "one",
-        "two",
-    )
-    .await
-    .expect("edit held.txt");
-    let backing = env.backing();
-    let held = HeldWorkspaceOperation::acquire(&backing).expect("operation lock");
-    let assert_contended = || {
-        let history = WorkspaceHistory::open(backing.clone()).expect("open history");
-        assert!(
-            history
-                .lock_workspace_operation(
-                    lancet_runtime::LockMode::Exclusive,
-                    lancet_runtime::Blocking::NonBlocking,
-                )
-                .is_err(),
-            "a competing exclusive operation must be refused"
-        );
-    };
-
-    let plan = lancet_api::plan_workspace_rewind(backing.clone(), Some(&target), &held)
-        .expect("plan under held token");
-    assert_eq!(plan.steps.len(), 1);
-    assert_contended();
-
-    let outcome = rewind_workspace(env.path(), backing.clone(), Some(&target), &held)
-        .expect("preflight and apply under held token");
-    assert!(matches!(outcome, WorkspaceRewindOutcome::Applied(_)));
-    assert_contended();
-
-    drop(held);
-    assert!(
-        WorkspaceHistory::open(backing)
-            .expect("open history after rewind")
-            .lock_workspace_operation(
-                lancet_runtime::LockMode::Exclusive,
-                lancet_runtime::Blocking::NonBlocking,
-            )
-            .expect("acquire after token drop")
-            .is_some(),
-        "the operation lock must be released with the token"
-    );
 }

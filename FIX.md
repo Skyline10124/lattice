@@ -7650,3 +7650,37 @@ Linux `renameat2(RENAME_NOREPLACE)`, and parent-directory fsync before SIGSTOP.
 **Changed areas:** WorkspaceHistory typed records/strict traversal, Rewind audit topology/schema,
 opaque operation-lock authority, product Rewind coordinator/partial/retry paths, CLI rendering,
 production-binary crash harness, current AGENTS guidance, and this append-only record.
+
+## GitHub #160 follow-up: restore full-CI wall-time margin without weakening coverage — 2026-08-26
+
+**Severity:** P0 / BLOCKER (acceptance infrastructure)
+
+**Problem:** The first combined P0 `cargo xtask ci` run exposed two wall-time failures. Twelve
+new #160 contracts had been expressed as separate full-runtime Rewind scenarios, making the Rewind
+target take 264 seconds and the complete `lattice-api` package exceed the fixed 300-second per-crate
+CI ceiling. The 18-call observation black-box scenario also took 29.80 seconds under a 30-second
+per-step budget, so normal four-way CI contention exhausted its margin.
+
+**Fix:** Pure lock-token, completed-replay corruption, typed placement, and partial-state contracts
+moved into fast crate-local test modules at their owning seams. Related product assertions remain in
+20 shared full-runtime Rewind scenarios, including the real audit-failure, unrelated-prior-Rewind,
+partial-state, lock-lifetime, and action-to-audit paths; no assertion was ignored or deleted without
+equivalent lower-level coverage. The observation scenario alone now has a 60-second step budget,
+with the 180-second total and every global harness/xtask timeout unchanged.
+
+**Verification:**
+
+- Timed `cargo test -p lattice-api` — 137.86 seconds, down from over 300 seconds; 112 unit tests
+  plus every integration passed. Rewind acceptance passed 20/20 in 20.76 seconds.
+- `direct_observation_visibility_and_bounds` — passed in 30.18 seconds under the scenario-local
+  60-second step budget; all 18 Tool calls and 19 provider captures remain asserted.
+- `cargo clippy -p lancet-api -p lattice-api -p lattice-system-harness --all-targets --
+  -D warnings`, formatting, diff checks, and primary LSP diagnostics — clean.
+- `env -u LATTICE_BIN cargo xtask ci` — passed from the final combined P0 tree: format, Clippy,
+  branch-local debug binary, both structural boundaries, generated Tool artifacts, 27-crate
+  four-way test matrix under the unchanged 300-second ceiling, black-box harness, Component
+  identities, and performance-regression gates.
+
+**Changed files:** `crates/lancet-api/src/rewind.rs`, `crates/lattice-api/src/rewind.rs`,
+`crates/lattice-api/tests/rewind_acceptance.rs`,
+`crates/lattice-system-harness/tests/direct_observation.rs`, and `FIX.md`.

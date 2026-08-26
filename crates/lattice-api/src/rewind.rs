@@ -1318,6 +1318,316 @@ mod tests {
         assert_ne!(empty, unavailable);
     }
 
+    fn replay_record() -> RewindAuditRecord {
+        let session_id = lancet_protocol::SessionId::parse("0123456789abcdef0123456789abcdef")
+            .expect("SessionId");
+        let target_turn_id =
+            lancet_protocol::TurnId::parse("10000000-0000-4000-8000-000000000001").expect("TurnId");
+        let hash = format!("blake3:{}", "d".repeat(64));
+        RewindAuditRecord {
+            schema_version: REWIND_AUDIT_SCHEMA_VERSION,
+            session_id,
+            target_turn_id,
+            target_commit_id: "a".repeat(40),
+            target_history_oid: Some("b".repeat(40)),
+            from_history_oid: Some("c".repeat(40)),
+            outcome: "success".to_string(),
+            steps_json: serde_json::to_string(&vec![RewindStep {
+                commit_id: "d".repeat(40),
+                method: "mutate.create".to_string(),
+                turn_id: target_turn_id,
+                invocation_id: lancet_protocol::InvocationId::parse(
+                    "20000000-0000-4000-8000-000000000001",
+                )
+                .expect("InvocationId"),
+                path: "notes.md".to_string(),
+                recorded_content_hash: Some(hash.clone()),
+            }])
+            .expect("steps JSON"),
+            preflight_json: serde_json::to_string(&vec![RewindPathPreflight {
+                path: "notes.md".to_string(),
+                expected_revision: Some(hash.clone()),
+                observed_revision: Some(hash),
+                diverged: false,
+            }])
+            .expect("preflight JSON"),
+            restored_json: Some(
+                serde_json::to_string(&vec![RewindRestoredPath {
+                    path: "notes.md".to_string(),
+                    restored_revision: None,
+                }])
+                .expect("restored JSON"),
+            ),
+            conflicts_json: None,
+            session_head_json: Some(
+                serde_json::to_string(&SessionHeadMove {
+                    branch: Some("main".to_string()),
+                    previous_commit_id: Some("e".repeat(40)),
+                    new_commit_id: "a".repeat(40),
+                    pinned_ref: Some(format!("rewound/{}", "e".repeat(40))),
+                })
+                .expect("SessionHeadMove JSON"),
+            ),
+            recorded_at: "2026-08-26T12:00:00Z".to_string(),
+        }
+    }
+
+    fn replay(record: &RewindAuditRecord) -> Result<RewindSuccess> {
+        replay_completed_success(
+            record,
+            record.session_id,
+            record.target_turn_id,
+            &record.target_commit_id,
+            record.target_history_oid.as_deref(),
+            &GraphHead::Branch {
+                name: "main".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn completed_rewind_replay_requires_the_exact_target_and_payload() {
+        let record = replay_record();
+        let success = replay(&record).expect("strict replay succeeds");
+        assert_eq!(success.session_id, record.session_id.to_string());
+        assert_eq!(success.target_commit_id, record.target_commit_id);
+        assert_eq!(success.steps.len(), 1);
+        assert_eq!(success.preflight.len(), 1);
+        assert_eq!(success.restored.len(), 1);
+
+        let error = replay_completed_success(
+            &record,
+            record.session_id,
+            record.target_turn_id,
+            &record.target_commit_id,
+            Some(&"f".repeat(40)),
+            &GraphHead::Branch {
+                name: "main".to_string(),
+            },
+        )
+        .expect_err("same target with conflicting history must fail closed");
+        assert!(
+            matches!(error, ApiError::Conflict(_))
+                && error.to_string().contains("does not exactly match"),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn completed_rewind_replay_rejects_corrupt_strict_payloads() {
+        let record = replay_record();
+
+        let mut unknown_field = record.clone();
+        let mut steps: serde_json::Value =
+            serde_json::from_str(&unknown_field.steps_json).expect("steps JSON");
+        steps[0]["unexpected"] = serde_json::Value::Bool(true);
+        unknown_field.steps_json = steps.to_string();
+        let error = replay(&unknown_field).expect_err("unknown fields must fail closed");
+        assert!(
+            matches!(error, ApiError::Internal(_))
+                && error.to_string().contains("steps payload")
+                && error.to_string().contains("unknown field"),
+            "got {error:?}"
+        );
+
+        let mut extra_path = record.clone();
+        let mut preflight: Vec<RewindPathPreflight> =
+            serde_json::from_str(&extra_path.preflight_json).expect("preflight JSON");
+        preflight.push(RewindPathPreflight {
+            path: "extra.md".to_string(),
+            expected_revision: None,
+            observed_revision: None,
+            diverged: false,
+        });
+        extra_path.preflight_json = serde_json::to_string(&preflight).expect("preflight JSON");
+        let mut restored: Vec<RewindRestoredPath> = serde_json::from_str(
+            extra_path
+                .restored_json
+                .as_deref()
+                .expect("restored payload"),
+        )
+        .expect("restored JSON");
+        restored.push(RewindRestoredPath {
+            path: "extra.md".to_string(),
+            restored_revision: None,
+        });
+        extra_path.restored_json = Some(serde_json::to_string(&restored).expect("restored JSON"));
+        let error = replay(&extra_path).expect_err("unmatched paths must fail closed");
+        assert!(
+            matches!(error, ApiError::Internal(_))
+                && error.to_string().contains("payloads are inconsistent"),
+            "got {error:?}"
+        );
+
+        let mut invalid_hash = record;
+        let mut steps: Vec<RewindStep> =
+            serde_json::from_str(&invalid_hash.steps_json).expect("steps JSON");
+        steps[0].recorded_content_hash = Some("blake3:not-canonical".to_string());
+        invalid_hash.steps_json = serde_json::to_string(&steps).expect("steps JSON");
+        let error = replay(&invalid_hash).expect_err("non-canonical hashes must fail closed");
+        assert!(
+            matches!(error, ApiError::Internal(_))
+                && error.to_string().contains("payloads are inconsistent"),
+            "got {error:?}"
+        );
+    }
+
+    fn placement_turn(
+        turn_id: lancet_protocol::TurnId,
+        commit_id: char,
+    ) -> lattice_session::TurnCommit {
+        lattice_session::TurnCommit {
+            commit_id: commit_id.to_string().repeat(40),
+            session_id: "0123456789abcdef0123456789abcdef".to_string(),
+            turn_id,
+            parent_ids: Vec::new(),
+            message_ids: Vec::new(),
+            agent_name: "default".to_string(),
+            profile_snapshot_hash: "profile".to_string(),
+            profile_snapshot_json: "{}".to_string(),
+            model: "model".to_string(),
+            provider: "provider".to_string(),
+            outcome: lattice_session::TurnOutcome::Completed {
+                finish_reason: lattice_session::TurnFinishReason::Stop,
+            },
+            origin: lattice_session::ClosureOrigin::Live,
+            commit_message: "test Turn".to_string(),
+            usage: None,
+            workspace_history_checkpoint: lattice_session::WorkspaceHistoryCheckpoint::Empty,
+            created_at: "2026-08-26T12:00:00Z".to_string(),
+        }
+    }
+
+    fn placement_log_entry(
+        turn_id: lancet_protocol::TurnId,
+        commit_id: char,
+        parent_ids: Vec<String>,
+    ) -> lattice_session::TurnLogEntry {
+        let turn = placement_turn(turn_id, commit_id);
+        lattice_session::TurnLogEntry {
+            commit_id: turn.commit_id,
+            turn_id,
+            parent_ids,
+            outcome: turn.outcome,
+            origin: turn.origin,
+            agent_name: turn.agent_name,
+            profile_snapshot_hash: turn.profile_snapshot_hash,
+            model: turn.model,
+            provider: turn.provider,
+            commit_message: turn.commit_message,
+            message_count: 0,
+            tool_message_count: 0,
+            usage: None,
+            workspace_history_checkpoint: turn.workspace_history_checkpoint,
+            created_at: turn.created_at,
+        }
+    }
+
+    fn placement_backing(
+        turn_id: Option<lancet_protocol::TurnId>,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        WorkspaceHistoryBacking,
+    ) {
+        let root = tempfile::tempdir().expect("project root");
+        let state = tempfile::tempdir().expect("state root");
+        let backing = WorkspaceHistoryBacking::for_project_in(state.path(), root.path())
+            .expect("derive backing");
+        let history = WorkspaceHistory::create(backing.clone()).expect("create history");
+        if let Some(turn_id) = turn_id {
+            history
+                .record(&lancet_runtime::MutationRecord {
+                    method: "mutate.create".to_string(),
+                    turn_id,
+                    invocation_id: lancet_protocol::InvocationId::parse(
+                        "20000000-0000-4000-8000-000000000001",
+                    )
+                    .expect("InvocationId"),
+                    path: "placed.md".to_string(),
+                    before: None,
+                    after: b"placed\n".to_vec(),
+                    content_hash: lancet_runtime::workspace::content_hash(b"placed\n"),
+                    recorded_at: 1_700_000_000,
+                })
+                .expect("record mutation")
+                .expect("history enabled");
+        }
+        (root, state, backing)
+    }
+
+    #[test]
+    fn full_unwind_placement_uses_unique_typed_turn_ids() {
+        let target_id = lancet_protocol::TurnId::parse("10000000-0000-4000-8000-000000000001")
+            .expect("target TurnId");
+        let later_id = lancet_protocol::TurnId::parse("10000000-0000-4000-8000-000000000002")
+            .expect("later TurnId");
+        let sibling_id = lancet_protocol::TurnId::parse("10000000-0000-4000-8000-000000000003")
+            .expect("sibling TurnId");
+        let target = placement_turn(target_id, 'a');
+
+        let (_root, _state, backing) = placement_backing(None);
+        let held = HeldWorkspaceOperation::acquire(&backing).expect("operation lock");
+        let duplicate_log = vec![
+            placement_log_entry(target_id, 'a', Vec::new()),
+            placement_log_entry(target_id, 'b', vec!["a".repeat(40)]),
+        ];
+        let error = guard_full_unwind(backing, &held, &target, &duplicate_log, 0)
+            .expect_err("duplicate TurnIds must fail closed");
+        assert!(
+            error.to_string().contains("repeats TurnId")
+                && error.to_string().contains(&target_id.to_string()),
+            "got {error:?}"
+        );
+
+        let (_root, _state, backing) = placement_backing(Some(target_id));
+        let held = HeldWorkspaceOperation::acquire(&backing).expect("operation lock");
+        let error = guard_full_unwind(
+            backing,
+            &held,
+            &target,
+            &[placement_log_entry(target_id, 'a', Vec::new())],
+            0,
+        )
+        .expect_err("at-target work must not be unwound");
+        assert!(
+            error.to_string().contains("placed.md") && error.to_string().contains("at or before"),
+            "got {error:?}"
+        );
+
+        let (_root, _state, backing) = placement_backing(Some(sibling_id));
+        let held = HeldWorkspaceOperation::acquire(&backing).expect("operation lock");
+        let selected_parent = "a".repeat(40);
+        let selected_log = vec![
+            placement_log_entry(target_id, 'a', Vec::new()),
+            placement_log_entry(later_id, 'b', vec![selected_parent.clone()]),
+        ];
+        let sibling = placement_log_entry(sibling_id, 'c', vec![selected_parent]);
+        assert_eq!(sibling.parent_ids, selected_log[1].parent_ids);
+        assert_ne!(sibling.turn_id, selected_log[1].turn_id);
+        let error = guard_full_unwind(backing, &held, &target, &selected_log, 0)
+            .expect_err("foreign or unselected sibling work must fail closed");
+        assert!(
+            error.to_string().contains("uniquely reachable")
+                && error.to_string().contains(&sibling_id.to_string()),
+            "got {error:?}"
+        );
+
+        let (_root, _state, backing) = placement_backing(Some(later_id));
+        let held = HeldWorkspaceOperation::acquire(&backing).expect("operation lock");
+        guard_full_unwind(
+            backing,
+            &held,
+            &target,
+            &[
+                placement_log_entry(target_id, 'a', Vec::new()),
+                placement_log_entry(later_id, 'b', vec!["a".repeat(40)]),
+            ],
+            0,
+        )
+        .expect("a uniquely placed post-target mutation is safe to unwind");
+    }
+
     #[cfg(feature = "test-crash-barriers")]
     #[test]
     fn rewind_barrier_ack_is_parse_complete_and_newline_terminated() {
