@@ -112,9 +112,32 @@ pub struct ComponentRuntime {
 /// without weakening it to a nonblocking best-effort operation.
 struct ComponentCallRuntime {
     engine: Engine,
+    async_runtime: ComponentAsyncRuntime,
     catalog: Arc<ClosedCatalog>,
     linker: Arc<Linker<StoreState>>,
     limits: Arc<Mutex<ExecutionLimits>>,
+}
+
+struct ComponentAsyncRuntime {
+    inner: Option<tokio::runtime::Runtime>,
+}
+
+impl ComponentAsyncRuntime {
+    fn handle(&self) -> tokio::runtime::Handle {
+        self.inner
+            .as_ref()
+            .expect("Component async runtime is present until drop")
+            .handle()
+            .clone()
+    }
+}
+
+impl Drop for ComponentAsyncRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.inner.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 /// Handle to the epoch ticker task. Stops when dropped.
@@ -148,16 +171,16 @@ impl ComponentRuntime {
     /// runs `from_embedded()` and the rest observe the same result. A
     /// composition failure is latched: every subsequent call returns the same
     /// error without retrying.
-    pub fn shared() -> Result<Arc<Self>, CompositionError> {
-        static INSTANCE: OnceLock<Result<Arc<ComponentRuntime>, String>> = OnceLock::new();
+    pub fn shared() -> Result<Arc<Self>, Arc<CompositionError>> {
+        static INSTANCE: OnceLock<Result<Arc<ComponentRuntime>, Arc<CompositionError>>> =
+            OnceLock::new();
         INSTANCE
             .get_or_init(|| {
                 ComponentRuntime::from_embedded()
                     .map(Arc::new)
-                    .map_err(|err| err.to_string())
+                    .map_err(Arc::new)
             })
             .clone()
-            .map_err(CompositionError::Latched)
     }
 
     /// Fixed no-op fixture for integration tests. No caller-controlled
@@ -176,6 +199,7 @@ impl ComponentRuntime {
         expected_identities: &[ExpectedToolIdentity],
     ) -> Result<Self, CompositionError> {
         let engine = build_engine().map_err(CompositionError::Engine)?;
+        let async_runtime = build_async_runtime().map_err(CompositionError::AsyncRuntime)?;
         let catalog =
             ClosedCatalog::compose(&engine, registrations.iter().copied(), expected_identities)?;
         let linker = build_linker(&engine).map_err(CompositionError::Linker)?;
@@ -184,6 +208,7 @@ impl ComponentRuntime {
         Ok(Self {
             core: Arc::new(ComponentCallRuntime {
                 engine,
+                async_runtime,
                 catalog: Arc::new(catalog),
                 linker: Arc::new(linker),
                 limits: Arc::new(Mutex::new(limits)),
@@ -255,32 +280,17 @@ impl ComponentRuntime {
         params: serde_json::Value,
         ctx: ComponentCallContext,
     ) -> Result<serde_json::Value, CepError> {
-        // Wasmtime runs off the async workers because workspace imports take
-        // blocking Linux locks. Async imports use a call-local runtime; it is shut
-        // down without joining its blocking pool so a cancelled DNS lookup cannot
-        // hold the Component call open.
+        // Poll the Wasmtime call from Tokio's blocking pool because synchronous
+        // workspace imports take Linux locks. Async network imports use the bounded
+        // runtime owned by this composed Component catalog.
         self.ensure_ticker();
 
         let name = name.to_owned();
         let error_name = name.clone();
-        let worker_name = name.clone();
         let core = Arc::clone(&self.core);
+        let async_handle = core.async_runtime.handle();
         tokio::task::spawn_blocking(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|_| {
-                    CepError::tool_execution(
-                        CepErrorCode::ExecutionFailed,
-                        &worker_name,
-                        "component_worker_setup_failed",
-                        None,
-                        Retriability::Permanent,
-                    )
-                })?;
-            let result = runtime.block_on(core.call_async(&name, params, ctx));
-            runtime.shutdown_background();
-            result
+            async_handle.block_on(core.call_async(&name, params, ctx))
         })
         .await
         .map_err(|err| {
@@ -298,9 +308,8 @@ impl ComponentRuntime {
 }
 
 impl ComponentCallRuntime {
-    /// Async Wasmtime execution on a call-local current-thread runtime. The outer
-    /// blocking worker keeps synchronous workspace locks off async workers; the
-    /// inner runtime drives network I/O and owns its DNS blocking pool.
+    /// Async Wasmtime execution driven by the composed catalog's bounded runtime.
+    /// The outer blocking worker keeps synchronous workspace locks off async workers.
     async fn call_async(
         &self,
         name: &str,
@@ -570,6 +579,16 @@ fn host_refusal(ctx: &ComponentCallContext) -> Option<CepError> {
 // ---------------------------------------------------------------------------
 // Engine + linker construction
 // ---------------------------------------------------------------------------
+
+fn build_async_runtime() -> std::io::Result<ComponentAsyncRuntime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(8)
+        .thread_name("lattice-component")
+        .enable_all()
+        .build()
+        .map(|inner| ComponentAsyncRuntime { inner: Some(inner) })
+}
 
 fn build_engine() -> Result<Engine, wasmtime::Error> {
     let mut c = wasmtime::Config::new();

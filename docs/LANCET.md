@@ -65,7 +65,7 @@ The canonical method names are grouped by primary effect class:
 | `observe.workspace` | Workspace observation. `mode=read_file` has single-path scope; `mode=grep`, `mode=list_directory`, and `mode=find_files` use root/directory observation scope. |
 | `mutate.create` | Workspace mutation by pure file creation (embedded Component Tool since #31). Existing targets are rejected; missing parent directories are rejected. |
 | `mutate.edit` | Workspace mutation of existing files through semantic replace/insert operations (embedded Component Tool since #31). The caller provides `expected_hash`; LANCET computes hashline anchors internally. |
-| `fetch.web` | External observation through a GET-only embedded Component. The host revalidates every URL/redirect, pins DNS results to connections, verifies TLS, enforces bounds and the shared observation budget, and records content-free per-hop evidence. |
+| `fetch.web` | External observation through a GET-only embedded Component. The host revalidates every URL/redirect, rejects non-global targets, pins DNS results, verifies TLS, enforces bounds/budget, and records per-hop evidence without userinfo/query/fragment. |
 | `session.todo_write` | Session-state mutation for todo state. |
 
 Audit query, tail, and turn replay are **not** catalog methods. Operators use
@@ -107,6 +107,9 @@ only for generic native/scaffold dispatch until #34 removes that vocabulary.
 `[lancet.network] allowed_hosts`. `allow_public_https` enables public HTTPS but
 does not grant any host; localhost additionally requires `allow_localhost = true`.
 Every redirect is checked against the same rules.
+Network evidence retains the normalized endpoint/path but removes userinfo, query, and
+fragment before persistence; it records host-received and guest-delivered body bytes
+separately. DNS or transport work that already occurred is an effect, never a pre-I/O denial.
 
 ### Command physical-boundary configuration (retired)
 

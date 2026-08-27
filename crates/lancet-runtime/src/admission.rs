@@ -277,7 +277,9 @@ pub fn authorize_operation(
                     cell.scope.clone(),
                 ));
             }
-            if host.is_empty() || host.trim() != host || host.contains('\0') {
+            let normalized =
+                url::Host::parse(host).is_ok_and(|parsed| parsed.to_string() == host.as_str());
+            if !normalized {
                 return Err(OperationDenial::HostNotNormalized);
             }
             Ok(())
@@ -793,6 +795,34 @@ mod tests {
                 "turn-1",
             ),
             Err(OperationDenial::HostNotNormalized)
+        );
+        for host in [
+            "EXAMPLE.com",
+            "example.com/path",
+            "user@example.com",
+            "example.com:443",
+        ] {
+            assert_eq!(
+                authorize_operation(
+                    &admitted,
+                    &cell(CtxOp::Alloc, "net"),
+                    &ObservedTarget::Host { host: host.into() },
+                    "turn-1",
+                ),
+                Err(OperationDenial::HostNotNormalized),
+                "{host}",
+            );
+        }
+        assert_eq!(
+            authorize_operation(
+                &admitted,
+                &cell(CtxOp::Alloc, "net"),
+                &ObservedTarget::Host {
+                    host: "[::1]".into(),
+                },
+                "turn-1",
+            ),
+            Ok(())
         );
 
         let session_tool = admitted_session_tool();

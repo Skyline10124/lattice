@@ -55,6 +55,23 @@ fn is_localhost_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
+fn is_non_global_ietf_assignment(v6: Ipv6Addr, preserve_benchmarking: bool) -> bool {
+    let [first, second, third, ..] = v6.segments();
+    if first != 0x2001 || second >= 0x0200 {
+        return false;
+    }
+
+    let address = u128::from_be_bytes(v6.octets());
+    let globally_reachable_exception = matches!(
+        address,
+        0x2001_0001_0000_0000_0000_0000_0000_0001 | 0x2001_0001_0000_0000_0000_0000_0000_0002
+    ) || second == 0x0003
+        || (second == 0x0004 && third == 0x0112)
+        || (preserve_benchmarking && second == 0x0002 && third == 0);
+
+    !globally_reachable_exception
+}
+
 fn is_private_or_reserved(ip: IpAddr, deny_benchmarking: bool) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -83,13 +100,11 @@ fn is_private_or_reserved(ip: IpAddr, deny_benchmarking: bool) -> bool {
                 || (segments[0] & 0xfe00) == 0xfc00
                 || (segments[0] & 0xffc0) == 0xfe80
                 || (segments[0] & 0xffc0) == 0xfec0
-                || (segments[0] == 0x2001 && segments[1] == 0x0000)
+                || is_non_global_ietf_assignment(v6, !deny_benchmarking)
                 || (segments[0] == 0x2001 && segments[1] == 0x0db8)
-                || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020)
-                || (deny_benchmarking
-                    && segments[0] == 0x2001
-                    && segments[1] == 0x0002
-                    && segments[2] == 0)
+                || (segments[0] == 0x3fff && segments[1] <= 0x0fff)
+                || segments[0] == 0x5f00
+                || (deny_benchmarking && segments[0] == 0x2002)
                 || segments[..4] == [0x0100, 0, 0, 0]
                 || segments[..3] == [0x0064, 0xff9b, 0x0001]
                 || embedded_ipv4(&v6)
@@ -324,14 +339,27 @@ mod tests {
             "::10.0.0.1",
             "100::1",
             "2001::1",
+            "2001:10::1",
+            "2001:100::1",
             "2001:20::1",
             "2001:db8::1",
+            "3fff:0fff::1",
+            "5f00::1",
             "fec0::1",
         ] {
             let ip: IpAddr = raw.parse().unwrap();
             assert!(is_private_or_reserved_ip(ip), "{raw} must fail closed");
         }
-        for raw in ["8.8.8.8", "2606:4700:4700::1111", "64:ff9b::808:808"] {
+        for raw in [
+            "8.8.8.8",
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+            "2001:1::1",
+            "2001:1::2",
+            "2001:3::1",
+            "2001:4:112::1",
+            "3fff:1000::1",
+        ] {
             let ip: IpAddr = raw.parse().unwrap();
             assert!(!is_private_or_reserved_ip(ip), "{raw} must remain public");
         }

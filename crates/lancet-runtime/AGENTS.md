@@ -36,10 +36,10 @@ Cell evidence, and Component result validation.
   cancellation state is the sole cancellation authority (#70 (Codeberg #48)):
   pre-call check, guest logical-error path, and epoch abort all converge on
   one shared `CallCancelled` error. `call` takes `&self`, launches Wasmtime on a
-  blocking worker, and drives async imports with a call-local current-thread Tokio
-  runtime so DNS uses a separate blocking pool. The process-level epoch ticker is
-  lazy and the `Arc<ComponentRuntime>` remains shareable across projection and
-  server dispatch.
+  blocking worker, and drives async imports through the composed catalog's bounded
+  process-level Tokio runtime (two async workers, at most eight blocking DNS tasks).
+  The process-level epoch ticker is lazy and the `Arc<ComponentRuntime>` remains
+  shareable across projection and server dispatch.
 - `src/history.rs` owns `WorkspaceHistory`, `WorkspaceHistoryBacking`,
   `MutationRecord`, `RecordedMutation`, and `HistorySnapshot` — the private
   durable history of successfully installed Atomic Local Mutations (#63),
@@ -99,8 +99,10 @@ Cell evidence, and Component result validation.
   validates policy before I/O, resolves and pins each connection, verifies TLS
   with platform roots, follows at most five revalidated redirects, strips caller
   headers on cross-origin redirects, disables compression, caps headers and the
-  final shaped body, shares the Turn observation budget/deadline/cancellation,
-  and records one content-free network evidence entry per attempted hop.
+  final shaped body, and shares the Turn observation budget/deadline/cancellation.
+  Per-hop evidence strips userinfo/query/fragment, distinguishes host-received bytes
+  from bytes delivered to the guest, and records every post-I/O failure as an
+  `ObservedEffect`; `DeniedOperation` remains pre-I/O only.
 - `src/limits.rs` owns `ExecutionLimits`, `RecordingLimits`, and
   `AbortReason`. Resource limits use `StoreLimits` + epoch interruption +
   fuel.

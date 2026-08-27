@@ -113,7 +113,6 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
             max_boundary: lancet_protocol::cell::Trust::Ex,
         },
         workspace_history: history.clone(),
-        components: None,
     })
     .expect("runtime with private history builds")
 }
@@ -346,7 +345,6 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
             ..Default::default()
         },
         workspace_history: history_backing(denied_state.path(), denied_root.path()),
-        components: None,
     })
     .expect("denied runtime builds");
     let denial = create_file(&denied_runtime, "README.md", "nope\n")
@@ -385,7 +383,6 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
             max_boundary: lancet_protocol::cell::Trust::In,
         },
         workspace_history: history_backing(effect_state.path(), effect_root.path()),
-        components: None,
     })
     .expect("effect-deny runtime builds");
     create_file(&effect_runtime, "denied.txt", "nope\n")

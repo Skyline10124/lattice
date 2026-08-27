@@ -260,9 +260,11 @@ store migrations. `lattice-conversation` landed in #142.
   source, runtime plugins, user processes, `exec.command_run`, and
   post-mutation verify are not Tool capabilities.
 - `fetch.web` reaches the network only through `lancet-runtime`'s async
-  `network-fetch` import. The host enforces GET-only policy, DNS resolution and
-  pinned connection, TLS verification, redirect/header/body limits, cancellation,
-  the shared observation budget, and per-hop content-free network evidence.
+  `network-fetch` import. The host enforces GET-only policy, complete special-address
+  rejection, DNS resolution and pinned connection, TLS verification, redirect/header/body
+  limits, cancellation, and the shared observation budget. Per-hop evidence excludes
+  userinfo/query/fragment, distinguishes received bytes from guest-delivered bytes, and
+  records post-I/O failures as effects rather than pre-I/O denials.
 - Mutating methods must pass authority policy, Guard L1, effect checks and audit
   recording. The concrete guarded Local Workspace is host-enforced: Components
   cannot bypass Local Revision checks, Mutation Preconditions, atomic

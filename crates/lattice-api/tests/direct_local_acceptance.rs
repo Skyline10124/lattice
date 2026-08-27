@@ -22,8 +22,8 @@ mod support;
 use lancet_api::LancetRuntimeConfig;
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
 use lancet_catalog::catalog;
-use lancet_protocol::Retriability;
 use lancet_protocol::evidence::{MutationInstallation, MutationPrecondition, ObservedTarget};
+use lancet_protocol::{CepErrorCode, Retriability};
 use support::ReservedRuntime;
 use tempfile::TempDir;
 
@@ -78,7 +78,6 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
             max_boundary: lancet_protocol::cell::Trust::Ex,
         },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        components: None,
     })
     .expect("direct-local runtime builds")
 }
@@ -245,23 +244,20 @@ async fn policy_deny_blocks_create_on_direct_local() {
         denied_write_patterns: vec!["secret/**".into()],
         ..Default::default()
     };
-    let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    enabled.push(TODO_WRITE.to_string());
+    let enabled = vec![MUTATE_CREATE.to_string()];
     let runtime = ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: dir.path().to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
-        // The embedded Component Tool is admitted too: `enabled_tools` is the
-        // stage-1 capability grant, and the shipped catalog is no longer
-        // native-only (#29).
+        // Admit the exact Component under test so rejection reaches the guarded
+        // workspace policy rather than stopping at tool exposure.
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
-            enabled_tools: std::iter::once(TODO_WRITE.to_string()).collect(),
+            enabled_tools: std::iter::once(MUTATE_CREATE.to_string()).collect(),
             ..Default::default()
         },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        components: None,
     })
     .expect("runtime");
     let client = runtime.client();
@@ -273,15 +269,8 @@ async fn policy_deny_blocks_create_on_direct_local() {
         )
         .await
         .expect_err("denied write must fail");
-    // The denied-write pattern is enforced by the guard / effect region
-    // check, surfacing as a guard denial or replan — never a silent install.
-    assert!(
-        matches!(
-            err.retriability,
-            Retriability::Permanent | Retriability::RequiresReplan
-        ),
-        "denied write must be rejected, got: {err:?}"
-    );
+    assert_eq!(err.code, CepErrorCode::EffectViolation, "{err:?}");
+    assert_eq!(err.retriability, Retriability::Permanent, "{err:?}");
     assert!(
         !dir.path().join("secret/leak.txt").exists(),
         "denied create must not install the file"

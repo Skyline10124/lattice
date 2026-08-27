@@ -18,6 +18,10 @@ LATTICE and LANCET.
   fetch execution in their owning crates.
 - Preserve request-time DNS pinning semantics in callers.
 
+- Keep IPv4/IPv6 special-purpose classification aligned with the IANA registries.
+  The generic provider path preserves documented proxy fake-IP ranges; the stricter
+  Tool-egress predicate rejects them. Add prefix-boundary tests with every update.
+
 ## Verification
 
 - Local: `cargo test -p net-guard`.

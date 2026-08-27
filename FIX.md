@@ -7840,3 +7840,31 @@ with the 180-second total and every global harness/xtask timeout unchanged.
   `crates/lancet-protocol/src/evidence.rs`, native catalog/server and authority-policy cleanup,
   LATTICE API/profile/harness migrations, generated host composition, workspace manifests,
   architecture/testing documentation, `FINDINGS.md`, and `FIX.md`.
+
+## 2026-08-27 — GitHub #32 post-implementation security and acceptance review fixes
+
+- **ID/severity:** GitHub #32 review follow-up / HIGH evidence confidentiality plus MEDIUM
+  network, resource-bound, and acceptance-contract defects.
+- **Problem:** durable network evidence retained URL query credentials; IPv6 special-purpose
+  classification omitted current IANA ranges; post-DNS policy refusals were mislabeled as
+  pre-I/O denials; and one byte field conflated data received by the host with data returned
+  to the guest. Component startup also exposed a caller-supplied production catalog seam and
+  created one Tokio runtime per Tool call. Two acceptance tests could pass without traversing
+  the policy/finalization contracts they named.
+- **Fix:** evidence now strips userinfo/query/fragment and separates bounded raw transport
+  bytes from guest-delivered shaped bytes. Tool egress rejects the missing IPv6 ranges,
+  DNS-or-later failures stay effects, and network targets require canonical URL-host syntax.
+  Production composition always uses the
+  shared generated inventory, initializes off async workers, and owns one bounded async/DNS
+  runtime. The direct policy test now admits `mutate.create` before checking the write deny;
+  dogfood finalization now persists the production canonical `ResultDraft` before terminal
+  publication. Regression coverage pins URL redaction, IPv6 boundaries, typed capability
+  errors, shared composition, and received/delivered evidence.
+- **Verification:**
+  - `cargo test -p net-guard -p lancet-protocol -p lancet-runtime -p lancet-native -p
+    lancet-api -p lattice-api -p lattice-tui` — passed.
+  - `env -u LATTICE_BIN cargo xtask ci` — passed formatting, Clippy, boundary and generated
+    artifact gates, every workspace/Component test, Direct-Local harness suites, and doctests.
+- **Changed files:** network guard/evidence/runtime composition and host code, API/TUI startup
+  seams, Direct-Local and dogfood acceptance tests, #32 decision and architecture documents,
+  and `FIX.md`.

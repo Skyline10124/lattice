@@ -66,26 +66,24 @@ pub struct LancetServer;
 impl LancetServer {
     /// Spawn a native CEP server bound to `config`, returning the client and lifecycle.
     ///
-    /// Composes the production Component runtime once from embedded inventory
-    /// and the generated `EXPECTED_COMPONENTS` identity list, then delegates
-    /// to [`LancetServer::spawn_composed`]. There is no public path to inject
+    /// Uses the process-shared production Component runtime composed from the
+    /// embedded inventory and generated identity list, then delegates to
+    /// [`LancetServer::spawn_composed`]. There is no public path to inject
     /// Component bytes, paths, or handlers; the catalog is closed at build
     /// time (ADR 0004).
     pub fn spawn(
         config: ServerRunConfig,
         channel_capacity: usize,
     ) -> Result<(CepClient, ServerLifecycle), LancetError> {
-        let components = Arc::new(
-            ComponentRuntime::from_embedded()
-                .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?,
-        );
+        let components = ComponentRuntime::shared()
+            .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?;
         Self::spawn_composed(config, channel_capacity, components)
     }
 
     /// Spawn a native CEP server with a pre-composed Component runtime.
     ///
-    /// `pub(crate)`: the only public entry ([`LancetServer::spawn`]) composes
-    /// from embedded inventory. Tests inject a fixed no-op fixture through
+    /// `pub(crate)`: the only public entry ([`LancetServer::spawn`]) uses the
+    /// process-shared embedded inventory. Tests inject a fixed no-op fixture through
     /// this seam (D.6). The same `Arc<ComponentRuntime>` is threaded into
     /// `ServerRunConfig.components` so `handle_request` can branch Component
     /// vs native dispatch within the existing audit lifecycle (D.3).
@@ -174,7 +172,6 @@ impl LancetRuntime {
             cep_mode,
             invocations,
             workspace_history,
-            components: precomposed,
         } = config;
 
         if !policy.denied_effect_kinds.is_empty() {
@@ -191,16 +188,10 @@ impl LancetRuntime {
             &workspace_history,
         )?;
 
-        // D.2: compose the Component runtime once from embedded inventory +
-        // the generated `EXPECTED_COMPONENTS`. When a pre-composed instance is
-        // supplied (process-level shared), skip recompilation entirely.
-        let components =
-            match precomposed {
-                Some(shared) => shared,
-                None => Arc::new(ComponentRuntime::from_embedded().map_err(|err| {
-                    LancetError::Internal(format!("component composition: {err}"))
-                })?),
-            };
+        // D.2: reuse the process-level closed runtime composed from this binary's
+        // generated production inventory. No caller-supplied catalog seam exists.
+        let components = ComponentRuntime::shared()
+            .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?;
         // D.4: project Component descriptors into LLM tool definitions.
         // The production native catalog is empty after #32. Definitions come from
         // the five generated Component descriptors.

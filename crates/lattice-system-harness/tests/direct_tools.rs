@@ -314,8 +314,8 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
         let err_text = last_tool_content(&captures[1]).unwrap_or_default();
         let err_lower = err_text.to_lowercase();
         require(
-            err_lower.contains("capability"),
-            format!("capability denial must cite capability admission: {err_text}"),
+            err_lower.contains("fetch.web") && err_lower.contains("has no admitted capability"),
+            format!("network.fetch admission denial mismatch: {err_text}"),
         )?;
         require(
             !tool_ok(&outcome.parsed, "fetch.web"),

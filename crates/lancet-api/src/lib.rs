@@ -76,6 +76,6 @@ pub use lancet_runtime::rewind_audit::{
     RewindAuditRecord,
 };
 pub use lancet_runtime::{
-    ComponentRuntime, HistorySnapshot, RewindPlan, RewindStep, WorkspaceHistory,
+    ComponentRuntime, CompositionError, HistorySnapshot, RewindPlan, RewindStep, WorkspaceHistory,
     WorkspaceHistoryBacking, WorkspaceHistoryError,
 };

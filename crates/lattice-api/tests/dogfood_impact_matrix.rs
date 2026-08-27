@@ -22,8 +22,12 @@ use lancet_native::{
     register_production_method_registry,
 };
 use lancet_protocol::{
-    BindingIdentity, InvocationBinding, InvocationId, PlanKey, SessionId, TurnId, arguments_digest,
+    BindingIdentity, InvocationBinding, InvocationId, ModelMessageAddress, PlanKey, SessionId,
+    ToolCallAddress, TurnId, arguments_digest, canonical_json,
 };
+use lattice_session::pending::{DraftPublication, ResultDraft, binding_digest};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore};
+use lattice_store::{Blocking, FlockGuard, LockMode};
 use tempfile::TempDir;
 
 const TODO_WRITE: &str = "session.todo_write";
@@ -43,6 +47,8 @@ const FIXED_TURN_ID: &str = "22222222-2222-4222-8222-222222222222";
 struct ReservedDogfoodClient {
     inner: lancet_api::CepClient,
     invocations: Arc<InvocationStore>,
+    sessions: Arc<GitSessionGraphStore>,
+    execution_lock: Arc<FlockGuard>,
     descriptors: BTreeMap<String, String>,
     next: AtomicU32,
 }
@@ -72,6 +78,21 @@ impl ReservedDogfoodClient {
                 arguments_digest: arguments_digest(&params),
             },
         };
+        let address = ToolCallAddress {
+            message: ModelMessageAddress {
+                session_id: binding.identity.session_id,
+                turn_id: binding.identity.turn_id,
+                model_step_ordinal: binding.identity.model_step_ordinal,
+            },
+            part_ordinal: binding.identity.part_ordinal,
+        };
+        let material_binding_digest = binding_digest(
+            &binding.invocation_id,
+            &address,
+            &binding.identity.method,
+            &binding.identity.descriptor_identity,
+            &binding.identity.arguments_digest,
+        );
         self.invocations
             .reserve_batch(
                 PlanKey {
@@ -86,14 +107,36 @@ impl ReservedDogfoodClient {
             .inner
             .call_raw_with_receipt(binding, method, params)
             .await?;
-        let material = serde_json::to_vec(&receipt.result).expect("serialize dogfood result");
+        let canonical_content = canonical_json(
+            receipt
+                .result
+                .as_ref()
+                .expect("dogfood Component call succeeds"),
+        );
+        let draft = ResultDraft::new(
+            invocation_id,
+            material_binding_digest,
+            turn_id,
+            address.message,
+            address.part_ordinal,
+            canonical_content,
+        )
+        .expect("build production-shaped ResultDraft");
+        let publication = self
+            .sessions
+            .publish_draft(&draft, &self.execution_lock)
+            .expect("publish dogfood ResultDraft");
+        assert!(
+            matches!(publication, DraftPublication::Durable { .. }),
+            "available terminal material requires durable draft publication: {publication:?}"
+        );
         self.invocations
             .publish_terminal(
                 invocation_id,
                 TerminalOutcome::Succeeded,
                 TerminalMaterial::Available {
-                    digest: *blake3::hash(&material).as_bytes(),
-                    byte_length: material.len() as u64,
+                    digest: draft.content_digest,
+                    byte_length: draft.byte_length,
                 },
                 TerminalEvidence {
                     admission: receipt.evidence.admission.clone(),
@@ -144,6 +187,27 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let invocations = Arc::new(
         InvocationStore::create_project(&canonical).expect("create project invocation ledger"),
     );
+    let sessions_dir = TempDir::new().expect("temp Session store");
+    let sessions = Arc::new(
+        GitSessionGraphStore::create(sessions_dir.path().join("sessions.git"))
+            .expect("create Session store"),
+    );
+    let project_key =
+        lattice_session::ProjectStoreKey::from_canonical_path_bytes(canonical_text.as_bytes());
+    sessions
+        .create_session(
+            FIXED_SESSION_ID,
+            Some("dogfood-impact-matrix"),
+            "dogfood",
+            "main",
+            &project_key,
+        )
+        .expect("create dogfood Session");
+    let execution_lock = Arc::new(
+        sessions
+            .lock_execution(FIXED_SESSION_ID, LockMode::Exclusive, Blocking::Block)
+            .expect("lock dogfood Session"),
+    );
     let components =
         Arc::new(lancet_runtime::ComponentRuntime::from_embedded().expect("embedded composition"));
     let mut descriptors = BTreeMap::new();
@@ -186,6 +250,8 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let client = ReservedDogfoodClient {
         inner: raw_client,
         invocations,
+        sessions,
+        execution_lock,
         descriptors,
         next: AtomicU32::new(0),
     };

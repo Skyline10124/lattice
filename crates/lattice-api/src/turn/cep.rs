@@ -413,10 +413,11 @@ pub(crate) async fn build_production_turn_deps(
         .map(|loaded| loaded.profile.capability_admission_policy())
         .unwrap_or_default();
 
-    // #171: use the process-level shared Component runtime so consecutive
-    // Turns skip recompilation. ComponentRuntime::shared() composes exactly
-    // once via OnceLock; subsequent calls return the same Arc.
-    let shared_components = ComponentRuntime::shared()
+    // Compile the process-level closed runtime off Tokio's async workers. The
+    // subsequent build reads the same latched instance without recompiling.
+    tokio::task::spawn_blocking(ComponentRuntime::shared)
+        .await
+        .map_err(|err| ApiError::Internal(format!("component composition worker failed: {err}")))?
         .map_err(|err| ApiError::Internal(format!("component composition: {err}")))?;
 
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
@@ -427,7 +428,6 @@ pub(crate) async fn build_production_turn_deps(
         cep_mode,
         invocations: workspace_history.clone(),
         workspace_history,
-        components: Some(shared_components),
     })
     .map_err(map_lancet_err)?;
 

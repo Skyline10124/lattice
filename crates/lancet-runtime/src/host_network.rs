@@ -163,11 +163,8 @@ impl NetworkFetchHost {
                 let target = ObservedTarget::Host {
                     host: validated.host.clone(),
                 };
-                let evidence = empty_network_evidence(
-                    hop,
-                    validated.url.as_str(),
-                    NetworkPolicyVerdict::Denied,
-                );
+                let evidence =
+                    empty_network_evidence(hop, &validated.url, NetworkPolicyVerdict::Denied);
                 ctx.evidence.record_network_denied(
                     self.cell(),
                     self.scope(ctx),
@@ -288,7 +285,7 @@ impl NetworkFetchHost {
                 self.scope(ctx),
                 target,
                 "cell_denied",
-                empty_network_evidence(hop, parsed.as_str(), NetworkPolicyVerdict::Denied),
+                empty_network_evidence(hop, &parsed, NetworkPolicyVerdict::Denied),
             );
             self.remember(effect_error(denial.to_string()));
             return Err(FetchError::Denied);
@@ -317,7 +314,7 @@ impl NetworkFetchHost {
                 host: host.to_string(),
             },
             reason,
-            empty_network_evidence(hop, url.as_str(), NetworkPolicyVerdict::Denied),
+            empty_network_evidence(hop, url, NetworkPolicyVerdict::Denied),
         );
     }
 
@@ -332,7 +329,7 @@ impl NetworkFetchHost {
             host: validated.host.clone(),
         };
         let mut evidence =
-            empty_network_evidence(hop, validated.url.as_str(), NetworkPolicyVerdict::Allowed);
+            empty_network_evidence(hop, &validated.url, NetworkPolicyVerdict::Allowed);
 
         let candidates = match resolve_candidates(&validated, ctx).await {
             Ok(candidates) => candidates,
@@ -352,13 +349,7 @@ impl NetworkFetchHost {
 
         if !candidates_allowed(&validated, &candidates) {
             evidence.policy_verdict = NetworkPolicyVerdict::Denied;
-            ctx.evidence.record_network_denied(
-                self.cell(),
-                self.scope(ctx),
-                target,
-                "resolved_address_denied",
-                evidence,
-            );
+            self.record_effect(ctx, target, evidence, None, None);
             self.remember(denied_error("resolved network target is not allowed"));
             return Err(FetchError::Denied);
         }
@@ -484,7 +475,7 @@ impl NetworkFetchHost {
                 Ok(location) => location,
                 Err(_) => {
                     evidence.failure_phase = Some(NetworkFailurePhase::HttpHeaders);
-                    self.record_effect(ctx, target, evidence, Some(0), Some(false));
+                    self.record_effect(ctx, target, evidence, None, None);
                     self.remember(unavailable_error());
                     return Err(FetchError::Unavailable);
                 }
@@ -493,13 +484,12 @@ impl NetworkFetchHost {
                 Ok(next) if next.as_str().len() <= MAX_URL_BYTES => next,
                 _ => {
                     evidence.failure_phase = Some(NetworkFailurePhase::HttpHeaders);
-                    self.record_effect(ctx, target, evidence, Some(0), Some(false));
+                    self.record_effect(ctx, target, evidence, None, None);
                     self.remember(limit_error("redirect_url"));
                     return Err(FetchError::LimitExceeded);
                 }
             };
-            evidence.body_bytes_returned = Some(0);
-            self.record_effect(ctx, target, evidence, Some(0), Some(false));
+            self.record_effect(ctx, target, evidence, None, None);
             return Ok(HopOutcome::Redirect(next.into()));
         }
 
@@ -527,6 +517,8 @@ impl NetworkFetchHost {
                 return Err(self.wait_refusal(wait));
             }
         };
+        let bytes_received = raw.bytes.len();
+        evidence.body_bytes_received = Some(bytes_received as u64);
         let (body, truncated) = shape_body(raw.bytes, raw.more, self.policy.max_web_response_bytes);
         if let Some(wait) = control_state(ctx) {
             evidence.failure_phase = Some(NetworkFailurePhase::Body);
@@ -538,25 +530,12 @@ impl NetworkFetchHost {
         let observation_bytes = bytes_returned
             .saturating_add(content_type.as_ref().map_or(0, String::len))
             .saturating_add(final_origin.len());
-        evidence.body_bytes_returned = Some(bytes_returned as u64);
         if let Err(refusal) = (self.charge)(observation_bytes) {
-            self.record_effect(
-                ctx,
-                target.clone(),
-                evidence.clone(),
-                Some(bytes_returned as u64),
-                Some(truncated),
-            );
-            ctx.evidence.record_network_denied(
-                self.cell(),
-                self.scope(ctx),
-                target,
-                "observation_budget_post_io",
-                evidence,
-            );
+            self.record_effect(ctx, target, evidence, None, Some(truncated));
             self.remember(budget_error(&refusal));
             return Err(FetchError::LimitExceeded);
         }
+        evidence.body_bytes_returned = Some(bytes_returned as u64);
         self.record_effect(
             ctx,
             target,
@@ -895,10 +874,19 @@ fn endpoint(address: SocketAddr) -> NetworkEndpoint {
     }
 }
 
-fn empty_network_evidence(hop: u32, url: &str, verdict: NetworkPolicyVerdict) -> NetworkEvidence {
+fn evidence_url(url: &Url) -> String {
+    let mut sanitized = url.clone();
+    let _ = sanitized.set_username("");
+    let _ = sanitized.set_password(None);
+    sanitized.set_query(None);
+    sanitized.set_fragment(None);
+    sanitized.to_string()
+}
+
+fn empty_network_evidence(hop: u32, url: &Url, verdict: NetworkPolicyVerdict) -> NetworkEvidence {
     NetworkEvidence {
         hop,
-        url: url.to_string(),
+        url: evidence_url(url),
         resolution: NetworkResolution::NotAttempted,
         dns_candidates: Vec::new(),
         transport: TransportEvidence {
@@ -906,6 +894,7 @@ fn empty_network_evidence(hop: u32, url: &str, verdict: NetworkPolicyVerdict) ->
             tls: TlsState::NotAttempted,
         },
         http_status: None,
+        body_bytes_received: None,
         body_bytes_returned: None,
         policy_verdict: verdict,
         failure_phase: None,
@@ -1033,6 +1022,12 @@ mod tests {
         }])
         .expect_err("Host must stay host-owned");
         assert_eq!(error.code, CepErrorCode::TypeError);
+    }
+
+    #[test]
+    fn evidence_url_omits_credentials_query_and_fragment() {
+        let url = Url::parse("https://user:pass@example.com/path?token=secret#fragment").unwrap();
+        assert_eq!(evidence_url(&url), "https://example.com/path");
     }
 
     #[test]
@@ -1174,12 +1169,10 @@ async fn budget_refusals_distinguish_pre_and_post_io() {
     assert!(matches!(error, FetchError::LimitExceeded), "{error:?}");
     let (_, effects, denied) = evidence.snapshot();
     assert_eq!(effects.effects.len(), 1);
-    assert_eq!(denied.denied.len(), 1);
-    for network in [
-        effects.effects[0].network.as_ref().unwrap(),
-        denied.denied[0].network.as_ref().unwrap(),
-    ] {
-        assert_eq!(network.http_status, Some(200));
-        assert_eq!(network.body_bytes_returned, Some(4));
-    }
+    assert!(denied.denied.is_empty());
+    assert_eq!(effects.effects[0].context_measure, None);
+    let network = effects.effects[0].network.as_ref().unwrap();
+    assert_eq!(network.http_status, Some(200));
+    assert_eq!(network.body_bytes_received, Some(4));
+    assert_eq!(network.body_bytes_returned, None);
 }

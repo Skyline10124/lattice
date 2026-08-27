@@ -140,7 +140,7 @@ pub enum NetworkFailurePhase {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NetworkEvidence {
     pub hop: u32,
-    /// Full normalized URL without a fragment. Query data is retained for operator evidence.
+    /// Normalized request URL without userinfo, query, or fragment.
     pub url: String,
     pub resolution: NetworkResolution,
     /// Sorted and deduplicated before persistence.
@@ -148,6 +148,11 @@ pub struct NetworkEvidence {
     pub transport: TransportEvidence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
+    /// Bounded raw response bytes read from transport, including at most one
+    /// truncation-sentinel byte beyond the delivery limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes_received: Option<u64>,
+    /// Response body bytes actually delivered to the guest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_bytes_returned: Option<u64>,
     pub policy_verdict: NetworkPolicyVerdict,

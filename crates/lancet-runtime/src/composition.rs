@@ -93,8 +93,8 @@ pub enum CompositionError {
     Engine(#[source] wasmtime::Error),
     #[error("linker construction failed")]
     Linker(#[source] wasmtime::Error),
-    #[error("process-level composition failed (latched): {0}")]
-    Latched(String),
+    #[error("component async runtime creation failed")]
+    AsyncRuntime(#[source] std::io::Error),
 }
 
 /// A compiled Tool ready for execution: descriptor, Component, pre-built

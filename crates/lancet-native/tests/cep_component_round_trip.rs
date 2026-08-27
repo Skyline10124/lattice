@@ -171,7 +171,7 @@ async fn spawn_fetch_server(
     spawn_fetch_server_with_deadline(allow_localhost, max_response_bytes, None).await
 }
 
-async fn spawn_body_server(body: &'static str) -> String {
+async fn spawn_body_server(body: &'static [u8]) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -179,10 +179,11 @@ async fn spawn_body_server(body: &'static str) -> String {
         let mut request = [0_u8; 1024];
         let _ = stream.read(&mut request).await;
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
             body.len()
         );
         stream.write_all(response.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
     });
     format!("http://{addr}/")
 }
@@ -357,13 +358,14 @@ async fn unenabled_tool_is_denied_before_the_runtime_is_entered() {
 
 #[tokio::test]
 async fn fetch_web_component_round_trips_with_transport_evidence() {
-    let url = spawn_body_server("ok").await;
+    let url = spawn_body_server(b"ok").await;
+    let request_url = format!("{url}?token=secret#fragment");
     let (client, config, _task) = spawn_fetch_server(true, 1024).await;
     let receipt = call_receipt(
         &client,
         &config,
         "fetch.web",
-        serde_json::json!({"url": url}),
+        serde_json::json!({"url": request_url}),
     )
     .await
     .expect("transport receipt");
@@ -387,12 +389,42 @@ async fn fetch_web_component_round_trips_with_transport_evidence() {
         .find(|effect| effect.network.is_some())
         .expect("network operation evidence");
     let network = operation.network.as_ref().unwrap();
+    assert_eq!(network.url, url);
     assert_eq!(network.hop, 0);
     assert_eq!(network.resolution, NetworkResolution::Literal);
     assert_eq!(network.policy_verdict, NetworkPolicyVerdict::Allowed);
     assert_eq!(network.http_status, Some(200));
+    assert_eq!(network.body_bytes_received, Some(2));
     assert_eq!(network.body_bytes_returned, Some(2));
     assert!(network.transport.connected_peer.is_some());
+}
+
+#[tokio::test]
+async fn fetch_web_evidence_separates_raw_and_shaped_body_bytes() {
+    let url = spawn_body_server(&[0xff, b'a']).await;
+    let (client, config, _task) = spawn_fetch_server(true, 1024).await;
+    let receipt = call_receipt(
+        &client,
+        &config,
+        "fetch.web",
+        serde_json::json!({"url": url}),
+    )
+    .await
+    .expect("transport receipt");
+    let result = receipt.result.expect("fetch result");
+    assert_eq!(result["body"], "�a");
+
+    let operation = receipt
+        .evidence
+        .effects
+        .effects
+        .iter()
+        .find(|effect| effect.network.is_some())
+        .expect("network operation evidence");
+    let network = operation.network.as_ref().unwrap();
+    assert_eq!(network.body_bytes_received, Some(2));
+    assert_eq!(network.body_bytes_returned, Some(4));
+    assert_eq!(operation.context_measure, Some(4));
 }
 
 #[tokio::test]
@@ -446,8 +478,13 @@ async fn fetch_web_follows_redirect_and_caps_shaped_body() {
         .filter_map(|effect| effect.network.as_ref())
         .collect();
     assert_eq!(hops.len(), 2);
+    assert_eq!(receipt.evidence.effects.effects[0].context_measure, None);
+    assert_eq!(receipt.evidence.effects.effects[0].truncated, None);
+    assert_eq!(hops[0].body_bytes_received, None);
+    assert_eq!(hops[0].body_bytes_returned, None);
     assert_eq!((hops[0].hop, hops[0].http_status), (0, Some(302)));
     assert_eq!((hops[1].hop, hops[1].http_status), (1, Some(200)));
+    assert_eq!(hops[1].body_bytes_received, Some(5));
     assert_eq!(hops[1].body_bytes_returned, Some(4));
 
     let target_request = target_request.await.expect("capture redirected request");
