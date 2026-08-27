@@ -53,8 +53,8 @@ runtime registry. LLM-facing definitions come from the closed generated
 five-Component inventory. Tool exposure is separate from base authority:
 Enabled methods filter the model-visible generated definitions. Cell admission
 and per-operation Tool Host authorization decide execution authority. Legacy
-`ToolExposure::base_authority()` and `BaseAuthorityPlan` remain only for the
-transitional generic/native machinery; they grant no production built-in.
+Legacy `ToolExposure::base_authority()` remains only for the
+transitional generic/native machinery; it grants no production built-in.
 
 ### Effect-contract tool surface
 
@@ -116,7 +116,7 @@ separately. DNS or transport work that already occurred is an effect, never a pr
 Landlock/netns command isolation, the `[lancet.isolation.command]` profile
 schema, and the Phase 29 native supervisor (unprivileged user namespaces,
 minimal mount view, allowlist environment, fd cleanup) were removed - see
-[docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed subsystems". `exec.command_run`
+ADR 0003 and root AGENTS.md "Architecture". `exec.command_run`
 itself is retired (a raw CEP call returns JSON-RPC `-32601`), so there is no
 command-isolation configuration surface. Git history retains the phase
 narrative.
@@ -126,7 +126,7 @@ narrative.
 The Phase 30 overlay/artifact-commit pipeline (diagnostic/artifact overlays,
 candidate verify layers, lower-drift recheck, HashLine commit-baseline gate)
 belonged to the retired `exec.command_run` command-isolation subsystem and was
-removed with it - see [docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed
+removed with it - see ADR 0003 and root AGENTS.md "Architecture".
 subsystems". The metadata keys it emitted (`overlay_status`,
 `artifact_adjudication`, `commit_baseline_validation`, etc.) are no longer
 produced. Git history retains the phase narrative.
@@ -160,7 +160,7 @@ not create missing parent directories. Existing-file edits must go through
 The `effective_boundary` / `host_probe` metadata model, the
 `physically_bounded` attribution rules, and the `exec.command_run` boundary
 JSON documented here belonged to the retired command-isolation subsystem and
-were removed with it - see [docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed
+were removed with it - see ADR 0003 and root AGENTS.md "Architecture".
 subsystems". Git history retains the metadata schema narrative.
 
 ## LANCET CLI inspection and self-check
@@ -178,14 +178,14 @@ subsystems". Git history retains the metadata schema narrative.
 
 The live Linux isolation canary lane (the ignored Rust canary suite, gated by a
 live-isolation env flag) was removed - see
-[docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed subsystems". Git history
+ADR 0003 and root AGENTS.md "Architecture". Git history
 retains the classification narrative.
 
 ## Phase 29 non-claims (retired)
 
 Phase 29 command-boundary reporting and the applied-evidence model were part of
 the retired `exec.command_run` command-isolation subsystem and were removed
-with it - see [docs/ARCHITECTURE.md](./ARCHITECTURE.md) "Removed subsystems".
+with it - see ADR 0003 and root AGENTS.md "Architecture".
 Git history retains the non-claims narrative.
 
 ## Operator Invocation Ledger
@@ -211,7 +211,7 @@ credentials, provider IDs as correlation identity, and internal metadata blobs a
 not operator fields. SQLite tables, `metadata_json`, pointer IDs, numeric
 call/audit/evidence IDs, schema adoption, import, dual read/write, and fallback
 opening are deleted. Old disposable development state is rebuilt explicitly; see
-[DEVELOPMENT.md](./DEVELOPMENT.md#manual-development-state-rebuild).
+by recreating new sessions via `lattice session new`.
 
 ### Query, tail, replay, and status
 

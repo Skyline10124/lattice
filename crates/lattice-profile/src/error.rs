@@ -108,7 +108,7 @@ pub enum ProfileError {
     },
 
     #[error(
-        "no default agent profile found: create at {dir} with `lattice new agent default`, or specify an agent with `--agent <name>`"
+        "no default agent profile found: create {dir}/agent.toml, or specify an agent with `--agent <name>`"
     )]
     MissingDefault { dir: PathBuf, template: String },
 }

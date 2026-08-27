@@ -5,8 +5,8 @@ Crate-local guidance for `lancet-authority`.
 ## Role
 
 This crate owns host-side policy semantics: capability matching, network and
-workspace policy, observation budgets, Guard L1, effect regions/checking, and
-boundary-credit validation. It performs no Tool I/O.
+workspace policy, observation budgets, Guard L1, and effect regions/checking.
+It performs no Tool I/O.
 
 ## Sub-architecture
 
@@ -20,11 +20,11 @@ boundary-credit validation. It performs no Tool I/O.
   after #32, so built-in Tools do not resolve through this hook.
 - `src/policy/resolved.rs` resolves only generic native catalog methods. All five
   built-ins are intentionally unknown to it.
-- `src/policy/visibility.rs` owns read visibility and System Path Exclusion
-  semantics consumed by the runtime workspace host.
+- `src/policy/visibility.rs` owns Policy-Visible Workspace read visibility decisions
+  (ignored inclusion, read denial, system exclusion precedence) and System Path Exclusion
+  semantics consumed by the runtime workspace host; read, list, grep, and find share the same decision.
 - `src/guard.rs` owns Guard L1 path and scope verdicts.
 - `src/effect/` owns the residual legacy effect region/checker/ledger types.
-- `src/boundary_credit.rs` validates isolation boundary evidence.
 
 ## Network policy
 

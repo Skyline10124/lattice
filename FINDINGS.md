@@ -274,7 +274,7 @@
 
 ## P22.5 supervision verification (2026-05-28)
 
-Live-scenario harness: `scripts/p22-real-scenarios.sh` (disposable workspaces under `build/tmp/p22-real-scenarios/`).
+Live-scenario harness: `benchmarks/lancet-dogfood/legacy/p22-real-scenarios.sh` (historical; disposable workspaces under `build/tmp/p22-real-scenarios/`).
 
 | Scenario | Result | Notes |
 |----------|--------|-------|
@@ -290,7 +290,7 @@ Live-scenario harness: `scripts/p22-real-scenarios.sh` (disposable workspaces un
 
 ## P22.6 self-host supervision (2026-05-28)
 
-Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp/p22-self-host/<run-id>/lattice-under-test`).
+Self-host harness: `benchmarks/lancet-dogfood/legacy/p22-self-host.sh` (historical; disposable clone under `build/tmp/p22-self-host/<run-id>/lattice-under-test`).
 
 | Task | Default | Result | Notes |
 |------|---------|--------|-------|

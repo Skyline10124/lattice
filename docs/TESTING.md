@@ -23,7 +23,7 @@ The test architecture is the **Direct-Local** model landed in issues #41 / #40:
 product behavior is proven by driving the built `lattice` binary through
 the real turn path against the canonical Local Workspace, and crate tests keep
 local invariants only. The per-test keep/elevate/delete triage for the
-pre-rewrite suite lives in [`docs/TEST-TRIAGE.md`](TEST-TRIAGE.md).
+The per-test keep/elevate/delete triage for the pre-rewrite suite was recorded in historical issue #40.
 
 ---
 
@@ -127,7 +127,7 @@ Earlier releases ran a hypervisor-backed sandbox-isolation test lane and a set
 of shell gate scripts. Both are removed — the isolation lane in #40 and the
 shell gates in #47 — and are **not** current test layers. They must not be
 reintroduced. For the precise removed-subsystems list, see
-`docs/ARCHITECTURE.md` ("Removed subsystems"); release evidence now flows
+ADR 0003 and root `AGENTS.md` ("Architecture"); release evidence now flows
 through the layer-4 rollout gate.
 
 ---

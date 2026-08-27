@@ -31,7 +31,8 @@ layers.
   `lancet_audit::ScopedXdgStateHome`, pulled in via
   `[dev-dependencies] lancet-audit = { features = ["test-support"] }`. The
   crate-local `src/commands/test_env.rs` copy was deleted in GitHub #39.
-- Integration tests cover cutover and release smoke behavior.
+- `tests/cli_cutover.rs` covers cutover behavior; release/end-to-end smoke testing
+  is owned by `lattice-system-harness` (`LATTICE_BIN` black-box) and `lattice-api`.
 
 ## Boundaries
 
@@ -84,5 +85,5 @@ layers.
 
 - Local: `cargo test -p lattice-cli`.
 - Command-surface changes need parser/help tests.
-- Turn rendering changes should run API streaming tests plus CLI release smoke
-  or run integration tests.
+- Turn rendering changes should run API streaming tests plus
+  `lattice-system-harness` integration scenarios.

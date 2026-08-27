@@ -7,10 +7,13 @@
 //!
 //! - **JSON-RPC 2.0** envelope types (`jsonrpc`) — domain-neutral request/response/notification.
 //! - **Frame aliases** (`frame`) — CEP-specific type aliases over JSON-RPC (`ToolCall`, `ToolResult`, `ToolEvent`).
-//! - **Execution envelopes** (`envelope`) — intent, capabilities, scope, impact, and guard verdicts.
 //! - **Cell effect model** (`cell`) — ADR 0004 `CtxOp`/`ExtImpact`/scope/trust/capability core.
+//! - **Required capabilities** (`capability`) — capability patterns and matchers.
+//! - **Legacy effect types** (`effect_types`) — transitional `ImpactKind`/`EffectDecl` types.
 //! - **Admission evidence** (`evidence`) — approved capabilities vs observed effects.
 //! - **Canonical JSON** (`canonical`) — deterministic bytes for protocol consumers.
+//! - **Typed identities** (`identity`) — UUID-v4 `InvocationId`/`TurnId` and `SessionId`.
+//! - **Durable bindings** (`binding`) — `InvocationBinding` and parameter digest helpers.
 //! - **Typed errors** (`error`) — error families with structured data and retriability.
 //! - **Policy hook API** (`policy`) — deterministic policy seam data types.
 //!
