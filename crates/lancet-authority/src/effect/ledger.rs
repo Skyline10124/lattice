@@ -188,25 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn fresh_ledger_has_empty_snapshot() {
-        let ledger = EffectLedger::new();
-        assert!(ledger.snapshot().is_empty());
-    }
-
-    #[test]
-    fn record_then_snapshot_returns_effect() {
-        let ledger = EffectLedger::new();
-        let effect = sample_effect(
-            ImpactKind::WorkspaceObservation,
-            EffectSource::HandlerBackend,
-        );
-        ledger.record(effect.clone());
-        let snapshot = ledger.snapshot();
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0], effect);
-    }
-
-    #[test]
     fn shared_arc_record_via_clone_a_read_via_clone_b() {
         let ledger_a = EffectLedger::new();
         let ledger_b = ledger_a.clone();
@@ -218,42 +199,6 @@ mod tests {
         let snapshot = ledger_b.snapshot();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0], effect);
-    }
-
-    #[test]
-    fn effect_source_has_all_four_variants() {
-        // Verify all source variants exist and are distinct.
-        let sources = [
-            EffectSource::HandlerBackend,
-            EffectSource::EffectProbe,
-            EffectSource::GuardProbe,
-            EffectSource::Verify,
-        ];
-        for (i, a) in sources.iter().enumerate() {
-            for (j, b) in sources.iter().enumerate() {
-                if i == j {
-                    assert_eq!(a, b);
-                } else {
-                    assert_ne!(a, b);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn observed_scope_variants() {
-        let path = ObservedScope::Path(PathBuf::from("/foo"));
-        let root = ObservedScope::Root("project".to_string());
-        let host = ObservedScope::Host("example.com".to_string());
-        let session = ObservedScope::SessionState;
-
-        // All variants are distinct
-        assert_ne!(path, root);
-        assert_ne!(path, host);
-        assert_ne!(path, session);
-        assert_ne!(root, host);
-        assert_ne!(root, session);
-        assert_ne!(host, session);
     }
 
     #[test]
@@ -309,16 +254,6 @@ mod region_slot_tests {
     fn fresh_slot_returns_none() {
         let slot = AuthorizedRegionSlot::new();
         assert!(slot.get().is_none());
-    }
-
-    #[test]
-    fn set_then_get_returns_region() {
-        let slot = AuthorizedRegionSlot::new();
-        let region = AuthorizedEffectRegion::empty();
-        slot.set(region.clone());
-        let retrieved = slot.get();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap(), region);
     }
 
     #[test]

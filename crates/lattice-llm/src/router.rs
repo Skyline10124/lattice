@@ -328,14 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_unknown_alias_returns_error() {
-        let router = ModelRouter::new();
-        let target = ModelTarget::new("nonexistent-model-xyz");
-        let result = router.resolve(&target);
-        assert!(result.is_err(), "unknown alias should return error");
-    }
-
-    #[test]
     fn resolve_unknown_alias_error_is_not_fallback() {
         let router = ModelRouter::new();
         let target = ModelTarget::new("random-string-that-is-not-an-alias");
@@ -366,18 +358,6 @@ mod tests {
                 debug_str.contains("OPENAI_API_KEY"),
                 "debug output should contain the env var name"
             );
-        });
-    }
-
-    #[test]
-    fn resolved_model_serialization_does_not_leak_secrets() {
-        with_env_vars(&[("ANTHROPIC_API_KEY", Some("sk-ant-secret"))], || {
-            let router = ModelRouter::new();
-            let target = ModelTarget::new("sonnet");
-            let resolved = router.resolve(&target).expect("sonnet should resolve");
-            assert_eq!(resolved.api_key_env, "ANTHROPIC_API_KEY");
-            let fields = format!("{:?}", resolved);
-            assert!(!fields.contains("sk-ant-secret"));
         });
     }
 

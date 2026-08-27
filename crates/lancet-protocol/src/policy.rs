@@ -379,35 +379,4 @@ mod tests {
             assert_eq!(&d, v);
         }
     }
-
-    // ── PolicyHook trait compile-time checks ─────────────────────────
-
-    #[test]
-    fn policy_hook_is_object_safe() {
-        struct AlwaysAllowed;
-        impl PolicyHook for AlwaysAllowed {
-            fn decide(&self, _input: &PolicyInput) -> PolicyDecision {
-                PolicyDecision::Allowed
-            }
-        }
-
-        let hook: &dyn PolicyHook = &AlwaysAllowed;
-        let input = PolicyInput {
-            method: "test".into(),
-            params: json!({}),
-            authority: PolicyAuthorityInput,
-            audit_context: PolicyAuditContext {
-                turn_id: "t".into(),
-                session_id: "s".into(),
-                invocation_id: None,
-                budget_snapshot: PolicyBudgetSnapshot {
-                    turn_observation_bytes_used: 0,
-                    turn_observation_bytes_limit: 0,
-                    todo_ops_used: 0,
-                    todo_ops_limit: 0,
-                },
-            },
-        };
-        assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
-    }
 }

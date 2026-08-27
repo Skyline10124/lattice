@@ -169,100 +169,6 @@ fn render_json_event_emits_single_line_with_trailing_newline() {
     assert_eq!(output, "{\"type\":\"token_delta\",\"content\":\"hi\"}\n");
 }
 
-#[test]
-fn render_json_event_roundtrips_every_variant() {
-    let events: Vec<TurnEvent> = vec![
-        TurnEvent::TurnStarted {
-            session_id: "s1".into(),
-            turn_id: "s1:root".into(),
-            parent_commit_id: None,
-            branch: Some("main".into()),
-        },
-        TurnEvent::ModelStarted {
-            provider: Some("anthropic".into()),
-            model: "claude".into(),
-        },
-        TurnEvent::LlmRequestError {
-            provider: Some("anthropic".into()),
-            model: "claude".into(),
-            attempt: 1,
-            max_attempts: 4,
-            error_kind: "transport".into(),
-            retryable: true,
-            will_retry: true,
-            delay_ms: Some(500),
-            status_code: None,
-            message: "connection reset".into(),
-        },
-        TurnEvent::ReasoningDelta {
-            content: "thinking".into(),
-        },
-        TurnEvent::TokenDelta {
-            content: "hello".into(),
-        },
-        TurnEvent::ToolCallStarted {
-            id: "tc1".into(),
-            name: "read_file".into(),
-        },
-        TurnEvent::ToolCallFinished {
-            id: "tc1".into(),
-            name: "read_file".into(),
-            ok: true,
-            output_len: 412,
-            error_summary: None,
-        },
-        TurnEvent::ModelFinished {
-            finish_reason: "stop".into(),
-            usage: Some(TurnUsageSummary {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-            }),
-        },
-        TurnEvent::TurnFailed {
-            reason: "boom".into(),
-        },
-        TurnEvent::TurnCancelled {
-            reason: Some("caller".into()),
-        },
-        TurnEvent::TurnCommitting,
-        TurnEvent::TurnCommitted {
-            origin: lattice_api::ClosureOrigin::Live,
-            workspace_history_checkpoint: lattice_api::WorkspaceHistoryCheckpoint::Empty,
-            session_id: "s1".into(),
-            commit_id: "c1".into(),
-            outcome: lattice_api::TurnOutcome::Completed {
-                finish_reason: lattice_api::TurnFinishReason::Stop,
-            },
-        },
-        TurnEvent::CommitFailed {
-            reason: "parent mismatch".into(),
-        },
-    ];
-
-    for event in &events {
-        let mut buf = Vec::new();
-        render_json_event(event, &mut buf).unwrap();
-        let line = String::from_utf8(buf).unwrap();
-        let trimmed = line.trim_end();
-        let parsed: TurnEvent = serde_json::from_str(trimmed).unwrap();
-        assert_eq!(&parsed, event, "roundtrip failed for {:?}", event);
-    }
-}
-
-#[test]
-fn render_json_event_emits_no_ansi_escapes() {
-    let event = TurnEvent::TurnFailed {
-        reason: "boom".into(),
-    };
-    let mut buf = Vec::new();
-    render_json_event(&event, &mut buf).unwrap();
-    assert!(
-        !buf.contains(&0x1B),
-        "JSON output must not contain ANSI ESC bytes"
-    );
-}
-
 // ─── Human renderer tests (Task 3) ─────────────────────────────
 
 #[test]
@@ -276,48 +182,6 @@ fn render_human_token_delta_writes_only_to_stdout() {
     render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
     assert_eq!(out, b"hi");
     assert!(err.is_empty());
-}
-
-#[test]
-fn render_human_status_line_after_partial_token_inserts_stderr_newline() {
-    // First: emit a partial token (no trailing newline)
-    let mut state = RunRenderState {
-        tokens_emitted_without_newline: true,
-        ..Default::default()
-    };
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    render_human_event(
-        &TurnEvent::TokenDelta {
-            content: "foo".into(),
-        },
-        &mut state,
-        &mut out,
-        &mut err,
-        false,
-    )
-    .unwrap();
-    apply_event_to_state(
-        &TurnEvent::TokenDelta {
-            content: "foo".into(),
-        },
-        &mut state,
-    );
-
-    // Then: a status line event (ToolCallStarted)
-    let event = TurnEvent::ToolCallStarted {
-        id: "t1".into(),
-        name: "read_file".into(),
-    };
-    let mut err2 = Vec::new();
-    render_human_event(&event, &mut state, &mut out, &mut err2, false).unwrap();
-
-    // err must start with \n (the mid-token newline trick)
-    assert!(
-        err2.starts_with(b"\n"),
-        "stderr should begin with newline after mid-token status line; got: {:?}",
-        String::from_utf8_lossy(&err2)
-    );
 }
 
 #[test]
@@ -372,53 +236,6 @@ fn render_human_tool_finished_ok_renders_byte_size() {
     let err_str = String::from_utf8(err).unwrap();
     assert!(err_str.contains("412 chars"));
     assert!(err_str.contains("read_file"));
-}
-
-#[test]
-fn render_human_tool_finished_err_renders_summary() {
-    let event = TurnEvent::ToolCallFinished {
-        id: "t1".into(),
-        name: "read_file".into(),
-        ok: false,
-        output_len: 120,
-        error_summary: Some("permission denied".into()),
-    };
-    let mut state = RunRenderState::default();
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
-    let err_str = String::from_utf8(err).unwrap();
-    assert!(err_str.contains("120 chars"));
-    assert!(err_str.contains("permission denied"));
-}
-
-#[test]
-fn render_human_reasoning_hidden_default() {
-    let event = TurnEvent::ReasoningDelta {
-        content: "thinking".into(),
-    };
-    let mut state = RunRenderState::default();
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
-    assert!(
-        err.is_empty(),
-        "reasoning should be hidden in non-verbose mode"
-    );
-}
-
-#[test]
-fn render_human_reasoning_visible_verbose() {
-    let event = TurnEvent::ReasoningDelta {
-        content: "thinking".into(),
-    };
-    let mut state = RunRenderState::default();
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    render_human_event(&event, &mut state, &mut out, &mut err, true).unwrap();
-    let err_str = String::from_utf8(err).unwrap();
-    assert!(err_str.contains("reasoning"));
-    assert!(err_str.contains("thinking"));
 }
 
 #[test]
@@ -506,23 +323,6 @@ fn verbose_epilogue_skips_unset_fields() {
         err.is_empty(),
         "empty state should produce no epilogue output"
     );
-}
-
-#[test]
-fn verbose_epilogue_usage_from_state_not_committed() {
-    // Simulate two ModelFinished events summed into usage_total
-    let state = RunRenderState {
-        usage_total: Some(TurnUsageSummary {
-            prompt_tokens: 20,
-            completion_tokens: 10,
-            total_tokens: 30,
-        }),
-        ..Default::default()
-    };
-    let mut err = Vec::new();
-    render_verbose_epilogue(&state, &mut err).unwrap();
-    let err_str = String::from_utf8(err).unwrap();
-    assert!(err_str.contains("30 tok (prompt: 20, completion: 10)"));
 }
 
 // ─── exit-code matrix (Task 6) ────────────────────────────

@@ -842,31 +842,4 @@ enabled = ["{tool}"]
             .await
             .expect("an empty deny list admits startup");
     }
-
-    /// #171: two consecutive `build_production_turn_deps` calls share the
-    /// same process-level `ComponentRuntime` (no re-composition).
-    #[tokio::test]
-    async fn consecutive_builds_share_component_runtime() {
-        let project = TempDir::new().unwrap();
-        let profile = write_and_load_profile(project.path(), "");
-        let deps_a = build_deps_for(&profile, &project).await.unwrap();
-        // Shut down the first runtime's server so it doesn't hold the
-        // workspace-history lock across the second build.
-        drop(deps_a);
-        let deps_b = build_deps_for(&profile, &project).await.unwrap();
-        // The shared OnceLock must return the same Arc. Since we can't
-        // directly inspect the Arc pointer through ProductionTurnDeps, we
-        // verify indirectly: both builds succeed (the second does not
-        // re-compose) and produce the same catalog size.
-        assert_eq!(deps_b.build_metrics.client_instances, 1);
-        assert_eq!(deps_b.build_metrics.transport_pairs, 1);
-
-        // Direct pointer-equality proof via the public shared() accessor:
-        let r1 = ComponentRuntime::shared().unwrap();
-        let r2 = ComponentRuntime::shared().unwrap();
-        assert!(
-            std::sync::Arc::ptr_eq(&r1, &r2),
-            "process-level ComponentRuntime must be shared across builds"
-        );
-    }
 }

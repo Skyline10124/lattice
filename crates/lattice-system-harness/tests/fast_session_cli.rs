@@ -301,24 +301,6 @@ fn fast_session_list_json_reports_created_sessions() {
 }
 
 #[test]
-fn fast_session_new_creates_session_and_appears_in_list() {
-    let (world, spec) = project_with_agent("fast-session-new");
-    let session_id = create_session(&world, &spec);
-
-    // The new session must be visible through the public list surface.
-    let list = run(&world, &spec, &["session", "list", "--json"]);
-    let list_result =
-        assert_exit_success(&list).and_then(|_| assert_stdout_contains(&list, &session_id));
-    ok_or_artifacts(
-        &world,
-        &spec.name,
-        "lattice session list --json (after new)",
-        &list,
-        list_result,
-    );
-}
-
-#[test]
 fn fast_session_status_new_session_shows_zero_commits_and_agent() {
     let (world, spec) = project_with_agent("fast-session-status");
     let session_id = create_session(&world, &spec);

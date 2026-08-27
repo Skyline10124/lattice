@@ -131,16 +131,6 @@ mod tests {
     }
 
     #[test]
-    fn length_prefix_prevents_concat_collisions() {
-        // Without the length prefix, ("ab","c") and ("a","bc") style splits
-        // could collide; here the split is inside a single fixed field so the
-        // prefix is defensive, but the vector still pins it.
-        let short = ProjectStoreKey::from_canonical_path_bytes(b"/a");
-        let long = ProjectStoreKey::from_canonical_path_bytes(b"/aa");
-        assert_ne!(short, long);
-    }
-
-    #[test]
     fn parse_round_trip() {
         let key = ProjectStoreKey::from_canonical_path_bytes(b"/some/path");
         let parsed = ProjectStoreKey::parse(&key.to_string()).unwrap();

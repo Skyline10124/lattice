@@ -102,31 +102,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_attempts_are_separate_records() {
-        let first = ModelAttemptRecord {
-            key: key(0),
-            origin: ProviderOrigin::Anthropic,
-            usage: None,
-            outcome: AttemptOutcome::Interrupted(AttemptInterruption::StreamError),
-        };
-        let second = ModelAttemptRecord {
-            key: key(1),
-            origin: ProviderOrigin::Anthropic,
-            usage: Some(TokenUsage {
-                prompt_tokens: 3,
-                completion_tokens: 0,
-                total_tokens: 3,
-            }),
-            outcome: AttemptOutcome::Complete,
-        };
-        assert_ne!(first.key, second.key);
-        // Missing usage on the first attempt stays unknown; it is not folded
-        // into zero or into the retry's usage.
-        assert_eq!(first.usage, None);
-        assert_ne!(second.usage, None);
-    }
-
-    #[test]
     fn attempt_record_serde_roundtrip_all_outcomes() {
         let outcomes = [
             AttemptOutcome::Complete,

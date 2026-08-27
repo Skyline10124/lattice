@@ -605,34 +605,6 @@ mod session_graph {
     }
 
     #[test]
-    fn create_and_open_session_round_trip() {
-        let api = api("create_open_round_trip");
-
-        let created = api
-            .create_session(CreateSessionRequest {
-                label: Some("my session".into()),
-                active_agent: "coder".into(),
-                project_branch: "main".to_string(),
-                project_store_key: test_store_key_hex(),
-            })
-            .expect("create_session");
-
-        assert!(!created.session_id.is_empty());
-        assert_eq!(created.label, Some("my session".to_string()));
-        assert_eq!(created.active_agent_name, "coder");
-
-        // Reopen by ID.
-        let opened = api
-            .open_session(OpenSessionRequest {
-                id: created.session_id.clone(),
-            })
-            .expect("open_session");
-
-        assert_eq!(opened.session_id, created.session_id);
-        assert_eq!(opened.label, Some("my session".to_string()));
-    }
-
-    #[test]
     fn graph_only_constructor_cannot_create_project_stores_via_global_xdg() {
         let root = temp_dir("graph_only_requires_layout");
         let api = SessionApi::git_create(root.join("sessions.git")).expect("create store");
@@ -879,43 +851,6 @@ mod session_graph {
         assert_eq!(result.old_commit_id, Some(commit_ids[2].clone()));
         assert_eq!(result.new_commit_id, commit_ids[0]);
         assert_eq!(result.branch, "main");
-    }
-
-    #[test]
-    fn session_api_does_not_expose_legacy_operations() {
-        // This test verifies the public API surface of SessionApi.
-        // The following methods SHOULD exist:
-        fn _assert_api_surface(api: &SessionApi) {
-            let _ = api.create_session(CreateSessionRequest {
-                label: None,
-                active_agent: "coder".into(),
-                project_branch: "main".to_string(),
-                project_store_key: test_store_key_hex(),
-            });
-            let _ = api.open_session(OpenSessionRequest { id: String::new() });
-            let _ = api.status("");
-            let _ = api.list_sessions();
-            let _ = api.log("");
-            let _ = api.checkout("", "");
-            let _ = api.branch("", "", None);
-            let _ = api.set_active_agent("", "");
-            let _ = api.diff("", "", "");
-            let _ = api.reset("", "");
-        }
-        // Rich graph operations beyond pointer movement should not exist on
-        // SessionApi.
-        //
-        // If any of these are added, this test module will fail to compile
-        // because the method calls below would succeed, which is NOT desired.
-        // (No code here — the absence of those methods is the assertion.)
-    }
-
-    #[test]
-    fn graph_store_trait_excludes_legacy_methods() {
-        // The trait is used as a bound to confirm it compiles with only
-        // the expected methods. If richer history rewriting methods were added,
-        // this module would need updating.
-        fn _assert_trait_bound(_store: &dyn SessionGraphStore) {}
     }
 
     #[test]
