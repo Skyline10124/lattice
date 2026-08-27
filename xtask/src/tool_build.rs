@@ -9,7 +9,7 @@
 //!    `--remap-path-prefix` for reproducible debug paths.
 //! 2. Encode the core module into a Component with `wasm-tools component new`.
 //! 3. Validate the Component and assert its import surface is exactly the WIT
-//!    world's `host-control` (no `wasi:*` ambient authority).
+//!    world's manifest-declared Tool Host interfaces (no `wasi:*` ambient authority).
 //! 4. SHA-256 the Component, write the digest back into `manifest.toml`
 //!    `[artifact] sha256`, and re-run `tool-codegen` so the generated
 //!    `expected-identity.json` (artifact + descriptor digest) stays consistent.

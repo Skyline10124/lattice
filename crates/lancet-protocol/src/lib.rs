@@ -48,9 +48,10 @@ pub use error::{
 pub use evidence::{
     ADMISSION_EVIDENCE_VERSION, AdmissionEvidence, CapabilityAdmissionPolicy,
     DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, DeniedOperationsRecord, EffectSource,
-    MutationEvidence, MutationInstallation, MutationPrecondition, OBSERVED_EFFECTS_RECORD_VERSION,
-    ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
-    WorkspaceVisibilityEvidence,
+    MutationEvidence, MutationInstallation, MutationPrecondition, NetworkEndpoint, NetworkEvidence,
+    NetworkFailurePhase, NetworkPolicyVerdict, NetworkResolution, OBSERVED_EFFECTS_RECORD_VERSION,
+    ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget, TlsState, TlsVersion,
+    TransportEvidence, WorkspaceVisibilityEvidence,
 };
 pub use evidence_triple::CellEvidenceTriple;
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};

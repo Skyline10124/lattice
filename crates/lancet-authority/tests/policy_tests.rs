@@ -41,18 +41,6 @@ fn policy_input(method: &str, params: serde_json::Value) -> PolicyInput {
     }
 }
 
-/// A write-deny list constrains writes only; it must not deny an observation.
-/// Asserted through `fetch.web` since #30 made `observe.workspace` a Component
-/// Tool: it is the last native observation method, so it is the only one that can
-/// still carry this crossing-of-wires check.
-#[test]
-fn allows_observation_without_denied_patterns() {
-    let config = project_config();
-    let hook = DefaultPolicyHook::new(config);
-    let input = policy_input("fetch.web", json!({"url": "https://example.com/doc"}));
-    assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
-}
-
 #[test]
 fn denies_migrated_mutations_as_unknown_legacy_methods() {
     let hook = DefaultPolicyHook::new(project_config());
@@ -85,52 +73,6 @@ fn denies_retired_command_run_as_unknown_method() {
             ..
         }
     ));
-}
-
-#[test]
-fn denies_network_host() {
-    let mut config = project_config();
-    config.network.allowed_hosts = vec!["allowed.example".into()];
-    config.network.allow_public_https = false;
-    let hook = DefaultPolicyHook::new(config);
-    let input = policy_input("fetch.web", json!({"url": "https://evil.example/page"}));
-    assert!(matches!(
-        hook.decide(&input),
-        PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::NetworkDenied,
-            ..
-        }
-    ));
-}
-
-/// The per-turn observation budget denial, on the last native method that spends
-/// it. `observe.workspace` carried this before #30; the Component path refuses on
-/// the same shared turn tracker inside the Tool Host instead.
-#[test]
-fn denies_observation_budget_exhausted() {
-    let hook = DefaultPolicyHook::new(project_config());
-    let mut input = policy_input("fetch.web", json!({"url": "https://example.com/doc"}));
-    input
-        .audit_context
-        .budget_snapshot
-        .turn_observation_bytes_used = 65536;
-    assert!(matches!(
-        hook.decide(&input),
-        PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::BudgetExceeded,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn decision_is_deterministic() {
-    let hook = DefaultPolicyHook::new(project_config());
-    let input = policy_input("fetch.web", json!({"url": "https://example.com/doc"}));
-    let first = hook.decide_with_evidence(&input);
-    let second = hook.decide_with_evidence(&input);
-    assert_eq!(first.decision, second.decision);
-    assert_eq!(first.evidence.network_host, second.evidence.network_host);
 }
 
 #[test]

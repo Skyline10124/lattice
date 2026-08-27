@@ -455,6 +455,8 @@ fn channels_for_domain_imports(imports: &BTreeSet<String>) -> BTreeSet<ChannelKi
         // reachable; the host enforces every path decision behind them.
         if interface == "workspace-observe" || interface == "workspace-mutate" {
             channels.insert(ChannelKind::Workspace);
+        } else if interface == "network-fetch" {
+            channels.insert(ChannelKind::Network);
         }
     }
     channels

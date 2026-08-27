@@ -12,7 +12,9 @@ use self::effect::apply_effect_check;
 use self::helpers::{
     admission_denied_error, call_cancelled_error, emit_cep_call_finished, emit_cep_call_started,
 };
-use super::hosts::{is_component_method, workspace_mutation_host, workspace_observation_host};
+use super::hosts::{
+    is_component_method, network_fetch_host, workspace_mutation_host, workspace_observation_host,
+};
 use super::transport_config::ServerRunConfig;
 use crate::server::evidence_respond::triple_from_ledger;
 use crate::server::registry::{HandlerContext, MethodRegistry};
@@ -189,6 +191,8 @@ pub(super) async fn handle_request(
                         default_policy_hook.as_deref(),
                         Arc::clone(&workspace_history),
                     );
+                    let network_host =
+                        network_fetch_host(&admitted.descriptor, &method, &cep_context);
                     let comp_ctx = ComponentCallContext {
                         invocation_id,
                         turn_id: turn_id.to_string(),
@@ -198,6 +202,7 @@ pub(super) async fn handle_request(
                         admitted: Arc::new(admitted),
                         workspace: workspace_host,
                         mutate: mutate_host,
+                        network: network_host,
                     };
                     rt.call(&method, params, comp_ctx).await
                 }

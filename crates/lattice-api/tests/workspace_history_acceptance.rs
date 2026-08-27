@@ -24,7 +24,6 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use lancet_api::{LancetRuntimeConfig, WorkspaceHistory, WorkspaceHistoryBacking};
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
-use lancet_catalog::catalog;
 use lancet_protocol::CepErrorCode;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
@@ -35,14 +34,12 @@ use lattice_session::StateLayout;
 use support::ReservedRuntime;
 use tempfile::TempDir;
 
-/// The embedded Component Tools of the default distribution. Literals, not
-/// catalog constants: their descriptor authority is their source manifest
-/// (`tools/*/manifest.toml`), and #29/#30 deleted the `lancet-catalog` types
-/// that used to name them.
-const COMPONENT_TOOLS: [&str; 4] = [
+/// The five embedded Component Tools of the default distribution.
+const COMPONENT_TOOLS: [&str; 5] = [
     "observe.workspace",
     "mutate.create",
     "mutate.edit",
+    "fetch.web",
     "session.todo_write",
 ];
 
@@ -97,14 +94,10 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
         denied_write_patterns: Vec::new(),
         ..Default::default()
     };
-    // All five shipped Tools: the three native catalog methods plus the two
-    // embedded Components (`session.todo_write` since #29, `observe.workspace`
-    // since #30). AC9 below asserts the private history adds nothing to that
-    // set, so the set has to be complete for the assertion to mean anything —
-    // and since #30 completeness means naming a Component for the observation
-    // that used to arrive with the catalog.
-    let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
+    let enabled = COMPONENT_TOOLS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
     ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: root.to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
@@ -117,7 +110,7 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
             enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
             denied_capabilities: Default::default(),
-            max_boundary: lancet_protocol::cell::Trust::In,
+            max_boundary: lancet_protocol::cell::Trust::Ex,
         },
         workspace_history: history.clone(),
         components: None,
@@ -343,11 +336,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
     let denied_runtime = ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: denied_root.path().to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
-        enabled_tools: catalog()
-            .iter()
-            .map(|d| d.name.to_string())
-            .chain(COMPONENT_TOOLS.iter().map(|n| (*n).to_string()))
-            .collect(),
+        enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         // Admit mutate.create so Cell admission is not the denier — the write
@@ -387,11 +376,7 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
     let effect_runtime = ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: effect_root.path().to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
-        enabled_tools: catalog()
-            .iter()
-            .map(|d| d.name.to_string())
-            .chain(COMPONENT_TOOLS.iter().map(|n| (*n).to_string()))
-            .collect(),
+        enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
         policy,
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {

@@ -3,11 +3,10 @@
 > **CURRENT BOUNDARY - 2026-08-23:** ADR 0003's guarded Direct-Local Workspace
 > path is production; the MSB/Upper path, `[workspace]` profile section, and
 > `lattice-workspace` crate are deleted. ADR 0004's manifest-owned Component
-> composition is production for `observe.workspace`, `mutate.create`,
-> `mutate.edit`, and `session.todo_write`; `fetch.web` remains the sole native
-> catalog method while #32 completes transport/runtime absorption. A built
-> runtime has a closed catalog and Components have no ambient WASI filesystem,
-> network, or process authority.
+> composition is production for all five built-ins. `fetch.web` joined the
+> embedded Component catalog in #32 and reaches the network only through the
+> async `network-fetch` Tool Host import. The production native catalog is empty.
+> Components have no ambient WASI filesystem, network, or process authority.
 >
 > ADR 0005's durable invocation hard cut is also production. One typed
 > `InvocationId` spans binding, CEP execution, Host context, history, terminal
@@ -29,36 +28,33 @@ InvocationStore ledger.
 
 ## Public surface (v1.4-alpha boundary contract)
 
-The documented public LANCET contract is framed by **`lancet-cep`**, which
-re-exports the CEP protocol/catalog/dispatch interface and owns tool exposure
-plus base-authority planning. The underlying contract remains split across
-**`lancet-protocol`** and **`lancet-catalog`**:
+The documented public CEP contract is framed by `lancet-cep`, which re-exports
+the transitional protocol/catalog/dispatch types. Runtime Tool definitions come
+from the closed generated Component inventory; Source Tool manifests own every
+built-in descriptor.
 
 | Component | Description |
 | ----------- | ------------- |
-| `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
-| `lancet-catalog::CATALOG` | The **native** CEP catalog plus descriptor metadata for methods that still use typed native handlers. Since GitHub #31 it is `fetch.web` only. The Agent-visible five-Tool distribution (`observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`, `session.todo_write`) is closed composition: four embedded Components plus this one native method. (`session.envelope`, `exec.command_run`, `mutate.batch`, post-mutation verify, and agent-visible audit CEP methods were removed - catalog and tests assert their absence.) |
+| `lancet-cep` | Transitional CEP facade: protocol/catalog/dispatch re-exports plus generic `ToolDefinition` and exposure helpers |
+| `lancet-catalog::catalog()` | Empty production native catalog after #32; generic method traits and dev-only scaffold entries remain until #34 |
 | `lancet-api::audit` | Stable operator query/tail/replay entry points over project-keyed `invocations.git`; a thin facade over `lancet-audit::operator` typed DTOs, pinned views, OID cursors, filters, and Cell-evidence projection. Not Agent Tools. |
-| Method params/results | Typed `*Params` / `*Result` structs per native catalog method in `lancet-catalog`; Component descriptors come from Source Tool manifests. |
+| Tool params/results | Manifest-generated descriptor schemas and guest types for built-ins; residual typed native traits remain generic migration machinery |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
 | `PolicyHook` / `PolicyDecision` | Pluggable external policy hook interface in `lancet-protocol` |
 | Invocation/evidence schemas | Typed bindings and versioned Cell-evidence shapes in `lancet-protocol`; authoritative records, pinned operator DTOs, and project store opening in `lancet-audit` |
 
-Internal implementation is split across `lancet-authority` (default policy, Guard L1, active envelope, effect-region semantics) and `lancet-native` (production handlers, transport lifecycle, edit/web integration).
+Internal implementation is split across `lancet-authority` (policy/guard/effect semantics), `lancet-runtime` (Component execution and Tool Host authority), and `lancet-native` (CEP server lifecycle and transitional routing).
 
-**Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
+**Not public:** transitional `lancet-native` server internals, low-level executor helpers, authority implementation details, and `#[doc(hidden)]` re-exports.
 
 Pre-v1.3.1 method names are removed. They are not accepted by the runtime or
-native registry, and LLM-facing tool definitions are projected from the closed
-five-Tool distribution (native catalog + embedded Component descriptors). Tool exposure is separate from base authority:
-enabled methods filter the model-visible catalog projection, while
-catalog descriptors declare method-local base authority requirements.
-`ToolExposure::base_authority()` aggregates those requirements, and
-`BaseAuthorityPlan` materializes them with runtime policy inputs such as allowed
-fetch hosts. The base envelope never grants workspace write or command scopes.
-Projection APIs live in `lancet-cep`; `lancet-native` and `lancet-api` do not
-carry compatibility projection shims.
+runtime registry. LLM-facing definitions come from the closed generated
+five-Component inventory. Tool exposure is separate from base authority:
+Enabled methods filter the model-visible generated definitions. Cell admission
+and per-operation Tool Host authorization decide execution authority. Legacy
+`ToolExposure::base_authority()` and `BaseAuthorityPlan` remain only for the
+transitional generic/native machinery; they grant no production built-in.
 
 ### Effect-contract tool surface
 
@@ -69,7 +65,7 @@ The canonical method names are grouped by primary effect class:
 | `observe.workspace` | Workspace observation. `mode=read_file` has single-path scope; `mode=grep`, `mode=list_directory`, and `mode=find_files` use root/directory observation scope. |
 | `mutate.create` | Workspace mutation by pure file creation (embedded Component Tool since #31). Existing targets are rejected; missing parent directories are rejected. |
 | `mutate.edit` | Workspace mutation of existing files through semantic replace/insert operations (embedded Component Tool since #31). The caller provides `expected_hash`; LANCET computes hashline anchors internally. |
-| `fetch.web` | External observation through URL fetch policy. |
+| `fetch.web` | External observation through a GET-only embedded Component. The host revalidates every URL/redirect, pins DNS results to connections, verifies TLS, enforces bounds and the shared observation budget, and records content-free per-hop evidence. |
 | `session.todo_write` | Session-state mutation for todo state. |
 
 Audit query, tail, and turn replay are **not** catalog methods. Operators use
@@ -96,34 +92,21 @@ since GitHub #39 they no longer live in `lancet-catalog` at all.
 
 ### Mode semantics
 
-`mode = "off"` under `[lancet]` skips effect-region enforcement only. The CEP policy hook still runs; capability declarations are still required, and effect-kind denial remains a hard fail. Legacy direct tool calls are not re-enabled - there is no legacy tool executor path in the production stack.
+`mode = "off"` under `[lancet]` skips legacy effect-region enforcement only.
+Component admission, workspace policy, and network policy remain host-enforced.
 
-Effect-kind denial is enforced in two layers, and the first one is a genuine
-write barrier. Configure it as `deny = ["workspace_mutation"]` under
-`[lancet.effects]` or `[effects]` in an external policy file.
+The production native catalog is empty after #32. A non-empty
+`[lancet.effects] deny` therefore fails runtime construction instead of becoming
+a silent no-op. Migrate impact-kind denies to manifest capability names under
+`[lancet.capabilities] deny`, for example `external_observation` →
+`network.fetch`, `workspace_observation` → `workspace.observation`, and
+`workspace_mutation` → `workspace.mutation`. Legacy `ImpactKind` checks remain
+only for generic native/scaffold dispatch until #34 removes that vocabulary.
 
-1. **Pre-dispatch (declared kinds, prevents).** Before any handler runs, the
-   transport compares the method's static `EffectDecl.kinds` from
-   `lancet_catalog::catalog()` with the turn's denied kinds. A hit returns
-   `EffectViolation` without entering the backend, so a denied `mutate.create`
-   or `mutate.edit` never touches Local Workspace and a denied
-   `observe.workspace` never reads it.
-2. **Post-dispatch (observed kinds, defense in depth).** After a successful
-   dispatch the same deny set is checked against the effect ledger, which
-   catches a handler whose runtime effects diverge from its declaration. This
-   layer reports a side effect that has **already** happened: per ADR 0003
-   decision 8 a successfully installed Atomic Local Mutation is never rolled
-   back, so an `EffectViolation` raised here means "denied effect landed and
-   was reported", not "denied effect prevented".
-
-Neither layer is tunable by `mode`: `warn` and `off` gate effect-*region*
-checks only. Both layers key on the fixed native catalog, so they apply to
-native methods only; Component Tool policy is `[lancet.capabilities]`
-admission, which never names impact identity.
-
-Because layer 1 keys on the declared kind, one deny entry covers every native
-method declaring that kind, but it cannot express "deny only this path" — that
-is `[lancet.workspace] denied_write_patterns`.
+`fetch.web` also requires `max_boundary = "ex"` and a non-empty
+`[lancet.network] allowed_hosts`. `allow_public_https` enables public HTTPS but
+does not grant any host; localhost additionally requires `allow_localhost = true`.
+Every redirect is checked against the same rules.
 
 ### Command physical-boundary configuration (retired)
 

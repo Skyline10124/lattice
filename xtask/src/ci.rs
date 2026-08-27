@@ -261,7 +261,6 @@ fn run_tests(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_TEST_TIMEOUT_SECS);
-    let skip_known_hangs = env::var_os("LATTICE_SKIP_KNOWN_HANGS").is_some();
 
     println!();
     println!(
@@ -271,19 +270,10 @@ fn run_tests(
 
     let mut failures: Vec<String> = Vec::new();
     for name in &crates {
-        let mut libtest: Vec<&str> = Vec::new();
-        if name == "lancet-native" && skip_known_hangs {
-            println!(
-                "\u{1b}[33m  {name}: skipping fetch_effect_contract_negative \
-                 (LATTICE_SKIP_KNOWN_HANGS; see FINDINGS.md L-26-01)\u{1b}[0m"
-            );
-            libtest.push("--skip");
-            libtest.push("fetch_effect_contract_negative");
-        }
         match run_cargo_test(
             root,
             name,
-            &libtest,
+            &[],
             build_jobs,
             lattice_bin,
             harness_failures,

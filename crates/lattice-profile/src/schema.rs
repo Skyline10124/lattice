@@ -151,29 +151,13 @@ pub struct LancetWorkspacePolicySection {
     pub denied_read_patterns: Vec<String>,
 }
 
-/// `[lancet.effects]` — effect-kind deny switch.
+/// `[lancet.effects]` — legacy native impact-kind deny input.
 ///
-/// `deny` is enforced twice with different guarantees (GitHub #71):
-///
-/// 1. **Pre-dispatch, on declared kinds — prevents.** A native method whose
-///    static `EffectDecl.kinds` intersects `deny` is rejected before its
-///    handler runs, so `deny = ["workspace_mutation"]` fails
-///    `mutate.create`/`mutate.edit` with no filesystem change.
-/// 2. **Post-dispatch, on observed effects — detects, does not undo.** The
-///    effect ledger is re-checked after a successful dispatch to catch a
-///    handler diverging from its declaration. A violation found here already
-///    happened: ADR 0003 decision 8 keeps successful Atomic Local Mutations
-///    immediate and un-rolled-back, so the caller sees `EffectViolation` while
-///    the bytes remain on disk.
-///
-/// Neither layer is tunable by `[lancet] mode`, which gates effect-*region*
-/// checks only. `deny` is per effect kind, not per path — use
-/// `[lancet.workspace] denied_write_patterns` for path-scoped write denial.
-///
-/// Native-path only: it denies method *impact kinds* on the legacy
-/// authorization path. Component Tool policy lives in
-/// `[lancet.capabilities]` and never names method impact identity (B8); this
-/// section is retired only once every consumer has migrated.
+/// The production native catalog is empty after #32, so these impact kinds cannot
+/// govern any shipped Tool. A non-empty `deny` still parses for migration clarity
+/// but runtime construction rejects it fail closed; use `[lancet.capabilities] deny`
+/// with manifest-declared capability names instead. The legacy shape remains only
+/// until #34 removes the migration vocabulary.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LancetEffectsSection {

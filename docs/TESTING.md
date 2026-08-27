@@ -397,8 +397,6 @@ A local mirror of the ordinary CI lane. Steps, in order
    (`LATTICE_TEST_TIMEOUT_SECS`, default 300 s), with `LATTICE_BIN` and
    `LATTICE_HARNESS_FAILURE_DIR` defaulted to the workspace `target/` tree.
    Build parallelism is capped (`CARGO_BUILD_JOBS`, default 4).
-   `LATTICE_SKIP_KNOWN_HANGS` skips `fetch_effect_contract_negative` in
-   `lancet-native` (DNS-blackhole hang; see `FINDINGS.md` L-26-01).
 9. `cargo xtask tool-build --verify` (warn-only)
 
 ### Alpha rollout gate (layer 4)
@@ -518,8 +516,6 @@ ordinary lane has no host matrix.
   `lancet-boundary`; `tool-codegen --check`), plus a **pinned `wasm-tools`
   install** that only this lane needs (the ordinary lane does not install it —
   nothing there shells out to the encoder), then:
-  - `cargo test -p lancet-native fetch_effect_contract` — the explicit-network
-    fetch-effect contract (positive + negative; real DNS/HTTP on the runner).
   - `cargo xtask rollout --channel alpha` — the layer-4 release-evidence lane.
   - `cargo xtask tool-build --verify` — rebuilds each Source Tool Component and
     compares its digest with the committed artifact. This is the only gate that

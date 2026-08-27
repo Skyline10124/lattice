@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_mutation_components_errors_as_unknown_method() {
+    fn resolve_component_methods_as_unknown_legacy_methods() {
         let resolver = test_resolver();
         for (method, params) in [
             (
@@ -211,6 +211,7 @@ mod tests {
                 "mutate.edit",
                 json!({"path": "src/main.rs", "expected_hash": "blake3:00", "edits": []}),
             ),
+            ("fetch.web", json!({"url": "https://example.com/"})),
         ] {
             let input = PolicyInput {
                 method: method.into(),
@@ -220,7 +221,7 @@ mod tests {
             };
             let err = resolver
                 .resolve(&input)
-                .expect_err("Component mutations must not resolve through the legacy catalog");
+                .expect_err("Component methods must not resolve through the legacy catalog");
             assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
         }
     }
@@ -239,41 +240,6 @@ mod tests {
         };
         let err = resolver.resolve(&input).unwrap_err();
         assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
-    }
-
-    #[test]
-    fn resolve_web_fetch_extracts_the_host() {
-        let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "fetch.web".into(),
-            params: json!({"url": "https://example.com/page"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(resolved.impact_kind, ImpactKind::ExternalObservation);
-        assert_eq!(resolved.resolved_network.unwrap().host, "example.com");
-        assert_eq!(resolved.invocation_facts.host.unwrap(), "example.com");
-    }
-
-    /// An unparseable URL resolves to an empty host, which no `allowed_hosts`
-    /// pattern matches — the allow decision stays fail-closed.
-    #[test]
-    fn resolve_web_fetch_unparseable_url_yields_no_grantable_host() {
-        let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "fetch.web".into(),
-            params: json!({"url": "not a url"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(),
-        };
-        let resolved = resolver.resolve(&input).unwrap();
-        let host = resolved.resolved_network.unwrap().host;
-        assert!(host.is_empty(), "got: {host}");
-        assert!(!super::super::network::host_allowed_by_list(
-            &host,
-            &["example.com".to_string()]
-        ));
     }
 
     #[test]

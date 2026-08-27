@@ -55,49 +55,77 @@ fn is_localhost_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
-fn is_private_or_reserved(ip: IpAddr) -> bool {
+fn is_private_or_reserved(ip: IpAddr, deny_benchmarking: bool) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            let octets = v4.octets();
+            let [a, b, c, _] = v4.octets();
             v4.is_loopback()
                 || v4.is_unspecified()
                 || v4.is_multicast()
                 || v4.is_documentation()
-                || octets[0] == 10
-                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
-                || (octets[0] == 192 && octets[1] == 168)
-                || (octets[0] == 169 && octets[1] == 254)
-                || octets[0] == 127
-                || octets[0] == 0
+                || a == 10
+                || (a == 100 && (b & 0xc0) == 64)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 192 && b == 168)
+                || (deny_benchmarking && a == 198 && (b & 0xfe) == 18)
+                || a == 127
+                || a == 0
+                || a >= 240
         }
         IpAddr::V6(v6) => {
+            let segments = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                || is_ipv4_mapped_private(&v6)
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xffc0) == 0xfec0
+                || (segments[0] == 0x2001 && segments[1] == 0x0000)
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020)
+                || (deny_benchmarking
+                    && segments[0] == 0x2001
+                    && segments[1] == 0x0002
+                    && segments[2] == 0)
+                || segments[..4] == [0x0100, 0, 0, 0]
+                || segments[..3] == [0x0064, 0xff9b, 0x0001]
+                || embedded_ipv4(&v6)
+                    .is_some_and(|v4| is_private_or_reserved(v4.into(), deny_benchmarking))
         }
     }
 }
 
-/// Returns true for loopback, RFC1918, link-local, documentation, and related reserved space.
+/// Returns true for private/reserved space while preserving proxy fake-IP ranges.
 pub fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
-    is_private_or_reserved(ip)
+    is_private_or_reserved(ip, false)
 }
 
-fn is_ipv4_mapped_private(v6: &Ipv6Addr) -> bool {
+/// Strict Tool-egress classification, including the RFC 2544 benchmarking range.
+pub fn is_forbidden_tool_target_ip(ip: IpAddr) -> bool {
+    is_private_or_reserved(ip, true)
+}
+
+fn embedded_ipv4(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
     let segments = v6.segments();
-    if segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
-        let v4 = Ipv4Addr::new(
-            (segments[6] >> 8) as u8,
-            (segments[6] & 0xff) as u8,
-            (segments[7] >> 8) as u8,
-            (segments[7] & 0xff) as u8,
-        );
-        return is_private_or_reserved(IpAddr::V4(v4));
-    }
-    false
+    let (high, low) = if (segments[..5] == [0; 5] && segments[5] == 0xffff)
+        || segments[..6] == [0; 6]
+        || (segments[..2] == [0x0064, 0xff9b] && segments[2..6] == [0; 4])
+    {
+        (segments[6], segments[7])
+    } else if segments[0] == 0x2002 {
+        (segments[1], segments[2])
+    } else {
+        return None;
+    };
+    Some(Ipv4Addr::new(
+        (high >> 8) as u8,
+        high as u8,
+        (low >> 8) as u8,
+        low as u8,
+    ))
 }
 
 /// Resolve `host:port` and return socket addresses that are all on the public internet.
@@ -128,7 +156,7 @@ pub fn resolve_public_socket_addrs(
         .trim_end_matches(']')
         .parse::<IpAddr>()
     {
-        if is_private_or_reserved(ip) {
+        if is_private_or_reserved(ip, false) {
             return Err(NetGuardError::Config {
                 message: format!("hostname targets private/reserved IP {ip}"),
             });
@@ -150,7 +178,7 @@ pub fn resolve_public_socket_addrs(
     }
 
     for addr in &addrs {
-        if is_private_or_reserved(addr.ip()) {
+        if is_private_or_reserved(addr.ip(), false) {
             return Err(NetGuardError::Config {
                 message: format!(
                     "hostname '{host}' resolves to private/reserved IP {}",
@@ -206,7 +234,7 @@ pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
     let host_clean = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_clean.parse::<IpAddr>()
         && !is_localhost_host(host)
-        && is_private_or_reserved(ip)
+        && is_private_or_reserved(ip, false)
     {
         return Err(NetGuardError::Config {
             message: format!("base_url targets private/reserved IP {ip}"),
@@ -229,7 +257,7 @@ pub fn validate_base_url(url: &str) -> Result<(), NetGuardError> {
             .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
         if let Ok(addrs) = (host, port).to_socket_addrs() {
             for addr in addrs {
-                if is_private_or_reserved(addr.ip()) {
+                if is_private_or_reserved(addr.ip(), false) {
                     return Err(NetGuardError::Config {
                         message: format!(
                             "hostname '{host}' resolves to private/reserved IP {}",
@@ -283,6 +311,49 @@ mod tests {
     }
 
     #[test]
+    fn classify_reserved_and_embedded_private_ranges() {
+        for raw in [
+            "100.64.0.1",
+            "192.0.0.1",
+            "192.88.99.1",
+            "240.0.0.1",
+            "255.255.255.255",
+            "64:ff9b::a00:1",
+            "64:ff9b:1::1",
+            "2002:0a00:0001::",
+            "::10.0.0.1",
+            "100::1",
+            "2001::1",
+            "2001:20::1",
+            "2001:db8::1",
+            "fec0::1",
+        ] {
+            let ip: IpAddr = raw.parse().unwrap();
+            assert!(is_private_or_reserved_ip(ip), "{raw} must fail closed");
+        }
+        for raw in ["8.8.8.8", "2606:4700:4700::1111", "64:ff9b::808:808"] {
+            let ip: IpAddr = raw.parse().unwrap();
+            assert!(!is_private_or_reserved_ip(ip), "{raw} must remain public");
+        }
+        for raw in [
+            "198.18.0.1",
+            "64:ff9b::c612:1",
+            "2001:2::1",
+            "2002:c612:0001::",
+        ] {
+            let ip: IpAddr = raw.parse().unwrap();
+            assert!(
+                !is_private_or_reserved_ip(ip),
+                "{raw} is a proxy fake-IP range"
+            );
+            assert!(
+                is_forbidden_tool_target_ip(ip),
+                "{raw} must deny Tool egress"
+            );
+        }
+    }
+
+    #[test]
     fn allow_localhost_http() {
         assert!(validate_base_url("http://localhost:11434/v1").is_ok());
     }
@@ -294,8 +365,8 @@ mod tests {
 
     #[test]
     fn allow_https_public() {
-        assert!(validate_base_url("https://api.openai.com/v1").is_ok());
-        assert!(validate_base_url("https://api.anthropic.com").is_ok());
+        assert!(validate_base_url("https://8.8.8.8/v1").is_ok());
+        assert!(validate_base_url("https://1.1.1.1").is_ok());
     }
 
     #[test]

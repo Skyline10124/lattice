@@ -16,7 +16,7 @@
 //! in this same crate; rewind still enters through `lancet-native` and consumes
 //! this module through the crate's public surface — one concrete host module,
 //! as the workspace contract requires, rather than two copies of secure path
-//! resolution. #32 finishes absorbing remaining native host surfaces.
+//! resolution. #32 moved the separate network host into this crate as well.
 
 mod local;
 pub mod rewind;

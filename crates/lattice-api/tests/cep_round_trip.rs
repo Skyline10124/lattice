@@ -4,9 +4,8 @@
 //! Impact matrix: one representative method per `ImpactKind` round-trips
 //! from catalog-derived LLM tool shape through `reserved CepClient fixture` and back.
 
-use lancet_catalog::CepMethod;
-use lancet_catalog::catalog;
-use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
+use lancet_catalog::test_method::{TestEcho, TestEchoParams};
+use lancet_catalog::{CepMethod, MethodDescriptor};
 use lancet_native::{
     CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
@@ -177,48 +176,20 @@ async fn reserved_client_with_registry(registry: MethodRegistry) -> ReservedClie
     let server_task = tokio::spawn(async move {
         let _ = server.run_native(registry, config).await;
     });
-    let definitions = lancet_cep::project_tool_definitions(catalog());
-    let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    let adapter = ReservedClient::new(client, invocations, &definitions, enabled);
+    let descriptor = MethodDescriptor::for_method::<TestEcho>();
+    let definitions = vec![lancet_cep::ToolDefinition::new(
+        descriptor.name,
+        descriptor.description,
+        (descriptor.params_schema)(),
+        "test-descriptor".to_string(),
+    )];
+    let adapter = ReservedClient::new(client, invocations, &definitions, [TestEcho::NAME]);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
     adapter
 }
 
-async fn fetch_only_client() -> ReservedClient {
-    let mut registry = MethodRegistry::new();
-    registry
-        .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
-            Ok(FetchResult {
-                status: 200,
-                body: "external observation body".into(),
-                content_type: Some("text/plain".into()),
-                truncated: None,
-            })
-        })
-        .expect("fetch handler");
-    reserved_client_with_registry(registry).await
-}
-
-/// A method the production runtime can actually serve: a native catalog method,
-/// or one of the embedded Component Tools (#29 — `session.todo_write` is the
-/// first, and its descriptor authority is its source manifest, not the catalog).
-fn assert_dispatchable_method(method: &str) {
-    let native = catalog().iter().any(|descriptor| descriptor.name == method);
-    let component = COMPONENT_TOOLS.contains(&method);
-    assert!(
-        native || component,
-        "method is neither a native catalog method nor an embedded Component: {method}"
-    );
-}
-
-/// The embedded Component Tools of the default distribution. `observe.workspace`
-/// joined `session.todo_write` here in #30, which is why the native catalog is
-/// down to three methods while the Agent-visible surface is still five.
-const MUTATE_CREATE: &str = "mutate.create";
-const MUTATE_EDIT: &str = "mutate.edit";
-const COMPONENT_TOOLS: [&str; 4] = [OBSERVE_WORKSPACE, MUTATE_CREATE, MUTATE_EDIT, TODO_WRITE];
-
+const FETCH_WEB: &str = "fetch.web";
 /// The migrated Tool's method name. Not a catalog constant any more: its name
 /// lives in `tools/todo-write/manifest.toml`.
 const TODO_WRITE: &str = "session.todo_write";
@@ -228,7 +199,6 @@ const TODO_WRITE: &str = "session.todo_write";
 const OBSERVE_WORKSPACE: &str = "observe.workspace";
 
 fn llm_tool_call(method: &str, arguments: Value) -> ToolCall {
-    assert_dispatchable_method(method);
     ToolCall {
         function: FunctionCall {
             name: method.to_string(),
@@ -318,22 +288,6 @@ async fn cep_round_trip_impact_matrix() {
         let parsed: Value = serde_json::from_str(&result_json).expect("reserved CEP result JSON");
         (row.assert_result)(&parsed);
     }
-
-    let fetch_adapter = fetch_only_client().await;
-    let fetch_call = llm_tool_call(
-        Fetch::NAME,
-        serde_json::json!({ "url": "https://example.invalid/cep-round-trip" }),
-    );
-    let fetch_result = fetch_adapter
-        .execute(&fetch_call)
-        .await
-        .expect("fetch.web round-trip");
-    let fetch_parsed: Value = serde_json::from_str(&fetch_result).expect("fetch result JSON");
-    assert_eq!(
-        fetch_parsed["body"].as_str(),
-        Some("external observation body")
-    );
-    assert_eq!(fetch_parsed["status"].as_u64(), Some(200));
 }
 
 #[tokio::test]
@@ -395,25 +349,24 @@ async fn cep_round_trip_cep_family_error_preserves_payload() {
     let wire_code = expected.wire_code();
     let server_err = Arc::new(expected);
 
-    // A native method with a stub handler that fails: this test is about the
-    // adapter preserving a structured `CepError` payload, so it needs a handler
-    // it can register. A Component Tool has no registrable handler seam.
+    // A dev-only typed registry method keeps this transport error test independent
+    // of Component guest behavior.
     let mut registry = MethodRegistry::new();
     registry
-        .register_method::<Fetch, _, _>({
+        .register_method::<TestEcho, _, _>({
             let server_err = Arc::clone(&server_err);
-            move |_params: lancet_catalog::methods::external::FetchParams, _ctx| {
+            move |_params: TestEchoParams, _ctx| {
                 let err = Arc::clone(&server_err);
                 async move { Err((*err).clone()) }
             }
         })
-        .expect("fetch handler");
+        .expect("echo handler");
     let adapter = reserved_client_with_registry(registry).await;
 
     let err = adapter
         .execute(&llm_tool_call(
-            Fetch::NAME,
-            serde_json::json!({ "url": "https://example.com/" }),
+            TestEcho::NAME,
+            serde_json::json!({ "items": [] }),
         ))
         .await
         .expect_err("CEP family error must propagate");
@@ -477,15 +430,12 @@ async fn production_client(root: &str, enabled: &[&str], allow_localhost: bool) 
 
     let (client, server) = CepTransport::pair(16);
     let mut config = ServerRunConfig::in_memory_for_tests();
-    // #29: the production dispatch surface is native handlers *plus* the
-    // embedded Component catalog. Composing from `from_embedded()` here is what
-    // makes `session.todo_write` reachable at all — a hand-built transport
-    // without it would report `method_not_found`, which is exactly the
-    // native-fallback absence the migration requires.
+    // Production dispatch is the closed embedded Component catalog.
     let components =
         Arc::new(lancet_runtime::ComponentRuntime::from_embedded().expect("embedded composition"));
     policy.capability_admission = lancet_protocol::evidence::CapabilityAdmissionPolicy {
         enabled_tools: enabled.iter().map(|name| (*name).to_string()).collect(),
+        max_boundary: lancet_protocol::Trust::Ex,
         ..Default::default()
     };
     config.components = Some(Arc::clone(&components));
@@ -499,21 +449,17 @@ async fn production_client(root: &str, enabled: &[&str], allow_localhost: bool) 
         let _ = server.run_native(registry, config).await;
     });
     let enabled_names: Vec<String> = enabled.iter().map(|s| (*s).to_string()).collect();
-    // Mirror `LancetRuntime::build`: the LLM-facing set is the native catalog
-    // projection extended with the Component descriptors and pinned identities.
-    let mut definitions = lancet_cep::project_tool_definitions(catalog());
-    definitions.extend(
-        components
-            .descriptor_identities()
-            .map(|(descriptor, identity)| {
-                lancet_cep::ToolDefinition::new(
-                    descriptor.name.clone(),
-                    descriptor.description.clone(),
-                    descriptor.params_schema.clone(),
-                    identity.to_string(),
-                )
-            }),
-    );
+    let definitions: Vec<_> = components
+        .descriptor_identities()
+        .map(|(descriptor, identity)| {
+            lancet_cep::ToolDefinition::new(
+                descriptor.name.clone(),
+                descriptor.description.clone(),
+                descriptor.params_schema.clone(),
+                identity.to_string(),
+            )
+        })
+        .collect();
     let adapter = ReservedClient::new(client, invocations, &definitions, enabled_names);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
@@ -524,21 +470,17 @@ async fn production_client(root: &str, enabled: &[&str], allow_localhost: bool) 
 async fn web_fetch_and_todo_write_return_content_free_receipts() {
     let dir = TempDir::new().expect("temp workspace");
     let fetch_url = spawn_echo_server("200 OK", "cep-body").await;
-    let adapter = production_client(
-        dir.path().to_str().unwrap(),
-        &[Fetch::NAME, TODO_WRITE],
-        true,
-    )
-    .await;
+    let adapter =
+        production_client(dir.path().to_str().unwrap(), &[FETCH_WEB, TODO_WRITE], true).await;
 
-    let fetch_call = llm_tool_call(Fetch::NAME, serde_json::json!({ "url": fetch_url }));
+    let fetch_call = llm_tool_call(FETCH_WEB, serde_json::json!({ "url": fetch_url }));
     let fetch = adapter
         .execute_receipt(&fetch_call)
         .await
         .expect("fetch receipt");
     let fetch_value = fetch.result.expect("fetch result");
     assert_eq!(fetch_value["body"].as_str(), Some("cep-body"));
-    assert_eq!(fetch.evidence.admission.tool, Fetch::NAME);
+    assert_eq!(fetch.evidence.admission.tool, FETCH_WEB);
 
     let todo_call = llm_tool_call(
         TODO_WRITE,

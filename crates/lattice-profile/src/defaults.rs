@@ -181,10 +181,9 @@ fn toml_string(value: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The five Tools of the default distribution (ADR 0004 decision 1). Since
-    /// #29 they are not all *native catalog* methods — `session.todo_write` is an
-    /// embedded Component Tool — so this list is deliberately the shipped-Tool
-    /// set a profile template may name, not `lancet_catalog::catalog()`.
+    /// The five manifest-owned Components of the default distribution (ADR 0004
+    /// decision 1). This is the shipped-Tool set a profile template may name, not
+    /// the empty production `lancet_catalog::catalog()`.
     fn is_default_distribution_tool(name: &str) -> bool {
         matches!(
             name,

@@ -161,6 +161,8 @@ enum DomainImport {
     /// replace-with-expected / refuse-edit, with path safety, precondition,
     /// install, structured diagnostics, and evidence host-side (#31).
     WorkspaceMutate,
+    /// GET-only host network channel for `fetch.web` (#32).
+    NetworkFetch,
 }
 
 impl DomainImport {
@@ -169,6 +171,7 @@ impl DomainImport {
         match self {
             Self::WorkspaceObserve => "workspace-observe",
             Self::WorkspaceMutate => "workspace-mutate",
+            Self::NetworkFetch => "network-fetch",
         }
     }
 
@@ -182,6 +185,7 @@ impl DomainImport {
         match self {
             Self::WorkspaceObserve => WORKSPACE_OBSERVE_WIT,
             Self::WorkspaceMutate => WORKSPACE_MUTATE_WIT,
+            Self::NetworkFetch => NETWORK_FETCH_WIT,
         }
     }
 }
@@ -349,6 +353,41 @@ interface workspace-mutate {
         field: string,
         reason: string,
     ) -> mutate-error;
+}
+";
+
+/// The narrow, GET-only host network interface used by `fetch.web` (#32).
+const NETWORK_FETCH_WIT: &str = "\
+interface network-fetch {
+    variant fetch-error {
+        invalid-request,
+        denied,
+        unavailable,
+        limit-exceeded,
+        timeout,
+        cancelled,
+    }
+
+    record header {
+        name: string,
+        value: string,
+    }
+
+    record fetch-request {
+        url: string,
+        headers: list<header>,
+    }
+
+    record fetch-response {
+        status: u16,
+        content-type: option<string>,
+        body: list<u8>,
+        truncated: bool,
+        final-origin: string,
+        redirect-count: u32,
+    }
+
+    fetch: func(request: fetch-request) -> result<fetch-response, fetch-error>;
 }
 ";
 
@@ -1167,7 +1206,7 @@ version = "0.1.0"
 description = "d"
 abi-version = 1
 distribution = "fixture"
-imports = ["network-fetch"]
+imports = ["network-open"]
 
 [params]
 schema = '{"type":"object"}'
@@ -1181,8 +1220,7 @@ toolchain = "t"
 "#;
         let err = toml::from_str::<Manifest>(bad).expect_err("unknown import rejected");
         assert!(
-            err.to_string().contains("network-fetch")
-                || err.to_string().contains("unknown variant"),
+            err.to_string().contains("network-open") || err.to_string().contains("unknown variant"),
             "{err}"
         );
     }

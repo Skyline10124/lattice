@@ -7,10 +7,7 @@ use std::sync::Arc;
 
 use lancet_authority::policy::default::DefaultPolicyHook;
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
-use lancet_catalog::catalog;
-use lancet_cep::{
-    ToolDefinition, ToolExposureError, project_tool_definitions, resolve_enabled_tools,
-};
+use lancet_cep::{ToolDefinition, ToolExposureError, resolve_enabled_tools};
 use lancet_dispatch::{CepClient, CepTransport};
 use lancet_native::{
     CepServerNativeExt, MethodRegistry, ServerRunConfig, register_production_method_registry,
@@ -180,6 +177,13 @@ impl LancetRuntime {
             components: precomposed,
         } = config;
 
+        if !policy.denied_effect_kinds.is_empty() {
+            return Err(LancetError::Config(format!(
+                "[lancet.effects] deny cannot apply because the production native catalog is empty; use [lancet.capabilities] deny instead: {:?}",
+                policy.denied_effect_kinds
+            )));
+        }
+
         policy.project_root = validate_project_store_bindings(
             &local_workspace_root,
             &policy.project_root,
@@ -198,11 +202,9 @@ impl LancetRuntime {
                 })?),
             };
         // D.4: project Component descriptors into LLM tool definitions.
-        // The available set is native catalog methods + Component Tools;
-        // enabled_tools is resolved against the combined set (spec D.4:
-        // profile enabled_tools ⊆ (5 native + built Components): LLM exposure).
-        let mut available = project_tool_definitions(catalog());
-        available.extend(project_component_definitions(&components));
+        // The production native catalog is empty after #32. Definitions come from
+        // the five generated Component descriptors.
+        let available = project_component_definitions(&components);
         let tool_definitions =
             resolve_enabled_tools(&enabled_tools, &available).map_err(map_tool_exposure_err)?;
 
@@ -422,6 +424,26 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("InvocationStore"));
+    }
+
+    #[test]
+    fn runtime_rejects_legacy_effect_denies_when_native_catalog_is_empty() {
+        let project = tempfile::TempDir::new().expect("project root");
+        let mut config = LancetRuntimeConfig::new(project.path());
+        config
+            .policy
+            .denied_effect_kinds
+            .insert(lancet_protocol::effect_types::ImpactKind::ExternalObservation);
+
+        let err = match LancetRuntime::build(config) {
+            Ok(_) => panic!("legacy effect deny must fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("[lancet.effects] deny"), "{err}");
+        assert!(
+            err.to_string().contains("[lancet.capabilities] deny"),
+            "{err}"
+        );
     }
 
     #[test]

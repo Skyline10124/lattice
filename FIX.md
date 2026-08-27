@@ -7809,3 +7809,34 @@ with the 180-second total and every global harness/xtask timeout unchanged.
 - **Changed files:** `tools/todo-write/manifest.toml`,
   `tools/todo-write/generated/{descriptor.json,llm-projection.json,expected-identity.json}`,
   `crates/lancet-runtime/src/generated/host_composition.rs`, and `FIX.md`.
+
+## 2026-08-27 — GitHub #32 migrate `fetch.web` to a closed Component Tool
+
+- **ID/severity:** GitHub #32 / HIGH architecture and network-authority migration.
+- **Problem:** `fetch.web` remained the final native catalog method, with a second native
+  descriptor/handler/effect-contract stack beside the ADR 0004 manifest-defined Component
+  catalog. That kept the native production registry non-empty, split network admission and
+  evidence ownership across layers, and blocked retirement of the native/CEP dispatch seam.
+- **Fix:** added `tools/fetch-web` as a manifest-defined WASM Component and generated its
+  descriptor, LLM projection, identity, and embedded host composition. Added one GET-only
+  `network-fetch` Tool Host import in `lancet-runtime` with exact Cell admission, URL and
+  header validation, DNS rebinding/SSRF checks, pinned candidates, TLS verification, bounded
+  redirects/body/headers, cancellation/deadline handling, pre-I/O observation-budget refusal,
+  and typed per-hop network evidence. The native catalog is now empty; native `fetch.web`
+  handlers, executor, policy matrix, fuzz scaffolding, dependencies, and obsolete warn report
+  were deleted. Legacy non-empty `[lancet.effects] deny` now fails closed and points operators
+  to `[lancet.capabilities] deny`; the resulting diff deletes roughly 2,000 more lines than
+  it adds.
+- **Verification:**
+  - Focused `fetch.web` Component round trip, dogfood evidence, localhost denial, scheme
+    denial, response limit, and authority/network-policy regressions passed.
+  - `cargo test -p lancet-authority -p lancet-runtime -p lancet-api` passed, including 200
+    `lancet-runtime` tests; affected all-target Clippy with `-D warnings` passed.
+  - Independent general and security reviews found no blocking issue after fixes; the
+    security re-review reported zero Critical, High, or Medium findings.
+  - `env -u LATTICE_BIN cargo xtask ci` passed formatting, Clippy, boundary gates, generated
+    Tool drift checks, every workspace/guest test, Direct-Local harness suites, and doctests.
+- **Changed files:** `tools/fetch-web/**`, `crates/lancet-runtime/{wit/tool-host.wit,src/**}`,
+  `crates/lancet-protocol/src/evidence.rs`, native catalog/server and authority-policy cleanup,
+  LATTICE API/profile/harness migrations, generated host composition, workspace manifests,
+  architecture/testing documentation, `FINDINGS.md`, and `FIX.md`.

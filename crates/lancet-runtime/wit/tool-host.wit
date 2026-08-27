@@ -168,9 +168,42 @@ interface workspace-mutate {
     ) -> mutate-error;
 }
 
+interface network-fetch {
+    variant fetch-error {
+        invalid-request,
+        denied,
+        unavailable,
+        limit-exceeded,
+        timeout,
+        cancelled,
+    }
+
+    record header {
+        name: string,
+        value: string,
+    }
+
+    record fetch-request {
+        url: string,
+        headers: list<header>,
+    }
+
+    record fetch-response {
+        status: u16,
+        content-type: option<string>,
+        body: list<u8>,
+        truncated: bool,
+        final-origin: string,
+        redirect-count: u32,
+    }
+
+    fetch: func(request: fetch-request) -> result<fetch-response, fetch-error>;
+}
+
 world tool {
     import host-control;
     import workspace-observe;
     import workspace-mutate;
+    import network-fetch;
     export tool-api;
 }

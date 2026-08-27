@@ -30,6 +30,18 @@ lancet-dispatch = { workspace = true }
 # (Layer 2.5 -> Layer 2) and closes no cycle. Do not reimplement policy
 # semantics here.
 lancet-authority = { workspace = true }
+# #32: GET-only network transport and SSRF enforcement live behind the
+# `network-fetch` Tool Host import. `net-guard` stays the neutral URL/DNS leaf;
+# HTTP/TLS construction and policy application stay here.
+net-guard = { workspace = true }
+bytes = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+tokio-rustls = { workspace = true }
+url = { workspace = true }
 # #143: the private WorkspaceHistory is a project-scoped store in the
 # domain-neutral durability kernel (ADR 0005 §4 layer graph puts
 # lancet-runtime -> lattice-store). Durability primitives — object writing,

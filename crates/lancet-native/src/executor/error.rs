@@ -13,9 +13,6 @@ pub(crate) enum ToolError {
         error: std::io::Error,
     },
 
-    #[error("HTTP error: {0}")]
-    HttpError(String),
-
     #[cfg(test)]
     #[error("size limit exceeded: {actual} > {limit}")]
     SizeLimit { limit: usize, actual: usize },

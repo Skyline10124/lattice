@@ -15,6 +15,16 @@ use crate::composition::{
     _parse_hex_digest as parse_hex_digest, EmbeddedTool, ExpectedToolIdentity,
 };
 
+/// Embedded `fetch.web` v0.1.0: name plus the committed descriptor and Component bytes.
+static FETCH_WEB: EmbeddedTool = EmbeddedTool {
+    name: "fetch.web",
+    descriptor_json: include_bytes!("../../../../tools/fetch-web/generated/descriptor.json"),
+    component_bytes: include_bytes!(
+        "../../../../tools/fetch-web/generated/fetch_web.component.wasm"
+    ),
+};
+inventory::submit!(&FETCH_WEB);
+
 /// Embedded `mutate.create` v0.1.0: name plus the committed descriptor and Component bytes.
 static MUTATE_CREATE: EmbeddedTool = EmbeddedTool {
     name: "mutate.create",
@@ -60,6 +70,20 @@ inventory::submit!(&SESSION_TODO_WRITE);
 /// The production expected-identity set. Pinned by the trusted host
 /// composition step; a Tool crate cannot self-approve.
 pub(crate) static EXPECTED_COMPONENTS: &[ExpectedToolIdentity] = &[
+    ExpectedToolIdentity {
+        name: "fetch.web",
+        descriptor_sha256: parse_hex_digest(
+            "f633ed1e26895be83b85b3c94856c14141e36ab6083835bc865698dcac805c10",
+        ),
+        artifact_sha256: parse_hex_digest(
+            "8c64158ccbb5a27f8a0637ea0619f4a241521bb35621e0e2735ab280dc4cd2d5",
+        ),
+        abi_version: 1,
+        imports: &[
+            "lattice:tool-host/host-control@0.1.0",
+            "lattice:tool-host/network-fetch@0.1.0",
+        ],
+    },
     ExpectedToolIdentity {
         name: "mutate.create",
         descriptor_sha256: parse_hex_digest(

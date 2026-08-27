@@ -19,7 +19,7 @@ pub struct NetworkPolicyConfig {
 }
 
 impl NetworkPolicyConfig {
-    /// Safe built-in defaults when `[lancet.network]` is absent.
+    /// Safe defaults: no host is granted until `allowed_hosts` is configured.
     pub fn safe_defaults() -> Self {
         Self {
             allow_public_https: true,
@@ -99,15 +99,12 @@ fn host_matches_pattern(host_lower: &str, pattern: &str) -> bool {
 /// layers cannot drift apart (crate `AGENTS.md` synchronization invariant).
 ///
 /// This function answers exactly one question: does any configured pattern
-/// grant this host? An empty list therefore matches nothing. What an empty list
-/// *means* is deliberately a per-layer decision and is not converging here:
-/// [`validate_fetch_url`] treats an empty list as "no allowlist configured" and
-/// falls back to `allow_public_https`, while `AuthorizedEffectRegion` grants no
-/// host at all, so Enforce mode denies `fetch.web` before outbound I/O unless an
-/// operator named the host. Those tiers are intentionally asymmetric — the
-/// region is the deny-by-default tier — and the asymmetry is pinned by the
-/// harness scenario `direct_tools_fetch_capability_denial_with_public_https`.
-/// Do not "fix" it by making the region permissive on an empty list.
+/// grant this host? An empty list matches nothing, and every enforcement layer
+/// treats that as no host grant. For
+/// `validate_fetch_url`, `allow_public_https` and `allow_localhost` are additional
+/// scheme/target switches, never replacements for an explicit host pattern.
+/// `AuthorizedEffectRegion` uses the same matcher for residual native/scaffold
+/// dispatch. Do not make either path permissive on an empty list.
 pub fn host_allowed_by_list(host: &str, allowed_hosts: &[String]) -> bool {
     let host_lower = normalize_host_pattern(host);
     allowed_hosts
@@ -148,6 +145,9 @@ pub fn validate_fetch_url(
 ) -> Result<ValidatedFetchUrl, CepError> {
     let parsed =
         Url::parse(url_str).map_err(|err| url_validation_error(format!("invalid URL: {err}")))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(url_validation_error("URL userinfo is not allowed"));
+    }
     let scheme = parsed.scheme();
     let host = parsed
         .host_str()
@@ -179,7 +179,7 @@ pub fn validate_fetch_url(
                 "URL not allowed: cloud metadata IP 169.254.169.254",
             ));
         }
-        if security::is_private_or_reserved_ip(ip) && !is_localhost_host(&host) {
+        if security::is_forbidden_tool_target_ip(ip) && !is_localhost_host(&host) {
             return Err(network_denied(format!(
                 "URL not allowed: private or reserved IP {ip}"
             )));
@@ -189,6 +189,9 @@ pub fn validate_fetch_url(
     let localhost = is_localhost_host(&host);
     let explicitly_allowed = host_allowed_by_list(&host, &policy.allowed_hosts);
 
+    if policy.allowed_hosts.is_empty() {
+        return Err(network_denied("URL not allowed: allowed_hosts is empty"));
+    }
     if localhost {
         if !policy.allow_localhost {
             return Err(network_denied(
@@ -200,7 +203,7 @@ pub fn validate_fetch_url(
                 "URL not allowed: localhost host '{host}' must appear in allowed_hosts"
             )));
         }
-    } else if !policy.allowed_hosts.is_empty() && !explicitly_allowed {
+    } else if !explicitly_allowed {
         return Err(network_denied(format!(
             "URL not allowed: host '{host}' is not in allowed_hosts"
         )));
@@ -222,17 +225,16 @@ pub fn validate_fetch_url(
         }
         "https" => {
             if !localhost {
-                let public_https_ok = policy.allow_public_https && policy.allowed_hosts.is_empty();
-                if !explicitly_allowed && !public_https_ok {
+                if !policy.allow_public_https {
                     return Err(network_denied(
-                        "URL not allowed: host is not granted by allow_public_https or allowed_hosts",
+                        "URL not allowed: public HTTPS requires allow_public_https=true",
                     ));
                 }
                 if let Ok(ip) = host
                     .trim_start_matches('[')
                     .trim_end_matches(']')
                     .parse::<IpAddr>()
-                    && security::is_private_or_reserved_ip(ip)
+                    && security::is_forbidden_tool_target_ip(ip)
                 {
                     return Err(network_denied(format!(
                         "URL not allowed: private or reserved IP {ip}"
@@ -285,14 +287,13 @@ mod tests {
     }
 
     #[test]
-    fn network_policy_allowlist_only_public_https() {
+    fn network_policy_requires_public_https_master_switch() {
         let policy = NetworkPolicyConfig {
             allow_public_https: false,
             allowed_hosts: vec!["api.example.com".into()],
             ..NetworkPolicyConfig::safe_defaults()
         };
-        validate_fetch_url("https://other.example/", &policy).unwrap_err();
-        validate_fetch_url("https://api.example.com/", &policy).unwrap();
+        validate_fetch_url("https://api.example.com/", &policy).unwrap_err();
     }
 
     #[test]
@@ -319,10 +320,21 @@ mod tests {
 
     #[test]
     fn network_policy_allows_public_https_host() {
-        let policy = NetworkPolicyConfig::safe_defaults();
+        let policy = NetworkPolicyConfig {
+            allowed_hosts: vec!["example.com".into()],
+            ..NetworkPolicyConfig::safe_defaults()
+        };
         let validated = validate_fetch_url("https://example.com/path", &policy).unwrap();
         assert!(!validated.use_localhost_client);
         assert_eq!(validated.host, "example.com");
+    }
+
+    #[test]
+    fn network_policy_empty_allowlist_fails_closed() {
+        let mut policy = NetworkPolicyConfig::safe_defaults();
+        policy.allow_public_https = true;
+        let error = validate_fetch_url("https://example.com/", &policy).unwrap_err();
+        assert_eq!(error.code, CepErrorCode::AmbientAuthorityDenied);
     }
 
     #[test]
@@ -409,7 +421,7 @@ mod tests {
     fn validate_fetch_url_agrees_with_the_shared_matcher() {
         for pattern in [".example.com", "Example.com", " example.com "] {
             let policy = NetworkPolicyConfig {
-                allow_public_https: false,
+                allow_public_https: true,
                 allowed_hosts: vec![pattern.to_string()],
                 ..NetworkPolicyConfig::safe_defaults()
             };
@@ -427,7 +439,7 @@ mod tests {
     #[test]
     fn validate_fetch_url_accepts_subdomain_of_leading_dot_pattern() {
         let policy = NetworkPolicyConfig {
-            allow_public_https: false,
+            allow_public_https: true,
             allowed_hosts: vec![".example.com".into()],
             ..NetworkPolicyConfig::safe_defaults()
         };

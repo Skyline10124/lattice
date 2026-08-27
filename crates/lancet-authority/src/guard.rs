@@ -934,42 +934,7 @@ mod guard_l1_tests {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
-    use crate::policy::default::PolicyConfig;
     use lancet_protocol::policy::{PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot};
-
-    #[test]
-    fn evaluate_with_default_hook_returns_evidence() {
-        // On the remaining native method. `evaluate_policy` attaches evidence to
-        // denials too, so a resolver-error input would satisfy this assertion
-        // without the default hook ever producing decision facts.
-        let hook = DefaultPolicyHook::new(PolicyConfig::defaults_for_project_root(
-            std::path::PathBuf::from("."),
-        ));
-        let input = PolicyInput {
-            method: "fetch.web".into(),
-            params: serde_json::json!({"url": "https://example.com/doc"}),
-            authority: PolicyAuthorityInput,
-            audit_context: PolicyAuditContext {
-                turn_id: "t".into(),
-                session_id: "s".into(),
-                invocation_id: Some(
-                    lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
-                        .expect("invocation id"),
-                ),
-                budget_snapshot: PolicyBudgetSnapshot {
-                    turn_observation_bytes_used: 0,
-                    turn_observation_bytes_limit: 65536,
-                    todo_ops_used: 0,
-                    todo_ops_limit: 10,
-                },
-            },
-        };
-        let eval = evaluate_policy(&hook, Some(&hook), &input).unwrap();
-        assert!(
-            eval.evidence.is_some(),
-            "default hook should return evidence"
-        );
-    }
 
     #[test]
     fn evaluate_with_external_hook_returns_no_evidence() {

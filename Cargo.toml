@@ -22,6 +22,7 @@ members = [
     "crates/lattice-tool-prelude",
     "crates/lancet-runtime",
     "crates/lattice-system-harness",
+    "tools/fetch-web",
     "tools/noop",
     "tools/observe-workspace",
     "tools/mutate-shared",
@@ -66,6 +67,9 @@ async-trait = "0.1"
 blake3 = "1"
 chrono = "0.4"
 futures = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 indexmap = "2"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "json", "rustls", "stream"] }
@@ -87,6 +91,9 @@ libc = "0.2"
 # fd-relative filesystem operations (openat/mkdirat/renameat/unlinkat) for
 # the TOCTOU-safe Local Workspace write path (#39).
 rustix = { version = "1.1.4", features = ["fs"] }
+rustls = "0.23"
+rustls-platform-verifier = "0.7"
+tokio-rustls = "0.26"
 gix = { version = "0.85", features = ["tree-editor"] }
 schemars = "1.2"
 bytes = "1"
@@ -121,7 +128,6 @@ rustyline = "=18.0.0"
 
 # Dev dependencies
 tempfile = "3"
-proptest = "1"
 
 [profile.bench]
 lto = true

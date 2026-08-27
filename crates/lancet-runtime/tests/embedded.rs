@@ -21,10 +21,9 @@ use lancet_runtime::{
 };
 use tokio::sync::{mpsc, watch};
 
-/// The default distribution's built-in Tools after #31. Ordered by manifest
-/// path discovery order in `tool-codegen`: mutate-create, mutate-edit,
-/// observe-workspace, todo-write.
-const EXPECTED_BUILTIN_TOOLS: [&str; 4] = [
+/// The default distribution's five built-in Components after #32.
+const EXPECTED_BUILTIN_TOOLS: [&str; 5] = [
+    "fetch.web",
     "mutate.create",
     "mutate.edit",
     "observe.workspace",
@@ -66,6 +65,7 @@ fn call_ctx(
         // authority refuses every observation operation (#30).
         workspace: None,
         mutate: None,
+        network: None,
     };
     (ctx, evidence, cancel_tx)
 }
