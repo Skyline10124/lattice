@@ -287,15 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn template_has_no_bundles_key() {
-        let toml_str = default_agent_template("t", "sonnet");
-        assert!(
-            !toml_str.contains("bundles ="),
-            "template must not contain 'bundles =' as a TOML key"
-        );
-    }
-
-    #[test]
     fn template_has_no_forbidden_legacy_concepts() {
         let toml_str = default_agent_template("t", "sonnet");
         let forbidden = [

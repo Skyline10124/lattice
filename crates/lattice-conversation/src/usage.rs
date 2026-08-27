@@ -41,19 +41,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_usage_is_unknown_not_zero() {
-        let unknown: Option<TokenUsage> = None;
-        // The contract: a missing report must stay distinguishable from a
-        // real all-zero report.
-        let zero = Some(TokenUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        });
-        assert_ne!(unknown, zero);
-    }
-
-    #[test]
     fn usage_serde_roundtrip() {
         let usage = TokenUsage {
             prompt_tokens: 10,

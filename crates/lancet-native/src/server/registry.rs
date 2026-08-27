@@ -58,20 +58,3 @@ impl HandlerContext {
         self.effect_ledger.record(effect);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::server::native_registry::register_production_method_registry;
-    use lancet_catalog::catalog;
-
-    #[test]
-    fn registry_full_catalog_registered_via_production_helper() {
-        let mut registry = MethodRegistry::new();
-        register_production_method_registry(&mut registry).unwrap();
-
-        for descriptor in catalog() {
-            assert!(registry.contains(descriptor.name));
-        }
-    }
-}

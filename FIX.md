@@ -2,6 +2,32 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## 测试清理：删除不符合 YAGNI/KISS 的重复与无效测试 — 2026-08-28
+
+**Severity:** LOW（测试债务与维护成本；无生产行为变更）
+
+**Problem:** 工作区中保留了多组严格被更强测试覆盖的测试，以及若干无法检测其
+声称不变量的恒真/编译型测试。典型问题包括：同一 renderer 的 focused 与 sequence
+测试重复、单值 profile 拒绝测试被表驱动矩阵覆盖、直接比较手工构造的 `Option`/enum
+值、所谓负向 API/trait 测试不会因新增禁用方法而失败，以及 #171 的共享 runtime
+测试只检查硬编码 metrics 和脱离生产依赖的 `Arc::ptr_eq`。这些测试增加运行与维护成本，
+但不增加独立回归信号。
+
+**Fix:** 删除 38 个经两轮只读审计与对抗复核确认的冗余/无效测试，并删除只服务于
+被删测试的 `descriptor_with` helper。保留具有独立信号的
+`direct_local_plain_text_turn_commits_and_exit_zero`、
+`tail_does_not_panic_when_the_cut_lands_mid_codepoint` 和 noop committed `render.json`
+比较。#32 已在本次清理前移除旧 native-catalog 的两个候选测试，因此本次未触碰它们。
+除清理由测试删除产生的未使用 import 外，不改生产代码。净减少 785 行。
+
+**Verification:**
+
+- `env -u LATTICE_BIN cargo xtask ci` — toolchain、fmt、clippy、build、system-harness boundary、LANCET boundary、tool-codegen check、28 crate tests 与完整 system harness 全部通过。
+- `git diff --check` — clean；38 个目标测试名全部消失，3 个明确保留的测试仍存在。
+
+**Changed files:** 20 个受影响的 test/test-module 文件（含
+`crates/lattice-api/src/turn/coordinator.rs` 的测试 import 清理）与 `FIX.md`。
+
 ## CI: remove crate-count prose pin after docs deletion — 2026-08-26
 
 **Severity:** LOW (CI red on `main`; test was not a real architecture gate)

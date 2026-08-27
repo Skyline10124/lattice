@@ -254,15 +254,4 @@ mod tests {
         let err = resolver.resolve(&input).unwrap_err();
         assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
     }
-
-    #[test]
-    fn resolved_policy_input_has_no_serialize() {
-        // Compile-time proof: ResolvedPolicyInput does not derive Serialize/Deserialize.
-        // If it did, this test would still pass but the type would be wire-exposable.
-        // The absence of Serialize/Deserialize derives is the security invariant.
-        fn assert_not_wire_exposable<T: 'static>() {
-            // This is a compile-time marker, not a runtime check.
-        }
-        assert_not_wire_exposable::<ResolvedPolicyInput>();
-    }
 }

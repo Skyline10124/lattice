@@ -1281,40 +1281,6 @@ toolchain = "t"
         assert!(toml::from_str::<Manifest>(bad).is_err());
     }
 
-    /// A typo'd top-level section must not be dropped on the floor: the root
-    /// is as strict as every sub-table, or a whole `[[capabilities]]` block
-    /// misspelled once would compose as an empty capability set.
-    #[test]
-    fn manifest_rejects_unknown_top_level_section() {
-        let bad = r#"
-[tool]
-name = "x"
-version = "0.1.0"
-description = "x"
-abi-version = 1
-distribution = "fixture"
-
-[params]
-schema = '{}'
-
-[result]
-schema = '{}'
-
-[[capabilties]]
-name = "session.result"
-cell = "alloc:none:session"
-
-[artifact]
-sha256 = "00"
-toolchain = "t"
-"#;
-        let err = toml::from_str::<Manifest>(bad).expect_err("unknown root section is rejected");
-        assert!(
-            err.to_string().contains("capabilties"),
-            "the error must name the typo'd section: {err}"
-        );
-    }
-
     #[test]
     fn manifest_rejects_unknown_top_level_field() {
         let bad = r#"

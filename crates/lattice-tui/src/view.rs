@@ -337,17 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_resets_scroll_and_follow() {
-        let mut v = Viewport::new();
-        v.on_content_changed(40, 8);
-        v.page_up(8);
-        assert!(!v.following());
-        v = Viewport::new();
-        assert_eq!(v.scroll(), 0);
-        assert!(v.following());
-    }
-
-    #[test]
     fn wrap_text_splits_cjk_by_display_width() {
         assert_eq!(
             wrap_text("中文中文", 4),

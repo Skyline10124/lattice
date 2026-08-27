@@ -291,13 +291,3 @@ fn gate_accepts_a_capability_name_shared_over_one_cell() {
     let catalog = compose(&[&first, &second]).expect("shared alias composes");
     assert_eq!(catalog.descriptor_names(), vec!["a.tool", "b.tool"]);
 }
-
-/// Closed catalog has no mutation API: the descriptors iterator is
-/// read-only and the catalog is immutable after compose.
-#[test]
-fn closed_catalog_is_immutable_after_compose() {
-    let tool = SyntheticTool::from_noop_bytes("noop.echo");
-    let catalog = compose(&[&tool]).expect("composes");
-    let names = catalog.descriptor_names();
-    assert_eq!(names, vec!["noop.echo"]);
-}

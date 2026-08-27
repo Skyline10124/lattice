@@ -721,7 +721,7 @@ fn empty_terminal_evidence(tool: &str) -> lancet_audit::invocation_store::Termin
 mod tests {
     use super::*;
     use lancet_audit::invocation_store::{BindingIdentity, ReservationBinding};
-    use lancet_protocol::{ModelMessageAddress, SessionId, ToolCallAddress};
+    use lancet_protocol::SessionId;
     use lattice_session::{ProjectStoreKey, StateLayout};
 
     /// Deterministic identity source: strictly-increasing v4-shaped IDs.
@@ -915,19 +915,5 @@ mod tests {
             source.new_turn_id().as_str(),
             "00000000-0000-4000-8000-000000000001"
         );
-    }
-
-    #[test]
-    fn address_types_are_nameable_for_future_binding_plans() {
-        // The coordinator's binding plan needs structural addresses; this
-        // keeps the import set honest while the shell is not yet wired.
-        let _address = ToolCallAddress {
-            message: ModelMessageAddress {
-                session_id: SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap(),
-                turn_id: TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap(),
-                model_step_ordinal: 0,
-            },
-            part_ordinal: 0,
-        };
     }
 }
