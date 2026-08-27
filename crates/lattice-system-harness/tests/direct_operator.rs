@@ -540,12 +540,14 @@ fn direct_operator_status_bounds_twenty_newest_invocations() {
         .expect("fixture HTTP server");
     let fetch_url = web.url_path("/bounded-status");
     let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
-    let (world, spec) = direct_world(
+    let (world, mut spec) = direct_world(
         "direct-operator-status-bound",
         "dl-op-bound",
         "[\"fetch.web\",\"session.todo_write\"]",
         &fetch_network_profile(),
     );
+    // One send durably finalizes 22 Component invocations.
+    spec.step_timeout_secs = 60;
     let mut calls = Vec::new();
     for index in 0..11 {
         calls.push((

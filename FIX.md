@@ -7868,3 +7868,18 @@ with the 180-second total and every global harness/xtask timeout unchanged.
 - **Changed files:** network guard/evidence/runtime composition and host code, API/TUI startup
   seams, Direct-Local and dogfood acceptance tests, #32 decision and architecture documents,
   and `FIX.md`.
+
+## 2026-08-27 — PR #175 newest-20 operator scenario timeout
+
+- **ID/severity:** PR #175 CI follow-up / LOW test-budget defect.
+- **Problem:** `direct_operator_status_bounds_twenty_newest_invocations` sends 22 Tool calls in
+  one Turn so it can prove `lancet status` keeps exactly the newest 20. After `fetch.web` moved
+  to the Component path, the GitHub runner exceeded the generic 30-second command timeout and
+  reported `TimedOut(30s)`. The same test took 25.7 seconds locally, leaving too little runner
+  margin; product assertions and every other CI test passed.
+- **Fix:** give only this intentionally heavy scenario a 60-second step timeout. Keep the shared
+  Direct-Local default at 30 seconds and the scenario total budget at 180 seconds.
+- **Verification:** the exact test under two same-core CPU burners failed before the fix at
+  30.10 seconds and passed after it at 39.30 seconds. The full `direct_operator` target passed
+  6/6, and `env -u LATTICE_BIN cargo xtask ci` passed all gates.
+- **Changed files:** `crates/lattice-system-harness/tests/direct_operator.rs`, `FIX.md`.
