@@ -26,7 +26,7 @@ use support::{
 
 /// Non-2xx startup with retry disabled commits an error turn; exit 1.
 /// Expected terminal sequence: turn_started ... turn_failed -> turn_committing
-/// -> turn_committed(status=error) ; exit 1.
+/// -> turn_committed(outcome=failed) ; exit 1.
 #[test]
 fn direct_failure_http_error_no_retry_commits_error() {
     let driver = driver();
@@ -85,7 +85,7 @@ fn direct_failure_http_error_no_retry_commits_error() {
             outcome.events.iter().any(
                 |e| matches!(e, TurnEventLine::TurnCommitted { outcome, .. } if outcome == "failed"),
             ),
-            "turn_committed outcome=error must surface",
+            "turn_committed outcome=failed must surface",
         )?;
         require(
             outcome.exit_code == Some(SendExitCode::Failed),

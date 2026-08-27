@@ -2,6 +2,37 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+
+## GitHub #85 / #86 / #87 / #89 / #102 / #168: 全面收口文档漂移、幽灵 API、编号与契约描述 — 2026-08-28
+
+**Severity:** DOCUMENTATION / LOW
+
+**Problem:** 仓库多处现行文档、crate-local AGENTS.md、Rust doc comments 与测试说明存在漂移与历史遗留失真：
+1. **#85**: 议题跟踪规则缺少对 AGENTS.md 必须使用 GitHub 编号的显式约束。
+2. **#86**: 根级与子模块错误提示存在不存在的命令指引（`lattice new agent default`）、过时的 Rust 版本描述及残留的 `git2`/`migrate` 提及。
+3. **#87**: 已退役的 `BaseAuthorityPlan`、`BaseExecutionEnvelope`、`lancet-cep/src/authority.rs` 仍残留在活跃文档中。
+4. **#89**: 四份 crate-local `AGENTS.md`（`lancet-protocol`、`lancet-authority`、`lancet-native`、`lattice-cli`）的模块地图指向已删除的文件（`envelope.rs`、`boundary.rs`、`boundary_credit.rs`、`release_smoke.rs`），且漏记了 `effect_types.rs`、`binding.rs` 与 `policy/visibility.rs`。
+5. **#102**: `README.md` 与 `AGENTS.md` 自述性架构说明、`INFO.md` 两条指向已删除架构的笔记以及 `FINDINGS.md` 的历史 P22 路径存在偏差。
+6. **#168**: `FinalizeBudget` 截止契约在生产计划文档中未明确“截止后不启动新 attempt 但允许在途 kernel durability call 安全返回”；Rewind 注释与测试中的 `status=error` / ledger 创建生命周期注释与当前生产实现不一致。
+
+**Fix:**
+- `docs/agents/issue-tracker.md`: 明确根与各 crate `AGENTS.md` 统一使用 GitHub 编号且不属于历史豁免面。
+- `crates/lattice-profile`: 将 `MissingDefault` 错误提示及 `discovery.rs` 测试断言修正为引导创建 `agent.toml`。
+- `docs/LANCET.md`、`docs/README.md`、`docs/TESTING.md`: 清理指向已删除文件的链接，移除对 `BaseAuthorityPlan` 等幽灵 API 的描述。
+- `crates/lancet-protocol`、`crates/lancet-authority`、`crates/lancet-cep`、`crates/lattice-cli`: 全面同步 `AGENTS.md` 与 `src/lib.rs` 中的模块地图与测试验证指引。
+- `crates/lancet-runtime/src/rewind_audit.rs`: 纠正 `target_history_oid` 描述为“目标历史 OID”而非“已移动至”。
+- `crates/lattice-system-harness`: 修正 `direct_failures.rs` 中的 `outcome=failed` 注释与断言文案，修正 `fast_audit_cli.rs` 关于 project ledger 建立时机的描述。
+- `docs/plans/2026-08-23-issue139b-production-hard-cut.md`: 补充 `FinalizeBudget` 截止与安全返回的权威契约说明。
+- `INFO.md` / `AGENTS.md`: 将过时笔记归入 `Obsolete Notes` 并补充 `INFO.md` 维护规则；校正 `FINDINGS.md` P22 路径。
+
+**Verification:**
+- `cargo test -p lattice-profile -p lancet-protocol -p lancet-authority -p lancet-native -p lattice-cli` (PASS)
+- `LATTICE_BIN=$PWD/target/debug/lattice cargo test -p lattice-system-harness --test direct_failures --test fast_audit_cli` (PASS)
+- `cargo clippy --workspace --all-targets -- -D warnings` (PASS)
+- `cargo fmt --all --check` (PASS)
+- `cargo xtask harness-boundary && cargo xtask lancet-boundary && cargo xtask tool-codegen --check` (PASS)
+
+**Changed files:** `AGENTS.md`, `FINDINGS.md`, `INFO.md`, `crates/lancet-authority/AGENTS.md`, `crates/lancet-cep/AGENTS.md`, `crates/lancet-protocol/AGENTS.md`, `crates/lancet-protocol/src/lib.rs`, `crates/lancet-runtime/src/rewind_audit.rs`, `crates/lattice-cli/AGENTS.md`, `crates/lattice-profile/src/discovery.rs`, `crates/lattice-profile/src/error.rs`, `crates/lattice-system-harness/tests/direct_failures.rs`, `crates/lattice-system-harness/tests/fast_audit_cli.rs`, `docs/LANCET.md`, `docs/README.md`, `docs/TESTING.md`, `docs/agents/issue-tracker.md`, `docs/plans/2026-08-23-issue139b-production-hard-cut.md`, `FIX.md`.
 ## CI: remove crate-count prose pin after docs deletion — 2026-08-26
 
 **Severity:** LOW (CI red on `main`; test was not a real architecture gate)

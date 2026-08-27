@@ -18,9 +18,9 @@ come from generated Component descriptors, not catalog projection.
 - `src/tool.rs` owns generic `ToolDefinition`, exact-name exposure filtering, and
   projection from any residual native catalog entries. Production projection of
   the empty catalog is intentionally empty.
-- `src/authority.rs` owns the residual `BaseAuthorityPlan` used by generic native
-  and scaffold paths. Component authority comes from Cell admission and Tool Host
-  checks.
+- `src/tool.rs` also aggregates `BaseAuthorityRequirement` across exposed
+  catalog methods via `ToolExposure::base_authority()`. Component authority
+  comes from Cell admission and Tool Host checks.
 
 ## Boundaries
 

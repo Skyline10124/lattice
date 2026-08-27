@@ -17,14 +17,12 @@ explicit architecture decision and a complete native implementation.
 
 ## Start Here
 
-- [Getting Started](GETTING-STARTED.md) - install, configure, and run LATTICE.
-- [Architecture](ARCHITECTURE.md) - current workspace structure and execution flow.
-- [Configuration](CONFIGURATION.md) - `agent.toml`, providers, workspace, and LANCET policy.
-- [Development](DEVELOPMENT.md) - contributor workflow and repository conventions.
+- [Root README](../README.md) - install, configure, quick start, and run LATTICE.
+- [Root AGENTS](../AGENTS.md) - workspace architecture, layer graph, crate roles, and engineering rules.
+- [Root CONTEXT](../CONTEXT.md) - repository-wide domain glossary.
 - [Testing](TESTING.md) - test strategy, commands, and CI lanes.
 - [LANCET](LANCET.md) - CEP and LANCET reference. Read its drift notice: current
   contracts and explicitly retained legacy sections coexist in this document.
-
 ## Architecture Decisions
 
 - [ADR 0001](adr/0001-workspace-vcs-replaces-guest-git-promotion.md) — historical
@@ -41,9 +39,6 @@ explicit architecture decision and a complete native implementation.
 
 ## Operational Records
 
-- [Test triage](TEST-TRIAGE.md) and
-  [`test-triage-decisions.json`](test-triage-decisions.json) track the active
-  test-suite rewrite decisions.
 - [`agents/`](agents/) contains repository configuration consumed by engineering
   skills.
 - [`specs/`](specs/) contains active design contracts. The Issue #27

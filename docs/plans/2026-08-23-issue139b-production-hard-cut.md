@@ -120,8 +120,10 @@ The owner accepted Q1–Q24 on 2026-08-23. These decisions are part of the plan:
    repository-lock acquisition, exact uncertain-draft revalidation, terminal /
    evidence publication attempts, and retry delays. The first attempt is
    immediate; exponential backoff starts at 25 ms and is capped at 1 second; no
-   new attempt starts after the deadline. It is neither profile configuration
-   nor public API. Corruption and identity/digest mismatch never retry.
+   new attempt starts after the deadline. Any in-flight kernel durability call is
+   allowed to safely return without asynchronous cancellation. It is neither profile
+   configuration nor public API. Corruption and identity/digest mismatch never retry;
+   failures retain active-turn and ledger facts for closure-only recovery.
 4. Binding collisions republish a complete `BindingPlanned` revision. The I/O
    owner generates fresh UUIDv4 candidates; the existing pure reducer returns
    `ReconciliationDecision::ReviseCandidates`; `reserve_batch` remains
@@ -284,8 +286,8 @@ no draft and records the real outcome plus
 `Unavailable(DraftPublicationFailed)`. `Uncertain` is revalidated only against
 the exact ref, candidate identity and digests.
 
-If terminal/evidence publication cannot finish before the `FinalizeBudget`, the
-caller receives `EvidenceDurabilityFailed`; the invocation remains
+If terminal/evidence publication cannot durably commit before the `FinalizeBudget`
+deadline, no further attempt is launched; the caller receives `EvidenceDurabilityFailed`;
 `DispatchStarted`, the journal remains at its existing `StepClosing`, later
 bindings remain reserved, and no ToolResult closure or TurnCommit is published.
 The next Session command uses a fresh finite recovery budget. When the ledger is

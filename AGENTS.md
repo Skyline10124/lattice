@@ -387,6 +387,8 @@ notification cannot create an invocation.
   the open section of `FINDINGS.md` or move it to an obsolete/closed section.
 - For partial fixes, record the completed work in `FIX.md` and keep the
   remaining risk in `FINDINGS.md` with an explicit residual status and plan.
+- `INFO.md` captures non-blocking informational review notes. Move stale entries
+  to an obsolete section when referenced files or subsystems are retired.
 
 ## Repository Hygiene
 

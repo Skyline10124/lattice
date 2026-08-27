@@ -188,10 +188,7 @@ system = "hello"
         let err = resolve_agent_profile(ProfileSource::Default, &paths).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no default agent profile"), "got: {err}");
-        assert!(
-            msg.contains("lattice new agent default"),
-            "must include creation hint"
-        );
+        assert!(msg.contains("agent.toml"), "must include creation hint");
     }
 
     #[test]

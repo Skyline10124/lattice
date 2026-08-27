@@ -5,33 +5,33 @@ Crate-local guidance for `lancet-protocol`.
 ## Role
 
 This crate is the pure CEP wire/data contract layer. It defines JSON-RPC
-request/response shapes, CEP frame aliases, execution envelopes, capability
-data, boundary reports, policy hook data, typed errors, and versioned Cell
-evidence types. It has no I/O and no Tokio dependency.
+request/response shapes, CEP frame aliases, capability data, policy hook data,
+typed errors, and versioned Cell evidence types. It has no I/O and no Tokio
+dependency.
 
 ## Sub-Architecture
 
 - `src/jsonrpc.rs` owns domain-neutral JSON-RPC 2.0 envelope types.
 - `src/frame.rs` gives CEP-specific aliases over JSON-RPC frames.
-- `src/envelope.rs` owns intent, impact, scope, effects, guard verdicts, and
-  `ExecutionEnvelope`.
 - `src/cell.rs` owns the ADR 0004 Cell effect core
   (`CtxOp`/`ExtImpact`/`Trust`/`ScopeDecl`/`Cell`/`Capability`/
   `ToolDescriptor`) plus trust-free CellRef layering.
+- `src/capability.rs` owns required-capability patterns and resolution errors.
+- `src/effect_types.rs` owns legacy `ImpactKind`/`EffectDecl`/`EffectKindSet`,
+  retained for generic migration until ADR 0004 removes that vocabulary.
 - `src/evidence.rs` owns the versioned admission/effect evidence vocabulary:
   `AdmissionEvidence`, `ObservedEffectsRecord`, `DeniedOperationsRecord`,
   `ObservedScope`, `ObservedTarget`, and `CapabilityAdmissionPolicy`.
 - `src/canonical.rs` owns `canonical_json`, the deterministic writer used for
   context measures and persisted evidence payload construction.
-- `src/capability.rs` owns required-capability patterns and resolution errors.
-- `src/error.rs` owns `CepError`, families, wire codes, and retriability.
-- `src/policy.rs` owns deterministic policy hook input/output data.
-- `src/boundary.rs` owns host/isolation boundary report wire shapes.
+- `src/binding.rs` owns `InvocationBinding` and `arguments_digest`.
 - `src/identity.rs` owns the strict typed identities (#142, ADR 0005 §1):
   `InvocationId`/`TurnId` (lowercase hyphenated UUID v4) and `SessionId` (32
   lowercase hex). Parse/display/serde/schema only — never a generator.
 - `src/address.rs` owns the provider-neutral structured addresses:
   `ModelMessageAddress`, `ToolCallAddress`, `ModelAttemptKey`, `PlanKey`.
+- `src/error.rs` owns `CepError`, families, wire codes, and retriability.
+- `src/policy.rs` owns deterministic policy hook input/output data.
 - Public re-exports in `src/lib.rs` are the crate contract; keep them stable.
 
 ## Boundaries

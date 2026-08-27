@@ -5,8 +5,8 @@
 //! black-box" matrix, Codeberg #18; triage replacement target
 //! `planned_audit_cli`).
 //!
-//! Drives the built `lattice` binary for the no-turn audit surface. With no
-//! agent turn having run in the project, the invocation ledger does not exist, so
+//! Drives the built `lattice` binary for the uninitialized audit surface. With no
+//! session/project store having been created for the project, the invocation ledger does not exist, so
 //! `audit query` / `replay` / `--tail` must degrade to a clean configuration
 //! error (exit 1, message naming the missing store) rather than panic.
 //! This is exactly the regression guard for the runtime-nesting bug
@@ -58,8 +58,8 @@ fn ok_or_artifacts(
 }
 
 /// Assert an audit subcommand degrades to the documented missing-store
-/// invocation-ledger configuration error (exit 1) instead of panicking. The
-/// ledger is created lazily on the first agent turn; with no turn run it is absent.
+/// invocation-ledger configuration error (exit 1) instead of panicking. With no
+/// session/project store created for the project, the ledger is absent.
 fn assert_missing_store(world: &ScenarioWorld, name: &str, summary: &str, out: &Output) {
     let result = assert_exit_failure(out)
         .and_then(|_| assert_stderr_contains(out, "invocation ledger not found"));

@@ -65,7 +65,7 @@ pub struct RewindAuditRecord {
     pub target_turn_id: lancet_protocol::TurnId,
     /// Immutable Session commit selected as the Rewind target.
     pub target_commit_id: String,
-    /// Workspace-history identity the Rewind moved to (`None` = empty).
+    /// Workspace-history identity the Rewind targeted (`None` = empty).
     pub target_history_oid: Option<String>,
     /// Workspace-history identity the Rewind started from (`None` = empty).
     pub from_history_oid: Option<String>,
