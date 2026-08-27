@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dogfood the mixed native/Component production catalog through typed bindings.
+//! Dogfood the five-Component production catalog through typed bindings.
 //!
 //! The historical test name is retained because test-triage documents index it.
 //! The ADR 0005 hard-cut contract is now: real Tool execution, content-free Cell
@@ -12,30 +12,43 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use lancet_api::{AuditReplayRequest, replay_audit};
-use lancet_audit::invocation_store::InvocationStore;
+use lancet_audit::invocation_store::{
+    InvocationStore, TerminalEvidence, TerminalMaterial, TerminalOutcome,
+};
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
-use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
-use lancet_catalog::{CepMethod, catalog};
 use lancet_native::{
     CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
 };
 use lancet_protocol::{
-    BindingIdentity, InvocationBinding, InvocationId, PlanKey, SessionId, TurnId, arguments_digest,
+    BindingIdentity, InvocationBinding, InvocationId, ModelMessageAddress, PlanKey, SessionId,
+    ToolCallAddress, TurnId, arguments_digest, canonical_json,
 };
+use lattice_session::pending::{DraftPublication, ResultDraft, binding_digest};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore};
+use lattice_store::{Blocking, FlockGuard, LockMode};
 use tempfile::TempDir;
 
 const TODO_WRITE: &str = "session.todo_write";
 const OBSERVE_WORKSPACE: &str = "observe.workspace";
+const FETCH_WEB: &str = "fetch.web";
 const MUTATE_EDIT: &str = "mutate.edit";
-const COMPONENT_TOOLS: [&str; 4] = [OBSERVE_WORKSPACE, "mutate.create", MUTATE_EDIT, TODO_WRITE];
+const COMPONENT_TOOLS: [&str; 5] = [
+    OBSERVE_WORKSPACE,
+    "mutate.create",
+    MUTATE_EDIT,
+    FETCH_WEB,
+    TODO_WRITE,
+];
 const FIXED_SESSION_ID: &str = "11111111111111111111111111111111";
 const FIXED_TURN_ID: &str = "22222222-2222-4222-8222-222222222222";
 
 struct ReservedDogfoodClient {
     inner: lancet_api::CepClient,
     invocations: Arc<InvocationStore>,
+    sessions: Arc<GitSessionGraphStore>,
+    execution_lock: Arc<FlockGuard>,
     descriptors: BTreeMap<String, String>,
     next: AtomicU32,
 }
@@ -65,6 +78,21 @@ impl ReservedDogfoodClient {
                 arguments_digest: arguments_digest(&params),
             },
         };
+        let address = ToolCallAddress {
+            message: ModelMessageAddress {
+                session_id: binding.identity.session_id,
+                turn_id: binding.identity.turn_id,
+                model_step_ordinal: binding.identity.model_step_ordinal,
+            },
+            part_ordinal: binding.identity.part_ordinal,
+        };
+        let material_binding_digest = binding_digest(
+            &binding.invocation_id,
+            &address,
+            &binding.identity.method,
+            &binding.identity.descriptor_identity,
+            &binding.identity.arguments_digest,
+        );
         self.invocations
             .reserve_batch(
                 PlanKey {
@@ -74,17 +102,50 @@ impl ReservedDogfoodClient {
                 std::slice::from_ref(&binding),
             )
             .expect("reserve dogfood invocation");
-        self.inner
+        let invocation_id = binding.invocation_id;
+        let receipt = self
+            .inner
             .call_raw_with_receipt(binding, method, params)
-            .await
-    }
-
-    async fn call_raw(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, lancet_protocol::CepError> {
-        self.call_receipt(method, params).await?.result
+            .await?;
+        let canonical_content = canonical_json(
+            receipt
+                .result
+                .as_ref()
+                .expect("dogfood Component call succeeds"),
+        );
+        let draft = ResultDraft::new(
+            invocation_id,
+            material_binding_digest,
+            turn_id,
+            address.message,
+            address.part_ordinal,
+            canonical_content,
+        )
+        .expect("build production-shaped ResultDraft");
+        let publication = self
+            .sessions
+            .publish_draft(&draft, &self.execution_lock)
+            .expect("publish dogfood ResultDraft");
+        assert!(
+            matches!(publication, DraftPublication::Durable { .. }),
+            "available terminal material requires durable draft publication: {publication:?}"
+        );
+        self.invocations
+            .publish_terminal(
+                invocation_id,
+                TerminalOutcome::Succeeded,
+                TerminalMaterial::Available {
+                    digest: draft.content_digest,
+                    byte_length: draft.byte_length,
+                },
+                TerminalEvidence {
+                    admission: receipt.evidence.admission.clone(),
+                    effects: receipt.evidence.effects.clone(),
+                    denied: receipt.evidence.denied.clone(),
+                },
+            )
+            .expect("publish dogfood terminal");
+        Ok(receipt)
     }
 }
 
@@ -126,12 +187,30 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let invocations = Arc::new(
         InvocationStore::create_project(&canonical).expect("create project invocation ledger"),
     );
+    let sessions_dir = TempDir::new().expect("temp Session store");
+    let sessions = Arc::new(
+        GitSessionGraphStore::create(sessions_dir.path().join("sessions.git"))
+            .expect("create Session store"),
+    );
+    let project_key =
+        lattice_session::ProjectStoreKey::from_canonical_path_bytes(canonical_text.as_bytes());
+    sessions
+        .create_session(
+            FIXED_SESSION_ID,
+            Some("dogfood-impact-matrix"),
+            "dogfood",
+            "main",
+            &project_key,
+        )
+        .expect("create dogfood Session");
+    let execution_lock = Arc::new(
+        sessions
+            .lock_execution(FIXED_SESSION_ID, LockMode::Exclusive, Blocking::Block)
+            .expect("lock dogfood Session"),
+    );
     let components =
         Arc::new(lancet_runtime::ComponentRuntime::from_embedded().expect("embedded composition"));
-    let mut descriptors: BTreeMap<String, String> = lancet_cep::project_tool_definitions(catalog())
-        .into_iter()
-        .map(|definition| (definition.name, definition.descriptor_identity))
-        .collect();
+    let mut descriptors = BTreeMap::new();
     descriptors.extend(
         components
             .descriptor_identities()
@@ -148,6 +227,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
             .iter()
             .map(|name| (*name).to_string())
             .collect(),
+        max_boundary: lancet_protocol::Trust::Ex,
         ..Default::default()
     };
     let mut policy_config = PolicyConfig::defaults_for_project_root(canonical.clone());
@@ -170,6 +250,8 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let client = ReservedDogfoodClient {
         inner: raw_client,
         invocations,
+        sessions,
+        execution_lock,
         descriptors,
         next: AtomicU32::new(0),
     };
@@ -207,22 +289,12 @@ async fn dogfood_impact_matrix_five_production_classes() {
     edit.result.expect("edit result");
 
     let fetch_url = spawn_echo_server("dog04-fetch-body").await;
-    let fetch: FetchResult = serde_json::from_value(
-        client
-            .call_raw(
-                Fetch::NAME,
-                serde_json::to_value(FetchParams {
-                    url: fetch_url,
-                    headers: Default::default(),
-                })
-                .expect("fetch params"),
-            )
-            .await
-            .expect("fetch result"),
-    )
-    .expect("typed fetch result");
-    assert_eq!(fetch.body, "dog04-fetch-body");
-
+    let fetch = client
+        .call_receipt(FETCH_WEB, serde_json::json!({"url": fetch_url}))
+        .await
+        .expect("fetch receipt");
+    let fetch_value = fetch.result.as_ref().expect("fetch result");
+    assert_eq!(fetch_value["body"], "dog04-fetch-body");
     let todo = client
         .call_receipt(
             TODO_WRITE,
@@ -234,7 +306,12 @@ async fn dogfood_impact_matrix_five_production_classes() {
         .expect("todo receipt");
     todo.result.expect("todo result");
 
-    for evidence in [&read.evidence, &edit.evidence, &todo.evidence] {
+    for evidence in [
+        &read.evidence,
+        &edit.evidence,
+        &fetch.evidence,
+        &todo.evidence,
+    ] {
         let json = serde_json::to_string(evidence).expect("serialize evidence");
         assert!(!json.contains("hello dog04"));
         assert!(!json.contains("dog04 impact matrix verified"));
@@ -260,7 +337,27 @@ async fn dogfood_impact_matrix_five_production_classes() {
         .collect();
     assert_eq!(
         methods,
-        vec![OBSERVE_WORKSPACE, MUTATE_EDIT, Fetch::NAME, TODO_WRITE]
+        vec![OBSERVE_WORKSPACE, MUTATE_EDIT, FETCH_WEB, TODO_WRITE]
+    );
+    let fetch_record = replay
+        .trace
+        .calls
+        .iter()
+        .find(|row| row.record.binding.method == FETCH_WEB)
+        .expect("fetch replay row");
+    let lancet_audit::invocation_store::InvocationState::Terminal { evidence, .. } =
+        &fetch_record.record.state
+    else {
+        panic!("fetch row must be terminal");
+    };
+    assert!(
+        evidence.effects.effects.iter().any(|effect| {
+            effect
+                .network
+                .as_ref()
+                .is_some_and(|network| network.http_status == Some(200))
+        }),
+        "replay must preserve network transport evidence"
     );
     let ordinals: Vec<u32> = replay
         .trace

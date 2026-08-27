@@ -13,10 +13,11 @@ use lancet_native::{
     register_production_method_registry,
 };
 use lancet_protocol::cell::CtxOp;
-use lancet_protocol::effect_types::ImpactKind;
-use lancet_protocol::evidence::{EffectSource, ObservedTarget};
+use lancet_protocol::evidence::{
+    EffectSource, NetworkPolicyVerdict, NetworkResolution, ObservedTarget,
+};
 use lancet_protocol::{CapabilityAdmissionPolicy, CepError, CepErrorCode, Trust};
-use lancet_runtime::ComponentRuntime;
+use lancet_runtime::{ComponentRuntime, ExecutionLimits};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -93,22 +94,8 @@ async fn spawn_native_with_noop() -> (
 ) {
     spawn_native_with_admission(admission(&[])).await
 }
-
 async fn spawn_native_with_admission(
     policy: CapabilityAdmissionPolicy,
-) -> (
-    lancet_native::CepClient,
-    ServerRunConfig,
-    tokio::task::JoinHandle<()>,
-) {
-    spawn_native_with_policies(policy, BTreeSet::new(), None, false).await
-}
-
-async fn spawn_native_with_policies(
-    policy: CapabilityAdmissionPolicy,
-    denied_effect_kinds: BTreeSet<ImpactKind>,
-    project_root: Option<&std::path::Path>,
-    allow_localhost: bool,
 ) -> (
     lancet_native::CepClient,
     ServerRunConfig,
@@ -117,38 +104,10 @@ async fn spawn_native_with_policies(
     let components =
         Arc::new(ComponentRuntime::noop_fixture().expect("closed no-op test composition"));
     let mut config = ServerRunConfig::in_memory_for_tests().with_capability_admission(policy);
-    let admission = config.cep_context.policy.capability_admission.clone();
-    let mut turn_policy = match project_root {
-        Some(root) => lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root),
-        None => config.cep_context.policy.clone(),
-    };
-    turn_policy.capability_admission = admission;
-    turn_policy.denied_effect_kinds = denied_effect_kinds;
-    if allow_localhost {
-        turn_policy.network.allow_localhost = true;
-        turn_policy.network.allowed_hosts = vec!["127.0.0.1".into()];
-    }
-    config.cep_context = Arc::new(CepTurnContext::from_policy(turn_policy));
-    if allow_localhost {
-        let mut hook_policy =
-            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
-                project_root
-                    .unwrap_or_else(|| std::path::Path::new("."))
-                    .to_path_buf(),
-            );
-        hook_policy.network.allow_localhost = true;
-        hook_policy.network.allowed_hosts = vec!["127.0.0.1".into()];
-        let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
-            hook_policy,
-        ));
-        config.policy_hook = hook.clone();
-        config.default_policy_hook = Some(hook);
-    }
     config.components = Some(components);
 
     let mut registry = MethodRegistry::new();
     register_production_method_registry(&mut registry).unwrap();
-
     let (client, server) = CepTransport::pair(64);
     let config_for_calls = config.clone();
     let task = tokio::spawn(async move {
@@ -158,46 +117,137 @@ async fn spawn_native_with_policies(
     (client, config_for_calls, task)
 }
 
-fn all_impact_kinds() -> BTreeSet<ImpactKind> {
-    BTreeSet::from([
-        ImpactKind::WorkspaceObservation,
-        ImpactKind::WorkspaceMutation,
-        ImpactKind::CommandExecution,
-        ImpactKind::ExternalObservation,
-        ImpactKind::SessionStateMutation,
-        ImpactKind::AuditObservation,
-    ])
-}
-
-fn native_probe_params(url: &str) -> serde_json::Value {
-    serde_json::json!({ "url": url })
-}
-
-async fn spawn_native_probe_server() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind localhost fixture");
-    let addr = listener.local_addr().expect("fixture address");
-    tokio::spawn(async move {
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut request = [0_u8; 1024];
-            let _ = stream.read(&mut request).await;
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-                .await;
-        }
-    });
-    format!("http://{addr}/")
-}
-
-async fn spawn_native_with_project_root(
-    project_root: &std::path::Path,
+async fn spawn_fetch_server_with_deadline(
+    allow_localhost: bool,
+    max_response_bytes: usize,
+    deadline: Option<std::time::Duration>,
 ) -> (
     lancet_native::CepClient,
     ServerRunConfig,
     tokio::task::JoinHandle<()>,
 ) {
-    spawn_native_with_policies(admission(&[]), BTreeSet::new(), Some(project_root), true).await
+    let admission = CapabilityAdmissionPolicy {
+        enabled_tools: BTreeSet::from(["fetch.web".to_string()]),
+        denied_capabilities: BTreeSet::new(),
+        max_boundary: Trust::Ex,
+    };
+    let mut component_runtime =
+        ComponentRuntime::from_embedded().expect("closed built-in composition");
+    if let Some(deadline) = deadline {
+        component_runtime.set_limits(ExecutionLimits {
+            deadline,
+            ..ExecutionLimits::default()
+        });
+    }
+    let components = Arc::new(component_runtime);
+    let mut config = ServerRunConfig::in_memory_for_tests();
+    let mut turn_policy = config.cep_context.policy.clone();
+    turn_policy.capability_admission = admission;
+    turn_policy.network.allow_localhost = allow_localhost;
+    turn_policy.network.allowed_hosts = vec!["127.0.0.1".into()];
+    turn_policy.network.max_web_response_bytes = max_response_bytes;
+    config.cep_context = Arc::new(CepTurnContext::from_policy(turn_policy));
+    config.components = Some(components);
+
+    let mut registry = MethodRegistry::new();
+    register_production_method_registry(&mut registry).unwrap();
+    let (client, server) = CepTransport::pair(64);
+    let config_for_calls = config.clone();
+    let task = tokio::spawn(async move {
+        let _ = server.run_native(registry, config).await;
+    });
+    tokio::task::yield_now().await;
+    (client, config_for_calls, task)
+}
+
+async fn spawn_fetch_server(
+    allow_localhost: bool,
+    max_response_bytes: usize,
+) -> (
+    lancet_native::CepClient,
+    ServerRunConfig,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_fetch_server_with_deadline(allow_localhost, max_response_bytes, None).await
+}
+
+async fn spawn_body_server(body: &'static [u8]) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+    });
+    format!("http://{addr}/")
+}
+
+async fn spawn_redirect_server(
+    body: &'static str,
+) -> (String, tokio::sync::oneshot::Receiver<String>) {
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let redirect = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let redirect_addr = redirect.local_addr().unwrap();
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let (mut stream, _) = target.accept().await.unwrap();
+        let mut request = [0_u8; 2048];
+        let size = stream.read(&mut request).await.unwrap();
+        let _ = request_tx.send(String::from_utf8_lossy(&request[..size]).into_owned());
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    });
+    tokio::spawn(async move {
+        let (mut stream, _) = redirect.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).await;
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    (format!("http://{redirect_addr}/start"), request_rx)
+}
+
+async fn spawn_redirect_to(location: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).await;
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    });
+    format!("http://{addr}/start")
+}
+
+async fn spawn_stalled_server() -> (String, tokio::sync::oneshot::Receiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).await;
+        let _ = started_tx.send(());
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    });
+    (format!("http://{addr}/"), started_rx)
 }
 
 #[tokio::test]
@@ -307,15 +357,204 @@ async fn unenabled_tool_is_denied_before_the_runtime_is_entered() {
 }
 
 #[tokio::test]
-async fn native_method_still_works_alongside_component() {
-    let dir = tempfile::TempDir::new().expect("temp project");
-    let (client, config, _task) = spawn_native_with_project_root(dir.path()).await;
-    let url = spawn_native_probe_server().await;
+async fn fetch_web_component_round_trips_with_transport_evidence() {
+    let url = spawn_body_server(b"ok").await;
+    let request_url = format!("{url}?token=secret#fragment");
+    let (client, config, _task) = spawn_fetch_server(true, 1024).await;
+    let receipt = call_receipt(
+        &client,
+        &config,
+        "fetch.web",
+        serde_json::json!({"url": request_url}),
+    )
+    .await
+    .expect("transport receipt");
+    assert_eq!(
+        receipt.result.expect("fetch result"),
+        serde_json::json!({
+            "status": 200,
+            "content_type": "text/plain",
+            "body": "ok",
+            "truncated": false,
+            "final_origin": url.trim_end_matches('/'),
+            "redirect_count": 0
+        })
+    );
 
-    let value = call_raw(&client, &config, "fetch.web", native_probe_params(&url))
+    let operation = receipt
+        .evidence
+        .effects
+        .effects
+        .iter()
+        .find(|effect| effect.network.is_some())
+        .expect("network operation evidence");
+    let network = operation.network.as_ref().unwrap();
+    assert_eq!(network.url, url);
+    assert_eq!(network.hop, 0);
+    assert_eq!(network.resolution, NetworkResolution::Literal);
+    assert_eq!(network.policy_verdict, NetworkPolicyVerdict::Allowed);
+    assert_eq!(network.http_status, Some(200));
+    assert_eq!(network.body_bytes_received, Some(2));
+    assert_eq!(network.body_bytes_returned, Some(2));
+    assert!(network.transport.connected_peer.is_some());
+}
+
+#[tokio::test]
+async fn fetch_web_evidence_separates_raw_and_shaped_body_bytes() {
+    let url = spawn_body_server(&[0xff, b'a']).await;
+    let (client, config, _task) = spawn_fetch_server(true, 1024).await;
+    let receipt = call_receipt(
+        &client,
+        &config,
+        "fetch.web",
+        serde_json::json!({"url": url}),
+    )
+    .await
+    .expect("transport receipt");
+    let result = receipt.result.expect("fetch result");
+    assert_eq!(result["body"], "�a");
+
+    let operation = receipt
+        .evidence
+        .effects
+        .effects
+        .iter()
+        .find(|effect| effect.network.is_some())
+        .expect("network operation evidence");
+    let network = operation.network.as_ref().unwrap();
+    assert_eq!(network.body_bytes_received, Some(2));
+    assert_eq!(network.body_bytes_returned, Some(4));
+    assert_eq!(operation.context_measure, Some(4));
+}
+
+#[tokio::test]
+async fn fetch_web_policy_denial_happens_before_network_io() {
+    let (client, config, _task) = spawn_fetch_server(false, 1024).await;
+    let receipt = call_receipt(
+        &client,
+        &config,
+        "fetch.web",
+        serde_json::json!({"url": "http://127.0.0.1:9/"}),
+    )
+    .await
+    .expect("transport receipt");
+    assert_eq!(
+        receipt.result.expect_err("localhost is disabled").code,
+        CepErrorCode::AmbientAuthorityDenied
+    );
+    assert!(receipt.evidence.effects.effects.is_empty());
+    let denial = receipt.evidence.denied.denied.first().unwrap();
+    assert_eq!(
+        denial.network.as_ref().unwrap().policy_verdict,
+        NetworkPolicyVerdict::Denied
+    );
+}
+
+#[tokio::test]
+async fn fetch_web_follows_redirect_and_caps_shaped_body() {
+    let (url, target_request) = spawn_redirect_server("abcdef").await;
+    let (client, config, _task) = spawn_fetch_server(true, 4).await;
+    let receipt = call_receipt(
+        &client,
+        &config,
+        "fetch.web",
+        serde_json::json!({
+            "url": url,
+            "headers": {"x-secret": "credential"}
+        }),
+    )
+    .await
+    .expect("transport receipt");
+    let result = receipt.result.expect("redirected fetch result");
+    assert_eq!(result["body"], "abcd");
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["redirect_count"], 1);
+
+    let hops: Vec<_> = receipt
+        .evidence
+        .effects
+        .effects
+        .iter()
+        .filter_map(|effect| effect.network.as_ref())
+        .collect();
+    assert_eq!(hops.len(), 2);
+    assert_eq!(receipt.evidence.effects.effects[0].context_measure, None);
+    assert_eq!(receipt.evidence.effects.effects[0].truncated, None);
+    assert_eq!(hops[0].body_bytes_received, None);
+    assert_eq!(hops[0].body_bytes_returned, None);
+    assert_eq!((hops[0].hop, hops[0].http_status), (0, Some(302)));
+    assert_eq!((hops[1].hop, hops[1].http_status), (1, Some(200)));
+    assert_eq!(hops[1].body_bytes_received, Some(5));
+    assert_eq!(hops[1].body_bytes_returned, Some(4));
+
+    let target_request = target_request.await.expect("capture redirected request");
+    assert!(
+        !target_request.to_ascii_lowercase().contains("x-secret:"),
+        "cross-origin redirect leaked caller headers: {target_request}"
+    );
+}
+
+#[tokio::test]
+async fn fetch_web_revalidates_redirect_target_before_connecting() {
+    let url = spawn_redirect_to("http://10.0.0.1/private").await;
+    let (client, config, _task) = spawn_fetch_server(true, 1024).await;
+    let receipt = call_receipt(
+        &client,
+        &config,
+        "fetch.web",
+        serde_json::json!({"url": url}),
+    )
+    .await
+    .expect("transport receipt");
+    assert_eq!(
+        receipt.result.expect_err("private redirect must fail").code,
+        CepErrorCode::AmbientAuthorityDenied
+    );
+    assert_eq!(receipt.evidence.effects.effects.len(), 1);
+    let denial = receipt.evidence.denied.denied.first().unwrap();
+    let network = denial.network.as_ref().unwrap();
+    assert_eq!(network.hop, 1);
+    assert_eq!(network.policy_verdict, NetworkPolicyVerdict::Denied);
+}
+
+#[tokio::test]
+async fn fetch_web_cancellation_interrupts_in_flight_io() {
+    let (url, started) = spawn_stalled_server().await;
+    let (client, config, _task) = spawn_fetch_server(true, 1024).await;
+    let params = serde_json::json!({"url": url});
+    let binding = binding("fetch.web", &params);
+    reserve(&config, &binding);
+    let (call, control) = client.start_call_raw(binding, "fetch.web".to_string(), params);
+    let call = tokio::spawn(call);
+    started.await.expect("request reached fixture");
+    control.cancel();
+    let error = call
         .await
-        .expect("fetch.web must remain a native registry method");
-    assert_eq!(value["status"], 200);
+        .expect("call task")
+        .expect_err("cancelled fetch must fail");
+    assert_eq!(error.code, CepErrorCode::CallCancelled);
+}
+
+#[tokio::test]
+async fn fetch_web_deadline_interrupts_in_flight_io() {
+    let (url, started) = spawn_stalled_server().await;
+    let (client, config, _task) =
+        spawn_fetch_server_with_deadline(true, 1024, Some(std::time::Duration::from_millis(250)))
+            .await;
+    let params = serde_json::json!({"url": url});
+    let binding = binding("fetch.web", &params);
+    reserve(&config, &binding);
+    let (call, _control) = client.start_call_raw(binding, "fetch.web".to_string(), params);
+    let call = tokio::spawn(call);
+    tokio::time::timeout(std::time::Duration::from_secs(2), started)
+        .await
+        .expect("request must start before the deadline")
+        .expect("fixture must observe request");
+    let error = call
+        .await
+        .expect("call task")
+        .expect_err("timed out fetch must fail");
+    assert_eq!(error.code, CepErrorCode::ToolTimeout);
 }
 
 #[tokio::test]
@@ -330,69 +569,6 @@ async fn migrated_todo_write_has_no_native_fallback() {
         -32601,
         "a migrated method with no embedded Component must be unrouted: {err:?}"
     );
-}
-
-#[tokio::test]
-async fn legacy_effect_deny_refuses_native_methods_and_never_component_calls() {
-    let denied = all_impact_kinds();
-    let dir = tempfile::TempDir::new().expect("temp project");
-    let (client, config, _task) =
-        spawn_native_with_policies(admission(&[]), denied, Some(dir.path()), false).await;
-
-    let err = call_raw(
-        &client,
-        &config,
-        "fetch.web",
-        native_probe_params("https://native.invalid/"),
-    )
-    .await
-    .expect_err("every declared impact kind is denied");
-    assert_eq!(err.code, CepErrorCode::EffectViolation);
-
-    let receipt = call_receipt(
-        &client,
-        &config,
-        "noop.echo",
-        serde_json::json!({"message": "isolated"}),
-    )
-    .await
-    .expect("the legacy deny list has no authority over a Cell-admitted Tool");
-    assert_eq!(
-        receipt.result.expect("tool result"),
-        serde_json::json!({"echoed": "isolated"})
-    );
-    assert_eq!(
-        receipt.evidence.admission.approved_capabilities,
-        vec!["session.events".to_string(), "session.result".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn cell_admission_denial_never_refuses_a_native_method() {
-    let dir = tempfile::TempDir::new().expect("temp project");
-    let (client, config, _task) = spawn_native_with_policies(
-        CapabilityAdmissionPolicy::default(),
-        BTreeSet::new(),
-        Some(dir.path()),
-        true,
-    )
-    .await;
-
-    let err = call_raw(
-        &client,
-        &config,
-        "noop.echo",
-        serde_json::json!({"message": "refused"}),
-    )
-    .await
-    .expect_err("no tool is enabled");
-    assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
-
-    let url = spawn_native_probe_server().await;
-    let result = call_raw(&client, &config, "fetch.web", native_probe_params(&url))
-        .await
-        .expect("Cell admission has no authority over a native method");
-    assert_eq!(result["status"], 200);
 }
 
 #[tokio::test]

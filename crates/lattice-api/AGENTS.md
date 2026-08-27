@@ -18,7 +18,8 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
 - `src/turn/collector.rs` drains live streams into `RunTurnResult`.
 - `src/turn/cep.rs` owns profile→policy translation, CEP-event→public-event
   mapping, and `build_production_turn_deps` over `lancet_api::LancetRuntime::build`.
-  Runtime assembly itself remains in `lancet-api`.
+  First-time shared Component composition runs through `spawn_blocking`; runtime
+  assembly itself remains in `lancet-api`.
 - `src/turn/coordinator.rs` owns the production #139-B `TurnCoordinator`:
   blocking store adapters (`spawn_blocking` over `GitSessionGraphStore` and the
   Git `InvocationStore`), the injectable `IdSource`, durable reconciliation,

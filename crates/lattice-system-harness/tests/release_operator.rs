@@ -96,7 +96,7 @@ fn turn_id_of(turn: &SendExecution) -> String {
 }
 
 fn fetch_network_profile() -> String {
-    "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n".to_string()
+    "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n".to_string()
 }
 
 fn assert_single_release_case(
@@ -275,48 +275,48 @@ fn assert_single_release_case(
     Ok(())
 }
 
-fn release_native_case() {
+fn release_fetch_case() {
     let driver = driver();
-    let web = FixtureHttpServer::start(HttpFixture::plain("release native fixture"))
+    let web = FixtureHttpServer::start(HttpFixture::plain("release fetch fixture"))
         .expect("fixture HTTP server");
-    let fetch_url = web.url_path("/release-native");
+    let fetch_url = web.url_path("/release-fetch");
     let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
     let (world, spec) = direct_world(
-        "release-operator-native",
-        "release-op-native",
+        "release-operator-fetch",
+        "release-op-fetch",
         "[\"fetch.web\"]",
         &fetch_network_profile(),
     );
     let server = wire_fake_llm(
         &world,
-        "release-op-native",
+        "release-op-fetch",
         sequence(vec![
-            tool_call("release-native", "fetch.web", &fetch_args),
-            SseScript::plain("release native complete"),
+            tool_call("release-fetch", "fetch.web", &fetch_args),
+            SseScript::plain("release fetch complete"),
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "release-op-native", "main")
+    let send = SessionSendDriver::new(&driver, &world, &spec, "release-op-fetch", "main")
         .expect("session");
     let session_id = send.session_id().to_string();
-    let turn = send.send("release native matrix").expect("native turn");
+    let turn = send.send("release fetch matrix").expect("fetch turn");
     let turn_id = turn_id_of(&turn);
     let captures = server.captured_requests();
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&turn)?;
         require(
             turn.has_committed_completed(),
-            "release native turn must complete",
+            "release fetch turn must complete",
         )?;
         web.wait_for_requests(1, Duration::from_secs(5))
             .map_err(|error| AssertError::StdoutMissing {
-                expected: format!("release native fetch missing: {error}"),
+                expected: format!("release fetch missing: {error}"),
             })?;
         assert_single_release_case(&world, &spec, &session_id, &turn_id, "fetch.web")
     })();
     finish_scenario(
         scenario_evidence,
-        &[("release native matrix", &turn.command)],
+        &[("release fetch matrix", &turn.command)],
         captures,
         result,
     );
@@ -382,7 +382,7 @@ fn release_mixed_case() {
     let mut scripts = Vec::new();
     for index in 0..11 {
         scripts.push(tool_call(
-            &format!("release-mixed-native-{index}"),
+            &format!("release-mixed-fetch-{index}"),
             "fetch.web",
             &fetch_args,
         ));
@@ -512,8 +512,8 @@ fn release_mixed_case() {
 }
 
 #[test]
-fn release_operator_native_component_mixed_matrix() {
-    release_native_case();
+fn release_operator_component_matrix() {
+    release_fetch_case();
     release_component_case();
     release_mixed_case();
 }

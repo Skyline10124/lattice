@@ -95,8 +95,8 @@ starts because build scripts and procedural macros execute as host code.
 - ADR 0005 keeps Tool runtime convergence here but assigns conversation,
   InvocationStore/operator reads, and cross-store Turn orchestration to
   `lattice-conversation`, `lancet-audit`, and `lattice-api`. LANCET has no
-  Standalone/direct CEP product invocation contract; #32 waits for the #139-B
-  InvocationId hard cut before the remaining native Tool migration.
+  Standalone/direct CEP product invocation contract. #32 followed the #139-B
+  InvocationId hard cut and completed the last built-in Tool migration.
 - The `ComponentRuntime` has three runtime lifecycle tiers (#171):
   1. **Process-level (built runtime):** `ComponentRuntime::shared()` returns a
      process-singleton `Arc<ComponentRuntime>` holding the Wasmtime Engine,

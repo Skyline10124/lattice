@@ -71,6 +71,95 @@ pub struct WorkspaceVisibilityEvidence {
     pub filtered_ignored_default: bool,
 }
 
+/// One concrete network endpoint resolved or connected by the host.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+pub struct NetworkEndpoint {
+    pub ip: std::net::IpAddr,
+    pub port: u16,
+}
+
+/// How the host obtained the target address set for one network hop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkResolution {
+    NotAttempted,
+    Literal,
+    Resolved,
+    Failed,
+}
+
+/// Host policy verdict for one network hop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPolicyVerdict {
+    Allowed,
+    Denied,
+}
+
+/// TLS protocol negotiated with the connected peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsVersion {
+    Tls12,
+    Tls13,
+    Other,
+}
+
+/// TLS state observed by the host transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TlsState {
+    NotApplicable,
+    NotAttempted,
+    Failed,
+    Established { version: TlsVersion },
+}
+
+/// Connection and TLS facts for one network hop.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TransportEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connected_peer: Option<NetworkEndpoint>,
+    pub tls: TlsState,
+}
+
+/// The transport phase in which one network hop failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkFailurePhase {
+    Dns,
+    Connect,
+    Tls,
+    HttpHeaders,
+    Body,
+}
+
+/// Host-recorded network facts for one initial request or redirect hop.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NetworkEvidence {
+    pub hop: u32,
+    /// Normalized request URL without userinfo, query, or fragment.
+    pub url: String,
+    pub resolution: NetworkResolution,
+    /// Sorted and deduplicated before persistence.
+    pub dns_candidates: Vec<NetworkEndpoint>,
+    pub transport: TransportEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Bounded raw response bytes read from transport, including at most one
+    /// truncation-sentinel byte beyond the delivery limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes_received: Option<u64>,
+    /// Response body bytes actually delivered to the guest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes_returned: Option<u64>,
+    pub policy_verdict: NetworkPolicyVerdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_phase: Option<NetworkFailurePhase>,
+}
+
 /// One effect that actually happened (B5): the real cell, the host-resolved
 /// scope, and the concrete target — never a capability alias.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -108,6 +197,9 @@ pub struct ObservedEffect {
     /// written before the mutation columns existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutation: Option<MutationEvidence>,
+    /// Host-computed network facts for one request or redirect hop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkEvidence>,
 }
 
 /// Closed precondition outcome for one host mutation attempt (#31).
@@ -165,6 +257,9 @@ pub struct DeniedOperation {
     /// Absent on non-mutation denials and on pre-#31 rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutation: Option<MutationEvidence>,
+    /// Host-computed network facts for a hop refused before outbound I/O.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkEvidence>,
 }
 
 /// Versioned container for a call's refused operations. Every persisted
@@ -252,6 +347,7 @@ mod tests {
             truncated: None,
             visibility: None,
             mutation: None,
+            network: None,
         }
     }
 
@@ -281,6 +377,7 @@ mod tests {
                 filtered_ignored_default: true,
             }),
             mutation: None,
+            network: None,
         }
     }
 
@@ -415,6 +512,7 @@ mod tests {
             },
             reason: "capability not admitted".into(),
             mutation: None,
+            network: None,
         };
         let record = DeniedOperationsRecord {
             version: DENIED_OPERATIONS_RECORD_VERSION,
@@ -538,6 +636,7 @@ mod tests {
             truncated: None,
             visibility: None,
             mutation: Some(mutation.clone()),
+            network: None,
         };
         let record = ObservedEffectsRecord {
             version: OBSERVED_EFFECTS_RECORD_VERSION,
@@ -569,6 +668,7 @@ mod tests {
                 precondition: MutationPrecondition::StaleRevision,
                 installation: MutationInstallation::NotAttempted,
             }),
+            network: None,
         };
         let denials = DeniedOperationsRecord {
             version: DENIED_OPERATIONS_RECORD_VERSION,

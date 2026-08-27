@@ -1,10 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! LANCET native production implementation.
+//! Transitional LANCET server and Rewind implementation.
 //!
-//! Low-level executor helpers stay crate-private and are reachable only through
-//! native catalog handlers. `lattice-agent` cannot reach them at compile time.
+//! Production Agent Tools are embedded Components. Residual low-level executors
+//! compile only for regression tests; `lattice-agent` cannot reach them.
 
 // The retired native HashLine engine remains only as a regression-test asset.
 // Production mutation execution lives in the embedded Components and
@@ -12,6 +12,7 @@
 #[cfg(test)]
 pub(crate) mod edit;
 pub mod enforcement;
+#[cfg(test)]
 pub(crate) mod executor;
 mod handlers;
 mod server;
@@ -49,9 +50,6 @@ pub use server::{
     CepServerNativeExt, HandlerContext, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
 };
-
-#[cfg(test)]
-mod effect_contract_tests;
 
 #[cfg(test)]
 mod public_api_tests {

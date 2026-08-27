@@ -51,6 +51,7 @@ fn call_ctx(
         // authority refuses every observation operation (#30).
         workspace: None,
         mutate: None,
+        network: None,
     };
     (ctx, rx, cancel_tx)
 }

@@ -250,25 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn native_descriptor_identity_is_stable_hex() {
-        let projected = project_tool_definitions(catalog());
-        assert!(!projected.is_empty());
-        for tool in &projected {
-            assert_eq!(tool.descriptor_identity.len(), 64);
-            assert!(
-                tool.descriptor_identity
-                    .chars()
-                    .all(|c| matches!(c, '0'..='9' | 'a'..='f')),
-                "identity must be lowercase hex: {}",
-                tool.descriptor_identity
-            );
-        }
-        // Reprojection is byte-identical.
-        let again = project_tool_definitions(catalog());
-        assert_eq!(projected, again);
-    }
-
-    #[test]
     fn projection_length_equals_catalog_len() {
         let projected = project_tool_definitions(catalog());
         assert_eq!(projected.len(), catalog().len());
@@ -287,25 +268,14 @@ mod tests {
         let err = resolve_catalog_tool_definitions(&["does.not.exist".to_string()])
             .expect_err("unknown tool must error");
         assert_eq!(err.unknown, vec!["does.not.exist".to_string()]);
-        assert!(!err.available.is_empty());
-    }
-
-    #[test]
-    fn enabled_filter_uses_exact_names() {
-        // This filter resolves only against `lancet_catalog::catalog()`. A
-        // prefix of its remaining native method must still not resolve.
-        let exposure = ToolExposure::from_catalog_enabled(&["fetch.web".to_string()])
-            .expect("known tool resolves");
-        assert!(exposure.contains("fetch.web"));
-        assert!(!exposure.contains("fetch"));
-        assert_eq!(exposure.definitions().len(), 1);
-        assert_eq!(exposure.definitions()[0].name, "fetch.web");
+        assert!(err.available.is_empty());
     }
 
     /// Migrated Component Tools do not resolve through the native catalog.
     #[test]
     fn migrated_component_tools_do_not_resolve_through_the_catalog() {
         for migrated in [
+            "fetch.web",
             "observe.workspace",
             "mutate.create",
             "mutate.edit",
@@ -315,16 +285,6 @@ mod tests {
                 .expect_err("a Component Tool is not a catalog method");
             assert_eq!(err.unknown, vec![migrated.to_string()]);
         }
-    }
-
-    #[test]
-    fn catalog_exposure_collects_base_authority_from_descriptors() {
-        let exposure = ToolExposure::from_catalog_enabled(&["fetch.web".to_string()])
-            .expect("known tool resolves");
-        let authority = exposure.base_authority();
-        assert!(authority.fetch_hosts);
-        assert!(!authority.session_state);
-        assert!(!authority.read_audit);
     }
 
     #[test]

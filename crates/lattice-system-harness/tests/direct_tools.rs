@@ -28,7 +28,7 @@ use support::{
 
 fn fetch_network_profile(max_bytes: u64) -> String {
     format!(
-        "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = {max_bytes}\n"
+        "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = {max_bytes}\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n"
     )
 }
 
@@ -202,7 +202,7 @@ fn direct_tools_fetch_host_policy_denial() {
         "direct-tools-fetch-deny",
         "dl-fdeny",
         "[\"fetch.web\"]",
-        "\n[lancet.network]\nallow_localhost = false\nallowed_hosts = []\n",
+        "\n[lancet.network]\nallow_localhost = false\nallowed_hosts = []\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n",
     );
     let args = format!(r#"{{"url":"{url}"}}"#);
     let server = wire_fake_llm(
@@ -254,11 +254,8 @@ fn direct_tools_fetch_host_policy_denial() {
     );
 }
 
-/// Enabled fetch with `allow_public_https=true` but empty `allowed_hosts`:
-/// URL-shape validation may allow public HTTPS, yet FetchUrl authorized hosts
-/// still come from `allowed_hosts`, so `https://example.com/` is rejected with
-/// an EffectViolation / authorized-region denial before outbound I/O. Distinct
-/// from host-policy denial (`allow_localhost=false` against a localhost URL).
+/// Explicit `network.fetch` denial rejects the Component at Cell admission before outbound I/O.
+/// Distinct from host-policy denial (`allow_localhost=false` against a localhost URL).
 #[test]
 fn direct_tools_fetch_capability_denial_with_public_https() {
     let driver = driver();
@@ -266,7 +263,7 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
         "direct-tools-fetch-cap",
         "dl-fcap",
         "[\"fetch.web\"]",
-        "\n[lancet.network]\nallow_public_https = true\nallow_localhost = false\nallowed_hosts = []\n",
+        "\n[lancet.network]\nallow_public_https = true\nallow_localhost = false\nallowed_hosts = []\n\n[lancet.capabilities]\ndeny = [\"network.fetch\"]\nmax_boundary = \"ex\"\n",
     );
     let server = wire_fake_llm(
         &world,
@@ -285,7 +282,7 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
         assert_clean_send(&outcome)?;
         require(
             tool_failed(&outcome.parsed, "fetch.web"),
-            "fetch.web must fail when FetchUrl hosts are empty despite allow_public_https",
+            "fetch.web must fail when network.fetch is denied",
         )?;
         let cep_started_raw = outcome.events.iter().find_map(|event| match event {
             TurnEventLine::Unknown { type_name, raw }
@@ -301,17 +298,15 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
                 raw.get("invocation_id")
                     .and_then(Value::as_str)
                     .is_some_and(|id| id.len() == 36)
-                    && raw.get("semantic_stage").and_then(Value::as_str) == Some("cep_native")
-                    && raw.get("guard_stage").and_then(Value::as_str)
-                        == Some("cep_policy_lifecycle")
+                    && raw.get("semantic_stage").and_then(Value::as_str) == Some("cell_component")
+                    && raw.get("guard_stage").and_then(Value::as_str) == Some("cell_admission")
             }),
             format!(
-                "fetch.web cep_call_started must carry typed identity and native stages: {cep_started_raw:?}"
+                "fetch.web cep_call_started must carry typed identity and Component stages: {cep_started_raw:?}"
             ),
         )?;
-        // Enforce-mode empty FetchUrl hosts deny before outbound I/O. The tool
-        // error must name the effect/authorized-region class so DNS/HTTP failure
-        // cannot satisfy this scenario.
+        // The Component never reaches the network host import when admission removes
+        // its sole capability.
         require(
             captures.len() >= 2,
             "capability denial needs tool result capture",
@@ -319,10 +314,8 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
         let err_text = last_tool_content(&captures[1]).unwrap_or_default();
         let err_lower = err_text.to_lowercase();
         require(
-            err_lower.contains("authorized region")
-                || err_lower.contains("effect")
-                || err_lower.contains("exceeds"),
-            format!("capability denial must cite effect/authorized-region: {err_text}"),
+            err_lower.contains("fetch.web") && err_lower.contains("has no admitted capability"),
+            format!("network.fetch admission denial mismatch: {err_text}"),
         )?;
         require(
             !tool_ok(&outcome.parsed, "fetch.web"),

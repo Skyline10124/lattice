@@ -30,6 +30,7 @@ use crate::error_map::{
 use crate::evidence::CellEvidenceLedger;
 use crate::generated;
 use crate::host_mutate::WorkspaceMutationHost;
+use crate::host_network::NetworkFetchHost;
 use crate::host_workspace::WorkspaceObservationHost;
 use crate::limits::{AbortReason, ExecutionLimits, RecordingLimits, ResourceFootprint};
 
@@ -64,6 +65,9 @@ pub struct ComponentCallContext {
     /// mutation import. Observation and mutation authorities are separate so a
     /// Tool that only observes never receives a write host by accident.
     pub mutate: Option<Arc<WorkspaceMutationHost>>,
+    /// GET-only network authority for the `network-fetch` import (#32).
+    /// `None` refuses every network operation.
+    pub network: Option<Arc<NetworkFetchHost>>,
 }
 
 /// Per-store state: the call context, resource limits, deadline, and abort
@@ -108,9 +112,32 @@ pub struct ComponentRuntime {
 /// without weakening it to a nonblocking best-effort operation.
 struct ComponentCallRuntime {
     engine: Engine,
+    async_runtime: ComponentAsyncRuntime,
     catalog: Arc<ClosedCatalog>,
     linker: Arc<Linker<StoreState>>,
     limits: Arc<Mutex<ExecutionLimits>>,
+}
+
+struct ComponentAsyncRuntime {
+    inner: Option<tokio::runtime::Runtime>,
+}
+
+impl ComponentAsyncRuntime {
+    fn handle(&self) -> tokio::runtime::Handle {
+        self.inner
+            .as_ref()
+            .expect("Component async runtime is present until drop")
+            .handle()
+            .clone()
+    }
+}
+
+impl Drop for ComponentAsyncRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.inner.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 /// Handle to the epoch ticker task. Stops when dropped.
@@ -144,16 +171,16 @@ impl ComponentRuntime {
     /// runs `from_embedded()` and the rest observe the same result. A
     /// composition failure is latched: every subsequent call returns the same
     /// error without retrying.
-    pub fn shared() -> Result<Arc<Self>, CompositionError> {
-        static INSTANCE: OnceLock<Result<Arc<ComponentRuntime>, String>> = OnceLock::new();
+    pub fn shared() -> Result<Arc<Self>, Arc<CompositionError>> {
+        static INSTANCE: OnceLock<Result<Arc<ComponentRuntime>, Arc<CompositionError>>> =
+            OnceLock::new();
         INSTANCE
             .get_or_init(|| {
                 ComponentRuntime::from_embedded()
                     .map(Arc::new)
-                    .map_err(|err| err.to_string())
+                    .map_err(Arc::new)
             })
             .clone()
-            .map_err(CompositionError::Latched)
     }
 
     /// Fixed no-op fixture for integration tests. No caller-controlled
@@ -172,6 +199,7 @@ impl ComponentRuntime {
         expected_identities: &[ExpectedToolIdentity],
     ) -> Result<Self, CompositionError> {
         let engine = build_engine().map_err(CompositionError::Engine)?;
+        let async_runtime = build_async_runtime().map_err(CompositionError::AsyncRuntime)?;
         let catalog =
             ClosedCatalog::compose(&engine, registrations.iter().copied(), expected_identities)?;
         let linker = build_linker(&engine).map_err(CompositionError::Linker)?;
@@ -180,6 +208,7 @@ impl ComponentRuntime {
         Ok(Self {
             core: Arc::new(ComponentCallRuntime {
                 engine,
+                async_runtime,
                 catalog: Arc::new(catalog),
                 linker: Arc::new(linker),
                 limits: Arc::new(Mutex::new(limits)),
@@ -251,33 +280,37 @@ impl ComponentRuntime {
         params: serde_json::Value,
         ctx: ComponentCallContext,
     ) -> Result<serde_json::Value, CepError> {
-        // Lazily start the epoch ticker (requires a tokio runtime context,
-        // which `call` runs inside; composition does not).
+        // Poll the Wasmtime call from Tokio's blocking pool because synchronous
+        // workspace imports take Linux locks. Async network imports use the bounded
+        // runtime owned by this composed Component catalog.
         self.ensure_ticker();
 
         let name = name.to_owned();
         let error_name = name.clone();
         let core = Arc::clone(&self.core);
-        tokio::task::spawn_blocking(move || core.call_blocking(&name, params, ctx))
-            .await
-            .map_err(|err| {
-                let mut cep_error = CepError::tool_execution(
-                    CepErrorCode::ExecutionFailed,
-                    &error_name,
-                    "component_worker_failed",
-                    None,
-                    Retriability::Permanent,
-                );
-                cep_error.message = format!("component worker failed: {err}");
-                cep_error
-            })?
+        let async_handle = core.async_runtime.handle();
+        tokio::task::spawn_blocking(move || {
+            async_handle.block_on(core.call_async(&name, params, ctx))
+        })
+        .await
+        .map_err(|err| {
+            let mut cep_error = CepError::tool_execution(
+                CepErrorCode::ExecutionFailed,
+                &error_name,
+                "component_worker_failed",
+                None,
+                Retriability::Permanent,
+            );
+            cep_error.message = format!("component worker failed: {err}");
+            cep_error
+        })?
     }
 }
 
 impl ComponentCallRuntime {
-    /// Synchronous Component execution. The caller runs this on Tokio's
-    /// blocking pool so host-side `flock` waits never park an async worker.
-    fn call_blocking(
+    /// Async Wasmtime execution driven by the composed catalog's bounded runtime.
+    /// The outer blocking worker keeps synchronous workspace locks off async workers.
+    async fn call_async(
         &self,
         name: &str,
         params: serde_json::Value,
@@ -303,7 +336,12 @@ impl ComponentCallRuntime {
 
         let mut store = self.new_store(ctx);
 
-        let instance = match bindings::Tool::instantiate(&mut store, &tool.component, &self.linker)
+        let instance = match bindings::Tool::instantiate_async(
+            &mut store,
+            &tool.component,
+            &self.linker,
+        )
+        .await
         {
             Ok(v) => v,
             Err(e) => return Err(map_component_error(&store, name, e, &tool.footprint)),
@@ -313,7 +351,7 @@ impl ComponentCallRuntime {
         let params_json = serde_json::to_string(&params)
             .map_err(|e| schema_mismatch(name, format!("params serialize: {e}")))?;
 
-        let raw = match tool_api.call_run(&mut store, &params_json) {
+        let raw = match tool_api.call_run(&mut store, &params_json).await {
             Ok(r) => r,
             Err(e) => return Err(map_component_error(&store, name, e, &tool.footprint)),
         };
@@ -531,11 +569,26 @@ fn host_refusal(ctx: &ComponentCallContext) -> Option<CepError> {
                 .as_ref()
                 .and_then(|mutate| mutate.take_refusal(ctx.invocation_id))
         })
+        .or_else(|| {
+            ctx.network
+                .as_ref()
+                .and_then(|network| network.take_refusal())
+        })
 }
 
 // ---------------------------------------------------------------------------
 // Engine + linker construction
 // ---------------------------------------------------------------------------
+
+fn build_async_runtime() -> std::io::Result<ComponentAsyncRuntime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(8)
+        .thread_name("lattice-component")
+        .enable_all()
+        .build()
+        .map(|inner| ComponentAsyncRuntime { inner: Some(inner) })
+}
 
 fn build_engine() -> Result<Engine, wasmtime::Error> {
     let mut c = wasmtime::Config::new();
@@ -571,6 +624,10 @@ fn build_linker(engine: &Engine) -> Result<Linker<StoreState>, wasmtime::Error> 
         _,
         wasmtime::component::HasSelf<_>,
     >(&mut linker, |state| state)?;
+    bindings::lattice::tool_host::network_fetch::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+        &mut linker,
+        |state| state,
+    )?;
     Ok(linker)
 }
 

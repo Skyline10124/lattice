@@ -21,6 +21,7 @@ mod session;
 pub mod stores;
 pub mod turn;
 
+pub use lancet_api::CompositionError;
 pub use lattice_session::{
     ClosureOrigin, TurnFinishReason, TurnOutcome, WorkspaceHistoryCheckpoint,
 };
@@ -58,8 +59,6 @@ pub use turn::{
 /// Wasmtime compilation cost is paid once at init rather than on the first
 /// prompt. Returns `Err` if composition fails; the error is latched and
 /// every subsequent `stream_turn` / `run_turn` will observe the same failure.
-pub fn warmup_component_runtime() -> Result<(), String> {
-    lancet_api::ComponentRuntime::shared()
-        .map(|_| ())
-        .map_err(|err| format!("component runtime warmup failed: {err}"))
+pub fn warmup_component_runtime() -> Result<(), std::sync::Arc<CompositionError>> {
+    lancet_api::ComponentRuntime::shared().map(|_| ())
 }

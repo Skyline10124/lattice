@@ -57,6 +57,7 @@ pub mod generated;
 pub mod history;
 pub mod host;
 pub mod host_mutate;
+pub mod host_network;
 pub mod host_workspace;
 pub mod limits;
 pub mod rewind_audit;
@@ -85,6 +86,7 @@ pub use host_mutate::{
     CreateInstalled, FileBytes, MutateError, MutationCallContext, ReplaceInstalled,
     WorkspaceMutationHost, mutate_cep_error,
 };
+pub use host_network::{BudgetRemaining, NetworkFetchHost};
 pub use host_workspace::{
     BudgetCharge, BudgetRefusal, ObservationCallContext, ObservationError,
     WorkspaceObservationHost, observation_cep_error,

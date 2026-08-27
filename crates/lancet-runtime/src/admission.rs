@@ -193,6 +193,11 @@ pub enum OperationDenial {
     /// A path target whose cell does not root in a workspace-channel scope.
     #[error("path target requires a workspace-channel scope, but {0} is not one")]
     PathOutsideWorkspaceChannel(String),
+    /// A host target whose cell does not root in a network-channel scope.
+    #[error("host target requires a network-channel scope, but {0} is not one")]
+    HostOutsideNetworkChannel(String),
+    #[error("host target is empty or malformed")]
+    HostNotNormalized,
     /// A path target that is not in the project-relative comparison form the
     /// host produces. Structural, not a containment check: containment is
     /// enforced by the workspace's per-segment resolution, and this refuses a
@@ -261,7 +266,24 @@ pub fn authorize_operation(
             }
             Ok(())
         }
-        ObservedTarget::Host { .. } => Err(OperationDenial::UnsupportedTarget("host")),
+        ObservedTarget::Host { host } => {
+            let declared = admitted
+                .descriptor
+                .scopes
+                .iter()
+                .find(|scope| scope.name == cell.scope);
+            if !matches!(declared, Some(scope) if scope.channel == ChannelKind::Network) {
+                return Err(OperationDenial::HostOutsideNetworkChannel(
+                    cell.scope.clone(),
+                ));
+            }
+            let normalized =
+                url::Host::parse(host).is_ok_and(|parsed| parsed.to_string() == host.as_str());
+            if !normalized {
+                return Err(OperationDenial::HostNotNormalized);
+            }
+            Ok(())
+        }
         ObservedTarget::None => Err(OperationDenial::UnsupportedTarget("none")),
     }
 }
@@ -748,28 +770,80 @@ mod tests {
         );
     }
 
-    /// Host and `none` targets are still refused outright: no channel produces
-    /// them. `path` left this set in #30 with the workspace channel.
+    /// Host targets require an admitted network-channel cell; `none` remains unsupported.
     #[test]
-    fn authorize_operation_denies_host_and_none_targets() {
-        let admitted = admitted_session_tool();
-        let operation_cell = cell(CtxOp::Mutate, "session");
-        let cases = [
-            (
-                ObservedTarget::Host {
-                    host: "example.com".into(),
+    fn authorize_operation_gates_host_targets_by_network_channel() {
+        let admitted = admit_tool(
+            descriptor(vec![capability("network.fetch", CtxOp::Alloc, "net")]),
+            &policy(&[], Trust::Ex),
+        )
+        .expect("network capability admits");
+        let target = ObservedTarget::Host {
+            host: "example.com".into(),
+        };
+        assert_eq!(
+            authorize_operation(&admitted, &cell(CtxOp::Alloc, "net"), &target, "turn-1"),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_operation(
+                &admitted,
+                &cell(CtxOp::Alloc, "net"),
+                &ObservedTarget::Host {
+                    host: String::new()
                 },
-                "host",
+                "turn-1",
             ),
-            (ObservedTarget::None, "none"),
-        ];
-        for (target, kind) in cases {
+            Err(OperationDenial::HostNotNormalized)
+        );
+        for host in [
+            "EXAMPLE.com",
+            "example.com/path",
+            "user@example.com",
+            "example.com:443",
+        ] {
             assert_eq!(
-                authorize_operation(&admitted, &operation_cell, &target, "turn-1"),
-                Err(OperationDenial::UnsupportedTarget(kind)),
-                "{target:?} must fail closed"
+                authorize_operation(
+                    &admitted,
+                    &cell(CtxOp::Alloc, "net"),
+                    &ObservedTarget::Host { host: host.into() },
+                    "turn-1",
+                ),
+                Err(OperationDenial::HostNotNormalized),
+                "{host}",
             );
         }
+        assert_eq!(
+            authorize_operation(
+                &admitted,
+                &cell(CtxOp::Alloc, "net"),
+                &ObservedTarget::Host {
+                    host: "[::1]".into(),
+                },
+                "turn-1",
+            ),
+            Ok(())
+        );
+
+        let session_tool = admitted_session_tool();
+        assert_eq!(
+            authorize_operation(
+                &session_tool,
+                &cell(CtxOp::Mutate, "session"),
+                &target,
+                "turn-1",
+            ),
+            Err(OperationDenial::HostOutsideNetworkChannel("session".into()))
+        );
+        assert_eq!(
+            authorize_operation(
+                &session_tool,
+                &cell(CtxOp::Mutate, "session"),
+                &ObservedTarget::None,
+                "turn-1",
+            ),
+            Err(OperationDenial::UnsupportedTarget("none"))
+        );
     }
 
     /// #30: a path target is authorizable only through a workspace-channel

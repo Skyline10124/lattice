@@ -7,10 +7,7 @@ use std::sync::Arc;
 
 use lancet_authority::policy::default::DefaultPolicyHook;
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
-use lancet_catalog::catalog;
-use lancet_cep::{
-    ToolDefinition, ToolExposureError, project_tool_definitions, resolve_enabled_tools,
-};
+use lancet_cep::{ToolDefinition, ToolExposureError, resolve_enabled_tools};
 use lancet_dispatch::{CepClient, CepTransport};
 use lancet_native::{
     CepServerNativeExt, MethodRegistry, ServerRunConfig, register_production_method_registry,
@@ -69,26 +66,24 @@ pub struct LancetServer;
 impl LancetServer {
     /// Spawn a native CEP server bound to `config`, returning the client and lifecycle.
     ///
-    /// Composes the production Component runtime once from embedded inventory
-    /// and the generated `EXPECTED_COMPONENTS` identity list, then delegates
-    /// to [`LancetServer::spawn_composed`]. There is no public path to inject
+    /// Uses the process-shared production Component runtime composed from the
+    /// embedded inventory and generated identity list, then delegates to
+    /// [`LancetServer::spawn_composed`]. There is no public path to inject
     /// Component bytes, paths, or handlers; the catalog is closed at build
     /// time (ADR 0004).
     pub fn spawn(
         config: ServerRunConfig,
         channel_capacity: usize,
     ) -> Result<(CepClient, ServerLifecycle), LancetError> {
-        let components = Arc::new(
-            ComponentRuntime::from_embedded()
-                .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?,
-        );
+        let components = ComponentRuntime::shared()
+            .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?;
         Self::spawn_composed(config, channel_capacity, components)
     }
 
     /// Spawn a native CEP server with a pre-composed Component runtime.
     ///
-    /// `pub(crate)`: the only public entry ([`LancetServer::spawn`]) composes
-    /// from embedded inventory. Tests inject a fixed no-op fixture through
+    /// `pub(crate)`: the only public entry ([`LancetServer::spawn`]) uses the
+    /// process-shared embedded inventory. Tests inject a fixed no-op fixture through
     /// this seam (D.6). The same `Arc<ComponentRuntime>` is threaded into
     /// `ServerRunConfig.components` so `handle_request` can branch Component
     /// vs native dispatch within the existing audit lifecycle (D.3).
@@ -177,8 +172,14 @@ impl LancetRuntime {
             cep_mode,
             invocations,
             workspace_history,
-            components: precomposed,
         } = config;
+
+        if !policy.denied_effect_kinds.is_empty() {
+            return Err(LancetError::Config(format!(
+                "[lancet.effects] deny cannot apply because the production native catalog is empty; use [lancet.capabilities] deny instead: {:?}",
+                policy.denied_effect_kinds
+            )));
+        }
 
         policy.project_root = validate_project_store_bindings(
             &local_workspace_root,
@@ -187,22 +188,14 @@ impl LancetRuntime {
             &workspace_history,
         )?;
 
-        // D.2: compose the Component runtime once from embedded inventory +
-        // the generated `EXPECTED_COMPONENTS`. When a pre-composed instance is
-        // supplied (process-level shared), skip recompilation entirely.
-        let components =
-            match precomposed {
-                Some(shared) => shared,
-                None => Arc::new(ComponentRuntime::from_embedded().map_err(|err| {
-                    LancetError::Internal(format!("component composition: {err}"))
-                })?),
-            };
+        // D.2: reuse the process-level closed runtime composed from this binary's
+        // generated production inventory. No caller-supplied catalog seam exists.
+        let components = ComponentRuntime::shared()
+            .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?;
         // D.4: project Component descriptors into LLM tool definitions.
-        // The available set is native catalog methods + Component Tools;
-        // enabled_tools is resolved against the combined set (spec D.4:
-        // profile enabled_tools ⊆ (5 native + built Components): LLM exposure).
-        let mut available = project_tool_definitions(catalog());
-        available.extend(project_component_definitions(&components));
+        // The production native catalog is empty after #32. Definitions come from
+        // the five generated Component descriptors.
+        let available = project_component_definitions(&components);
         let tool_definitions =
             resolve_enabled_tools(&enabled_tools, &available).map_err(map_tool_exposure_err)?;
 
@@ -422,6 +415,26 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("InvocationStore"));
+    }
+
+    #[test]
+    fn runtime_rejects_legacy_effect_denies_when_native_catalog_is_empty() {
+        let project = tempfile::TempDir::new().expect("project root");
+        let mut config = LancetRuntimeConfig::new(project.path());
+        config
+            .policy
+            .denied_effect_kinds
+            .insert(lancet_protocol::effect_types::ImpactKind::ExternalObservation);
+
+        let err = match LancetRuntime::build(config) {
+            Ok(_) => panic!("legacy effect deny must fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("[lancet.effects] deny"), "{err}");
+        assert!(
+            err.to_string().contains("[lancet.capabilities] deny"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -27,8 +27,9 @@ use std::sync::{Arc, Mutex};
 use lancet_protocol::cell::Cell;
 use lancet_protocol::evidence::{
     AdmissionEvidence, DENIED_OPERATIONS_RECORD_VERSION, DeniedOperation, DeniedOperationsRecord,
-    EffectSource, MutationEvidence, OBSERVED_EFFECTS_RECORD_VERSION, ObservedEffect,
-    ObservedEffectsRecord, ObservedScope, ObservedTarget, WorkspaceVisibilityEvidence,
+    EffectSource, MutationEvidence, NetworkEvidence, OBSERVED_EFFECTS_RECORD_VERSION,
+    ObservedEffect, ObservedEffectsRecord, ObservedScope, ObservedTarget,
+    WorkspaceVisibilityEvidence,
 };
 
 #[derive(Debug, Default)]
@@ -82,6 +83,7 @@ impl CellEvidenceLedger {
             truncated: None,
             visibility: None,
             mutation: None,
+            network: None,
         });
     }
 
@@ -114,6 +116,34 @@ impl CellEvidenceLedger {
             truncated: Some(truncated),
             visibility: Some(visibility),
             mutation: None,
+            network: None,
+        });
+    }
+
+    /// Record one network hop after outbound I/O began.
+    pub fn record_network_effect(
+        &self,
+        cell: Cell,
+        scope: ObservedScope,
+        target: ObservedTarget,
+        context_measure: Option<u64>,
+        truncated: Option<bool>,
+        network: NetworkEvidence,
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        let seq = inner.seq;
+        inner.seq += 1;
+        inner.effects.push(ObservedEffect {
+            seq,
+            cell,
+            scope,
+            target,
+            source: EffectSource::Operation,
+            context_measure,
+            truncated,
+            visibility: None,
+            mutation: None,
+            network: Some(network),
         });
     }
 
@@ -138,6 +168,7 @@ impl CellEvidenceLedger {
             truncated: None,
             visibility: None,
             mutation: Some(mutation),
+            network: None,
         });
     }
 
@@ -173,6 +204,30 @@ impl CellEvidenceLedger {
             target,
             reason: reason.into(),
             mutation,
+            network: None,
+        });
+    }
+
+    /// Record a network-related refusal with the hop facts gathered so far.
+    pub fn record_network_denied(
+        &self,
+        cell: Cell,
+        scope: ObservedScope,
+        target: ObservedTarget,
+        reason: impl Into<String>,
+        network: NetworkEvidence,
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        let seq = inner.seq;
+        inner.seq += 1;
+        inner.denied.push(DeniedOperation {
+            seq,
+            cell,
+            scope,
+            target,
+            reason: reason.into(),
+            mutation: None,
+            network: Some(network),
         });
     }
 

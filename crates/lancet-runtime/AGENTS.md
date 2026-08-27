@@ -4,16 +4,11 @@ Crate-local guidance for `lancet-runtime`.
 
 ## Role
 
-ADR 0004 Component engine, closed composition gate, Cell capability
-admission, and ToolHost for LATTICE Source Tools (#27 (Codeberg #5)
-slices C–D, #28 (Codeberg #6), #30, #31). Owns the wasmtime engine, embedded
-inventory collection, the fail-closed composition gate, the
-admission/authorization authority, the ToolHost (control plus the
-`workspace-observe` and `workspace-mutate` domain imports), the concrete Local
-Workspace module, the `call` execution path with result/effect validation, and
-the `contains`/`descriptors`/`descriptor` surface that `lancet-native` and
-`lancet-api` use for the D.3 dispatch split, the D.4 LLM projection, and the
-per-call admission step.
+ADR 0004 Component engine, closed composition gate, Cell capability admission,
+and Tool Host for all five built-ins (#27/#28/#29/#30/#31/#32). Owns the
+wasmtime engine, generated inventory, fail-closed composition, per-call
+admission/authorization, concrete Local Workspace, GET-only network execution,
+Cell evidence, and Component result validation.
 
 ## Sub-Architecture
 
@@ -40,10 +35,11 @@ per-call admission step.
   host-computed context measure, Cell evidence recording). Call-scoped
   cancellation state is the sole cancellation authority (#70 (Codeberg #48)):
   pre-call check, guest logical-error path, and epoch abort all converge on
-  one shared `CallCancelled` error. `call` takes `&self`
-  (the epoch ticker is lazily spawned via `OnceLock`); an
-  `Arc<ComponentRuntime>` can be shared across the projection (D.4) and
-  server dispatch (D.3) paths.
+  one shared `CallCancelled` error. `call` takes `&self`, launches Wasmtime on a
+  blocking worker, and drives async imports through the composed catalog's bounded
+  process-level Tokio runtime (two async workers, at most eight blocking DNS tasks).
+  The process-level epoch ticker is lazy and the `Arc<ComponentRuntime>` remains
+  shareable across projection and server dispatch.
 - `src/history.rs` owns `WorkspaceHistory`, `WorkspaceHistoryBacking`,
   `MutationRecord`, `RecordedMutation`, and `HistorySnapshot` — the private
   durable history of successfully installed Atomic Local Mutations (#63),
@@ -99,6 +95,14 @@ per-call admission step.
   history and installed evidence, then returns `ExecutionFailed`; it never
   relabels changed bytes as an uninstalled refusal. Early refusals (parse / guard / size) call
   `record_refusal` so the typed CEP code outranks the guest `Err(String)`.
+- `src/host_network.rs` implements the async `network-fetch` import (#32). It
+  validates policy before I/O, resolves and pins each connection, verifies TLS
+  with platform roots, follows at most five revalidated redirects, strips caller
+  headers on cross-origin redirects, disables compression, caps headers and the
+  final shaped body, and shares the Turn observation budget/deadline/cancellation.
+  Per-hop evidence strips userinfo/query/fragment, distinguishes host-received bytes
+  from bytes delivered to the guest, and records every post-I/O failure as an
+  `ObservedEffect`; `DeniedOperation` remains pre-I/O only.
 - `src/limits.rs` owns `ExecutionLimits`, `RecordingLimits`, and
   `AbortReason`. Resource limits use `StoreLimits` + epoch interruption +
   fuel.
@@ -120,8 +124,8 @@ per-call admission step.
   runtime: a Tool crate's own `generated/registration.rs` is not compiled
   anywhere. Since #29 it embeds `session.todo_write`, so `from_embedded()`
   composes a non-empty catalog in production; #30 added `observe.workspace`,
-  and #31 added `mutate.create` / `mutate.edit` (fetch.web remains native until
-  #32).
+  and #31 added `mutate.create` / `mutate.edit`; #32 added `fetch.web`. The
+  production composition now contains all five built-ins.
   `src/generated/noop_fixture.rs` remains the hand-maintained `test-utils`
   fixture.
 - `src/test_helpers.rs` (`test-utils` feature) provides synthetic
@@ -161,14 +165,14 @@ per-call admission step.
   generated `EXPECTED_COMPONENTS` only.
 - `test-utils` feature exposes only the fixed no-op fixture constructor
   and synthetic test helpers. Production code never enables it.
-  Domain operations arrive as handle-per-capability domain imports; #30 added
-  `workspace-observe`, #31 added `workspace-mutate`, and each binds its own cell
-  through the same `authorize_operation` seam.
+  Domain operations use handle-per-capability imports: `workspace-observe`,
+  `workspace-mutate`, and async `network-fetch`. Each binds its own Cell through
+  `authorize_operation`.
 - Every effectful Tool Host import is gated by its host-bound cell and
   concrete target. A denial rejects only that operation: the host facility
   is never invoked, the call continues, and a `DeniedOperation` is recorded
-  instead of an effect. Path/host targets are refused outright until a
-  domain channel can produce them.
+  instead of an effect. Path targets require workspace scopes; host targets
+  require network scopes. Other target kinds fail closed.
 - Admission runs per call, outside this crate (the transport), and is
   handed in through `ComponentCallContext::admitted`. The runtime never
   admits a tool itself, and no legacy effect type takes part in a decision
@@ -185,6 +189,8 @@ per-call admission step.
 - Observation changes: `cargo test -p lancet-runtime --lib host_workspace::`
   plus `LATTICE_BIN=$PWD/target/debug/lattice cargo test -p
   lattice-system-harness --test direct_observation`.
+- Network changes: `cargo test -p lancet-runtime --lib host_network::` plus
+  `cargo test -p lancet-native --test cep_component_round_trip fetch_web`.
 - Mutation changes: `cargo test -p lancet-runtime --lib host_mutate::` plus
   `LATTICE_BIN=$PWD/target/debug/lattice cargo test -p lattice-system-harness
   --test direct_mutation --test direct_failures --test direct_rewind

@@ -34,21 +34,22 @@ Layer 0.5:       net-guard
                  lattice-llm(->net-guard,conversation)
 Layer 1:         lancet-catalog(->protocol)
                  lattice-profile(->protocol)
-                 lattice-session(->conversation)
+                 lattice-session(->protocol,conversation,lattice-store)
                  lattice-agent(->llm,conversation)
 Layer 2:         lancet-dispatch(->protocol,catalog)
-                 lancet-audit(->protocol,catalog)
+                 lancet-audit(->protocol,catalog,lattice-store)
                  lancet-authority(->protocol,catalog,net-guard)
 Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
-                 lancet-runtime(->protocol,dispatch)
+                 lancet-runtime(->protocol,dispatch,authority,net-guard,
+                                lattice-store)
 Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,authority,
-                               net-guard,runtime)
+                               runtime)
 Layer 3.5:       lancet-api(->protocol,catalog,dispatch,cep,audit,authority,
                             native,runtime)
 Layer 4:         lattice-api(->lancet-api,lancet-protocol,lancet-catalog,
-                             lancet-authority,lancet-native,lattice-agent,
-                             lattice-conversation,lattice-llm,lattice-profile,
-                             lattice-session)
+                             lancet-audit,lancet-authority,lancet-native,
+                             lattice-agent,lattice-conversation,lattice-llm,
+                             lattice-profile,lattice-session)
 Layer 5:         lattice-tui(->lattice-api + presentation deps)
                  lattice-cli(->lattice-api,lattice-session,lattice-tui,
                               lancet-api + presentation deps)
@@ -60,13 +61,13 @@ lattice-system-harness (black-box tests; must not depend on product crates).
 | Crate | Role |
 |---|---|
 | `lancet-protocol` | Pure CEP wire/data contracts: JSON-RPC frames, errors, policy/effect and versioned Cell-evidence types. No I/O, no tokio. |
-| `lancet-catalog` | Typed CEP method contracts, descriptors, and the static production catalog. |
+| `lancet-catalog` | Transitional generic CEP method traits and dev-only scaffold catalog; production `catalog()` is empty after #32. |
 | `lancet-dispatch` | Method registry, typed CEP dispatch, in-process transport, cancellation. |
 | `lancet-cep` | Public CEP facade; projects LLM-facing tool schemas from the catalog. |
 | `lancet-audit` | Authoritative project-keyed Git `InvocationStore` plus pinned-view operator query/tail/replay; terminal records carry typed Cell evidence under `InvocationId`. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, effect ledger. |
-| `lancet-native` | Remaining native `fetch.web` handler, CEP server lifecycle, reservation-gated dispatch, and the Component/native split. |
-| `lancet-runtime` | WASM Component engine, closed composition gate, Tool Host enforcement, and guarded Local Workspace/history. |
+| `lancet-native` | CEP server lifecycle, reservation-gated dispatch, and transitional Component/native routing; the production native registry is empty. |
+| `lancet-runtime` | WASM Component engine, closed composition, Tool Host enforcement, guarded Local Workspace/history, and pinned GET-only network execution. |
 | `lancet-api` | Unified LANCET facade for runtime composition and Git-ledger operator reads. |
 | `net-guard` | Neutral URL/DNS safety leaf: base-URL validation, private/reserved IP checks. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, URL/DNS security, and provider replay/projection. |
@@ -83,11 +84,9 @@ lattice-system-harness (black-box tests; must not depend on product crates).
 
 ### CEP method catalog
 
-`lancet-catalog::CATALOG` is the authoritative production catalog with exactly
-**5 agent-visible methods**:
-
-`observe.workspace`, `mutate.create`, `mutate.edit`,
-`fetch.web`, `session.todo_write`.
+The built runtime exposes exactly five manifest-owned Component Tools:
+`observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`, and
+`session.todo_write`. `lancet-catalog::catalog()` is empty after #32.
 
 Audit query, tail, and replay are **operator-only** (`lattice audit` via
 `lancet-api::{query_audit, tail_audit, replay_audit}`); they are not CEP catalog

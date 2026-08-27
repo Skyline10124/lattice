@@ -15,7 +15,8 @@ composition into `lancet-runtime`.
 ## Sub-Architecture
 
 - `src/runtime.rs` owns `LancetRuntime`, `LancetServer`, server lifecycle, and
-  production composition.
+  production composition. `LancetRuntime::build` always uses the process-shared
+  generated inventory; `LancetRuntimeConfig` has no caller-supplied catalog seam.
 - `src/config.rs` owns `LancetRuntimeConfig` over policy, capability admission,
   the strict project `InvocationStore`, and WorkspaceHistory backing.
 - `src/audit.rs` is the thin delegating facade over `lancet_audit::operator`.

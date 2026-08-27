@@ -50,11 +50,6 @@ jobs:
       - run: cargo xtask harness-boundary
       - run: cargo xtask lancet-boundary
       - run: cargo xtask tool-codegen --check
-      # Plus the slots that need explicit network or longer runtime.
-      - name: explicit-network fetch contract
-        # Positive + negative fetch effect contracts; real DNS/HTTP on the
-        # runner (known-hang L-26-01 only affects DNS-blackhole environments).
-        run: cargo test -p lancet-native fetch_effect_contract
       - name: alpha rollout (locked release binary, JSON record)
         run: cargo xtask rollout --channel alpha
       # Component reproducibility evidence for #73. `cargo xtask ci` runs this

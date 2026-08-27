@@ -22,9 +22,8 @@ mod support;
 use lancet_api::LancetRuntimeConfig;
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
 use lancet_catalog::catalog;
-use lancet_cep::ToolExposure;
-use lancet_protocol::Retriability;
 use lancet_protocol::evidence::{MutationInstallation, MutationPrecondition, ObservedTarget};
+use lancet_protocol::{CepErrorCode, Retriability};
 use support::ReservedRuntime;
 use tempfile::TempDir;
 
@@ -37,14 +36,19 @@ const TODO_WRITE: &str = "session.todo_write";
 /// `lancet-catalog` types that used to describe it are gone.
 const OBSERVE_WORKSPACE: &str = "observe.workspace";
 
-/// The two embedded Component Tools of the default distribution, in the order
-/// their source directories sort.
+/// The five embedded Component Tools of the default distribution.
 const MUTATE_CREATE: &str = "mutate.create";
 const MUTATE_EDIT: &str = "mutate.edit";
-const COMPONENT_TOOLS: [&str; 4] = [OBSERVE_WORKSPACE, MUTATE_CREATE, MUTATE_EDIT, TODO_WRITE];
+const FETCH_WEB: &str = "fetch.web";
+const COMPONENT_TOOLS: [&str; 5] = [
+    OBSERVE_WORKSPACE,
+    MUTATE_CREATE,
+    MUTATE_EDIT,
+    FETCH_WEB,
+    TODO_WRITE,
+];
 
-/// Build a production runtime rooted at `root` with all five shipped Tools
-/// enabled — the one native catalog method plus four embedded Components —
+/// Build a production runtime rooted at `root` with all five Components enabled
 /// and an empty write-deny list.
 fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
     let mut policy = PolicyConfig::defaults_for_project_root(root.to_path_buf());
@@ -52,8 +56,10 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
         denied_write_patterns: Vec::new(),
         ..Default::default()
     };
-    let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
+    let enabled = COMPONENT_TOOLS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
     ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: root.to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
@@ -69,10 +75,9 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
             enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
             denied_capabilities: Default::default(),
-            max_boundary: lancet_protocol::cell::Trust::In,
+            max_boundary: lancet_protocol::cell::Trust::Ex,
         },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        components: None,
     })
     .expect("direct-local runtime builds")
 }
@@ -99,20 +104,11 @@ async fn direct_local_runtime_exposes_closed_five_method_catalog() {
     got.sort();
     assert_eq!(got, expected, "Agent-visible catalog must be exactly five");
 
-    // One of the five comes from the native catalog; the other four are the
-    // embedded Components, projected from their generated descriptors. The split
-    // moved with #31 — the Agent-visible five did not, which is the point: a
-    // migration is invisible from the model's side of the boundary.
     let native: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    let exposure = ToolExposure::from_catalog_enabled(&native).expect("exposure");
-    assert_eq!(exposure.definitions().len(), 1);
-    for migrated in COMPONENT_TOOLS {
-        assert!(
-            !native.contains(&migrated.to_string()),
-            "the migrated Tool must not be a native catalog method: {migrated}"
-        );
+    assert!(native.is_empty(), "all production methods have migrated");
+    for component in COMPONENT_TOOLS {
+        assert!(!native.contains(&component.to_string()));
     }
-
     // The Component's LLM projection carries its manifest description and schema.
     let todo = runtime
         .tool_definitions()
@@ -248,23 +244,20 @@ async fn policy_deny_blocks_create_on_direct_local() {
         denied_write_patterns: vec!["secret/**".into()],
         ..Default::default()
     };
-    let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    enabled.push(TODO_WRITE.to_string());
+    let enabled = vec![MUTATE_CREATE.to_string()];
     let runtime = ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: dir.path().to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
-        // The embedded Component Tool is admitted too: `enabled_tools` is the
-        // stage-1 capability grant, and the shipped catalog is no longer
-        // native-only (#29).
+        // Admit the exact Component under test so rejection reaches the guarded
+        // workspace policy rather than stopping at tool exposure.
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
-            enabled_tools: std::iter::once(TODO_WRITE.to_string()).collect(),
+            enabled_tools: std::iter::once(MUTATE_CREATE.to_string()).collect(),
             ..Default::default()
         },
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
-        components: None,
     })
     .expect("runtime");
     let client = runtime.client();
@@ -276,15 +269,8 @@ async fn policy_deny_blocks_create_on_direct_local() {
         )
         .await
         .expect_err("denied write must fail");
-    // The denied-write pattern is enforced by the guard / effect region
-    // check, surfacing as a guard denial or replan — never a silent install.
-    assert!(
-        matches!(
-            err.retriability,
-            Retriability::Permanent | Retriability::RequiresReplan
-        ),
-        "denied write must be rejected, got: {err:?}"
-    );
+    assert_eq!(err.code, CepErrorCode::EffectViolation, "{err:?}");
+    assert_eq!(err.retriability, Retriability::Permanent, "{err:?}");
     assert!(
         !dir.path().join("secret/leak.txt").exists(),
         "denied create must not install the file"

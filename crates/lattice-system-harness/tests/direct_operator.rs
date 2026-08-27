@@ -111,7 +111,7 @@ fn turn_id_of(turn: &SendExecution) -> String {
 }
 
 fn fetch_network_profile() -> String {
-    "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n".to_string()
+    "\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\nmax_web_response_bytes = 1024\n\n[lancet.capabilities]\nmax_boundary = \"ex\"\n".to_string()
 }
 
 fn assert_single_operator_case(
@@ -300,39 +300,37 @@ fn assert_single_operator_case(
 }
 
 #[test]
-fn direct_operator_native_terminal_contract() {
+fn direct_operator_fetch_terminal_contract() {
     let driver = driver();
-    let web = FixtureHttpServer::start(HttpFixture::plain("native operator fixture"))
+    let web = FixtureHttpServer::start(HttpFixture::plain("fetch operator fixture"))
         .expect("fixture HTTP server");
-    let fetch_url = web.url_path("/native-operator");
+    let fetch_url = web.url_path("/fetch-operator");
     let (world, spec) = direct_world(
-        "direct-operator-native",
-        "dl-op-native",
+        "direct-operator-fetch",
+        "dl-op-fetch",
         "[\"fetch.web\"]",
         &fetch_network_profile(),
     );
     let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
     let server = wire_fake_llm(
         &world,
-        "dl-op-native",
+        "dl-op-fetch",
         sequence(vec![
             tool_call("n-only", "fetch.web", &fetch_args),
-            SseScript::plain("native complete"),
+            SseScript::plain("fetch complete"),
         ]),
     );
     let scenario_evidence = evidence(&world, &spec);
     let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-op-native", "main").expect("session");
+        SessionSendDriver::new(&driver, &world, &spec, "dl-op-fetch", "main").expect("session");
     let session_id = send.session_id().to_string();
-    let turn = send
-        .send("run native operator fixture")
-        .expect("native turn");
+    let turn = send.send("run fetch operator fixture").expect("fetch turn");
     let turn_id = turn_id_of(&turn);
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
         assert_clean_send(&turn)?;
-        require(turn.has_committed_completed(), "native turn must complete")?;
+        require(turn.has_committed_completed(), "fetch turn must complete")?;
         web.wait_for_requests(1, Duration::from_secs(5))
             .map_err(|error| AssertError::StdoutMissing {
                 expected: format!("fetch fixture did not receive a request: {error}"),
@@ -341,7 +339,7 @@ fn direct_operator_native_terminal_contract() {
     })();
     finish_scenario(
         scenario_evidence,
-        &[("native operator turn", &turn.command)],
+        &[("fetch operator turn", &turn.command)],
         captures,
         result,
     );
@@ -529,7 +527,7 @@ fn direct_operator_mixed_query_tail_replay_and_status() {
     })();
     finish_scenario(
         scenario_evidence,
-        &[("mixed native/component turn", &turn.command)],
+        &[("mixed component turn", &turn.command)],
         captures,
         result,
     );
@@ -542,44 +540,45 @@ fn direct_operator_status_bounds_twenty_newest_invocations() {
         .expect("fixture HTTP server");
     let fetch_url = web.url_path("/bounded-status");
     let fetch_args = format!(r#"{{"url":"{fetch_url}"}}"#);
-    let (world, spec) = direct_world(
+    let (world, mut spec) = direct_world(
         "direct-operator-status-bound",
         "dl-op-bound",
         "[\"fetch.web\",\"session.todo_write\"]",
         &fetch_network_profile(),
     );
-    let mut scripts = Vec::new();
+    // One send durably finalizes 22 Component invocations.
+    spec.step_timeout_secs = 60;
+    let mut calls = Vec::new();
     for index in 0..11 {
-        scripts.push(tool_call(
-            &format!("bound-native-{index}"),
-            "fetch.web",
-            &fetch_args,
+        calls.push((
+            format!("bound-fetch-{index}"),
+            "fetch.web".to_string(),
+            fetch_args.clone(),
         ));
-        scripts.push(tool_call(
-            &format!("bound-component-{index}"),
-            "session.todo_write",
-            &format!(r#"{{"todos":[{{"content":"bounded {index}","status":"pending"}}]}}"#),
+        calls.push((
+            format!("bound-component-{index}"),
+            "session.todo_write".to_string(),
+            format!(r#"{{"todos":[{{"content":"bounded {index}","status":"pending"}}]}}"#),
         ));
-        scripts.push(SseScript::plain(format!("bounded turn {index} complete")));
     }
-    let server = wire_fake_llm(&world, "dl-op-bound", sequence(scripts));
+    let server = wire_fake_llm(
+        &world,
+        "dl-op-bound",
+        sequence(vec![
+            SseScript::ToolCalls { calls },
+            SseScript::plain("bounded turn complete"),
+        ]),
+    );
     let scenario_evidence = evidence(&world, &spec);
     let send =
         SessionSendDriver::new(&driver, &world, &spec, "dl-op-bound", "main").expect("session");
     let session_id = send.session_id().to_string();
-    let turns: Vec<_> = (0..11)
-        .map(|index| {
-            send.send(&format!("run bounded turn {index}"))
-                .expect("turn")
-        })
-        .collect();
+    let turn = send.send("run bounded turn").expect("turn");
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
-        for turn in &turns {
-            assert_clean_send(turn)?;
-            require(turn.has_committed_completed(), "bounded turn must complete")?;
-        }
+        assert_clean_send(&turn)?;
+        require(turn.has_committed_completed(), "bounded turn must complete")?;
         web.wait_for_requests(11, Duration::from_secs(5))
             .map_err(|error| AssertError::StdoutMissing {
                 expected: format!("fetch fixture did not receive 11 requests: {error}"),
@@ -627,15 +626,12 @@ fn direct_operator_status_bounds_twenty_newest_invocations() {
         Ok(())
     })();
 
-    let summaries: Vec<String> = (0..turns.len())
-        .map(|index| format!("bounded turn {index}"))
-        .collect();
-    let commands: Vec<(&str, &lattice_system_harness::CommandOutcome)> = summaries
-        .iter()
-        .zip(&turns)
-        .map(|(summary, turn)| (summary.as_str(), &turn.command))
-        .collect();
-    finish_scenario(scenario_evidence, &commands, captures, result);
+    finish_scenario(
+        scenario_evidence,
+        &[("bounded turn", &turn.command)],
+        captures,
+        result,
+    );
 }
 
 #[test]

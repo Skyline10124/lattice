@@ -413,10 +413,11 @@ pub(crate) async fn build_production_turn_deps(
         .map(|loaded| loaded.profile.capability_admission_policy())
         .unwrap_or_default();
 
-    // #171: use the process-level shared Component runtime so consecutive
-    // Turns skip recompilation. ComponentRuntime::shared() composes exactly
-    // once via OnceLock; subsequent calls return the same Arc.
-    let shared_components = ComponentRuntime::shared()
+    // Compile the process-level closed runtime off Tokio's async workers. The
+    // subsequent build reads the same latched instance without recompiling.
+    tokio::task::spawn_blocking(ComponentRuntime::shared)
+        .await
+        .map_err(|err| ApiError::Internal(format!("component composition worker failed: {err}")))?
         .map_err(|err| ApiError::Internal(format!("component composition: {err}")))?;
 
     let runtime = LancetRuntime::build(LancetRuntimeConfig {
@@ -427,7 +428,6 @@ pub(crate) async fn build_production_turn_deps(
         cep_mode,
         invocations: workspace_history.clone(),
         workspace_history,
-        components: Some(shared_components),
     })
     .map_err(map_lancet_err)?;
 
@@ -735,20 +735,10 @@ mod turn_wiring {
     // `lancet-api::runtime`.
 
     #[test]
-    fn catalog_exposure_omits_unknown_envelope_method() {
-        // session.envelope was removed from the catalog; attempting to enable
-        // it now produces a ToolExposureError listing it as unknown.
-        //
-        // The companion name must be a *native catalog* method, because that is
-        // the only set `from_catalog_enabled` resolves against. It used to be
-        // `observe.workspace`; since #30 that name would land in `unknown` too
-        // and the assertion would no longer isolate `session.envelope`.
-        let err = ToolExposure::from_catalog_enabled(&[
-            "mutate.create".to_string(),
-            "session.envelope".to_string(),
-        ])
-        .expect_err("session.envelope is no longer a catalog method");
-        assert!(err.unknown.contains(&"session.envelope".to_string()));
+    fn catalog_exposure_rejects_unknown_method_when_catalog_is_empty() {
+        let err = ToolExposure::from_catalog_enabled(&["session.envelope".to_string()])
+            .expect_err("production native catalog is empty");
+        assert_eq!(err.unknown, vec!["session.envelope".to_string()]);
     }
 
     /// Write a real `agent.toml` under `dir` and load it through the profile
@@ -770,10 +760,8 @@ system = "sys"
 [tools]
 enabled = ["{tool}"]
 {capabilities}"#,
-                // The embedded Component Tool: naming it here is what proves the
-                // production available set is native catalog + Component
-                // descriptors, and that a profile can enable a Component Tool at
-                // all (#29 criterion 5).
+                // A manifest-owned Component name proves the production available set
+                // comes from generated descriptors and remains profile-selectable.
                 tool = "session.todo_write",
             ),
         )

@@ -37,5 +37,6 @@ pub use lancet_protocol::{
 pub mod methods {
     //! CEP typed method modules re-exported from `lancet-catalog`.
 
+    #[cfg(feature = "inspect-scaffold")]
     pub use lancet_catalog::methods::*;
 }

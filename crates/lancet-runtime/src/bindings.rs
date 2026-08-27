@@ -32,4 +32,6 @@
 wasmtime::component::bindgen!({
     path: "wit/tool-host.wit",
     world: "tool",
+    imports: { "lattice:tool-host/network-fetch.fetch": async },
+    exports: { default: async },
 });

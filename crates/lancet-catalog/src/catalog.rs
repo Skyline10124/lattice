@@ -1,44 +1,27 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Static CEP method catalog for CEP.
+//! Transitional native CEP catalog.
 
 use crate::method::MethodDescriptor;
-use crate::methods::Fetch;
-use std::sync::LazyLock;
 
-/// Exhaustive native CEP method descriptor list in stable registration order.
-///
-/// `session.todo_write` (#29), `observe.workspace` (#30), and
-/// `mutate.create` / `mutate.edit` (#31) are not here: each is an embedded
-/// Component Tool whose source manifest is its sole descriptor authority.
-/// Removing a migrated method from this catalog is not bookkeeping — a name
-/// present in both vocabularies fails the whole server run closed
-/// (`validate_no_component_native_collision`), because a collision arms the
-/// legacy effect path against a Component's call.
-///
-/// The default distribution is five Tools: one native method (`fetch.web`)
-/// plus four Components. #32 moves the last native method.
-pub static CATALOG: LazyLock<[MethodDescriptor; 1]> =
-    LazyLock::new(|| [MethodDescriptor::for_method::<Fetch>()]);
+/// Every built-in method is now an embedded Component Tool.
+pub static CATALOG: [MethodDescriptor; 0] = [];
 
-/// Compile-time-known length of [`CATALOG`]. Mirrors the array bound in
-/// [`CATALOG`]'s type (`[MethodDescriptor; 1]`); keep these in sync when the
-/// root CEP method contract changes. Callers (e.g. the LANCET doctor) read
-/// this instead of hard-coding a method count.
-pub const CATALOG_LEN: usize = 1;
+/// Compile-time-known native catalog length.
+pub const CATALOG_LEN: usize = 0;
 
-/// Borrow the catalog as a slice.
+/// Return the production native catalog, empty after #32.
 pub fn catalog() -> &'static [MethodDescriptor] {
-    &*CATALOG
+    &CATALOG
 }
 
 #[cfg(feature = "inspect-scaffold")]
 use crate::methods::scaffold::{Inspect, Navigate};
+#[cfg(feature = "inspect-scaffold")]
+use std::sync::LazyLock;
 
-/// Feature-gated scaffold descriptors (`workspace.inspect`, `workspace.navigate`).
-///
-/// Never merged into [`catalog`] / [`CATALOG`]; use only via [`scaffold_catalog`].
+/// Feature-gated scaffold descriptors; never part of [`catalog`].
 #[cfg(feature = "inspect-scaffold")]
 pub static SCAFFOLD_CATALOG: LazyLock<[MethodDescriptor; 2]> = LazyLock::new(|| {
     [
@@ -47,7 +30,6 @@ pub static SCAFFOLD_CATALOG: LazyLock<[MethodDescriptor; 2]> = LazyLock::new(|| 
     ]
 });
 
-/// Borrow the inspect/navigate scaffold catalog (requires `inspect-scaffold` feature).
 #[cfg(feature = "inspect-scaffold")]
 pub fn scaffold_catalog() -> &'static [MethodDescriptor] {
     &*SCAFFOLD_CATALOG
@@ -55,239 +37,9 @@ pub fn scaffold_catalog() -> &'static [MethodDescriptor] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::method::CepMethod;
-    use crate::methods::Fetch;
-    use lancet_protocol::{ImpactKind, RequiredCapability};
-
-    const EXPECTED_ORDER: [&str; 1] = ["fetch.web"];
-
     #[test]
-    fn catalog_contains_expected_methods_in_stable_order() {
-        let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
-        assert_eq!(names, EXPECTED_ORDER);
-    }
-
-    #[test]
-    fn catalog_method_names_are_unique() {
-        let mut names: Vec<_> = catalog().iter().map(|d| d.name).collect();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), catalog().len());
-    }
-
-    #[test]
-    fn catalog_method_names_are_full_dotted_names() {
-        for descriptor in catalog() {
-            assert!(
-                descriptor.name.contains('.'),
-                "expected dotted name: {}",
-                descriptor.name
-            );
-            assert!(
-                !descriptor.name.contains('/'),
-                "slash names forbidden: {}",
-                descriptor.name
-            );
-        }
-    }
-
-    #[test]
-    fn catalog_descriptors_have_non_empty_descriptions() {
-        for descriptor in catalog() {
-            assert!(
-                !descriptor.description.is_empty(),
-                "empty description for {}",
-                descriptor.name
-            );
-        }
-    }
-
-    #[test]
-    fn catalog_descriptors_have_params_schema_object() {
-        for descriptor in catalog() {
-            let schema = (descriptor.params_schema)();
-            assert_eq!(
-                schema.get("type").and_then(|v| v.as_str()),
-                Some("object"),
-                "params schema for {} must be an object",
-                descriptor.name
-            );
-        }
-    }
-
-    #[test]
-    fn catalog_descriptors_declare_base_authority_requirements() {
-        for descriptor in catalog() {
-            match descriptor.name {
-                "fetch.web" => {
-                    assert!(!descriptor.base_authority.session_state);
-                    assert!(descriptor.base_authority.fetch_hosts);
-                    assert!(!descriptor.base_authority.read_audit);
-                }
-                other => panic!("unexpected catalog method: {other}"),
-            }
-        }
-    }
-
-    #[test]
-    fn catalog_impact_and_capability_match_method_constants() {
-        let catalog = catalog();
-        assert_eq!(catalog[0].impact, Fetch::IMPACT);
-        assert_eq!(catalog[0].capability, Fetch::CAPABILITY);
-        assert_eq!(Fetch::IMPACT, ImpactKind::ExternalObservation);
-        assert_eq!(Fetch::CAPABILITY, RequiredCapability::FetchUrl);
-    }
-
-    /// The native catalog is one method since #29/#30/#31 moved the rest to
-    /// embedded Component Tools. The shipped catalog is still five Tools; this
-    /// constant counts only the ones a native handler still serves.
-    #[test]
-    fn catalog_len_is_1() {
-        assert_eq!(catalog().len(), 1);
-        assert_eq!(catalog().len(), CATALOG_LEN);
-    }
-
-    /// A migrated method must not reappear as a native catalog entry: a second
-    /// descriptor beside the source manifest is exactly the parallel schema
-    /// ADR 0004 forbids, and it would arm both authorization vocabularies for
-    /// one call name (#28 design §11).
-    #[test]
-    fn migrated_component_tools_are_not_native_catalog_methods() {
-        for (method, manifest) in [
-            ("session.todo_write", "tools/todo-write/manifest.toml"),
-            ("observe.workspace", "tools/observe-workspace/manifest.toml"),
-            ("mutate.create", "tools/mutate-create/manifest.toml"),
-            ("mutate.edit", "tools/mutate-edit/manifest.toml"),
-        ] {
-            assert!(
-                catalog().iter().all(|descriptor| descriptor.name != method),
-                "{method} is a Component Tool; its descriptor authority is {manifest}"
-            );
-        }
-    }
-
-    #[test]
-    fn default_catalog_has_no_inspect_or_navigate() {
-        for descriptor in catalog() {
-            assert_ne!(descriptor.name, "workspace.inspect");
-            assert_ne!(descriptor.name, "workspace.navigate");
-        }
-    }
-}
-
-#[cfg(all(test, feature = "inspect-scaffold"))]
-mod scaffold_tests {
-    use super::*;
-    use crate::methods::scaffold::ScaffoldStubResult;
-    use schemars::schema_for;
-
-    const SCAFFOLD_ORDER: [&str; 2] = ["workspace.inspect", "workspace.navigate"];
-
-    #[test]
-    fn scaffold_catalog_contains_inspect_and_navigate() {
-        let names: Vec<_> = scaffold_catalog().iter().map(|d| d.name).collect();
-        assert_eq!(names, SCAFFOLD_ORDER);
-    }
-
-    #[test]
-    fn scaffold_descriptors_have_object_params_schema() {
-        for descriptor in scaffold_catalog() {
-            let schema = (descriptor.params_schema)();
-            assert_eq!(
-                schema.get("type").and_then(|v| v.as_str()),
-                Some("object"),
-                "params schema for {} must be an object",
-                descriptor.name
-            );
-        }
-    }
-
-    #[test]
-    fn scaffold_result_schema_includes_status_semantic_stage_and_routed() {
-        let schema = schema_for!(ScaffoldStubResult);
-        let value = serde_json::to_value(schema).expect("serialize schema");
-        let props = value["properties"]
-            .as_object()
-            .expect("object schema with properties")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for field in ["status", "semantic_stage", "routed"] {
-            assert!(
-                props.contains(&field.to_string()),
-                "ScaffoldStubResult missing {field}"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod catalog_default_snapshot {
-    use super::*;
-
-    #[test]
-    fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 1);
-        let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
-        assert_eq!(names, ["fetch.web"]);
-        for descriptor in catalog() {
-            assert_ne!(descriptor.name, "workspace.inspect");
-            assert_ne!(descriptor.name, "workspace.navigate");
-            assert_ne!(descriptor.name, "observe.audit");
-            assert_ne!(descriptor.name, "observe.audit_replay");
-        }
-    }
-
-    /// Regression test for issue #33 (Codeberg #11): audit methods are
-    /// operator-read only.
-    #[test]
-    fn catalog_excludes_audit_agent_methods() {
-        for name in ["observe.audit", "observe.audit_replay"] {
-            assert!(
-                !catalog().iter().any(|d| d.name == name),
-                "{name} must not appear in the production agent catalog"
-            );
-        }
-    }
-
-    /// Regression test for issue #26 (Codeberg #4): `exec.command_run` is
-    /// permanently retired from the CEP catalog.
-    #[test]
-    fn catalog_retires_exec_command_run() {
-        assert_eq!(catalog().len(), CATALOG_LEN);
-        assert!(
-            !catalog().iter().any(|d| d.name == "exec.command_run"),
-            "exec.command_run must not appear in the production catalog"
-        );
-    }
-
-    /// Regression test for issue #37 (Codeberg #15): `mutate.batch` is
-    /// permanently retired from the CEP catalog.
-    #[test]
-    fn catalog_retires_mutate_batch() {
-        assert_eq!(catalog().len(), CATALOG_LEN);
-        assert!(
-            !catalog().iter().any(|d| d.name == "mutate.batch"),
-            "mutate.batch must not appear in the production catalog"
-        );
-    }
-
-    /// `CATALOG_LEN` must stay in sync with the runtime catalog length so the
-    /// LANCET doctor's expected-count check cannot silently drift.
-    #[test]
-    fn catalog_len_matches_runtime_catalog() {
-        assert_eq!(CATALOG_LEN, catalog().len());
-    }
-
-    #[cfg(feature = "inspect-scaffold")]
-    #[test]
-    fn catalog_default_snapshot_scaffold_is_separate() {
-        assert_eq!(scaffold_catalog().len(), 2);
-        assert!(
-            !catalog()
-                .iter()
-                .any(|d| d.name == "workspace.inspect" || d.name == "workspace.navigate")
-        );
+    fn native_catalog_is_empty_after_fetch_web_migration() {
+        assert!(super::catalog().is_empty());
+        assert_eq!(super::CATALOG_LEN, 0);
     }
 }

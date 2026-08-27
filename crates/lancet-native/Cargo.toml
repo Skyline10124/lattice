@@ -4,10 +4,9 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LANCET native production handlers, transport integration, verify, edit, shell, and web"
+description = "LANCET CEP server lifecycle, Rewind, and transitional dispatch"
 
 [dependencies]
-net-guard = { workspace = true }
 lancet-protocol = { workspace = true }
 lancet-catalog = { workspace = true }
 lancet-dispatch = { workspace = true }
@@ -20,7 +19,6 @@ futures = { workspace = true }
 indexmap = { workspace = true }
 libc = { workspace = true }
 regex = { workspace = true }
-reqwest = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,11 +26,9 @@ tempfile = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-url = { workspace = true }
 gix = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
 # `test-fault-injection` moved down with the Local Workspace in #30: the

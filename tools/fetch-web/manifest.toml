@@ -1,0 +1,55 @@
+# Sole Tool Descriptor authority (ADR 0004 §2) for `fetch.web`.
+imports = ["network-fetch"]
+
+[tool]
+name = "fetch.web"
+version = "0.1.0"
+description = "Fetch a URL over HTTP(S) and return its text content. The URL host must be permitted by the profile network allowlist. A blocked host is a policy decision, not a transient error: do not retry the same host; use an allowed host or request the host be added to the profile network allowlist."
+abi-version = 1
+distribution = "builtin"
+
+[params]
+schema = '''
+{
+  "type": "object",
+  "properties": {
+    "url": { "type": "string", "minLength": 1 },
+    "headers": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "required": ["url"],
+  "additionalProperties": false
+}
+'''
+
+[result]
+schema = '''
+{
+  "type": "object",
+  "properties": {
+    "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+    "body": { "type": "string" },
+    "content_type": { "type": "string" },
+    "truncated": { "type": "boolean" },
+    "final_origin": { "type": "string" },
+    "redirect_count": { "type": "integer", "minimum": 0, "maximum": 5 }
+  },
+  "required": ["status", "body", "truncated"],
+  "additionalProperties": false
+}
+'''
+
+[[scopes]]
+name = "external-host"
+trust = "ex"
+channel = "network"
+
+[[capabilities]]
+name = "network.fetch"
+cell = "alloc:read:external-host"
+
+[artifact]
+sha256 = "8c64158ccbb5a27f8a0637ea0619f4a241521bb35621e0e2735ab280dc4cd2d5"
+toolchain = "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"

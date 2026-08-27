@@ -93,8 +93,8 @@ pub enum CompositionError {
     Engine(#[source] wasmtime::Error),
     #[error("linker construction failed")]
     Linker(#[source] wasmtime::Error),
-    #[error("process-level composition failed (latched): {0}")]
-    Latched(String),
+    #[error("component async runtime creation failed")]
+    AsyncRuntime(#[source] std::io::Error),
 }
 
 /// A compiled Tool ready for execution: descriptor, Component, pre-built
@@ -455,6 +455,8 @@ fn channels_for_domain_imports(imports: &BTreeSet<String>) -> BTreeSet<ChannelKi
         // reachable; the host enforces every path decision behind them.
         if interface == "workspace-observe" || interface == "workspace-mutate" {
             channels.insert(ChannelKind::Workspace);
+        } else if interface == "network-fetch" {
+            channels.insert(ChannelKind::Network);
         }
     }
     channels

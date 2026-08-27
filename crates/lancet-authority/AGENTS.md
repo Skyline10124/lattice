@@ -4,137 +4,67 @@ Crate-local guidance for `lancet-authority`.
 
 ## Role
 
-This crate owns CEP authority semantics: default policy, capability matching,
-network/observation/budget policy, Guard L1 path/scope checks, effect-region
-data, effect checking, effect ledger helpers, and boundary-credit validation.
+This crate owns host-side policy semantics: capability matching, network and
+workspace policy, observation budgets, Guard L1, effect regions/checking, and
+boundary-credit validation. It performs no Tool I/O.
 
-## Sub-Architecture
+## Sub-architecture
 
-- `src/policy/mod.rs` ties policy modules and exported config together.
-- `src/policy/default.rs` resolves default policy decisions.
-- `src/policy/capability.rs` holds `InvocationFacts` and
-  `SessionStateOperation`. Its capability *checking* left with the envelope path
-  (`ba3a8e27`); required capabilities come from catalog descriptors.
-- `src/policy/network.rs`, `observation.rs`, and `budget.rs` own
-  domain-specific policy decisions. Command policy was permanently retired with
-  `exec.command_run` (issue #26, Codeberg #4); do not reintroduce
-  `policy/command.rs` or `shell_ast.rs`. `network.rs` owns the one host
-  allow-matcher (`host_allowed_by_list`); `observation.rs` owns the one
-  observation limit set and `budget.rs` is its derived turn-scoped projection.
-- `src/policy/resolved.rs` resolves a `PolicyInput` into lexical facts. It
-  carries only the project root — limits live in `PolicyConfig`, where the
-  decision path reads them.
+- `src/policy/network.rs` validates URL policy before network I/O and owns the
+  single `allowed_hosts` matcher. `lancet-runtime::host_network` consumes it,
+  then independently validates every resolved address before connecting.
+- `src/policy/observation.rs` owns observation bounds and derives the shared
+  per-Turn budget limits.
+- `src/policy/default.rs` holds profile/external-policy configuration plus the
+  residual legacy native decision hook. The production native catalog is empty
+  after #32, so built-in Tools do not resolve through this hook.
+- `src/policy/resolved.rs` resolves only generic native catalog methods. All five
+  built-ins are intentionally unknown to it.
+- `src/policy/visibility.rs` owns read visibility and System Path Exclusion
+  semantics consumed by the runtime workspace host.
 - `src/guard.rs` owns Guard L1 path and scope verdicts.
-- `src/effect/region.rs`, `checker.rs`, and `ledger.rs` own effect regions and
-  checking.
+- `src/effect/` owns the residual legacy effect region/checker/ledger types.
 - `src/boundary_credit.rs` validates isolation boundary evidence.
+
+## Network policy
+
+`fetch.web` is fail-closed unless all applicable gates agree:
+
+- the Tool is enabled and admitted at `Trust::Ex`;
+- `allow_public_https = true`;
+- the normalized host matches non-empty `allowed_hosts`;
+- localhost additionally has `allow_localhost = true` and an exact allowlist
+  match;
+- URL, DNS result, redirect target, and connected peer pass the reserved/private
+  address rules.
+
+`host_allowed_by_list` is the only host-pattern matcher. It trims and
+ASCII-lowercases patterns; a leading dot matches the apex and subdomains. Empty
+or dots-only patterns match nothing. Keep URL policy and runtime host-target
+scope checks on this function.
 
 ## Boundaries
 
-- No native shell/filesystem/web execution or handler lifecycle code.
-- No audit row persistence; native lifecycle writes audit through
-  `lancet-audit`.
-- Keep policy decisions deterministic and explicit about allow/warn/deny/action.
-- Do not let LLM tool exposure become the authority model.
-- ADR 0004 keeps authority host-side: admission and each Tool Host operation must
-  derive from protocol Cell/capability/scope data. Components never become the
-  policy authority.
-
-## Recent Issues
-
-- ADDED #31: `mutate.create` and `mutate.edit` are embedded Component Tools.
-  The legacy `PolicyResolver` rejects both as unknown catalog methods; path
-  parsing, Mutation Preconditions, Guard L1, cancellation, and installation run
-  in `lancet-runtime`'s `workspace-mutate` host. `WorkspacePolicyConfig::
-  authorized_region_for` still materializes the mutation region consumed by
-  that host — removing legacy method resolution does not remove host-side
-  blacklist and System Path Exclusion semantics.
-- ADDED #30: `observe.workspace` is an embedded Component Tool; this crate's
-  per-method observation resolution went with it. `policy/resolved.rs` no
-  longer extracts a per-mode observation path (`observe.workspace` resolves
-  as an unknown method, pinned by
-  `resolve_observe_workspace_errors_as_unknown_method`), and
-  `policy/default.rs` dropped its WorkspaceObservation arm. What stays is the
-  *input* side the Tool Host consumes: `[lancet.workspace]` visibility
-  (included-ignored / denied-read patterns) and the `ObservationPolicyConfig`
-  limit set, now read by `lancet-runtime`'s `workspace-observe` host imports
-  rather than by a native handler.
-- ADDED #28: `CepPolicyConfig` carries `capability_admission`
-  (`CapabilityAdmissionPolicy`), the Component Tool admission inputs the native
-  transport reads per call. Every constructor initializes it fail-closed. This
-  crate does not interpret it — Cell admission lives in `lancet-runtime` and is
-  unconditional, so `CepMode` still gates only the legacy effect-region checks.
-- FIXED M-24-04: catalog descriptors declare method-local base authority
-  requirements applied through `lancet-cep::BaseAuthorityPlan`; this crate
-  remains the policy/guard/effect authority implementation.
-- FIXED #46 (Codeberg #24): declared denied effect kinds are rejected before
-  handler dispatch; observed-effect checks remain post-dispatch defense in
-  depth.
-- FIXED #122: `policy::network::host_allowed_by_list` (with
-  `normalize_host_pattern`) is the one `allowed_hosts` matcher. Network URL
-  validation, `DefaultPolicyHook`, and `AuthorizedEffectRegion::contains` all
-  call it; `authorized_region_for` stores `region.hosts` in comparison form.
-  Semantics: trim, ASCII-lowercase, leading dot means suffix match including the
-  apex domain, empty/dots-only patterns match nothing. Three implementations with
-  two semantics previously made `.example.com` pass the policy layers and fail
-  the region as an `EffectViolation`.
-  What an *empty* `allowed_hosts` means stays per-layer on purpose: URL
-  validation falls back to `allow_public_https`, while the region grants no host,
-  so Enforce-mode `fetch.web` fails closed before outbound I/O. That asymmetry is
-  pinned by the harness scenario
-  `direct_tools_fetch_capability_denial_with_public_https`; do not converge it by
-  loosening the region.
-- FIXED #121: every configurable key in this crate has an execution-side reader.
-  `ObservationPolicyConfig` is the one limit set and `BudgetLimits` is its
-  two-field derived projection (`budget_limits()`), so the external policy file's
-  `[budget]` (now a deprecated alias of `[observation]`) can no longer land in
-  slots nothing reads. Deleted as write-only residue: `ObservationPolicyConfig::
-  allowed_roots` + `resolve_observation_target` (read scope is the canonical
-  project root plus `[lancet.workspace]` visibility), `MethodPolicy::
-  {allowed_sources, required_capability, max_single_read_bytes}`,
-  `CapabilitySourceClass`/`CapabilitySourcePolicy`/`PolicyConfig::
-  capability_sources` and their TOML tables, and the four unread `PolicyResolver`
-  fields. `MethodPolicy` keeps `enabled` + `max_todo_ops`, both with readers.
-- WATCH: `PolicyReasonCode::CapabilitySourceNotAllowed`
-  (`lancet-protocol/src/policy.rs`) has no producer since `ba3a8e27` — the same
-  envelope residue as #121, but protocol-stable serialized surface, so its
-  removal is a separate decision.
-- WATCH: `mode = off` skips effect-region checks only; policy, capability,
-  effect-kind denial, and native routing remain active.
-- No current root finding is isolated solely to this crate.
-
-## Next Actions
-
-- Keep base-authority grant expansion outside this crate unless it becomes a
-  policy decision; this crate should validate capabilities, policy, guard, and
-  effect semantics.
-- Any new host comparison must call `policy::network::host_allowed_by_list`. Do
-  not hand-roll trim / lowercase / leading-dot handling — that is what #122 was.
-- Every configurable policy key must have an execution-side reader, and any value
-  duplicated across structs must be derived, not copied (#121). A key that is
-  validated but unread is worse than an unsupported key: an unsupported key
-  errors, an unread one silently leaves policy wider than the operator intended.
-- Add policy coverage whenever new decision reasons are introduced.
-- Preserve Guard L1 path traversal and project-root escape tests for every path
-  handling change.
-- Retire legacy envelope/base-authority/effect-region vocabulary only after all
-  behavior consumers use the Cell path; do not run permanent dual authority
-  models. The four deletion preconditions are in root `AGENTS.md` (full record:
-  #28 design §11).
-
-## Record Maintenance
-
-- Update `Recent Issues` and `Next Actions` when policy, guard, effect
-  region, or boundary-credit behavior changes.
-- Record unresolved authority risks in root `FINDINGS.md`.
-- Record landed authority fixes in root `FIX.md` with tests run.
-- Keep cross-crate authority notes here only if they affect local edit strategy.
-- Keep this file near 80 lines by replacing stale issue notes with current ones.
+- Keep decisions deterministic and I/O-free. DNS, sockets, TLS, redirects, and
+  response shaping belong to `lancet-runtime`.
+- Components declare requested Cells; host admission and each Tool Host import
+  remain the authority.
+- Do not let LLM tool exposure grant authority.
+- Keep audit persistence in `lancet-audit` and server lifecycle in
+  `lancet-native`.
+- Add policy readers with their config keys. Reject unsupported keys rather than
+  accepting values that execution ignores.
+- Retire legacy envelope/base-authority/effect vocabulary only when the root
+  `AGENTS.md` preconditions all hold.
 
 ## Verification
 
 - Local: `cargo test -p lancet-authority`.
-- Policy/guard/effect changes: include property tests and integration tests in
-  native/API paths.
-- Boundary-credit changes should validate both accepted evidence and rejected
-  unsupported credit claims.
+- Network changes: also run `cargo test -p lancet-runtime --lib host_network::`
+  and the `lancet-native` `fetch_web` Component round trips.
+- Guard/effect changes: run both accepted and rejected integration cases.
+
+## Record maintenance
+
+Update this file when policy ownership moves. Record landed fixes in root
+`FIX.md`; keep only open residuals in `FINDINGS.md`.

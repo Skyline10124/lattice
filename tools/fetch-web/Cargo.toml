@@ -1,0 +1,19 @@
+[package]
+name = "fetch-web"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+description = "fetch.web Source Tool: typed request and result shaping over the GET-only network-fetch host import."
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+
+[dependencies]
+lattice-tool-prelude = { workspace = true }
+wit-bindgen = { workspace = true }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

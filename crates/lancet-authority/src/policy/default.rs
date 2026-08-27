@@ -14,9 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use lancet_protocol::policy::{
-    PolicyActionRequired, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
-};
+use lancet_protocol::policy::{PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode};
 
 use super::network::NetworkPolicyConfig;
 use super::observation::ObservationPolicyConfig;
@@ -108,25 +106,6 @@ impl WorkspacePolicy {
 
         let mut region = AuthorizedEffectRegion::empty();
         match method {
-            // The `observe.workspace` arm (WorkspaceObservation plus the `.`
-            // observation-root sentinel) lived here. It is a Component Tool since
-            // #30, so no native method reaches this function with that name and
-            // Cell admission plus the Tool Host's own scope check are its
-            // authority — a legacy region for it would be a second, unreachable
-            // grant. `AuthorizedEffectRegion::observation_roots` stays: the effect
-            // checker still compares against it for regions built elsewhere.
-            "fetch.web" => {
-                region.kinds.insert(ImpactKind::ExternalObservation);
-                // Normalize at the construction site (#122) so the region carries
-                // comparison-form patterns; `contains` applies the same shared
-                // matcher the network/policy layers use.
-                region.hosts = policy
-                    .network
-                    .allowed_hosts
-                    .iter()
-                    .map(|host| super::network::normalize_host_pattern(host))
-                    .collect();
-            }
             "mutate.create" | "mutate.edit" => {
                 region.kinds.insert(ImpactKind::WorkspaceMutation);
                 // System Path Exclusions are host-enforced and not
@@ -485,74 +464,7 @@ impl DefaultPolicyHook {
             };
         }
 
-        if let Some(denied) = self.check_network_and_budget(resolved) {
-            return denied;
-        }
-
         self.allowed_outcome_direct(resolved)
-    }
-
-    fn check_network_and_budget(
-        &self,
-        resolved: &super::resolved::ResolvedPolicyInput,
-    ) -> Option<RichPolicyOutcome> {
-        if resolved.method == "fetch.web"
-            && let Some(net) = &resolved.resolved_network
-            && !self.config.network.allowed_hosts.is_empty()
-        {
-            // Single shared matcher (#122): policy, network validation, and the
-            // effect region must agree on `allowed_hosts` semantics.
-            let allowed =
-                super::network::host_allowed_by_list(&net.host, &self.config.network.allowed_hosts);
-            if !allowed {
-                return Some(RichPolicyOutcome {
-                    decision: PolicyDecision::Denied {
-                        reason_code: PolicyReasonCode::NetworkDenied,
-                        message: format!("host '{}' not in allowed_hosts", net.host),
-                        action_required: Some(PolicyActionRequired::ChangeUrl),
-                    },
-                    evidence: PolicyEvidence {
-                        network_host: Some(net.host.clone()),
-                        ..Default::default()
-                    },
-                });
-            }
-        }
-
-        let budget = &resolved.budget_snapshot;
-        // `fetch.web` is the last native method that spends the per-turn
-        // observation budget, so this pre-dispatch refusal narrows to it (#30
-        // moved `observe.workspace` out of the catalog). The budget itself is not
-        // residue: `ObservationBudgetTracker::try_charge_observation` is still
-        // charged by the `fetch.web` handler and, for the migrated Tool, by the
-        // closure the native transport hands
-        // `lancet_runtime::WorkspaceObservationHost` — the Component path refuses
-        // on the same shared turn tracker, one layer lower.
-        let is_observation = resolved.method == "fetch.web";
-        if is_observation
-            && budget.turn_observation_bytes_used >= budget.turn_observation_bytes_limit
-        {
-            return Some(RichPolicyOutcome {
-                decision: PolicyDecision::Denied {
-                    reason_code: PolicyReasonCode::BudgetExceeded,
-                    message: "turn observation budget exhausted".into(),
-                    action_required: Some(PolicyActionRequired::ReduceReadSize),
-                },
-                evidence: PolicyEvidence {
-                    budget_remaining: Some(
-                        budget
-                            .turn_observation_bytes_limit
-                            .saturating_sub(budget.turn_observation_bytes_used),
-                    ),
-                    ..Default::default()
-                },
-            });
-        }
-        // The per-turn todo-ops budget check lived here. `session.todo_write` is
-        // a Component Tool since #29, so no native method reaches this branch;
-        // see FINDINGS.md for the residual (Component result accounting measures
-        // but does not charge, per #27/#28).
-        None
     }
 
     fn allowed_outcome_direct(
@@ -689,118 +601,6 @@ mod tests {
         ));
     }
 
-    // ── Test 4: fetch.web with disallowed host ─────────────────────────
-
-    #[test]
-    fn default_hook_denies_web_fetch_with_disallowed_host() {
-        let mut config = test_config();
-        config.network.allowed_hosts = vec!["allowed.example".into()];
-        config.network.allow_public_https = false;
-        let hook = DefaultPolicyHook::new(config);
-        let input = PolicyInput {
-            method: "fetch.web".into(),
-            params: json!({"url": "https://evil.example.com/page"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(default_budget()),
-        };
-        let outcome = hook.decide_with_evidence(&input);
-        assert!(matches!(
-            outcome.decision,
-            PolicyDecision::Denied {
-                reason_code: PolicyReasonCode::NetworkDenied,
-                ..
-            }
-        ));
-    }
-
-    /// #122: the hook honours the same non-canonical `allowed_hosts` forms the
-    /// matcher does, and the region it hands to the effect checker stores the
-    /// comparison form — so a leading-dot entry cannot be allowed here and then
-    /// rejected as an `EffectViolation`.
-    #[test]
-    fn default_hook_and_region_agree_on_non_canonical_allowed_hosts() {
-        for pattern in [".example.com", "Example.com", " example.com "] {
-            let mut config = test_config();
-            config.network.allowed_hosts = vec![pattern.to_string()];
-            config.network.allow_public_https = false;
-            let policy = config.to_cep_policy_config();
-            let region = config.workspace.authorized_region_for("fetch.web", &policy);
-            for host in ["example.com", "api.example.com"] {
-                let granted = super::super::network::host_allowed_by_list(
-                    host,
-                    &config.network.allowed_hosts,
-                );
-                let region_grants = region.contains(&crate::effect::ledger::ObservedEffect {
-                    kind: ImpactKind::ExternalObservation,
-                    scope: crate::effect::ledger::ObservedScope::Host(host.to_string()),
-                    required_capability: lancet_catalog::method::RequiredCapability::FetchUrl,
-                    source: crate::effect::ledger::EffectSource::HandlerBackend,
-                });
-                assert_eq!(
-                    granted, region_grants,
-                    "pattern {pattern:?} host {host}: policy={granted} region={region_grants}"
-                );
-            }
-
-            let hook = DefaultPolicyHook::new(config);
-            let outcome = hook.decide_with_evidence(&PolicyInput {
-                method: "fetch.web".into(),
-                params: json!({"url": "https://api.example.com/v1"}),
-                authority: PolicyAuthorityInput,
-                audit_context: audit_ctx(default_budget()),
-            });
-            let allowed = matches!(outcome.decision, PolicyDecision::Allowed);
-            // Only the leading-dot form covers the subdomain; the exact forms
-            // must deny it. Either way the region above agreed.
-            assert_eq!(
-                allowed,
-                pattern.trim().starts_with('.'),
-                "pattern {pattern:?} produced decision {:?}",
-                outcome.decision
-            );
-        }
-    }
-
-    /// The region carries patterns in comparison form, not the operator's
-    /// literal profile text (#122).
-    #[test]
-    fn authorized_region_stores_normalized_hosts() {
-        let mut config = test_config();
-        config.network.allowed_hosts = vec![" Example.COM ".into(), ".Example.com".into()];
-        let policy = config.to_cep_policy_config();
-        let region = config.workspace.authorized_region_for("fetch.web", &policy);
-        assert_eq!(region.hosts, vec!["example.com", ".example.com"]);
-    }
-
-    // ── Test 5: observation over budget ────────────────────────────────
-
-    /// The per-turn observation budget refusal is the mechanism under test, not
-    /// the method: it moved onto `fetch.web`, the last native observation method,
-    /// when #30 took `observe.workspace` out of the catalog.
-    #[test]
-    fn default_hook_denies_observation_over_budget() {
-        let hook = DefaultPolicyHook::new(test_config());
-        let input = PolicyInput {
-            method: "fetch.web".into(),
-            params: json!({"url": "https://example.com/page"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(PolicyBudgetSnapshot {
-                turn_observation_bytes_used: 65536,
-                turn_observation_bytes_limit: 65536,
-                todo_ops_used: 0,
-                todo_ops_limit: 10,
-            }),
-        };
-        let outcome = hook.decide_with_evidence(&input);
-        assert!(matches!(
-            outcome.decision,
-            PolicyDecision::Denied {
-                reason_code: PolicyReasonCode::BudgetExceeded,
-                ..
-            }
-        ));
-    }
-
     // ── Test 6: Denied for unknown method ──────────────────
 
     #[test]
@@ -930,9 +730,7 @@ max_todo_ops = 22
     /// #121: the retired `[capability_sources]` table and the three retired
     /// `[methods.*]` keys are hard parse errors, not silently ignored settings.
     ///
-    /// The per-method table is keyed on `fetch.web`, the sole remaining native
-    /// method: the mechanism under test is `deny_unknown_fields` on
-    /// `ExternalMethodPolicy`, not acceptance of a migrated method name.
+    /// The method name is only a stable fixture for `deny_unknown_fields`.
     #[test]
     fn retired_external_policy_keys_fail_to_parse() {
         for retired in [
@@ -947,71 +745,6 @@ max_todo_ops = 22
                 "retired external policy key must be rejected: {retired}"
             );
         }
-    }
-
-    // ── Test 9: decide_resolved is pure ────────────────────────────────
-
-    /// Purity is asserted through the remaining native method and includes its
-    /// resolved network fact, rather than comparing two unknown-method errors.
-    #[test]
-    fn decide_resolved_is_pure_same_input_same_output() {
-        let hook = DefaultPolicyHook::new(test_config());
-        let input = PolicyInput {
-            method: "fetch.web".into(),
-            params: json!({"url": "https://example.com/page"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(default_budget()),
-        };
-        let outcome1 = hook.decide_with_evidence(&input);
-        let outcome2 = hook.decide_with_evidence(&input);
-        assert_eq!(outcome1.decision, outcome2.decision);
-        assert!(
-            outcome1.evidence.network_host.is_some(),
-            "the purity comparison must have a resolved host to compare"
-        );
-        assert_eq!(
-            outcome1.evidence.network_host,
-            outcome2.evidence.network_host
-        );
-    }
-
-    // ── Test 10: decide_with_evidence contains rich facts ──────────────
-
-    /// Rich legacy evidence now comes from `fetch.web`; mutation evidence is
-    /// produced by `lancet-runtime`'s Component Tool Host path.
-    #[test]
-    fn decide_with_evidence_contains_rich_facts() {
-        let hook = DefaultPolicyHook::new(test_config());
-        let input = PolicyInput {
-            method: "fetch.web".into(),
-            params: json!({"url": "https://example.com/page"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(default_budget()),
-        };
-        let outcome = hook.decide_with_evidence(&input);
-        assert_eq!(outcome.decision, PolicyDecision::Allowed);
-        assert!(outcome.evidence.budget_remaining.is_some());
-        assert_eq!(
-            outcome.evidence.network_host.as_deref(),
-            Some("example.com")
-        );
-    }
-
-    // ── Additional: PolicyHook::decide returns stable PolicyDecision ───
-
-    #[test]
-    fn policy_hook_decide_returns_stable_decision() {
-        // The trait impl must forward the allow outcome from the one remaining
-        // native method.
-        let hook = DefaultPolicyHook::new(test_config());
-        let input = PolicyInput {
-            method: "fetch.web".into(),
-            params: json!({"url": "https://example.com/page"}),
-            authority: PolicyAuthorityInput,
-            audit_context: audit_ctx(default_budget()),
-        };
-        let decision = hook.decide(&input);
-        assert_eq!(decision, PolicyDecision::Allowed);
     }
 
     // ── Additional: to_cep_policy_config backward compat ───────────

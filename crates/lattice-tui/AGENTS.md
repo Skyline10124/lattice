@@ -27,7 +27,7 @@ edge. Do not create `render/` in this crate until #116.
 
 ## Source layout
 
-- `lib.rs` — public surface (`TuiOptions`, `run`) and module tree
+- `lib.rs` — public surface (`TuiOptions`, `run`) and blocking-pool Component warmup
 - `session.rs` — session open/create, profile load, `SessionApi` per turn
 - `app.rs` — three-arm event loop, `App` state, `TurnEvent` → `Block`
 - `input.rs` — `InputBuffer`, `History`, key dispatch

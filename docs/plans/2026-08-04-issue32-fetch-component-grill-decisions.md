@@ -106,18 +106,21 @@ Cloudflare/反自动化响应不伪装成空成功：
 至少覆盖三条回归：带 `Set-Cookie` 的 403 challenge HTML、空 body 的 429、
 带敏感 headers 的 200 正常 body。
 
-### D7. 网络 evidence 保存完整 URL；取消 digest，并要求精确 invocation 关联
+### D7. 网络 evidence 保存脱敏 URL；取消 digest，并要求精确 invocation 关联
 
-- 本地 evidence 对初始请求及每个 redirect hop 保存完整规范化 URL，包括
-  path/query。fragment 不发送也不保存；含 URL userinfo（`user:pass@`）的输入
-  直接拒绝。
-- 不保存 URL digest。该数据库由操作者审自己的 Agent；只有 digest 而丢失原始
-  URL 无法独立证明访问目标，继续同时保存 URL 与 digest 也没有额外价值。
-- 已明确接受：签名 URL 或 query token 会随完整 URL 写入本地 evidence。不要
-  另外保存 header values、Cookie、body 或 Host 管理的凭证。
-- 每个 hop 的 network evidence 至少包含：完整 target URL、DNS candidates、typed
-  transport state（实际 peer / TLS / failure phase）、`http_status`（如有）、字节
-  计数与 policy verdict。`origin` 可由 URL 唯一派生，不重复持久化。
+> 2026-08-27 review amendment: maintainer authorization after the #32 implementation review
+> supersedes the earlier decision to persist query tokens in local evidence.
+
+- 本地 evidence 对初始请求及每个 redirect hop 保存规范化 scheme、host、port 与
+  path；userinfo、query、fragment 均不持久化。Host 只在内存中的 transport URL
+  保留 query，因此签名 URL、API key 与 session token 不进入 durable ledger。
+- 不保存 URL digest。脱敏 URL 仍能独立证明访问的 endpoint/path；digest 既不能
+  恢复目标，也不能替代证据脱敏。不要保存 header values、Cookie、body 或 Host
+  管理的凭证。
+- 每个 hop 的 network evidence 至少包含：脱敏 target URL、DNS candidates、typed
+  transport state（实际 peer / TLS / failure phase）、`http_status`（如有）、从
+  transport 有界读取的原始 body bytes、实际交付 guest 的整形 body bytes，以及 policy verdict。
+  `origin` 可由 URL 唯一派生，不重复持久化。
 - 已连接/观察到的 hop 附着在现有 `ObservedEffect` 路径；在连接前被政策或安全
   检查阻止的 hop 附着在现有 `DeniedOperation` 路径。网络细节作为共享的可选
   `NetworkEvidence` 扩展现有 versioned evidence records，不新建平行 evidence
@@ -177,7 +180,7 @@ cell = "alloc:read:external-host"
 - `redirect_count?`：实际跟随的 redirect 数，初始直达响应为 0。
 
 `final_origin` / `redirect_count` 使用 additive optional 字段。Agent 因此可以确认
-正文是否完整、最终站点与 redirect 数，但只有本地 evidence 保存完整 hop URLs。
+正文是否完整、最终站点与 redirect 数；本地 evidence 只保存脱敏 hop URLs。
 
 ### D11. `network-fetch` 成功面是一个 typed `fetch` interface
 
@@ -366,14 +369,15 @@ struct NetworkEvidence {
     dns_candidates: Vec<NetworkEndpoint>,
     transport: TransportEvidence,
     http_status: Option<u16>,
+    body_bytes_received: Option<u64>,
     body_bytes_returned: Option<u64>,
     policy_verdict: NetworkPolicyVerdict,
     failure_phase: Option<NetworkFailurePhase>,
 }
 ```
 
-- 不保存重复 `origin`；operator projection 从完整规范化 `url` 派生。Agent-facing
-  `final_origin` 仍保留，因为模型不读取包含 path/query/token 的 evidence URL。
+- 不保存重复 `origin`；operator projection 从脱敏 `url` 派生。Agent-facing
+  `final_origin` 保留，模型不读取 Host-only network evidence。
 - Evidence 使用 `http_status`；WIT `fetch-response.status` 保持简名，因为那个
   interface 已明确是 HTTP。
 - `connected_peer=None` + `failure_phase=Connect` 是 TCP connect failure；peer

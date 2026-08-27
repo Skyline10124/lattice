@@ -6,8 +6,8 @@ use lancet_authority::policy::default::DefaultPolicyHook;
 use lancet_protocol::CepError;
 use lancet_protocol::cell::ToolDescriptor;
 use lancet_runtime::{
-    BudgetCharge, BudgetRefusal, ComponentRuntime, LocalWorkspace, WorkspaceHistory,
-    WorkspaceMutationHost, WorkspaceObservationHost,
+    BudgetCharge, BudgetRefusal, BudgetRemaining, ComponentRuntime, LocalWorkspace,
+    NetworkFetchHost, WorkspaceHistory, WorkspaceMutationHost, WorkspaceObservationHost,
 };
 use std::sync::Arc;
 
@@ -71,6 +71,46 @@ pub(super) fn workspace_observation_host(
         cep_context.policy.observation.clone(),
         charge,
         scope.name.clone(),
+    )))
+}
+
+/// Build the GET-only network host for the migrated `fetch.web` Component.
+pub(super) fn network_fetch_host(
+    descriptor: &ToolDescriptor,
+    method: &str,
+    cep_context: &Arc<CepTurnContext>,
+) -> Option<Arc<NetworkFetchHost>> {
+    use lancet_protocol::cell::ChannelKind;
+
+    if method != "fetch.web" {
+        return None;
+    }
+    let network_scope = descriptor
+        .scopes
+        .iter()
+        .find(|scope| scope.channel == ChannelKind::Network)?;
+    let charge_budget = Arc::clone(&cep_context.budget);
+    let charge: BudgetCharge = Arc::new(move |bytes: usize| {
+        charge_budget
+            .try_charge_observation(bytes)
+            .map_err(|exhausted| BudgetRefusal {
+                limit: exhausted.limit,
+                requested: exhausted.requested,
+                remaining: exhausted.remaining,
+            })
+    });
+    let remaining_budget = Arc::clone(&cep_context.budget);
+    let remaining: BudgetRemaining = Arc::new(move || {
+        let snapshot = remaining_budget.snapshot();
+        snapshot
+            .max_turn_observation_bytes
+            .saturating_sub(snapshot.turn_observation_bytes_used)
+    });
+    Some(Arc::new(NetworkFetchHost::new(
+        cep_context.policy.network.clone(),
+        charge,
+        remaining,
+        network_scope.name.clone(),
     )))
 }
 

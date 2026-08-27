@@ -7809,3 +7809,77 @@ with the 180-second total and every global harness/xtask timeout unchanged.
 - **Changed files:** `tools/todo-write/manifest.toml`,
   `tools/todo-write/generated/{descriptor.json,llm-projection.json,expected-identity.json}`,
   `crates/lancet-runtime/src/generated/host_composition.rs`, and `FIX.md`.
+
+## 2026-08-27 — GitHub #32 migrate `fetch.web` to a closed Component Tool
+
+- **ID/severity:** GitHub #32 / HIGH architecture and network-authority migration.
+- **Problem:** `fetch.web` remained the final native catalog method, with a second native
+  descriptor/handler/effect-contract stack beside the ADR 0004 manifest-defined Component
+  catalog. That kept the native production registry non-empty, split network admission and
+  evidence ownership across layers, and blocked retirement of the native/CEP dispatch seam.
+- **Fix:** added `tools/fetch-web` as a manifest-defined WASM Component and generated its
+  descriptor, LLM projection, identity, and embedded host composition. Added one GET-only
+  `network-fetch` Tool Host import in `lancet-runtime` with exact Cell admission, URL and
+  header validation, DNS rebinding/SSRF checks, pinned candidates, TLS verification, bounded
+  redirects/body/headers, cancellation/deadline handling, pre-I/O observation-budget refusal,
+  and typed per-hop network evidence. The native catalog is now empty; native `fetch.web`
+  handlers, executor, policy matrix, fuzz scaffolding, dependencies, and obsolete warn report
+  were deleted. Legacy non-empty `[lancet.effects] deny` now fails closed and points operators
+  to `[lancet.capabilities] deny`; the resulting diff deletes roughly 2,000 more lines than
+  it adds.
+- **Verification:**
+  - Focused `fetch.web` Component round trip, dogfood evidence, localhost denial, scheme
+    denial, response limit, and authority/network-policy regressions passed.
+  - `cargo test -p lancet-authority -p lancet-runtime -p lancet-api` passed, including 200
+    `lancet-runtime` tests; affected all-target Clippy with `-D warnings` passed.
+  - Independent general and security reviews found no blocking issue after fixes; the
+    security re-review reported zero Critical, High, or Medium findings.
+  - `env -u LATTICE_BIN cargo xtask ci` passed formatting, Clippy, boundary gates, generated
+    Tool drift checks, every workspace/guest test, Direct-Local harness suites, and doctests.
+- **Changed files:** `tools/fetch-web/**`, `crates/lancet-runtime/{wit/tool-host.wit,src/**}`,
+  `crates/lancet-protocol/src/evidence.rs`, native catalog/server and authority-policy cleanup,
+  LATTICE API/profile/harness migrations, generated host composition, workspace manifests,
+  architecture/testing documentation, `FINDINGS.md`, and `FIX.md`.
+
+## 2026-08-27 — GitHub #32 post-implementation security and acceptance review fixes
+
+- **ID/severity:** GitHub #32 review follow-up / HIGH evidence confidentiality plus MEDIUM
+  network, resource-bound, and acceptance-contract defects.
+- **Problem:** durable network evidence retained URL query credentials; IPv6 special-purpose
+  classification omitted current IANA ranges; post-DNS policy refusals were mislabeled as
+  pre-I/O denials; and one byte field conflated data received by the host with data returned
+  to the guest. Component startup also exposed a caller-supplied production catalog seam and
+  created one Tokio runtime per Tool call. Two acceptance tests could pass without traversing
+  the policy/finalization contracts they named.
+- **Fix:** evidence now strips userinfo/query/fragment and separates bounded raw transport
+  bytes from guest-delivered shaped bytes. Tool egress rejects the missing IPv6 ranges,
+  DNS-or-later failures stay effects, and network targets require canonical URL-host syntax.
+  Production composition always uses the
+  shared generated inventory, initializes off async workers, and owns one bounded async/DNS
+  runtime. The direct policy test now admits `mutate.create` before checking the write deny;
+  dogfood finalization now persists the production canonical `ResultDraft` before terminal
+  publication. Regression coverage pins URL redaction, IPv6 boundaries, typed capability
+  errors, shared composition, and received/delivered evidence.
+- **Verification:**
+  - `cargo test -p net-guard -p lancet-protocol -p lancet-runtime -p lancet-native -p
+    lancet-api -p lattice-api -p lattice-tui` — passed.
+  - `env -u LATTICE_BIN cargo xtask ci` — passed formatting, Clippy, boundary and generated
+    artifact gates, every workspace/Component test, Direct-Local harness suites, and doctests.
+- **Changed files:** network guard/evidence/runtime composition and host code, API/TUI startup
+  seams, Direct-Local and dogfood acceptance tests, #32 decision and architecture documents,
+  and `FIX.md`.
+
+## 2026-08-27 — PR #175 newest-20 operator scenario timeout
+
+- **ID/severity:** PR #175 CI follow-up / LOW test-budget defect.
+- **Problem:** `direct_operator_status_bounds_twenty_newest_invocations` sends 22 Tool calls in
+  one Turn so it can prove `lancet status` keeps exactly the newest 20. After `fetch.web` moved
+  to the Component path, the GitHub runner exceeded the generic 30-second command timeout and
+  reported `TimedOut(30s)`. The same test took 25.7 seconds locally, leaving too little runner
+  margin; product assertions and every other CI test passed.
+- **Fix:** give only this intentionally heavy scenario a 60-second step timeout. Keep the shared
+  Direct-Local default at 30 seconds and the scenario total budget at 180 seconds.
+- **Verification:** the exact test under two same-core CPU burners failed before the fix at
+  30.10 seconds and passed after it at 39.30 seconds. The full `direct_operator` target passed
+  6/6, and `env -u LATTICE_BIN cargo xtask ci` passed all gates.
+- **Changed files:** `crates/lattice-system-harness/tests/direct_operator.rs`, `FIX.md`.

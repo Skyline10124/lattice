@@ -4,7 +4,6 @@
 use crate::turn::cep::ToolExecutionError;
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
-use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::test_method::{TestEcho, TestEchoParams, TestEchoResult};
 use lancet_native::{CepServerNativeExt, CepTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::effect_types::ImpactKind;
@@ -256,40 +255,27 @@ async fn reserved_cep_client_parse_error_maps_to_32700() {
     assert_cep_payload(&err, jsonrpc::PARSE_ERROR);
 }
 
-/// A single-name enabled set lets that name through the reserved client and the
-/// arguments reach the handler.
-///
-/// Driven through `fetch.web`: this fixture needs a *registrable* handler seam.
-/// Component Tools have no `register_method` seam; their reserved-client coverage lives
-/// in `component_client::reserved_cep_client_executes_component_tool`.
+/// An enabled registry method receives its reserved arguments.
 #[tokio::test]
-async fn reserved_cep_client_allows_enabled_native_method() {
-    let mut registry = MethodRegistry::new();
-    registry
-        .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
-            Ok(FetchResult {
-                status: 200,
-                body: "ok-from-handler".into(),
-                content_type: None,
-                truncated: None,
-            })
+async fn reserved_cep_client_allows_enabled_registry_method() {
+    let adapter = reserved_client_over_registry(todo_registry(|params, _ctx| async move {
+        Ok(TestEchoResult {
+            items: params.items,
         })
-        .unwrap();
-    let adapter = reserved_client_over_registry(registry).await;
+    }))
+    .await;
 
     let result = adapter
         .execute_reserved(&ToolCall {
             function: FunctionCall {
-                name: "fetch.web".to_string(),
-                arguments: r#"{"url":"https://example.com/"}"#.to_string(),
+                name: TestEcho::NAME.to_string(),
+                arguments: r#"{"items":[{"content":"ok-from-handler","status":"completed"}]}"#
+                    .to_string(),
             },
         })
         .await
-        .expect("enabled tool should execute");
-    assert!(
-        result.contains("ok-from-handler") || result.contains("status"),
-        "handler result must surface through the reserved client: {result}"
-    );
+        .expect("enabled registry method should execute");
+    assert!(result.contains("ok-from-handler"));
 }
 
 #[tokio::test]
@@ -309,40 +295,25 @@ async fn reserved_cep_client_unknown_method_maps_to_32601() {
     assert_cep_payload(&err, jsonrpc::METHOD_NOT_FOUND);
 }
 
-/// Params the handler's type cannot accept fail as invalid_params (-32602).
-///
-/// Driven through `fetch.web`: this asserts the *native registry's* server-side
-/// validation, which needs a registered handler. `url` is the omitted required
-/// field.
+/// Handler parameter schema failures map to JSON-RPC invalid params.
 #[tokio::test]
 async fn reserved_cep_client_invalid_params_maps_to_32602() {
-    let mut registry = MethodRegistry::new();
-    registry
-        .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
-            Ok(FetchResult {
-                status: 200,
-                body: "ok".into(),
-                content_type: None,
-                truncated: None,
-            })
+    let adapter = reserved_client_over_registry(todo_registry(|params, _ctx| async move {
+        Ok(TestEchoResult {
+            items: params.items,
         })
-        .unwrap();
-    let adapter = reserved_client_over_registry(registry).await;
+    }))
+    .await;
 
     let err = adapter
         .execute_reserved(&ToolCall {
             function: FunctionCall {
-                name: "fetch.web".to_string(),
-                arguments: r#"{"headers":{}}"#.to_string(),
+                name: TestEcho::NAME.to_string(),
+                arguments: r#"{"wrong":[]}"#.to_string(),
             },
         })
         .await
         .expect_err("schema mismatch must fail");
-
-    // D.5: the adapter no longer does client-side typed deserialization,
-    // so it does not extract the missing field path. The server-side native
-    // registry validates params and returns invalid_params (-32602) with
-    // field="params" (the registry's default, not the extracted field name).
     assert_cep_payload(&err, jsonrpc::INVALID_PARAMS);
 }
 
@@ -503,118 +474,6 @@ async fn turn_runtime_constructs_one_client_per_turn() {
     assert_eq!(deps2.build_metrics.transport_pairs, 1);
 }
 
-#[cfg(test)]
-mod cep_native_registry {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[tokio::test]
-    async fn cep_native_registry_production_runtime_uses_native_audit_stage() {
-        use lattice_agent::LlmClient;
-        use lattice_agent::testing::FakeStreamingLlmClient;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        use crate::turn::test_support::build_test_production_deps;
-
-        let _xdg = lancet_audit::ScopedXdgStateHome::new();
-        let dir = TempDir::new().unwrap();
-
-        let llm: Arc<dyn LlmClient> = Arc::new(
-            FakeStreamingLlmClient::builder()
-                .push_events(vec![lattice_llm::LlmEvent::Done {
-                    finish_reason: "stop".to_string(),
-                    usage: None,
-                }])
-                .build(),
-        );
-
-        // Localhost echo — avoids depending on public HTTPS for an audit-stage pin.
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf).await;
-                let body = b"native-audit";
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.write_all(body).await;
-            }
-        });
-        let url = format!("http://127.0.0.1:{}/", addr.port());
-
-        // A native method: this test asserts the *native* audit stage, so a
-        // Component Tool would be labeled `cell_component` and prove the
-        // opposite. It used to drive `observe.workspace` / `mutate.create`;
-        // both migrated to Components (#30/#31). `fetch.web` remains native.
-        let lancet = lattice_profile::LancetSection {
-            network: Some(lattice_profile::LancetNetworkSection {
-                allow_localhost: Some(true),
-                allowed_hosts: vec!["127.0.0.1".into(), "localhost".into()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let deps = build_test_production_deps(
-            dir.path().to_str().unwrap(),
-            &["fetch.web".to_string()],
-            llm,
-            true,
-            Some(&lancet),
-        )
-        .await;
-
-        let params = FetchParams {
-            url,
-            headers: Default::default(),
-        };
-        let value = serde_json::to_value(&params).unwrap();
-        let binding = lancet_protocol::InvocationBinding {
-            invocation_id: lancet_protocol::InvocationId::parse(
-                "00000000-0000-4000-8000-000000000001",
-            )
-            .unwrap(),
-            identity: lancet_protocol::BindingIdentity {
-                session_id: lancet_protocol::SessionId::parse("11111111111111111111111111111111")
-                    .unwrap(),
-                turn_id: lancet_protocol::TurnId::parse("22222222-2222-4222-8222-222222222222")
-                    .unwrap(),
-                model_step_ordinal: 0,
-                part_ordinal: 0,
-                method: Fetch::NAME.to_string(),
-                descriptor_identity: deps
-                    .tool_catalog
-                    .iter()
-                    .find(|tool| tool.name == Fetch::NAME)
-                    .expect("fetch definition")
-                    .descriptor_identity
-                    .clone(),
-                arguments_digest: lancet_protocol::arguments_digest(&value),
-            },
-        };
-        let layout = lattice_session::StateLayout::resolve().unwrap();
-        let key = crate::turn::test_support::test_project_key(dir.path());
-        lancet_audit::invocation_store::InvocationStore::open(&layout, &key)
-            .unwrap()
-            .reserve_batch(
-                lancet_protocol::PlanKey {
-                    turn_id: binding.identity.turn_id,
-                    model_step_ordinal: 0,
-                },
-                std::slice::from_ref(&binding),
-            )
-            .unwrap();
-        deps.cep_client
-            .call::<Fetch>(binding, params)
-            .await
-            .expect("native fetch.web");
-    }
-}
-
 /// D.6: `reserved CepClient fixture` can execute a Component Tool using a
 /// descriptor-projected definition. This proves the LLM tool-call path
 /// is reachable for Component Tools (D.5's `call_raw` dispatch + D.4's
@@ -744,12 +603,9 @@ mod component_client {
     }
 }
 
-/// #71: the `[lancet.effects] deny` configuration path, from TOML to the
-/// `denied_effect_kinds` set both pre-dispatch layers read.
-///
-/// The `lancet-native` transport-seam tests build the deny set in Rust, so
-/// without this the snake_case wire names and the profile → policy translation
-/// are only covered for `mutate.create` (through the LATTICE_BIN harness).
+/// Legacy `[lancet.effects] deny` values still parse into typed impact kinds so
+/// runtime construction can reject the obsolete production control with a clear,
+/// fail-closed migration error.
 mod effects_deny_profile_path {
     use lancet_protocol::effect_types::ImpactKind;
     use lattice_profile::AgentProfile;

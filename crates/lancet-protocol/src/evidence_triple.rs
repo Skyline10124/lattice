@@ -72,8 +72,8 @@ mod tests {
 
     #[test]
     fn native_method_triple_is_content_free_and_round_trips() {
-        let triple = CellEvidenceTriple::native_method("fetch.web");
-        assert_eq!(triple.admission.tool, "fetch.web");
+        let triple = CellEvidenceTriple::native_method("native.example");
+        assert_eq!(triple.admission.tool, "native.example");
         assert!(triple.effects.effects.is_empty());
         assert!(triple.denied.denied.is_empty());
         let json = serde_json::to_string(&triple).expect("serialize");
