@@ -590,7 +590,9 @@ fn direct_mutation_denials_have_no_side_effect() {
 #[test]
 fn direct_mutation_concurrent_same_target_create_has_one_winner() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-mut-race", "dl-race", "[\"mutate.create\"]", "");
+    let (world, mut spec) = direct_world("direct-mut-race", "dl-race", "[\"mutate.create\"]", "");
+    // Either wait may span both full-Turn executions behind the Session lock.
+    spec.step_timeout_secs = 60;
 
     let (server, gate) = wire_gated_fake_llm(
         &world,
@@ -625,6 +627,8 @@ fn direct_mutation_concurrent_same_target_create_has_one_winner() {
     let captures = server.captured_requests();
 
     let result: Result<(), AssertError> = (|| {
+        assert_clean_send(&a)?;
+        assert_clean_send(&b)?;
         let tool_successes = [&a, &b]
             .into_iter()
             .filter(|outcome| tool_ok(&outcome.parsed, "mutate.create"))
