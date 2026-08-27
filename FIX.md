@@ -7883,3 +7883,21 @@ with the 180-second total and every global harness/xtask timeout unchanged.
   30.10 seconds and passed after it at 39.30 seconds. The full `direct_operator` target passed
   6/6, and `env -u LATTICE_BIN cargo xtask ci` passed all gates.
 - **Changed files:** `crates/lattice-system-harness/tests/direct_operator.rs`, `FIX.md`.
+
+## 2026-08-27 — main concurrent mutation scenario timeout
+
+- **ID/severity:** main CI after PR #175 / LOW test-budget defect.
+- **Problem:** `direct_mutation_concurrent_same_target_create_has_one_winner` starts two sends for
+  one Session. The full-Turn Session lock intentionally serializes them, so the process that
+  loses the lock can spend one command budget waiting for the first Turn and then executing its
+  own Component Turn. On the GitHub runner that path exceeded the generic 30-second step timeout;
+  one send had no events while the other completed, obscuring the timeout as a 1-winner/0-loser
+  assertion failure.
+- **Fix:** give only this lock-competition scenario a 60-second step timeout and assert both send
+  processes exited normally before checking Tool winner/loser semantics. Keep the global
+  Direct-Local default at 30 seconds and the scenario total budget at 180 seconds.
+- **Verification:** forcing the waited process behind the lock under four same-core CPU burners
+  reproduced the CI event shape and failed at 40.31 seconds before the fix; the same reproducer
+  passed after the fix at 55.96 seconds. The exact test and the full `direct_mutation` target
+  passed 1/1 and 7/7. `env -u LATTICE_BIN cargo xtask ci` passed all gates.
+- **Changed files:** `crates/lattice-system-harness/tests/direct_mutation.rs`, `FIX.md`.
