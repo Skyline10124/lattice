@@ -67,6 +67,9 @@ Tool-execution product contract.
   authoritative read of the same `InvocationId`. Return `NotExecuted` only while
   the fact is still pre-dispatch; `DispatchStarted`, terminal, and unreadable
   states return `ReconciliationRequired`, preserving original retriability.
+  Cancellation is checked synchronously before admission and synchronized again
+  into the call-scoped sender after `DispatchStarted`; polling covers only the
+  subsequent in-flight interval.
 - ADDED #63/#64: runtime composition owns private workspace history and public
   rewind, while session-graph movement stays above this crate.
 - FIXED #39: operator audit behavior and DTO ownership moved to `lancet-audit`;

@@ -115,6 +115,8 @@ Cell evidence, and Component result validation.
   `CallCancelled`) and owns the shared `cancelled_error` used by every
   cancellation observation point (#70). No guest backtrace/host path/secret
   is exposed.
+  `lancet-api` reuses that public constructor for the pre-admission cancellation
+  boundary, so the structured code/category is not duplicated above the runtime.
 - `src/generated/host_composition.rs` is **generated** by `cargo xtask
   tool-codegen` from the Tool manifests that declare `distribution = "builtin"`
   (#29). It carries their `inventory` registrations (`include_bytes!` of the

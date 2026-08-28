@@ -7,20 +7,6 @@
 
 ## HIGH
 
-### H-GH34-02: cancellation can cross the live-saga/runtime handoff before the Component sees it — OPEN, blocking PR #178 — `correctness` / `lancet-api` / `lattice-api`
-
-- **Location**: `crates/lattice-api/src/turn/saga.rs`（pre-dispatch cancel check）；
-  `crates/lancet-api/src/runtime.rs`（durable admission、watch bridge、Component call）。
-- **Problem**: saga 只在进入 Tool 循环时检查一次共享 `AtomicBool`；runtime 随后先发布
-  `DispatchStarted`，再创建异步轮询 task 把该 flag 转成 call-scoped watch。取消若落在
-  两者之间，Component 的同步 pre-cancel check 可能先于 monitor task 运行，mutation 可在
-  已经取消的 Turn 上产生副作用。
-- **Current status**: OPEN，PR #178 的剩余 blocking review comment。comment
-  `5454528610` 已复核确认；本次 admission 分类修复没有改变 cancellation handoff。
-- **Plan**: 在 durable admission 前和 Component handoff 前分别做同步取消检查，并补一条
-  可重复命中该窗口且断言无 workspace/history/terminal 副作用的回归。保持现有 call-scoped
-  cancellation authority，不新增 token 类型或第二套取消通道。
-
 ### H-GH34-03: reserved binding identity is not checked against the current compiled descriptor — OPEN, required before #35 — `integrity` / `lancet-api` / `lancet-runtime`
 
 - **Location**: `crates/lancet-api/src/runtime.rs`（dispatch）；
@@ -74,11 +60,11 @@
 
 ## MEDIUM
 
-### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — hard cut implemented; review/Bundle/docs remain — `architecture` / `lancet-runtime`
+### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — hard cut implemented; identity/Bundle/docs remain — `architecture` / `lancet-runtime`
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-runtime`; Source Tools under `tools/`.
-- **Problem**: PR #178 implements runtime convergence, but one blocking cancellation handoff defect and the pre-#35 descriptor-identity residual remain; operator Tool Bundle installation/activation and the final architecture-document closeout are separate work.
-- **Current status**: PARTIAL — the five default Tools are manifest-owned Components in one generated closed runtime. Admission ambiguity is fixed; `H-GH34-02` still blocks #178, `H-GH34-03` must close before #35, and #35/#36 remain.
-- **Plan**: close the two linked findings, then execute #35 and #36 without adding a second Tool schema, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
+- **Problem**: PR #178 implements runtime convergence; the pre-#35 descriptor-identity residual remains, while operator Tool Bundle installation/activation and the final architecture-document closeout are separate work.
+- **Current status**: PARTIAL — the five default Tools are manifest-owned Components in one generated closed runtime. The two blocking PR-review defects (admission ambiguity and cancellation handoff) are fixed; `H-GH34-03` must close before #35, and #35/#36 remain.
+- **Plan**: close `H-GH34-03`, then execute #35 and #36 without adding a second Tool schema, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
 
 
 ### ENV-OOM-01: 开发机常驻 Electron app 重度超售撞 24 并发 cargo 编译 → global OOM(已缓解,非代码 bug)— `environment` / dev-loop / #27

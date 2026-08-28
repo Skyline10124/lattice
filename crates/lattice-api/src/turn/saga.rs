@@ -626,13 +626,8 @@ pub(super) async fn run_coordinator_saga(
                     ));
                 }
                 DispatchOutcome::NotExecuted(error) => {
-                    if let Err(err) = publish_not_executed(
-                        &coordinator,
-                        binding,
-                        lancet_audit::invocation_store::NotExecutedReason::BeforeDispatch,
-                    )
-                    .await
-                    {
+                    let reason = not_executed_reason(&error);
+                    if let Err(err) = publish_not_executed(&coordinator, binding, reason).await {
                         break 'saga Err(err);
                     }
                     let closure = ClosedBinding {
@@ -1496,6 +1491,14 @@ fn classify_receipt(
     }
 }
 
+fn not_executed_reason(error: &CepError) -> lancet_audit::invocation_store::NotExecutedReason {
+    if error.code == lancet_protocol::CepErrorCode::CallCancelled {
+        lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch
+    } else {
+        lancet_audit::invocation_store::NotExecutedReason::BeforeDispatch
+    }
+}
+
 fn batch_stop_reason(
     outcome: ToolResultOutcome,
 ) -> Option<lancet_audit::invocation_store::NotExecutedReason> {
@@ -1712,6 +1715,18 @@ mod tests {
             }
         ));
         assert_eq!(conversation, ToolResultOutcome::Indeterminate);
+    }
+
+    #[test]
+    fn call_cancelled_maps_to_cancelled_terminal_and_conversation() {
+        let error = lancet_runtime::error_map::cancelled_error("mutate.create");
+        assert_eq!(
+            not_executed_reason(&error),
+            NotExecutedReason::CancelledBeforeDispatch
+        );
+        let (terminal, conversation) = map_cep_outcome(&error);
+        assert_eq!(terminal, TerminalOutcome::Cancelled);
+        assert_eq!(conversation, ToolResultOutcome::Cancelled);
     }
 
     #[test]

@@ -13,7 +13,7 @@ use lancet_protocol::{CepError, CepErrorCode, InvocationBinding, Retriability, T
 use lancet_runtime::{
     CancellationSender, CatalogSelectionError, ComponentRuntime, ExecutionReceipt,
     RuntimeExecution, ToolDefinition, WorkspaceHistory, WorkspaceHistoryBacking,
-    enabled_tool_definitions,
+    enabled_tool_definitions, error_map::cancelled_error,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -23,6 +23,10 @@ use crate::error::LancetError;
 
 #[cfg(test)]
 static FAIL_NEXT_ADMISSION_REF_FSYNC: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static CANCEL_AFTER_NEXT_ADMISSION: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static STALL_NEXT_CANCELLATION_MONITOR: AtomicBool = AtomicBool::new(false);
 
 /// Result of the reservation-gated handoff.
 #[derive(Debug)]
@@ -122,7 +126,8 @@ impl LancetRuntime {
         &self.workspace_history
     }
 
-    /// Durably admit an exact reservation, then hand it to Component execution.
+    /// Refuse pre-cancellation before dispatch; otherwise durably admit the exact
+    /// reservation and synchronize cancellation before Component execution.
     pub async fn dispatch(
         &self,
         binding: InvocationBinding,
@@ -136,15 +141,32 @@ impl LancetRuntime {
             ));
         }
 
+        if cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            return DispatchOutcome::NotExecuted(cancelled_error(&method));
+        }
+
         let store = Arc::clone(&self.invocations);
         let admission_store = Arc::clone(&store);
         let admission_binding = binding.clone();
+        #[cfg(test)]
+        let admission_cancel_flag = cancel_flag.clone();
         match tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if FAIL_NEXT_ADMISSION_REF_FSYNC.swap(false, Ordering::SeqCst) {
                 lattice_store::fault::fail_ref_fsync(true);
             }
-            admission_store.admit_reserved(&admission_binding)
+            let result = admission_store.admit_reserved(&admission_binding);
+            #[cfg(test)]
+            if CANCEL_AFTER_NEXT_ADMISSION.swap(false, Ordering::SeqCst) {
+                admission_cancel_flag
+                    .as_ref()
+                    .expect("admission cancellation hook requires a flag")
+                    .store(true, Ordering::SeqCst);
+            }
+            result
         })
         .await
         {
@@ -171,15 +193,28 @@ impl LancetRuntime {
         stop_after_dispatch_started(&self.invocations, binding.invocation_id);
 
         let (sender, cancellation) = CancellationSender::pair();
-        let monitor = cancel_flag.map(|flag| {
+        let monitor = cancel_flag.as_ref().map(|flag| {
+            let flag = Arc::clone(flag);
             let sender = sender.clone();
+            #[cfg(test)]
+            let stall_monitor = STALL_NEXT_CANCELLATION_MONITOR.swap(false, Ordering::SeqCst);
             tokio::spawn(async move {
+                #[cfg(test)]
+                if stall_monitor {
+                    std::future::pending::<()>().await;
+                }
                 while !flag.load(Ordering::Relaxed) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 sender.cancel();
             })
         });
+        if cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            sender.cancel();
+        }
         let _guard = DispatchGuard { sender, monitor };
         DispatchOutcome::Executed(
             self.execution
@@ -382,13 +417,21 @@ fn stop_after_dispatch_started(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_audit::invocation_store::InvocationState;
     use lancet_protocol::{
-        BindingIdentity, InvocationId, PlanKey, SessionId, TurnId, arguments_digest,
+        BindingIdentity, InvocationId, PlanKey, SessionId, TurnId, arguments_digest, cell::Trust,
+        evidence::CapabilityAdmissionPolicy,
     };
+    use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn published_dispatch_started_is_not_classified_not_executed() {
+    static DISPATCH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct TestRuntime {
+        runtime: LancetRuntime,
+        workspace: TempDir,
+        _state: TempDir,
+    }
+
+    fn test_runtime(enabled: &[&str]) -> TestRuntime {
         let workspace = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(workspace.path()).unwrap();
@@ -399,30 +442,53 @@ mod tests {
             WorkspaceHistoryBacking::Disabled => unreachable!(),
         };
         InvocationStore::create(layout, &key).unwrap();
-
+        let enabled_tools = enabled.iter().map(|name| (*name).to_string()).collect();
         let runtime = LancetRuntime::build(LancetRuntimeConfig {
             local_workspace_root: root.clone(),
-            enabled_tools: Vec::new(),
+            enabled_tools,
             policy: lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 root,
             ),
-            capability_admission: Default::default(),
+            capability_admission: CapabilityAdmissionPolicy {
+                enabled_tools: enabled.iter().map(|name| (*name).to_string()).collect(),
+                denied_capabilities: Default::default(),
+                max_boundary: Trust::Ex,
+            },
             invocations: backing.clone(),
             workspace_history: backing,
         })
         .unwrap();
+        TestRuntime {
+            runtime,
+            workspace,
+            _state: state,
+        }
+    }
+
+    fn reserve_binding(
+        runtime: &LancetRuntime,
+        method: &str,
+        params: &Value,
+        ordinal: u32,
+    ) -> InvocationBinding {
         let turn_id = TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
-        let params = serde_json::json!({"value": "test"});
+        let descriptor_identity = runtime
+            .tool_definitions
+            .iter()
+            .find(|tool| tool.name == method)
+            .map(|tool| tool.descriptor_identity.clone())
+            .unwrap_or_else(|| "test-descriptor".to_string());
         let binding = InvocationBinding {
-            invocation_id: InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
+            invocation_id: InvocationId::parse(&format!("00000000-0000-4000-8000-{ordinal:012x}"))
+                .unwrap(),
             identity: BindingIdentity {
                 session_id: SessionId::parse("11111111111111111111111111111111").unwrap(),
                 turn_id,
-                model_step_ordinal: 0,
+                model_step_ordinal: ordinal,
                 part_ordinal: 0,
-                method: "test.echo".to_string(),
-                descriptor_identity: "test-descriptor".to_string(),
-                arguments_digest: arguments_digest(&params),
+                method: method.to_string(),
+                descriptor_identity,
+                arguments_digest: arguments_digest(params),
             },
         };
         runtime
@@ -430,14 +496,38 @@ mod tests {
             .reserve_batch(
                 PlanKey {
                     turn_id,
-                    model_step_ordinal: 0,
+                    model_step_ordinal: ordinal,
                 },
                 std::slice::from_ref(&binding),
             )
             .unwrap();
+        binding
+    }
+
+    fn assert_pre_effect_state(env: &TestRuntime, binding: &InvocationBinding, path: &str) {
+        let facts = env
+            .runtime
+            .invocations
+            .query_invocations(&[binding.invocation_id])
+            .unwrap();
+        assert_eq!(
+            facts[&binding.invocation_id].state,
+            InvocationState::Reserved
+        );
+        assert!(!env.workspace.path().join(path).exists());
+        assert_eq!(env.runtime.workspace_history().current().unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn published_dispatch_started_is_not_classified_not_executed() {
+        let _guard = DISPATCH_TEST_LOCK.lock().await;
+        let env = test_runtime(&[]);
+        let params = serde_json::json!({"value": "test"});
+        let binding = reserve_binding(&env.runtime, "test.echo", &params, 1);
 
         FAIL_NEXT_ADMISSION_REF_FSYNC.store(true, Ordering::SeqCst);
-        let outcome = runtime
+        let outcome = env
+            .runtime
             .dispatch(
                 binding.clone(),
                 binding.identity.method.clone(),
@@ -450,7 +540,8 @@ mod tests {
             panic!("a visible DispatchStarted fact must require reconciliation");
         };
         assert_eq!(error.retriability, Retriability::Transient);
-        let facts = runtime
+        let facts = env
+            .runtime
             .invocations
             .query_invocations(&[binding.invocation_id])
             .unwrap();
@@ -458,5 +549,80 @@ mod tests {
             facts[&binding.invocation_id].state,
             InvocationState::DispatchStarted
         ));
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_mutation_stays_reserved_and_has_no_effects() {
+        let _guard = DISPATCH_TEST_LOCK.lock().await;
+        let env = test_runtime(&["mutate.create"]);
+        let path = "cancelled-before-dispatch.txt";
+        let params = serde_json::json!({
+            "path": path,
+            "content": "must not be installed\n",
+            "create_parents": false
+        });
+        let binding = reserve_binding(&env.runtime, "mutate.create", &params, 2);
+        let cancel_flag = Arc::new(AtomicBool::new(true));
+
+        let outcome = env
+            .runtime
+            .dispatch(
+                binding.clone(),
+                binding.identity.method.clone(),
+                params,
+                Some(cancel_flag),
+            )
+            .await;
+
+        let DispatchOutcome::NotExecuted(error) = outcome else {
+            panic!("pre-cancelled call must not cross durable admission");
+        };
+        assert_eq!(error.code, CepErrorCode::CallCancelled);
+        assert_pre_effect_state(&env, &binding, path);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_admission_reaches_component_before_mutation() {
+        let _guard = DISPATCH_TEST_LOCK.lock().await;
+        let env = test_runtime(&["mutate.create"]);
+        let path = "cancelled-during-admission.txt";
+        let params = serde_json::json!({
+            "path": path,
+            "content": "must not be installed\n",
+            "create_parents": false
+        });
+        let binding = reserve_binding(&env.runtime, "mutate.create", &params, 3);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        CANCEL_AFTER_NEXT_ADMISSION.store(true, Ordering::SeqCst);
+        STALL_NEXT_CANCELLATION_MONITOR.store(true, Ordering::SeqCst);
+
+        let outcome = env
+            .runtime
+            .dispatch(
+                binding.clone(),
+                binding.identity.method.clone(),
+                params,
+                Some(cancel_flag),
+            )
+            .await;
+
+        let DispatchOutcome::Executed(receipt) = outcome else {
+            panic!("post-admission cancellation must close as an executed cancellation");
+        };
+        let error = receipt
+            .result
+            .expect_err("Component must observe cancellation before mutation");
+        assert_eq!(error.code, CepErrorCode::CallCancelled);
+        let facts = env
+            .runtime
+            .invocations
+            .query_invocations(&[binding.invocation_id])
+            .unwrap();
+        assert_eq!(
+            facts[&binding.invocation_id].state,
+            InvocationState::DispatchStarted
+        );
+        assert!(!env.workspace.path().join(path).exists());
+        assert_eq!(env.runtime.workspace_history().current().unwrap(), None);
     }
 }

@@ -62,7 +62,9 @@ its reservation-bound Component runtime.
 - FIXED #34 PR review: if runtime admission cannot prove pre-dispatch state, the
   live saga remains at its durable `StepClosing` snapshot and emits typed
   `RecoveryRequired`; reopen reconciles ledger facts and never redispatches the
-  Tool or publishes a guessed `NotExecuted` terminal.
+  Tool or publishes a guessed `NotExecuted` terminal. A pre-admission
+  `CallCancelled` publishes `NotExecuted(CancelledBeforeDispatch)`; a cancellation
+  observed after `DispatchStarted` maps to the durable `Cancelled` terminal.
 - FIXED #159: live and reopen finalization consume the same journal-derived
   cumulative transcript/candidate basis. Reconciliation terminal evidence uses
   the frozen binding method. One shared WorkspaceOperationLock now covers the

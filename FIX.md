@@ -2,6 +2,44 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #34 PR #178 review: close cancellation across the durable handoff — 2026-08-29
+
+**Severity:** HIGH（cancellation correctness / mutation safety）
+
+**Problem:** saga 在进入 dispatch 前只检查一次 request `cancel_flag`。runtime 随后先发布
+`DispatchStarted`，再创建初值为 false 的 call-scoped watch，并依赖每 10 ms 运行一次的
+异步 monitor 转发 flag。取消若在 saga 检查后到达，monitor 不保证先于 Component 的
+pre-cancel check 运行；真实 `mutate.create` 可先安装文件并写入 private history。
+
+**Fix:** `LancetRuntime::dispatch` 在 exact request check 后、durable admission 前同步读取
+flag；已取消则返回共享的 typed `CallCancelled`，保持 reservation 未 dispatch，
+`lattice-api` 以 `NotExecuted(CancelledBeforeDispatch)` 闭合。admission 成功后先建立
+call-scoped sender/receiver 和持续 monitor，再同步重读 flag；若此时已取消，立即调用
+sender，使 Component handoff 前的 authoritative pre-cancel check 必然看到取消。该路径
+已越过 `DispatchStarted`，因此仍返回 executed receipt，并由 saga 映射为 durable
+`TerminalOutcome::Cancelled` / conversation `Cancelled`；monitor 只负责后续 in-flight
+取消。`lancet-runtime::error_map::cancelled_error` 公开给薄门面复用，未复制错误码或
+category authority。
+
+**Verification:**
+
+- RED：`cargo test -p lancet-api cancel` — 2 failed；pre-cancelled case 越过
+  admission，admission-window case 实际返回已写入 22 bytes 的 `mutate.create` 结果。
+- GREEN：同一命令 — 2 passed；两条均使用真实 `mutate.create`，分别断言
+  `Reserved`/`DispatchStarted` 边界、零 workspace 文件、零 workspace history。
+- `cargo test -p lattice-api call_cancelled_maps_to_cancelled_terminal_and_conversation`
+  — PASS，锁定 durable/conversation `Cancelled` 映射及 `CancelledBeforeDispatch` reason。
+- `cargo test -p lancet-runtime -p lancet-api -p lattice-api` — PASS。
+- `cargo clippy -p lancet-runtime -p lancet-api -p lattice-api --all-targets
+  --all-features -- -D warnings` — PASS。
+- `cargo xtask lancet-boundary` — PASS。
+- 三个改动 Rust 文件的 LSP diagnostics、`cargo fmt --all --check`、
+  `git diff --check` — PASS。
+
+**Changed files:** `crates/lancet-runtime/src/error_map.rs`、
+`crates/lancet-api/src/runtime.rs`、`crates/lattice-api/src/turn/saga.rs`、
+三份 crate-local `AGENTS.md`、`FINDINGS.md`、`FIX.md`。
+
 ## GitHub #34 PR #178 review: admission durability ambiguity fails into reconciliation — 2026-08-29
 
 **Severity:** HIGH（durable invocation lifecycle / correctness）

@@ -90,7 +90,7 @@ pub(crate) fn map_component_error(
 /// Build the shared structured cancellation error (#70). Every call-scoped
 /// cancellation observation point (host pre-check, guest cooperative exit,
 /// epoch interruption) maps to this exact error.
-pub(crate) fn cancelled_error(method: &str) -> CepError {
+pub fn cancelled_error(method: &str) -> CepError {
     CepError::tool_execution(
         CepErrorCode::CallCancelled,
         method,
