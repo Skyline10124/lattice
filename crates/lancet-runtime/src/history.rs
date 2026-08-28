@@ -156,8 +156,8 @@ impl From<StoreError> for WorkspaceHistoryError {
 pub enum WorkspaceHistoryBacking {
     /// No history recording.
     ///
-    /// For unit-test servers and embedders that have no per-project state
-    /// root. Production turn runtimes always resolve a [`Self::Project`].
+    /// For unit tests and embedders that have no per-project state root.
+    /// Production Turn runtimes always resolve [`Self::Project`].
     Disabled,
     /// Project-scoped store under a state layout, addressed by the Local
     /// Workspace root's [`ProjectStoreKey`].

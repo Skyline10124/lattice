@@ -52,59 +52,62 @@ impl ObserverSink {
 
 #[derive(Default)]
 pub(super) struct CepOrderedEmitter {
-    pending_calls: HashSet<lancet_protocol::InvocationId>,
-    buffered: VecDeque<TurnEvent>,
+    completed_calls: HashSet<lancet_protocol::InvocationId>,
+    buffered: VecDeque<(Option<lancet_protocol::InvocationId>, TurnEvent)>,
 }
 
 impl CepOrderedEmitter {
     pub(super) async fn emit(&mut self, observer: &mut ObserverSink, event: TurnEvent) {
         match event {
-            TurnEvent::CepCallStarted { invocation_id, .. } => {
-                self.pending_calls.insert(invocation_id);
-                observer.emit(event).await;
-            }
+            TurnEvent::CepCallStarted { .. } => observer.emit(event).await,
             TurnEvent::CepCallFinished { invocation_id, .. } => {
                 observer.emit(event).await;
-                self.pending_calls.remove(&invocation_id);
-                if self.pending_calls.is_empty() {
-                    self.flush_buffered(observer).await;
+                self.completed_calls.insert(invocation_id);
+                self.flush_call(observer, invocation_id).await;
+            }
+            event @ TurnEvent::ToolCallFinished { .. } => {
+                let invocation_id = tool_call_finished_id(&event);
+                if invocation_id.is_some_and(|id| self.completed_calls.remove(&id)) {
+                    observer.emit(event).await;
+                } else {
+                    self.buffered.push_back((invocation_id, event));
                 }
             }
-            event if is_cep_event(&event) => {
-                observer.emit(event).await;
-                if self.pending_calls.is_empty() {
-                    self.flush_buffered(observer).await;
-                }
-            }
-            event if self.pending_calls.is_empty() && !is_tool_call_finished(&event) => {
-                self.flush_buffered(observer).await;
-                observer.emit(event).await;
-            }
-            event => {
-                self.buffered.push_back(event);
-            }
+            event => observer.emit(event).await,
         }
     }
 
     pub(super) async fn finish(&mut self, observer: &mut ObserverSink) {
-        self.pending_calls.clear();
-        self.flush_buffered(observer).await;
+        self.completed_calls.clear();
+        while let Some((_, event)) = self.buffered.pop_front() {
+            observer.emit(event).await;
+        }
     }
 
-    async fn flush_buffered(&mut self, observer: &mut ObserverSink) {
-        while let Some(event) = self.buffered.pop_front() {
-            observer.emit(event).await;
+    async fn flush_call(
+        &mut self,
+        observer: &mut ObserverSink,
+        invocation_id: lancet_protocol::InvocationId,
+    ) {
+        let mut buffered = std::mem::take(&mut self.buffered);
+        let mut emitted = false;
+        while let Some((buffered_id, event)) = buffered.pop_front() {
+            if buffered_id == Some(invocation_id) {
+                observer.emit(event).await;
+                emitted = true;
+            } else {
+                self.buffered.push_back((buffered_id, event));
+            }
+        }
+        if emitted {
+            self.completed_calls.remove(&invocation_id);
         }
     }
 }
 
-fn is_tool_call_finished(event: &TurnEvent) -> bool {
-    matches!(event, TurnEvent::ToolCallFinished { .. })
-}
-
-fn is_cep_event(event: &TurnEvent) -> bool {
-    matches!(
-        event,
-        TurnEvent::CepCallStarted { .. } | TurnEvent::CepCallFinished { .. }
-    )
+fn tool_call_finished_id(event: &TurnEvent) -> Option<lancet_protocol::InvocationId> {
+    let TurnEvent::ToolCallFinished { id, .. } = event else {
+        return None;
+    };
+    lancet_protocol::InvocationId::parse(id).ok()
 }

@@ -13,9 +13,8 @@
 //!   5. dependency/architecture boundary checks (public xtask contracts)
 //!   6. Direct-Local harness scenarios against the release binary (`LATTICE_BIN`)
 //!   7. offline correctness suites (with an anti-vacuous zero-pass guard)
-//!   8. dogfood impact matrix
-//!   9. release operator N/C/M audit matrix (exact-named test)
-//!  10. `lattice --json lancet doctor` (JSON saved as evidence)
+//!   8. release operator Component audit matrix (exact-named test)
+//!   9. `lattice --json lancet doctor` (JSON saved as evidence)
 //!
 //! SKIPPED IS NOT PASS: every planned step is seeded `blocked` and only
 //! overwritten by actually running it; the verdict is `pass` iff every
@@ -370,29 +369,20 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         "-p",
         "lancet-protocol",
         "-p",
-        "lancet-catalog",
+        "lancet-runtime",
         "-p",
         "lancet-authority",
         "-p",
         "lancet-audit",
         "-p",
-        "lancet-native",
+        "lancet-api",
+        "-p",
+        "lattice-api",
         "-p",
         "lattice-session",
     ]);
-
-    let mut dogfood = Command::new("cargo");
-    dogfood.current_dir(&ctx.root).args([
-        "test",
-        "-p",
-        "lattice-api",
-        "--test",
-        "dogfood_impact_matrix",
-    ]);
-
-    // Exact-named, feature-gated release scenario so a renamed test fails
-    // loudly instead of filtering to zero (which the zero-pass guard also
-    // rejects). Its fixture/assertions are independent of `direct_operator`.
+    // Exact-named, feature-gated Component audit scenario so a renamed test
+    // fails loudly instead of filtering to zero.
     let mut release_operator_matrix = Command::new("cargo");
     release_operator_matrix
         .current_dir(&ctx.root)
@@ -404,15 +394,15 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
             "release-operator",
             "--test",
             "release_operator",
-            "release_operator_native_component_mixed_matrix",
+            "release_operator_component_matrix",
             "--",
             "--exact",
         ])
         .env("LATTICE_BIN", &ctx.lattice_bin)
         .env("LATTICE_HARNESS_FAILURE_DIR", &ctx.harness_failures);
 
-    // Doctor needs no project (registry/transport/policy checks only); run it
-    // with a cleared env + temp HOME in a temp cwd for reproducibility.
+    // Doctor validates the temporary Local Workspace and generated catalog; run
+    // with a cleared environment for reproducibility.
     let mut doctor = Command::new(&ctx.lattice_bin);
     doctor
         .args(["--json", "lancet", "doctor"])
@@ -461,11 +451,6 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
             id: "offline_correctness",
             display: display_command(&offline, false),
             action: Action::CargoTest(offline),
-        },
-        Planned {
-            id: "dogfood",
-            display: display_command(&dogfood, false),
-            action: Action::CargoTest(dogfood),
         },
         Planned {
             id: "release_operator_matrix",
@@ -923,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn release_operator_step_targets_its_own_feature_gated_binary_matrix() {
+    fn release_operator_step_targets_component_matrix() {
         let temp = tempfile::tempdir().expect("tempdir");
         let ctx = Ctx {
             root: temp.path().to_path_buf(),
@@ -941,9 +926,7 @@ mod tests {
         assert!(
             step.display.contains("--features release-operator")
                 && step.display.contains("--test release_operator")
-                && step
-                    .display
-                    .contains("release_operator_native_component_mixed_matrix"),
+                && step.display.contains("release_operator_component_matrix"),
             "release lane must execute its own release-binary matrix: {}",
             step.display
         );

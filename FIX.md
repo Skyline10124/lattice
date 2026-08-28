@@ -2,6 +2,57 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+
+## GitHub #34: LANCET runtime convergence hard cut — 2026-08-28
+
+**Severity:** HIGH（架构 / 安全边界 / 删除迁移残留）
+
+**Problem:** 五个默认 Tool 已迁为 manifest-owned WASM Components，但生产 Turn 仍通过
+`lancet-native` → `lancet-dispatch` / `lancet-cep` / `lancet-catalog` 的兼容链执行，
+并保留 legacy effect policy/type、native registry、JSON-RPC client/server transport、
+独立 catalog authority 与多套调用/错误/证据语义。这使 closed catalog、typed
+`InvocationId`、durable reservation/admission、Cell evidence 与 cancellation 的唯一权威
+仍不成立，也阻塞 ADR 0004 的最终收敛。
+
+**Fix:**
+- 删除 `lancet-native`、`lancet-dispatch`、`lancet-cep`、`lancet-catalog` 四个 crate，
+  以及 `ImpactKind` / `EffectScopeKind` / `OverlayBehavior` /
+  `FailureSemantics` / `BaseAuthorityRequirement`、`ResolvedPolicy`、legacy effect
+  ledger/checker 与 `[lancet.effects]` 生产面。
+- 在 `lancet-runtime` 建立唯一 closed Component catalog、provider Tool projection、
+  reservation-bound `RuntimeExecution`、call-scoped cancellation、host-bound ordered
+  Tool events 与 typed `CellEvidenceTriple` receipt；workspace observation、mutation、
+  network fetch 统一复用同一 admitted descriptor、budget、Local Workspace 与 history。
+- 将 `lancet-api` 收窄为 runtime/audit/rewind 门面；`lattice-api::TurnCoordinator`
+  在 `DispatchStarted` 后直接调用该门面并以同一 typed `InvocationId` 发布 Tool
+  events、terminal material 与 evidence。修复异步转发竞争，使
+  `cep_call_started < cep_call_finished < ToolCallFinished` 对同一 invocation 恒成立。
+- 严格 profile 只接受 Cell capability/workspace/network/budget 配置；更新 CLI status/
+  doctor、rollout 顺序、README、LANCET/TESTING 文档与 crate-local `AGENTS.md`。
+  `cargo xtask lancet-boundary` 现在检查实际剩余依赖边界、legacy hard-cut residue
+  与 production/test feature reachability，不保留已删除名字的 tombstone deny-list。
+
+**Verification:**
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（toolchain、fmt、clippy、binary build、
+  harness/LANCET boundaries、tool-codegen、24-crate tests、全部 system harness、
+  `cargo xtask tool-build --verify`）。
+- `LATTICE_BIN=$PWD/target/debug/lattice cargo test --workspace` — PASS。
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS。
+- `cargo build --workspace --exclude noop-echo --exclude fetch-web --exclude observe-workspace
+  --exclude mutate-create --exclude mutate-edit --exclude session-todo_write` — PASS；
+  `cargo build -p noop-echo --target wasm32-unknown-unknown` — PASS。Issue 原列出的
+  `cargo build --workspace --exclude noop-echo` 会按预期 host-link 其余五个 wasm guest
+  cdylib 并失败；该既有 Cargo 目标隔离限制已在 `FINDINGS.md` `ENV-WASM-01` 更新，
+  真实 guest gate 由 `cargo xtask tool-build --verify` 覆盖。
+- `cargo test -p lancet-api -p lancet-runtime -p lattice-api -p lattice-profile
+  -p lattice-cli -p lattice-system-harness` — PASS。
+- `cargo xtask lancet-boundary`、`cargo fmt --all --check`、`git diff --check` — PASS。
+
+**Changed files:** 删除 `crates/{lancet-native,lancet-dispatch,lancet-cep,lancet-catalog}`；
+重构 `crates/lancet-{protocol,authority,runtime,api}`、`crates/lattice-{api,profile,cli}`
+及 system harness；更新 root manifests、`README.md`、`AGENTS.md`、`FINDINGS.md`、
+`docs/{LANCET,TESTING}.md`、issue #28 design closeout 与 `xtask` boundary/CI/rollout。
+
 ## 测试清理：删除不符合 YAGNI/KISS 的重复与无效测试 — 2026-08-28
 
 **Severity:** LOW（测试债务与维护成本；无生产行为变更）

@@ -21,7 +21,6 @@ test-fault-injection = []
 wasmtime = { workspace = true }
 inventory = { workspace = true }
 lancet-protocol = { workspace = true }
-lancet-dispatch = { workspace = true }
 # #30 moved the concrete Local Workspace down into this crate so the
 # `workspace-observe` Tool Host imports can execute observation without reaching
 # up a layer. The visibility *decision vocabulary* (`ReadVisibilityPolicy` /

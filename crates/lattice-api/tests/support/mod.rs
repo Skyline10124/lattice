@@ -2,16 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 #![allow(dead_code)]
 
-//! Shared helpers for lattice-api integration tests.
-//!
-//! #59 (Codeberg #37) removed the Upper workspace override surface; these
-//! helpers now only provide the git-repo bootstrap used by Direct-Local test
-//! fixtures.
+//! Shared direct-Component integration-test helpers.
+
 use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use lancet_audit::invocation_store::InvocationStore;
 use lancet_protocol::{
@@ -21,7 +18,7 @@ use lancet_protocol::{
 use lattice_session::test_utils::init_fixture_repo;
 
 pub struct ReservedRuntime {
-    runtime: lancet_api::LancetRuntime,
+    runtime: Arc<lancet_api::LancetRuntime>,
     client: ReservedClient,
     _state: tempfile::TempDir,
 }
@@ -31,7 +28,7 @@ impl ReservedRuntime {
         mut config: lancet_api::LancetRuntimeConfig,
     ) -> Result<Self, lancet_api::LancetError> {
         let state = tempfile::TempDir::new()
-            .map_err(|err| lancet_api::LancetError::Internal(err.to_string()))?;
+            .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?;
         let backing = match &config.workspace_history {
             lancet_api::WorkspaceHistoryBacking::Project { .. } => config.workspace_history.clone(),
             lancet_api::WorkspaceHistoryBacking::Disabled => {
@@ -39,9 +36,9 @@ impl ReservedRuntime {
                     state.path(),
                     &config.local_workspace_root,
                 )
-                .map_err(|err| lancet_api::LancetError::Internal(err.to_string()))?;
+                .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?;
                 lancet_api::WorkspaceHistory::create(backing.clone())
-                    .map_err(|err| lancet_api::LancetError::Internal(err.to_string()))?;
+                    .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?;
                 config.workspace_history = backing.clone();
                 backing
             }
@@ -51,19 +48,25 @@ impl ReservedRuntime {
             lancet_api::WorkspaceHistoryBacking::Disabled => unreachable!(),
         };
         InvocationStore::create(&layout, &key)
-            .map_err(|err| lancet_api::LancetError::Internal(err.to_string()))?;
+            .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?;
         config.invocations = backing;
-        let runtime = lancet_api::LancetRuntime::build(config)?;
+
+        let mut runtime = lancet_api::LancetRuntime::build(config)?;
+        // Keep the ordered Tool event receiver live while these tests focus on
+        // terminal results rather than event projection.
+        let mut events = runtime.take_events();
+        tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let runtime = Arc::new(runtime);
         let descriptors = runtime
             .tool_definitions()
             .iter()
             .map(|tool| (tool.name.clone(), tool.descriptor_identity.clone()))
             .collect();
         let client = ReservedClient {
-            inner: runtime.client(),
+            runtime: Arc::clone(&runtime),
             invocations: Arc::new(
                 InvocationStore::open(&layout, &key)
-                    .map_err(|err| lancet_api::LancetError::Internal(err.to_string()))?,
+                    .map_err(|error| lancet_api::LancetError::Internal(error.to_string()))?,
             ),
             descriptors: Arc::new(descriptors),
             next: Arc::new(AtomicU32::new(0)),
@@ -90,7 +93,7 @@ impl Deref for ReservedRuntime {
 
 #[derive(Clone)]
 pub struct ReservedClient {
-    inner: lancet_api::CepClient,
+    runtime: Arc<lancet_api::LancetRuntime>,
     invocations: Arc<InvocationStore>,
     descriptors: Arc<BTreeMap<String, String>>,
     next: Arc<AtomicU32>,
@@ -135,9 +138,14 @@ impl ReservedClient {
         params: serde_json::Value,
     ) -> Result<lancet_api::ExecutionReceipt, CepError> {
         let method = method.into();
-        self.inner
-            .call_raw_with_receipt(self.binding(&method, &params), method, params)
+        match self
+            .runtime
+            .dispatch(self.binding(&method, &params), method, params, None)
             .await
+        {
+            lancet_api::DispatchOutcome::Executed(receipt) => Ok(receipt),
+            lancet_api::DispatchOutcome::NotExecuted(error) => Err(error),
+        }
     }
 
     pub async fn call_raw(
@@ -154,28 +162,47 @@ impl ReservedClient {
         params: serde_json::Value,
     ) -> (
         impl std::future::Future<Output = Result<serde_json::Value, CepError>> + Send + 'static,
-        lancet_api::CallControl,
+        TestCallControl,
     ) {
-        self.inner
-            .start_call_raw(self.binding(&method, &params), method, params)
+        let binding = self.binding(&method, &params);
+        let runtime = Arc::clone(&self.runtime);
+        let flag = Arc::new(AtomicBool::new(false));
+        let control = TestCallControl {
+            flag: Arc::clone(&flag),
+        };
+        let future = async move {
+            match runtime.dispatch(binding, method, params, Some(flag)).await {
+                lancet_api::DispatchOutcome::Executed(receipt) => receipt.result,
+                lancet_api::DispatchOutcome::NotExecuted(error) => Err(error),
+            }
+        };
+        (future, control)
     }
 }
+
+pub struct TestCallControl {
+    flag: Arc<AtomicBool>,
+}
+
+impl TestCallControl {
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+    }
+}
+
 pub fn init_git_repo(root: &Path) {
-    // Capture any pre-written project files into the initial commit so HEAD is
-    // born and the worktree baseline matches the fixture.
-    let mut files: Vec<(String, String)> = Vec::new();
+    let mut files = Vec::new();
     collect_files(root, root, &mut files);
-    let owned: Vec<(String, String)> = files;
-    let refs: Vec<(&str, &str)> = owned
+    let refs: Vec<(&str, &str)> = files
         .iter()
-        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .map(|(path, content)| (path.as_str(), content.as_str()))
         .collect();
     let _ = init_fixture_repo(root, &refs);
 }
 
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
     let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
+        Ok(entries) => entries,
         Err(_) => return,
     };
     for entry in entries.flatten() {
@@ -186,13 +213,13 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
         if path.is_dir() {
             collect_files(root, &path, out);
         } else if path.is_file() {
-            let rel = path
+            let relative = path
                 .strip_prefix(root)
                 .expect("under root")
                 .to_string_lossy()
                 .into_owned();
             let content = std::fs::read_to_string(&path).unwrap_or_default();
-            out.push((rel, content));
+            out.push((relative, content));
         }
     }
 }

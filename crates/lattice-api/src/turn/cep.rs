@@ -9,18 +9,11 @@ use std::sync::Arc;
 
 use lancet_api::{
     ComponentRuntime, LancetError, LancetRuntime, LancetRuntimeConfig, WorkspaceHistory,
-    WorkspaceHistoryBacking, workspace_history_backing,
+    WorkspaceHistoryBacking,
 };
 use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{CepPolicyConfig, NetworkPolicyConfig, ObservationPolicyConfig};
-use lancet_native::CepClient;
-#[cfg(test)]
-use lancet_native::wire_code_for_error;
 use lancet_protocol::ToolEvent;
-#[cfg(test)]
-use lancet_protocol::error::{CepErrorData, jsonrpc};
-#[cfg(test)]
-use lancet_protocol::{CepError, Retriability};
 #[cfg(test)]
 use lattice_profile::LancetWorkspacePolicySection;
 use lattice_profile::{LancetNetworkSection, LancetObservationSection, LancetSection};
@@ -28,37 +21,6 @@ use serde_json::Value;
 
 use crate::session::ApiError;
 use crate::turn::types::{RunTurnRequest, TurnEvent};
-
-/// Structured CEP error metadata preserved for API/CLI observation.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CepErrorPayload {
-    pub code: i32,
-    pub message: String,
-    pub data: serde_json::Value,
-    pub retriability: String,
-}
-
-/// Tool execution failure with optional structured CEP metadata.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolExecutionError {
-    pub message: String,
-    pub cep_error: Option<CepErrorPayload>,
-}
-
-impl ToolExecutionError {
-    pub fn simple(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            cep_error: None,
-        }
-    }
-}
-
-impl From<String> for ToolExecutionError {
-    fn from(message: String) -> Self {
-        Self::simple(message)
-    }
-}
 
 /// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
 fn map_lancet_err(err: LancetError) -> ApiError {
@@ -71,40 +33,27 @@ fn map_lancet_err(err: LancetError) -> ApiError {
     }
 }
 
-/// Per-build construction metrics (test-only; each production build is exactly one pair + adapter).
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CepRuntimeBuildMetrics {
-    pub client_instances: usize,
-    pub transport_pairs: usize,
-}
-
 /// Resolved production turn dependencies assembled by the API layer.
 ///
-/// The LANCET runtime (server lifecycle and bound CEP client) plus the
-/// one-attempt model driver and descriptor-pinned Tool catalog consumed by
-/// the production TurnCoordinator.
+/// The generated Component runtime plus one-attempt model driver and
+/// descriptor-pinned Tool catalog consumed by the production TurnCoordinator.
 pub(crate) struct ProductionTurnDeps {
     pub model_driver: lattice_agent::ModelStepDriver,
     pub tool_catalog: Vec<lancet_api::ToolDefinition>,
-    pub runtime: lancet_api::ServerLifecycle,
-    pub cep_client: CepClient,
+    pub runtime: LancetRuntime,
+    pub events: tokio::sync::mpsc::UnboundedReceiver<ToolEvent>,
     /// Private durable history of successfully installed Atomic Local
     /// Mutations (#63). The live turn path reads its current object id once
     /// the agent loop is done and records it on the Turn commit.
     pub workspace_history: Arc<WorkspaceHistory>,
-    #[cfg(test)]
-    pub build_metrics: CepRuntimeBuildMetrics,
 }
 
 pub(crate) struct ProductionTurnDepsInput<'a> {
     pub request: &'a RunTurnRequest,
     pub project_root: &'a str,
-    /// The binding validated from SessionState. Production turns must use this
-    /// key to locate history; the path-derived fallback is only for direct
-    /// LANCET fixture construction that has no SessionApi composition context.
-    pub project_store_key: Option<lattice_session::ProjectStoreKey>,
-    pub state_layout: Option<lattice_session::StateLayout>,
+    /// Project identity validated from SessionState.
+    pub project_store_key: lattice_session::ProjectStoreKey,
+    pub state_layout: lattice_session::StateLayout,
     pub enabled_tools: &'a [String],
     pub llm: Arc<dyn lattice_agent::LlmClient>,
     pub lancet: Option<&'a LancetSection>,
@@ -153,11 +102,6 @@ pub(crate) fn cep_policy_from_profile(
         project_root: effective_root,
         observation,
         network,
-        denied_effect_kinds: lancet
-            .effects
-            .as_ref()
-            .map(|effects| effects.deny.iter().cloned().collect())
-            .unwrap_or_default(),
         // Component Tool admission needs `[tools].enabled` as well as
         // `[lancet.capabilities]`, so it is lowered from the whole profile at
         // runtime assembly; this executor-facing config leaves it fail-closed.
@@ -201,9 +145,6 @@ fn apply_observation_profile(
     }
     if let Some(value) = section.max_find_paths {
         observation.max_find_paths = value;
-    }
-    if let Some(value) = section.max_todo_ops {
-        observation.max_todo_ops = value;
     }
     Ok(())
 }
@@ -251,12 +192,10 @@ pub(crate) fn load_policy_config(
 
     let cep_context = cep_policy_from_profile(lancet, runtime_project_root)?;
     let mut config = PolicyConfig {
-        methods: Default::default(),
         network: cep_context.network,
         observation: cep_context.observation,
         workspace: workspace_policy_from_profile(lancet)?,
         project_root: cep_context.project_root,
-        denied_effect_kinds: cep_context.denied_effect_kinds,
     };
 
     if let Some(policy_section) = &lancet.policy
@@ -343,8 +282,8 @@ fn canonicalize_existing(path: &Path, field: &str) -> Result<PathBuf, ApiError> 
 /// Translate the optional profile `[lancet]` section into a fully-resolved
 /// LANCET policy configuration.
 ///
-/// This is the LATTICE-side half of the seam: it knows about `LancetSection`
-/// and produces the LANCET-native types `lancet-api` consumes.
+/// This is the LATTICE-side seam: it knows `LancetSection` and produces the
+/// resolved policy types consumed by `lancet-api`.
 fn resolve_lancet_policy(
     lancet: Option<&LancetSection>,
     project_root: &str,
@@ -390,19 +329,7 @@ pub(crate) async fn build_production_turn_deps(
     })?;
 
     let policy = resolve_lancet_policy(lancet, project_root)?;
-    let cep_mode = lancet
-        .map(|c| c.mode.clone())
-        .unwrap_or(lancet_protocol::policy::CepMode::Enforce);
-    let workspace_history = match (state_layout, project_store_key) {
-        (Some(layout), Some(key)) => WorkspaceHistoryBacking::for_key(layout, key),
-        (None, None) => workspace_history_backing(Path::new(project_root))
-            .map_err(|err| ApiError::Internal(format!("resolve workspace history path: {err}")))?,
-        _ => {
-            return Err(ApiError::Internal(
-                "Session project-store layout and ProjectStoreKey must be supplied together".into(),
-            ));
-        }
-    };
+    let workspace_history = WorkspaceHistoryBacking::for_key(state_layout, project_store_key);
 
     // #28 B8/D6: the profile is the single admission authority — `[tools].enabled`
     // is the stage-1 capability grant, `[lancet.capabilities]` subtracts. Without
@@ -420,31 +347,25 @@ pub(crate) async fn build_production_turn_deps(
         .map_err(|err| ApiError::Internal(format!("component composition worker failed: {err}")))?
         .map_err(|err| ApiError::Internal(format!("component composition: {err}")))?;
 
-    let runtime = LancetRuntime::build(LancetRuntimeConfig {
+    let mut runtime = LancetRuntime::build(LancetRuntimeConfig {
         local_workspace_root: canonical_root,
         enabled_tools: enabled_tools.to_vec(),
         policy,
         capability_admission,
-        cep_mode,
         invocations: workspace_history.clone(),
         workspace_history,
     })
     .map_err(map_lancet_err)?;
+    let tool_catalog = runtime.tool_definitions().to_vec();
+    let workspace_history = Arc::clone(runtime.workspace_history());
+    let events = runtime.take_events();
 
-    let parts = runtime.into_parts();
-
-    let tool_catalog = parts.tool_definitions;
     Ok(ProductionTurnDeps {
         model_driver: lattice_agent::ModelStepDriver::new(llm),
         tool_catalog,
-        runtime: parts.lifecycle,
-        cep_client: parts.client,
-        workspace_history: parts.workspace_history,
-        #[cfg(test)]
-        build_metrics: CepRuntimeBuildMetrics {
-            client_instances: 1,
-            transport_pairs: 1,
-        },
+        runtime,
+        events,
+        workspace_history,
     })
 }
 
@@ -482,26 +403,6 @@ fn string_param(params: &Value, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-pub(super) fn test_wire_code(cep: &CepError) -> i32 {
-    if let CepErrorData::Validation(data) = &cep.data
-        && data.reason == "invalid params"
-    {
-        return jsonrpc::INVALID_PARAMS;
-    }
-    wire_code_for_error(cep)
-}
-
-#[cfg(test)]
-pub(super) fn retriability_label(value: &Retriability) -> String {
-    match value {
-        Retriability::Permanent => "permanent".to_string(),
-        Retriability::Transient => "transient".to_string(),
-        Retriability::RequiresReplan => "requires_replan".to_string(),
-        Retriability::Unknown => "unknown".to_string(),
-    }
-}
-
-#[cfg(test)]
 mod cep_context_profile_policy {
     use super::*;
     use lattice_profile::LancetSection;
@@ -527,14 +428,12 @@ mod cep_context_profile_policy {
         let cep = LancetSection {
             observation: Some(LancetObservationSection {
                 max_single_read_bytes: Some(4096),
-                max_todo_ops: Some(7),
                 ..Default::default()
             }),
             ..Default::default()
         };
         let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
         assert_eq!(policy.observation.max_single_read_bytes, 4096);
-        assert_eq!(policy.budget().max_todo_ops, 7);
         assert_eq!(policy.project_root, dir.path().canonicalize().unwrap());
     }
 
@@ -681,19 +580,11 @@ mod cep_context_profile_policy {
             ..Default::default()
         };
         let config = load_policy_config(&cep, dir.path()).expect("policy");
-        // mutate.create/edit are Component Tools (#31): DefaultPolicyHook no longer
-        // resolves them. The profile write-deny list still shapes the mutate
-        // authorized region that the Tool Host enforces.
-        let region = config
-            .workspace
-            .authorized_region_for("mutate.create", &config.to_cep_policy_config());
-        assert!(
-            region
-                .denied_write_path_prefixes
-                .iter()
-                .any(|p| p.ends_with("src")),
-            "profile denied_write_patterns must reach the mutate region: {:?}",
-            region.denied_write_path_prefixes
+        // Component mutation authority consumes the profile write-deny list directly.
+        assert_eq!(
+            config.workspace.denied_write_patterns,
+            vec!["src/**"],
+            "profile denied_write_patterns must reach Component mutation authority",
         );
     }
 }
@@ -711,8 +602,8 @@ mod turn_wiring {
                 "invocation_id": invocation,
                 "method": "fetch.web",
                 "ok": true,
-                "semantic_stage": "cep_native",
-                "guard_stage": "cep_policy_lifecycle",
+                "semantic_stage": "cell_component",
+                "guard_stage": "cell_admission",
                 "error_code": null
             }),
         );
@@ -723,23 +614,9 @@ mod turn_wiring {
         ));
     }
 
-    use lancet_cep::ToolExposure;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_profile::LoadedAgentProfile;
     use tempfile::TempDir;
-
-    // #37: `upper_lifecycle_session_tool_creates_lease` was removed — the
-    // Upper lease it asserted on no longer exists. The Direct-Local runtime
-    // builds its own execution routing internally, so an equivalent smoke
-    // test is `runtime_config_defaults_have_no_execution_field` in
-    // `lancet-api::runtime`.
-
-    #[test]
-    fn catalog_exposure_rejects_unknown_method_when_catalog_is_empty() {
-        let err = ToolExposure::from_catalog_enabled(&["session.envelope".to_string()])
-            .expect_err("production native catalog is empty");
-        assert_eq!(err.unknown, vec!["session.envelope".to_string()]);
-    }
 
     /// Write a real `agent.toml` under `dir` and load it through the profile
     /// loader — the production entry point, not a hand-built struct.
@@ -791,8 +668,8 @@ enabled = ["{tool}"]
         build_production_turn_deps(ProductionTurnDepsInput {
             request: &request,
             project_root: project.path().to_str().unwrap(),
-            project_store_key: Some(project_key),
-            state_layout: Some(layout),
+            project_store_key: project_key,
+            state_layout: layout,
             enabled_tools: &enabled_tools,
             llm,
             lancet: Some(&profile.profile.lancet),
@@ -800,13 +677,8 @@ enabled = ["{tool}"]
         .await
     }
 
-    /// #28 B2/B8: the profile's `[lancet.capabilities]` is what production
-    /// admission runs on. A deny entry naming no composed capability is a
-    /// startup error (C2) — the only decision observable end to end while the
-    /// production component catalog is empty — so this pins the whole chain
-    /// `agent.toml` → `LoadedAgentProfile` → `CapabilityAdmissionPolicy` →
-    /// `ServerRunConfig`. Lose the profile lowering and the fail-closed
-    /// default silently takes over with an empty deny list.
+    /// The profile capability policy reaches generated Component admission.
+    /// Unknown deny entries fail startup instead of silently retaining authority.
     #[tokio::test]
     async fn profile_capabilities_section_reaches_component_admission() {
         let project = TempDir::new().unwrap();

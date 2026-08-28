@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use lancet_api::{ExecutionReceipt, WorkspaceHistory};
+use lancet_api::{DispatchOutcome, ExecutionReceipt, WorkspaceHistory};
 use lancet_protocol::{
     BindingIdentity, CepError, CepErrorFamily, InvocationBinding, ModelAttemptKey,
     ModelMessageAddress, PlanKey, SessionId, ToolCallAddress, TurnId, arguments_digest,
@@ -80,8 +80,8 @@ pub(super) async fn run_coordinator_saga(
     let ProductionTurnDeps {
         model_driver,
         tool_catalog,
-        mut runtime,
-        cep_client,
+        runtime,
+        mut events,
         workspace_history,
         ..
     } = deps;
@@ -107,10 +107,9 @@ pub(super) async fn run_coordinator_saga(
         .unwrap_or(1);
 
     let (agent_tx, mut agent_rx) = mpsc::channel::<TurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
-    let cep_forward_client = cep_client.clone();
     let cep_agent_tx = agent_tx.clone();
     let cep_forwarder = tokio::spawn(async move {
-        while let Some(event) = cep_forward_client.next_event().await {
+        while let Some(event) = events.recv().await {
             if let Some(agent_event) = map_cep_tool_event(event)
                 && cep_agent_tx.send(agent_event).await.is_err()
             {
@@ -609,16 +608,75 @@ pub(super) async fn run_coordinator_saga(
                 break 'saga Err(map_io(err));
             }
             let params = call.arguments.clone();
-            let receipt = cep_client
-                .call_raw_with_receipt(invocation_binding, binding.method.clone(), params)
-                .await;
+            let receipt = match runtime
+                .dispatch(
+                    invocation_binding,
+                    binding.method.clone(),
+                    params,
+                    request.cancel_flag.clone(),
+                )
+                .await
+            {
+                DispatchOutcome::Executed(receipt) => receipt,
+                DispatchOutcome::NotExecuted(error) => {
+                    if let Err(err) = publish_not_executed(
+                        &coordinator,
+                        binding,
+                        lancet_audit::invocation_store::NotExecutedReason::BeforeDispatch,
+                    )
+                    .await
+                    {
+                        break 'saga Err(err);
+                    }
+                    let closure = ClosedBinding {
+                        binding: binding.clone(),
+                        outcome: ToolResultOutcome::NotExecuted,
+                        material: MaterialAvailability::Unavailable {
+                            reason: UnavailableMaterialReason::NotExecuted,
+                            digest: None,
+                            byte_length: None,
+                        },
+                    };
+                    let tool_result = tool_result_message(&closure);
+                    closing.closures.push(closure);
+                    closing.closure_cursor = (index as u32) + 1;
+                    closing.current_candidate = None;
+                    let recorded_at = chrono::Utc::now().timestamp();
+                    if let Err(err) = coordinator
+                        .io
+                        .advance_turn(
+                            session_id.clone(),
+                            PendingStage::StepClosing(closing.clone()),
+                            recorded_at,
+                            Arc::clone(&execution_lock),
+                        )
+                        .await
+                    {
+                        break 'saga Err(map_io(err));
+                    }
+                    crash_barrier!('saga, &format!("cursor_{}", closing.closure_cursor));
+                    history.push(tool_result);
+                    ordered_events
+                        .emit(
+                            &mut observer,
+                            TurnEvent::ToolCallFinished {
+                                id: public_invocation_id,
+                                name: binding.method.clone(),
+                                ok: false,
+                                output_len: 0,
+                                error_summary: Some(error.message),
+                            },
+                        )
+                        .await;
+                    continue;
+                }
+            };
             #[cfg(feature = "test-crash-barriers")]
             super::crash_barrier::record_tool_effect(binding.invocation_id);
             let finalize_budget = FinalizeBudget::anchored_at(Instant::now());
 
             let (exec_outcome, conversation_outcome, canonical_content, evidence) =
-                classify_receipt(receipt, &binding.method);
-
+                classify_receipt(receipt);
             let draft_result = ResultDraft::new(
                 binding.invocation_id,
                 binding.binding_digest,
@@ -793,23 +851,26 @@ pub(super) async fn run_coordinator_saga(
 
             history.push(tool_result);
 
-            observer
-                .emit(TurnEvent::ToolCallFinished {
-                    id: public_invocation_id,
-                    name: binding.method.clone(),
-                    ok: matches!(conversation_outcome, ToolResultOutcome::Succeeded),
-                    output_len: match &closure.material {
-                        MaterialAvailability::Available { byte_length, .. } => {
-                            *byte_length as usize
-                        }
-                        MaterialAvailability::Unavailable {
-                            byte_length: Some(n),
-                            ..
-                        } => *n as usize,
-                        _ => 0,
+            ordered_events
+                .emit(
+                    &mut observer,
+                    TurnEvent::ToolCallFinished {
+                        id: public_invocation_id,
+                        name: binding.method.clone(),
+                        ok: matches!(conversation_outcome, ToolResultOutcome::Succeeded),
+                        output_len: match &closure.material {
+                            MaterialAvailability::Available { byte_length, .. } => {
+                                *byte_length as usize
+                            }
+                            MaterialAvailability::Unavailable {
+                                byte_length: Some(n),
+                                ..
+                            } => *n as usize,
+                            _ => 0,
+                        },
+                        error_summary: None,
                     },
-                    error_summary: None,
-                })
+                )
                 .await;
 
             let _ = draft_for_pin;
@@ -904,8 +965,6 @@ pub(super) async fn run_coordinator_saga(
         observer.emit(terminal).await;
     }
     observer.emit(TurnEvent::TurnCommitting).await;
-
-    runtime.shutdown().await;
 
     match saga_result {
         Ok(()) => {
@@ -1395,8 +1454,7 @@ async fn reserve_with_revision(
 }
 
 fn classify_receipt(
-    receipt: Result<ExecutionReceipt, CepError>,
-    method: &str,
+    receipt: ExecutionReceipt,
 ) -> (
     lancet_audit::invocation_store::TerminalOutcome,
     ToolResultOutcome,
@@ -1404,34 +1462,25 @@ fn classify_receipt(
     lancet_audit::invocation_store::TerminalEvidence,
 ) {
     match receipt {
-        Ok(ExecutionReceipt {
+        ExecutionReceipt {
             result: Ok(value),
             evidence,
-        }) => (
+        } => (
             lancet_audit::invocation_store::TerminalOutcome::Succeeded,
             ToolResultOutcome::Succeeded,
             canonical_json(&value),
             terminal_evidence(evidence),
         ),
-        Ok(ExecutionReceipt {
+        ExecutionReceipt {
             result: Err(err),
             evidence,
-        }) => {
+        } => {
             let (terminal, conversation) = map_cep_outcome(&err);
             (
                 terminal,
                 conversation,
                 bounded_error_content(&err),
                 terminal_evidence(evidence),
-            )
-        }
-        Err(err) => {
-            let (terminal, conversation) = map_cep_outcome(&err);
-            (
-                terminal,
-                conversation,
-                bounded_error_content(&err),
-                empty_evidence(method),
             )
         }
     }
@@ -1632,7 +1681,6 @@ mod tests {
     };
     use lancet_protocol::InvocationId;
     use lattice_session::{ProjectStoreKey, StateLayout};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn empty_triple(tool: &str) -> lancet_protocol::CellEvidenceTriple {
         lancet_protocol::CellEvidenceTriple {
@@ -1654,150 +1702,6 @@ mod tests {
             }
         ));
         assert_eq!(conversation, ToolResultOutcome::Indeterminate);
-    }
-
-    #[tokio::test]
-    async fn post_dispatch_response_loss_is_durable_indeterminate_and_stops_the_batch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let layout = StateLayout::in_state_root(tmp.path());
-        let key = ProjectStoreKey::derive(tmp.path()).unwrap();
-        let invocations = Arc::new(InvocationStore::create(&layout, &key).unwrap());
-        let session_id = SessionId::parse("00000000000040008000000000000001").unwrap();
-        let turn_id = TurnId::parse("00000000-0000-4000-8000-000000000001").unwrap();
-        let method = "test.response";
-        let first_params = serde_json::json!({"ordinal": 0});
-        let second_params = serde_json::json!({"ordinal": 1});
-        let first = InvocationBinding {
-            invocation_id: InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
-            identity: BindingIdentity {
-                session_id,
-                turn_id,
-                model_step_ordinal: 0,
-                part_ordinal: 0,
-                method: method.into(),
-                descriptor_identity: "test-descriptor".into(),
-                arguments_digest: arguments_digest(&first_params),
-            },
-        };
-        let second = InvocationBinding {
-            invocation_id: InvocationId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
-            identity: BindingIdentity {
-                session_id,
-                turn_id,
-                model_step_ordinal: 0,
-                part_ordinal: 1,
-                method: method.into(),
-                descriptor_identity: "test-descriptor".into(),
-                arguments_digest: arguments_digest(&second_params),
-            },
-        };
-        invocations
-            .reserve_batch(
-                PlanKey {
-                    turn_id,
-                    model_step_ordinal: 0,
-                },
-                &[first.clone(), second.clone()],
-            )
-            .unwrap();
-
-        let (client, server) = lancet_api::CepTransport::pair(4);
-        let shutdown = server.shutdown_handle();
-        let dispatches = Arc::new(AtomicUsize::new(0));
-        let server_invocations = Arc::clone(&invocations);
-        let server_dispatches = Arc::clone(&dispatches);
-        let server_task = tokio::spawn(async move {
-            server
-                .run_with_handler(move |call| {
-                    let invocations = Arc::clone(&server_invocations);
-                    let dispatches = Arc::clone(&server_dispatches);
-                    async move {
-                        invocations
-                            .admit_reserved(call.binding())
-                            .expect("authoritative admission");
-                        call.mark_dispatch_started();
-                        dispatches.fetch_add(1, Ordering::SeqCst);
-                        drop(call);
-                    }
-                })
-                .await
-                .expect("transport server")
-        });
-
-        let receipt = client
-            .call_raw_with_receipt(first.clone(), method, first_params)
-            .await;
-        let (terminal, conversation, _content, evidence) = classify_receipt(receipt, method);
-        assert!(matches!(
-            terminal,
-            TerminalOutcome::Indeterminate {
-                reason: lancet_audit::invocation_store::IndeterminateReason::MayHaveOccurred
-            }
-        ));
-        assert_eq!(conversation, ToolResultOutcome::Indeterminate);
-        assert!(evidence.effects.effects.is_empty());
-        let stop = batch_stop_reason(conversation).expect("indeterminate stops the batch");
-        assert_eq!(stop, NotExecutedReason::PrecedingInvocationIndeterminate);
-
-        invocations
-            .publish_terminal(
-                first.invocation_id,
-                terminal,
-                lancet_audit::invocation_store::TerminalMaterial::Unavailable {
-                    reason: lancet_audit::invocation_store::UnavailableMaterialReason::DraftPublicationFailed,
-                    digest: None,
-                    byte_length: None,
-                },
-                evidence,
-            )
-            .unwrap();
-        invocations
-            .publish_terminal(
-                second.invocation_id,
-                TerminalOutcome::NotExecuted { reason: stop },
-                lancet_audit::invocation_store::TerminalMaterial::Unavailable {
-                    reason: lancet_audit::invocation_store::UnavailableMaterialReason::NotExecuted,
-                    digest: None,
-                    byte_length: None,
-                },
-                empty_evidence(method),
-            )
-            .unwrap();
-
-        let view = invocations.pinned_view().unwrap();
-        assert!(matches!(
-            view.snapshot.invocations[&first.invocation_id].state,
-            InvocationState::Terminal {
-                outcome: TerminalOutcome::Indeterminate { .. },
-                ..
-            }
-        ));
-        assert!(matches!(
-            view.snapshot.invocations[&second.invocation_id].state,
-            InvocationState::Terminal {
-                outcome: TerminalOutcome::NotExecuted {
-                    reason: NotExecutedReason::PrecedingInvocationIndeterminate
-                },
-                ..
-            }
-        ));
-        let transitions = invocations.tail(None).unwrap();
-        assert_eq!(transitions.len(), 5);
-        assert_eq!(
-            transitions
-                .iter()
-                .filter(|transition| matches!(
-                    transition.record.state,
-                    InvocationState::DispatchStarted
-                ))
-                .count(),
-            1,
-            "the following binding is terminalized without redispatch"
-        );
-        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
-
-        shutdown.send(true).expect("shutdown");
-        server_task.await.expect("server task");
     }
 
     #[test]
@@ -1834,11 +1738,11 @@ mod tests {
     #[test]
     fn successful_oversize_receipt_keeps_success_and_records_unavailable_material() {
         let value = serde_json::Value::String("x".repeat(65_535));
-        let receipt = Ok(ExecutionReceipt {
+        let receipt = ExecutionReceipt {
             result: Ok(value),
             evidence: empty_triple("oversize.test"),
-        });
-        let (terminal, conversation, content, _) = classify_receipt(receipt, "oversize.test");
+        };
+        let (terminal, conversation, content, _) = classify_receipt(receipt);
         assert_eq!(terminal, TerminalOutcome::Succeeded);
         assert_eq!(conversation, ToolResultOutcome::Succeeded);
         assert_eq!(content.len(), 65_537);

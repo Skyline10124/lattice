@@ -1,237 +1,206 @@
-# LANCET runtime-enforced surface
+# LANCET runtime surface
 
-> **CURRENT BOUNDARY - 2026-08-23:** ADR 0003's guarded Direct-Local Workspace
-> path is production; the MSB/Upper path, `[workspace]` profile section, and
-> `lattice-workspace` crate are deleted. ADR 0004's manifest-owned Component
-> composition is production for all five built-ins. `fetch.web` joined the
-> embedded Component catalog in #32 and reaches the network only through the
-> async `network-fetch` Tool Host import. The production native catalog is empty.
-> Components have no ambient WASI filesystem, network, or process authority.
->
-> ADR 0005's durable invocation hard cut is also production. One typed
-> `InvocationId` spans binding, CEP execution, Host context, history, terminal
-> Cell evidence, events, cancellation, and operator output. `lattice-api`'s
-> `TurnCoordinator` is the sole product invocation owner; lower LANCET APIs exist
-> for composition/internal tests only and require an exact durable binding. The
-> project-keyed Git `InvocationStore` is invocation/evidence/operator authority.
-> SQLite audit/evidence stores, numeric call/audit/evidence identities, dual
-> writes, imports, fallback readers, Standalone invocation, and direct CEP product
-> callers are deleted. Provider Tool Call IDs remain optional replay metadata.
-> The JSON-RPC request `id` is the already-reserved `InvocationId`; inbound
-> notifications cannot create or dispatch an invocation.
+LANCET is LATTICE's controlled Tool-execution subsystem. Production Tool calls
+run through one reservation-gated WASM Component path in `lancet-runtime`.
+Source Tool manifests and their generated artifacts are the only Tool contract
+authority.
 
-LATTICE executes Tools through **LANCET**, its controlled execution subsystem.
-CEP (Controlled Execution Protocol) is the typed JSON-RPC method protocol behind
-the runtime; admission combines exact durable binding state, capability/policy
-gates, path guards, effect checks, and the authoritative append-only Git
-InvocationStore ledger.
+The default distribution embeds five Components:
 
-## Public surface (v1.4-alpha boundary contract)
+- `observe.workspace`
+- `mutate.create`
+- `mutate.edit`
+- `fetch.web`
+- `session.todo_write`
 
-The documented public CEP contract is framed by `lancet-cep`, which re-exports
-the transitional protocol/catalog/dispatch types. Runtime Tool definitions come
-from the closed generated Component inventory; Source Tool manifests own every
-built-in descriptor.
+Components have no ambient WASI filesystem, network, or process authority. They
+can reach the host only through the imports declared by their manifests and
+pinned by the generated composition metadata.
 
-| Component | Description |
-| ----------- | ------------- |
-| `lancet-cep` | Transitional CEP facade: protocol/catalog/dispatch re-exports plus generic `ToolDefinition` and exposure helpers |
-| `lancet-catalog::catalog()` | Empty production native catalog after #32; generic method traits and dev-only scaffold entries remain until #34 |
-| `lancet-api::audit` | Stable operator query/tail/replay entry points over project-keyed `invocations.git`; a thin facade over `lancet-audit::operator` typed DTOs, pinned views, OID cursors, filters, and Cell-evidence projection. Not Agent Tools. |
-| Tool params/results | Manifest-generated descriptor schemas and guest types for built-ins; residual typed native traits remain generic migration machinery |
-| `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
-| `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
-| `PolicyHook` / `PolicyDecision` | Pluggable external policy hook interface in `lancet-protocol` |
-| Invocation/evidence schemas | Typed bindings and versioned Cell-evidence shapes in `lancet-protocol`; authoritative records, pinned operator DTOs, and project store opening in `lancet-audit` |
+## Ownership
 
-Internal implementation is split across `lancet-authority` (policy/guard/effect semantics), `lancet-runtime` (Component execution and Tool Host authority), and `lancet-native` (CEP server lifecycle and transitional routing).
+| Crate | Responsibility |
+| --- | --- |
+| `lancet-protocol` | Data-only invocation, error, Cell, event, and evidence contracts |
+| `lancet-authority` | Cell admission, Guard L1, network policy, and workspace visibility policy |
+| `lancet-runtime` | Closed Component composition, exact invocation execution, Tool Host imports, Local Workspace, network transport, evidence, cancellation, events, and private workspace history |
+| `lancet-audit` | Project-keyed `InvocationStore` plus operator query, tail, and replay |
+| `lancet-api` | Thin runtime and operator facade used by `lattice-api` and frontends |
+| `lattice-api` | `TurnCoordinator`, PendingTurn reconciliation, and cross-store Turn saga |
 
-**Not public:** transitional `lancet-native` server internals, low-level executor helpers, authority implementation details, and `#[doc(hidden)]` re-exports.
+`lattice-api::TurnCoordinator` is the sole product invocation owner. LANCET has
+no standalone Tool product, caller-composed catalog, generic execution backend,
+or runtime plugin interface.
 
-Pre-v1.3.1 method names are removed. They are not accepted by the runtime or
-runtime registry. LLM-facing definitions come from the closed generated
-five-Component inventory. Tool exposure is separate from base authority:
-Enabled methods filter the model-visible generated definitions. Cell admission
-and per-operation Tool Host authorization decide execution authority. Legacy
-Legacy `ToolExposure::base_authority()` remains only for the
-transitional generic/native machinery; it grants no production built-in.
+## Closed catalog
 
-### Effect-contract tool surface
+Each Source Tool manifest owns its descriptor, scopes, capabilities, schemas,
+and import declarations. `cargo xtask tool-codegen` generates the WIT bindings,
+provider projection, host metadata, expected identity, and inventory
+registration. The build links only generated registrations into the runtime.
 
-The canonical method names are grouped by primary effect class:
+Startup fails closed when a registration is missing or duplicated, or when the
+descriptor, artifact digest, actual import set, ABI, or expected identity drifts.
+Enabled Tool names only filter the immutable generated inventory; callers cannot
+supply descriptors or executable implementations.
 
-| Method | Primary effect contract |
-| -------- | ------------------------- |
-| `observe.workspace` | Workspace observation. `mode=read_file` has single-path scope; `mode=grep`, `mode=list_directory`, and `mode=find_files` use root/directory observation scope. |
-| `mutate.create` | Workspace mutation by pure file creation (embedded Component Tool since #31). Existing targets are rejected; missing parent directories are rejected. |
-| `mutate.edit` | Workspace mutation of existing files through semantic replace/insert operations (embedded Component Tool since #31). The caller provides `expected_hash`; LANCET computes hashline anchors internally. |
-| `fetch.web` | External observation through a GET-only embedded Component. The host revalidates every URL/redirect, rejects non-global targets, pins DNS results, verifies TLS, enforces bounds/budget, and records per-hop evidence without userinfo/query/fragment. |
-| `session.todo_write` | Session-state mutation for todo state. |
+Provider-visible Tool definitions are projected directly from the generated
+descriptors. There is no second hand-maintained method schema.
 
-Audit query, tail, and turn replay are **not** catalog methods. Operators use
-`lattice audit` (default: query/tail; `lattice audit replay --turn <id>` for a
-turn's finalized call trace), backed by `lancet-api::{query_audit, tail_audit,
-replay_audit}`, which delegate to `lancet-audit::operator`; see **Operator
-Audit** below. The operator DTOs never lived in `CATALOG`, and
-since GitHub #39 they no longer live in `lancet-catalog` at all.
+## Invocation lifecycle
 
-### Rollout gate and self-check
+One typed `InvocationId` identifies a Tool call across its binding,
+`InvocationStore` record, Component call context, events, terminal material, and
+`CellEvidenceTriple`.
 
-- **Alpha rollout gate:** `cargo xtask rollout --channel alpha` - rejects a
-  tracked-dirty worktree, builds a locked release binary, runs
-  Direct-Local/offline/dogfood/release-operator-matrix/doctor evidence steps against it,
-  and writes a versioned JSON record to `target/rollout/`. See
-  [docs/TESTING.md](./TESTING.md).
-- **LANCET self-check:** `lattice lancet doctor` (or `cargo run -p lattice-cli
-  -- lancet doctor`) - verifies the production registry fully registers the
-  CATALOG, in-process transport smoke-tests, base envelope constructs, and mode
-  policy parses cleanly.
-- **v1.4-alpha release record:** `docs/archive/releases/v1.4-alpha-release-record.md` - archived, unfilled evidence template for the retired host-isolation model.
-- **Warn-mode report:** `docs/archive/releases/lancet-warn-report.md` - archived v1.3.1-alpha warn-mode baseline.
-- **Capability boundary walkthrough:** `docs/archive/releases/v1.3-alpha-walkthrough.md` - archived v1.3-alpha Layer-1 walkthrough.
+The production sequence is:
 
-### Mode semantics
+1. `TurnCoordinator` binds the provider Tool call to an exact
+   `InvocationBinding` and durably reserves the candidate ID.
+2. The LANCET facade verifies that the method and canonical arguments match the
+   binding.
+3. `InvocationStore` durably advances `Reserved` to `DispatchStarted` before
+   the Component receives control.
+4. `lancet-runtime` admits the generated descriptor under the resolved Cell
+   policy and constructs call-scoped workspace, mutation, or network hosts.
+5. The Component runs with an independent cancellation signal and host-bound
+   event sink.
+6. The Turn saga publishes typed terminal material and the exact host-produced
+   evidence triple.
 
-`mode = "off"` under `[lancet]` skips legacy effect-region enforcement only.
-Component admission, workspace policy, and network policy remain host-enforced.
+An invocation that never crosses `DispatchStarted` is reported as not executed.
+After `DispatchStarted`, loss of a reliable terminal answer is reconciled as
+`Indeterminate`; reopening never resends the provider request or redispatches a
+Tool.
 
-The production native catalog is empty after #32. A non-empty
-`[lancet.effects] deny` therefore fails runtime construction instead of becoming
-a silent no-op. Migrate impact-kind denies to manifest capability names under
-`[lancet.capabilities] deny`, for example `external_observation` →
-`network.fetch`, `workspace_observation` → `workspace.observation`, and
-`workspace_mutation` → `workspace.mutation`. Legacy `ImpactKind` checks remain
-only for generic native/scaffold dispatch until #34 removes that vocabulary.
+Calls do not share cancellation identity or event identity. Dropping one caller
+cannot cancel another invocation. Host event emission overwrites any
+caller-supplied `invocation_id` with the bound ID.
 
-`fetch.web` also requires `max_boundary = "ex"` and a non-empty
-`[lancet.network] allowed_hosts`. `allow_public_https` enables public HTTPS but
-does not grant any host; localhost additionally requires `allow_localhost = true`.
-Every redirect is checked against the same rules.
-Network evidence retains the normalized endpoint/path but removes userinfo, query, and
-fragment before persistence; it records host-received and guest-delivered body bytes
-separately. DNS or transport work that already occurred is an effect, never a pre-I/O denial.
+## Cell admission and policy
 
-### Command physical-boundary configuration (retired)
+Tool enablement and Cell admission are separate checks:
 
-Landlock/netns command isolation, the `[lancet.isolation.command]` profile
-schema, and the Phase 29 native supervisor (unprivileged user namespaces,
-minimal mount view, allowlist environment, fd cleanup) were removed - see
-ADR 0003 and root AGENTS.md "Architecture". `exec.command_run`
-itself is retired (a raw CEP call returns JSON-RPC `-32601`), so there is no
-command-isolation configuration surface. Git history retains the phase
-narrative.
+- the profile's enabled Tool list controls provider visibility;
+- `[lancet.capabilities] deny` removes named manifest capabilities;
+- `max_boundary` limits the maximum admitted Cell trust boundary;
+- every host operation must be covered by an admitted descriptor Cell with the
+  exact channel, scope, context operation, and external impact.
 
-### Phase 30 overlay modes and artifact commit (retired)
+Unknown denied capability names fail runtime construction. The default policy
+is fail closed.
 
-The Phase 30 overlay/artifact-commit pipeline (diagnostic/artifact overlays,
-candidate verify layers, lower-drift recheck, HashLine commit-baseline gate)
-belonged to the retired `exec.command_run` command-isolation subsystem and was
-removed with it - see ADR 0003 and root AGENTS.md "Architecture".
-subsystems". The metadata keys it emitted (`overlay_status`,
-`artifact_adjudication`, `commit_baseline_validation`, etc.) are no longer
-produced. Git history retains the phase narrative.
+Current profile sections are:
 
-## Mutation and command observation
+- `[lancet]`
+- `[lancet.observation]`
+- `[lancet.network]`
+- `[lancet.workspace]`
+- `[lancet.capabilities]`
 
-### Semantic edits
+## Local Workspace
 
-`mutate.edit` edits one existing file with semantic operations such as
-`replace_text`, `insert_before`, and `insert_after`. The caller supplies the
-file `expected_hash` from `observe.workspace`; LANCET verifies that hash on the
-`workspace-mutate` host before guest compilation and again at the final atomic
-install operation. Semantic ops run in the guest (`tools/mutate-edit` +
-`mutate-shared`); their validation/replan diagnostics return through a
-non-installing host refusal, and the LLM-facing tool surface does not accept
-hashline patch documents.
+The runtime constructs one concrete `LocalWorkspace` for a Turn. Component
+imports cannot bypass its path resolution or installation rules.
 
-Edits are forced to be based on the current Local Revision before commit. Audit
-metadata records MutationEvidence (before/after revision, precondition,
-installation). Agent-visible workspace mutation is limited to `mutate.create`
-and `mutate.edit` (single-file methods only).
+### Observation
 
-### Create-only writes
+`observe.workspace` supports bounded read, list, grep, and find operations over
+tracked and non-ignored Local files by default. `[lancet.workspace]` controls
+explicit ignored-path inclusion and read denial. System Path Exclusions always
+win.
 
-`mutate.create` is create-only. It fails if the target already exists and does
-not create missing parent directories. Existing-file edits must go through
-`mutate.edit`.
+All observation modes use the same host visibility decision. Hidden paths look
+missing to the guest; the hidden reason is recorded only in evidence. Traversal,
+content limits, and truncation are host-computed. Long grep/find walks check the
+call cancellation signal and finish with a typed cancellation error.
 
-### Command boundary metadata (retired)
+### Mutation
 
-The `effective_boundary` / `host_probe` metadata model, the
-`physically_bounded` attribution rules, and the `exec.command_run` boundary
-JSON documented here belonged to the retired command-isolation subsystem and
-were removed with it - see ADR 0003 and root AGENTS.md "Architecture".
-subsystems". Git history retains the metadata schema narrative.
+`mutate.create` installs one new file and refuses an existing target.
+`mutate.edit` edits one existing file using semantic replace/insert operations.
+The caller must provide the `content_hash` returned by `observe.workspace` as
+`expected_hash`.
 
-## LANCET CLI inspection and self-check
+The host rechecks Mutation Preconditions at the atomic installation boundary.
+Successful installs are recorded in the project-keyed private
+`workspace-history.git`; pre-install refusals do not move history. Workspace
+history is separate from Session history and the invocation ledger.
 
-- `lattice lancet status` opens the authoritative project-keyed
-  `invocations.git` directly (no CEP server), pins one ledger view, and shows its
-  `ledger_oid`, newest 20 current invocation records, and last lifecycle verdict.
-  `--json` emits the same typed data.
-- `lattice lancet doctor` runs LANCET self-checks: the production registry
-  fully registers the CATALOG, in-process transport smoke-tests, base envelope
-  constructs, and mode policy parses cleanly. It exits nonzero if any check
-  fails; `--json` emits a `{ ok, checks }` object.
+`/rewind` verifies every affected path against recorded post-state, restores
+through the same safe resolver and atomic installer, and moves history/session
+refs only after workspace restoration succeeds.
 
-### Live canary classification (retired)
+## Network
 
-The live Linux isolation canary lane (the ignored Rust canary suite, gated by a
-live-isolation env flag) was removed - see
-ADR 0003 and root AGENTS.md "Architecture". Git history
-retains the classification narrative.
+`fetch.web` reaches the network only through the runtime's `network-fetch` host
+import. The host enforces:
 
-## Phase 29 non-claims (retired)
+- GET only;
+- explicit `allowed_hosts` matching;
+- public HTTPS policy and optional explicit localhost policy;
+- complete private, reserved, and special-address rejection;
+- DNS resolution with connection pinning and rebinding checks;
+- TLS verification;
+- per-hop redirect validation;
+- header, body, deadline, cancellation, and shared observation-budget limits.
 
-Phase 29 command-boundary reporting and the applied-evidence model were part of
-the retired `exec.command_run` command-isolation subsystem and were removed
-with it - see ADR 0003 and root AGENTS.md "Architecture".
-Git history retains the non-claims narrative.
+Evidence records normalized per-hop endpoints without userinfo, query, or
+fragment. It distinguishes bytes received by the host from bytes delivered to
+the guest. Post-I/O failures remain effects rather than being rewritten as
+pre-I/O denials.
 
-## Operator Invocation Ledger
+## Evidence and errors
 
-### Git store and Cell evidence
+Every executed call returns an `ExecutionReceipt` containing a typed result and
+`CellEvidenceTriple`:
 
-Every accepted production invocation is keyed by one typed `InvocationId` in the
-project's authoritative Git ledger:
+- admission evidence explains which capabilities and boundary were admitted or
+  refused;
+- observed effects record host-observed operations and result effects;
+- denied operations record refusals before a host facility ran.
+
+Evidence is content-free: Tool arguments, result bodies, fetched bytes,
+credentials, and host filesystem paths are not persisted. Runtime failures map
+to typed `CepError` families with explicit retriability and bounded, redacted
+messages.
+
+## Operator ledger
+
+Accepted invocations live in:
 
 ```text
 $XDG_STATE_HOME/lattice/projects/<ProjectStoreKey>/invocations.git
 ```
 
-The store owns exact ordered batch reservation, durable `DispatchStarted`, atomic
-terminal-state plus versioned `CellEvidenceTriple` publication, an ordered
-high-water witness, and pinned linear-ancestry views. Current records include
-`Reserved` and `DispatchStarted`, not only terminal calls. Terminal material is
-represented by outcome-independent digest/length/availability metadata; evidence
-contains admission, observed-effect, and denial facts without Tool content.
+The Git ledger owns ordered batch reservation, durable `DispatchStarted`, atomic
+terminal-and-evidence publication, and pinned linear-ancestry reads.
 
-Arguments, result/fetched content, provider payload or opaque replay state,
-credentials, provider IDs as correlation identity, and internal metadata blobs are
-not operator fields. SQLite tables, `metadata_json`, pointer IDs, numeric
-call/audit/evidence IDs, schema adoption, import, dual read/write, and fallback
-opening are deleted. Old disposable development state is rebuilt explicitly; see
-by recreating new sessions via `lattice session new`.
+Operator commands are host-only and are not Agent Tools:
 
-### Query, tail, replay, and status
+- `lattice audit` queries a pinned view;
+- `lattice audit tail` reads ordered lifecycle transitions from an exclusive OID
+  cursor;
+- `lattice audit replay --turn <TurnId>` returns one Turn's invocation trace in
+  model-step/part order;
+- `lattice lancet status` reports the pinned ledger OID and recent typed states.
 
-Operator reads are host-only. `lattice audit` delegates to
-`lancet-api::{query_audit, tail_audit, replay_audit}` and never composes a CEP
-server or takes a project operation lock. Agents receive no audit Tool.
+Operator reads use `lancet-audit` directly through the `lancet-api` facade. They
+do not compose the Tool runtime or take the workspace operation lock.
 
-- Query pins the requested `--at <ledger-oid>` view, or the current tip, and
-  returns at most 1,000 current records filtered by typed Session/Turn identity,
-  method, and lifecycle verdict.
-- Tail uses `--since <ledger-oid>` as an exclusive reachable commit cursor, returns
-  lifecycle transitions in commit order, and never splits one atomic reservation
-  commit at the page boundary.
-- Replay pins one view and returns every invocation for the typed Session/Turn in
-  structural model-step/part order.
-- Status pins one view and returns that `ledger_oid`, the newest 20 current records,
-  and the latest lifecycle verdict.
+## Doctor and verification
 
-The owning behavior and contract tests live in `lancet-audit::operator`;
-`lancet-api` is a thin error-mapping facade. Structural dependencies keep
-`lancet-audit` free of `lancet-native`, `lancet-dispatch`, `lancet-cep`, and
-`lancet-runtime`, so the read path cannot name a server, transport, or registry
-type.
+`lattice lancet doctor` canonicalizes the Local Workspace and verifies that the
+generated closed Component catalog composes. It exits nonzero if either check
+fails; `--json` emits the same structured result.
+
+Useful verification commands:
+
+```bash
+cargo xtask tool-codegen --check
+cargo xtask tool-build --verify
+cargo xtask lancet-boundary
+cargo test -p lancet-runtime -p lancet-api -p lattice-api -p lattice-system-harness
+```
+
+See [TESTING.md](./TESTING.md) for the full workspace gate.

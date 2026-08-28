@@ -8,10 +8,8 @@
 //! invariant) live in [`lancet_audit::operator`]. This module only re-exports
 //! the operator DTOs under their established `lancet_api` paths and maps
 //! [`OperatorAuditError`] onto [`LancetError`] (messages pass through
-//! verbatim). Operator reads never compose a CEP server: the behavior lives in
-//! `lancet-audit`, which depends on none of `lancet-native`, `lancet-dispatch`,
-//! `lancet-cep`, or `lancet-runtime`, so the boundary holds structurally rather
-//! than by assertion.
+//! verbatim). Operator reads stay in `lancet-audit` and never compose the
+//! Component runtime, so operator and Tool execution surfaces remain separate.
 
 use lancet_audit::OperatorAuditError;
 pub use lancet_audit::{
@@ -70,7 +68,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn query_audit_reads_invocation_store_without_cep_server() {
+    async fn query_audit_reads_invocation_store_without_tool_runtime() {
         let _xdg = ScopedXdgStateHome::new();
         let project = TempDir::new().unwrap();
         InvocationStore::create_project(project.path()).unwrap();

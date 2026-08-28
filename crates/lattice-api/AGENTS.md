@@ -6,8 +6,9 @@ Crate-local guidance for `lattice-api`.
 
 This crate owns the public facade for session creation/opening and turn
 execution. It exposes `SessionApi`, `stream_turn`, `run_turn`, and public turn
-events/results. LANCET runtime composition now lives in `lancet-api`; this crate
-translates profile `[lancet]` policy into LANCET-native config and drives the journal-backed `TurnCoordinator` over `lancet-api`'s bound CEP runtime.
+events/results. Runtime composition lives in `lancet-api`; this crate translates
+profile `[lancet]` policy and drives the journal-backed `TurnCoordinator` over
+its reservation-bound Component runtime.
 
 ## Sub-Architecture
 
@@ -16,21 +17,21 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
 - `src/turn/live.rs` owns the live streaming turn core.
 - `src/turn/execute.rs` owns the `run_turn` entrypoint.
 - `src/turn/collector.rs` drains live streams into `RunTurnResult`.
-- `src/turn/cep.rs` owns profile→policy translation, CEP-event→public-event
-  mapping, and `build_production_turn_deps` over `lancet_api::LancetRuntime::build`.
-  First-time shared Component composition runs through `spawn_blocking`; runtime
-  assembly itself remains in `lancet-api`.
+- `src/turn/cep.rs` owns profile-to-policy translation, Tool-event-to-public-event
+  mapping, and `build_production_turn_deps` over
+  `lancet_api::LancetRuntime::build`. First-time shared Component composition runs
+  through `spawn_blocking`; assembly itself remains in `lancet-api`.
 - `src/turn/coordinator.rs` owns the production #139-B `TurnCoordinator`:
   blocking store adapters (`spawn_blocking` over `GitSessionGraphStore` and the
   Git `InvocationStore`), the injectable `IdSource`, durable reconciliation,
   and terminal/evidence publication.
 - `src/turn/saga.rs` drives each live Turn through the durable journal, binding,
-  reservation, sequential dispatch, ResultDraft, terminal, and finalization stages.
+  reservation, sequential Component execution, ResultDraft, terminal, and finalization stages.
 - `src/turn/invocation_facts.rs` is the #139-B cross-domain projection
   (`lancet_audit::PinnedLedgerView` ->
   `lattice_session::pending::InvocationFactsSnapshot`). This crate owns that
   composition because `lancet-audit -> lattice-session` must not exist.
-- Integration tests cover CEP round trips, typed operator audit reads, release flows, and
+- Integration tests cover Component Tool calls, typed operator audit reads, release flows, and
   consistency.
 - Project-store tests serialise `XDG_STATE_HOME` through
   `lancet_audit::ScopedXdgStateHome`, pulled in via
@@ -43,14 +44,13 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
 - `stream_turn` is the single live execution core; `run_turn` drains it.
 - Keep CLI rendering out of this crate.
 - Keep provider protocol details in `lattice-llm`.
-- Keep LANCET execution implementation below this crate. It currently lives in
-  `lancet-native`; after ADR 0004 convergence it lives in `lancet-runtime`.
-  Neither path belongs in the session/turn facade.
+- Keep Component execution implementation in `lancet-runtime`, below this crate;
+  it does not belong in the Session/Turn facade.
 - ADR 0005 assigns the production cross-store saga here. `TurnCoordinator` owns the full-Turn session execution lock, PendingTurn,
   exact binding plan, InvocationStore reservation/finalization, Tool dispatch,
   ResultDraft, reconciliation, and final Turn commit through narrow domain
   interfaces. It must never hold two repository write locks, invent a
-  cross-store transaction, or expose a Standalone/direct CEP product caller.
+  cross-store transaction, or expose a standalone/direct Tool-runtime caller.
 - `TurnCoordinator` is the only Turn saga owner, but not the only cross-store
   workflow in this crate: explicit rewind is owned by a separate
   `RewindCoordinator`. Both obey SessionExecutionLock -> project
@@ -102,15 +102,14 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
 
 ## Next Actions
 
-- Keep runtime composition in `lancet-api`; this crate should only translate
-  profile policy and drive `TurnCoordinator`. Do not reintroduce server/transport
-  assembly here.
+- Keep runtime composition in `lancet-api`; this crate translates profile policy
+  and drives `TurnCoordinator`. Do not add Component-engine assembly here.
 - Consume Tool definitions projected by the LANCET public facade; do not add a
-  LATTICE-owned schema or native/Component dispatch switch during migration.
+  LATTICE-owned schema or second dispatch path.
 - Keep `run_turn` implemented through `stream_turn` and `RunTurnCollector`.
 - Add focused tests whenever public `TurnEvent` mapping or commit semantics
   change.
-- Read the workspace-history identity after the LANCET server has drained;
+- Read the workspace-history identity after the LANCET runtime has drained;
   the pure reducer emits `TurnCommitCandidateBasis`, and only the composition
   layer may complete it with a validated checkpoint sampled under the shared
   operation lock. Never substitute `Empty` for an error or malformed OID.
@@ -129,7 +128,7 @@ translates profile `[lancet]` policy into LANCET-native config and drives the jo
 ## Verification
 
 - Local: `cargo test -p lattice-api`.
-- Runtime composition changes: also run affected native, agent, session, and CLI
-  tests.
+- Runtime composition changes: also run affected `lancet-runtime`, agent,
+  session, and CLI tests.
 - Streaming changes should cover live events, collector output, failures,
   cancellation, commit, and observer backpressure.

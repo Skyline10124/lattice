@@ -36,9 +36,6 @@ mod stream_tests;
 mod types_tests;
 
 #[cfg(test)]
-mod cep_tests;
-
-#[cfg(test)]
 mod live_tests;
 
 pub use collector::collect_turn_result_from_events;
@@ -47,6 +44,3 @@ pub use types::{
     RunTurnRequest, RunTurnResult, RunTurnStage, ToolResultSummary, TurnEvent, TurnEventStream,
     TurnUsageSummary,
 };
-
-#[doc(hidden)]
-pub use cep::{CepErrorPayload, ToolExecutionError};

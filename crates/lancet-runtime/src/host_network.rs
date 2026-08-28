@@ -22,7 +22,7 @@ use lancet_authority::NetworkPolicyConfig;
 use lancet_authority::policy::network::validate_fetch_url;
 use lancet_protocol::cell::{Cell, ChannelKind, CtxOp, ExtImpact};
 use lancet_protocol::error::{
-    EffectErrorData, PermissionErrorData, ReservedErrorData, ValidationErrorData,
+    CapabilityErrorData, PermissionErrorData, ReservedErrorData, ValidationErrorData,
 };
 use lancet_protocol::evidence::{
     NetworkEndpoint, NetworkEvidence, NetworkFailurePhase, NetworkPolicyVerdict, NetworkResolution,
@@ -595,7 +595,7 @@ struct NetworkCallContext {
     turn_id: String,
     admitted: Arc<AdmittedTool>,
     evidence: CellEvidenceLedger,
-    cancellation: lancet_dispatch::Cancellation,
+    cancellation: crate::control::Cancellation,
     deadline: Instant,
 }
 
@@ -927,13 +927,10 @@ fn denied_error(message: &str) -> CepError {
 
 fn effect_error(reason: String) -> CepError {
     CepError::new(
-        CepErrorCode::EffectViolation,
+        CepErrorCode::CapabilityViolation,
         "network operation cell is not authorized",
-        CepErrorData::Effect(Box::new(EffectErrorData {
+        CepErrorData::Capability(Box::new(CapabilityErrorData {
             method: METHOD.into(),
-            declared_effect: Vec::new(),
-            authorized_effect: Vec::new(),
-            observed_effects: Vec::new(),
             violations: vec![reason],
             cell_ref: None,
             capability: Some("network.fetch".into()),
@@ -1103,7 +1100,7 @@ async fn budget_refusals_distinguish_pre_and_post_io() {
         turn_id: "test-turn".into(),
         admitted: Arc::new(admitted),
         evidence: evidence.clone(),
-        cancellation: lancet_dispatch::Cancellation::new(cancel_rx),
+        cancellation: crate::control::Cancellation::new(cancel_rx),
         deadline: Instant::now() + Duration::from_secs(5),
     };
     let mut policy = NetworkPolicyConfig::safe_defaults();

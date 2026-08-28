@@ -149,7 +149,7 @@ pub(crate) fn schema_violation_detail(
     )
 }
 
-/// Build an `EffectViolation` error when the guest's result CellRef is not
+/// Build an `CapabilityViolation` error when the guest's result CellRef is not
 /// in the descriptor's capability cells.
 pub(crate) fn effect_violation(method: &str, cell_ref: &str) -> CepError {
     result_cell_violation(
@@ -160,7 +160,7 @@ pub(crate) fn effect_violation(method: &str, cell_ref: &str) -> CepError {
     )
 }
 
-/// Build an `EffectViolation` error when the result CellRef is declared by
+/// Build an `CapabilityViolation` error when the result CellRef is declared by
 /// the descriptor but outside the set admitted for this call (the effect
 /// ceiling, D3). Same code as a declaration violation — the admitted set is
 /// an intersection, not a separate error family.
@@ -175,17 +175,16 @@ pub(crate) fn effect_not_admitted(method: &str, cell_ref: &str) -> CepError {
 
 fn result_cell_violation(method: &str, cell_ref: &str, summary: &str, violation: &str) -> CepError {
     CepError::new(
-        CepErrorCode::EffectViolation,
+        CepErrorCode::CapabilityViolation,
         format!("{method}: result cell {cell_ref} {summary}"),
-        lancet_protocol::CepErrorData::Effect(Box::new(lancet_protocol::error::EffectErrorData {
-            method: method.into(),
-            declared_effect: vec![],
-            authorized_effect: vec![],
-            observed_effects: vec![],
-            violations: vec![format!("result cell {cell_ref} {violation}")],
-            cell_ref: Some(cell_ref.to_owned()),
-            capability: None,
-        })),
+        lancet_protocol::CepErrorData::Capability(Box::new(
+            lancet_protocol::error::CapabilityErrorData {
+                method: method.into(),
+                violations: vec![format!("result cell {cell_ref} {violation}")],
+                cell_ref: Some(cell_ref.to_owned()),
+                capability: None,
+            },
+        )),
         Retriability::Permanent,
     )
 }

@@ -1,8 +1,6 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use lancet_protocol::CepMode;
-use lancet_protocol::ImpactKind;
 use lancet_protocol::cell::Trust;
 use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use serde::{Deserialize, Serialize, de};
@@ -55,7 +53,6 @@ pub const TYPED_LANCET_SUB_TABLES: &[&str] = &[
     "observation",
     "network",
     "policy",
-    "effects",
     "capabilities",
     "workspace",
 ];
@@ -65,10 +62,8 @@ pub const TYPED_LANCET_SUB_TABLES: &[&str] = &[
 /// Sub-tables named in [`TYPED_LANCET_SUB_TABLES`] deserialize into typed fields
 /// and are therefore strictly validated. Other future sub-tables remain in
 /// `extensions`.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct LancetSection {
-    #[serde(default = "default_lancet_mode")]
-    pub mode: CepMode,
     #[serde(default)]
     pub project_root: Option<LancetProjectRootSection>,
     #[serde(default)]
@@ -77,8 +72,6 @@ pub struct LancetSection {
     pub network: Option<LancetNetworkSection>,
     #[serde(default)]
     pub policy: Option<LancetPolicySection>,
-    #[serde(default)]
-    pub effects: Option<LancetEffectsSection>,
     #[serde(default)]
     pub capabilities: Option<LancetCapabilitiesSection>,
     #[serde(default)]
@@ -95,7 +88,7 @@ pub struct LancetProjectRootSection {
     pub root: Option<String>,
 }
 
-/// `[lancet.observation]` — observation and todo budget limits.
+/// `[lancet.observation]` — observation limits.
 ///
 /// Observation *scope* is not configured here: it is
 /// `[lancet.project_root].root` plus the `[lancet.workspace]` read-visibility
@@ -111,7 +104,6 @@ pub struct LancetObservationSection {
     pub max_grep_matches: Option<usize>,
     pub max_list_entries: Option<usize>,
     pub max_find_paths: Option<usize>,
-    pub max_todo_ops: Option<usize>,
 }
 
 /// `[lancet.network]` — `fetch.web` host policy and response size cap.
@@ -151,20 +143,6 @@ pub struct LancetWorkspacePolicySection {
     pub denied_read_patterns: Vec<String>,
 }
 
-/// `[lancet.effects]` — legacy native impact-kind deny input.
-///
-/// The production native catalog is empty after #32, so these impact kinds cannot
-/// govern any shipped Tool. A non-empty `deny` still parses for migration clarity
-/// but runtime construction rejects it fail closed; use `[lancet.capabilities] deny`
-/// with manifest-declared capability names instead. The legacy shape remains only
-/// until #34 removes the migration vocabulary.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct LancetEffectsSection {
-    #[serde(default)]
-    pub deny: Vec<ImpactKind>,
-}
-
 /// `[lancet.capabilities]` — Component Tool capability admission policy.
 ///
 /// Admission runs in a fixed stage order: the enabled tools' declared
@@ -175,10 +153,8 @@ pub struct LancetEffectsSection {
 /// capability is not callable.
 ///
 /// Every `deny` entry must name a capability of the composed Component
-/// catalog. An unknown name is a hard error at server construction, never a
-/// warning: a deny typo that silently keeps a grant is fail-open. On a binary
-/// whose Component catalog is empty, *any* `deny` entry therefore fails
-/// startup.
+/// catalog. An unknown name is a hard error at runtime construction, never a
+/// warning: a deny typo that silently keeps a grant is fail-open.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LancetCapabilitiesSection {
@@ -204,28 +180,8 @@ impl Default for LancetCapabilitiesSection {
     }
 }
 
-fn default_lancet_mode() -> CepMode {
-    CepMode::Enforce
-}
-
 fn default_max_boundary() -> Trust {
     Trust::In
-}
-
-impl Default for LancetSection {
-    fn default() -> Self {
-        Self {
-            mode: default_lancet_mode(),
-            project_root: None,
-            observation: None,
-            network: None,
-            policy: None,
-            effects: None,
-            capabilities: None,
-            workspace: None,
-            extensions: BTreeMap::new(),
-        }
-    }
 }
 
 impl<'de> Deserialize<'de> for LancetSection {
@@ -234,15 +190,21 @@ impl<'de> Deserialize<'de> for LancetSection {
         D: serde::Deserializer<'de>,
     {
         let mut raw = BTreeMap::<String, toml::Value>::deserialize(deserializer)?;
-        let mode = match raw.remove("mode") {
-            Some(value) => value.try_into().map_err(de::Error::custom)?,
-            None => default_lancet_mode(),
-        };
+        if raw.remove("mode").is_some() {
+            return Err(de::Error::custom(
+                "`lancet.mode` is retired; Component Cell admission is always enforced",
+            ));
+        }
+        if raw.remove("effects").is_some() {
+            return Err(de::Error::custom(
+                "`lancet.effects` is retired; use `[lancet.capabilities] deny`",
+            ));
+        }
 
         for (key, value) in &raw {
             if !matches!(value, toml::Value::Table(_)) {
                 return Err(de::Error::custom(format!(
-                    "unknown scalar field `lancet.{key}`; only `mode` and future sub-tables are supported"
+                    "unknown scalar field `lancet.{key}`; only typed or future sub-tables are supported"
                 )));
             }
         }
@@ -263,10 +225,6 @@ impl<'de> Deserialize<'de> for LancetSection {
             .remove("policy")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
-        let effects = raw
-            .remove("effects")
-            .map(|value| value.try_into().map_err(de::Error::custom))
-            .transpose()?;
         // Typed here so an admission policy can never fall into `extensions`
         // and be silently ignored.
         let capabilities = raw
@@ -279,12 +237,10 @@ impl<'de> Deserialize<'de> for LancetSection {
             .transpose()?;
 
         Ok(Self {
-            mode,
             project_root,
             observation,
             network,
             policy,
-            effects,
             capabilities,
             workspace,
             extensions: raw,
@@ -724,65 +680,9 @@ system = "hi"
     }
 
     #[test]
-    fn cep_defaults_to_enforce_when_section_absent() {
+    fn lancet_defaults_when_section_absent() {
         let profile = parse(minimal_profile_prefix()).unwrap();
-        assert_eq!(profile.lancet.mode, CepMode::Enforce);
-        assert!(profile.lancet.extensions.is_empty());
-    }
-
-    #[test]
-    fn cep_parses_enforce_mode() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet]
-mode = "enforce"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        assert_eq!(profile.lancet.mode, CepMode::Enforce);
-    }
-
-    #[test]
-    fn cep_parses_warn_mode() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet]
-mode = "warn"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        assert_eq!(profile.lancet.mode, CepMode::Warn);
-    }
-
-    #[test]
-    fn cep_parses_off_mode() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet]
-mode = "off"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        assert_eq!(profile.lancet.mode, CepMode::Off);
-    }
-
-    #[test]
-    fn cep_rejects_invalid_mode() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet]
-mode = "permissive"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        assert!(parse(&toml).is_err());
+        assert_eq!(profile.lancet, LancetSection::default());
     }
 
     #[test]
@@ -805,8 +705,6 @@ mod = "off"
             r#"{prefix}
 
 [lancet]
-mode = "enforce"
-
 [lancet.project_root]
 root = "."
 
@@ -816,7 +714,6 @@ max_turn_observation_bytes = 8192
 max_grep_matches = 500
 max_list_entries = 300
 max_find_paths = 400
-max_todo_ops = 10
 
 [lancet.network]
 allow_public_https = true
@@ -827,7 +724,6 @@ max_web_response_bytes = 2048
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert_eq!(profile.lancet.mode, CepMode::Enforce);
         let project_root = profile.lancet.project_root.as_ref().unwrap();
         assert_eq!(project_root.root.as_deref(), Some("."));
         let observation = profile.lancet.observation.as_ref().unwrap();
@@ -847,33 +743,13 @@ max_web_response_bytes = 2048
             r#"{prefix}
 
 [lancet]
-mode = "enforce"
-
 [lancet.future_table]
 some_field = true
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert_eq!(profile.lancet.mode, CepMode::Enforce);
         assert!(profile.lancet.extensions.contains_key("future_table"));
-        assert!(profile.lancet.project_root.is_none());
-        assert!(profile.lancet.observation.is_none());
-        assert!(profile.lancet.network.is_none());
-    }
-
-    #[test]
-    fn cep_older_profile_mode_only_still_parses() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet]
-mode = "enforce"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        assert_eq!(profile.lancet.mode, CepMode::Enforce);
         assert!(profile.lancet.project_root.is_none());
         assert!(profile.lancet.observation.is_none());
         assert!(profile.lancet.network.is_none());
@@ -905,18 +781,16 @@ max_web_response_bytes = 1024
         extensions.insert("future_table".into(), toml::Value::Table(future));
 
         let section = LancetSection {
-            mode: CepMode::Warn,
             project_root: None,
             observation: None,
             network: None,
             policy: None,
-            effects: None,
             capabilities: None,
             workspace: None,
             extensions,
         };
         let serialized = toml::to_string(&section).unwrap();
-        assert!(serialized.contains("mode = \"warn\""), "got: {serialized}");
+        assert!(!serialized.contains("mode"), "got: {serialized}");
         assert!(serialized.contains("[future_table]"), "got: {serialized}");
         assert!(!serialized.contains("extensions"), "got: {serialized}");
     }
@@ -929,12 +803,10 @@ max_web_response_bytes = 1024
     #[test]
     fn typed_lancet_sub_tables_match_the_struct_fields() {
         let section = LancetSection {
-            mode: CepMode::Warn,
             project_root: Some(LancetProjectRootSection::default()),
             observation: Some(LancetObservationSection::default()),
             network: Some(LancetNetworkSection::default()),
             policy: Some(LancetPolicySection::default()),
-            effects: Some(LancetEffectsSection::default()),
             capabilities: Some(LancetCapabilitiesSection::default()),
             workspace: Some(LancetWorkspacePolicySection::default()),
             extensions: BTreeMap::new(),

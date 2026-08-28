@@ -22,7 +22,6 @@ pub struct ObservationPolicyConfig {
     pub max_grep_matches: usize,
     pub max_list_entries: usize,
     pub max_find_paths: usize,
-    pub max_todo_ops: usize,
 }
 
 impl ObservationPolicyConfig {
@@ -34,21 +33,16 @@ impl ObservationPolicyConfig {
             max_grep_matches: 1000,
             max_list_entries: 1000,
             max_find_paths: 1000,
-            max_todo_ops: 100,
         }
     }
 
     /// Project the turn-scoped budget out of these limits.
     ///
-    /// This is the only place [`super::BudgetLimits`] is derived (#121). The two
-    /// structs used to hold six duplicated fields kept in sync by hand at three
-    /// construction sites, and the external-policy-file path missed that sync,
-    /// so half of a configured limit set landed in slots nothing read. Configure
-    /// the observation limits; the budget follows.
+    /// This is the only place [`super::BudgetLimits`] is derived, so profile
+    /// resolution and the turn-scoped tracker cannot drift.
     pub fn budget_limits(&self) -> super::BudgetLimits {
         super::BudgetLimits {
             max_turn_observation_bytes: self.max_turn_observation_bytes,
-            max_todo_ops: self.max_todo_ops,
         }
     }
 }
@@ -127,9 +121,8 @@ mod tests {
         reject_parent_traversal("src/main.rs").unwrap();
     }
 
-    /// #121: the limits are the whole configurable surface here. A scope field
-    /// would have to be read by the `VisibilityEngine` and the effect region to
-    /// mean anything, so it must not come back as a config-only value.
+    /// The limits are the whole configurable surface here. Observation scope
+    /// belongs to project-root and workspace-visibility policy.
     #[test]
     fn defaults_carry_limits_and_agree_with_the_budget_projection() {
         let observation = ObservationPolicyConfig::defaults();

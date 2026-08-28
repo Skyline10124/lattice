@@ -1,9 +1,9 @@
 # LATTICE Testing
 
 This document describes how LATTICE tests are written and run. LATTICE is a
-Rust Cargo workspace: 19 product crates under `crates/`, plus `tools/noop` and
-the root-level `xtask` automation crate (21 workspace members total; see root
-`Cargo.toml`). Testing uses Rust's built-in `#[test]` attribute and the
+Rust Cargo workspace: 17 maintained crates under `crates/`, seven Source Tool
+packages under `tools/`, and the root-level `xtask` automation crate (25
+workspace members total; see root `Cargo.toml`). Testing uses Rust's built-in
 `cargo test` runner. There is no Node/JavaScript toolchain, no `package.json`,
 and no external test framework.
 
@@ -22,8 +22,7 @@ alongside the tests (e.g.
 The test architecture is the **Direct-Local** model landed in issues #41 / #40:
 product behavior is proven by driving the built `lattice` binary through
 the real turn path against the canonical Local Workspace, and crate tests keep
-local invariants only. The per-test keep/elevate/delete triage for the
-The per-test keep/elevate/delete triage for the pre-rewrite suite was recorded in historical issue #40.
+local invariants only. Historical issue #40 records the pre-rewrite test triage.
 
 ---
 
@@ -44,21 +43,16 @@ pure logic, type invariants, and closed-set checks. It must **never** prove
 end-to-end product behavior (a real turn, a real file mutation, a real audit
 row) from inside a product crate — that belongs to layer 2 or 3.
 
-Confirmed `*_tests.rs` and `tests/` examples include
-`crates/lancet-audit/src/audit_tests.rs`,
-`crates/lattice-api/src/turn/{cep_tests,stream_tests,run_tests,live_tests,types_tests}.rs`,
-`crates/lattice-cli/src/commands/run_tests.rs`,
-`crates/lancet-authority/tests/` (guard-decide fuzz, `policy_tests.rs`),
-`crates/lancet-native/tests/` (CEP warn harness, policy integration, Component
-evidence round trips), and `crates/lattice-agent/tests/` (agent loop, streaming,
-completion).
+Representative examples include `crates/lancet-audit/src/operator_tests.rs`,
+`crates/lancet-runtime/tests/{call,embedded,negative}.rs`,
+`crates/lattice-api/src/turn/{stream_tests,run_tests,live_tests,types_tests}.rs`,
+`crates/lattice-cli/src/commands/run_tests.rs`, and the `lattice-agent`
+integration suites.
 
 **Pre-existing exception.** Several suites under `crates/lattice-api/tests/`
-(Direct-Local acceptance, dogfood matrix, and release e2e) still
-prove end-to-end behavior from inside a product crate, which the rule above
-forbids. They predate this architecture and are retained because CI and the
-rollout gate consume their offline/dogfood evidence (§7). They are
-**not a precedent**: a new test of that shape belongs in layer 3.
+still prove end-to-end behavior from inside a product crate. They predate this
+architecture and remain as focused compatibility/rewind/history acceptance
+coverage. They are not a precedent: a new product scenario belongs in layer 3.
 
 ### Layer 2 — Fast binary black-box
 
@@ -86,8 +80,8 @@ The Direct-Local matrix (landed in #46 (Codeberg #24), slices 0–8):
 
 - `direct_turn_contract.rs` — turn lifecycle + session reopen.
 - `direct_observation.rs` — workspace visibility and bounds.
-- `direct_mutation.rs` — atomic mutation, concurrency, effect denial.
-- `direct_tools.rs` — fetch, todo, catalog, retired methods.
+- `direct_mutation.rs` — atomic mutation, concurrency, and capability denial.
+- `direct_tools.rs` — fetch, todo, generated catalog, validation, and evidence.
 - `direct_failures.rs` — provider failures, SIGINT, deadline, no-rollback.
 - `direct_operator.rs` — independent native/Component/mixed audit contracts,
   query/tail cursors, replay completeness, and newest-20 status bounds.
@@ -346,7 +340,7 @@ cargo test -p lancet-authority
 cargo test -p lattice-system-harness --test direct_local_turn
 cargo test -p lattice-system-harness --test direct_operator
 cargo test -p lattice-system-harness --features release-operator \
-  --test release_operator release_operator_native_component_mixed_matrix -- --exact
+  --test release_operator release_operator_component_matrix -- --exact
 ```
 
 ### Single test function (substring match)
@@ -406,31 +400,21 @@ cargo xtask rollout --channel alpha
 ```
 
 Runs the release-evidence lane against a **locked release** binary and writes a
-versioned JSON record. The plan (11 steps, `xtask/src/rollout.rs`):
+versioned JSON record. The plan has ten required steps (`xtask/src/rollout.rs`):
 
-1. `clean_worktree` — `git status --porcelain=v1 --untracked-files=no`;
-   tracked dirt (staged or unstaged) is rejected. Untracked files are
-   **not** fatal.
-2. `capability_probes` — `rustc_version` (gating, must contain `1.96.0`),
-   `wasm32_target_installed` (gating), plus informational `wasm_tools_version`,
-   `git_version`, `dev_kvm_present` (never gating), `os`, `arch`.
-3. `build_release_locked` — `cargo build --locked --release -p lattice-cli
-   --bin lattice`.
-4. `artifact_identity` — sha256 + size of `target/release/lattice`.
-5. `harness_boundary` — `cargo xtask harness-boundary`.
-6. `lancet_boundary` — `cargo xtask lancet-boundary`.
-7. `direct_local` — `cargo test -p lattice-system-harness` against the release
-   binary (`LATTICE_BIN`).
-8. `offline_correctness` — `cargo test` for `lancet-protocol`, `lancet-catalog`,
-   `lancet-authority`, `lancet-audit`, `lancet-native`, `lattice-session`.
-9. `dogfood` — `cargo test -p lattice-api --test dogfood_impact_matrix`.
-10. `release_operator_matrix` — `cargo test -p lattice-system-harness
-    --features release-operator --test release_operator
-    release_operator_native_component_mixed_matrix -- --exact` against the
-    release binary. This feature-gated target owns N/C/M fixtures and
-    assertions independent of `direct_operator`.
-11. `doctor` — `lattice --json lancet doctor` with a cleared env and temp HOME;
-    JSON saved to `target/rollout/evidence/doctor.json`.
+1. `clean_worktree` — reject staged or unstaged tracked dirt.
+2. `capability_probes` — verify the Rust pin and wasm target; record host facts.
+3. `build_release_locked` — build the locked release `lattice` binary.
+4. `artifact_identity` — record its SHA-256 and size.
+5. `harness_boundary` — enforce the external-harness dependency boundary.
+6. `lancet_boundary` — enforce surviving LANCET dependency boundaries.
+7. `direct_local` — run `lattice-system-harness` against the release binary.
+8. `offline_correctness` — test protocol, authority, audit, runtime, API,
+   Session, and Turn-coordinator crates.
+9. `release_operator_matrix` — run the exact feature-gated Component audit
+   scenario in `release_operator.rs`.
+10. `doctor` — run `lattice --json lancet doctor` in a temporary workspace and
+    save its JSON output under `target/rollout/evidence/`.
 
 **Skipped is not pass:** every step is seeded `blocked` and overwritten only by
 actually running it; the verdict is `pass` iff every required step is `passed`
@@ -463,11 +447,11 @@ lattice lancet doctor          # human-readable
 lattice --json lancet doctor   # one JSON object on stdout (rollout evidence)
 ```
 
-`lattice lancet doctor` (`crates/lattice-cli/src/commands/lancet.rs`, backed by
-`run_doctor_checks`) runs registry/transport/policy checks and needs no
-project. It is a rollout evidence step and a useful standalone post-build
-sanity check. Related: `lattice lancet status` shows audit-derived CEP status
-(recent calls, last guard verdict).
+`lattice lancet doctor` canonicalizes the current Local Workspace and composes
+the generated closed Component catalog. It exits nonzero on failure and is both
+a rollout evidence step and a useful standalone post-build check.
+`lattice lancet status` reports recent typed invocation states from a pinned
+operator-ledger view.
 
 ---
 

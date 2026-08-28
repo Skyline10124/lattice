@@ -44,18 +44,12 @@
 
 ## MEDIUM
 
-### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — all built-ins migrated; convergence remains — `architecture` / `lancet-runtime` / Tool migration
-- **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; transitional crates in `crates/{lancet-catalog,lancet-cep,lancet-dispatch,lancet-native}`; Component runtime in `crates/lancet-runtime`; Source Tools under `tools/`.
-- **Problem**: all built-ins now execute as embedded Components, but the generic catalog/CEP/dispatch/native migration surfaces still duplicate the target runtime shape until #34 converges and deletes them.
-- **Current status**: PARTIAL — slices A–D and #28–#32 landed. The five default Tools (`session.todo_write`, `observe.workspace`, `mutate.create`, `mutate.edit`, `fetch.web`) are manifest-owned Components in the generated closed composition; `fetch.web` reaches the network only through the async `network-fetch` Tool Host import. The production native catalog is empty. REMAINING: #34 (delete/converge migration crates), #35 (Bundle install), #36 (final docs).
-- **Plan**: execute #34–#36. Do not add a third Tool schema, native Tool ABI, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
+### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — runtime convergence complete; Bundle/docs remain — `architecture` / `lancet-runtime`
+- **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-runtime`; Source Tools under `tools/`.
+- **Problem**: runtime convergence is complete, but operator Tool Bundle installation/activation and the final architecture-document closeout remain separate work.
+- **Current status**: PARTIAL — #28–#34 landed. The five default Tools are manifest-owned Components in one generated closed runtime; #35 (Bundle install) and #36 (final docs) remain.
+- **Plan**: execute #35 and #36 without adding a second Tool schema, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
 
-### M-REWIND-01: `/rewind` has no gix-backed Local mutation history — RESOLVED by #63 + #64; two residuals moved to L-64-01 — `architecture` / `lancet-runtime` / `lattice-session` / `lattice-api`
-- **Location**: `docs/adr/0003-lancet-operates-directly-on-local-workspace.md`; `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lattice-session/src/graph.rs` (`TurnCommit`); `crates/lattice-session/src/git_graph/refs.rs` (`reset_impl`); current workspace mutation handlers in `crates/lancet-native`; `gix` is now a workspace dependency (used by #39 visibility; history ownership still open).
-- **Problem**: Current session reset moves only Session History refs and metadata. Turn commits do not identify a persisted workspace tree, so the runtime cannot reverse LATTICE file mutations while preserving unrelated external changes.
-- **Current status**: RESOLVED — #63 landed the history half and #64 landed Rewind. #63: `lancet_runtime::WorkspaceHistory` records every successfully installed Atomic Local Mutation into a private bare gix repository outside the Local Workspace and the project `.git` (`refs/lattice/workspace-history/current` + per-record pins under `refs/lattice/workspace-history/records/<oid>`, no time-based expiry, no compensation commits), and a completed `TurnCommit` carries the `workspace_history_oid` it arrived at. #64: `WorkspaceHistory::{plan_rewind,rewind_with}` walk `current` back to a target identity and move the ref backwards (deleting it for an empty target) under the recording lock; `lancet_native::rewind::preflight_and_restore` verifies every affected path's recorded post-state before any write and restores parent-tree content through System Path Exclusion, symlink-rejecting resolution, and atomic installation; `lancet_api::rewind_workspace` composes the two and `lattice_api::rewind_to_turn` resolves the target Turn, orders the two ref moves, pins the abandoned session head, and writes the durable `rewind_records` audit row. `lattice session rewind` is the single user-facing surface.
-- **Residual risks**: (a) a Turn whose history-recording failed after a successful install is invisible to the Rewind walk — the mutation stays installed by design, and preflight is the defence: the drifted content conflicts instead of being silently overwritten; (b) the private history is per project, so a Rewind reverses every in-range mutation including one another session installed (the only workspace-consistent choice; the audit steps identify each reversed step's Turn). Both are covered by tests and tracked as `L-64-01`.
-- **Plan**: closed. Do not add a second mutation-history store, compensation commits, or a second user-facing rewind surface. The concrete history owner is `lancet-runtime` (root `AGENTS.md`, ADR 0004); see the ADR 0003 ownership amendment note recorded with #63.
 
 ### ENV-OOM-01: 开发机常驻 Electron app 重度超售撞 24 并发 cargo 编译 → global OOM(已缓解,非代码 bug)— `environment` / dev-loop / #27
 - **位置**: `xtask/src/ci.rs`(test step,已修);开发机环境(非 repo 代码)。完整根因账本在 `/tmp/lattice-oom-investigation/`(/tmp,不进 repo)。
@@ -103,23 +97,10 @@
 - **Original status**: WITHDRAWN, blocking. The harness has been rewritten to drive `BindingPlanned -> exact reservation -> Bound -> StepClosing(cursor 0, no candidate)` and then, per binding, `DispatchStarted -> StepClosing(cursor i + exact candidate) -> draft path -> terminal + evidence -> StepClosing(cursor i+1, closure appended)`, ending at `StepClosed(ContinueModel)` and to prove by reopen/reduce that the durable state closes legally; it also asserts the two repository write locks are never held together. It has been run **once** as a functional check. The raw bundles were not rewritten and are retained byte-for-byte in the local ignored artifact directory; the current Git tree no longer tracks them. The local-ledger group remains valid historical evidence.
 - **Original plan (executed)**: a maintainer authorized the fresh 20+20 run, the new immutable bundle was retained, and this approval commit re-derives the `FinalizeBudget` and the result-finalize regression thresholds from it.
 
-### L-GH112-01: evidence 写入失败只记日志，且形状检查按列名不按列类型 — `robustness` / `lancet-audit` / GitHub #112
-- **位置**: `crates/lancet-native/src/server/transport.rs`（`record_call_evidence` 失败处理）；`crates/lancet-audit/src/audit.rs`（`missing_evidence_columns` 按列名判定）。
-- **问题**: 两条残留，均由对抗性验收查出：
-  (a) **写入失败只记日志**。失败时保留 audit 行、不带 `evidence_id`（缺口因此可检测），但没有计数器/指标/健康信号，所以一个 evidence 表不可写的库能长期运行、持续产出无 evidence 的 audit 行。
-  (b) **形状检查按列名，不按列类型**（与既有 `cep_audit_entries` 检查同一口径）。列名齐全但类型/约束不符的 `evidence_calls` 能通过 open，之后每次写入在运行时失败。
-- **当前状态**: PARTIAL。同批查出并**已修**的四项：`evidence_effects` / `evidence_denials` 的 per-entry `record_version` 此前只写不读，现逐条校验并与记录头比对；`effects_version` / `denials_version` 为 NULL 时此前被静默当作当前版本，现报 `MissingRecordVersion`（带 operator action）；生产读取路径不再 `.ok().flatten()` 吞掉 `EvidenceError`；`REQUIRED_EVIDENCE_CALL_COLUMNS` 补上遗漏的两个 version 列（此前 9/11，正是 (b) 中"能 open 但每次写入失败"的成因之一）；legacy import 现清除被导入行的 `evidence_id` 指针（此前历史行可解析到一条无关的新 evidence 行）。
-- **计划**: (a) 随 #34 的 runtime 收口加健康信号 —— 单个 Tool 的特例计数器不值得。(b) 与既有 audit 表检查同源（`REQUIRED_AUDIT_COLUMNS` 也是按列名），若要收紧应一并改，不要只给 evidence 表加一套更严的口径。
 
-### L-GH29-01: `max_todo_ops` 的跨调用累计预算随 Component 迁移失效 — `behavior-change` / `lancet-authority` / `lancet-runtime` / GitHub #29
-- **位置**: `tools/todo-write/manifest.toml`（`maxItems`）；`crates/lancet-authority/src/policy/budget.rs`（`try_charge_todo_ops`、`max_todo_ops`，现无调用点）；`crates/lattice-profile/src/schema.rs`（`[lancet.observation] max_todo_ops` 仍被解析与文档承诺）。
-- **问题**: 迁移前 native handler 调 `budget.try_charge_todo_ops(len)` 按 turn 累计扣减 `max_todo_ops`（默认 100，profile 可配），超限报 `BudgetExhausted`。Component 侧没有等价扣费点：按 #27/#28 的设计，runtime 对成功返回值只做 `context_measure` 度量，charge/credit seam 明确推迟，`session.todo_write` 也不再是 native catalog 方法，所以 `DefaultPolicyHook` 的 todo budget 分支已随本票删除（此前它是死代码）。
-- **当前状态**: PARTIAL —— 单次调用上限保留且更强（descriptor 的 `maxItems: 100` 是构建期常量，Tool 作者改不动、profile 也改不动），跨调用累计上限消失（实测：200 次 × 100 条 = 20000 ops 全部成功）。`try_charge_todo_ops` / `todo_ops` / `ObservationBudgetSnapshot.todo_ops_used` 与 `MethodPolicy.max_todo_ops` / `ExternalMethodPolicy.max_todo_ops` 均保留但已无读取点，等 charge seam 落地后复用。
-- **同因失效的另两个 profile 面（对抗性验收查出）**: `[lancet.effects] deny` 与 `[lancet.policy] methods."session.todo_write".enabled` 都按 `ImpactKind` / native 方法身份判定，对 Component Tool 一律不生效 —— 操作者按文档设 `deny = ["session_state_mutation"]` 期望关掉该 Tool，调用仍会成功。正确的开关是 `[tools].enabled`（stage-1 capability grant）与 `[lancet.capabilities]`。`docs/CONFIGURATION.md` 已就三处加注说明；这属 #121（"被校验、被文档承诺，但执行侧无读取点"）同类问题，随 #34 的词表退役一并收口。
-- **计划**: 由 context budget 的 charge/credit seam 统一处理（ADR 0005 决策 7 的 value 上限与 #28 的 `context_measure` 是其输入）。届时按 `CtxOp::Alloc` 对返回值统一扣费，替代按方法名的 per-op 计数；同时决定 `max_todo_ops` 是改指新 seam 还是随旧词表退役。在那之前不要为单个 Tool 重新引入按方法名的特例扣费点。
 
 ### L-64-01: two accepted Rewind residuals — unrecorded mutations and cross-session range — `robustness` / `lancet-runtime` / `lattice-api` / #64
-- **Location**: `crates/lancet-runtime/src/history.rs` (`plan_rewind`); `crates/lancet-native/src/handlers/mutation.rs:584-620` (`record_mutation_history`); `crates/lancet-api/src/config.rs` (`workspace_history_backing`, per-project key); `crates/lattice-api/src/rewind.rs`.
+- **Location**: `crates/lancet-runtime/src/{history,host_mutate}.rs`; `crates/lancet-api/src/rewind.rs`; `crates/lattice-api/src/rewind.rs`.
 - **问题**: (a) 安装成功但 history 记录失败的 mutation(#63 设计上只留 `workspace_history.recorded=false` 审计证据 + `tracing::error!`)对 Rewind 的回溯遍历不可见,因此不会被反转;(b) private history 按 project 而非 session 分片,Rewind 会反转目标 Turn 之后的**全部** in-range mutation,包括另一个 session 安装的。
 - **当前状态**: ACCEPTED,两者都有测试覆盖。(a) 的防线是 preflight:未被反转的路径若已偏离记录的 post-state 会报 conflict 而不是被覆盖,不会静默丢用户内容;真正丢失的只是"这条 mutation 无法被 Rewind 撤销"。(b) 是唯一与 workspace 一致的选择——共享 Local Workspace 只有一个真实状态;审计记录的每个 step 都带 `turn_id`,可追溯是哪个 Turn 装的(`a_rewind_reverses_in_range_mutations_from_every_session`)。
 - **升级条件**: 若 (a) 的记录失败率在真实使用中不可忽略(而不是磁盘故障级别的罕见事件),或用户报告 (b) 造成意外的跨 session 回滚 → 升为 MEDIUM,分别考虑"记录失败即让 mutation 报错"与"跨 session in-range step 需显式确认"。
@@ -178,11 +159,11 @@
 - **计划**: (a) 跑门禁前先确认没有其他会话在编译,或用 `LATTICE_TEST_TIMEOUT_SECS` 抬高超时;(b) 定期 `cargo clean` 不活跃的 worktree target(单个 34–38 GB);(c) **不要**因为这条去删别人正在用的 worktree target;(d) 若要根治并行争用,给各 worktree 配独立 `CARGO_HOME`(锁即不再全局),代价是依赖缓存不复用、磁盘占用更高——在当前 95% 占用下不划算。
 
 ### ENV-WASM-01: 不过滤的 `cargo build --workspace` 在本开发机 host-link wasm guest cdylib 失败 — `environment` / dev-loop(pre-existing)
-- **位置**: `tools/noop`(`noop-echo`)与 `tools/observe-workspace`(`observe-workspace`,#30 新增)——两者都是 `[lib] crate-type = ["cdylib"]`、真实目标 `wasm32-unknown-unknown`,且都是根 `Cargo.toml` 的 workspace member;任何不带 `-p` / `--exclude` 的 `cargo build --workspace`。
-- **问题**: unfiltered workspace build 会拿**宿主**目标去链接这些 wasm guest cdylib 并失败。它们只在 `xtask tool-build` 的 wasm 目标下才有意义。
-- **当前状态**: ACCEPTED RESIDUAL,pre-existing——在 baseline 上以完全相同方式失败,非 #39/#30 引入。CI 与 `xtask ci` 的 fmt/clippy/test 门都不 host-link 它们(`xtask ci` 的 test step 逐 crate 跑 `cargo test -p <crate>`,见 ENV-OOM-01),因此不阻塞任何门禁。
-- **升级条件**: 若任何门禁步骤引入 unfiltered `cargo build --workspace` → 升为 MEDIUM。
-- **计划**: 验证时一律用 `-p <crate>` 或 `--exclude noop-echo --exclude observe-workspace`。若要根治,给 guest crate 加目标约束(`[target.'cfg(target_arch = "wasm32")']` 形态或独立 workspace),**不要**为让宿主链接通过而改它们的 `crate-type`——`.wasm` 产物的字节可复现性依赖当前配置(见 L-5-02)。
+- **位置**: `tools/{fetch-web,mutate-create,mutate-edit,noop,observe-workspace,todo-write}`——六者都是 `[lib] crate-type = ["cdylib"]`、真实目标 `wasm32-unknown-unknown`，且都是根 `Cargo.toml` 的 workspace member；任何不排除 guest crate 的 `cargo build --workspace`。
+- **问题**: unfiltered workspace build 会拿**宿主**目标去链接这些 wasm guest cdylib，并因 wit-bindgen 导出的 Component 符号不能进入 Linux host version script 而失败。它们只在 `xtask tool-build` 的 wasm 目标下才有意义。
+- **当前状态**: ACCEPTED RESIDUAL，非 #34 回归。#30–#32 把五个默认 Source Tool 全部迁成 Component 后，原先只影响 `noop-echo` / `observe-workspace` 的宿主链接限制自然覆盖全部六个 guest crate。CI 与 `xtask ci` 的 fmt/clippy/test 门不 host-link 它们；`xtask ci` 另以 `cargo xtask tool-build --verify` 构建并验证真实 wasm32 artifacts。
+- **升级条件**: 若任何门禁步骤引入不排除 guest crate 的 host `cargo build --workspace` → 升为 MEDIUM。
+- **计划**: host 构建验证使用 `cargo build --workspace` 并逐一 `--exclude` 六个 guest cdylib；guest 构建使用 `cargo xtask tool-build --verify`。若要根治，使用独立 guest workspace 或等价的 Cargo 目标隔离；**不要**为让宿主链接通过而改它们的 `crate-type`——`.wasm` 产物的字节可复现性依赖当前配置（见 L-5-02）。
 
 ### L-39-06: `lattice audit --tail` 在 turn 进行中可能漏行;多批次分页无黑盒覆盖 — `robustness` / operator-path(pre-existing)
 - **位置**: `crates/lancet-audit/src/operator.rs`:`tail_audit` 批次循环的游标(每批 `since_audit_id = since + 1`);覆盖面对照 `crates/lattice-system-harness/tests/{fast_audit_cli,direct_operator}.rs`。
@@ -205,20 +186,9 @@
 - **升级条件**: 若有人把批次说明的 running total 当成权威计数来源(而非把 JSON / 汇总表当权威)→ 升为 MEDIUM 并一次性重算所有批次说明。
 - **计划**: 不回写历史批次说明。今后新增批次说明一律引用 JSON 真实基线,并保持 §1 汇总表、§1.5 决定分布表、按 crate 表与 JSON 逐条一致(可用一次性脚本重新派生校验)。
 
-### L-38-01: `inspect-scaffold` feature 下 `lancet-native` 测试无法编译（先于 #28 存在）— `verification` / feature-gated / #38
-- **位置**: `crates/lancet-native/src/handlers/scaffold.rs:178`（`#[cfg(all(test, feature = "inspect-scaffold"))]` 内 `server.run(registry, config)`）；`crates/lancet-native/src/server/transport.rs:82,121`（`ServerRuntime<HandlerContext>` 只由 `NativeServerRuntime` 实现）。
-- **问题**: #38 删除 ExecutionBackend 路由层时把 server runtime 从 `ServerRunConfig` 拆成 `NativeServerRuntime`，feature-gated 的 scaffold 测试仍直接把 `ServerRunConfig` 传给 `CepServer::run`，于是 `cargo check --workspace --all-features --all-targets` 以 3 个 E0277（`ServerRunConfig: ServerRuntime<HandlerContext>` 未满足）失败。
-- **当前状态**: OPEN，非 #28 引入——在 base `538b476e` 上同样失败。`cargo xtask ci` 从不开 `inspect-scaffold`，所以门是绿的；只有显式 `--all-features` 才暴露。
-- **升级条件**: 若 scaffold 方法重新进入任何产品 lane，或门加上 `--all-features` → 升为 MEDIUM。
-- **计划**: 在 scaffold 测试里构造 `NativeServerRuntime` 再 `server.run(registry, runtime)`；`inspect-scaffold` 属 ADR 0004 待退役面（#34），若届时整体删除则本条随之关闭。
 
 （L-47-01 与 L-47-02 已于 2026-07-27 收口，见下方 OBSOLETE / CLOSED 段与 FIX.md `#105 / #106`。）
 
-### L-5-01: `lancet-protocol` Cell core coexists add-only with legacy `ImpactKind` — `architecture` / #5 / #6 / #12
-- **位置**: `crates/lancet-protocol/src/cell.rs` (ADR 0004 Cell core); `crates/lancet-protocol/src/effect_types.rs` (legacy effect vocabulary retained by transitional and read-only surfaces).
-- **问题**: ADR 0004 Cell types are authoritative for Component Tools, while legacy `effect_types.rs` shapes remain in transitional APIs and read-only audit compatibility. The two vocabularies coexist until #34 can delete the migration surfaces.
-- **当前状态**: ACCEPTED RESIDUAL (by plan). All five built-ins now consume the Cell vocabulary through manifest-generated descriptors, Component admission, Tool Host evidence, and audit projection; the production native catalog is empty after #32. Legacy effect types remain for transitional APIs and read-only records until every deletion precondition is met.
-- **计划**: do not extend `effect_types.rs` for new ADR 0004 needs. #34 owns deletion of the legacy vocabulary and migration crates once the four preconditions in workspace `AGENTS.md` and `docs/specs/2026-07-26-issue28-cell-admission-design.md` §11 hold.
 
 ### L-5-02: #5 slice B toolchain-authority divergences + cross-machine reproducibility unverified — `tooling` / #5 slice B / #73
 - **位置**: `tools/noop/manifest.toml` (`toolchain = "rustc-1.96.0+wit-bindgen-0.59+wasm-tools-1.254.0"`); `xtask/src/tool_codegen.rs` (WIT `,` separators); `tools/noop/src/lib.rs` (direct `wit-bindgen` dep, `export_tool!` invoked inside `mod bindings`); `crates/lattice-tool-prelude/src/lib.rs` (`export_tool!` doc); `xtask/src/tool_build.rs` (`build_guest` 的双 `--remap-path-prefix`)。
@@ -305,6 +275,21 @@ Self-host harness: `benchmarks/lancet-dogfood/legacy/p22-self-host.sh` (historic
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### M-REWIND-01: ~~Local mutation history and Rewind were missing~~ — CLOSED by #63/#64
+- **Resolution:** `lancet-runtime::WorkspaceHistory` records successful atomic mutations in private Git; `lancet-api` and `lattice-api` coordinate verified restore and ref movement. Residual policy choices remain in `L-64-01`.
+
+### L-GH112-01: ~~evidence publication could fail independently of the invocation terminal~~ — CLOSED by #139-B/#34
+- **Resolution:** terminal material and `CellEvidenceTriple` now publish atomically in the Git `InvocationStore`. The deleted SQLite side-write and shape-check paths cannot recur.
+
+### L-GH29-01: ~~`max_todo_ops` was parsed but not enforced after Component migration~~ — CLOSED by #34
+- **Resolution:** the dead profile/external-policy field, tracker counter, snapshot fields, and charge API were deleted. `session.todo_write` retains its manifest-owned per-call schema bound; Tool enablement and denial use the generated catalog and Cell capabilities.
+
+### L-38-01: ~~the scaffold feature did not compile~~ — CLOSED by #34
+- **Resolution:** the scaffold product/test surface and its feature were deleted with the migration layers; no tombstone test remains.
+
+### L-5-01: ~~Cell and legacy impact/effect vocabularies coexisted~~ — CLOSED by #34
+- **Resolution:** production policy and execution now use only manifest-generated Cell scopes/capabilities and versioned Cell evidence. The legacy effect types and policy machinery were deleted.
 
 ### L-GH139B-01: ~~production provider adapters bypassed `provider_projection`~~ — CLOSED by #139-B
 - **Resolution:** `ChatRequest.messages` now carries `NativeMessage<BoundToolCall>` directly. Every production provider request builder delegates message and ToolResult encoding to `request_messages_to_wire`; every SSE parser accumulates one provider-complete response and publishes `MessageComplete` through `wire_to_native`, while all usage is parsed through `wire_usage` into the single `lattice-conversation::TokenUsage`. `ModelStepDriver` no longer assembles protocol messages, Tool IDs, or wire usage. Provider call IDs remain optional; Gemini `tc_*` synthesis, the legacy `Message`/`Role` request DTOs, and the buffered response assembler are deleted. A production-source boundary regression requires all three adapters to call the shared request, response, and usage projectors.

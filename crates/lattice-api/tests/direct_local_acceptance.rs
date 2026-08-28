@@ -21,7 +21,6 @@ mod support;
 
 use lancet_api::LancetRuntimeConfig;
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
-use lancet_catalog::catalog;
 use lancet_protocol::evidence::{MutationInstallation, MutationPrecondition, ObservedTarget};
 use lancet_protocol::{CepErrorCode, Retriability};
 use support::ReservedRuntime;
@@ -32,8 +31,7 @@ use tempfile::TempDir;
 const TODO_WRITE: &str = "session.todo_write";
 
 /// The second migrated Component Tool (#30). Same reason it is a literal: its
-/// contract lives in `tools/observe-workspace/manifest.toml`, and the
-/// `lancet-catalog` types that used to describe it are gone.
+/// contract lives solely in `tools/observe-workspace/manifest.toml`.
 const OBSERVE_WORKSPACE: &str = "observe.workspace";
 
 /// The five embedded Component Tools of the default distribution.
@@ -66,18 +64,13 @@ fn direct_local_runtime(root: &std::path::Path) -> ReservedRuntime {
         workspace_history: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
-        // The embedded Component Tools are admitted too: `enabled_tools` is the
-        // stage-1 capability grant, and the shipped catalog is no longer
-        // native-only (#29). Since #30 that grant is what makes *observation*
-        // reachable at all — Cell admission is fail-closed and admits nothing by
-        // default, so an omitted `observe.workspace` here would fail every read
-        // in this file with `capability_not_granted` rather than a policy answer.
+        // `enabled_tools` is admission stage one. Admission is fail-closed, so the
+        // fixture grants every Tool exercised by this acceptance matrix.
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
             enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
             denied_capabilities: Default::default(),
             max_boundary: lancet_protocol::cell::Trust::Ex,
         },
-        cep_mode: lancet_protocol::policy::CepMode::Enforce,
     })
     .expect("direct-local runtime builds")
 }
@@ -104,11 +97,6 @@ async fn direct_local_runtime_exposes_closed_five_method_catalog() {
     got.sort();
     assert_eq!(got, expected, "Agent-visible catalog must be exactly five");
 
-    let native: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    assert!(native.is_empty(), "all production methods have migrated");
-    for component in COMPONENT_TOOLS {
-        assert!(!native.contains(&component.to_string()));
-    }
     // The Component's LLM projection carries its manifest description and schema.
     let todo = runtime
         .tool_definitions()
@@ -156,9 +144,7 @@ async fn observe_sees_external_modification_between_tool_calls() {
     let runtime = direct_local_runtime(dir.path());
     let client = runtime.client();
 
-    // Called untyped since #30: the contract is the Source Tool manifest, not a
-    // `lancet-catalog` Rust type, so this is exactly the call a production
-    // caller makes.
+    // This is the same manifest-derived untyped call the product path makes.
     let read_watch = serde_json::json!({ "mode": "read_file", "path": "watch.txt" });
 
     let first = client
@@ -252,12 +238,11 @@ async fn policy_deny_blocks_create_on_direct_local() {
         enabled_tools: enabled,
         policy,
         // Admit the exact Component under test so rejection reaches the guarded
-        // workspace policy rather than stopping at tool exposure.
+        // workspace policy rather than stopping at catalog selection.
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
             enabled_tools: std::iter::once(MUTATE_CREATE.to_string()).collect(),
             ..Default::default()
         },
-        cep_mode: lancet_protocol::policy::CepMode::Enforce,
     })
     .expect("runtime");
     let client = runtime.client();
@@ -269,7 +254,7 @@ async fn policy_deny_blocks_create_on_direct_local() {
         )
         .await
         .expect_err("denied write must fail");
-    assert_eq!(err.code, CepErrorCode::EffectViolation, "{err:?}");
+    assert_eq!(err.code, CepErrorCode::CapabilityViolation, "{err:?}");
     assert_eq!(err.retriability, Retriability::Permanent, "{err:?}");
     assert!(
         !dir.path().join("secret/leak.txt").exists(),

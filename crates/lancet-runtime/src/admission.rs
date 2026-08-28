@@ -15,8 +15,7 @@
 //!   and concrete target are covered by that admitted set. A failure rejects
 //!   only the operation; the host facility is never invoked (B3).
 //!
-//! Admission is unconditional: `CepMode` warn/off gates only the legacy
-//! effect-region checks and never softens these stages (D11).
+//! Admission is unconditional; no warn/off mode can soften these stages.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -84,7 +83,7 @@ pub enum PolicyValidationError {
 
 /// Refuse a policy whose deny list names capabilities the composed catalog
 /// does not declare (C2). Runs once, where catalog and policy first coexist
-/// (server construction), never per turn.
+/// (runtime construction), never per call.
 pub fn validate_policy_against_catalog<'a>(
     catalog_capabilities: impl IntoIterator<Item = &'a str>,
     policy: &CapabilityAdmissionPolicy,

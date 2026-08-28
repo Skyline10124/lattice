@@ -446,15 +446,8 @@ fn direct_observation_visibility_and_bounds() {
         // Every escape attempt is refused as `PathContainment`, and the event
         // stream says so.
         //
-        // This read `GuardDenied` until #30. The code changed with the authority,
-        // not with the outcome: the native handler ran each call through the
-        // legacy policy hook first, which normalized the path, denied it, and
-        // mapped that to `GuardDenied`. `observe.workspace` is a Component Tool
-        // now — its authorization is Cell admission plus the Tool Host's own
-        // checks, and the refusal comes from the host's path resolution, which
-        // names what actually happened. `PathContainment` is the more precise
-        // answer, and it is the same code the native workspace layer already
-        // used for a containment failure it detected itself.
+        // Cell admission precedes the Tool Host's path resolver. Lexical or
+        // symlink escape therefore keeps the precise `PathContainment` code.
         let containment_denied_finishes = outcome
             .events
             .iter()

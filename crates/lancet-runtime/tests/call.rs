@@ -13,10 +13,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lancet_dispatch::{Cancellation, EventSink};
 use lancet_protocol::cell::Trust;
 use lancet_protocol::evidence::{CapabilityAdmissionPolicy, EffectSource};
 use lancet_protocol::{CepErrorCode, InvocationId};
+use lancet_runtime::{Cancellation, EventSink};
 use lancet_runtime::{CellEvidenceLedger, ComponentCallContext, ComponentRuntime, admit_tool};
 use tokio::sync::{mpsc, watch};
 
@@ -39,10 +39,10 @@ fn call_ctx_with(
 ) -> (
     ComponentCallContext,
     CellEvidenceLedger,
-    mpsc::Receiver<lancet_protocol::ToolEvent>,
+    mpsc::UnboundedReceiver<lancet_protocol::ToolEvent>,
     watch::Sender<bool>,
 ) {
-    let (tx, rx) = mpsc::channel(64);
+    let (tx, rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let descriptor = rt.descriptor("noop.echo").expect("fixture tool exists");
     let admitted = admit_tool(descriptor, policy).expect("noop.echo is admitted");
@@ -71,7 +71,7 @@ fn call_ctx(
 ) -> (
     ComponentCallContext,
     CellEvidenceLedger,
-    mpsc::Receiver<lancet_protocol::ToolEvent>,
+    mpsc::UnboundedReceiver<lancet_protocol::ToolEvent>,
     watch::Sender<bool>,
 ) {
     call_ctx_with(rt, &policy(&[]))
@@ -274,7 +274,7 @@ async fn result_cell_outside_the_admitted_set_fails_closed() {
         .call("noop.echo", serde_json::json!({"message": "ceiling"}), ctx)
         .await
         .expect_err("an unadmitted result cell must fail the call");
-    assert_eq!(err.code, CepErrorCode::EffectViolation);
+    assert_eq!(err.code, CepErrorCode::CapabilityViolation);
 
     // The operation was admitted, so it really happened and is recorded.
     assert!(rx.try_recv().is_ok(), "the event was emitted");
@@ -311,14 +311,4 @@ async fn precancelled_call_returns_call_cancelled() {
         .await
         .expect_err("pre-cancelled call must fail");
     assert_eq!(err.code, CepErrorCode::CallCancelled);
-}
-
-/// `contains` reports whether a method name is in the closed catalog.
-/// D.3's dispatch split uses this to branch Component vs native.
-#[test]
-fn contains_reports_catalog_membership() {
-    let rt = ComponentRuntime::noop_fixture().expect("fixture composes");
-    assert!(rt.contains("noop.echo"));
-    assert!(!rt.contains("observe.workspace"));
-    assert!(!rt.contains("does.not.exist"));
 }

@@ -25,10 +25,10 @@ terminal outcome/material, and Cell evidence.
 
 ## Boundaries
 
-- Keep this crate free of `lancet-native`, `lancet-dispatch`, `lancet-cep`,
-  `lancet-runtime`, and all LATTICE session/agent/profile production dependencies.
-  Operator reads must remain usable without composing a CEP server.
-- Do not make live policy, authorization, effect, or workspace decisions here.
+- Keep this crate free of `lancet-runtime` and all LATTICE
+  session/agent/profile production dependencies. Operator reads must remain
+  usable without composing a Tool runtime.
+- Do not make live policy, capability-admission, or workspace decisions here.
 - `InvocationId` is the only public invocation identity. Do not restore numeric
   call/audit/evidence IDs, SQLite stores, dual writes, importers, or compatibility
   adapters.

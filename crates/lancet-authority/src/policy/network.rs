@@ -92,19 +92,15 @@ fn host_matches_pattern(host_lower: &str, pattern: &str) -> bool {
 
 /// The single host allow-matching implementation for the whole workspace.
 ///
-/// Every layer that decides whether a host is granted by `allowed_hosts` —
-/// network policy ([`validate_fetch_url`]), the policy decision path
-/// (`DefaultPolicyHook`), and the effect region
-/// (`AuthorizedEffectRegion::contains`) — must call this function so the three
-/// layers cannot drift apart (crate `AGENTS.md` synchronization invariant).
+/// Every network policy consumer must call this function so host matching cannot drift.
 ///
 /// This function answers exactly one question: does any configured pattern
 /// grant this host? An empty list matches nothing, and every enforcement layer
 /// treats that as no host grant. For
 /// `validate_fetch_url`, `allow_public_https` and `allow_localhost` are additional
 /// scheme/target switches, never replacements for an explicit host pattern.
-/// `AuthorizedEffectRegion` uses the same matcher for residual native/scaffold
-/// dispatch. Do not make either path permissive on an empty list.
+/// The network Tool Host uses the same matcher for the initial request and every
+/// redirect hop. Empty lists stay fail-closed.
 pub fn host_allowed_by_list(host: &str, allowed_hosts: &[String]) -> bool {
     let host_lower = normalize_host_pattern(host);
     allowed_hosts
@@ -367,9 +363,7 @@ mod tests {
         }
     }
 
-    /// A leading dot is a suffix pattern that also matches the apex domain —
-    /// the form #122 found accepted by the policy layers and rejected by the
-    /// effect region.
+    /// A leading dot is a suffix pattern that also matches the apex domain.
     #[test]
     fn leading_dot_pattern_matches_apex_and_subdomains() {
         let patterns = vec![".example.com".to_string()];
@@ -413,10 +407,8 @@ mod tests {
         assert!(!host_allowed_by_list("example.com", &[]));
     }
 
-    /// #122 acceptance: a non-canonical `allowed_hosts` entry must produce the
-    /// same verdict in URL validation as in the shared matcher. Before the fix
-    /// `.example.com` passed here and was rejected by the effect region; the
-    /// region-side half of this agreement lives in `effect::region`'s tests.
+    /// Non-canonical `allowed_hosts` entries produce the same verdict in URL
+    /// validation and the shared matcher.
     #[test]
     fn validate_fetch_url_agrees_with_the_shared_matcher() {
         for pattern in [".example.com", "Example.com", " example.com "] {

@@ -98,37 +98,30 @@ async fn stream_turn_live_with_agent(
     request: RunTurnRequest,
     tool_definitions: Vec<lattice_llm::ToolDefinition>,
 ) -> crate::session::Result<TurnEventStream> {
-    let (cep_client, _server) = lancet_native::CepTransport::pair(1);
-    let tool_catalog: Vec<lancet_api::ToolDefinition> = tool_definitions
-        .iter()
-        .map(|tool| {
-            lancet_api::ToolDefinition::new(
-                tool.name.clone(),
-                tool.description.clone(),
-                tool.parameters.clone(),
-                "0".repeat(64),
-            )
-        })
-        .collect();
+    assert!(tool_definitions.is_empty());
     let layout = session.state_layout().expect("test StateLayout");
-    let key = crate::root::LocalWorkspaceRoot::resolve()
-        .expect("resolve cwd")
-        .store_key();
-    let workspace_history = lancet_api::WorkspaceHistory::open(
-        lancet_api::WorkspaceHistoryBacking::for_key(layout, key),
-    )
-    .expect("open test workspace history");
+    let root = crate::root::LocalWorkspaceRoot::resolve().expect("resolve cwd");
+    let backing = lancet_api::WorkspaceHistoryBacking::for_key(layout, root.store_key());
+    let mut runtime = lancet_api::LancetRuntime::build(lancet_api::LancetRuntimeConfig {
+        local_workspace_root: root.canonical_path().to_path_buf(),
+        enabled_tools: Vec::new(),
+        policy: lancet_api::PolicyConfig::defaults_for_project_root(
+            root.canonical_path().to_path_buf(),
+        ),
+        capability_admission: Default::default(),
+        invocations: backing.clone(),
+        workspace_history: backing,
+    })
+    .expect("build direct Component runtime");
+    let tool_catalog = runtime.tool_definitions().to_vec();
+    let workspace_history = Arc::clone(runtime.workspace_history());
+    let events = runtime.take_events();
     let deps = super::cep::ProductionTurnDeps {
-        workspace_history: Arc::new(workspace_history),
+        workspace_history,
         model_driver,
         tool_catalog,
-        runtime: lancet_api::ServerLifecycle::noop(),
-        cep_client,
-        #[cfg(test)]
-        build_metrics: super::cep::CepRuntimeBuildMetrics {
-            client_instances: 0,
-            transport_pairs: 0,
-        },
+        runtime,
+        events,
     };
 
     super::live::stream_turn_live(session, request, deps).await

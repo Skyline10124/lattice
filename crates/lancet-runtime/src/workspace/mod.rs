@@ -9,14 +9,8 @@
 //! atomic replacement, and filesystem error normalization behind one concrete
 //! type. It is not a public pluggable execution-backend interface.
 //!
-//! GitHub #30 moved the module down from `lancet-native` into this crate: the
-//! Tool Host's `workspace-observe` imports (`host_workspace.rs`) execute
-//! observation for the `observe.workspace` Component, and a host import cannot
-//! reach up a layer. #31 moved mutation onto `workspace-mutate` (`host_mutate.rs`)
-//! in this same crate; rewind still enters through `lancet-native` and consumes
-//! this module through the crate's public surface — one concrete host module,
-//! as the workspace contract requires, rather than two copies of secure path
-//! resolution. #32 moved the separate network host into this crate as well.
+//! Tool Host `workspace-observe` and `workspace-mutate` imports plus Rewind
+//! share this module. Network execution is owned by the sibling runtime host.
 
 mod local;
 pub mod rewind;
@@ -33,10 +27,8 @@ pub use visibility::{VisibilityEngine, VisibilityEvidence, join_rel};
 
 /// Maximum bytes a single Atomic Local Mutation may write to one file (#120).
 ///
-/// One definition for every live workspace write path: `host_mutate` reads this
-/// constant, and the residual `lancet-native` hashline apply engine aliases it
-/// so the cap cannot drift. Deliberately not a profile/config axis — a Cell must
-/// not raise its own write budget. Rewind restore stays exempt because it
+/// One definition for every live workspace write path. It is not a
+/// profile/config axis: a Cell must not raise its own write budget. Rewind
 /// reinstates bytes the workspace already held.
 pub const MAX_WORKSPACE_WRITE_BYTES: usize = 1024 * 1024;
 
@@ -44,11 +36,8 @@ pub const MAX_WORKSPACE_WRITE_BYTES: usize = 1024 * 1024;
 ///
 /// `blake3:<64 hex>` is the one hash form the workspace speaks: `read_file`
 /// observation returns it as `content_hash`, and `mutate.edit` verifies the
-/// caller's `expected_hash` against it. It lives beside the workspace rather
-/// than in the edit engine so the observation host imports can hash a file
-/// without `lancet-runtime` reaching up into `lancet-native`'s patch parser
-/// (which owns the *other* hash forms — hashline anchors — and stays there
-/// until #32).
+/// caller's `expected_hash` against it. Observation and mutation share this
+/// exact implementation.
 pub fn content_hash(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }

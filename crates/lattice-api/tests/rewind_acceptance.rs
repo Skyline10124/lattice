@@ -27,7 +27,6 @@ use lancet_api::{
     WorkspaceRewindError, WorkspaceRewindOutcome, rewind_workspace,
 };
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
-use lancet_catalog::catalog;
 use lancet_protocol::CepErrorCode;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
@@ -113,15 +112,15 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
         denied_write_patterns: Vec::new(),
         ..Default::default()
     };
-    // Catalog natives plus the mutate/observe Components this harness drives.
-    let mut enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    enabled.extend(COMPONENT_TOOLS.iter().map(|name| (*name).to_string()));
+    let enabled = COMPONENT_TOOLS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
     ReservedRuntime::build(LancetRuntimeConfig {
         local_workspace_root: root.to_path_buf(),
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
-        cep_mode: lancet_protocol::policy::CepMode::Enforce,
         // mutate.create/edit are Components (#31): Cell admission is fail-closed.
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
             enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),

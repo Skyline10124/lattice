@@ -1,185 +1,55 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! LANCET runtime composition: spawn a native CEP server and hand back a client.
+//! Thin composition of the durable InvocationStore with Component execution.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use lancet_authority::policy::default::DefaultPolicyHook;
+use lancet_audit::invocation_store::{InvocationStore, InvocationStoreError};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
-use lancet_cep::{ToolDefinition, ToolExposureError, resolve_enabled_tools};
-use lancet_dispatch::{CepClient, CepTransport};
-use lancet_native::{
-    CepServerNativeExt, MethodRegistry, ServerRunConfig, register_production_method_registry,
+use lancet_protocol::{CepError, CepErrorCode, InvocationBinding, Retriability, ToolEvent};
+use lancet_runtime::{
+    CancellationSender, CatalogSelectionError, ComponentRuntime, ExecutionReceipt,
+    RuntimeExecution, ToolDefinition, WorkspaceHistory, WorkspaceHistoryBacking,
+    enabled_tool_definitions,
 };
-use lancet_runtime::{ComponentRuntime, WorkspaceHistory, WorkspaceHistoryBacking};
+use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::config::LancetRuntimeConfig;
 use crate::error::LancetError;
 
-/// Default CEP transport channel capacity for the production runtime.
-pub const DEFAULT_CHANNEL_CAPACITY: usize = 256;
-
-/// Owns a spawned native CEP server task and shuts it down on drop.
-///
-/// Hold this for as long as the paired [`CepClient`] is in use; dropping it (or
-/// calling [`ServerLifecycle::shutdown`]) signals the server to stop.
-pub struct ServerLifecycle {
-    server_task: tokio::task::JoinHandle<()>,
-    shutdown: tokio::sync::watch::Sender<bool>,
+/// Result of the reservation-gated handoff.
+#[derive(Debug)]
+pub enum DispatchOutcome {
+    /// The exact invocation never crossed durable `DispatchStarted`.
+    NotExecuted(CepError),
+    /// The Component returned a known result/evidence receipt after handoff.
+    Executed(ExecutionReceipt),
 }
 
-impl ServerLifecycle {
-    /// Signal shutdown and await the server task to drain pending work.
-    pub async fn shutdown(&mut self) {
-        let _ = self.shutdown.send(true);
-        let task = std::mem::replace(&mut self.server_task, tokio::spawn(async {}));
-        let _ = task.await;
-    }
-
-    /// A lifecycle that manages no server task.
-    ///
-    /// For tests and for callers that pair a [`CepClient`] with an externally
-    /// managed (or absent) server.
-    pub fn noop() -> Self {
-        Self {
-            server_task: tokio::spawn(async {}),
-            shutdown: tokio::sync::watch::channel(false).0,
-        }
-    }
-}
-
-impl Drop for ServerLifecycle {
-    fn drop(&mut self) {
-        let _ = self.shutdown.send(true);
-    }
-}
-
-/// Low-level launcher for a native CEP server over an in-process transport.
-///
-/// Registers the production method registry, pairs a client/server transport,
-/// and spawns the server task. Callers that need bespoke [`ServerRunConfig`]
-/// values (custom base envelope, pre-opened audit store) use this directly;
-/// [`LancetRuntime::build`] is the higher-level path for full turn runtimes.
-pub struct LancetServer;
-
-impl LancetServer {
-    /// Spawn a native CEP server bound to `config`, returning the client and lifecycle.
-    ///
-    /// Uses the process-shared production Component runtime composed from the
-    /// embedded inventory and generated identity list, then delegates to
-    /// [`LancetServer::spawn_composed`]. There is no public path to inject
-    /// Component bytes, paths, or handlers; the catalog is closed at build
-    /// time (ADR 0004).
-    pub fn spawn(
-        config: ServerRunConfig,
-        channel_capacity: usize,
-    ) -> Result<(CepClient, ServerLifecycle), LancetError> {
-        let components = ComponentRuntime::shared()
-            .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?;
-        Self::spawn_composed(config, channel_capacity, components)
-    }
-
-    /// Spawn a native CEP server with a pre-composed Component runtime.
-    ///
-    /// `pub(crate)`: the only public entry ([`LancetServer::spawn`]) uses the
-    /// process-shared embedded inventory. Tests inject a fixed no-op fixture through
-    /// this seam (D.6). The same `Arc<ComponentRuntime>` is threaded into
-    /// `ServerRunConfig.components` so `handle_request` can branch Component
-    /// vs native dispatch within the existing audit lifecycle (D.3).
-    pub(crate) fn spawn_composed(
-        mut config: ServerRunConfig,
-        channel_capacity: usize,
-        components: Arc<ComponentRuntime>,
-    ) -> Result<(CepClient, ServerLifecycle), LancetError> {
-        config.components = Some(Arc::clone(&components));
-
-        // #28 C2: catalog and admission policy first coexist here. The server
-        // run refuses an unknown deny name too, but surfacing it during
-        // composition is what turns it into a build error instead of a server
-        // task that dies after the client is already handed out.
-        config.validate_capability_admission().map_err(|err| {
-            LancetError::Internal(format!("capability admission: {}", err.message))
-        })?;
-
-        // #28 design §11: one method name must not resolve to both a Component
-        // Tool and a native catalog method. Surfacing it here makes it a build
-        // error instead of a server task that dies after the client is handed
-        // out.
-        config
-            .validate_no_component_native_collision()
-            .map_err(|err| LancetError::Internal(format!("catalog collision: {}", err.message)))?;
-
-        let mut registry = MethodRegistry::new();
-        register_production_method_registry(&mut registry).map_err(|err| {
-            LancetError::Internal(format!("production method registry registration: {err:?}"))
-        })?;
-
-        let (client, server) = CepTransport::pair(channel_capacity);
-        let shutdown = server.shutdown_handle();
-        let server_task = tokio::spawn(async move {
-            let _ = server.run_native(registry, config).await;
-        });
-
-        Ok((
-            client,
-            ServerLifecycle {
-                server_task,
-                shutdown,
-            },
-        ))
-    }
-}
-
-/// Decomposed runtime pieces for callers that wire their own executors on top.
-pub struct LancetRuntimeParts {
-    /// CEP client for typed method calls.
-    pub client: CepClient,
-    /// Catalog-derived tool definitions filtered to the enabled set.
-    pub tool_definitions: Vec<ToolDefinition>,
-    /// Private workspace mutation history backing this runtime (#63).
-    pub workspace_history: Arc<WorkspaceHistory>,
-    /// Server lifecycle; keep alive while the client is used.
-    pub lifecycle: ServerLifecycle,
-}
-
-/// A fully-composed LANCET runtime: a live native CEP server plus its client.
-///
-/// This is the unified entry point for driving LANCET independently of any host
-/// application. Build it from a [`LancetRuntimeConfig`], call typed methods via
-/// [`LancetRuntime::client`], and read finalized operator audit rows through
-/// the direct-store API.
+/// One opaque, turn-scoped generated-Component runtime.
 pub struct LancetRuntime {
-    client: CepClient,
+    execution: RuntimeExecution,
+    invocations: Arc<InvocationStore>,
     tool_definitions: Vec<ToolDefinition>,
     workspace_history: Arc<WorkspaceHistory>,
-    lifecycle: ServerLifecycle,
+    events: Option<mpsc::UnboundedReceiver<ToolEvent>>,
 }
 
 impl LancetRuntime {
-    /// Compose and spawn a production LANCET runtime from `config`.
-    ///
-    /// D.2: composes the Component runtime once from embedded inventory +
-    /// generated `EXPECTED_COMPONENTS`. The same `Arc<ComponentRuntime>`
-    /// is threaded into `ServerRunConfig.components` for dispatch (D.3)
-    /// and projected into LLM tool definitions (D.4).
+    /// Compose the generated catalog and strictly open the project stores.
     pub fn build(config: LancetRuntimeConfig) -> Result<Self, LancetError> {
         let LancetRuntimeConfig {
             local_workspace_root,
             enabled_tools,
             mut policy,
             capability_admission,
-            cep_mode,
             invocations,
             workspace_history,
         } = config;
-
-        if !policy.denied_effect_kinds.is_empty() {
-            return Err(LancetError::Config(format!(
-                "[lancet.effects] deny cannot apply because the production native catalog is empty; use [lancet.capabilities] deny instead: {:?}",
-                policy.denied_effect_kinds
-            )));
-        }
 
         policy.project_root = validate_project_store_bindings(
             &local_workspace_root,
@@ -188,107 +58,170 @@ impl LancetRuntime {
             &workspace_history,
         )?;
 
-        // D.2: reuse the process-level closed runtime composed from this binary's
-        // generated production inventory. No caller-supplied catalog seam exists.
         let components = ComponentRuntime::shared()
-            .map_err(|err| LancetError::Internal(format!("component composition: {err}")))?;
-        // D.4: project Component descriptors into LLM tool definitions.
-        // The production native catalog is empty after #32. Definitions come from
-        // the five generated Component descriptors.
-        let available = project_component_definitions(&components);
-        let tool_definitions =
-            resolve_enabled_tools(&enabled_tools, &available).map_err(map_tool_exposure_err)?;
+            .map_err(|error| LancetError::Internal(format!("component composition: {error}")))?;
+        let tool_definitions = enabled_tool_definitions(&components, &enabled_tools)
+            .map_err(map_catalog_selection_error)?;
+        lancet_runtime::validate_policy_against_catalog(
+            components
+                .descriptors()
+                .flat_map(|descriptor| descriptor.capabilities.iter())
+                .map(|capability| capability.name.as_str()),
+            &capability_admission,
+        )
+        .map_err(|error| LancetError::Config(format!("capability admission: {error}")))?;
 
         let cep_policy = CepPolicyConfig {
             project_root: policy.project_root.clone(),
             observation: policy.observation.clone(),
             network: policy.network.clone(),
-            denied_effect_kinds: policy.denied_effect_kinds.clone(),
             capability_admission,
         };
-
-        // ADR 0003 / #38: the runtime carries no execution-routing field.
-        // The native server constructs the one concrete Local Workspace from
-        // the resolved policy's canonical project root when the run starts;
-        // embedders cannot inject an alternative workspace implementation.
-        let invocations = match invocations {
-            WorkspaceHistoryBacking::Project { layout, key } => Arc::new(
-                lancet_audit::invocation_store::InvocationStore::open(&layout, &key).map_err(
-                    |err| LancetError::Internal(format!("invocation store setup: {err}")),
-                )?,
-            ),
-            WorkspaceHistoryBacking::Disabled => {
-                return Err(LancetError::Internal(
-                    "production runtime requires a project InvocationStore backing".into(),
-                ));
-            }
-        };
-
-        // #63: the private mutation history repository is opened once per
-        // runtime, before the server starts, so a turn can never install a
-        // mutation the history is not ready to record.
-        let workspace_history = Arc::new(
-            WorkspaceHistory::open(workspace_history)
-                .map_err(|err| LancetError::Internal(format!("workspace history setup: {err}")))?,
-        );
-
-        let cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
-        let default_hook = Arc::new(DefaultPolicyHook::new(policy));
-
-        let server_config = ServerRunConfig {
-            invocations,
-            test_state_guard: None,
-            cep_context,
-            policy_hook: default_hook.clone(),
-            default_policy_hook: Some(default_hook),
-            cep_mode,
-            components: None, // set by spawn_composed
-            workspace_history: Arc::clone(&workspace_history),
-        };
-
-        let (client, lifecycle) =
-            LancetServer::spawn_composed(server_config, DEFAULT_CHANNEL_CAPACITY, components)?;
+        let invocations = open_invocation_store(&invocations)?;
+        let workspace_history =
+            Arc::new(WorkspaceHistory::open(workspace_history).map_err(|error| {
+                LancetError::Internal(format!("workspace history setup: {error}"))
+            })?);
+        let (execution, events) = RuntimeExecution::new(
+            components,
+            Arc::new(CepTurnContext::from_policy(cep_policy)),
+            &policy,
+            Arc::clone(&workspace_history),
+        )
+        .map_err(LancetError::Config)?;
 
         Ok(Self {
-            client,
+            execution,
+            invocations,
             tool_definitions,
             workspace_history,
-            lifecycle,
+            events: Some(events),
         })
     }
 
-    /// Clone of the CEP client for typed method dispatch.
-    pub fn client(&self) -> CepClient {
-        self.client.clone()
-    }
-
-    /// Catalog-derived tool definitions filtered to the enabled set.
+    /// Frozen provider-visible definitions from generated descriptors.
     pub fn tool_definitions(&self) -> &[ToolDefinition] {
         &self.tool_definitions
     }
 
-    /// Private durable history of successfully installed Atomic Local
-    /// Mutations (#63).
-    ///
-    /// Hosts read [`WorkspaceHistory::current`] at the end of a Turn to record
-    /// the workspace-history object id the Turn arrived at.
+    /// Take the sole event receiver for this Turn runtime.
+    pub fn take_events(&mut self) -> mpsc::UnboundedReceiver<ToolEvent> {
+        self.events
+            .take()
+            .expect("Tool event receiver may be taken only once")
+    }
+
+    /// Private mutation history sampled after all dispatches complete.
     pub fn workspace_history(&self) -> &Arc<WorkspaceHistory> {
         &self.workspace_history
     }
 
-    /// Signal shutdown and await the server task.
-    pub async fn shutdown(&mut self) {
-        self.lifecycle.shutdown().await;
-    }
-
-    /// Decompose into owned parts for callers that build their own executors.
-    pub fn into_parts(self) -> LancetRuntimeParts {
-        LancetRuntimeParts {
-            client: self.client,
-            tool_definitions: self.tool_definitions,
-            workspace_history: self.workspace_history,
-            lifecycle: self.lifecycle,
+    /// Durably admit an exact reservation, then hand it to Component execution.
+    pub async fn dispatch(
+        &self,
+        binding: InvocationBinding,
+        method: String,
+        params: Value,
+        cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> DispatchOutcome {
+        if !binding.matches_request(&method, &params) {
+            return DispatchOutcome::NotExecuted(CepError::invalid_params(
+                "invocation binding does not match request method/arguments",
+            ));
         }
+
+        let store = Arc::clone(&self.invocations);
+        let admission_binding = binding.clone();
+        match tokio::task::spawn_blocking(move || store.admit_reserved(&admission_binding)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return DispatchOutcome::NotExecuted(admission_error(error)),
+            Err(_) => return DispatchOutcome::NotExecuted(admission_worker_error()),
+        }
+
+        #[cfg(feature = "test-crash-barriers")]
+        stop_after_dispatch_started(&self.invocations, binding.invocation_id);
+
+        let (sender, cancellation) = CancellationSender::pair();
+        let monitor = cancel_flag.map(|flag| {
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                while !flag.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                sender.cancel();
+            })
+        });
+        let _guard = DispatchGuard { sender, monitor };
+        DispatchOutcome::Executed(
+            self.execution
+                .call(binding, method, params, cancellation)
+                .await,
+        )
+    }
+}
+
+struct DispatchGuard {
+    sender: CancellationSender,
+    monitor: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        self.sender.cancel();
+        if let Some(monitor) = self.monitor.take() {
+            monitor.abort();
+        }
+    }
+}
+
+fn open_invocation_store(
+    backing: &WorkspaceHistoryBacking,
+) -> Result<Arc<InvocationStore>, LancetError> {
+    match backing {
+        WorkspaceHistoryBacking::Project { layout, key } => {
+            Ok(Arc::new(InvocationStore::open(layout, key).map_err(
+                |error| LancetError::Internal(format!("invocation store setup: {error}")),
+            )?))
+        }
+        WorkspaceHistoryBacking::Disabled => Err(LancetError::Config(
+            "production runtime requires a project InvocationStore backing".into(),
+        )),
+    }
+}
+
+fn admission_worker_error() -> CepError {
+    CepError::tool_execution(
+        CepErrorCode::ExecutionFailed,
+        "invocation",
+        "admission_worker_failed",
+        None,
+        Retriability::Permanent,
+    )
+}
+
+fn admission_error(error: InvocationStoreError) -> CepError {
+    let (code, category) = match error {
+        InvocationStoreError::InvalidTransition { .. }
+        | InvocationStoreError::DifferentPlan { .. }
+        | InvocationStoreError::DuplicateInvocation { .. }
+        | InvocationStoreError::InvalidReservation { .. } => {
+            (CepErrorCode::ResourceConflict, "reservation_state")
+        }
+        InvocationStoreError::Corruption { .. } => {
+            (CepErrorCode::Reserved, "invocation_store_corruption")
+        }
+        _ => (
+            CepErrorCode::ExecutionFailed,
+            "invocation_store_unavailable",
+        ),
+    };
+    CepError::tool_execution(code, "invocation", category, None, Retriability::Permanent)
+}
+
+fn map_catalog_selection_error(error: CatalogSelectionError) -> LancetError {
+    LancetError::UnknownTools {
+        unknown: error.unknown,
+        available: error.available,
     }
 }
 
@@ -298,15 +231,15 @@ fn validate_project_store_bindings(
     invocations: &WorkspaceHistoryBacking,
     workspace_history: &WorkspaceHistoryBacking,
 ) -> Result<std::path::PathBuf, LancetError> {
-    let canonical_workspace = std::fs::canonicalize(local_workspace_root).map_err(|err| {
+    let canonical_workspace = std::fs::canonicalize(local_workspace_root).map_err(|error| {
         LancetError::Config(format!(
-            "cannot canonicalize Local Workspace root '{}': {err}",
+            "cannot canonicalize Local Workspace root '{}': {error}",
             local_workspace_root.display()
         ))
     })?;
-    let canonical_policy = std::fs::canonicalize(policy_root).map_err(|err| {
+    let canonical_policy = std::fs::canonicalize(policy_root).map_err(|error| {
         LancetError::Config(format!(
-            "cannot canonicalize policy project root '{}': {err}",
+            "cannot canonicalize policy project root '{}': {error}",
             policy_root.display()
         ))
     })?;
@@ -318,19 +251,16 @@ fn validate_project_store_bindings(
         )));
     }
 
-    let expected_key = lancet_runtime::ProjectStoreKey::derive(&canonical_workspace)
-        .map_err(|err| LancetError::Config(format!("derive Local Workspace project key: {err}")))?;
+    let expected_key =
+        lancet_runtime::ProjectStoreKey::derive(&canonical_workspace).map_err(|error| {
+            LancetError::Config(format!("derive Local Workspace project key: {error}"))
+        })?;
     let (invocation_layout, invocation_key) = project_backing(invocations, "InvocationStore")?;
     let (history_layout, history_key) = project_backing(workspace_history, "WorkspaceHistory")?;
-    if invocation_key != expected_key {
-        return Err(LancetError::Config(format!(
-            "InvocationStore project key {invocation_key} does not match canonical Local Workspace key {expected_key}"
-        )));
-    }
-    if history_key != expected_key {
-        return Err(LancetError::Config(format!(
-            "WorkspaceHistory project key {history_key} does not match canonical Local Workspace key {expected_key}"
-        )));
+    if invocation_key != expected_key || history_key != expected_key {
+        return Err(LancetError::Config(
+            "project store key does not match canonical Local Workspace".into(),
+        ));
     }
     if invocation_layout != history_layout {
         return Err(LancetError::Config(
@@ -358,196 +288,36 @@ fn project_backing<'a>(
     }
 }
 
-fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
-    LancetError::UnknownTools {
-        unknown: err.unknown,
-        available: err.available,
+#[cfg(feature = "test-crash-barriers")]
+fn stop_after_dispatch_started(
+    invocations: &InvocationStore,
+    invocation_id: lancet_protocol::InvocationId,
+) {
+    use std::io::Write;
+
+    if std::env::var_os("LATTICE_CRASH_BARRIER").as_deref()
+        != Some(std::ffi::OsStr::new("dispatch_started"))
+    {
+        return;
     }
-}
-
-/// D.4: Project Component Tool descriptors into LLM-facing tool definitions.
-///
-/// The name/description/params schema come only from the generated descriptor
-/// JSON — the adapter does not hand-write method/schema matches. Since #29 a
-/// production build projects `session.todo_write` from its manifest-generated
-/// descriptor; tests may inject a no-op fixture instead.
-fn project_component_definitions(components: &ComponentRuntime) -> Vec<ToolDefinition> {
-    components
-        .descriptor_identities()
-        .map(|(desc, descriptor_identity)| {
-            ToolDefinition::new(
-                desc.name.clone(),
-                desc.description.clone(),
-                desc.params_schema.clone(),
-                descriptor_identity,
-            )
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn production_config() -> (tempfile::TempDir, tempfile::TempDir, LancetRuntimeConfig) {
-        let state = tempfile::TempDir::new().expect("state root");
-        let project = tempfile::TempDir::new().expect("project root");
-        let backing = WorkspaceHistoryBacking::for_project_in(state.path(), project.path())
-            .expect("project backing");
-        let (layout, key) = match &backing {
-            WorkspaceHistoryBacking::Project { layout, key } => (layout.clone(), *key),
-            WorkspaceHistoryBacking::Disabled => unreachable!(),
-        };
-        WorkspaceHistory::create(backing.clone()).expect("workspace history");
-        lancet_audit::invocation_store::InvocationStore::create(&layout, &key)
-            .expect("invocation store");
-        let mut config = LancetRuntimeConfig::new(project.path());
-        config.invocations = backing.clone();
-        config.workspace_history = backing;
-        (state, project, config)
-    }
-
-    #[test]
-    fn runtime_requires_authoritative_project_stores() {
-        let project = tempfile::TempDir::new().expect("project root");
-        let err = match LancetRuntime::build(LancetRuntimeConfig::new(project.path())) {
-            Ok(_) => panic!("disabled stores must fail closed"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("InvocationStore"));
-    }
-
-    #[test]
-    fn runtime_rejects_legacy_effect_denies_when_native_catalog_is_empty() {
-        let project = tempfile::TempDir::new().expect("project root");
-        let mut config = LancetRuntimeConfig::new(project.path());
-        config
-            .policy
-            .denied_effect_kinds
-            .insert(lancet_protocol::effect_types::ImpactKind::ExternalObservation);
-
-        let err = match LancetRuntime::build(config) {
-            Ok(_) => panic!("legacy effect deny must fail closed"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("[lancet.effects] deny"), "{err}");
-        assert!(
-            err.to_string().contains("[lancet.capabilities] deny"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn runtime_rejects_mismatched_project_stores_before_any_append() {
-        let state_a = tempfile::TempDir::new().expect("state a");
-        let state_b = tempfile::TempDir::new().expect("state b");
-        let project = tempfile::TempDir::new().expect("project");
-        let key = lancet_runtime::ProjectStoreKey::derive(project.path()).unwrap();
-        let layout_a = lancet_runtime::StateLayout::in_state_root(state_a.path());
-        let layout_b = lancet_runtime::StateLayout::in_state_root(state_b.path());
-        let invocations = WorkspaceHistoryBacking::for_key(layout_a.clone(), key);
-        let history = WorkspaceHistoryBacking::for_key(layout_b.clone(), key);
-        let ledger = lancet_audit::invocation_store::InvocationStore::create(&layout_a, &key)
-            .expect("invocation store");
-        WorkspaceHistory::create(history.clone()).expect("history store");
-        let before = ledger.pinned_view().unwrap().commit_oid;
-
-        let mut config = LancetRuntimeConfig::new(project.path());
-        config.invocations = invocations;
-        config.workspace_history = history.clone();
-        let err = match LancetRuntime::build(config) {
-            Ok(_) => panic!("different state roots must fail closed"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("different StateLayout"), "{err}");
-        assert_eq!(ledger.pinned_view().unwrap().commit_oid, before);
-        assert_eq!(
-            WorkspaceHistory::open(history).unwrap().current().unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn runtime_rejects_mismatched_project_keys_before_any_store_open() {
-        let state = tempfile::TempDir::new().expect("state");
-        let project = tempfile::TempDir::new().expect("project");
-        let other_project = tempfile::TempDir::new().expect("other project");
-        let layout = lancet_runtime::StateLayout::in_state_root(state.path());
-        let key = lancet_runtime::ProjectStoreKey::derive(project.path()).unwrap();
-        let other_key = lancet_runtime::ProjectStoreKey::derive(other_project.path()).unwrap();
-
-        let mut config = LancetRuntimeConfig::new(project.path());
-        config.invocations = WorkspaceHistoryBacking::for_key(layout.clone(), key);
-        config.workspace_history = WorkspaceHistoryBacking::for_key(layout, other_key);
-        let err = match LancetRuntime::build(config) {
-            Ok(_) => panic!("different project keys must fail closed"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string().contains("WorkspaceHistory project key"),
-            "{err}"
-        );
-        assert!(err.to_string().contains(&key.to_string()), "{err}");
-        assert!(err.to_string().contains(&other_key.to_string()), "{err}");
-    }
-
-    #[test]
-    fn runtime_rejects_canonical_policy_root_divergence_before_store_reads() {
-        use std::os::unix::fs::symlink;
-
-        let state = tempfile::TempDir::new().expect("state");
-        let project = tempfile::TempDir::new().expect("project");
-        let outside = tempfile::TempDir::new().expect("outside");
-        symlink(outside.path(), project.path().join("scope")).expect("symlink scope");
-        let backing = WorkspaceHistoryBacking::for_project_in(state.path(), project.path())
-            .expect("project backing");
-        let (layout, key) = match &backing {
-            WorkspaceHistoryBacking::Project { layout, key } => (layout.clone(), *key),
-            WorkspaceHistoryBacking::Disabled => unreachable!(),
-        };
-        lancet_audit::invocation_store::InvocationStore::create(&layout, &key)
-            .expect("invocation store");
-        WorkspaceHistory::create(backing.clone()).expect("history store");
-
-        let mut config = LancetRuntimeConfig::new(project.path());
-        config.policy.project_root = project.path().join("scope");
-        config.invocations = backing.clone();
-        config.workspace_history = backing;
-        let err = match LancetRuntime::build(config) {
-            Ok(_) => panic!("symlink escape must fail closed"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("outside Local Workspace"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn runtime_allows_policy_to_narrow_within_the_bound_workspace() {
-        let (_state, project, mut config) = production_config();
-        let scope = project.path().join("scope");
-        std::fs::create_dir(&scope).unwrap();
-        config.policy.project_root = scope.clone();
-        let mut runtime = LancetRuntime::build(config).expect("narrow policy scope");
-        assert_eq!(runtime.tool_definitions().len(), 0);
-        runtime.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn runtime_projects_manifest_tools_without_sqlite_authority() {
-        let (_state, _project, mut config) = production_config();
-        config.enabled_tools = vec![
-            "observe.workspace".into(),
-            "session.todo_write".into(),
-            "fetch.web".into(),
-        ];
-        let mut runtime = LancetRuntime::build(config).expect("runtime");
-        let names = runtime
-            .tool_definitions()
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(names.contains("observe.workspace"));
-        assert!(names.contains("session.todo_write"));
-        assert!(names.contains("fetch.web"));
-        runtime.shutdown().await;
-    }
+    let facts = invocations
+        .query_invocations(&[invocation_id])
+        .expect("read dispatch barrier facts");
+    let path = std::env::var_os("LATTICE_CRASH_BARRIER_ACK").expect("barrier ack path");
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .expect("create barrier ack");
+    serde_json::to_writer(
+        &mut file,
+        &serde_json::json!({
+            "invocation_id": invocation_id,
+            "state": facts.get(&invocation_id).map(|record| format!("{:?}", record.state)),
+        }),
+    )
+    .expect("write barrier ack");
+    file.write_all(b"\n").expect("write barrier newline");
+    file.sync_all().expect("sync barrier ack");
+    unsafe { libc::raise(libc::SIGSTOP) };
 }

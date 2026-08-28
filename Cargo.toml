@@ -9,12 +9,8 @@ members = [
     "crates/lattice-conversation",
     "crates/lattice-agent",
     "crates/lancet-protocol",
-    "crates/lancet-catalog",
-    "crates/lancet-dispatch",
-    "crates/lancet-cep",
     "crates/lancet-audit",
     "crates/lancet-authority",
-    "crates/lancet-native",
     "crates/lancet-api",
     "crates/lattice-tui",
     "crates/lattice-cli",
@@ -49,12 +45,8 @@ lattice-session  = { path = "crates/lattice-session" }
 lattice-conversation = { path = "crates/lattice-conversation" }
 lattice-agent    = { path = "crates/lattice-agent" }
 lancet-protocol = { path = "crates/lancet-protocol" }
-lancet-catalog  = { path = "crates/lancet-catalog" }
-lancet-dispatch = { path = "crates/lancet-dispatch" }
-lancet-cep      = { path = "crates/lancet-cep" }
 lancet-audit    = { path = "crates/lancet-audit" }
 lancet-authority = { path = "crates/lancet-authority" }
-lancet-native   = { path = "crates/lancet-native" }
 lancet-api      = { path = "crates/lancet-api" }
 lancet-runtime  = { path = "crates/lancet-runtime" }
 lattice-tui      = { path = "crates/lattice-tui" }

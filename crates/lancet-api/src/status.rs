@@ -21,7 +21,7 @@ pub struct LancetStatusOutput {
     pub last_verdict: Option<String>,
 }
 
-/// Build status from one pinned ledger view without composing a CEP server.
+/// Build status from one pinned ledger view without composing a Tool runtime.
 pub fn collect_status(project_root: &Path) -> LancetResult<LancetStatusOutput> {
     let store_exists = InvocationStore::project_store_exists(project_root)
         .map_err(|err| LancetError::Config(format!("resolve invocation store: {err}")))?;

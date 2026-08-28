@@ -103,7 +103,6 @@ fn build_runtime(root: &Path, history: &WorkspaceHistoryBacking) -> ReservedRunt
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: enabled,
         policy,
-        cep_mode: lancet_protocol::policy::CepMode::Enforce,
         // `enabled_tools` is the stage-1 capability grant, and Cell admission is
         // fail-closed: an omitted name here is a Tool the runtime exposes and
         // then refuses.
@@ -337,7 +336,6 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
         policy,
-        cep_mode: lancet_protocol::policy::CepMode::Enforce,
         // Admit mutate.create so Cell admission is not the denier — the write
         // Guard is (#31).
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
@@ -352,16 +350,14 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         .expect_err("guard must deny");
     // The host refusal outranks the guest's string retelling, so the Guard
     // denial keeps its structured Cell-era code through Component dispatch.
-    assert_eq!(denial, CepErrorCode::EffectViolation);
+    assert_eq!(denial, CepErrorCode::CapabilityViolation);
     assert_eq!(
         denied_runtime.workspace_history().current().unwrap(),
         None,
         "a policy denial records nothing"
     );
 
-    // 4. Capability denial for the mutate cell. Legacy ImpactKind /
-    //    declared-effect-kind gates (#71) apply to native catalog methods;
-    //    Component mutate.create is authorized by Cell admission (#31), so the
+    // 4. Capability denial for the mutate Cell is enforced before installation.
     //    pre-install refusal here is `denied_capabilities`. Subject: a denied
     //    mutation installs nothing and records nothing.
     let effect_root = TempDir::new().unwrap();
@@ -376,7 +372,6 @@ async fn failures_before_installation_record_nothing_and_do_not_move_current() {
         invocations: lancet_api::WorkspaceHistoryBacking::Disabled,
         enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
         policy,
-        cep_mode: lancet_protocol::policy::CepMode::Enforce,
         capability_admission: lancet_protocol::evidence::CapabilityAdmissionPolicy {
             enabled_tools: COMPONENT_TOOLS.iter().map(|n| (*n).to_string()).collect(),
             denied_capabilities: std::iter::once("workspace.mutation".to_string()).collect(),

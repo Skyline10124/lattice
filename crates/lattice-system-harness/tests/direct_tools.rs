@@ -1,11 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local fetch, todo, catalog exposure, and retired methods
-//! (issue #46 slice 4, Codeberg #24).
+//! Direct-Local fetch, todo, and generated-catalog scenarios (issue #46 slice 4,
+//! Codeberg #24).
 //!
-//! Completes built-binary coverage of the default five-Tool distribution and
-//! proves retired methods fail explicitly without side effects or fallback.
+//! Completes built-binary coverage of the default five-Tool distribution.
 //!
 //! `fetch.web` is driven against a harness-only localhost HTTP fixture
 //! (not the OpenAI-compatible fake LLM). Tool results are inspected in the
@@ -13,7 +12,6 @@
 
 mod support;
 
-use std::fs;
 use std::time::Duration;
 
 use lattice_system_harness::{
@@ -348,11 +346,8 @@ fn direct_tools_fetch_capability_denial_with_public_https() {
 /// request — executed by the **default binary** through its embedded WASM
 /// Component (#29 criterion 9).
 ///
-/// The Component/native distinction is observable from outside the binary: a
-/// Cell-governed call reports `semantic_stage = "cell_component"` and
-/// `guard_stage = "cell_admission"`, which no native handler ever emits. A build
-/// that fell back to a native handler, or whose composition failed to embed the
-/// Component, fails here rather than passing silently.
+/// The lifecycle stages prove the call traversed the Cell-governed Component
+/// path and the generated catalog embedded the Tool.
 #[test]
 fn direct_tools_todo_write_success() {
     let driver = driver();
@@ -407,18 +402,13 @@ fn direct_tools_todo_write_success() {
                 TurnEventLine::ToolCallFinished { name, .. } if name == "session.todo_write"
             )
         });
-        // CEP call events and agent-loop tool events travel on separate async
-        // channels (the CEP sink in lancet-native's transport vs the turn event
-        // stream), so their relative interleaving is not ordered. Assert only
-        // the ordering that holds within the CEP channel itself, plus the
-        // presence of the tool completion. Requiring
-        // `cep_finished < ToolCallFinished` across the two channels would assert
-        // an ordering the implementation does not provide.
+        // The ordered emitter holds public completion until both host-bound
+        // runtime lifecycle events have been observed for the same invocation.
         require(
             cep_started
                 .zip(cep_finished)
-                .is_some_and(|(started, finished)| started < finished)
-                && tool_finished.is_some(),
+                .zip(tool_finished)
+                .is_some_and(|((started, finished), tool)| started < finished && finished < tool),
             format!(
                 "todo CEP/tool lifecycle ordering missing: {:?}",
                 outcome.events
@@ -546,10 +536,6 @@ fn direct_tools_todo_write_validation_rejection() {
         "direct-tools-todo-bad",
         "dl-todobad",
         "[\"session.todo_write\"]",
-        // No `max_todo_ops` here: that knob has no enforcement point for a
-        // Component Tool (FINDINGS.md L-GH29-01), so setting it would read as
-        // live budget coverage this scenario does not provide. The refusal below
-        // is the descriptor's one-in_progress rule.
         "",
     );
     let server = wire_fake_llm(
@@ -603,11 +589,10 @@ fn direct_tools_todo_write_validation_rejection() {
 /// #29 criterion 8: the Component Tool's result survives into the next turn's
 /// transcript after the session is reopened.
 ///
-/// A Component result reaches the model through the persisted tool-role message,
-/// the same durable path a native handler's result took. Reopening the session
-/// and driving a second turn proves the migration did not move the result into
-/// some in-process-only channel — and, since this Tool has no store, that the
-/// transcript is the only place the plan is remembered.
+/// The Component result reaches the model through the persisted tool-role
+/// message. Reopening the session proves the result did not live only in an
+/// in-process channel and, because this Tool owns no store, the transcript is
+/// the only place the plan is remembered.
 #[test]
 fn direct_tools_todo_write_result_survives_session_reopen() {
     let driver = driver();
@@ -719,77 +704,6 @@ fn direct_tools_catalog_exposure_matches_enabled() {
     finish_scenario(
         scenario_evidence,
         &[("catalog exposure", &outcome.command)],
-        captures,
-        result,
-    );
-}
-
-/// Forced retired method calls fail as unknown/disabled, emit no successful
-/// tool finish, and leave project files unchanged.
-#[test]
-fn direct_tools_retired_methods_fail_closed() {
-    let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-tools-retired",
-        "dl-ret",
-        "[\"observe.workspace\"]",
-        "",
-    );
-    world
-        .write_project_file("sentinel.txt", "untouched\n")
-        .expect("sentinel");
-    world.commit_all("seed").expect("commit");
-
-    let retired = [
-        ("exec.command_run", r#"{"command":"echo pwned","cwd":"."}"#),
-        ("mutate.batch", r#"{"operations":[]}"#),
-        ("observe.audit", r#"{}"#),
-    ];
-    let mut scripts = Vec::new();
-    for (i, (name, args)) in retired.iter().enumerate() {
-        scripts.push(tool_call(&format!("r{i}"), name, args));
-        scripts.push(SseScript::plain(format!("handled {name}")));
-    }
-    let server = wire_fake_llm(&world, "dl-ret", sequence(scripts));
-    let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-ret", "main").expect("session");
-
-    // One turn that chains retired tool calls via Sequence.
-    let outcome = send.send("try retired methods").expect("turn");
-    let captures = server.captured_requests();
-
-    let result: Result<(), AssertError> = (|| {
-        assert_clean_send(&outcome)?;
-        for (name, _) in &retired {
-            require(
-                !tool_ok(&outcome.parsed, name),
-                format!("retired method {name} must not succeed"),
-            )?;
-        }
-        // No successful CEP backend for retired tools: if ToolCallFinished exists, ok=false.
-        for event in &outcome.events {
-            if let TurnEventLine::ToolCallFinished { name, ok, .. } = event
-                && retired.iter().any(|(n, _)| n == name)
-            {
-                require(!*ok, format!("retired {name} finished ok=true"))?;
-            }
-        }
-        require(
-            fs::read_to_string(world.project_dir().join("sentinel.txt")).unwrap_or_default()
-                == "untouched\n",
-            "retired methods must not mutate project files",
-        )?;
-        // No surprise new files from exec/batch.
-        require(
-            !world.project_dir().join("pwned").exists(),
-            "exec.command_run must not create side-effect files",
-        )?;
-        Ok(())
-    })();
-
-    finish_scenario(
-        scenario_evidence,
-        &[("retired methods", &outcome.command)],
         captures,
         result,
     );
