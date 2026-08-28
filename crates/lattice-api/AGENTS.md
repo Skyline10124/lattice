@@ -59,6 +59,10 @@ its reservation-bound Component runtime.
 
 ## Recent Issues
 
+- FIXED #34 PR review: if runtime admission cannot prove pre-dispatch state, the
+  live saga remains at its durable `StepClosing` snapshot and emits typed
+  `RecoveryRequired`; reopen reconciles ledger facts and never redispatches the
+  Tool or publishes a guessed `NotExecuted` terminal.
 - FIXED #159: live and reopen finalization consume the same journal-derived
   cumulative transcript/candidate basis. Reconciliation terminal evidence uses
   the frozen binding method. One shared WorkspaceOperationLock now covers the

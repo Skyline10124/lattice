@@ -618,6 +618,13 @@ pub(super) async fn run_coordinator_saga(
                 .await
             {
                 DispatchOutcome::Executed(receipt) => receipt,
+                DispatchOutcome::ReconciliationRequired(_error) => {
+                    break 'saga Err(ApiError::RecoveryRequired(
+                        crate::session::RecoveryRequired::InvocationReconciliationRequired {
+                            invocation_id: binding.invocation_id,
+                        },
+                    ));
+                }
                 DispatchOutcome::NotExecuted(error) => {
                     if let Err(err) = publish_not_executed(
                         &coordinator,
@@ -1007,6 +1014,9 @@ pub(super) async fn run_coordinator_saga(
                     attempts: err.attempts,
                 })
                 .await;
+        }
+        Err(ApiError::RecoveryRequired(reason)) => {
+            observer.emit(TurnEvent::RecoveryRequired { reason }).await;
         }
         Err(err) => {
             observer

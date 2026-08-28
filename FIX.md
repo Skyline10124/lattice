@@ -2,6 +2,45 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #34 PR #178 review: admission durability ambiguity fails into reconciliation — 2026-08-29
+
+**Severity:** HIGH（durable invocation lifecycle / correctness）
+
+**Problem:** `LancetRuntime::dispatch` 把 `InvocationStore::admit_reserved` 的所有错误和
+blocking worker 失败都包装为 `DispatchOutcome::NotExecuted`。但 admission 会先发布
+`DispatchStarted` ref、再执行 durability barrier；后置 fsync 失败时调用方拿到 `Err`，
+authoritative ledger 已经越过 dispatch boundary。`lattice-api` 随后补写
+`NotExecuted(BeforeDispatch)`，会与 durable fact 冲突，并把 may-have-executed 路径错误
+降级为确定未执行。
+
+**Fix:** admission 失败后按同一 typed `InvocationId` 重读 authoritative ledger。只有
+事实仍为 `Reserved` 时才返回 `NotExecuted`；观察到候选缺失、
+`DispatchStarted`/`Terminal` 或无法完成 authoritative read 时返回新的
+`DispatchOutcome::ReconciliationRequired`。durability 类原始错误保持 `Transient`，
+blocking worker 的未知状态保持 `Unknown`。`lattice-api` 在现有 `StepClosing` journal
+位置停止 live saga，发出 typed `TurnEvent::RecoveryRequired`；`run_turn` collector、CLI
+和 TUI 保留 typed recovery，而 reopen 继续使用既有 reducer 将裸
+`DispatchStarted` 闭合为 `Indeterminate(MayHaveOccurred)`，不重发 Tool，也不伪造
+`NotExecuted` terminal。
+
+**Verification:**
+
+- RED：`cargo test -p lancet-api published_dispatch_started_is_not_classified_not_executed`
+  在旧实现下失败，观测到 `DispatchStarted` 时仍返回 `NotExecuted`。
+- GREEN：`cargo test -p lancet-api` — 9 passed。
+- `cargo test -p lattice-api reconciliation_requirement` — 2 focused tests passed。
+- `cargo test -p lancet-api -p lattice-api -p lattice-cli -p lattice-tui` — PASS
+  （lancet-api 9、lattice-api 90 + integration matrices、lattice-cli 125、lattice-tui 24）。
+- `cargo clippy -p lancet-api -p lattice-api -p lattice-cli -p lattice-tui
+  --all-targets --all-features -- -D warnings` — PASS。
+- `cargo xtask lancet-boundary` — PASS。
+- `cargo fmt --all --check`、`git diff --check`、关键文件 LSP diagnostics — PASS。
+
+**Changed files:** `crates/lancet-api/src/runtime.rs`、
+`crates/lattice-api/src/{session.rs,turn/{types.rs,types_tests.rs,collector.rs,saga.rs}}`、
+`crates/lattice-api/tests/support/mod.rs`、`crates/lattice-cli/src/commands/run.rs`、
+`crates/lattice-tui/src/app.rs`、相关 `AGENTS.md`、`FINDINGS.md`、`FIX.md`。
+
 ## GitHub #34 follow-up: 删除墓碑门禁与弱信号测试 — 2026-08-28
 
 **Severity:** LOW（测试债务 / hard-cut 收口）

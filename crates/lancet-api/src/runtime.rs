@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use lancet_audit::invocation_store::{InvocationStore, InvocationStoreError};
+use lancet_audit::invocation_store::{InvocationState, InvocationStore, InvocationStoreError};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
 use lancet_protocol::{CepError, CepErrorCode, InvocationBinding, Retriability, ToolEvent};
 use lancet_runtime::{
@@ -21,11 +21,17 @@ use tokio::sync::mpsc;
 use crate::config::LancetRuntimeConfig;
 use crate::error::LancetError;
 
+#[cfg(test)]
+static FAIL_NEXT_ADMISSION_REF_FSYNC: AtomicBool = AtomicBool::new(false);
+
 /// Result of the reservation-gated handoff.
 #[derive(Debug)]
 pub enum DispatchOutcome {
     /// The exact invocation never crossed durable `DispatchStarted`.
     NotExecuted(CepError),
+    /// Durable state may have crossed `DispatchStarted`; preserve pending state
+    /// and let the coordinator reconcile from authoritative invocation facts.
+    ReconciliationRequired(CepError),
     /// The Component returned a known result/evidence receipt after handoff.
     Executed(ExecutionReceipt),
 }
@@ -131,11 +137,34 @@ impl LancetRuntime {
         }
 
         let store = Arc::clone(&self.invocations);
+        let admission_store = Arc::clone(&store);
         let admission_binding = binding.clone();
-        match tokio::task::spawn_blocking(move || store.admit_reserved(&admission_binding)).await {
+        match tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if FAIL_NEXT_ADMISSION_REF_FSYNC.swap(false, Ordering::SeqCst) {
+                lattice_store::fault::fail_ref_fsync(true);
+            }
+            admission_store.admit_reserved(&admission_binding)
+        })
+        .await
+        {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => return DispatchOutcome::NotExecuted(admission_error(error)),
-            Err(_) => return DispatchOutcome::NotExecuted(admission_worker_error()),
+            Ok(Err(error)) => {
+                return classify_admission_failure(
+                    store,
+                    binding.invocation_id,
+                    admission_error(error),
+                )
+                .await;
+            }
+            Err(_) => {
+                return classify_admission_failure(
+                    store,
+                    binding.invocation_id,
+                    admission_worker_error(),
+                )
+                .await;
+            }
         }
 
         #[cfg(feature = "test-crash-barriers")]
@@ -174,6 +203,29 @@ impl Drop for DispatchGuard {
     }
 }
 
+async fn classify_admission_failure(
+    store: Arc<InvocationStore>,
+    invocation_id: lancet_protocol::InvocationId,
+    error: CepError,
+) -> DispatchOutcome {
+    let observed = tokio::task::spawn_blocking(move || {
+        store.query_invocations(std::slice::from_ref(&invocation_id))
+    })
+    .await;
+    let definitely_not_executed = matches!(
+        observed,
+        Ok(Ok(ref facts))
+            if facts
+                .get(&invocation_id)
+                .is_some_and(|record| matches!(record.state, InvocationState::Reserved))
+    );
+    if definitely_not_executed {
+        DispatchOutcome::NotExecuted(error)
+    } else {
+        DispatchOutcome::ReconciliationRequired(error)
+    }
+}
+
 fn open_invocation_store(
     backing: &WorkspaceHistoryBacking,
 ) -> Result<Arc<InvocationStore>, LancetError> {
@@ -195,11 +247,16 @@ fn admission_worker_error() -> CepError {
         "invocation",
         "admission_worker_failed",
         None,
-        Retriability::Permanent,
+        Retriability::Unknown,
     )
 }
 
 fn admission_error(error: InvocationStoreError) -> CepError {
+    let retriability = if error.is_durability_retryable() {
+        Retriability::Transient
+    } else {
+        Retriability::Permanent
+    };
     let (code, category) = match error {
         InvocationStoreError::InvalidTransition { .. }
         | InvocationStoreError::DifferentPlan { .. }
@@ -215,7 +272,7 @@ fn admission_error(error: InvocationStoreError) -> CepError {
             "invocation_store_unavailable",
         ),
     };
-    CepError::tool_execution(code, "invocation", category, None, Retriability::Permanent)
+    CepError::tool_execution(code, "invocation", category, None, retriability)
 }
 
 fn map_catalog_selection_error(error: CatalogSelectionError) -> LancetError {
@@ -320,4 +377,86 @@ fn stop_after_dispatch_started(
     file.write_all(b"\n").expect("write barrier newline");
     file.sync_all().expect("sync barrier ack");
     unsafe { libc::raise(libc::SIGSTOP) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lancet_audit::invocation_store::InvocationState;
+    use lancet_protocol::{
+        BindingIdentity, InvocationId, PlanKey, SessionId, TurnId, arguments_digest,
+    };
+
+    #[tokio::test]
+    async fn published_dispatch_started_is_not_classified_not_executed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(workspace.path()).unwrap();
+        let backing = WorkspaceHistoryBacking::for_project_in(state.path(), &root).unwrap();
+        WorkspaceHistory::create(backing.clone()).unwrap();
+        let (layout, key) = match &backing {
+            WorkspaceHistoryBacking::Project { layout, key } => (layout, *key),
+            WorkspaceHistoryBacking::Disabled => unreachable!(),
+        };
+        InvocationStore::create(layout, &key).unwrap();
+
+        let runtime = LancetRuntime::build(LancetRuntimeConfig {
+            local_workspace_root: root.clone(),
+            enabled_tools: Vec::new(),
+            policy: lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+                root,
+            ),
+            capability_admission: Default::default(),
+            invocations: backing.clone(),
+            workspace_history: backing,
+        })
+        .unwrap();
+        let turn_id = TurnId::parse("22222222-2222-4222-8222-222222222222").unwrap();
+        let params = serde_json::json!({"value": "test"});
+        let binding = InvocationBinding {
+            invocation_id: InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
+            identity: BindingIdentity {
+                session_id: SessionId::parse("11111111111111111111111111111111").unwrap(),
+                turn_id,
+                model_step_ordinal: 0,
+                part_ordinal: 0,
+                method: "test.echo".to_string(),
+                descriptor_identity: "test-descriptor".to_string(),
+                arguments_digest: arguments_digest(&params),
+            },
+        };
+        runtime
+            .invocations
+            .reserve_batch(
+                PlanKey {
+                    turn_id,
+                    model_step_ordinal: 0,
+                },
+                std::slice::from_ref(&binding),
+            )
+            .unwrap();
+
+        FAIL_NEXT_ADMISSION_REF_FSYNC.store(true, Ordering::SeqCst);
+        let outcome = runtime
+            .dispatch(
+                binding.clone(),
+                binding.identity.method.clone(),
+                params,
+                None,
+            )
+            .await;
+
+        let DispatchOutcome::ReconciliationRequired(error) = outcome else {
+            panic!("a visible DispatchStarted fact must require reconciliation");
+        };
+        assert_eq!(error.retriability, Retriability::Transient);
+        let facts = runtime
+            .invocations
+            .query_invocations(&[binding.invocation_id])
+            .unwrap();
+        assert!(matches!(
+            facts[&binding.invocation_id].state,
+            InvocationState::DispatchStarted
+        ));
+    }
 }

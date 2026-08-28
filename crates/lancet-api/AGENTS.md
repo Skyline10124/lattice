@@ -63,6 +63,10 @@ Tool-execution product contract.
 
 ## Recent Issues
 
+- FIXED #34 PR review: a failed durable admission is classified from a fresh
+  authoritative read of the same `InvocationId`. Return `NotExecuted` only while
+  the fact is still pre-dispatch; `DispatchStarted`, terminal, and unreadable
+  states return `ReconciliationRequired`, preserving original retriability.
 - ADDED #63/#64: runtime composition owns private workspace history and public
   rewind, while session-graph movement stays above this crate.
 - FIXED #39: operator audit behavior and DTO ownership moved to `lancet-audit`;

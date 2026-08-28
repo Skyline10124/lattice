@@ -189,6 +189,10 @@ pub enum TurnEvent {
     },
     /// Terminal/evidence publication exhausted its fixed durability budget.
     EvidenceDurabilityFailed { attempts: u32 },
+    /// Durable invocation facts require a closure-only reconciliation pass.
+    RecoveryRequired {
+        reason: crate::session::RecoveryRequired,
+    },
     /// Commit persistence failed.
     CommitFailed { reason: String },
     /// A CEP call has started on the embedded server.

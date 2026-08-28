@@ -25,6 +25,10 @@ pub struct EvidenceDurabilityFailed {
 pub enum RecoveryRequired {
     #[error("{0}")]
     EvidenceDurabilityFailed(EvidenceDurabilityFailed),
+    #[error("invocation {invocation_id} requires durable reconciliation")]
+    InvocationReconciliationRequired {
+        invocation_id: lancet_protocol::InvocationId,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

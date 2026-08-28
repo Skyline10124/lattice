@@ -27,3 +27,4 @@ test-crash-barriers = ["dep:libc"]
 # test builds get `ScopedXdgStateHome` (shared XDG/env test isolation).
 lancet-audit = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+lattice-store = { workspace = true, features = ["test-fault-injection"] }

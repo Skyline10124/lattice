@@ -123,6 +123,11 @@ fn apply_event_to_state(event: &TurnEvent, state: &mut RunRenderState) {
                 reason: format!("terminal evidence durability failed after {attempts} attempt(s)"),
             });
         }
+        TurnEvent::RecoveryRequired { reason } => {
+            state.last_commit = Some(CommitSignal::Failed {
+                reason: format!("recovery required: {reason}"),
+            });
+        }
         // All other variants (ModelStarted, ReasoningDelta,
         // ToolCallStarted, ModelFinished without usage): no state mutation.
         _ => {}
@@ -314,6 +319,10 @@ fn render_human_event<WOut: Write, WErr: Write>(
                 "{} terminal evidence durability failed after {attempts} attempt(s)",
                 "✗".red()
             )?;
+        }
+        TurnEvent::RecoveryRequired { reason } => {
+            flush_before_status(out, err, state)?;
+            writeln!(err, "{} recovery required: {reason}", "✗".red())?;
         }
         TurnEvent::CepCallStarted { method, .. } => {
             if verbose {

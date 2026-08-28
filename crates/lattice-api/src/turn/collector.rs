@@ -118,6 +118,9 @@ impl RunTurnCollector {
                     crate::session::EvidenceDurabilityFailed { attempts },
                 ));
             }
+            TurnEvent::RecoveryRequired { reason } => {
+                self.commit_error = Some(ApiError::RecoveryRequired(reason));
+            }
             TurnEvent::TurnCommitting
             | TurnEvent::ModelStarted { .. }
             | TurnEvent::LlmRequestError { .. }
@@ -252,6 +255,24 @@ mod tests {
             ApiError::EvidenceDurabilityFailed(crate::session::EvidenceDurabilityFailed {
                 attempts: 4
             })
+        ));
+    }
+
+    #[test]
+    fn collector_returns_typed_invocation_reconciliation_requirement() {
+        let invocation_id =
+            lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let reason =
+            crate::session::RecoveryRequired::InvocationReconciliationRequired { invocation_id };
+        let error = collect_turn_result_from_events([TurnEvent::RecoveryRequired { reason }])
+            .expect_err("reconciliation must not become a generic commit error");
+        assert!(matches!(
+            error,
+            ApiError::RecoveryRequired(
+                crate::session::RecoveryRequired::InvocationReconciliationRequired {
+                    invocation_id: observed
+                }
+            ) if observed == invocation_id
         ));
     }
 }

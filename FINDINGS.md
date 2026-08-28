@@ -7,6 +7,36 @@
 
 ## HIGH
 
+### H-GH34-02: cancellation can cross the live-saga/runtime handoff before the Component sees it — OPEN, blocking PR #178 — `correctness` / `lancet-api` / `lattice-api`
+
+- **Location**: `crates/lattice-api/src/turn/saga.rs`（pre-dispatch cancel check）；
+  `crates/lancet-api/src/runtime.rs`（durable admission、watch bridge、Component call）。
+- **Problem**: saga 只在进入 Tool 循环时检查一次共享 `AtomicBool`；runtime 随后先发布
+  `DispatchStarted`，再创建异步轮询 task 把该 flag 转成 call-scoped watch。取消若落在
+  两者之间，Component 的同步 pre-cancel check 可能先于 monitor task 运行，mutation 可在
+  已经取消的 Turn 上产生副作用。
+- **Current status**: OPEN，PR #178 的剩余 blocking review comment。comment
+  `5454528610` 已复核确认；本次 admission 分类修复没有改变 cancellation handoff。
+- **Plan**: 在 durable admission 前和 Component handoff 前分别做同步取消检查，并补一条
+  可重复命中该窗口且断言无 workspace/history/terminal 副作用的回归。保持现有 call-scoped
+  cancellation authority，不新增 token 类型或第二套取消通道。
+
+### H-GH34-03: reserved binding identity is not checked against the current compiled descriptor — OPEN, required before #35 — `integrity` / `lancet-api` / `lancet-runtime`
+
+- **Location**: `crates/lancet-api/src/runtime.rs`（dispatch）；
+  `crates/lancet-protocol/src/binding.rs`（`matches_request`）；
+  `crates/lancet-runtime/src/execution.rs`（method lookup）。
+- **Problem**: `admit_reserved` 会精确校验调用 binding 与 durable reservation 一致，
+  但 dispatch 的 request check 只比较 method/arguments digest；执行阶段再按 method 选择
+  current compiled Tool。reservation 中的 `descriptor_identity` 因此没有与当前 catalog
+  descriptor 做 exact equality gate。
+- **Current status**: OPEN，PR #178 非阻塞 residual；当前 production binding 与 runtime
+  都从同一 turn-scoped catalog 生成，尚无 active-version 切换。operator Bundle activation
+  会让该假设失效，因此本条是 #35 的前置条件。comment `5454533817` 已复核确认。
+- **Plan**: 在 admission 前从 current enabled catalog 取 method 的 compiled identity，与
+  binding identity 精确比较并 fail closed；同时让 model-visible 与 executable enabled set
+  共享同一选择结果。不要增加第二个 catalog authority。
+
 ### L-GH139A-12: `session_journal_pin` grows with closures already in the Turn — OPEN, non-blocking follow-up — `performance` / `lattice-session` / GitHub #153
 
 - **Location**: `crates/lattice-session/src/git_graph/pending.rs`
@@ -44,11 +74,11 @@
 
 ## MEDIUM
 
-### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — runtime convergence complete; Bundle/docs remain — `architecture` / `lancet-runtime`
+### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — hard cut implemented; review/Bundle/docs remain — `architecture` / `lancet-runtime`
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-runtime`; Source Tools under `tools/`.
-- **Problem**: runtime convergence is complete, but operator Tool Bundle installation/activation and the final architecture-document closeout remain separate work.
-- **Current status**: PARTIAL — #28–#34 landed. The five default Tools are manifest-owned Components in one generated closed runtime; #35 (Bundle install) and #36 (final docs) remain.
-- **Plan**: execute #35 and #36 without adding a second Tool schema, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
+- **Problem**: PR #178 implements runtime convergence, but one blocking cancellation handoff defect and the pre-#35 descriptor-identity residual remain; operator Tool Bundle installation/activation and the final architecture-document closeout are separate work.
+- **Current status**: PARTIAL — the five default Tools are manifest-owned Components in one generated closed runtime. Admission ambiguity is fixed; `H-GH34-02` still blocks #178, `H-GH34-03` must close before #35, and #35/#36 remain.
+- **Plan**: close the two linked findings, then execute #35 and #36 without adding a second Tool schema, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
 
 
 ### ENV-OOM-01: 开发机常驻 Electron app 重度超售撞 24 并发 cargo 编译 → global OOM(已缓解,非代码 bug)— `environment` / dev-loop / #27
