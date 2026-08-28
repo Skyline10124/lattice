@@ -98,12 +98,4 @@ mod tests {
         assert_eq!(error.unknown, vec!["unknown.tool"]);
         assert_eq!(error.available, vec!["noop.echo"]);
     }
-
-    #[test]
-    fn enabled_projection_uses_host_pinned_identity() {
-        let runtime = ComponentRuntime::noop_fixture().unwrap();
-        let definitions = enabled_tool_definitions(&runtime, &["noop.echo".into()]).unwrap();
-        assert_eq!(definitions.len(), 1);
-        assert_eq!(definitions[0].descriptor_identity.len(), 64);
-    }
 }

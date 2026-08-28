@@ -120,14 +120,4 @@ mod tests {
             serde_json::json!(invocation_id().to_string())
         );
     }
-
-    #[tokio::test]
-    async fn cancellation_pairs_are_independent() {
-        let (sender_a, mut cancellation_a) = CancellationSender::pair();
-        let (_sender_b, cancellation_b) = CancellationSender::pair();
-        sender_a.cancel();
-        cancellation_a.cancelled().await;
-        assert!(cancellation_a.is_cancelled());
-        assert!(!cancellation_b.is_cancelled());
-    }
 }

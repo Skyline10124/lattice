@@ -5,7 +5,7 @@ use std::path::Path;
 
 use cargo_metadata::{DependencyKind, MetadataCommand};
 
-use crate::scan_rs_tree::{LineHit, collect_rs_line_hits};
+type LineHit = String;
 
 /// `lancet-audit` owns operator ledger reads without composing the Tool runtime.
 /// Keeping the runtime dependency absent makes that boundary structural.
@@ -162,26 +162,6 @@ fn feature_reaches_test_only(
     reaches
 }
 
-/// Symbols the #139-B hard cut deletes (plan §5 Commit 1 / §5 Commit 9).
-///
-/// The needles deliberately include comments and doc text: after the cut,
-/// even a mention of the retired vocabulary in production code is residue,
-/// because a reader cannot tell a stale comment from a live path without
-/// opening every hit.
-pub const ISSUE139B_LEGACY_NEEDLES: &[&str] = &[
-    "AgentLoop",
-    "CepAuditStore",
-    "AuditBacking",
-    "ProvisionalCompletionHook",
-    "ToolCallExecutor",
-    "legacy_status",
-    "call_id: u64",
-    "evidence_id",
-    // The retired numeric JSON-RPC request-id allocator, replaced by
-    // caller-allocated `InvocationId`.
-    "next_id",
-];
-
 /// Forbidden normal/dev dependency edges of the #139-B composition (plan
 /// §2.1). `lancet-audit -> lattice-session` as a *dev*-dependency is the
 /// documented #139-A qualification seam and stays legal until that harness
@@ -214,33 +194,6 @@ pub fn issue139b_forbidden_dependency_graph(repo_root: &Path) -> anyhow::Result<
     Ok(parts)
 }
 
-/// Every legacy-symbol hit fails permanently after the Commit 7 hard cut.
-pub fn issue139b_legacy_residue_hits(repo_root: &Path) -> anyhow::Result<Vec<LineHit>> {
-    let mut hits = Vec::new();
-    for needle in ISSUE139B_LEGACY_NEEDLES {
-        hits.extend(scan_workspace_rust_targets(repo_root, needle)?);
-    }
-    hits.sort();
-    hits.dedup();
-    Ok(hits)
-}
-
-fn scan_workspace_rust_targets(repo_root: &Path, needle: &str) -> anyhow::Result<Vec<LineHit>> {
-    let mut hits = Vec::new();
-    for root in ["crates", "tools"] {
-        let path = repo_root.join(root);
-        if path.is_dir() {
-            hits.extend(collect_rs_line_hits(
-                &path,
-                repo_root,
-                |_| false,
-                |line| line.contains(needle),
-            )?);
-        }
-    }
-    Ok(hits)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,50 +202,6 @@ mod tests {
 
     fn joined(hits: &[LineHit]) -> String {
         hits.join("\n")
-    }
-
-    #[test]
-    fn issue139b_needles_cover_the_plan_residue_set() {
-        for required in [
-            "AgentLoop",
-            "CepAuditStore",
-            "AuditBacking",
-            "ProvisionalCompletionHook",
-            "ToolCallExecutor",
-            "legacy_status",
-            "call_id: u64",
-            "evidence_id",
-            "next_id",
-        ] {
-            assert!(
-                ISSUE139B_LEGACY_NEEDLES.contains(&required),
-                "missing plan §5 Commit 9 needle: {required}"
-            );
-        }
-    }
-
-    #[test]
-    fn issue139b_residue_scan_reports_every_hit() {
-        let dir = TempDir::new().unwrap();
-        let hit = dir.path().join("crates/lattice-api/src/turn/fresh.rs");
-        fs::create_dir_all(hit.parent().unwrap()).unwrap();
-        fs::write(&hit, "fn x() { let _ = AgentLoop; }\n").unwrap();
-        let hits = issue139b_legacy_residue_hits(dir.path()).unwrap();
-        assert!(joined(&hits).contains("fresh.rs"));
-    }
-
-    #[test]
-    fn issue139b_residue_scan_covers_build_scripts_and_tools() {
-        let dir = TempDir::new().unwrap();
-        let build = dir.path().join("crates/example/build.rs");
-        let guest = dir.path().join("tools/example/src/lib.rs");
-        fs::create_dir_all(build.parent().unwrap()).unwrap();
-        fs::create_dir_all(guest.parent().unwrap()).unwrap();
-        fs::write(&build, "fn main() { let _ = AgentLoop; }\n").unwrap();
-        fs::write(&guest, "fn x() { let _ = next_id; }\n").unwrap();
-        let text = joined(&issue139b_legacy_residue_hits(dir.path()).unwrap());
-        assert!(text.contains("build.rs"));
-        assert!(text.contains("tools/example/src/lib.rs"));
     }
 
     /// A two-crate virtual workspace where the consumer enables `test-utils`

@@ -2,6 +2,35 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #34 follow-up: 删除墓碑门禁与弱信号测试 — 2026-08-28
+
+**Severity:** LOW（测试债务 / hard-cut 收口）
+
+**Problem:** #34 首次提交后只读复核发现一条新增单测仅点名断言已删除 legacy
+effect 字段不存在；同时 `cargo xtask lancet-boundary` 仍永久扫描 #139-B 已删除符号，
+并由三条自测维护这份 tombstone needle 表。另有两条单测分别只断言 descriptor
+identity 字符串长度为 64、两个独立 `watch` channel 互不共享状态，未证明其测试名
+声称的 host pin 来源或 runtime 调用隔离。它们没有独立语义回归信号。
+
+**Fix:** 删除 `capability_error_data_round_trips_without_legacy_effect_fields`、
+`enabled_projection_uses_host_pinned_identity`、`cancellation_pairs_are_independent`，
+删除 `ISSUE139B_LEGACY_NEEDLES`、`issue139b_legacy_residue_hits` 及其三条自测，并从
+LANCET boundary runner 移除该永久 tombstone gate。删除只被该 gate 使用的
+`xtask/src/scan_rs_tree.rs`；保留真实依赖图、production/test feature 边界、当前
+catalog unknown-name、mid-traversal cancellation、typed event identity 与生命周期
+排序回归。
+
+**Verification:**
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（完整 workspace 与 system harness）。
+- `cargo test -p lancet-protocol -p lancet-runtime -p xtask` — PASS（73 / 202 +
+  9 / 12 / 14 / 11 / 102）。
+- `cargo xtask lancet-boundary` — PASS，当前只检查仍存在的结构边界。
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS。
+- `cargo fmt --all --check`、`git diff --check`、LSP diagnostics — PASS。
+
+**Changed files:** `crates/lancet-protocol/src/error.rs`、
+`crates/lancet-runtime/src/{catalog,control}.rs`、`xtask/src/{main,scan_rs_tree}.rs`、
+`xtask/src/lancet_boundary{,/check}.rs`、`FIX.md`。
 
 ## GitHub #34: LANCET runtime convergence hard cut — 2026-08-28
 

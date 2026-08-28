@@ -505,24 +505,6 @@ mod tests {
     }
 
     #[test]
-    fn capability_error_data_round_trips_without_legacy_effect_fields() {
-        let wrapped = CepErrorData::Capability(Box::new(CapabilityErrorData {
-            method: "observe.workspace".into(),
-            violations: vec!["scope denied".into()],
-            cell_ref: Some("alloc:none:workspace".into()),
-            capability: Some("alloc:read:workspace".into()),
-        }));
-        let value = serde_json::to_value(&wrapped).unwrap();
-        assert_eq!(value["kind"], "capability");
-        assert!(value.get("declared_effect").is_none());
-        assert!(value.get("authorized_effect").is_none());
-        assert_eq!(
-            serde_json::from_value::<CepErrorData>(value).unwrap(),
-            wrapped
-        );
-    }
-
-    #[test]
     fn retriability_present_after_round_trip() {
         let err = CepError {
             code: CepErrorCode::ExecutionFailed,
