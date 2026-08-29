@@ -2,6 +2,50 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #34 PR #178 review: close pre-dispatch cancellation durably — 2026-08-29
+
+**Severity:** HIGH（durable cancellation / crash recovery correctness）
+
+**Problem:** runtime 已在 admission 前阻止 pre-dispatch cancellation 的 Tool 副作用，并把
+invocation 终结为 `NotExecuted(CancelledBeforeDispatch)`；但 saga 闭合该 binding 后直接
+`continue`，没有把取消传播到 `stop_batch`。单 ToolCall 因此持久化
+`StepClosed::ContinueModel`。若进程在下一轮 live cancellation check 前退出，reopen 会按
+契约闭合为 `Interrupted(WhileAwaitingModelContinuation)`，使同一 durable cancellation
+因崩溃时机不同得到 `Cancelled` 或 `Interrupted` 两种 Turn outcome。
+
+**Fix:** `DispatchOutcome::NotExecuted(CallCancelled)` 在完成当前 terminal、
+`ClosedBinding`、cursor 和事件后把 `CancelledBeforeDispatch` 写入 `stop_batch`。后续
+bindings 继续按既有顺序闭合为未执行，step 最终持久化 `StepClosed::CancelTurn`；普通
+`BeforeDispatch` 错误不受影响。新增 test-only saga hook，在循环顶部检查后、runtime
+admission 前置位真实 cancel flag，并由 external binary harness 在 durable `StepClosed`
+处 SIGSTOP/SIGKILL。回归同时验证真实 `mutate.create` 未写文件、未移动
+WorkspaceHistory、ledger reason、无下一次模型请求，以及 reopen 后
+`TurnOutcome::Cancelled`。同步更正 `lancet-runtime/AGENTS.md`：durable reservation
+校验属于 `lancet-api::LancetRuntime::dispatch`，`RuntimeExecution` 只负责
+request/binding consistency、descriptor resolution、Cell admission 与 Component execution。
+
+**Verification:**
+
+- RED：构建 `cargo build -p lattice-cli --features test-crash-barriers` 后，以该 binary
+  运行 focused `pre_dispatch_cancellation_step_closed_sigkill_reopens_cancelled`；snapshot
+  实际为 `StepClosed::ContinueModel`，测试按预期失败。
+- GREEN：同一 focused SIGKILL 测试 — PASS（1 passed）。
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（toolchain、fmt、clippy、binary build、
+  boundaries、tool-codegen、24 crate tests、system harness 与 Tool artifact verify）。
+- `cargo test -p lattice-api --all-features` — PASS。
+- `cargo clippy -p lattice-api -p lattice-system-harness --all-targets --all-features
+  -- -D warnings` — PASS。
+- `cargo xtask lancet-boundary`、`cargo xtask harness-boundary` — PASS。
+- 三个改动 Rust 文件的 LSP diagnostics、`cargo fmt --all --check`、
+  `git diff --check` — PASS。
+- 完整 `direct_crash_barriers` target：7 passed / 1 pre-existing failure；失败的
+  `dispatch_started` case 使用两套不一致的 test-only env names，已记录为
+  `FINDINGS.md` `T-GH34-04`，不属于本次 cancellation closure。
+
+**Changed files:** `crates/lattice-api/src/turn/{saga,crash_barrier}.rs`、
+`crates/lattice-system-harness/tests/direct_crash_barriers.rs`、三份 crate-local
+`AGENTS.md`、`FINDINGS.md`、`FIX.md`。
+
 ## GitHub #34 PR #178 review: close cancellation across the durable handoff — 2026-08-29
 
 **Severity:** HIGH（cancellation correctness / mutation safety）

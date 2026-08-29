@@ -68,7 +68,8 @@ integration-test target of any product crate.
   recorded in the private bare history under the scenario's isolated HOME,
   read back with plain `gix`; a pre-install failure records nothing),
   `direct_crash_barriers` (feature `crash-barriers`: real SIGSTOP/SIGKILL
-  windows, including cumulative multi-step transcript recovery and
+  windows, including cumulative multi-step transcript recovery, pre-dispatch
+  cancellation closing durably as `StepClosed::CancelTurn` with no Tool effect, and
   post-mutation WorkspaceHistory checkpoint publication),
   `direct_rewind` (#64: `session rewind` reverses only the later LATTICE
   mutations while unrelated external creates/edits/deletes and ignored

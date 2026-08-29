@@ -29,7 +29,8 @@ Cell evidence, and Component result validation.
   and execution receipts carrying typed Cell evidence.
 - `src/execution.rs` owns `RuntimeExecution`, the sole per-Turn composition of
   Component runtime, admitted call context, hosts, budgets, Local Workspace, and
-  WorkspaceHistory. It validates exact durable bindings before every call.
+  WorkspaceHistory. It checks request method/arguments against the binding, resolves
+  the current descriptor, performs Cell admission, and executes the Component.
 - `src/runtime.rs` owns `ComponentRuntime`, `ComponentCallContext`,
   `StoreState`, the engine/linker/ticker construction, and the `call`
   method (params validation, pre-cancel short-circuit, instantiation,
@@ -173,9 +174,11 @@ Cell evidence, and Component result validation.
   is never invoked, the call continues, and a `DeniedOperation` is recorded
   instead of an effect. Path targets require workspace scopes; host targets
   require network scopes. Other target kinds fail closed.
-- `RuntimeExecution` performs admission per call after exact durable-binding and
-  reservation checks, then passes the resulting `AdmittedTool` through
-  `ComponentCallContext`. No legacy effect vocabulary participates in a decision.
+- `lancet-api::LancetRuntime::dispatch` validates the exact durable reservation before
+  calling this crate. `RuntimeExecution` checks request/binding consistency, performs
+  Cell admission, and passes the resulting `AdmittedTool` through
+  `ComponentCallContext`. The current compiled descriptor-identity residual is tracked
+  as `H-GH34-03`; no legacy effect vocabulary participates in a decision.
 - `call` is `&self`: the epoch ticker is lazily spawned on first call via
   `OnceLock` (requires a tokio runtime context; composition does not).
   `set_limits` remains `&mut self` (tests only).

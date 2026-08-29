@@ -63,8 +63,9 @@ its reservation-bound Component runtime.
   live saga remains at its durable `StepClosing` snapshot and emits typed
   `RecoveryRequired`; reopen reconciles ledger facts and never redispatches the
   Tool or publishes a guessed `NotExecuted` terminal. A pre-admission
-  `CallCancelled` publishes `NotExecuted(CancelledBeforeDispatch)`; a cancellation
-  observed after `DispatchStarted` maps to the durable `Cancelled` terminal.
+  `CallCancelled` publishes `NotExecuted(CancelledBeforeDispatch)`, closes remaining
+  bindings in order, and records `StepClosed::CancelTurn`; cancellation observed after
+  `DispatchStarted` maps to the durable `Cancelled` terminal.
 - FIXED #159: live and reopen finalization consume the same journal-derived
   cumulative transcript/candidate basis. Reconciliation terminal evidence uses
   the frozen binding method. One shared WorkspaceOperationLock now covers the

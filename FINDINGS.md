@@ -63,7 +63,7 @@
 ### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — hard cut implemented; identity/Bundle/docs remain — `architecture` / `lancet-runtime`
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-runtime`; Source Tools under `tools/`.
 - **Problem**: PR #178 implements runtime convergence; the pre-#35 descriptor-identity residual remains, while operator Tool Bundle installation/activation and the final architecture-document closeout are separate work.
-- **Current status**: PARTIAL — the five default Tools are manifest-owned Components in one generated closed runtime. The two blocking PR-review defects (admission ambiguity and cancellation handoff) are fixed; `H-GH34-03` must close before #35, and #35/#36 remain.
+- **Current status**: PARTIAL — the five default Tools are manifest-owned Components in one generated closed runtime. The two blocking PR-review defects are fixed, including authoritative admission recovery and durable `StepClosed::CancelTurn` propagation after pre-dispatch cancellation; `H-GH34-03` must close before #35, and #35/#36 remain.
 - **Plan**: close `H-GH34-03`, then execute #35 and #36 without adding a second Tool schema, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
 
 
@@ -85,6 +85,12 @@
 > 下列 `L-39-*` / `ENV-WASM-01` / `T-39-01` 中的 `#39` 一律指 **GitHub #39**(= Codeberg #17,
 > operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
 > `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
+
+### T-GH34-04: `dispatch_started` SIGKILL barrier uses mismatched environment names — OPEN — `verification` / `lancet-api` / `lattice-system-harness`
+- **Location**: `crates/lancet-api/src/runtime.rs` (`stop_after_dispatch_started`); `crates/lattice-api/src/turn/crash_barrier.rs`; `crates/lattice-system-harness/tests/direct_crash_barriers.rs`.
+- **Problem**: the system harness configures `LATTICE_TEST_TURN_BARRIER{,_ACK}`, while the lower `lancet-api` barrier reads `LATTICE_CRASH_BARRIER{,_ACK}`. The `dispatch_started` matrix case therefore publishes only its context sidecar and times out waiting for the terminal ack.
+- **Current status**: OPEN, pre-existing and non-production. It does not affect the focused pre-dispatch cancellation SIGKILL regression, which passes, but the complete `direct_crash_barriers` target currently reports 7 passed / 1 failed.
+- **Plan**: give both barrier layers one test-only environment contract, then rerun the full crash-barrier target. Keep this separate from the cancellation closure fix; do not add a production fallback or duplicate alias path.
 
 ### T-GH143-01: `sigkill_mid_create_leaves_only_absent_or_fully_valid_stores` 的 120ms 窗口隐含假设 TMPDIR 在 tmpfs 上 — `verification` / test-hygiene / `lattice-store`
 - **位置**: `crates/lattice-store/tests/integration.rs`（父进程 `sleep(120ms)` 后 SIGKILL 子进程，随后断言 `published > 0`）。

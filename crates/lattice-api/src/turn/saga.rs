@@ -607,6 +607,8 @@ pub(super) async fn run_coordinator_saga(
             {
                 break 'saga Err(map_io(err));
             }
+            #[cfg(feature = "test-crash-barriers")]
+            super::crash_barrier::cancel_before_dispatch(request.cancel_flag.as_ref());
             let params = call.arguments.clone();
             let receipt = match runtime
                 .dispatch(
@@ -627,6 +629,10 @@ pub(super) async fn run_coordinator_saga(
                 }
                 DispatchOutcome::NotExecuted(error) => {
                     let reason = not_executed_reason(&error);
+                    let stop_after_closure = matches!(
+                        reason,
+                        lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch
+                    );
                     if let Err(err) = publish_not_executed(&coordinator, binding, reason).await {
                         break 'saga Err(err);
                     }
@@ -670,6 +676,9 @@ pub(super) async fn run_coordinator_saga(
                             },
                         )
                         .await;
+                    if stop_after_closure {
+                        stop_batch = Some(reason);
+                    }
                     continue;
                 }
             };

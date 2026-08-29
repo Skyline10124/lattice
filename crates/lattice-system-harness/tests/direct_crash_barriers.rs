@@ -204,6 +204,118 @@ fn next_model_attempt_sigkill_recovers_the_byte_exact_cumulative_transcript() {
 }
 
 #[test]
+fn pre_dispatch_cancellation_step_closed_sigkill_reopens_cancelled() {
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-crash-pre-dispatch-cancel",
+        "dl-crash-cancel",
+        "[\"mutate.create\"]",
+        "",
+    );
+    let outside = tempfile::tempdir().expect("external crash-surviving counters");
+    let provider_log = outside.path().join("provider.log");
+    let effect_log = outside.path().join("effects.log");
+    world.set_env(
+        "LATTICE_TEST_TOOL_EFFECT_LOG",
+        effect_log.display().to_string(),
+    );
+    let server = wire_logged_fake_llm(
+        &world,
+        "dl-crash-cancel",
+        sequence(vec![
+            tool_call(
+                "cancelled-mutation-call",
+                "mutate.create",
+                r#"{"path":"must-not-exist.txt","content":"forbidden\n","create_parents":false}"#,
+            ),
+            SseScript::plain("fresh turn after cancelled recovery"),
+        ]),
+        &provider_log,
+    );
+    let send =
+        SessionSendDriver::new(&driver, &world, &spec, "dl-crash-cancel", "main").expect("session");
+    let ack = outside.path().join("cancelled-step-closed.json");
+    world.set_env(BARRIER_ENV, "cancel_before_dispatch_step_closed");
+    world.set_env(ACK_ENV, ack.display().to_string());
+    let running = send
+        .spawn("cancel after batch check, then stop at StepClosed")
+        .expect("spawn");
+    let facts = wait_for_ack(&ack, Duration::from_secs(20));
+    assert_eq!(
+        running.kill_and_wait().expect("kill").termination,
+        Termination::Killed
+    );
+    world.unset_env(BARRIER_ENV);
+    world.unset_env(ACK_ENV);
+
+    assert_eq!(facts["barrier"], "step_closed");
+    assert_eq!(
+        facts
+            .pointer("/snapshot/stage/stage")
+            .and_then(Value::as_str),
+        Some("step_closed")
+    );
+    assert!(
+        facts.pointer("/snapshot/stage/kind/cancel_turn").is_some(),
+        "pre-dispatch cancellation must durably close the step as CancelTurn: {facts}"
+    );
+    let invocations = facts["invocations"].as_object().expect("invocation map");
+    assert_eq!(invocations.len(), 1, "{facts}");
+    let record = invocations.values().next().expect("invocation");
+    assert_eq!(
+        record
+            .pointer("/state/terminal/outcome/not_executed/reason")
+            .and_then(Value::as_str),
+        Some("cancelled_before_dispatch"),
+        "{facts}"
+    );
+    assert!(!world.project_dir().join("must-not-exist.txt").exists());
+    assert_eq!(
+        fsynced_count(&effect_log),
+        0,
+        "cancelled call had an effect"
+    );
+    assert!(
+        !workspace_history_has_current(&world),
+        "cancelled call moved WorkspaceHistory"
+    );
+    assert_eq!(
+        server.captured_requests().len(),
+        1,
+        "StepClosed cancellation must not start another model attempt"
+    );
+    assert_eq!(fsynced_count(&provider_log), 1);
+
+    let recovery = send
+        .send("fresh turn after cancelled recovery")
+        .expect("reopen and continue");
+    assert_clean_send(&recovery).expect("clean recovery");
+    assert_eq!(
+        server.captured_requests().len(),
+        2,
+        "reopen must close without provider replay; only the fresh Turn may call it"
+    );
+    assert_eq!(fsynced_count(&provider_log), 2);
+    assert_eq!(fsynced_count(&effect_log), 0, "reopen redispatched Tool");
+    assert!(!active_turn_exists(&world, send.session_id()));
+
+    let log = send
+        .run_command(&["--json", "session", "log", send.session_id()])
+        .expect("session log");
+    let log_json: Value = serde_json::from_slice(&log.stdout).expect("session log JSON");
+    let reconciled = log_json["turns"]
+        .as_array()
+        .expect("turns")
+        .iter()
+        .find(|turn| turn["origin"].as_str() == Some("reconciled"))
+        .expect("reconciled Turn");
+    assert!(
+        reconciled["outcome"].get("cancelled").is_some(),
+        "StepClosed CancelTurn must reopen as Cancelled: {log_json}"
+    );
+}
+
+#[test]
 fn post_mutation_step_closed_sigkill_reconciles_with_current_history_checkpoint() {
     let driver = driver();
     let (world, spec) = direct_world(
@@ -765,6 +877,26 @@ fn fsynced_count(path: &std::path::Path) -> usize {
     std::fs::read_to_string(path)
         .map(|content| content.lines().count())
         .unwrap_or(0)
+}
+
+fn workspace_history_has_current(world: &lattice_system_harness::ScenarioWorld) -> bool {
+    let projects = world.home().join(".local/state/lattice/projects");
+    let repos: Vec<_> = std::fs::read_dir(projects)
+        .expect("project stores")
+        .map(|entry| {
+            entry
+                .expect("project store entry")
+                .path()
+                .join("workspace-history.git")
+        })
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(repos.len(), 1, "one project workspace-history store");
+    let repo =
+        gix::open_opts(&repos[0], gix::open::Options::isolated()).expect("open workspace history");
+    repo.try_find_reference("refs/lattice/workspace-history/current")
+        .expect("read current workspace-history ref")
+        .is_some()
 }
 
 fn workspace_history_tip(world: &lattice_system_harness::ScenarioWorld) -> String {
