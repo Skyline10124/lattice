@@ -242,11 +242,11 @@ pub fn derive_tool_batch_control(
         match outcome {
             ExecutionOutcome::Indeterminate { .. } => {
                 saw_indeterminate = true;
-                controlling.get_or_insert_with(|| {
-                    ToolBatchControl::Interrupt(TurnInterruption::InvocationMayHaveOccurred {
+                controlling.get_or_insert(ToolBatchControl::Interrupt(
+                    TurnInterruption::InvocationMayHaveOccurred {
                         invocation: binding.invocation_id,
-                    })
-                });
+                    },
+                ));
             }
             ExecutionOutcome::Cancelled
             | ExecutionOutcome::NotExecuted {
