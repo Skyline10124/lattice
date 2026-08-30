@@ -23,6 +23,27 @@
   binding identity 精确比较并 fail closed；同时让 model-visible 与 executable enabled set
   共享同一选择结果。不要增加第二个 catalog authority。
 
+### H-GH179-01: `OutputTooLarge` live cursor advance is rejected — OPEN — `correctness` / `lattice-session` / `lattice-api`
+
+- **Location**: `crates/lattice-session/src/pending/contract.rs`; `crates/lattice-api/src/turn/saga.rs`.
+- **Problem**: a successful Tool result over 65,536 bytes publishes `Succeeded + Unavailable(OutputTooLarge)` with no `ResultDraft`, but the `StepClosing -> StepClosing` transition only admits no-candidate `NotExecuted` and conservative `Indeterminate` closures. A normal live Turn therefore fails after terminal publication.
+- **Current status**: OPEN, blocking PR #178. The store-backed regression reproduces `advance_pending_turn` rejecting the cursor advance.
+- **Plan**: admit only the exact `Succeeded + OutputTooLarge + Some(digest) + Some(length)` closure without changing PendingTurn schema v3.
+
+### H-GH179-02: legal no-draft terminal facts reopen as corruption — OPEN — `recovery` / `lattice-session`
+
+- **Location**: `crates/lattice-session/src/pending/reconcile.rs` (`step_closing_closure`).
+- **Problem**: cancellation skip, timeout skip, runtime `NotExecuted`, preceding-indeterminate skip, and `OutputTooLarge` can all publish a terminal before advancing the cursor without a `ResultDraft`. Reopen currently classifies every such terminal as `JournalCorruption`.
+- **Current status**: OPEN, blocking PR #178.
+- **Plan**: implement the schema-v3 terminal/material truth table. Resume exact `NotExecuted + Unavailable(NotExecuted)` and `Succeeded + Unavailable(OutputTooLarge)` facts, while keeping missing-draft `Available` and `DraftPublicationFailed` fail closed.
+
+### H-GH179-03: reopen loses durable cancellation after cursor advance — OPEN — `recovery` / `lattice-session` / `lattice-api`
+
+- **Location**: `crates/lattice-session/src/pending/reconcile.rs`; `crates/lattice-api/src/turn/saga.rs`.
+- **Problem**: live code keeps `CancelledBeforeDispatch` only in `stop_batch`. If the process exits after all cursors advance but before `StepClosed`, reopen ignores the typed ledger reason and closes as `Interrupted(ProcessInterruptedDuringStepClosing)` instead of `Cancelled`.
+- **Current status**: OPEN, blocking PR #178.
+- **Plan**: derive one session-domain batch controlling cause from ordered durable outcomes plus an optional live-only cause, and use it in both live and reopen closure.
+
 ### L-GH139A-12: `session_journal_pin` grows with closures already in the Turn — OPEN, non-blocking follow-up — `performance` / `lattice-session` / GitHub #153
 
 - **Location**: `crates/lattice-session/src/git_graph/pending.rs`
@@ -63,7 +84,7 @@
 ### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — hard cut implemented; identity/Bundle/docs remain — `architecture` / `lancet-runtime`
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-runtime`; Source Tools under `tools/`.
 - **Problem**: PR #178 implements runtime convergence; the pre-#35 descriptor-identity residual remains, while operator Tool Bundle installation/activation and the final architecture-document closeout are separate work.
-- **Current status**: PARTIAL — the five default Tools are manifest-owned Components in one generated closed runtime. The two blocking PR-review defects are fixed, including authoritative admission recovery and durable `StepClosed::CancelTurn` propagation after pre-dispatch cancellation; `H-GH34-03` must close before #35, and #35/#36 remain.
+- **Current status**: PARTIAL — the five default Tools are manifest-owned Components in one generated closed runtime. The earlier admission and cancellation-handoff defects are fixed, but the three blocking `StepClosing` defects tracked by GitHub #179 remain open; `H-GH34-03` must close before #35, and #35/#36 remain.
 - **Plan**: close `H-GH34-03`, then execute #35 and #36 without adding a second Tool schema, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
 
 
