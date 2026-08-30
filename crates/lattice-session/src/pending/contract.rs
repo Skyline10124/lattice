@@ -1199,6 +1199,14 @@ pub fn validate_transition(prev: &PendingStage, next: &PendingStage) -> Result<(
                                 },
                             )
                             | (
+                                lattice_conversation::ToolResultOutcome::Succeeded,
+                                super::step::MaterialAvailability::Unavailable {
+                                    reason: super::facts::UnavailableMaterialReason::OutputTooLarge,
+                                    digest: Some(_),
+                                    byte_length: Some(_),
+                                },
+                            )
+                            | (
                                 lattice_conversation::ToolResultOutcome::Indeterminate,
                                 super::step::MaterialAvailability::Unavailable {
                                     reason: super::facts::UnavailableMaterialReason::DraftPublicationFailed,

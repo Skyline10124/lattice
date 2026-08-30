@@ -421,6 +421,33 @@ fn bound_requires_the_byte_equal_plan_and_closing_starts_at_cursor_zero() {
     let mut jumped = step_closing_cursor_0(&one_call_plan());
     jumped.closure_cursor = 1;
     assert!(validate_transition(&bound, &PendingStage::StepClosing(jumped)).is_err());
+
+    let plan = one_call_plan();
+    let baseline = PendingStage::StepClosing(step_closing_cursor_0(&plan));
+    let mut oversize = step_closing_cursor_0(&plan);
+    oversize.closure_cursor = 1;
+    oversize.closures.push(super::super::step::ClosedBinding {
+        binding: plan.bindings[0].clone(),
+        outcome: ToolResultOutcome::Succeeded,
+        material: super::super::step::MaterialAvailability::Unavailable {
+            reason: super::super::facts::UnavailableMaterialReason::OutputTooLarge,
+            digest: Some([7; 32]),
+            byte_length: Some(65_537),
+        },
+    });
+    assert!(validate_transition(
+        &baseline,
+        &PendingStage::StepClosing(oversize.clone()),
+    )
+    .is_ok());
+
+    let super::super::step::MaterialAvailability::Unavailable { digest, .. } =
+        &mut oversize.closures[0].material
+    else {
+        unreachable!();
+    };
+    *digest = None;
+    assert!(validate_transition(&baseline, &PendingStage::StepClosing(oversize)).is_err());
 }
 
 #[test]

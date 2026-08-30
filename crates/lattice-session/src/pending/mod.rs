@@ -67,8 +67,9 @@ pub use facts::{
     UnavailableMaterialReason,
 };
 pub use outcome::{
-    ClosureOrigin, TurnCancellation, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
-    TurnUsageAggregate, WorkspaceHistoryCheckpoint,
+    ClosureOrigin, LiveControllingCause, ToolBatchControl, TurnCancellation, TurnFailure,
+    TurnFinishReason, TurnInterruption, TurnOutcome, TurnUsageAggregate,
+    WorkspaceHistoryCheckpoint, derive_tool_batch_control,
 };
 pub use reconcile::{
     CandidateRevisionRequest, ReconciliationAction, ReconciliationDecision, ReconciliationPlan,
