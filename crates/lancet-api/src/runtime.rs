@@ -410,30 +410,54 @@ fn stop_after_dispatch_started(
 ) {
     use std::io::Write;
 
-    if std::env::var_os("LATTICE_CRASH_BARRIER").as_deref()
-        != Some(std::ffi::OsStr::new("dispatch_started"))
-    {
+    const BARRIER_ENV: &str = "LATTICE_TEST_TURN_BARRIER";
+    const ACK_ENV: &str = "LATTICE_TEST_TURN_BARRIER_ACK";
+    if std::env::var_os(BARRIER_ENV).as_deref() != Some(std::ffi::OsStr::new("dispatch_started")) {
         return;
     }
     let facts = invocations
         .query_invocations(&[invocation_id])
         .expect("read dispatch barrier facts");
-    let path = std::env::var_os("LATTICE_CRASH_BARRIER_ACK").expect("barrier ack path");
+    let path =
+        std::path::PathBuf::from(std::env::var_os(ACK_ENV).expect("dispatch barrier ack path"));
+    assert!(
+        path.is_absolute(),
+        "dispatch barrier ack path must be absolute"
+    );
+    let mut context_path = path.as_os_str().to_os_string();
+    context_path.push(".context");
+    let context: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::path::PathBuf::from(context_path))
+            .expect("read dispatch barrier session context"),
+    )
+    .expect("parse dispatch barrier session context");
+    let session_context = context
+        .get("session")
+        .expect("dispatch barrier context has session facts");
+    let record = facts
+        .get(&invocation_id)
+        .expect("dispatch barrier invocation record");
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(path)
-        .expect("create barrier ack");
+        .open(&path)
+        .expect("create dispatch barrier ack");
     serde_json::to_writer(
         &mut file,
         &serde_json::json!({
+            "barrier": "dispatch_started",
             "invocation_id": invocation_id,
-            "state": facts.get(&invocation_id).map(|record| format!("{:?}", record.state)),
+            "record": record,
+            "session_context": session_context,
         }),
     )
-    .expect("write barrier ack");
+    .expect("write dispatch barrier ack");
     file.write_all(b"\n").expect("write barrier newline");
-    file.sync_all().expect("sync barrier ack");
+    file.sync_all().expect("sync dispatch barrier ack");
+    std::fs::File::open(path.parent().expect("dispatch ack parent"))
+        .expect("open dispatch ack parent")
+        .sync_all()
+        .expect("sync dispatch ack parent");
     unsafe { libc::raise(libc::SIGSTOP) };
 }
 
@@ -527,20 +551,6 @@ mod tests {
         binding
     }
 
-    fn assert_pre_effect_state(env: &TestRuntime, binding: &InvocationBinding, path: &str) {
-        let facts = env
-            .runtime
-            .invocations
-            .query_invocations(&[binding.invocation_id])
-            .unwrap();
-        assert_eq!(
-            facts[&binding.invocation_id].state,
-            InvocationState::Reserved
-        );
-        assert!(!env.workspace.path().join(path).exists());
-        assert_eq!(env.runtime.workspace_history().current().unwrap(), None);
-    }
-
     #[tokio::test]
     async fn published_dispatch_started_is_not_classified_not_executed() {
         let _guard = DISPATCH_TEST_LOCK.lock().await;
@@ -572,37 +582,6 @@ mod tests {
             facts[&binding.invocation_id].state,
             InvocationState::DispatchStarted
         ));
-    }
-
-    #[tokio::test]
-    async fn pre_cancelled_mutation_stays_reserved_and_has_no_effects() {
-        let _guard = DISPATCH_TEST_LOCK.lock().await;
-        let env = test_runtime(&["mutate.create"]);
-        let path = "cancelled-before-dispatch.txt";
-        let params = serde_json::json!({
-            "path": path,
-            "content": "must not be installed\n",
-            "create_parents": false
-        });
-        let binding = reserve_binding(&env.runtime, "mutate.create", &params, 2);
-        let cancel_flag = Arc::new(AtomicBool::new(true));
-
-        let outcome = env
-            .runtime
-            .dispatch(
-                binding.clone(),
-                binding.identity.method.clone(),
-                params,
-                Some(cancel_flag),
-            )
-            .await;
-
-        let DispatchOutcome::NotExecuted { cause, error } = outcome else {
-            panic!("pre-cancelled call must not cross durable admission");
-        };
-        assert_eq!(cause, DispatchNotStartedCause::CancelledBeforeDispatch);
-        assert_eq!(error.code, CepErrorCode::CallCancelled);
-        assert_pre_effect_state(&env, &binding, path);
     }
 
     #[tokio::test]

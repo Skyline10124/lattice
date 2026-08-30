@@ -261,6 +261,9 @@ retired crates or APIs.
    attempt at a time, binding and reservation, sequential Component Tool
    execution, exact ResultDraft/terminal publication, typed closure, and final
    Turn commit.
+   Live and reopen batch control both derive from the published terminal fact
+   through `lattice_session::pending::batch_control_from_terminal`. Keep
+   `CepError` diagnostic and `ToolResultOutcome` lossy; neither controls the batch.
 5. Every Tool executes as an embedded Component behind Tool Host imports; host
    capability admission, Guard L1, evidence, and Local Workspace checks remain
    authoritative.

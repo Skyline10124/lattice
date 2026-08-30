@@ -535,6 +535,7 @@ pub(super) async fn run_coordinator_saga(
                     Err(err) => break 'saga Err(err),
                 };
                 terminal_facts.push(terminal);
+                crash_barrier!('saga, "terminal_published");
                 let closure = ClosedBinding {
                     binding: binding.clone(),
                     outcome: ToolResultOutcome::NotExecuted,
@@ -651,6 +652,7 @@ pub(super) async fn run_coordinator_saga(
                         Err(err) => break 'saga Err(err),
                     };
                     terminal_facts.push(terminal);
+                    crash_barrier!('saga, "terminal_published");
                     let closure = ClosedBinding {
                         binding: binding.clone(),
                         outcome: ToolResultOutcome::NotExecuted,

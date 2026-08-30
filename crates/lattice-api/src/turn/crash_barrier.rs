@@ -18,7 +18,8 @@ use super::coordinator::{CoordinatorIoError, TurnCoordinator};
 
 pub(crate) const BARRIER_ENV: &str = "LATTICE_TEST_TURN_BARRIER";
 pub(crate) const ACK_ENV: &str = "LATTICE_TEST_TURN_BARRIER_ACK";
-const CANCEL_BEFORE_DISPATCH_STEP_CLOSED: &str = "cancel_before_dispatch_step_closed";
+const INJECTION_ENV: &str = "LATTICE_TEST_TURN_INJECTION";
+const CANCEL_BEFORE_DISPATCH: &str = "cancel_before_dispatch";
 
 #[derive(Serialize)]
 struct CrashBarrierFacts {
@@ -38,10 +39,7 @@ pub(crate) async fn hit(
     barrier: &str,
 ) -> Result<(), CoordinatorIoError> {
     let configured = std::env::var(BARRIER_ENV).ok();
-    if configured.as_deref() != Some(barrier)
-        && !(configured.as_deref() == Some(CANCEL_BEFORE_DISPATCH_STEP_CLOSED)
-            && barrier == "step_closed")
-    {
+    if configured.as_deref() != Some(barrier) {
         return Ok(());
     }
     let (tip, ledger, draft_classification) = coordinator
@@ -52,9 +50,9 @@ pub(crate) async fn hit(
 }
 
 pub(crate) fn cancel_before_dispatch(cancel_flag: Option<&Arc<AtomicBool>>) {
-    if std::env::var(BARRIER_ENV).ok().as_deref() == Some(CANCEL_BEFORE_DISPATCH_STEP_CLOSED) {
+    if std::env::var(INJECTION_ENV).ok().as_deref() == Some(CANCEL_BEFORE_DISPATCH) {
         cancel_flag
-            .expect("cancellation crash barrier requires the CLI cancel flag")
+            .expect("cancellation injection requires the CLI cancel flag")
             .store(true, Ordering::Relaxed);
     }
 }

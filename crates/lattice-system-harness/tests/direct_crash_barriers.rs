@@ -15,6 +15,7 @@ use support::{
 
 const BARRIER_ENV: &str = "LATTICE_TEST_TURN_BARRIER";
 const ACK_ENV: &str = "LATTICE_TEST_TURN_BARRIER_ACK";
+const INJECTION_ENV: &str = "LATTICE_TEST_TURN_INJECTION";
 
 #[test]
 fn turn_started_sigkill_reopens_without_replaying_the_provider() {
@@ -201,118 +202,6 @@ fn next_model_attempt_sigkill_recovers_the_byte_exact_cumulative_transcript() {
     let messages = committed_messages(&world, recovered["commit_id"].as_str().expect("commit id"));
     assert_eq!(messages.len(), 3, "user + exact durable transcript");
     assert_eq!(&messages[1..], durable.as_slice());
-}
-
-#[test]
-fn pre_dispatch_cancellation_step_closed_sigkill_reopens_cancelled() {
-    let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-crash-pre-dispatch-cancel",
-        "dl-crash-cancel",
-        "[\"mutate.create\"]",
-        "",
-    );
-    let outside = tempfile::tempdir().expect("external crash-surviving counters");
-    let provider_log = outside.path().join("provider.log");
-    let effect_log = outside.path().join("effects.log");
-    world.set_env(
-        "LATTICE_TEST_TOOL_EFFECT_LOG",
-        effect_log.display().to_string(),
-    );
-    let server = wire_logged_fake_llm(
-        &world,
-        "dl-crash-cancel",
-        sequence(vec![
-            tool_call(
-                "cancelled-mutation-call",
-                "mutate.create",
-                r#"{"path":"must-not-exist.txt","content":"forbidden\n","create_parents":false}"#,
-            ),
-            SseScript::plain("fresh turn after cancelled recovery"),
-        ]),
-        &provider_log,
-    );
-    let send =
-        SessionSendDriver::new(&driver, &world, &spec, "dl-crash-cancel", "main").expect("session");
-    let ack = outside.path().join("cancelled-step-closed.json");
-    world.set_env(BARRIER_ENV, "cancel_before_dispatch_step_closed");
-    world.set_env(ACK_ENV, ack.display().to_string());
-    let running = send
-        .spawn("cancel after batch check, then stop at StepClosed")
-        .expect("spawn");
-    let facts = wait_for_ack(&ack, Duration::from_secs(20));
-    assert_eq!(
-        running.kill_and_wait().expect("kill").termination,
-        Termination::Killed
-    );
-    world.unset_env(BARRIER_ENV);
-    world.unset_env(ACK_ENV);
-
-    assert_eq!(facts["barrier"], "step_closed");
-    assert_eq!(
-        facts
-            .pointer("/snapshot/stage/stage")
-            .and_then(Value::as_str),
-        Some("step_closed")
-    );
-    assert!(
-        facts.pointer("/snapshot/stage/kind/cancel_turn").is_some(),
-        "pre-dispatch cancellation must durably close the step as CancelTurn: {facts}"
-    );
-    let invocations = facts["invocations"].as_object().expect("invocation map");
-    assert_eq!(invocations.len(), 1, "{facts}");
-    let record = invocations.values().next().expect("invocation");
-    assert_eq!(
-        record
-            .pointer("/state/terminal/outcome/not_executed/reason")
-            .and_then(Value::as_str),
-        Some("cancelled_before_dispatch"),
-        "{facts}"
-    );
-    assert!(!world.project_dir().join("must-not-exist.txt").exists());
-    assert_eq!(
-        fsynced_count(&effect_log),
-        0,
-        "cancelled call had an effect"
-    );
-    assert!(
-        !workspace_history_has_current(&world),
-        "cancelled call moved WorkspaceHistory"
-    );
-    assert_eq!(
-        server.captured_requests().len(),
-        1,
-        "StepClosed cancellation must not start another model attempt"
-    );
-    assert_eq!(fsynced_count(&provider_log), 1);
-
-    let recovery = send
-        .send("fresh turn after cancelled recovery")
-        .expect("reopen and continue");
-    assert_clean_send(&recovery).expect("clean recovery");
-    assert_eq!(
-        server.captured_requests().len(),
-        2,
-        "reopen must close without provider replay; only the fresh Turn may call it"
-    );
-    assert_eq!(fsynced_count(&provider_log), 2);
-    assert_eq!(fsynced_count(&effect_log), 0, "reopen redispatched Tool");
-    assert!(!active_turn_exists(&world, send.session_id()));
-
-    let log = send
-        .run_command(&["--json", "session", "log", send.session_id()])
-        .expect("session log");
-    let log_json: Value = serde_json::from_slice(&log.stdout).expect("session log JSON");
-    let reconciled = log_json["turns"]
-        .as_array()
-        .expect("turns")
-        .iter()
-        .find(|turn| turn["origin"].as_str() == Some("reconciled"))
-        .expect("reconciled Turn");
-    assert!(
-        reconciled["outcome"].get("cancelled").is_some(),
-        "StepClosed CancelTurn must reopen as Cancelled: {log_json}"
-    );
 }
 
 #[test]
@@ -575,14 +464,9 @@ fn result_terminal_and_cursor_windows_recover_without_redispatch() {
             "durable",
             Some("dispatch_started"),
         ),
-        BarrierCase::tool_with_draft(
-            "terminal_published",
-            "step_closing",
-            "durable",
-            Some("terminal"),
-        ),
-        BarrierCase::tool("cursor_1", "step_closing", 1, Some("terminal")),
-        BarrierCase::tool("step_closed", "step_closed", 1, Some("terminal")),
+        BarrierCase::oversize("terminal_published", "step_closing"),
+        BarrierCase::cancelled("cursor_1", "step_closing"),
+        BarrierCase::oversize("step_closed", "step_closed"),
         BarrierCase::tool("turn_closing", "turn_closing", 1, Some("terminal")),
     ] {
         run_barrier_case(case);
@@ -599,6 +483,15 @@ fn every_multi_tool_cursor_recovers_without_redispatch() {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BarrierScenario {
+    Plain,
+    Todo,
+    MultiTodo,
+    Oversize,
+    CancelledMutation,
+}
+
 #[derive(Clone, Copy)]
 struct BarrierCase {
     barrier: &'static str,
@@ -606,8 +499,7 @@ struct BarrierCase {
     invocation_count: usize,
     lifecycle: Option<&'static str>,
     draft_classification: Option<&'static str>,
-    tool_bearing: bool,
-    tool_count: usize,
+    scenario: BarrierScenario,
 }
 
 impl BarrierCase {
@@ -623,8 +515,7 @@ impl BarrierCase {
             invocation_count,
             lifecycle,
             draft_classification: None,
-            tool_bearing: false,
-            tool_count: 0,
+            scenario: BarrierScenario::Plain,
         }
     }
 
@@ -635,19 +526,18 @@ impl BarrierCase {
         lifecycle: Option<&'static str>,
     ) -> Self {
         Self {
-            tool_bearing: true,
-            tool_count: 1,
+            scenario: BarrierScenario::Todo,
             ..Self::plain(barrier, stage, invocation_count, lifecycle)
         }
     }
 
     const fn multi_tool(barrier: &'static str) -> Self {
         Self {
-            tool_bearing: true,
-            tool_count: 2,
+            scenario: BarrierScenario::MultiTodo,
             ..Self::plain(barrier, "step_closing", 2, None)
         }
     }
+
     const fn tool_with_draft(
         barrier: &'static str,
         stage: &'static str,
@@ -659,15 +549,75 @@ impl BarrierCase {
             ..Self::tool(barrier, stage, 1, lifecycle)
         }
     }
+
+    const fn oversize(barrier: &'static str, stage: &'static str) -> Self {
+        Self {
+            scenario: BarrierScenario::Oversize,
+            ..Self::plain(barrier, stage, 1, Some("terminal"))
+        }
+    }
+
+    const fn cancelled(barrier: &'static str, stage: &'static str) -> Self {
+        Self {
+            scenario: BarrierScenario::CancelledMutation,
+            ..Self::plain(barrier, stage, 1, Some("terminal"))
+        }
+    }
+
+    fn tools(self) -> &'static str {
+        match self.scenario {
+            BarrierScenario::Plain => "[]",
+            BarrierScenario::Todo | BarrierScenario::MultiTodo | BarrierScenario::Oversize => {
+                "[\"session.todo_write\"]"
+            }
+            BarrierScenario::CancelledMutation => "[\"mutate.create\"]",
+        }
+    }
+
+    fn tool_count(self) -> usize {
+        match self.scenario {
+            BarrierScenario::Plain => 0,
+            BarrierScenario::MultiTodo => 2,
+            _ => 1,
+        }
+    }
+
+    fn injection(self) -> Option<&'static str> {
+        match self.scenario {
+            BarrierScenario::CancelledMutation => Some("cancel_before_dispatch"),
+            _ => None,
+        }
+    }
+
+    fn expected_reconciled_outcome(self) -> &'static str {
+        match self.scenario {
+            BarrierScenario::CancelledMutation => "cancelled",
+            _ => "interrupted",
+        }
+    }
+
+    fn expected_effects(self) -> usize {
+        match self.scenario {
+            BarrierScenario::Plain | BarrierScenario::CancelledMutation => 0,
+            BarrierScenario::MultiTodo if self.barrier == "cursor_1" => 1,
+            BarrierScenario::MultiTodo => 2,
+            BarrierScenario::Todo | BarrierScenario::Oversize => usize::from(matches!(
+                self.barrier,
+                "candidate_computed"
+                    | "candidate_pinned"
+                    | "draft_published"
+                    | "terminal_published"
+                    | "cursor_1"
+                    | "step_closed"
+                    | "turn_closing"
+            )),
+        }
+    }
 }
 
 fn run_barrier_case(case: BarrierCase) {
     let driver = driver();
-    let tools = if case.tool_bearing {
-        "[\"session.todo_write\"]"
-    } else {
-        "[]"
-    };
+    let tools = case.tools();
     let (world, spec) = direct_world(
         &format!("direct-crash-{}", case.barrier.replace('_', "-")),
         "dl-crash-matrix",
@@ -675,14 +625,14 @@ fn run_barrier_case(case: BarrierCase) {
         "",
     );
     let mut scripts = vec![SseScript::plain("baseline complete")];
-    match case.tool_count {
-        0 => {}
-        1 => scripts.push(tool_call(
+    match case.scenario {
+        BarrierScenario::Plain => {}
+        BarrierScenario::Todo => scripts.push(tool_call(
             "provider-private-call-id",
             "session.todo_write",
             r#"{"todos":[{"content":"crash matrix","status":"pending"}]}"#,
         )),
-        2 => scripts.push(SseScript::ToolCalls {
+        BarrierScenario::MultiTodo => scripts.push(SseScript::ToolCalls {
             calls: vec![
                 (
                     "provider-private-call-1".into(),
@@ -696,7 +646,22 @@ fn run_barrier_case(case: BarrierCase) {
                 ),
             ],
         }),
-        _ => unreachable!(),
+        BarrierScenario::Oversize => {
+            let args = serde_json::json!({
+                "todos": [{"content": "x".repeat(70_000), "status": "pending"}]
+            })
+            .to_string();
+            scripts.push(tool_call(
+                "provider-private-oversize-call",
+                "session.todo_write",
+                &args,
+            ));
+        }
+        BarrierScenario::CancelledMutation => scripts.push(tool_call(
+            "provider-private-cancelled-call",
+            "mutate.create",
+            r#"{"path":"must-not-exist.txt","content":"forbidden\n","create_parents":false}"#,
+        )),
     }
     if case.barrier == "turn_closing" {
         scripts.push(SseScript::plain(
@@ -719,6 +684,9 @@ fn run_barrier_case(case: BarrierCase) {
     let ack = outside.path().join(format!("{}.json", case.barrier));
     world.set_env(BARRIER_ENV, case.barrier);
     world.set_env(ACK_ENV, ack.display().to_string());
+    if let Some(injection) = case.injection() {
+        world.set_env(INJECTION_ENV, injection);
+    }
     let running = send.spawn("kill at durable barrier").expect("spawn send");
     let facts = wait_for_ack(&ack, Duration::from_secs(20));
     assert_eq!(facts["barrier"], case.barrier);
@@ -751,7 +719,7 @@ fn run_barrier_case(case: BarrierCase) {
         };
         assert_eq!(actual, Some(expected), "{facts}");
     }
-    if case.tool_count == 2 {
+    if case.tool_count() == 2 {
         let terminal = invocations
             .values()
             .filter(|record| record["state"].get("terminal").is_some())
@@ -773,20 +741,72 @@ fn run_barrier_case(case: BarrierCase) {
             "{facts}"
         );
     }
+    match case.scenario {
+        BarrierScenario::Oversize => {
+            let record = invocations.values().next().expect("oversize invocation");
+            assert_eq!(
+                record
+                    .pointer("/state/terminal/material/unavailable/reason")
+                    .and_then(Value::as_str),
+                Some("output_too_large"),
+                "{facts}"
+            );
+            assert!(
+                record
+                    .pointer("/state/terminal/material/unavailable/digest")
+                    .and_then(Value::as_str)
+                    .is_some_and(|digest| digest.len() == 64),
+                "{facts}"
+            );
+            assert!(
+                record
+                    .pointer("/state/terminal/material/unavailable/byte_length")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|length| length > 65_536),
+                "{facts}"
+            );
+            if case.barrier == "terminal_published" {
+                assert_eq!(
+                    session_facts
+                        .pointer("/snapshot/stage/current_candidate")
+                        .unwrap_or(&Value::Null),
+                    &Value::Null,
+                    "oversize result must not pin a ResultDraft: {facts}"
+                );
+            }
+        }
+        BarrierScenario::CancelledMutation => {
+            let record = invocations.values().next().expect("cancelled invocation");
+            assert_eq!(
+                record
+                    .pointer("/state/terminal/outcome/not_executed/reason")
+                    .and_then(Value::as_str),
+                Some("cancelled_before_dispatch"),
+                "{facts}"
+            );
+            assert_eq!(
+                session_facts
+                    .pointer("/snapshot/stage/closures/0/outcome")
+                    .and_then(Value::as_str),
+                Some("not_executed"),
+                "conversation closure must stay lossy: {facts}"
+            );
+            assert!(!world.project_dir().join("must-not-exist.txt").exists());
+            assert!(
+                !workspace_history_has_current(&world),
+                "cancelled call moved WorkspaceHistory"
+            );
+        }
+        _ => {}
+    }
     let expected_pre_kill = if case.barrier == "turn_closing" {
         3
-    } else if case.tool_bearing {
+    } else if case.tool_count() > 0 {
         2
     } else {
         1
     };
-    let expected_effects = match case.barrier {
-        "cursor_1" => 1,
-        "cursor_2" => 2,
-        "candidate_computed" | "candidate_pinned" | "draft_published" | "terminal_published"
-        | "step_closed" | "turn_closing" => 1,
-        _ => 0,
-    };
+    let expected_effects = case.expected_effects();
     assert_eq!(server.captured_requests().len(), expected_pre_kill);
     assert_eq!(fsynced_count(&provider_log), expected_pre_kill);
     assert_eq!(fsynced_count(&effect_log), expected_effects);
@@ -805,6 +825,7 @@ fn run_barrier_case(case: BarrierCase) {
     );
     world.unset_env(BARRIER_ENV);
     world.unset_env(ACK_ENV);
+    world.unset_env(INJECTION_ENV);
     let recovery = send
         .send("recover killed turn")
         .expect("reopen and reconcile");
@@ -830,6 +851,13 @@ fn run_barrier_case(case: BarrierCase) {
         "reopen must not redispatch a Tool at {}",
         case.barrier
     );
+    if case.scenario == BarrierScenario::CancelledMutation {
+        assert!(!world.project_dir().join("must-not-exist.txt").exists());
+        assert!(
+            !workspace_history_has_current(&world),
+            "reopen moved WorkspaceHistory for cancelled call"
+        );
+    }
     let recovery_log = send
         .run_command(&["--json", "session", "log", send.session_id()])
         .expect("recovery log");
@@ -846,12 +874,13 @@ fn run_barrier_case(case: BarrierCase) {
             "{recovery_json}"
         );
     } else {
+        let expected = case.expected_reconciled_outcome();
         assert!(
-            recovered_turns
-                .iter()
-                .any(|turn| turn["origin"].as_str() == Some("reconciled")
-                    && turn["outcome"].get("interrupted").is_some()),
-            "{recovery_json}"
+            recovered_turns.iter().any(|turn| {
+                turn["origin"].as_str() == Some("reconciled")
+                    && turn["outcome"].get(expected).is_some()
+            }),
+            "expected reconciled {expected} outcome: {recovery_json}"
         );
     }
     assert!(
@@ -975,9 +1004,10 @@ fn collect_tree_files(tree: &gix::Tree<'_>, prefix: &str, out: &mut Vec<(String,
 fn wait_for_ack(path: &std::path::Path, timeout: Duration) -> Value {
     let deadline = Instant::now() + timeout;
     loop {
-        if path.is_file() {
-            let bytes = std::fs::read(path).expect("read barrier ack");
-            return serde_json::from_slice(&bytes).expect("barrier ack JSON");
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(facts) = serde_json::from_slice(&bytes) {
+                return facts;
+            }
         }
         assert!(Instant::now() < deadline, "barrier ack was not published");
         std::thread::sleep(Duration::from_millis(5));
