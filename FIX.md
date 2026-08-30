@@ -2,6 +2,51 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #179: make live and reopen Tool batches use one durable authority — 2026-08-30
+
+**Severity:** HIGH（durable Turn closure / crash recovery correctness）
+
+**Problem:** live saga 与 reopen reducer 分别推导 Tool batch 的控制结果。live path 读取
+`CepErrorCode` 和 lossy `ToolResultOutcome`，reopen 则读取 durable invocation facts；同一
+terminal 可随 crash timing 得到不同 Turn outcome。另一个缺口在无 ResultDraft 的合法 terminal：
+`ResultDraft::new` 对超过 64 KiB 的结果返回 `OutputTooLarge`，ledger 随后持久化
+`TerminalMaterial::Unavailable(OutputTooLarge)`，但 `StepClosing.current_candidate` 保持 `None`。
+reopen 把这个 terminal 当作 journal corruption。`dispatch_started` SIGKILL row 还因两层 barrier
+使用不同环境变量而无法运行。
+
+**Fix:** `lattice-session` 新增纯函数 `derive_tool_batch_control`，live 与 reopen 都把 exact
+published terminal 投影成同一 `InvocationLifecycleFact` 后调用它；`CepError` 只保留诊断用途，
+conversation closure 继续保持 lossy。`lancet-api::DispatchOutcome::NotExecuted` 现在携带 closed
+`DispatchNotStartedCause`，不再由错误码决定 durable reason。PendingTurn 保持 schema v3 与既有
+wire shape；`contract.rs` 仅扩展 no-candidate cursor 真值表，使 exact
+`Succeeded + Unavailable(OutputTooLarge, Some(digest), Some(length))` 合法。reducer 从 pinned
+InvocationStore facts 恢复 exact no-draft terminal，并继续拒绝缺少 matching draft 的
+`Available` / `DraftPublicationFailed`、material mismatch 与 `Reserved + ResultDraft`。
+
+Product SIGKILL matrix 复用现有 barrier，加入真实 `session.todo_write` 70 KiB 结果和真实
+`mutate.create` pre-dispatch cancellation rows。cancellation 注入与 crash 位置使用两个独立环境
+变量；两层 barrier 统一为 `LATTICE_TEST_TURN_BARRIER{,_ACK}`，ack 同时携带 exact typed
+invocation record 与 pinned session snapshot。旧 standalone cancellation tests 和重复 helper 已删除。
+
+**Verification:**
+
+- `cargo test -p lattice-session` — PASS。
+- `cargo test -p lancet-api`、`cargo test -p lattice-api` — PASS。
+- `cargo check -p lattice-api --features test-crash-barriers` — PASS。
+- 使用本工作树 `target/debug/lattice` 运行完整 `direct_crash_barriers` target — 7 passed，
+  包含 `dispatch_started`、`OutputTooLarge` terminal→cursor/reopen、pre-dispatch cancellation、
+  multi-Tool cursor 与 TurnClosing rows。
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（toolchain、fmt、workspace clippy、debug binary、
+  boundary gates、tool-codegen、24 crate tests、system harness、Tool artifact verify）。
+- `cargo clippy -p lattice-session --all-targets -- -D warnings` — PASS。
+
+**Changed files:** `AGENTS.md`、`FINDINGS.md`、`FIX.md`、
+`crates/lancet-api/src/{lib,runtime}.rs`、`crates/lattice-api/src/turn/{crash_barrier,invocation_facts,saga}.rs`、
+`crates/lattice-api/tests/support/mod.rs`、
+`crates/lattice-session/src/pending/{contract,contract_tests,mod,outcome,reconcile}.rs`、
+`crates/lattice-session/src/git_graph/tests/pending_crash.rs`、
+`crates/lattice-system-harness/tests/direct_crash_barriers.rs`。
+
 ## GitHub #34 PR #178 review: close pre-dispatch cancellation durably — 2026-08-29
 
 **Severity:** HIGH（durable cancellation / crash recovery correctness）
