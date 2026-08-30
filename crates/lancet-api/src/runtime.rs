@@ -28,11 +28,25 @@ static CANCEL_AFTER_NEXT_ADMISSION: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static STALL_NEXT_CANCELLATION_MONITOR: AtomicBool = AtomicBool::new(false);
 
+/// Typed reason the runtime did not cross durable `DispatchStarted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchNotStartedCause {
+    /// Validation or admission failed while the reservation remained pre-dispatch.
+    BeforeDispatch,
+    /// Caller cancellation was already visible before dispatch.
+    CancelledBeforeDispatch,
+}
+
 /// Result of the reservation-gated handoff.
 #[derive(Debug)]
 pub enum DispatchOutcome {
     /// The exact invocation never crossed durable `DispatchStarted`.
-    NotExecuted(CepError),
+    NotExecuted {
+        /// Typed durable reason, independent of error-code presentation.
+        cause: DispatchNotStartedCause,
+        /// Diagnostic error returned to the caller.
+        error: CepError,
+    },
     /// Durable state may have crossed `DispatchStarted`; preserve pending state
     /// and let the coordinator reconcile from authoritative invocation facts.
     ReconciliationRequired(CepError),
@@ -136,16 +150,22 @@ impl LancetRuntime {
         cancel_flag: Option<Arc<AtomicBool>>,
     ) -> DispatchOutcome {
         if !binding.matches_request(&method, &params) {
-            return DispatchOutcome::NotExecuted(CepError::invalid_params(
-                "invocation binding does not match request method/arguments",
-            ));
+            return DispatchOutcome::NotExecuted {
+                cause: DispatchNotStartedCause::BeforeDispatch,
+                error: CepError::invalid_params(
+                    "invocation binding does not match request method/arguments",
+                ),
+            };
         }
 
         if cancel_flag
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
         {
-            return DispatchOutcome::NotExecuted(cancelled_error(&method));
+            return DispatchOutcome::NotExecuted {
+                cause: DispatchNotStartedCause::CancelledBeforeDispatch,
+                error: cancelled_error(&method),
+            };
         }
 
         let store = Arc::clone(&self.invocations);
@@ -255,7 +275,10 @@ async fn classify_admission_failure(
                 .is_some_and(|record| matches!(record.state, InvocationState::Reserved))
     );
     if definitely_not_executed {
-        DispatchOutcome::NotExecuted(error)
+        DispatchOutcome::NotExecuted {
+            cause: DispatchNotStartedCause::BeforeDispatch,
+            error,
+        }
     } else {
         DispatchOutcome::ReconciliationRequired(error)
     }
@@ -574,9 +597,10 @@ mod tests {
             )
             .await;
 
-        let DispatchOutcome::NotExecuted(error) = outcome else {
+        let DispatchOutcome::NotExecuted { cause, error } = outcome else {
             panic!("pre-cancelled call must not cross durable admission");
         };
+        assert_eq!(cause, DispatchNotStartedCause::CancelledBeforeDispatch);
         assert_eq!(error.code, CepErrorCode::CallCancelled);
         assert_pre_effect_state(&env, &binding, path);
     }

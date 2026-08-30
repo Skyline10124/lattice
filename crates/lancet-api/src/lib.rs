@@ -28,7 +28,7 @@ pub use rewind::{
     WorkspaceRewindReport, plan_workspace_rewind, record_rewind_audit, rewind_audit_records,
     rewind_workspace,
 };
-pub use runtime::{DispatchOutcome, LancetRuntime};
+pub use runtime::{DispatchNotStartedCause, DispatchOutcome, LancetRuntime};
 pub use status::{LancetStatusOutput, collect_status};
 
 pub use lancet_authority::policy::default::PolicyConfig;

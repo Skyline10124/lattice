@@ -144,7 +144,7 @@ impl ReservedClient {
             .await
         {
             lancet_api::DispatchOutcome::Executed(receipt) => Ok(receipt),
-            lancet_api::DispatchOutcome::NotExecuted(error)
+            lancet_api::DispatchOutcome::NotExecuted { error, .. }
             | lancet_api::DispatchOutcome::ReconciliationRequired(error) => Err(error),
         }
     }
@@ -174,7 +174,7 @@ impl ReservedClient {
         let future = async move {
             match runtime.dispatch(binding, method, params, Some(flag)).await {
                 lancet_api::DispatchOutcome::Executed(receipt) => receipt.result,
-                lancet_api::DispatchOutcome::NotExecuted(error)
+                lancet_api::DispatchOutcome::NotExecuted { error, .. }
                 | lancet_api::DispatchOutcome::ReconciliationRequired(error) => Err(error),
             }
         };
