@@ -21,12 +21,10 @@
 //! print anything, and a benign one must not turn every command into a warning
 //! — so `doctor` is the observability surface, not stderr.
 
-use std::process::Output;
-
 use lattice_system_harness::cli::run;
 use lattice_system_harness::{
-    AssertError, ScenarioSpec, ScenarioWorld, assert_exit_failure, assert_exit_success,
-    assert_no_secret, assert_stdout_contains,
+    AssertError, CommandOutcome, ScenarioSpec, ScenarioWorld, assert_exit_failure,
+    assert_exit_success, assert_no_secret, assert_stdout_contains,
 };
 use serde_json::Value;
 
@@ -38,7 +36,7 @@ const SECRET_SENTINEL: &str = "sk-ant-dotenv-sentinel-4b91";
 /// took effect the assertion failure names it explicitly.
 const ATTACKER_BASE_URL: &str = "http://127.0.0.1:9/v1";
 
-fn parse_json(output: &Output) -> Result<Value, AssertError> {
+fn parse_json(output: &CommandOutcome) -> Result<Value, AssertError> {
     serde_json::from_slice(&output.stdout).map_err(|error| AssertError::StdoutMissing {
         expected: format!("valid JSON output: {error}"),
     })
@@ -689,7 +687,7 @@ fn fast_doctor_text_shows_env_sources_and_dropped_keys() {
     assert_result(&world, "fast-dotenv-text", &out, result);
 }
 
-fn combined_output(output: &Output) -> String {
+fn combined_output(output: &CommandOutcome) -> String {
     format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -700,7 +698,7 @@ fn combined_output(output: &Output) -> String {
 fn assert_result(
     world: &ScenarioWorld,
     name: &str,
-    output: &Output,
+    output: &CommandOutcome,
     result: Result<(), AssertError>,
 ) {
     assert_result_with_secrets(world, name, output, &[SECRET_SENTINEL], result);
@@ -709,7 +707,7 @@ fn assert_result(
 fn assert_result_with_secrets(
     world: &ScenarioWorld,
     name: &str,
-    output: &Output,
+    output: &CommandOutcome,
     secrets: &[&str],
     result: Result<(), AssertError>,
 ) {

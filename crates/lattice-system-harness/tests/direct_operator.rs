@@ -6,12 +6,11 @@
 mod support;
 
 use std::collections::HashSet;
-use std::process::Output;
 use std::time::Duration;
 
 use lattice_system_harness::{
-    AssertError, FixtureHttpServer, HttpFixture, SendExecution, SessionSendDriver, SseScript,
-    TurnEventLine,
+    AssertError, CommandOutcome, FixtureHttpServer, HttpFixture, SendExecution, SessionSendDriver,
+    SseScript, TurnEventLine,
 };
 use serde_json::Value;
 use support::{
@@ -19,7 +18,7 @@ use support::{
     tool_call, wire_fake_llm,
 };
 
-fn parse_json(output: &Output) -> Value {
+fn parse_json(output: &CommandOutcome) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(stdout.trim())
         .unwrap_or_else(|error| panic!("expected JSON output, got {stdout:?}: {error}"))
@@ -139,7 +138,7 @@ fn assert_single_operator_case(
         ],
     );
     require(
-        query.status.success(),
+        query.is_clean_exit(0),
         format!(
             "{expected_method} query failed: {}",
             String::from_utf8_lossy(&query.stderr)
@@ -172,7 +171,7 @@ fn assert_single_operator_case(
             tip,
         ],
     );
-    require(pinned.status.success(), "pinned query failed")?;
+    require(pinned.is_clean_exit(0), "pinned query failed")?;
     let pinned_json = parse_json(&pinned);
     require(
         pinned_json.get("ledger_oid").and_then(Value::as_str) == Some(tip)
@@ -199,7 +198,7 @@ fn assert_single_operator_case(
             "--tail",
         ],
     );
-    require(tail.status.success(), "tail failed")?;
+    require(tail.is_clean_exit(0), "tail failed")?;
     let tail_json = parse_json(&tail);
     let transitions = rows(&tail_json);
     require(
@@ -241,7 +240,7 @@ fn assert_single_operator_case(
             cursor,
         ],
     );
-    require(continued.status.success(), "tail continuation failed")?;
+    require(continued.is_clean_exit(0), "tail continuation failed")?;
     let continued_json = parse_json(&continued);
     require(
         rows(&continued_json).is_empty()
@@ -263,7 +262,7 @@ fn assert_single_operator_case(
             turn_id,
         ],
     );
-    require(replay.status.success(), "replay failed")?;
+    require(replay.is_clean_exit(0), "replay failed")?;
     let replay_json = parse_json(&replay);
     let calls = replay_calls(&replay_json);
     require(
@@ -278,7 +277,7 @@ fn assert_single_operator_case(
     )?;
 
     let status = cli(world, spec, &["--json", "lancet", "status"]);
-    require(status.status.success(), "lancet status failed")?;
+    require(status.is_clean_exit(0), "lancet status failed")?;
     let status_json = parse_json(&status);
     let recent = status_json
         .get("recent_calls")
@@ -438,7 +437,7 @@ fn direct_operator_mixed_query_tail_replay_and_status() {
             &spec,
             &["--json", "audit", "query", "--session", &session_id],
         );
-        require(query.status.success(), "mixed query failed")?;
+        require(query.is_clean_exit(0), "mixed query failed")?;
         let query_json = parse_json(&query);
         let current = rows(&query_json);
         require(
@@ -465,7 +464,7 @@ fn direct_operator_mixed_query_tail_replay_and_status() {
                 "--tail",
             ],
         );
-        require(tail.status.success(), "mixed tail failed")?;
+        require(tail.is_clean_exit(0), "mixed tail failed")?;
         let tail_json = parse_json(&tail);
         let transitions = rows(&tail_json);
         require(
@@ -496,7 +495,7 @@ fn direct_operator_mixed_query_tail_replay_and_status() {
                 &turn_id,
             ],
         );
-        require(replay.status.success(), "mixed replay failed")?;
+        require(replay.is_clean_exit(0), "mixed replay failed")?;
         let replay_json = parse_json(&replay);
         require(
             methods(replay_calls(&replay_json)) == vec!["fetch.web", "session.todo_write"],
@@ -504,7 +503,7 @@ fn direct_operator_mixed_query_tail_replay_and_status() {
         )?;
 
         let status = cli(&world, &spec, &["--json", "lancet", "status"]);
-        require(status.status.success(), "mixed status failed")?;
+        require(status.is_clean_exit(0), "mixed status failed")?;
         let status_json = parse_json(&status);
         let recent = status_json
             .get("recent_calls")
@@ -589,13 +588,13 @@ fn direct_operator_status_bounds_twenty_newest_invocations() {
             &spec,
             &["--json", "audit", "query", "--session", &session_id],
         );
-        require(query.status.success(), "bounded query failed")?;
+        require(query.is_clean_exit(0), "bounded query failed")?;
         let query_json = parse_json(&query);
         let all = rows(&query_json);
         require(all.len() == 22, format!("expected 22 rows: {query_json}"))?;
 
         let status = cli(&world, &spec, &["--json", "lancet", "status"]);
-        require(status.status.success(), "bounded status failed")?;
+        require(status.is_clean_exit(0), "bounded status failed")?;
         let status_json = parse_json(&status);
         let recent = status_json
             .get("recent_calls")
@@ -656,7 +655,7 @@ fn direct_operator_unknown_typed_session_is_empty() {
         ],
     );
     let result: Result<(), AssertError> = (|| {
-        require(query.status.success(), "unknown session query must succeed")?;
+        require(query.is_clean_exit(0), "unknown session query must succeed")?;
         let json = parse_json(&query);
         require(
             json.get("row_count").and_then(Value::as_u64) == Some(0),
@@ -696,7 +695,10 @@ fn direct_operator_unknown_typed_turn_fails() {
         ],
     );
     let result: Result<(), AssertError> = (|| {
-        require(!replay.status.success(), "unknown turn replay must fail")?;
+        require(
+            replay.clean_exit_code().is_some_and(|code| code != 0),
+            "unknown turn replay must fail",
+        )?;
         let error = String::from_utf8_lossy(&replay.stderr);
         require(
             error.contains("no invocations for turn_id"),

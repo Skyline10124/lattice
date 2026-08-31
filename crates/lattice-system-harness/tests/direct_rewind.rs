@@ -275,11 +275,8 @@ fn direct_rewind_reverses_later_mutations_and_preserves_external_changes() {
         let rewind_stdout = String::from_utf8_lossy(&rewind.stdout).to_string();
         let rewind_stderr = String::from_utf8_lossy(&rewind.stderr).to_string();
         require(
-            rewind.status.success(),
-            format!(
-                "rewind failed ({:?}): {rewind_stderr}",
-                rewind.status.code()
-            ),
+            rewind.is_clean_exit(0),
+            format!("rewind failed ({:?}): {rewind_stderr}", rewind.exit_code()),
         )?;
         let report: Value =
             serde_json::from_str(&rewind_stdout).map_err(|e| AssertError::StdoutMissing {
@@ -515,10 +512,10 @@ fn direct_rewind_conflict_moves_nothing() {
         );
         let stdout = String::from_utf8_lossy(&rewind.stdout).to_string();
         require(
-            rewind.status.code() == Some(1),
+            rewind.is_clean_exit(1),
             format!(
                 "a conflict must exit 1, got {:?}: {stdout}",
-                rewind.status.code()
+                rewind.exit_code()
             ),
         )?;
         let report: Value =

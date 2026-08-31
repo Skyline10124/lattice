@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::Read;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -32,25 +33,99 @@ pub enum DriverError {
     DrainThreadPanicked,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Termination {
-    Exited(Option<i32>),
+/// The direct child's observed kernel termination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessTermination {
+    Exited(i32),
+    Signaled(i32),
+}
+
+/// An action the harness requested, retained in request order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessIntervention {
+    InterruptRequested,
     TimedOut(Duration),
-    Interrupted,
-    Killed,
+    ForcedKill,
 }
 
-#[derive(Debug)]
+/// A fallible operation used to force process-group cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupOperation {
+    SignalProcessGroup(i32),
+    KillChild,
+    WaitChild,
+}
+
+/// One cleanup failure with its operation and complete I/O diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupError {
+    pub operation: CleanupOperation,
+    pub kind: std::io::ErrorKind,
+    pub raw_os_error: Option<i32>,
+    pub message: String,
+}
+
+impl CleanupError {
+    fn new(operation: CleanupOperation, error: std::io::Error) -> Self {
+        Self {
+            operation,
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+            message: error.to_string(),
+        }
+    }
+}
+
+/// Forced-cleanup state, operation failures, and final live group members.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessGroupCleanup {
+    pub forced: bool,
+    pub errors: Vec<CleanupError>,
+    pub surviving_pids: Vec<u32>,
+}
+
+impl ProcessGroupCleanup {
+    pub fn succeeded(&self) -> bool {
+        self.errors.is_empty() && self.surviving_pids.is_empty()
+    }
+}
+
+/// Lossless command bytes, direct-child observation, intervention, and cleanup.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
-    pub output: Output,
-    pub termination: Termination,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// `None` only when cleanup could not wait for the direct child.
+    pub termination: Option<ProcessTermination>,
+    pub interventions: Vec<HarnessIntervention>,
+    pub cleanup: ProcessGroupCleanup,
 }
 
-impl std::ops::Deref for CommandOutcome {
-    type Target = Output;
+impl CommandOutcome {
+    pub fn exit_code(&self) -> Option<i32> {
+        match self.termination {
+            Some(ProcessTermination::Exited(code)) => Some(code),
+            _ => None,
+        }
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.output
+    pub fn signal(&self) -> Option<i32> {
+        match self.termination {
+            Some(ProcessTermination::Signaled(signal)) => Some(signal),
+            _ => None,
+        }
+    }
+
+    pub fn clean_exit_code(&self) -> Option<i32> {
+        if self.interventions.is_empty() && !self.cleanup.forced && self.cleanup.succeeded() {
+            self.exit_code()
+        } else {
+            None
+        }
+    }
+
+    pub fn is_clean_exit(&self, expected: i32) -> bool {
+        self.clean_exit_code() == Some(expected)
     }
 }
 
@@ -76,7 +151,7 @@ pub struct RunningCommand {
     pgid: u32,
     stdout: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
     stderr: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
-    interrupted: bool,
+    interventions: Vec<HarnessIntervention>,
 }
 
 impl RunningCommand {
@@ -94,7 +169,7 @@ impl RunningCommand {
             pgid,
             stdout,
             stderr,
-            interrupted: false,
+            interventions: Vec::new(),
         })
     }
 
@@ -105,73 +180,95 @@ impl RunningCommand {
     /// Deliver a controlled interrupt to the whole process group.
     pub fn interrupt(&mut self) -> std::io::Result<()> {
         interrupt_process_group(self.pgid)?;
-        self.interrupted = true;
+        self.interventions
+            .push(HarnessIntervention::InterruptRequested);
         Ok(())
     }
 
     /// SIGKILL the whole process group and retain bytes drained before death.
     pub fn kill_and_wait(mut self) -> Result<CommandOutcome, DriverError> {
-        kill_process_group(self.pgid);
+        self.interventions.push(HarnessIntervention::ForcedKill);
+        let mut cleanup = ProcessGroupCleanup {
+            forced: true,
+            ..ProcessGroupCleanup::default()
+        };
+        record_cleanup_result(
+            &mut cleanup,
+            CleanupOperation::SignalProcessGroup(libc::SIGKILL),
+            signal_process_group(self.pgid, libc::SIGKILL),
+        );
         let child = self.child.as_mut().expect("running child");
-        let _ = child.kill();
-        let status = child.wait()?;
-        self.child.take();
-        let stdout = join_drain(self.stdout.take())?;
-        let stderr = join_drain(self.stderr.take())?;
-        Ok(CommandOutcome {
-            output: Output {
-                status,
-                stdout,
-                stderr,
-            },
-            termination: Termination::Killed,
-        })
+        record_cleanup_result(&mut cleanup, CleanupOperation::KillChild, child.kill());
+        let status = record_cleanup_result(&mut cleanup, CleanupOperation::WaitChild, child.wait());
+        self.finish(status, cleanup)
     }
+
     /// Wait for completion while retaining all bytes drained before cleanup.
     /// Timeout and interrupt are outcomes, not I/O errors.
     pub fn wait(mut self, timeout: Option<Duration>) -> Result<CommandOutcome, DriverError> {
         let start = Instant::now();
-        let child = self.child.as_mut().expect("running child");
-        let (status, termination) = loop {
-            if let Some(status) = child.try_wait()? {
-                let termination = if self.interrupted {
-                    Termination::Interrupted
-                } else {
-                    Termination::Exited(status.code())
-                };
-                break (status, termination);
+        loop {
+            if let Some(status) = self.child.as_mut().expect("running child").try_wait()? {
+                let mut cleanup = ProcessGroupCleanup::default();
+                if self
+                    .interventions
+                    .contains(&HarnessIntervention::InterruptRequested)
+                    && !processes_in_pgid(self.pgid).is_empty()
+                {
+                    self.interventions.push(HarnessIntervention::ForcedKill);
+                    cleanup.forced = true;
+                    record_cleanup_result(
+                        &mut cleanup,
+                        CleanupOperation::SignalProcessGroup(libc::SIGKILL),
+                        signal_process_group(self.pgid, libc::SIGKILL),
+                    );
+                }
+                return self.finish(Some(status), cleanup);
             }
             if let Some(limit) = timeout
                 && start.elapsed() >= limit
             {
-                kill_process_group(self.pgid);
-                let _ = child.kill();
-                let status = child.wait()?;
-                let termination = if self.interrupted {
-                    Termination::Interrupted
-                } else {
-                    Termination::TimedOut(limit)
+                self.interventions
+                    .push(HarnessIntervention::TimedOut(limit));
+                self.interventions.push(HarnessIntervention::ForcedKill);
+                let mut cleanup = ProcessGroupCleanup {
+                    forced: true,
+                    ..ProcessGroupCleanup::default()
                 };
-                break (status, termination);
+                record_cleanup_result(
+                    &mut cleanup,
+                    CleanupOperation::SignalProcessGroup(libc::SIGKILL),
+                    signal_process_group(self.pgid, libc::SIGKILL),
+                );
+                let child = self.child.as_mut().expect("running child");
+                record_cleanup_result(&mut cleanup, CleanupOperation::KillChild, child.kill());
+                let status =
+                    record_cleanup_result(&mut cleanup, CleanupOperation::WaitChild, child.wait());
+                return self.finish(status, cleanup);
             }
             std::thread::sleep(TIMEOUT_POLL);
-        };
-        if self.interrupted {
-            // The direct child may exit on SIGINT while a descendant ignores it.
-            // Force-close the entire group before joining pipe drains so no
-            // descendant can retain stdout/stderr and hang this wait forever.
-            kill_process_group(self.pgid);
         }
+    }
+
+    fn finish(
+        mut self,
+        status: Option<ExitStatus>,
+        mut cleanup: ProcessGroupCleanup,
+    ) -> Result<CommandOutcome, DriverError> {
         self.child.take();
         let stdout = join_drain(self.stdout.take())?;
         let stderr = join_drain(self.stderr.take())?;
+        cleanup.surviving_pids = if cleanup.forced {
+            wait_for_process_group_exit(self.pgid)
+        } else {
+            processes_in_pgid(self.pgid)
+        };
         Ok(CommandOutcome {
-            output: Output {
-                status,
-                stdout,
-                stderr,
-            },
-            termination,
+            stdout,
+            stderr,
+            termination: status.as_ref().and_then(process_termination),
+            interventions: std::mem::take(&mut self.interventions),
+            cleanup,
         })
     }
 }
@@ -280,6 +377,38 @@ fn join_drain(
     }
 }
 
+fn record_cleanup_result<T>(
+    cleanup: &mut ProcessGroupCleanup,
+    operation: CleanupOperation,
+    result: std::io::Result<T>,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            cleanup.errors.push(CleanupError::new(operation, error));
+            None
+        }
+    }
+}
+
+fn process_termination(status: &ExitStatus) -> Option<ProcessTermination> {
+    status
+        .code()
+        .map(ProcessTermination::Exited)
+        .or_else(|| status.signal().map(ProcessTermination::Signaled))
+}
+
+fn wait_for_process_group_exit(pgid: u32) -> Vec<u32> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let survivors = processes_in_pgid(pgid);
+        if survivors.is_empty() || Instant::now() >= deadline {
+            return survivors;
+        }
+        std::thread::sleep(TIMEOUT_POLL);
+    }
+}
+
 pub(crate) fn set_new_process_group(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
@@ -365,12 +494,48 @@ pub fn processes_in_pgid(pgid: u32) -> Vec<u32> {
             out.push(pid);
         }
     }
+    out.sort_unstable();
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_records_code_without_intervention_or_forced_cleanup() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 7"]);
+        let outcome = RunningCommand::spawn(cmd)
+            .expect("spawn")
+            .wait(Some(Duration::from_secs(2)))
+            .expect("exit outcome");
+
+        assert_eq!(outcome.termination, Some(ProcessTermination::Exited(7)));
+        assert!(outcome.interventions.is_empty());
+        assert_eq!(outcome.cleanup, ProcessGroupCleanup::default());
+        assert_eq!(outcome.exit_code(), Some(7));
+        assert_eq!(outcome.signal(), None);
+    }
+
+    #[test]
+    fn signal_records_concrete_signal_without_magic_exit_code() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "kill -TERM $$"]);
+        let outcome = RunningCommand::spawn(cmd)
+            .expect("spawn")
+            .wait(Some(Duration::from_secs(2)))
+            .expect("signal outcome");
+
+        assert_eq!(
+            outcome.termination,
+            Some(ProcessTermination::Signaled(libc::SIGTERM))
+        );
+        assert_eq!(outcome.exit_code(), None);
+        assert_eq!(outcome.signal(), Some(libc::SIGTERM));
+        assert!(outcome.interventions.is_empty());
+        assert_eq!(outcome.cleanup, ProcessGroupCleanup::default());
+    }
 
     #[test]
     fn timeout_retains_partial_output_and_cleans_process_group() {
@@ -386,8 +551,18 @@ mod tests {
             .expect("timeout outcome");
         assert_eq!(
             outcome.termination,
-            Termination::TimedOut(Duration::from_millis(100))
+            Some(ProcessTermination::Signaled(libc::SIGKILL))
         );
+        assert_eq!(
+            outcome.interventions,
+            vec![
+                HarnessIntervention::TimedOut(Duration::from_millis(100)),
+                HarnessIntervention::ForcedKill,
+            ]
+        );
+        assert!(outcome.cleanup.forced);
+        assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
+        assert!(outcome.cleanup.surviving_pids.is_empty());
         assert_eq!(outcome.stdout, b"partial-out");
         assert_eq!(outcome.stderr, b"partial-err");
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -395,6 +570,97 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(processes_in_pgid(pgid).is_empty());
+    }
+
+    #[test]
+    fn interrupt_timeout_preserves_both_interventions_and_forced_kill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ready = dir.path().join("ready");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "trap '' INT; touch '{}'; sleep 30",
+            ready.display()
+        ));
+        let mut running = RunningCommand::spawn(cmd).expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(ready.exists(), "child never reached interrupt gate");
+
+        running.interrupt().expect("interrupt group");
+        let outcome = running
+            .wait(Some(Duration::from_millis(100)))
+            .expect("interrupt timeout outcome");
+
+        assert_eq!(
+            outcome.termination,
+            Some(ProcessTermination::Signaled(libc::SIGKILL))
+        );
+        assert_eq!(
+            outcome.interventions,
+            vec![
+                HarnessIntervention::InterruptRequested,
+                HarnessIntervention::TimedOut(Duration::from_millis(100)),
+                HarnessIntervention::ForcedKill,
+            ]
+        );
+        assert!(outcome.cleanup.forced);
+        assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
+    }
+
+    #[test]
+    fn kill_and_wait_records_forced_kill() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30"]);
+        let outcome = RunningCommand::spawn(cmd)
+            .expect("spawn")
+            .kill_and_wait()
+            .expect("kill outcome");
+
+        assert_eq!(
+            outcome.termination,
+            Some(ProcessTermination::Signaled(libc::SIGKILL))
+        );
+        assert_eq!(outcome.interventions, vec![HarnessIntervention::ForcedKill]);
+        assert!(outcome.cleanup.forced);
+        assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
+        assert!(outcome.cleanup.surviving_pids.is_empty());
+    }
+
+    #[test]
+    fn cleanup_failures_are_retained_without_an_invented_process_status() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        let running = RunningCommand::spawn(cmd).expect("spawn");
+        let child_pid = running.child.as_ref().expect("running child").id();
+        let mut status = 0;
+        // SAFETY: `child_pid` belongs to this test and `status` points to a
+        // valid integer for `waitpid` to write.
+        assert_eq!(
+            unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, 0) },
+            child_pid as libc::pid_t
+        );
+
+        let outcome = running.kill_and_wait().expect("cleanup outcome");
+
+        assert_eq!(outcome.termination, None);
+        assert_eq!(outcome.interventions, vec![HarnessIntervention::ForcedKill]);
+        assert!(outcome.cleanup.forced);
+        assert_eq!(
+            outcome
+                .cleanup
+                .errors
+                .iter()
+                .map(|error| error.operation)
+                .collect::<Vec<_>>(),
+            vec![
+                CleanupOperation::SignalProcessGroup(libc::SIGKILL),
+                CleanupOperation::KillChild,
+                CleanupOperation::WaitChild,
+            ]
+        );
+        assert!(outcome.cleanup.surviving_pids.is_empty());
     }
 
     /// #105: a group signal aimed at the harness's own group would interrupt
@@ -441,8 +707,8 @@ mod tests {
         let ready = dir.path().join("ready");
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(format!(
-            "touch '{}'; trap 'exit 0' INT; \
-             sh -c \"trap '' INT; sleep 30\" & wait",
+            "trap 'exit 0' INT; sh -c \"trap '' INT; sleep 30\" & \
+             touch '{}'; while :; do sleep 1; done",
             ready.display()
         ));
         let mut running = RunningCommand::spawn(cmd).expect("spawn");
@@ -456,7 +722,17 @@ mod tests {
         let outcome = running
             .wait(Some(Duration::from_secs(2)))
             .expect("interrupt outcome");
-        assert_eq!(outcome.termination, Termination::Interrupted);
+        assert_eq!(outcome.termination, Some(ProcessTermination::Exited(0)));
+        assert_eq!(
+            outcome.interventions,
+            vec![
+                HarnessIntervention::InterruptRequested,
+                HarnessIntervention::ForcedKill,
+            ]
+        );
+        assert!(outcome.cleanup.forced);
+        assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
+        assert!(outcome.cleanup.surviving_pids.is_empty());
         let deadline = Instant::now() + Duration::from_secs(2);
         while !processes_in_pgid(pgid).is_empty() && Instant::now() < deadline {
             std::thread::yield_now();

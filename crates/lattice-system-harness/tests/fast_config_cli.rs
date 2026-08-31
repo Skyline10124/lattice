@@ -12,12 +12,10 @@
 //! the crate-internal `cli_diagnostics_models_*`, `cli_diagnostics_resolve_*`,
 //! and `doctor_*` unit tests in `lattice-cli` (see `docs/TEST-TRIAGE.md`).
 
-use std::process::Output;
-
 use lattice_system_harness::{
-    AssertError, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld, assert_exit_failure,
-    assert_exit_success, assert_no_secret, assert_stderr_contains, assert_stdout_contains,
-    assert_stdout_contains_all, assert_with_failure_artifacts,
+    AssertError, CommandOutcome, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld,
+    assert_exit_failure, assert_exit_success, assert_no_secret, assert_stderr_contains,
+    assert_stdout_contains, assert_stdout_contains_all, assert_with_failure_artifacts,
 };
 use serde_json::Value;
 
@@ -30,7 +28,7 @@ fn driver() -> LatticeDriver {
 /// may name the env var (`ANTHROPIC_API_KEY`) but must never echo the value.
 const SECRET_SENTINEL: &str = "sk-ant-harness-sentinel-7c3f";
 
-fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
+fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> CommandOutcome {
     driver()
         .run(
             world,
@@ -40,21 +38,20 @@ fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
             },
         )
         .expect("drive lattice")
-        .output
 }
 
 fn ok_or_artifacts(
     world: &ScenarioWorld,
     name: &str,
     summary: &str,
-    output: &Output,
+    output: &CommandOutcome,
     result: Result<(), AssertError>,
 ) {
     assert_with_failure_artifacts(world, name, summary, output, &[SECRET_SENTINEL], result)
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
-fn parse_json<T: serde::de::DeserializeOwned>(output: &Output) -> Result<T, AssertError> {
+fn parse_json<T: serde::de::DeserializeOwned>(output: &CommandOutcome) -> Result<T, AssertError> {
     serde_json::from_slice(&output.stdout).map_err(|error| AssertError::StdoutMissing {
         expected: format!("valid JSON output: {error}"),
     })

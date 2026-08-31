@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::path::{Path, PathBuf};
-use std::process::Output;
 
 use thiserror::Error;
 
@@ -33,7 +32,7 @@ pub fn redact(text: &str, secrets: &[&str]) -> String {
 
 pub fn capture_from_output(
     dir: PathBuf,
-    output: &Output,
+    output: &CommandOutcome,
     command_summary: impl Into<String>,
     secrets: &[&str],
 ) -> FailureArtifacts {
@@ -175,9 +174,7 @@ pub enum EvidenceError {
 #[derive(Debug, Clone)]
 struct RecordedCommand {
     summary: String,
-    termination: crate::driver::Termination,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+    outcome: CommandOutcome,
 }
 
 /// Failure-only scenario recorder. Construction clears stale artifacts so a
@@ -214,9 +211,7 @@ impl ScenarioEvidence {
     pub fn record_command(&mut self, summary: impl Into<String>, outcome: &CommandOutcome) {
         self.commands.push(RecordedCommand {
             summary: summary.into(),
-            termination: outcome.termination.clone(),
-            stdout: outcome.stdout.clone(),
-            stderr: outcome.stderr.clone(),
+            outcome: outcome.clone(),
         });
     }
 
@@ -234,20 +229,17 @@ impl ScenarioEvidence {
             std::fs::write(
                 self.failure_dir.join(format!("{index}-command.txt")),
                 redact(
-                    &format!(
-                        "{}\ntermination: {:?}\n",
-                        command.summary, command.termination
-                    ),
+                    &format!("{}\noutcome: {:?}\n", command.summary, command.outcome),
                     &secrets,
                 ),
             )?;
             std::fs::write(
                 self.failure_dir.join(format!("{index}-stdout.txt")),
-                redact(&String::from_utf8_lossy(&command.stdout), &secrets),
+                redact(&String::from_utf8_lossy(&command.outcome.stdout), &secrets),
             )?;
             std::fs::write(
                 self.failure_dir.join(format!("{index}-stderr.txt")),
-                redact(&String::from_utf8_lossy(&command.stderr), &secrets),
+                redact(&String::from_utf8_lossy(&command.outcome.stderr), &secrets),
             )?;
         }
         write_fake_llm_log(&self.failure_dir, &self.captures, &secrets)?;
@@ -502,9 +494,14 @@ pub fn write_world_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::{
+        CleanupError, CleanupOperation, HarnessIntervention, ProcessGroupCleanup,
+        ProcessTermination,
+    };
     use crate::fake_llm::CapturedRequest;
     use crate::world::ScenarioWorld;
     use serde_json::json;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -764,6 +761,68 @@ mod tests {
         let evidence = ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
         evidence.finish(true).unwrap();
         assert!(failure_dir.join("workspace_diff.txt").is_file());
+    }
+
+    #[test]
+    fn scenario_evidence_records_complete_command_outcome() {
+        let world = ScenarioWorld::new("evidence-command-outcome").unwrap();
+        let root = TempDir::new().unwrap();
+        let failure_dir = root.path().join("scenario");
+        let mut evidence =
+            ScenarioEvidence::new(&world, &failure_dir, Vec::<String>::new()).unwrap();
+        let cleanup_errors = [
+            CleanupOperation::SignalProcessGroup(libc::SIGKILL),
+            CleanupOperation::KillChild,
+            CleanupOperation::WaitChild,
+        ]
+        .into_iter()
+        .map(|operation| CleanupError {
+            operation,
+            kind: std::io::ErrorKind::Other,
+            raw_os_error: None,
+            message: "synthetic cleanup failure".into(),
+        })
+        .collect();
+        let outcome = CommandOutcome {
+            stdout: b"partial stdout".to_vec(),
+            stderr: b"partial stderr".to_vec(),
+            termination: Some(ProcessTermination::Signaled(libc::SIGTERM)),
+            interventions: vec![
+                HarnessIntervention::InterruptRequested,
+                HarnessIntervention::TimedOut(Duration::from_secs(1)),
+                HarnessIntervention::ForcedKill,
+            ],
+            cleanup: ProcessGroupCleanup {
+                forced: true,
+                errors: cleanup_errors,
+                surviving_pids: vec![11, 22],
+            },
+        };
+
+        evidence.record_command("lattice test", &outcome);
+        evidence.finish(true).unwrap();
+
+        let command = std::fs::read_to_string(failure_dir.join("0-command.txt")).unwrap();
+        for fact in [
+            "Signaled(15)",
+            "InterruptRequested",
+            "TimedOut(1s)",
+            "ForcedKill",
+            "SignalProcessGroup(9)",
+            "KillChild",
+            "WaitChild",
+            "surviving_pids: [11, 22]",
+        ] {
+            assert!(command.contains(fact), "missing {fact:?} in {command}");
+        }
+        assert_eq!(
+            std::fs::read(failure_dir.join("0-stdout.txt")).unwrap(),
+            b"partial stdout"
+        );
+        assert_eq!(
+            std::fs::read(failure_dir.join("0-stderr.txt")).unwrap(),
+            b"partial stderr"
+        );
     }
 
     #[test]

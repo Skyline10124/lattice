@@ -3,12 +3,10 @@
 
 #![allow(dead_code)]
 
-use std::process::Output;
-
 use lattice_system_harness::{
-    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FakeLlmServer, LatticeCommand,
-    LatticeDriver, ResponseGate, ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution,
-    SendOutcome, SseScript, Termination, TurnEventLine, failure_dir,
+    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FakeLlmServer, HarnessIntervention,
+    LatticeCommand, LatticeDriver, ProcessTermination, ResponseGate, ScenarioEvidence,
+    ScenarioSpec, ScenarioWorld, SendExecution, SendOutcome, SseScript, TurnEventLine, failure_dir,
 };
 use serde_json::Value;
 
@@ -17,12 +15,9 @@ pub(crate) fn driver() -> LatticeDriver {
 }
 
 pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
-    if !matches!(&execution.command.termination, Termination::Exited(Some(_))) {
+    if execution.command.clean_exit_code().is_none() {
         return Err(AssertError::StdoutMissing {
-            expected: format!(
-                "session send did not exit normally: {:?}",
-                execution.command.termination
-            ),
+            expected: format!("session send did not exit cleanly: {:?}", execution.command),
         });
     }
     if !execution.malformed_lines.is_empty() {
@@ -34,6 +29,16 @@ pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertE
         });
     }
     Ok(())
+}
+
+pub(crate) fn assert_forced_kill(outcome: &CommandOutcome) {
+    assert_eq!(
+        outcome.termination,
+        Some(ProcessTermination::Signaled(libc::SIGKILL))
+    );
+    assert_eq!(outcome.interventions, vec![HarnessIntervention::ForcedKill]);
+    assert!(outcome.cleanup.forced);
+    assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
 }
 
 pub(crate) fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
@@ -199,7 +204,7 @@ pub(crate) fn sequence(scripts: Vec<SseScript>) -> SseScript {
     SseScript::Sequence { scripts }
 }
 
-pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
+pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> CommandOutcome {
     driver()
         .run(
             world,
@@ -209,5 +214,4 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
             },
         )
         .expect("drive lattice")
-        .output
 }

@@ -75,8 +75,8 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
             "Tool-bearing secret scenario must execute session.todo_write",
         )?;
         // Collect all public outputs as one scan surface.
-        let send_stdout = String::from_utf8_lossy(&turn.command.output.stdout);
-        let send_stderr = String::from_utf8_lossy(&turn.command.output.stderr);
+        let send_stdout = String::from_utf8_lossy(&turn.command.stdout);
+        let send_stderr = String::from_utf8_lossy(&turn.command.stderr);
 
         let ss = cli(&world, &spec, &["--json", "session", "status", &sid]);
         let sl = cli(&world, &spec, &["--json", "session", "log", &sid]);
@@ -203,7 +203,7 @@ fn direct_secrets_failure_bundle_redacts_sentinels() {
             &world,
             &spec.name,
             "lattice --json session send",
-            &turn.command.output,
+            &turn.command,
             &[FAKE_API_KEY],
             Err(failing),
         );

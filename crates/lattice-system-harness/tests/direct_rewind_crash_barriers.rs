@@ -8,11 +8,13 @@ mod support;
 use std::time::{Duration, Instant};
 
 use lattice_system_harness::{
-    CommandOutcome, LatticeCommand, ScenarioWorld, SessionSendDriver, SseScript, Termination,
-    TurnEventLine,
+    CommandOutcome, LatticeCommand, ScenarioWorld, SessionSendDriver, SseScript, TurnEventLine,
 };
 use serde_json::Value;
-use support::{assert_clean_send, direct_world, driver, sequence, tool_call, wire_logged_fake_llm};
+use support::{
+    assert_clean_send, assert_forced_kill, direct_world, driver, sequence, tool_call,
+    wire_logged_fake_llm,
+};
 
 #[test]
 fn rewind_action_to_audit_windows_survive_sigkill() {
@@ -117,10 +119,7 @@ fn run_case(barrier: &str) {
         }
         _ => unreachable!(),
     }
-    assert_eq!(
-        running.kill_and_wait().expect("kill rewind").termination,
-        Termination::Killed
-    );
+    assert_forced_kill(&running.kill_and_wait().expect("kill rewind"));
     assert_eq!(server.captured_requests().len(), 4);
     assert_eq!(fsynced_count(&provider_log), 4);
     assert_eq!(fsynced_count(&effect_log), 2);
@@ -147,13 +146,7 @@ fn run_case(barrier: &str) {
             1,
             "retry must append exactly one success record"
         );
-        assert_eq!(
-            retry
-                .kill_and_wait()
-                .expect("kill retry Rewind")
-                .termination,
-            Termination::Killed
-        );
+        assert_forced_kill(&retry.kill_and_wait().expect("kill retry Rewind"));
     }
 
     world.unset_env("LATTICE_TEST_REWIND_BARRIER");
@@ -193,7 +186,7 @@ fn run_case(barrier: &str) {
 
 fn assert_successful_rewind(output: &CommandOutcome, target: &str, barrier: &str) {
     assert!(
-        output.status.success(),
+        output.is_clean_exit(0),
         "completed retry after {barrier} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -211,7 +204,7 @@ fn assert_completed_state(send: &SessionSendDriver<'_>, world: &ScenarioWorld, t
         .run_command(&["--json", "session", "log", send.session_id()])
         .expect("session log after completed retry");
     assert!(
-        log.status.success(),
+        log.is_clean_exit(0),
         "session log failed: {}",
         String::from_utf8_lossy(&log.stderr)
     );

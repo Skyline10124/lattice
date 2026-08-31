@@ -486,7 +486,7 @@ fn direct_tools_todo_write_success() {
             format!("next request lacked todo JSON: {body}"),
         )?;
         require(
-            status.status.success(),
+            status.is_clean_exit(0),
             format!(
                 "lancet status failed: {}",
                 String::from_utf8_lossy(&status.stderr)

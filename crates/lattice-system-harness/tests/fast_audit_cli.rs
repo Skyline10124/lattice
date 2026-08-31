@@ -22,18 +22,16 @@
 //! These scenarios supersede the crate-internal
 //! `audit_query_errors_when_store_missing` unit test in `lattice-cli`.
 
-use std::process::Output;
-
 use lattice_system_harness::{
-    AssertError, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld, assert_exit_failure,
-    assert_stderr_contains, assert_with_failure_artifacts,
+    AssertError, CommandOutcome, LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld,
+    assert_exit_failure, assert_stderr_contains, assert_with_failure_artifacts,
 };
 
 fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
 }
 
-fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
+fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> CommandOutcome {
     driver()
         .run(
             world,
@@ -43,14 +41,13 @@ fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
             },
         )
         .expect("drive lattice")
-        .output
 }
 
 fn ok_or_artifacts(
     world: &ScenarioWorld,
     name: &str,
     summary: &str,
-    out: &Output,
+    out: &CommandOutcome,
     result: Result<(), AssertError>,
 ) {
     assert_with_failure_artifacts(world, name, summary, out, &[], result)
@@ -60,7 +57,7 @@ fn ok_or_artifacts(
 /// Assert an audit subcommand degrades to the documented missing-store
 /// invocation-ledger configuration error (exit 1) instead of panicking. With no
 /// session/project store created for the project, the ledger is absent.
-fn assert_missing_store(world: &ScenarioWorld, name: &str, summary: &str, out: &Output) {
+fn assert_missing_store(world: &ScenarioWorld, name: &str, summary: &str, out: &CommandOutcome) {
     let result = assert_exit_failure(out)
         .and_then(|_| assert_stderr_contains(out, "invocation ledger not found"));
     ok_or_artifacts(world, name, summary, out, result);

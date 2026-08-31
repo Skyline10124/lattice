@@ -7,10 +7,11 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use lattice_system_harness::{AssertError, SessionSendDriver, SseScript, Termination};
+use lattice_system_harness::{AssertError, SessionSendDriver, SseScript};
 use serde_json::Value;
 use support::{
-    assert_clean_send, direct_world, driver, require, sequence, tool_call, wire_logged_fake_llm,
+    assert_clean_send, assert_forced_kill, direct_world, driver, require, sequence, tool_call,
+    wire_logged_fake_llm,
 };
 
 const BARRIER_ENV: &str = "LATTICE_TEST_TURN_BARRIER";
@@ -87,7 +88,7 @@ fn turn_started_sigkill_reopens_without_replaying_the_provider() {
     result.unwrap_or_else(|error| panic!("{error}"));
 
     let killed = running.kill_and_wait().expect("SIGKILL send process group");
-    assert_eq!(killed.termination, Termination::Killed);
+    assert_forced_kill(&killed);
     world.unset_env(BARRIER_ENV);
     world.unset_env(ACK_ENV);
 
@@ -177,10 +178,7 @@ fn next_model_attempt_sigkill_recovers_the_byte_exact_cumulative_transcript() {
     assert_eq!(fsynced_count(&provider_log), 1);
     assert_eq!(fsynced_count(&effect_log), 1);
 
-    assert_eq!(
-        running.kill_and_wait().expect("kill").termination,
-        Termination::Killed
-    );
+    assert_forced_kill(&running.kill_and_wait().expect("kill"));
     world.unset_env(BARRIER_ENV);
     world.unset_env(ACK_ENV);
     let recovery = send.send("close then run new prompt").expect("recovery");
@@ -264,10 +262,7 @@ fn post_mutation_step_closed_sigkill_reconciles_with_current_history_checkpoint(
         "durable\n"
     );
 
-    assert_eq!(
-        running.kill_and_wait().expect("kill").termination,
-        Termination::Killed
-    );
+    assert_forced_kill(&running.kill_and_wait().expect("kill"));
     world.unset_env(BARRIER_ENV);
     world.unset_env(ACK_ENV);
     let recovery = send
@@ -384,10 +379,7 @@ fn post_mutation_turn_closing_sigkill_preserves_the_current_history_checkpoint()
         "durable\n"
     );
 
-    assert_eq!(
-        running.kill_and_wait().expect("kill").termination,
-        Termination::Killed
-    );
+    assert_forced_kill(&running.kill_and_wait().expect("kill"));
     world.unset_env(BARRIER_ENV);
     world.unset_env(ACK_ENV);
     let recovery = send.send("close then continue").expect("recovery");
@@ -819,10 +811,7 @@ fn run_barrier_case(case: BarrierCase) {
             "effect log InvocationIds differ from the durable ledger: {facts}"
         );
     }
-    assert_eq!(
-        running.kill_and_wait().expect("kill send").termination,
-        Termination::Killed
-    );
+    assert_forced_kill(&running.kill_and_wait().expect("kill send"));
     world.unset_env(BARRIER_ENV);
     world.unset_env(ACK_ENV);
     world.unset_env(INJECTION_ENV);
@@ -831,7 +820,7 @@ fn run_barrier_case(case: BarrierCase) {
         .expect("reopen and reconcile");
     assert_clean_send(&recovery).expect("recovery command clean");
     assert!(
-        recovery.command.status.success(),
+        recovery.command.is_clean_exit(0),
         "recovery command failed at {}: stdout={} stderr={}",
         case.barrier,
         String::from_utf8_lossy(&recovery.command.stdout),

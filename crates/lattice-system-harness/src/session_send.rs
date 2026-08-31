@@ -27,9 +27,7 @@
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::driver::{
-    CommandOutcome, DriverError, LatticeCommand, LatticeDriver, RunningCommand, Termination,
-};
+use crate::driver::{CommandOutcome, DriverError, LatticeCommand, LatticeDriver, RunningCommand};
 use crate::scenario::{ScenarioBudget, ScenarioSpec};
 use crate::world::ScenarioWorld;
 
@@ -519,9 +517,9 @@ fn create_session_with_timeout(
             timeout: Some(timeout),
         },
     )?;
-    if !matches!(&output.termination, Termination::Exited(Some(0))) {
+    if !output.is_clean_exit(0) {
         return Err(SessionSendError::NewSessionFailed {
-            code: output.status.code(),
+            code: output.exit_code(),
         });
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -558,7 +556,7 @@ fn send_prompt_with_timeout(
             timeout: Some(timeout),
         },
     )?;
-    let parsed = parse_send_stdout(&command.stdout, command.status.code());
+    let parsed = parse_send_stdout(&command.stdout, command.exit_code());
     Ok(SendExecution { command, parsed })
 }
 
@@ -636,7 +634,7 @@ impl<'a> SessionSendDriver<'a> {
     /// JSONL the same way [`send`](Self::send) does.
     pub fn wait_spawned(&self, running: RunningCommand) -> Result<SendExecution, DriverError> {
         let command = running.wait(Some(self.budget.cap_timeout(self.spec.step_timeout())))?;
-        let parsed = parse_send_stdout(&command.stdout, command.status.code());
+        let parsed = parse_send_stdout(&command.stdout, command.exit_code());
         Ok(SendExecution { command, parsed })
     }
 

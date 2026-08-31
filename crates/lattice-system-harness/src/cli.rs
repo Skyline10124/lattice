@@ -9,10 +9,8 @@
 //! failure-artifact bundle before panicking. Centralising those three steps
 //! here keeps each per-target file focused on its own CLI contract.
 
-use std::process::Output;
-
 use crate::assert::{AssertError, assert_with_failure_artifacts};
-use crate::driver::{LatticeCommand, LatticeDriver};
+use crate::driver::{CommandOutcome, LatticeCommand, LatticeDriver};
 use crate::scenario::ScenarioSpec;
 use crate::world::ScenarioWorld;
 
@@ -23,7 +21,7 @@ pub fn driver() -> LatticeDriver {
 }
 
 /// Run `lattice <args...>` inside `world` with the spec's per-command timeout.
-pub fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output {
+pub fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> CommandOutcome {
     driver()
         .run(
             world,
@@ -33,7 +31,6 @@ pub fn run(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> Output 
             },
         )
         .expect("drive lattice")
-        .output
 }
 
 /// Unwrap an assertion result, writing the failure-artifact bundle (redacted
@@ -42,7 +39,7 @@ pub fn ok_or_artifacts(
     world: &ScenarioWorld,
     name: &str,
     summary: &str,
-    out: &Output,
+    out: &CommandOutcome,
     result: Result<(), AssertError>,
 ) {
     assert_with_failure_artifacts(world, name, summary, out, &[], result)
