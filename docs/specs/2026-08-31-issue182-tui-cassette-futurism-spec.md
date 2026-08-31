@@ -1,11 +1,11 @@
 # lattice TUI 设计 spec
 
 定稿日期：2026-08-28
-状态：当前可做（细节 + 本轮视觉）
+实现状态：已由 PR #184 落地。
 配色源：Cassette Futurism v2
 数字来源：2026-08-28 细节锁定 + 2026-08-31 讨论复核 + 2026-08-31 实现前对码复核
 
-这份 spec 只写已经定死的东西。现码仍是 #118 底栏 + 输入 1..=6 行，那是现状，不是本 spec。
+这份 spec 记录已经定死并落地的 #182 行为。
 
 ---
 
@@ -83,7 +83,8 @@ transcript   剩余高度
 - 左侧 `PROMPT` tag：iris-9 底 + tag 字色，贴 gutter 之后
 - 右侧 status 段：navy-11 底 + DimMeta 字，填满余宽
 - 各自保留配色，互不串色
-- status 段从左到右：`session_id · agent · phase · [scroll]? · Alt+Enter 换行`（kitty 时键位为 `S-Enter 换行`）
+- status 段从左到右：`session_id · agent · phase · [scroll]? · Alt+Enter newline`（kitty 时键位为 `S-Enter newline`）
+- 第一次 Ctrl+C 后的两秒内，`Ctrl+C to quit` 暂时替换最低优先级的换行键提示
 - 依次让位：先移除键位提示，再截断 `session_id`，再截断 `agent`；`phase` 与 `[scroll]` 在空间允许时优先保留
 - 宽度仍不足时按 display width 尽力裁剪。任何宽高下不得 panic，不得发生 `u16` 下溢——判定窄屏在算 `left_w` 之前，或一律 `saturating_sub`
 - `stream` 中 phase 字走 User；`cancel` phase 走 ToolErr——与右栏同一套着色
@@ -106,10 +107,10 @@ PROMPT              6 字符色块，不是方括号；不占输入高度
 
 ### Transcript
 
-说话人单独一行：用户 `你`（User / iris-7），助手用当前 agent 名（Assistant / cream-2）。不当每行前缀。正文从下一行起，wrap 在 `content_w`。回合之间空一行当分隔。工具行留在助手回合内，不再加空行。左栏不填背景；透出来的是终端底色，视觉上等于 `navy-12` `#1c293e`。
+说话人单独一行：用户 `user`（User / iris-7），助手用当前 agent 名（Assistant / cream-2）。不当每行前缀。正文从下一行起并统一使用 Assistant / cream-2，wrap 在 `content_w`。回合之间空一行当分隔。工具行留在助手回合内，不再加空行。左栏不填背景；透出来的是终端底色，视觉上等于 `navy-12` `#1c293e`。
 
 ```text
-你
+user
 帮我看下 session.rs 里的重开逻辑
 
 assistant
@@ -118,13 +119,13 @@ assistant
 ▾ ✗ mutate.edit
   expected_hash mismatch
 
-你
+user
 改成先校验再重开
 ```
 
 **一个助手段只印一次 agent 名。** 渲染时线性扫描 blocks：
 
-1. 遇到用户块 → 空行 + `你` + 正文，重置 header 状态
+1. 遇到用户块 → 空行 + `user` + 正文，重置 header 状态
 2. 此后第一次遇到助手正文 / tool / 终态 status → 印一次 agent 名
 3. 直到下一个用户块为止，不再重复
 4. `Notice`（启动横幅、`/help`）是独立 meta，既不触发也不重置 header
@@ -172,9 +173,9 @@ assistant
 3. 空行
 4. `phase`：短 ASCII，`idle` | `stream` | `commit` | `cancel`（现码印 `streaming`/`committing`/`cancelling`，本轮改短以适配栏宽）
 5. 空行
-6. 换行键：`Alt+Enter`，下一行「换行」；kitty 用 `S-Enter`
+6. 换行键：`Alt+Enter`，下一行 `newline`；kitty 用 `S-Enter`
 7. 未跟随时：`[scroll]`（沿用现码措辞，不改名）
-8. 退出提示：「2 秒内再按一次 Ctrl+C」（不是鼠标双击）
+8. 第一次 Ctrl+C 后两秒内显示：`Ctrl+C to quit`
 
 Status 在右栏顶，`tip.key` 在右栏底。具体用词可按终端改（kitty），结构不要改。
 
@@ -228,7 +229,7 @@ Ok 用 `ToolOk` 勾。Failed 的 `✗`、`error_summary`、`TurnFailed`、cancel
 
 | 角色 | 终端命名色 | Cassette token | hex | 用途 |
 | --- | --- | --- | --- | --- |
-| User | LightBlue | iris-7 | `#8695e3` | 说话人 `你`、提示符 `>`、stream 中 phase |
+| User | LightBlue | iris-7 | `#8695e3` | 说话人 `user`、提示符 `>`、stream 中 phase |
 | Assistant | White | cream-2 | `#f5f3ef` | agent 名、正文、输入文本、`PROMPT` tag 字 |
 | ToolOk | Cyan | cyan-7 | `#2ab0b0` | `✓` |
 | ToolErr | Red | signal-red-9 | `#cb2b31` | `✗`、TurnFailed、cancel phase |
