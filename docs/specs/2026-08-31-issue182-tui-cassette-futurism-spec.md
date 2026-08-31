@@ -3,7 +3,7 @@
 定稿日期：2026-08-28
 状态：当前可做（细节 + 本轮视觉）
 配色源：Cassette Futurism v2
-数字来源：2026-08-28 细节锁定 + 2026-08-31 讨论复核
+数字来源：2026-08-28 细节锁定 + 2026-08-31 讨论复核 + 2026-08-31 实现前对码复核
 
 这份 spec 只写已经定死的东西。现码仍是 #118 底栏 + 输入 1..=6 行，那是现状，不是本 spec。
 
@@ -32,6 +32,8 @@
 - 为折叠加新键或鼠标处理
 - 浅色终端适配、主题系统、响应式 UI
 - 给已有 UI 文案改名（`[scroll]` 沿用现码）
+- 自绘软光标、光标形状/颜色控制
+- 嵌套 Turn 数据模型、`render/` 模块、Theme/Palette trait、新依赖
 
 ---
 
@@ -39,7 +41,7 @@
 
 单位：列（cell），不是像素。`frame_w` 是终端可用列宽。`frame_w / 8` 按整数除法。
 
-```
+```text
 frame_w
 ├── left_w = frame_w - status_w - gap
 │     ├── gutter = 2          折叠符预留，不含正文
@@ -63,15 +65,27 @@ frame_w
 
 `Role` 五枚举不增：layout 从竖切改横切，枚举不用加。
 
+### 左栏垂直切分
+
+```text
+transcript   剩余高度
+分割线       1 行
+输入         input_h = 2..=5
+底行         1 行（宽屏是 PROMPT tag；窄屏是 tag + status）
+```
+
+宽窄两种模式的底部开销相同：transcript 高度 = `frame_h - (input_h + 2)`，下限 0。极矮终端以实际分配到的 `Rect.height` 为准，不假设 transcript 至少一行。
+
 ### 窄屏底栏
 
-左栏结构不变（transcript / 分割线 / 输入）。底栏只占一行：
+左栏结构不变。底栏只占一行：
 
-- 左侧 `PROMPT` tag：iris-9 底 + cream-1 字，贴 gutter 之后
+- 左侧 `PROMPT` tag：iris-9 底 + tag 字色，贴 gutter 之后
 - 右侧 status 段：navy-11 底 + DimMeta 字，填满余宽
 - 各自保留配色，互不串色
 - status 段从左到右：`session_id · agent · phase · [scroll]? · Alt+Enter 换行`（kitty 时键位为 `S-Enter 换行`）
-- 放不下时先丢键位提示，再截断 `session_id`；`phase` 与 `[scroll]` 永远保留
+- 依次让位：先移除键位提示，再截断 `session_id`，再截断 `agent`；`phase` 与 `[scroll]` 在空间允许时优先保留
+- 宽度仍不足时按 display width 尽力裁剪。任何宽高下不得 panic，不得发生 `u16` 下溢——判定窄屏在算 `left_w` 之前，或一律 `saturating_sub`
 - `stream` 中 phase 字走 User；`cancel` phase 走 ToolErr——与右栏同一套着色
 
 ---
@@ -80,7 +94,7 @@ frame_w
 
 宽屏：
 
-```
+```text
 transcript          不填背景，透出终端底色
 ────────────        左栏分割线，不到右栏
 >  prompt           高 2..=5 行；`>` 只在第一行
@@ -94,19 +108,28 @@ PROMPT              6 字符色块，不是方括号；不占输入高度
 
 说话人单独一行：用户 `你`（User / iris-7），助手用当前 agent 名（Assistant / cream-2）。不当每行前缀。正文从下一行起，wrap 在 `content_w`。回合之间空一行当分隔。工具行留在助手回合内，不再加空行。左栏不填背景；透出来的是终端底色，视觉上等于 `navy-12` `#1c293e`。
 
-```
+```text
 你
 帮我看下 session.rs 里的重开逻辑
 
 assistant
 我先读 pending 模块和重开入口。
-▸ ✓ observe.workspace · read_file · 1,204 chars
-▾ ✗ mutate.edit · replace_with_expected
-  expected_hash mismatch（stale read）
+▸ ✓ observe.workspace · 1204 B
+▾ ✗ mutate.edit
+  expected_hash mismatch
 
 你
 改成先校验再重开
 ```
+
+**一个助手段只印一次 agent 名。** 渲染时线性扫描 blocks：
+
+1. 遇到用户块 → 空行 + `你` + 正文，重置 header 状态
+2. 此后第一次遇到助手正文 / tool / 终态 status → 印一次 agent 名
+3. 直到下一个用户块为止，不再重复
+4. `Notice`（启动横幅、`/help`）是独立 meta，既不触发也不重置 header
+
+底层 blocks 保持扁平，不引入 Turn 容器、不存 turn ID。
 
 ### 分割线
 
@@ -116,11 +139,12 @@ assistant
 
 ### Prompt
 
-- 高 2..=5 行自适应：最少 2 行，第二行空着也留着；随内容撑到 5 行；发送/清空后收回 2 行；超 5 行区内滚动；bracketed paste 一次到位
+- 高 2..=5 行自适应：最少 2 行，第二行空着也留着；随内容撑到 5 行；发送/清空后收回 2 行；超 5 行区内滚动
+- 换行宽度是 `content_w`，与 transcript 同一个宽度口径
 - 前缀 `>`（大于号 + 空格）只在第一行；续行无前缀，与第一行正文对齐
 - `>` 走 User；已输入文本走 Assistant / cream-2
 - 空：两行空白 + 光标
-- 块光标为 `cream-2` 实心块
+- 光标可见、位置与逻辑字符位置一致（含 CJK 宽字符）；外观沿用用户终端配置，不自绘、不改形状颜色
 - 输入区不含 status tag
 
 ### Status tag
@@ -129,7 +153,7 @@ assistant
 - 窄屏：与 status 合并为底栏一行，见 §2
 - 文案只有 `PROMPT`：全大写、无点号、无方括号——6 个字符的色块
 - 空输入和正常打提示词同形：都显示 `PROMPT`，不换 tag、不加第二模式
-- 填 `iris-9`，字 `cream-1` `#fbfaf8`
+- 填 `iris-9`，字复用 `Assistant` / `cream-2`（不新增第六种前景色）
 - 左对齐，贴左栏内容起始（gutter 之后）
 - `SLASH` / `BASH` / `CONFIG` 的结构位保留，本轮不实现、不画
 
@@ -146,13 +170,15 @@ assistant
 1. `session_id`（超可用宽截断）
 2. `agent`（超可用宽截断）
 3. 空行
-4. `phase`：短 ASCII，`idle` | `stream` | `commit` | `cancel`
+4. `phase`：短 ASCII，`idle` | `stream` | `commit` | `cancel`（现码印 `streaming`/`committing`/`cancelling`，本轮改短以适配栏宽）
 5. 空行
 6. 换行键：`Alt+Enter`，下一行「换行」；kitty 用 `S-Enter`
 7. 未跟随时：`[scroll]`（沿用现码措辞，不改名）
-8. 双击退出提示
+8. 退出提示：「2 秒内再按一次 Ctrl+C」（不是鼠标双击）
 
 Status 在右栏顶，`tip.key` 在右栏底。具体用词可按终端改（kitty），结构不要改。
+
+Ctrl+C 提示有 2 秒时限，但事件循环在 `dirty == false` 时跳过重绘，提示会留死。用现有 33ms ticker 判过期后置 `dirty = true` 即可，不另开 timer。
 
 ---
 
@@ -162,15 +188,35 @@ gutter 两列预留折叠符，**不加新键、不做鼠标处理**。折叠符
 
 默认按本表：Ok 收 / Failed 展。
 
-工具行只读通用字段：`id` / `name` / `ok` / `output_len` / `error_summary`。零按工具名分支。
-
 | 块 | 默认 |
 | --- | --- |
 | tool Ok | 一行收起 |
 | tool Failed | 展开，露出 `error_summary` |
 | 进行中 | 一行，`DimMeta`（`running ·`） |
 
-Ok 用 `ToolOk` 勾。Failed 的 `✗`、`error_summary`、`TurnFailed`、cancel phase 走 `ToolErr`。其余 meta（工具名、字符数、hash）走 `DimMeta`。
+### 可用字段
+
+事件只有 `id` / `name` / `ok` / `output_len` / `error_summary`，零按工具名分支。
+
+- `id` 是 opaque invocation ID，只用于 started/finished 配对，**默认不显示**；确需排障时可显示截断的 `#<id>`，但不得伪装成操作名
+- 没有 operation、hash、参数字段——不要显示不存在的东西
+- `output_len` 是**字节数**（saga 取 `byte_length`），显示为 `1204 B`，不写 `chars`、不加千分位
+
+行形如：
+
+```text
+▸ ✓ observe.workspace · 1204 B
+▾ ✗ mutate.edit
+  expected_hash mismatch
+```
+
+`✓` 与 metadata 用不同 Span 着色即可，不借机建 rich-text/card renderer。
+
+### running 收口
+
+`ToolCallStarted` 不保证有配对的 `ToolCallFinished`：saga 在两者之间有多条错误提前退出路径。收到 turn 终态事件、或 stream 结束时，把仍为 `Running` 的 tool 收口为现有的 `Failed`，error 用简短原因（`turn ended before tool completion` / `cancelled` / 对应终态原因）。复用 `ToolState::Failed`，不新增 `Interrupted` / `Unknown` 枚举。
+
+Ok 用 `ToolOk` 勾。Failed 的 `✗`、`error_summary`、`TurnFailed`、cancel phase 走 `ToolErr`。其余 meta（工具名、字节数）走 `DimMeta`。
 
 ---
 
@@ -183,21 +229,23 @@ Ok 用 `ToolOk` 勾。Failed 的 `✗`、`error_summary`、`TurnFailed`、cancel
 | 角色 | 终端命名色 | Cassette token | hex | 用途 |
 | --- | --- | --- | --- | --- |
 | User | LightBlue | iris-7 | `#8695e3` | 说话人 `你`、提示符 `>`、stream 中 phase |
-| Assistant | White | cream-2 | `#f5f3ef` | agent 名、正文、输入文本 |
+| Assistant | White | cream-2 | `#f5f3ef` | agent 名、正文、输入文本、`PROMPT` tag 字 |
 | ToolOk | Cyan | cyan-7 | `#2ab0b0` | `✓` |
 | ToolErr | Red | signal-red-9 | `#cb2b31` | `✗`、TurnFailed、cancel phase |
-| DimMeta | DarkGray | warm-gray-8 | `#857f78` | 右栏字、回合间空行、分割线、running ·、hash、键位 |
+| DimMeta | DarkGray | warm-gray-8 | `#857f78` | 右栏字、分割线、running ·、字节数、键位 |
 
 ### 两处背景填充
 
-| 表面 | token | hex | 字 |
-| --- | --- | --- | --- |
-| 右栏 bg（窄屏 status 段同此） | navy-11 | `#2c4267` | DimMeta |
-| `PROMPT` tag bg | iris-9 | `#5965ca` | cream-1 `#fbfaf8` |
+| 表面 | token | hex | 命名色回退 | 字 |
+| --- | --- | --- | --- | --- |
+| 右栏 bg（窄屏 status 段同此） | navy-11 | `#2c4267` | Blue | DimMeta |
+| `PROMPT` tag bg | iris-9 | `#5965ca` | LightBlue | Assistant / cream-2 |
 
-truecolor 用 hex；否则就近命名色。不要为了这两处把整套 8×12 塞进终端。
+truecolor 用 hex；否则用上表命名色回退。不探测 256 色、不读 terminfo、不引入 Theme 类型。不要为了这两处把整套 8×12 塞进终端。
 
 终端底（transcript 透出）=`navy-12` `#1c293e`。它不是填出来的色，是默认底。
+
+`DimMeta #857f78` 压在右栏 `#2c4267` 上，sRGB 相对亮度对比度约 2.55:1，小字号下可能偏暗。锁版前真机看一次；确实难读就让 `session_id` / `agent` 这类主值改走 `Assistant`，提示文字继续 `DimMeta`——不引入 accessibility 系统。
 
 ### 禁止
 
@@ -207,4 +255,3 @@ truecolor 用 hex；否则就近命名色。不要为了这两处把整套 8×12
 - 把 Cassette 其他阶当 TUI token 用
 - 浅色终端适配、主题系统、响应式 UI
 - 把 `[scroll]` 改成别的文案
-
