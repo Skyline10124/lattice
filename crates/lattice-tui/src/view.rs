@@ -16,6 +16,7 @@ pub(crate) const STATUS_MAX: u16 = 24;
 pub(crate) const GAP: u16 = 1;
 pub(crate) const GUTTER: u16 = 2;
 pub(crate) const NARROW_MIN: u16 = 56;
+const CTRL_C_HINT: &str = "Ctrl+C to quit";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StatusSlot {
@@ -258,8 +259,8 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
         match block {
             Block::User(text) => {
                 separate(&mut lines);
-                lines.extend(body("你", content_w, role_style(Role::User)));
-                lines.extend(body(text, content_w, role_style(Role::User)));
+                lines.extend(body("user", content_w, role_style(Role::User)));
+                lines.extend(body(text, content_w, role_style(Role::Assistant)));
                 assistant_header = false;
             }
             Block::Assistant(text) => {
@@ -586,7 +587,7 @@ fn draw_right_status(frame: &mut Frame, app: &App, area: Rect) {
         set_status_row(
             &mut rows,
             height.saturating_sub(3),
-            "2 秒内再按一次 Ctrl+C",
+            CTRL_C_HINT,
             Role::ToolErr,
             available,
         );
@@ -606,7 +607,7 @@ fn draw_right_status(frame: &mut Frame, app: &App, area: Rect) {
     set_status_row(
         &mut rows,
         height.saturating_sub(1),
-        "换行",
+        "newline",
         Role::DimMeta,
         available,
     );
@@ -662,10 +663,12 @@ fn draw_bottom_status(frame: &mut Frame, app: &App, area: Rect) {
 fn bottom_status_line(app: &App, width: usize) -> Line<'static> {
     let phase = phase_text(app.phase);
     let scroll = (!app.viewport.following()).then_some("[scroll]");
-    let key = if app.kitty_keyboard {
-        "S-Enter 换行"
+    let key = if ctrl_c_visible(app) {
+        CTRL_C_HINT
+    } else if app.kitty_keyboard {
+        "S-Enter newline"
     } else {
-        "Alt+Enter 换行"
+        "Alt+Enter newline"
     };
     let full = [
         app.ctx.session_id.as_str(),
@@ -774,6 +777,7 @@ mod tests {
     use crate::session::SessionContext;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::time::{Duration, Instant};
 
     fn test_app() -> App {
         App::new(
@@ -785,6 +789,19 @@ mod tests {
             false,
             std::path::Path::new("/nonexistent-tui-test-history"),
         )
+    }
+
+    fn rendered_text(app: &App, width: u16) -> anyhow::Result<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24))?;
+        terminal.draw(|frame| draw(frame, app))?;
+        Ok((0..24u16)
+            .map(|y| {
+                (0..width)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 
     #[test]
@@ -810,6 +827,20 @@ mod tests {
                 status: StatusSlot::Right { w: 22 },
             }
         );
+    }
+
+    #[test]
+    fn ctrl_c_hint_fits_wide_and_narrow_then_expires() -> anyhow::Result<()> {
+        let mut app = test_app();
+        app.last_ctrl_c = Some(Instant::now());
+        assert!(rendered_text(&app, 80)?.contains("Ctrl+C to quit"));
+        assert!(rendered_text(&app, 55)?.contains("Ctrl+C to quit"));
+
+        app.last_ctrl_c = Some(Instant::now() - CTRL_C_WINDOW - Duration::from_millis(1));
+        let expired = rendered_text(&app, 55)?;
+        assert!(!expired.contains("Ctrl+C to quit"));
+        assert!(expired.contains("Alt+Enter newline"));
+        Ok(())
     }
 
     #[test]
@@ -865,6 +896,16 @@ mod tests {
         };
         assert_eq!(text[tool - 1].trim(), "before tool");
         assert_eq!(text[tool + 1].trim(), "after tool");
+    }
+
+    #[test]
+    fn user_speaker_and_body_use_distinct_english_styles() {
+        let mut app = test_app();
+        app.blocks.push(Block::User("question".into()));
+        let lines = transcript_lines(&app, 61);
+        assert_eq!(lines[0].to_string().trim(), "user");
+        assert_eq!(lines[0].spans[1].style, role_style(Role::User));
+        assert_eq!(lines[1].spans[1].style, role_style(Role::Assistant));
     }
 
     #[test]
