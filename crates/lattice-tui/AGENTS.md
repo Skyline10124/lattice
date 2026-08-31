@@ -58,8 +58,9 @@ Exactly these five files. Do not add `render/` (that is #116).
 | `Ctrl+C` | — | 同 Esc；2 秒内再按一次退出 |
 | `Ctrl+D` | 缓冲为空 | 退出 |
 
-`supports_keyboard_enhancement()` 在启动时探测一次。不可用时状态栏显示
-`Alt+Enter 换行`；可用时显示 `Shift+Enter 换行`。**不静默失效。**
+`supports_keyboard_enhancement()` is probed once at startup. The status area
+shows `Alt+Enter newline` without it and `S-Enter newline` with it. The
+transient two-second exit hint is `Ctrl+C to quit`. Do not fail silently.
 
 ## 不复刻清单
 

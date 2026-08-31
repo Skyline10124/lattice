@@ -2,6 +2,34 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #182 PR #184 review: keep compact TUI copy actionable — 2026-08-31
+
+**Severity:** MEDIUM（status 可用性 / 视觉契约）
+
+**Problem:** PR #184 修复了 Ctrl+C 提示的过期重绘，但 80 列右栏只有 15 个可用 cell，
+硬编码的中文提示会把 `Ctrl+C` 和退出动作截掉；窄屏底栏完全不读取两秒提示状态。界面同时
+混用 `你`、`换行` 与其他英文 UI 文案。用户正文还错误复用了 User / iris-7，而锁版颜色
+契约要求只有 speaker/prompt/stream phase 使用 User，正文使用 Assistant / cream-2。权威 spec
+在合并后仍把 #118 的旧布局描述成当前实现。
+
+**Fix:** 将固定 UI 文案收口为 `user`、`newline`、`Ctrl+C to quit`。宽屏提示现在完整落在
+15-cell status 内容区；窄屏在两秒窗口内用退出提示替换最低优先级的换行键提示，过期后
+恢复 `Alt+Enter newline` / `S-Enter newline`。用户正文改用 Assistant 色，speaker `user`
+保留 User 色。同步把 #182 spec 标记为已由 PR #184 落地，并更新 crate 契约文案；没有新增
+timer、状态、布局、依赖或国际化抽象。
+
+**Verification:**
+
+- RED：`cargo test -p lattice-tui view::tests:: -- --nocapture` 按预期失败 2 项：80 列不含
+  `Ctrl+C to quit`，speaker 仍为 `你`。
+- GREEN：同一 focused view 测试 — PASS（12 passed）。
+- `cargo test -p lattice-tui` — PASS（33 passed）。
+- `cargo clippy -p lattice-tui --all-targets -- -D warnings` — PASS。
+- `cargo fmt --all -- --check`、`git diff --check`、修改 Rust 文件 LSP diagnostics — PASS。
+
+**Changed files:** `crates/lattice-tui/src/view.rs`、`crates/lattice-tui/AGENTS.md`、
+`docs/specs/2026-08-31-issue182-tui-cassette-futurism-spec.md`、`FIX.md`。
+
 ## GitHub #179 acceptance audit: restore the all-feature clippy gate — 2026-08-31
 
 **Severity:** MEDIUM（acceptance evidence / test-only lint）
