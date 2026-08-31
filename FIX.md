@@ -2,6 +2,51 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #185: preserve command termination and cleanup facts — 2026-09-01
+
+**Severity:** MEDIUM（system-harness false green / process cleanup diagnostics）
+
+**Problem:** `CommandOutcome` used one `Termination` enum to mix the direct child's exit,
+harness intervention, and cleanup. Signals collapsed to `Exited(None)`; an interrupt could hide
+the observed exit; interrupt followed by timeout lost the timeout and forced kill; group-signal,
+direct-child kill/wait errors, and surviving PIDs were discarded. Assertion helpers accepted only
+`std::process::Output`, mapped signals to `-1`, and could not reject a matching exit code
+contaminated by intervention or failed cleanup.
+
+**Fix:** Replaced the old enum in place with one authoritative `CommandOutcome`. It now retains
+stdout/stderr, `ProcessTermination::{Exited, Signaled}`, ordered `HarnessIntervention` facts, and
+`ProcessGroupCleanup` with forced-cleanup state, typed operation errors, and sorted surviving PIDs.
+Timeout after interrupt keeps interrupt, timeout, and forced-kill facts. Exact-exit helpers now
+accept only a matching normal exit with no intervention, forced cleanup, cleanup error, or survivor.
+All harness consumers retain the full outcome; failure evidence records the same model. No generic
+panic inference was added because the product exposes no panic marker.
+
+The existing timeout and interrupt test identities remain. Their prior byte-drain and empty-group
+assertions remain and now also pin concrete termination, interventions, and cleanup. New exit,
+signal, interrupt-timeout, explicit-kill, cleanup-failure, exact-exit, and artifact tests form a
+strict assertion superset; no test was deleted or moved. `FINDINGS.md` was unchanged because this
+fix leaves no issue-specific residual.
+
+**Verification:**
+
+- `cargo test -p lattice-system-harness --lib driver::tests -- --nocapture` — PASS（9 passed）;
+  the same focused driver suite passed 20 consecutive runs.
+- `cargo test -p lattice-system-harness --lib assert::tests -- --nocapture` — PASS（2 passed）。
+- `cargo test -p lattice-system-harness --lib artifacts::tests -- --nocapture` — PASS（17 passed）。
+- `cargo test -p lattice-system-harness --all-features --no-run` — PASS（all targets compiled）。
+- `cargo build -p lattice-cli --bin lattice` — PASS。
+- `LATTICE_BIN="$(pwd)/target/debug/lattice" cargo test -p lattice-system-harness` — PASS
+  （71 library tests plus every ordinary fast, Direct-Local, and PTY target）。
+- `cargo xtask harness-boundary` — PASS。
+- `cargo fmt --all --check` — PASS。
+- `cargo clippy -p lattice-system-harness --all-targets -- -D warnings` — PASS。
+- Retired-interface search found no old `Termination`, `Exited(None)`, or lossy harness
+  `.output`/`.status` consumer. The remaining `std::process::Output` belongs to test-side Git.
+
+**Changed files:** `crates/lattice-system-harness/src/{driver,assert,artifacts,cli,lib,session_send}.rs`,
+`crates/lattice-system-harness/tests/support/mod.rs`, the migrated `direct_*` consumers,
+`fast_{audit,config,env_boundary,session}_cli.rs`, and `release_operator.rs`.
+
 ## GitHub #182 PR #184 review: keep compact TUI copy actionable — 2026-08-31
 
 **Severity:** MEDIUM（status 可用性 / 视觉契约）
