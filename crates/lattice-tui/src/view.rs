@@ -791,17 +791,21 @@ mod tests {
         )
     }
 
-    fn rendered_text(app: &App, width: u16) -> anyhow::Result<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, 24))?;
-        terminal.draw(|frame| draw(frame, app))?;
-        Ok((0..24u16)
+    fn buffer_text(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
+        (0..height)
             .map(|y| {
                 (0..width)
                     .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
-            .join("\n"))
+            .join("\n")
+    }
+
+    fn rendered_text(app: &App, width: u16) -> anyhow::Result<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24))?;
+        terminal.draw(|frame| draw(frame, app))?;
+        Ok(buffer_text(&terminal, width, 24))
     }
 
     #[test]
@@ -953,14 +957,7 @@ mod tests {
         app.input.set_text("abcd");
         let mut terminal = Terminal::new(TestBackend::new(8, 4))?;
         terminal.draw(|frame| draw_input(frame, &app, Rect::new(0, 0, 8, 2), 6))?;
-        let screen = (0..2u16)
-            .map(|y| {
-                (0..8u16)
-                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let screen = buffer_text(&terminal, 8, 2);
         assert_eq!(screen.matches('>').count(), 1);
         assert_eq!(
             terminal.get_cursor_position()?,
