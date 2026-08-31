@@ -19,7 +19,7 @@ use crate::{Result, SessionError};
 /// Schema version of the `pending.json` payload.
 pub const PENDING_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
-/// The thirteen durable states of one pending Turn.
+/// The twelve durable states of one pending Turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "stage")]
 pub enum PendingStage {

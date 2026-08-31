@@ -91,7 +91,8 @@ pub enum NotExecutedReason {
     /// A `BindingPlanned`/`Bound` closure-only path: reopen never
     /// dispatches.
     BeforeDispatch,
-    /// Cancellation reached a reserved invocation before dispatch.
+    /// Cancellation was first observed at this reserved invocation before
+    /// dispatch. Later bindings closed structurally use [`Self::BeforeDispatch`].
     CancelledBeforeDispatch,
     /// An earlier invocation in the ordered batch went indeterminate, so
     /// this one never ran.

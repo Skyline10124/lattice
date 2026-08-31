@@ -575,6 +575,11 @@ fn validate_terminal_with_candidate(
             digest: Some(digest),
             byte_length: Some(byte_length),
         } => *digest == draft.content_digest && *byte_length == draft.byte_length,
+        ResultMaterial::Unavailable {
+            reason: UnavailableMaterialReason::DraftPublicationFailed,
+            digest: None,
+            byte_length: None,
+        } => matches!(outcome, ExecutionOutcome::Indeterminate { .. }),
         _ => false,
     };
     if matches_candidate {
@@ -603,6 +608,13 @@ fn validate_terminal_without_candidate(
             ExecutionOutcome::NotExecuted { .. },
             ResultMaterial::Unavailable {
                 reason: UnavailableMaterialReason::NotExecuted,
+                digest: None,
+                byte_length: None,
+            },
+        ) | (
+            ExecutionOutcome::Indeterminate { .. },
+            ResultMaterial::Unavailable {
+                reason: UnavailableMaterialReason::DraftPublicationFailed,
                 digest: None,
                 byte_length: None,
             },
@@ -1709,6 +1721,43 @@ mod tests {
                     reason: TurnInterruption::ProcessInterruptedDuringStepClosing
                 }
             ));
+        }
+
+        for current_candidate in [Some(candidate.clone()), None] {
+            let state = StepClosingState {
+                plan_key: one.plan_key,
+                bindings: one.bindings.clone(),
+                closure_cursor: 0,
+                closures: Vec::new(),
+                current_candidate,
+            };
+            let result = closure(
+                &snapshot(PendingStage::StepClosing(state)),
+                &facts_with_plan(
+                    &one,
+                    vec![InvocationLifecycleFact::Terminal {
+                        outcome: ExecutionOutcome::Indeterminate {
+                            reason: IndeterminateReason::MayHaveOccurred,
+                        },
+                        material: ResultMaterial::Unavailable {
+                            reason: UnavailableMaterialReason::DraftPublicationFailed,
+                            digest: None,
+                            byte_length: None,
+                        },
+                    }],
+                ),
+                "second reopen after conservative terminal publication",
+            );
+            assert!(matches!(
+                result.outcome,
+                TurnOutcome::Interrupted {
+                    reason: TurnInterruption::InvocationMayHaveOccurred { invocation }
+                } if invocation == one.bindings[0].invocation_id
+            ));
+            assert!(result.actions.iter().all(|action| !matches!(
+                action,
+                ReconciliationAction::TerminalizeInvocation { .. }
+            )));
         }
 
         for (name, outcome, material, expected) in [

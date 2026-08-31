@@ -13,7 +13,7 @@
 //! This module owns the pure data contract and the pure reconciliation
 //! decision function:
 //!
-//! - [`contract`]: the versioned [`PendingSnapshot`] envelope, the thirteen
+//! - [`contract`]: the versioned [`PendingSnapshot`] envelope, the twelve
 //!   durable [`PendingStage`] states, and pure stage-transition validation;
 //! - [`config`]: the frozen request-acceptance facts published by
 //!   `TurnStarted`;
