@@ -31,7 +31,10 @@ use super::facts::{
     ExecutionOutcome, IndeterminateReason, InvocationFactsSnapshot, InvocationLifecycleFact,
     NotExecutedReason, PlanValidation, ResultMaterial, UnavailableMaterialReason,
 };
-use super::outcome::{ClosureOrigin, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome};
+use super::outcome::{
+    ClosureOrigin, ToolBatchControl, TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome,
+    derive_tool_batch_control,
+};
 use super::step::{ClosedBinding, MaterialAvailability, StepClosedKind, StepClosingState};
 use crate::{Result, SessionError};
 
@@ -475,25 +478,12 @@ fn step_closing_closure(
     let (indeterminate_at, resume) = match (current, current_fact, candidate) {
         (None, _, _) => (None, None),
         (Some(_), Some(InvocationLifecycleFact::Terminal { outcome, material }), Some(draft)) => {
-            // Available material must be the pinned candidate's exact
-            // content; a mismatch is corruption (ADR 0005 §12).
-            if let ResultMaterial::Available {
-                digest,
-                byte_length,
-            } = material
-                && (*digest != draft.content_digest || *byte_length != draft.byte_length)
-            {
-                return Err(SessionError::JournalCorruption {
-                    detail: "terminal material does not match the pinned draft candidate"
-                        .to_string(),
-                });
-            }
+            validate_terminal_with_candidate(draft, outcome, material)?;
             (None, Some((outcome.clone(), material.clone())))
         }
-        (Some(_), Some(InvocationLifecycleFact::Terminal { .. }), None) => {
-            return Err(SessionError::JournalCorruption {
-                detail: "terminal invocation fact without a pinned draft candidate".to_string(),
-            });
+        (Some(_), Some(InvocationLifecycleFact::Terminal { outcome, material }), None) => {
+            validate_terminal_without_candidate(outcome, material)?;
+            (None, Some((outcome.clone(), material.clone())))
         }
         (Some(_), Some(InvocationLifecycleFact::DispatchStarted), _) => (Some(cursor), None),
         (Some(_), Some(InvocationLifecycleFact::Reserved), Some(_)) => {
@@ -511,23 +501,131 @@ fn step_closing_closure(
     let already_terminal_at =
         matches!(current_fact, Some(InvocationLifecycleFact::Terminal { .. })).then_some(cursor);
 
+    let mut classifications =
+        classifications_for(&state.bindings, cursor, indeterminate_at, resume);
+    for (index, (binding, closure)) in state.bindings.iter().zip(&state.closures).enumerate() {
+        let Some(InvocationLifecycleFact::Terminal { outcome, material }) =
+            facts.lifecycle_of(&binding.invocation_id)
+        else {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "closed binding {} has no terminal invocation fact",
+                    binding.invocation_id
+                ),
+            });
+        };
+        if to_tool_result_outcome(outcome) != closure.outcome
+            || to_material_availability(material) != closure.material
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "closed binding {} differs from its terminal invocation fact",
+                    binding.invocation_id
+                ),
+            });
+        }
+        classifications[index] = (outcome.clone(), material.clone());
+    }
+
+    let control = derive_tool_batch_control(&state.bindings, &classifications, None)?;
     let mut actions = Vec::new();
-    let classifications = classifications_for(&state.bindings, cursor, indeterminate_at, resume);
     actions.extend(closing_loop_actions(
         false,
         already_terminal_at,
         state,
         &classifications,
     ));
-
-    let reason = match indeterminate_at {
-        Some(_) => TurnInterruption::InvocationMayHaveOccurred {
-            invocation: state.bindings[cursor].invocation_id,
-        },
-        None => TurnInterruption::ProcessInterruptedDuringStepClosing,
+    let outcome = match control {
+        ToolBatchControl::Continue => {
+            return Err(SessionError::JournalCorruption {
+                detail: "reopen cannot continue provider execution from StepClosing".to_string(),
+            });
+        }
+        ToolBatchControl::Cancel(reason) => {
+            actions.push(ReconciliationAction::PublishStepClosed {
+                kind: StepClosedKind::CancelTurn { reason },
+            });
+            TurnOutcome::Cancelled { reason }
+        }
+        ToolBatchControl::Interrupt(reason) => {
+            actions.push(step_closed_interrupt(reason.clone()));
+            interrupted(reason)
+        }
     };
-    actions.push(step_closed_interrupt(reason.clone()));
-    Ok((interrupted(reason), actions))
+    Ok((outcome, actions))
+}
+
+fn validate_terminal_with_candidate(
+    draft: &super::draft::ResultDraft,
+    outcome: &ExecutionOutcome,
+    material: &ResultMaterial,
+) -> Result<()> {
+    if matches!(outcome, ExecutionOutcome::NotExecuted { .. }) {
+        return Err(SessionError::JournalCorruption {
+            detail: "not-executed terminal cannot have a pinned draft candidate".to_string(),
+        });
+    }
+    let matches_candidate = match material {
+        ResultMaterial::Available {
+            digest,
+            byte_length,
+        } => *digest == draft.content_digest && *byte_length == draft.byte_length,
+        ResultMaterial::Unavailable {
+            reason: UnavailableMaterialReason::DraftPublicationFailed,
+            digest: Some(digest),
+            byte_length: Some(byte_length),
+        } => *digest == draft.content_digest && *byte_length == draft.byte_length,
+        ResultMaterial::Unavailable {
+            reason: UnavailableMaterialReason::DraftPublicationFailed,
+            digest: None,
+            byte_length: None,
+        } => matches!(outcome, ExecutionOutcome::Indeterminate { .. }),
+        _ => false,
+    };
+    if matches_candidate {
+        Ok(())
+    } else {
+        Err(SessionError::JournalCorruption {
+            detail: "terminal material does not match the pinned draft candidate".to_string(),
+        })
+    }
+}
+
+fn validate_terminal_without_candidate(
+    outcome: &ExecutionOutcome,
+    material: &ResultMaterial,
+) -> Result<()> {
+    if matches!(
+        (outcome, material),
+        (
+            ExecutionOutcome::Succeeded,
+            ResultMaterial::Unavailable {
+                reason: UnavailableMaterialReason::OutputTooLarge,
+                digest: Some(_),
+                byte_length: Some(_),
+            },
+        ) | (
+            ExecutionOutcome::NotExecuted { .. },
+            ResultMaterial::Unavailable {
+                reason: UnavailableMaterialReason::NotExecuted,
+                digest: None,
+                byte_length: None,
+            },
+        ) | (
+            ExecutionOutcome::Indeterminate { .. },
+            ResultMaterial::Unavailable {
+                reason: UnavailableMaterialReason::DraftPublicationFailed,
+                digest: None,
+                byte_length: None,
+            },
+        )
+    ) {
+        Ok(())
+    } else {
+        Err(SessionError::JournalCorruption {
+            detail: "terminal invocation fact requires a matching draft candidate".to_string(),
+        })
+    }
 }
 
 /// `StepClosed` closure: terminal kinds map to their recorded outcome;
@@ -1585,6 +1683,232 @@ mod tests {
             candidate.messages[2].role,
             lattice_conversation::MessageRole::Tool
         );
+
+        let one = plan(1);
+        let candidate = draft_for(&one.bindings[0], "{\"rows\":[]}");
+        for material in [
+            ResultMaterial::Available {
+                digest: candidate.content_digest,
+                byte_length: candidate.byte_length,
+            },
+            ResultMaterial::Unavailable {
+                reason: UnavailableMaterialReason::DraftPublicationFailed,
+                digest: Some(candidate.content_digest),
+                byte_length: Some(candidate.byte_length),
+            },
+        ] {
+            let state = StepClosingState {
+                plan_key: one.plan_key,
+                bindings: one.bindings.clone(),
+                closure_cursor: 0,
+                closures: Vec::new(),
+                current_candidate: Some(candidate.clone()),
+            };
+            let result = closure(
+                &snapshot(PendingStage::StepClosing(state)),
+                &facts_with_plan(
+                    &one,
+                    vec![InvocationLifecycleFact::Terminal {
+                        outcome: ExecutionOutcome::Succeeded,
+                        material,
+                    }],
+                ),
+                "matching candidate terminal",
+            );
+            assert!(matches!(
+                result.outcome,
+                TurnOutcome::Interrupted {
+                    reason: TurnInterruption::ProcessInterruptedDuringStepClosing
+                }
+            ));
+        }
+
+        for current_candidate in [Some(candidate.clone()), None] {
+            let state = StepClosingState {
+                plan_key: one.plan_key,
+                bindings: one.bindings.clone(),
+                closure_cursor: 0,
+                closures: Vec::new(),
+                current_candidate,
+            };
+            let result = closure(
+                &snapshot(PendingStage::StepClosing(state)),
+                &facts_with_plan(
+                    &one,
+                    vec![InvocationLifecycleFact::Terminal {
+                        outcome: ExecutionOutcome::Indeterminate {
+                            reason: IndeterminateReason::MayHaveOccurred,
+                        },
+                        material: ResultMaterial::Unavailable {
+                            reason: UnavailableMaterialReason::DraftPublicationFailed,
+                            digest: None,
+                            byte_length: None,
+                        },
+                    }],
+                ),
+                "second reopen after conservative terminal publication",
+            );
+            assert!(matches!(
+                result.outcome,
+                TurnOutcome::Interrupted {
+                    reason: TurnInterruption::InvocationMayHaveOccurred { invocation }
+                } if invocation == one.bindings[0].invocation_id
+            ));
+            assert!(result.actions.iter().all(|action| !matches!(
+                action,
+                ReconciliationAction::TerminalizeInvocation { .. }
+            )));
+        }
+
+        for (name, outcome, material, expected) in [
+            (
+                "output too large",
+                ExecutionOutcome::Succeeded,
+                ResultMaterial::Unavailable {
+                    reason: UnavailableMaterialReason::OutputTooLarge,
+                    digest: Some([9; 32]),
+                    byte_length: Some(65_537),
+                },
+                TurnOutcome::Interrupted {
+                    reason: TurnInterruption::ProcessInterruptedDuringStepClosing,
+                },
+            ),
+            (
+                "before dispatch",
+                ExecutionOutcome::NotExecuted {
+                    reason: NotExecutedReason::BeforeDispatch,
+                },
+                not_executed_material(),
+                TurnOutcome::Interrupted {
+                    reason: TurnInterruption::ProcessInterruptedDuringStepClosing,
+                },
+            ),
+            (
+                "cancelled before dispatch",
+                ExecutionOutcome::NotExecuted {
+                    reason: NotExecutedReason::CancelledBeforeDispatch,
+                },
+                not_executed_material(),
+                TurnOutcome::Cancelled {
+                    reason: super::super::outcome::TurnCancellation::UserCancelled,
+                },
+            ),
+        ] {
+            let one = plan(1);
+            let state = StepClosingState {
+                plan_key: one.plan_key,
+                bindings: one.bindings.clone(),
+                closure_cursor: 0,
+                closures: Vec::new(),
+                current_candidate: None,
+            };
+            let result = closure(
+                &snapshot(PendingStage::StepClosing(state)),
+                &facts_with_plan(
+                    &one,
+                    vec![InvocationLifecycleFact::Terminal { outcome, material }],
+                ),
+                name,
+            );
+            assert_eq!(result.outcome, expected, "{name}");
+            assert!(
+                result.actions.iter().all(|action| !matches!(
+                    action,
+                    ReconciliationAction::TerminalizeInvocation { .. }
+                )),
+                "{name}"
+            );
+        }
+
+        let cancelled = plan(1);
+        let cancelled_closure = ClosedBinding {
+            binding: cancelled.bindings[0].clone(),
+            outcome: ToolResultOutcome::NotExecuted,
+            material: MaterialAvailability::Unavailable {
+                reason: UnavailableMaterialReason::NotExecuted,
+                digest: None,
+                byte_length: None,
+            },
+        };
+        let result = closure(
+            &snapshot(PendingStage::StepClosing(StepClosingState {
+                plan_key: cancelled.plan_key,
+                bindings: cancelled.bindings.clone(),
+                closure_cursor: 1,
+                closures: vec![cancelled_closure],
+                current_candidate: None,
+            })),
+            &facts_with_plan(
+                &cancelled,
+                vec![InvocationLifecycleFact::Terminal {
+                    outcome: ExecutionOutcome::NotExecuted {
+                        reason: NotExecutedReason::CancelledBeforeDispatch,
+                    },
+                    material: not_executed_material(),
+                }],
+            ),
+            "cancelled cursor complete",
+        );
+        assert!(matches!(
+            result.outcome,
+            TurnOutcome::Cancelled {
+                reason: super::super::outcome::TurnCancellation::UserCancelled
+            }
+        ));
+        assert!(result.actions.iter().any(|action| matches!(
+            action,
+            ReconciliationAction::PublishStepClosed {
+                kind: StepClosedKind::CancelTurn { .. }
+            }
+        )));
+
+        let preceding = plan(2);
+        let indeterminate_closure = ClosedBinding {
+            binding: preceding.bindings[0].clone(),
+            outcome: ToolResultOutcome::Indeterminate,
+            material: MaterialAvailability::Unavailable {
+                reason: UnavailableMaterialReason::DraftPublicationFailed,
+                digest: None,
+                byte_length: None,
+            },
+        };
+        let result = closure(
+            &snapshot(PendingStage::StepClosing(StepClosingState {
+                plan_key: preceding.plan_key,
+                bindings: preceding.bindings.clone(),
+                closure_cursor: 1,
+                closures: vec![indeterminate_closure],
+                current_candidate: None,
+            })),
+            &facts_with_plan(
+                &preceding,
+                vec![
+                    InvocationLifecycleFact::Terminal {
+                        outcome: ExecutionOutcome::Indeterminate {
+                            reason: IndeterminateReason::MayHaveOccurred,
+                        },
+                        material: ResultMaterial::Unavailable {
+                            reason: UnavailableMaterialReason::DraftPublicationFailed,
+                            digest: None,
+                            byte_length: None,
+                        },
+                    },
+                    InvocationLifecycleFact::Terminal {
+                        outcome: ExecutionOutcome::NotExecuted {
+                            reason: NotExecutedReason::PrecedingInvocationIndeterminate,
+                        },
+                        material: not_executed_material(),
+                    },
+                ],
+            ),
+            "preceding indeterminate",
+        );
+        assert!(matches!(
+            result.outcome,
+            TurnOutcome::Interrupted {
+                reason: TurnInterruption::InvocationMayHaveOccurred { invocation }
+            } if invocation == preceding.bindings[0].invocation_id
+        ));
     }
 
     #[test]
@@ -1614,6 +1938,81 @@ mod tests {
         );
         assert!(matches!(
             reconcile(&snap, &facts),
+            Err(SessionError::JournalCorruption { .. })
+        ));
+
+        for material in [
+            ResultMaterial::Available {
+                digest: draft.content_digest,
+                byte_length: draft.byte_length,
+            },
+            ResultMaterial::Unavailable {
+                reason: UnavailableMaterialReason::DraftPublicationFailed,
+                digest: Some(draft.content_digest),
+                byte_length: Some(draft.byte_length),
+            },
+            ResultMaterial::Unavailable {
+                reason: UnavailableMaterialReason::OutputTooLarge,
+                digest: None,
+                byte_length: Some(65_537),
+            },
+        ] {
+            let state = StepClosingState {
+                plan_key: plan_one.plan_key,
+                bindings: plan_one.bindings.clone(),
+                closure_cursor: 0,
+                closures: Vec::new(),
+                current_candidate: None,
+            };
+            let facts = facts_with_plan(
+                &plan_one,
+                vec![InvocationLifecycleFact::Terminal {
+                    outcome: ExecutionOutcome::Succeeded,
+                    material,
+                }],
+            );
+            assert!(matches!(
+                reconcile(&snapshot(PendingStage::StepClosing(state)), &facts),
+                Err(SessionError::JournalCorruption { .. })
+            ));
+        }
+
+        let draft_publication_mismatch = facts_with_plan(
+            &plan_one,
+            vec![InvocationLifecycleFact::Terminal {
+                outcome: ExecutionOutcome::Succeeded,
+                material: ResultMaterial::Unavailable {
+                    reason: UnavailableMaterialReason::DraftPublicationFailed,
+                    digest: Some(wrong.content_digest),
+                    byte_length: Some(wrong.byte_length),
+                },
+            }],
+        );
+        assert!(matches!(
+            reconcile(
+                &snapshot(PendingStage::StepClosing(StepClosingState {
+                    plan_key: plan_one.plan_key,
+                    bindings: plan_one.bindings.clone(),
+                    closure_cursor: 0,
+                    closures: Vec::new(),
+                    current_candidate: Some(draft.clone()),
+                })),
+                &draft_publication_mismatch,
+            ),
+            Err(SessionError::JournalCorruption { .. })
+        ));
+
+        assert!(matches!(
+            reconcile(
+                &snapshot(PendingStage::StepClosing(StepClosingState {
+                    plan_key: plan_one.plan_key,
+                    bindings: plan_one.bindings.clone(),
+                    closure_cursor: 0,
+                    closures: Vec::new(),
+                    current_candidate: Some(draft),
+                })),
+                &facts_with_plan(&plan_one, vec![InvocationLifecycleFact::Reserved]),
+            ),
             Err(SessionError::JournalCorruption { .. })
         ));
     }

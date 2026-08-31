@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use lancet_api::{DispatchOutcome, ExecutionReceipt, WorkspaceHistory};
+use lancet_api::{DispatchNotStartedCause, DispatchOutcome, ExecutionReceipt, WorkspaceHistory};
 use lancet_protocol::{
     BindingIdentity, CepError, CepErrorFamily, InvocationBinding, ModelAttemptKey,
     ModelMessageAddress, PlanKey, SessionId, ToolCallAddress, TurnId, arguments_digest,
@@ -27,10 +27,11 @@ use lattice_conversation::{
 use lattice_llm::ToolDefinition;
 use lattice_session::pending::{
     BindingPlan, ClosedBinding, ClosureOrigin, DraftClassification, DraftPublication,
-    MAX_MODEL_STEPS, MaterialAvailability, PendingStage, PlannedBinding, ResultDraft,
-    StepClosedKind, StepClosingState, ToolContentError, TurnCancellation, TurnClosingFacts,
+    ExecutionOutcome, LiveControllingCause, MAX_MODEL_STEPS, MaterialAvailability,
+    NotExecutedReason, PendingStage, PlannedBinding, ResultDraft, ResultMaterial, StepClosedKind,
+    StepClosingState, ToolBatchControl, ToolContentError, TurnCancellation, TurnClosingFacts,
     TurnFailure, TurnFinishReason, TurnInterruption, TurnOutcome, UnavailableMaterialReason,
-    WorkspaceHistoryCheckpoint, step_conversation_digest,
+    WorkspaceHistoryCheckpoint, derive_tool_batch_control, step_conversation_digest,
 };
 use lattice_session::{FlockGuard, TurnCommit};
 use tokio::sync::mpsc;
@@ -515,21 +516,26 @@ pub(super) async fn run_coordinator_saga(
 
         history.push(bound_assistant.clone());
 
-        let mut stop_batch: Option<lancet_audit::invocation_store::NotExecutedReason> = None;
+        let mut live_cause = LiveControllingCause::Continue;
+        let mut batch_control = ToolBatchControl::Continue;
+        let mut terminal_facts = Vec::with_capacity(plan.bindings.len());
         for (index, binding) in plan.bindings.iter().enumerate() {
-            if stop_batch.is_none() {
-                stop_batch = if is_cancelled(request.cancel_flag.as_ref()) {
-                    Some(lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch)
+            let mut skip_reason = remaining_skip_reason(&batch_control);
+            if skip_reason.is_none() {
+                if is_cancelled(request.cancel_flag.as_ref()) {
+                    skip_reason = Some(NotExecutedReason::CancelledBeforeDispatch);
                 } else if Instant::now() >= turn_deadline {
-                    Some(lancet_audit::invocation_store::NotExecutedReason::BeforeDispatch)
-                } else {
-                    None
-                };
-            }
-            if let Some(reason) = stop_batch {
-                if let Err(err) = publish_not_executed(&coordinator, binding, reason).await {
-                    break 'saga Err(err);
+                    live_cause = LiveControllingCause::ModelAttemptTimeout;
+                    skip_reason = Some(NotExecutedReason::BeforeDispatch);
                 }
+            }
+            if let Some(reason) = skip_reason {
+                let terminal = match publish_not_executed(&coordinator, binding, reason).await {
+                    Ok(terminal) => terminal,
+                    Err(err) => break 'saga Err(err),
+                };
+                terminal_facts.push(terminal);
+                crash_barrier!('saga, "terminal_published");
                 let closure = ClosedBinding {
                     binding: binding.clone(),
                     outcome: ToolResultOutcome::NotExecuted,
@@ -558,6 +564,11 @@ pub(super) async fn run_coordinator_saga(
                 }
                 crash_barrier!('saga, &format!("cursor_{}", closing.closure_cursor));
                 history.push(tool_result);
+                batch_control =
+                    match derive_live_batch_control(&plan.bindings, &terminal_facts, live_cause) {
+                        Ok(control) => control,
+                        Err(err) => break 'saga Err(err),
+                    };
                 continue;
             }
 
@@ -627,15 +638,21 @@ pub(super) async fn run_coordinator_saga(
                         },
                     ));
                 }
-                DispatchOutcome::NotExecuted(error) => {
-                    let reason = not_executed_reason(&error);
-                    let stop_after_closure = matches!(
-                        reason,
-                        lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch
-                    );
-                    if let Err(err) = publish_not_executed(&coordinator, binding, reason).await {
-                        break 'saga Err(err);
-                    }
+                DispatchOutcome::NotExecuted { cause, error } => {
+                    let reason = match cause {
+                        DispatchNotStartedCause::BeforeDispatch => {
+                            NotExecutedReason::BeforeDispatch
+                        }
+                        DispatchNotStartedCause::CancelledBeforeDispatch => {
+                            NotExecutedReason::CancelledBeforeDispatch
+                        }
+                    };
+                    let terminal = match publish_not_executed(&coordinator, binding, reason).await {
+                        Ok(terminal) => terminal,
+                        Err(err) => break 'saga Err(err),
+                    };
+                    terminal_facts.push(terminal);
+                    crash_barrier!('saga, "terminal_published");
                     let closure = ClosedBinding {
                         binding: binding.clone(),
                         outcome: ToolResultOutcome::NotExecuted,
@@ -676,9 +693,14 @@ pub(super) async fn run_coordinator_saga(
                             },
                         )
                         .await;
-                    if stop_after_closure {
-                        stop_batch = Some(reason);
-                    }
+                    batch_control = match derive_live_batch_control(
+                        &plan.bindings,
+                        &terminal_facts,
+                        live_cause,
+                    ) {
+                        Ok(control) => control,
+                        Err(err) => break 'saga Err(err),
+                    };
                     continue;
                 }
             };
@@ -812,7 +834,7 @@ pub(super) async fn run_coordinator_saga(
                 .publish_terminal_with_budget(
                     binding.invocation_id,
                     exec_outcome.clone(),
-                    terminal_material,
+                    terminal_material.clone(),
                     evidence,
                     finalize_budget,
                 )
@@ -821,6 +843,10 @@ pub(super) async fn run_coordinator_saga(
                 break 'saga Err(map_finalize_failure(err));
             }
 
+            terminal_facts.push(super::invocation_facts::project_terminal(
+                exec_outcome,
+                terminal_material,
+            ));
             crash_barrier!('saga, "terminal_published");
 
             let closure = ClosedBinding {
@@ -885,55 +911,43 @@ pub(super) async fn run_coordinator_saga(
                 .await;
 
             let _ = draft_for_pin;
-            if let Some(reason) = batch_stop_reason(conversation_outcome) {
-                stop_batch = Some(reason);
-            }
+            batch_control =
+                match derive_live_batch_control(&plan.bindings, &terminal_facts, live_cause) {
+                    Ok(control) => control,
+                    Err(err) => break 'saga Err(err),
+                };
         }
 
-        let step_closed_kind = match stop_batch {
-            None => StepClosedKind::ContinueModel {
+        let step_closed_kind = match &batch_control {
+            ToolBatchControl::Continue => StepClosedKind::ContinueModel {
                 model_step_ordinal: model_step,
                 ordered_tool_results: closing.closures.clone(),
                 conversation_digest: step_conversation_digest(&bound_assistant, &closing.closures),
             },
-            Some(lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch) => {
-                turn_outcome = TurnOutcome::Cancelled {
-                    reason: TurnCancellation::UserCancelled,
-                };
+            ToolBatchControl::Cancel(reason) => {
+                turn_outcome = TurnOutcome::Cancelled { reason: *reason };
                 terminal_reason = Some("cancelled by caller".into());
-                StepClosedKind::CancelTurn {
-                    reason: TurnCancellation::UserCancelled,
-                }
+                StepClosedKind::CancelTurn { reason: *reason }
             }
-            Some(lancet_audit::invocation_store::NotExecutedReason::BeforeDispatch) => {
-                let reason = TurnInterruption::ModelAttempt(
-                    lattice_conversation::AttemptInterruption::Timeout,
+            ToolBatchControl::Interrupt(reason) => {
+                turn_outcome = TurnOutcome::Interrupted {
+                    reason: reason.clone(),
+                };
+                terminal_reason = Some(
+                    match reason {
+                        TurnInterruption::ModelAttempt(
+                            lattice_conversation::AttemptInterruption::Timeout,
+                        ) => "timeout",
+                        TurnInterruption::InvocationMayHaveOccurred { .. } => {
+                            "tool invocation may have occurred"
+                        }
+                        _ => "tool batch interrupted",
+                    }
+                    .into(),
                 );
-                turn_outcome = TurnOutcome::Interrupted {
+                StepClosedKind::InterruptTurn {
                     reason: reason.clone(),
-                };
-                terminal_reason = Some("timeout".into());
-                StepClosedKind::InterruptTurn { reason }
-            }
-            Some(
-                lancet_audit::invocation_store::NotExecutedReason::PrecedingInvocationIndeterminate,
-            ) => {
-                let Some(invocation) = closing
-                    .closures
-                    .iter()
-                    .find(|closure| matches!(closure.outcome, ToolResultOutcome::Indeterminate))
-                    .map(|closure| closure.binding.invocation_id)
-                else {
-                    break 'saga Err(ApiError::Internal(
-                        "indeterminate stop has no indeterminate closure".into(),
-                    ));
-                };
-                let reason = TurnInterruption::InvocationMayHaveOccurred { invocation };
-                turn_outcome = TurnOutcome::Interrupted {
-                    reason: reason.clone(),
-                };
-                terminal_reason = Some("tool invocation may have occurred".into());
-                StepClosedKind::InterruptTurn { reason }
+                }
             }
         };
 
@@ -955,7 +969,7 @@ pub(super) async fn run_coordinator_saga(
 
         crash_barrier!('saga, "step_closed");
 
-        if stop_batch.is_some() {
+        if !matches!(batch_control, ToolBatchControl::Continue) {
             break 'saga Ok(());
         }
 
@@ -1274,26 +1288,64 @@ fn map_finalize_failure(
 async fn publish_not_executed(
     coordinator: &TurnCoordinator,
     binding: &PlannedBinding,
-    reason: lancet_audit::invocation_store::NotExecutedReason,
-) -> Result<(), ApiError> {
+    reason: NotExecutedReason,
+) -> Result<(ExecutionOutcome, ResultMaterial), ApiError> {
+    let reason = match reason {
+        NotExecutedReason::BeforeDispatch => {
+            lancet_audit::invocation_store::NotExecutedReason::BeforeDispatch
+        }
+        NotExecutedReason::CancelledBeforeDispatch => {
+            lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch
+        }
+        NotExecutedReason::PrecedingInvocationIndeterminate => {
+            lancet_audit::invocation_store::NotExecutedReason::PrecedingInvocationIndeterminate
+        }
+    };
+    let outcome = lancet_audit::invocation_store::TerminalOutcome::NotExecuted { reason };
+    let material = lancet_audit::invocation_store::TerminalMaterial::Unavailable {
+        reason: lancet_audit::invocation_store::UnavailableMaterialReason::NotExecuted,
+        digest: None,
+        byte_length: None,
+    };
     coordinator
         .io
         .publish_terminal_under_budget(
             binding.invocation_id,
-            lancet_audit::invocation_store::TerminalOutcome::NotExecuted { reason },
-            lancet_audit::invocation_store::TerminalMaterial::Unavailable {
-                reason: lancet_audit::invocation_store::UnavailableMaterialReason::NotExecuted,
-                digest: None,
-                byte_length: None,
-            },
+            outcome.clone(),
+            material.clone(),
             empty_evidence(&binding.method),
         )
         .await
-        .map_err(map_finalize_failure)
+        .map_err(map_finalize_failure)?;
+    Ok(super::invocation_facts::project_terminal(outcome, material))
 }
 
 fn is_cancelled(flag: Option<&Arc<AtomicBool>>) -> bool {
     flag.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn derive_live_batch_control(
+    bindings: &[PlannedBinding],
+    outcomes: &[(ExecutionOutcome, ResultMaterial)],
+    live_cause: LiveControllingCause,
+) -> Result<ToolBatchControl, ApiError> {
+    let closed_bindings = bindings.get(..outcomes.len()).ok_or_else(|| {
+        ApiError::Internal("Tool batch produced more outcomes than bindings".to_string())
+    })?;
+    derive_tool_batch_control(closed_bindings, outcomes, Some(live_cause))
+        .map_err(|error| ApiError::Internal(error.to_string()))
+}
+
+fn remaining_skip_reason(control: &ToolBatchControl) -> Option<NotExecutedReason> {
+    match control {
+        ToolBatchControl::Continue => None,
+        ToolBatchControl::Interrupt(TurnInterruption::InvocationMayHaveOccurred { .. }) => {
+            Some(NotExecutedReason::PrecedingInvocationIndeterminate)
+        }
+        ToolBatchControl::Cancel(_) | ToolBatchControl::Interrupt(_) => {
+            Some(NotExecutedReason::BeforeDispatch)
+        }
+    }
 }
 
 fn user_message(input: &str) -> NativeMessage<BoundToolCall> {
@@ -1500,28 +1552,6 @@ fn classify_receipt(
     }
 }
 
-fn not_executed_reason(error: &CepError) -> lancet_audit::invocation_store::NotExecutedReason {
-    if error.code == lancet_protocol::CepErrorCode::CallCancelled {
-        lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch
-    } else {
-        lancet_audit::invocation_store::NotExecutedReason::BeforeDispatch
-    }
-}
-
-fn batch_stop_reason(
-    outcome: ToolResultOutcome,
-) -> Option<lancet_audit::invocation_store::NotExecutedReason> {
-    match outcome {
-        ToolResultOutcome::Indeterminate => Some(
-            lancet_audit::invocation_store::NotExecutedReason::PrecedingInvocationIndeterminate,
-        ),
-        ToolResultOutcome::Cancelled => {
-            Some(lancet_audit::invocation_store::NotExecutedReason::CancelledBeforeDispatch)
-        }
-        _ => None,
-    }
-}
-
 fn map_cep_outcome(
     err: &CepError,
 ) -> (
@@ -1699,10 +1729,10 @@ mod tests {
     use super::*;
     use lancet_audit::invocation_store::{
         BindingIdentity as StoreBindingIdentity, InvocationState, InvocationStore,
-        NotExecutedReason, ReservationBinding, TerminalOutcome,
+        NotExecutedReason as AuditNotExecutedReason, ReservationBinding, TerminalOutcome,
     };
     use lancet_protocol::InvocationId;
-    use lattice_session::{ProjectStoreKey, StateLayout};
+    use lattice_session::{ProjectStoreKey, SessionGraphStore, StateLayout};
 
     fn empty_triple(tool: &str) -> lancet_protocol::CellEvidenceTriple {
         lancet_protocol::CellEvidenceTriple {
@@ -1724,18 +1754,6 @@ mod tests {
             }
         ));
         assert_eq!(conversation, ToolResultOutcome::Indeterminate);
-    }
-
-    #[test]
-    fn call_cancelled_maps_to_cancelled_terminal_and_conversation() {
-        let error = lancet_runtime::error_map::cancelled_error("mutate.create");
-        assert_eq!(
-            not_executed_reason(&error),
-            NotExecutedReason::CancelledBeforeDispatch
-        );
-        let (terminal, conversation) = map_cep_outcome(&error);
-        assert_eq!(terminal, TerminalOutcome::Cancelled);
-        assert_eq!(conversation, ToolResultOutcome::Cancelled);
     }
 
     #[test]
@@ -1770,39 +1788,202 @@ mod tests {
         assert_eq!(reason.as_deref(), Some("cancelled by caller"));
     }
     #[test]
-    fn successful_oversize_receipt_keeps_success_and_records_unavailable_material() {
-        let value = serde_json::Value::String("x".repeat(65_535));
+    fn successful_oversize_receipt_advances_live_cursor_without_a_draft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = StateLayout::in_state_root(tmp.path());
+        let project_key = ProjectStoreKey::derive(tmp.path()).unwrap();
+        let store = lattice_session::GitSessionGraphStore::create_layout(&layout).unwrap();
+        let session = "00000000000040008000000000000003";
+        let session_id = SessionId::parse(session).unwrap();
+        let turn_id = TurnId::parse("00000000-0000-4000-8000-000000000002").unwrap();
+        let invocation_id = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        store
+            .create_session(session, None, "test", "main", &project_key)
+            .unwrap();
+        let lock = store
+            .lock_execution(
+                session,
+                lattice_session::LockMode::Exclusive,
+                lattice_session::Blocking::Block,
+            )
+            .unwrap();
+        let descriptor_identity = "d".repeat(64);
+        let catalog = lattice_session::pending::ToolCatalogSnapshot::new(
+            "test-build".to_string(),
+            vec![lattice_session::pending::ToolCatalogEntry {
+                name: "observe.workspace".to_string(),
+                descriptor_identity: descriptor_identity.clone(),
+                description: "observe".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+        )
+        .unwrap();
+        store
+            .begin_pending_turn(
+                lattice_session::pending::TurnStartedFacts {
+                    turn_id,
+                    session_id,
+                    project_store_key: project_key,
+                    parent_conversation_tip: None,
+                    user_message: NativeMessage::new(
+                        MessageRole::User,
+                        None,
+                        vec![MessagePart::semantic_only(MessageSemantic::Text {
+                            text: "read the large file".to_string(),
+                        })],
+                    ),
+                    config: lattice_session::pending::FrozenTurnConfig {
+                        agent_name: "test".to_string(),
+                        model: "test-model".to_string(),
+                        provider: "test-provider".to_string(),
+                        system_prompt: None,
+                        profile_snapshot_json: "{}".to_string(),
+                        policy_snapshot_json: "{}".to_string(),
+                        catalog,
+                        limits: lattice_session::pending::TurnExecutionLimits {
+                            timeout_secs: 60,
+                            max_model_steps: MAX_MODEL_STEPS,
+                            max_model_attempts: 1,
+                        },
+                    },
+                    accepted_at: "2026-08-30T00:00:00Z".to_string(),
+                },
+                &lock,
+            )
+            .unwrap();
+        store
+            .advance_pending_turn(
+                session,
+                PendingStage::ModelAttemptStarted {
+                    key: ModelAttemptKey {
+                        turn_id,
+                        model_step_ordinal: 0,
+                        attempt_ordinal: 0,
+                    },
+                },
+                100,
+                &lock,
+            )
+            .unwrap();
+
+        let arguments = serde_json::json!({"path": "large.txt"});
+        let address = ToolCallAddress {
+            message: ModelMessageAddress {
+                session_id,
+                turn_id,
+                model_step_ordinal: 0,
+            },
+            part_ordinal: 0,
+        };
+        let arguments_digest = arguments_digest(&arguments);
+        let binding = PlannedBinding {
+            invocation_id,
+            binding_digest: lattice_session::pending::binding_digest(
+                &invocation_id,
+                &address,
+                "observe.workspace",
+                &descriptor_identity,
+                &arguments_digest,
+            ),
+            address,
+            method: "observe.workspace".to_string(),
+            descriptor_identity,
+            arguments_digest,
+        };
+        let plan = BindingPlan {
+            plan_key: PlanKey {
+                turn_id,
+                model_step_ordinal: 0,
+            },
+            message: NativeMessage::new(
+                MessageRole::Assistant,
+                Some(lattice_conversation::ProviderOrigin::Anthropic),
+                vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+                    call: UnboundToolCall {
+                        provider_call_id: Some("call-oversize".to_string()),
+                        name: binding.method.clone(),
+                        arguments,
+                    },
+                })],
+            ),
+            bindings: vec![binding.clone()],
+        };
+        store
+            .advance_pending_turn(
+                session,
+                PendingStage::BindingPlanned {
+                    plan: plan.clone(),
+                    usage: None,
+                },
+                101,
+                &lock,
+            )
+            .unwrap();
+        store
+            .advance_pending_turn(
+                session,
+                PendingStage::Bound { plan: plan.clone() },
+                102,
+                &lock,
+            )
+            .unwrap();
+        let closing = StepClosingState {
+            plan_key: plan.plan_key,
+            bindings: plan.bindings,
+            closure_cursor: 0,
+            closures: Vec::new(),
+            current_candidate: None,
+        };
+        store
+            .advance_pending_turn(
+                session,
+                PendingStage::StepClosing(closing.clone()),
+                103,
+                &lock,
+            )
+            .unwrap();
+
         let receipt = ExecutionReceipt {
-            result: Ok(value),
+            result: Ok(serde_json::Value::String("x".repeat(65_535))),
             evidence: empty_triple("oversize.test"),
         };
         let (terminal, conversation, content, _) = classify_receipt(receipt);
         assert_eq!(terminal, TerminalOutcome::Succeeded);
         assert_eq!(conversation, ToolResultOutcome::Succeeded);
         assert_eq!(content.len(), 65_537);
-        let invocation = InvocationId::parse("00000000-0000-4000-8000-000000000001").unwrap();
-        let turn_id = TurnId::parse("00000000-0000-4000-8000-000000000002").unwrap();
-        let error = ResultDraft::new(
-            invocation,
-            [7; 32],
+        let ToolContentError::TooLarge {
+            actual,
+            full_digest,
+            ..
+        } = ResultDraft::new(
+            invocation_id,
+            binding.binding_digest,
             turn_id,
-            ModelMessageAddress {
-                session_id: SessionId::parse("00000000000040008000000000000003").unwrap(),
-                turn_id,
-                model_step_ordinal: 0,
-            },
-            0,
+            address.message,
+            address.part_ordinal,
             content,
         )
-        .expect_err("plus-one canonical content is not persisted as a draft");
-        assert!(matches!(
-            error,
-            ToolContentError::TooLarge {
-                limit: 65_536,
-                actual: 65_537,
-                ..
-            }
-        ));
+        .expect_err("oversize canonical content is not persisted as a draft");
+        store
+            .advance_pending_turn(
+                session,
+                PendingStage::StepClosing(StepClosingState {
+                    closure_cursor: 1,
+                    closures: vec![ClosedBinding {
+                        binding,
+                        outcome: conversation,
+                        material: MaterialAvailability::Unavailable {
+                            reason: UnavailableMaterialReason::OutputTooLarge,
+                            digest: Some(full_digest),
+                            byte_length: Some(actual as u64),
+                        },
+                    }],
+                    ..closing
+                }),
+                104,
+                &lock,
+            )
+            .expect("a live oversize closure advances without a pinned draft");
     }
 
     #[test]
@@ -1899,7 +2080,7 @@ mod tests {
             snapshot.invocations[&invocation_id].state,
             InvocationState::Terminal {
                 outcome: TerminalOutcome::NotExecuted {
-                    reason: NotExecutedReason::BeforeDispatch
+                    reason: AuditNotExecutedReason::BeforeDispatch
                 },
                 ..
             }

@@ -2,6 +2,108 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #179 acceptance audit: restore the all-feature clippy gate — 2026-08-31
+
+**Severity:** MEDIUM（acceptance evidence / test-only lint）
+
+**Problem:** 验收第 15 条要求 all-feature clippy，但 `cargo xtask ci` 的 workspace clippy 不带
+`--all-features`，此前的 focused clippy 也只覆盖 `lattice-session`。在当前 branch 首次运行
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` 时，
+`direct_crash_barriers::wait_for_ack` 的嵌套 `if let` 触发 `clippy::collapsible_if`。因此第 15 条
+此前没有完整证据，且实际为失败。
+
+**Fix:** 将两层 `if let` 合为一个 let-chain，不改变 ack 部分写入重试语义。第 12 条也逐项复核：
+barrier/matrix 实现在 `6e5d2094`，`T-GH34-04` 的关闭记录在 `36177b28`，当前
+`FINDINGS.md` 已关闭该项；完整 crash target 与普通 system harness 都在当前 source head 复跑。
+
+**Verification:**
+
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — 首次按预期 FAIL，
+  修正后 PASS。
+- 使用本工作树 feature binary 运行完整 `direct_crash_barriers` target — PASS（7 passed）。
+- `env -u LATTICE_BIN cargo xtask ci` — PASS，包含 fmt、workspace clippy、两个 boundary gates、
+  24 crate tests、完整普通 system harness、tool-codegen 与 Tool artifact verify。
+- `cargo fmt --all -- --check`、修改文件 LSP diagnostics、`git diff --check` — PASS。
+
+**Changed files:** `crates/lattice-system-harness/tests/direct_crash_barriers.rs`、`FIX.md`。
+
+## GitHub #179 review: make conservative terminal recovery repeatable — 2026-08-30
+
+**Severity:** HIGH（repeated-crash reconciliation correctness）
+
+**Problem:** 第一次 reopen 遇到 `DispatchStarted` 时，会把当前 invocation 保守终结为
+`Indeterminate(MayHaveOccurred) + Unavailable(DraftPublicationFailed, None, None)`。若进程在随后
+发布 `AdvanceStepClosing` 前再次退出，第二次 reopen 会把自己刚写入的 terminal 交给
+`validate_terminal_with_candidate` 或 `validate_terminal_without_candidate`；两者都拒绝这个 exact
+保守形状并误报 `JournalCorruption`。
+
+**Fix:** 两个 validator 现在只额外接受 exact
+`Indeterminate + DraftPublicationFailed(None, None)`。有无仍然 pinned 的 `ResultDraft` 都可恢复，
+其他 candidate/material mismatch 继续 fail closed。回归作为既有 StepClosing reducer table 的两行
+加入，没有新增 test function、PendingStage、schema version 或 wire 字段。`NotExecutedReason` 文档同时
+明确 ledger 边界：首个观察到 cancellation 的 invocation 记录 `CancelledBeforeDispatch`，后续仅因
+batch 已停止而闭合的 bindings 记录结构性 `BeforeDispatch`；live 与 reopen 因而写出相同证据。
+PendingStage 数量文档由错误的 thirteen 改回 twelve。
+
+**Verification:**
+
+- RED：`cargo test -p lattice-session step_closing_resumes_the_cursor_binding_from_its_terminal_fact -- --nocapture`
+  以 `terminal material does not match the pinned draft candidate` 失败。
+- GREEN：同一 focused reducer test — PASS。
+- `cargo test -p lattice-session` — PASS（152 passed）。
+- `cargo clippy -p lattice-session --all-targets -- -D warnings` — PASS。
+- 使用本工作树 feature binary 运行完整 `direct_crash_barriers` target — PASS（7 passed）。
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（fmt、workspace clippy、boundary gates、
+  tool-codegen、24 crate tests、完整 system harness 与 Tool artifact verify）。
+
+**Changed files:** `crates/lattice-session/src/pending/{contract,facts,mod,reconcile}.rs`、
+`FINDINGS.md`、`FIX.md`。
+
+## GitHub #179: make live and reopen Tool batches use one durable authority — 2026-08-30
+
+**Severity:** HIGH（durable Turn closure / crash recovery correctness）
+
+**Problem:** live saga 与 reopen reducer 分别推导 Tool batch 的控制结果。live path 读取
+`CepErrorCode` 和 lossy `ToolResultOutcome`，reopen 则读取 durable invocation facts；同一
+terminal 可随 crash timing 得到不同 Turn outcome。另一个缺口在无 ResultDraft 的合法 terminal：
+`ResultDraft::new` 对超过 64 KiB 的结果返回 `OutputTooLarge`，ledger 随后持久化
+`TerminalMaterial::Unavailable(OutputTooLarge)`，但 `StepClosing.current_candidate` 保持 `None`。
+reopen 把这个 terminal 当作 journal corruption。`dispatch_started` SIGKILL row 还因两层 barrier
+使用不同环境变量而无法运行。
+
+**Fix:** `lattice-session` 新增纯函数 `derive_tool_batch_control`，live 与 reopen 都把 exact
+published terminal 投影成同一 `InvocationLifecycleFact` 后调用它；`CepError` 只保留诊断用途，
+conversation closure 继续保持 lossy。`lancet-api::DispatchOutcome::NotExecuted` 现在携带 closed
+`DispatchNotStartedCause`，不再由错误码决定 durable reason。PendingTurn 保持 schema v3 与既有
+wire shape；`contract.rs` 仅扩展 no-candidate cursor 真值表，使 exact
+`Succeeded + Unavailable(OutputTooLarge, Some(digest), Some(length))` 合法。reducer 从 pinned
+InvocationStore facts 恢复 exact no-draft terminal，并继续拒绝缺少 matching draft 的
+`Available` / `DraftPublicationFailed`、material mismatch 与 `Reserved + ResultDraft`。
+
+Product SIGKILL matrix 复用现有 barrier，加入真实 `session.todo_write` 70 KiB 结果和真实
+`mutate.create` pre-dispatch cancellation rows。cancellation 注入与 crash 位置使用两个独立环境
+变量；两层 barrier 统一为 `LATTICE_TEST_TURN_BARRIER{,_ACK}`，ack 同时携带 exact typed
+invocation record 与 pinned session snapshot。旧 standalone cancellation tests 和重复 helper 已删除。
+
+**Verification:**
+
+- `cargo test -p lattice-session` — PASS。
+- `cargo test -p lancet-api`、`cargo test -p lattice-api` — PASS。
+- `cargo check -p lattice-api --features test-crash-barriers` — PASS。
+- 使用本工作树 `target/debug/lattice` 运行完整 `direct_crash_barriers` target — 7 passed，
+  包含 `dispatch_started`、`OutputTooLarge` terminal→cursor/reopen、pre-dispatch cancellation、
+  multi-Tool cursor 与 TurnClosing rows。
+- `env -u LATTICE_BIN cargo xtask ci` — PASS（toolchain、fmt、workspace clippy、debug binary、
+  boundary gates、tool-codegen、24 crate tests、system harness、Tool artifact verify）。
+- `cargo clippy -p lattice-session --all-targets -- -D warnings` — PASS。
+
+**Changed files:** `AGENTS.md`、`FINDINGS.md`、`FIX.md`、
+`crates/lancet-api/src/{lib,runtime}.rs`、`crates/lattice-api/src/turn/{crash_barrier,invocation_facts,saga}.rs`、
+`crates/lattice-api/tests/support/mod.rs`、
+`crates/lattice-session/src/pending/{contract,contract_tests,mod,outcome,reconcile}.rs`、
+`crates/lattice-session/src/git_graph/tests/pending_crash.rs`、
+`crates/lattice-system-harness/tests/direct_crash_barriers.rs`。
+
 ## GitHub #34 PR #178 review: close pre-dispatch cancellation durably — 2026-08-29
 
 **Severity:** HIGH（durable cancellation / crash recovery correctness）

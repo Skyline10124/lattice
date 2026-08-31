@@ -50,6 +50,15 @@ pub(crate) fn project_facts(
     InvocationFactsSnapshot { plan, invocations }
 }
 
+/// Project one just-published terminal into the same session-domain vocabulary
+/// used by pinned-view reopen reconciliation.
+pub(crate) fn project_terminal(
+    outcome: TerminalOutcome,
+    material: TerminalMaterial,
+) -> (ExecutionOutcome, ResultMaterial) {
+    (project_outcome(outcome), project_material(material))
+}
+
 fn project_plan(plan: &PlanReservation) -> lattice_session::pending::PlanFacts {
     lattice_session::pending::PlanFacts {
         plan_key: plan.plan_key,

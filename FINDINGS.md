@@ -63,7 +63,7 @@
 ### M-TOOL-01: ADR 0004 build-closed WASM Component Tool runtime — hard cut implemented; identity/Bundle/docs remain — `architecture` / `lancet-runtime`
 - **Location**: `docs/adr/0004-build-closed-wasm-tool-catalog.md`; `crates/lancet-runtime`; Source Tools under `tools/`.
 - **Problem**: PR #178 implements runtime convergence; the pre-#35 descriptor-identity residual remains, while operator Tool Bundle installation/activation and the final architecture-document closeout are separate work.
-- **Current status**: PARTIAL — the five default Tools are manifest-owned Components in one generated closed runtime. The two blocking PR-review defects are fixed, including authoritative admission recovery and durable `StepClosed::CancelTurn` propagation after pre-dispatch cancellation; `H-GH34-03` must close before #35, and #35/#36 remain.
+- **Current status**: PARTIAL — the five default Tools are manifest-owned Components in one generated closed runtime. GitHub #179 closed the three blocking `StepClosing` defects and the `dispatch_started` barrier mismatch; `H-GH34-03` must close before #35, and #35/#36 remain.
 - **Plan**: close `H-GH34-03`, then execute #35 and #36 without adding a second Tool schema, runtime plugin loader, local third-party Cargo build, or ambient WASI authority.
 
 
@@ -86,11 +86,6 @@
 > operator audit 下沉 + PR #74 Local Workspace 缺陷修复)。仓内其他文档里裸写的
 > `#37/#38/#39/#40` workstream A 编号是 Codeberg 编号(GitHub #59–#62),是另一张票。
 
-### T-GH34-04: `dispatch_started` SIGKILL barrier uses mismatched environment names — OPEN — `verification` / `lancet-api` / `lattice-system-harness`
-- **Location**: `crates/lancet-api/src/runtime.rs` (`stop_after_dispatch_started`); `crates/lattice-api/src/turn/crash_barrier.rs`; `crates/lattice-system-harness/tests/direct_crash_barriers.rs`.
-- **Problem**: the system harness configures `LATTICE_TEST_TURN_BARRIER{,_ACK}`, while the lower `lancet-api` barrier reads `LATTICE_CRASH_BARRIER{,_ACK}`. The `dispatch_started` matrix case therefore publishes only its context sidecar and times out waiting for the terminal ack.
-- **Current status**: OPEN, pre-existing and non-production. It does not affect the focused pre-dispatch cancellation SIGKILL regression, which passes, but the complete `direct_crash_barriers` target currently reports 7 passed / 1 failed.
-- **Plan**: give both barrier layers one test-only environment contract, then rerun the full crash-barrier target. Keep this separate from the cancellation closure fix; do not add a production fallback or duplicate alias path.
 
 ### T-GH143-01: `sigkill_mid_create_leaves_only_absent_or_fully_valid_stores` 的 120ms 窗口隐含假设 TMPDIR 在 tmpfs 上 — `verification` / test-hygiene / `lattice-store`
 - **位置**: `crates/lattice-store/tests/integration.rs`（父进程 `sleep(120ms)` 后 SIGKILL 子进程，随后断言 `published > 0`）。
@@ -297,6 +292,18 @@ Self-host harness: `benchmarks/lancet-dogfood/legacy/p22-self-host.sh` (historic
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### H-GH179-01: ~~`OutputTooLarge` live cursor advance was rejected~~ — CLOSED by #179
+- **Resolution:** PendingTurn remains schema v3. The no-candidate `StepClosing` edge now admits only `Succeeded + Unavailable(OutputTooLarge, Some(digest), Some(length))` in addition to the existing conservative closure forms. A store-backed regression drives a 65,537-byte canonical Tool result through `advance_pending_turn`; the product crash matrix exercises a real 70 KiB `session.todo_write` result.
+
+### H-GH179-02: ~~legal no-draft terminal facts reopened as corruption~~ — CLOSED by #179
+- **Resolution:** reconciliation accepts exact durable `NotExecuted + Unavailable(NotExecuted, None, None)`, `Succeeded + Unavailable(OutputTooLarge, Some, Some)`, and the recovery-generated `Indeterminate + Unavailable(DraftPublicationFailed, None, None)` terminal with or without a still-pinned candidate. Missing-candidate `Available`, non-indeterminate `DraftPublicationFailed`, mismatched material, and `Reserved + ResultDraft` remain corruption. The table-driven reducer coverage includes cancellation, timeout/BeforeDispatch, runtime NotExecuted, preceding indeterminate, oversized results, and a second crash before cursor publication.
+
+### H-GH179-03: ~~reopen lost durable cancellation after cursor advance~~ — CLOSED by #179
+- **Resolution:** live and reopen now call the same session-domain `derive_tool_batch_control` over ordered exact terminal facts; only unrecoverable live deadline/continuation context is optional. The first invocation where cancellation is observed keeps exact `CancelledBeforeDispatch` in the ledger, structurally skipped tail bindings use `BeforeDispatch`, and every conversation closure remains lossy `NotExecuted`. Cursor-to-`StepClosed` recovery deterministically publishes `CancelTurn` / `TurnOutcome::Cancelled`.
+
+### T-GH34-04: ~~`dispatch_started` SIGKILL barrier used mismatched environment names~~ — CLOSED by #179
+- **Resolution:** `lancet-api` and `lattice-api` now read `LATTICE_TEST_TURN_BARRIER{,_ACK}` and publish the same ack shape: exact typed invocation record plus the pinned session snapshot. Fault injection has its own environment variable, independent of barrier placement. The full `direct_crash_barriers` target passes 7/7, including `dispatch_started`, cancellation, and oversized-result rows.
 
 ### M-REWIND-01: ~~Local mutation history and Rewind were missing~~ — CLOSED by #63/#64
 - **Resolution:** `lancet-runtime::WorkspaceHistory` records successful atomic mutations in private Git; `lancet-api` and `lattice-api` coordinate verified restore and ref movement. Residual policy choices remain in `L-64-01`.

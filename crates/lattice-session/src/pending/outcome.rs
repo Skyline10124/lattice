@@ -12,6 +12,11 @@ use lancet_protocol::InvocationId;
 use lattice_conversation::{AttemptInterruption, TokenUsage, ToolCallValidation};
 use serde::{Deserialize, Serialize};
 
+use super::binding::PlannedBinding;
+use super::facts::{
+    ExecutionOutcome, NotExecutedReason, ResultMaterial, UnavailableMaterialReason,
+};
+use crate::{Result, SessionError};
 /// Whether a Turn outcome was decided by the live owner or produced by
 /// reopen reconciliation (ADR 0005 §15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -173,6 +178,108 @@ pub enum TurnInterruption {
     },
 }
 
+/// Live-only context that durable invocation outcomes cannot recover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveControllingCause {
+    /// The live owner may continue to another model step.
+    Continue,
+    /// The live Turn deadline expired before the next dispatch.
+    ModelAttemptTimeout,
+}
+
+/// One shared decision for whether a closed Tool batch may continue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolBatchControl {
+    /// Only the live owner may continue provider execution.
+    Continue,
+    /// A durable cancellation controls the Turn outcome.
+    Cancel(TurnCancellation),
+    /// A durable indeterminate outcome, live deadline, or reopen gap interrupts the Turn.
+    Interrupt(TurnInterruption),
+}
+
+/// Derive the Tool batch's controlling cause from exact ordered invocation outcomes.
+///
+/// Reopen passes `None` for `live_cause`, so durable outcomes that do not carry a
+/// stronger cancellation or indeterminate cause close as
+/// `ProcessInterruptedDuringStepClosing` rather than continuing the provider.
+pub fn derive_tool_batch_control(
+    bindings: &[PlannedBinding],
+    outcomes: &[(ExecutionOutcome, ResultMaterial)],
+    live_cause: Option<LiveControllingCause>,
+) -> Result<ToolBatchControl> {
+    if bindings.len() != outcomes.len() {
+        return Err(SessionError::JournalCorruption {
+            detail: format!(
+                "Tool batch control has {} bindings but {} outcomes",
+                bindings.len(),
+                outcomes.len()
+            ),
+        });
+    }
+
+    let mut controlling = None;
+    let mut saw_indeterminate = false;
+    for (binding, (outcome, material)) in bindings.iter().zip(outcomes) {
+        if matches!(outcome, ExecutionOutcome::NotExecuted { .. })
+            && !matches!(
+                material,
+                ResultMaterial::Unavailable {
+                    reason: UnavailableMaterialReason::NotExecuted,
+                    digest: None,
+                    byte_length: None,
+                }
+            )
+        {
+            return Err(SessionError::JournalCorruption {
+                detail: format!(
+                    "not-executed invocation {} has non-canonical material",
+                    binding.invocation_id
+                ),
+            });
+        }
+
+        match outcome {
+            ExecutionOutcome::Indeterminate { .. } => {
+                saw_indeterminate = true;
+                controlling.get_or_insert(ToolBatchControl::Interrupt(
+                    TurnInterruption::InvocationMayHaveOccurred {
+                        invocation: binding.invocation_id,
+                    },
+                ));
+            }
+            ExecutionOutcome::Cancelled
+            | ExecutionOutcome::NotExecuted {
+                reason: NotExecutedReason::CancelledBeforeDispatch,
+            } => {
+                controlling
+                    .get_or_insert(ToolBatchControl::Cancel(TurnCancellation::UserCancelled));
+            }
+            ExecutionOutcome::NotExecuted {
+                reason: NotExecutedReason::PrecedingInvocationIndeterminate,
+            } if !saw_indeterminate => {
+                return Err(SessionError::JournalCorruption {
+                    detail: format!(
+                        "invocation {} names a preceding indeterminate outcome that is absent",
+                        binding.invocation_id
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(controlling) = controlling {
+        return Ok(controlling);
+    }
+    Ok(match live_cause {
+        Some(LiveControllingCause::Continue) => ToolBatchControl::Continue,
+        Some(LiveControllingCause::ModelAttemptTimeout) => ToolBatchControl::Interrupt(
+            TurnInterruption::ModelAttempt(AttemptInterruption::Timeout),
+        ),
+        None => ToolBatchControl::Interrupt(TurnInterruption::ProcessInterruptedDuringStepClosing),
+    })
+}
 /// The typed outcome of one accepted Turn (ADR 0005 §15).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

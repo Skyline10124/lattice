@@ -853,8 +853,8 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
                 outcome: ExecutionOutcome::Succeeded,
                 material: ResultMaterial::Unavailable {
                     reason: UnavailableMaterialReason::DraftPublicationFailed,
-                    digest: None,
-                    byte_length: None,
+                    digest: Some(draft.content_digest),
+                    byte_length: Some(draft.byte_length),
                 },
             },
         },
@@ -876,8 +876,8 @@ fn draft_outcome_crash_windows_close_from_the_classified_material() {
         closure_material.material,
         MaterialAvailability::Unavailable {
             reason: UnavailableMaterialReason::DraftPublicationFailed,
-            digest: None,
-            byte_length: None,
+            digest: Some(draft.content_digest),
+            byte_length: Some(draft.byte_length),
         }
     );
 
