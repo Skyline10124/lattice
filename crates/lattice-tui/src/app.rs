@@ -17,9 +17,11 @@ use lattice_api::{RunTurnRequest, TurnEvent};
 use crate::TuiOptions;
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
 use crate::session::SessionContext;
-use crate::view::{Viewport, block_lines};
+use crate::view::{Viewport, frame_layout, input_visual_height, transcript_lines};
 
 const FRAME: Duration = Duration::from_millis(33);
+pub(crate) const INPUT_MIN_ROWS: u16 = 2;
+pub(crate) const INPUT_MAX_ROWS: u16 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Block {
@@ -145,27 +147,31 @@ impl App {
                 }
             }
             TurnEvent::TurnCommitted { commit_id, .. } => {
+                self.fail_running_tools("turn ended before tool completion");
                 self.push_status(StatusKind::Committed { commit_id });
             }
             TurnEvent::CommitFailed { reason } => {
+                self.fail_running_tools(&reason);
                 self.push_status(StatusKind::CommitFailed { reason });
             }
             TurnEvent::EvidenceDurabilityFailed { attempts } => {
-                self.push_status(StatusKind::CommitFailed {
-                    reason: format!(
-                        "terminal evidence durability failed after {attempts} attempt(s)"
-                    ),
-                });
+                let reason = format!(
+                    "terminal evidence durability failed after {attempts} attempt(s)"
+                );
+                self.fail_running_tools(&reason);
+                self.push_status(StatusKind::CommitFailed { reason });
             }
             TurnEvent::RecoveryRequired { reason } => {
-                self.push_status(StatusKind::CommitFailed {
-                    reason: format!("recovery required: {reason}"),
-                });
+                let reason = format!("recovery required: {reason}");
+                self.fail_running_tools(&reason);
+                self.push_status(StatusKind::CommitFailed { reason });
             }
             TurnEvent::TurnFailed { reason } => {
+                self.fail_running_tools(&reason);
                 self.push_status(StatusKind::TurnFailed { reason });
             }
             TurnEvent::TurnCancelled { reason } => {
+                self.fail_running_tools(reason.as_deref().unwrap_or("cancelled"));
                 self.push_status(StatusKind::Cancelled { reason });
             }
             TurnEvent::LlmRequestError {
@@ -231,11 +237,13 @@ impl App {
             }
             KeyAction::ScrollPageUp => self.viewport.page_up(self.transcript_height()),
             KeyAction::ScrollPageDown => {
-                let rows = self.content_rows(self.term_width);
+                let layout = frame_layout(self.term_width);
+                let rows = self.content_rows(layout.content_w);
                 self.viewport.page_down(rows, self.transcript_height());
             }
             KeyAction::ScrollToBottom => {
-                let rows = self.content_rows(self.term_width);
+                let layout = frame_layout(self.term_width);
+                let rows = self.content_rows(layout.content_w);
                 self.viewport.to_bottom(rows, self.transcript_height());
             }
             KeyAction::CancelOrClear => self.cancel_or_clear(),
@@ -257,18 +265,51 @@ impl App {
         }
     }
 
-    /// Number of transcript rows at width `w`, used by `Viewport`.
-    pub(crate) fn content_rows(&self, w: u16) -> usize {
-        self.blocks.iter().map(|b| block_lines(b, w).len()).sum()
+    /// Number of transcript rows at the shared content width, used by `Viewport`.
+    pub(crate) fn content_rows(&self, content_w: u16) -> usize {
+        transcript_lines(self, content_w).len()
     }
 
-    #[rustfmt::skip]
     pub(crate) fn apply_stream_idle_timeout(&mut self) {
-        self.push_status(StatusKind::TurnFailed {
-            reason: format!("stream timed out after {}s", lattice_api::STREAM_IDLE_TIMEOUT_SECS),
-        });
+        let reason = format!(
+            "stream timed out after {}s",
+            lattice_api::STREAM_IDLE_TIMEOUT_SECS
+        );
+        self.fail_running_tools(&reason);
+        self.push_status(StatusKind::TurnFailed { reason });
         self.phase = TurnPhase::Idle;
         self.cancel_flag = None;
+    }
+
+    pub(crate) fn fail_running_tools(&mut self, reason: &str) {
+        for block in &mut self.blocks {
+            if let Block::Tool {
+                state: state @ ToolState::Running,
+                ..
+            } = block
+            {
+                *state = ToolState::Failed {
+                    output_len: 0,
+                    error: Some(reason.to_owned()),
+                };
+            }
+        }
+    }
+
+    fn finish_stream(&mut self) {
+        self.fail_running_tools("turn ended before tool completion");
+        self.phase = TurnPhase::Idle;
+        self.cancel_flag = None;
+    }
+
+    fn expire_ctrl_c_notice(&mut self, now: Instant) -> bool {
+        let expired = self
+            .last_ctrl_c
+            .is_some_and(|then| now.duration_since(then) > CTRL_C_WINDOW);
+        if expired {
+            self.last_ctrl_c = None;
+        }
+        expired
     }
 
     fn push_status(&mut self, kind: StatusKind) {
@@ -307,12 +348,11 @@ impl App {
         }
     }
 
-    /// Must use the same **wrapped** input height the draw path reserves: a
-    /// long line wraps to up to six rows, and counting it as one here makes
-    /// follow and page size disagree with the screen.
+    /// Uses the same content width and vertical costs as the draw path.
     fn transcript_height(&self) -> usize {
-        let input_h = crate::view::input_visual_height(self, self.term_width);
-        self.term_height.saturating_sub(input_h + 1).max(1) as usize
+        let layout = frame_layout(self.term_width);
+        let input_h = input_visual_height(self, layout.content_w);
+        self.term_height.saturating_sub(input_h + 2) as usize
     }
 }
 
@@ -365,8 +405,7 @@ pub(crate) async fn run_app(options: TuiOptions, ctx: SessionContext) -> anyhow:
                     TurnWait::Ended => {
                         turn_stream = None;
                         turn_deadline = None;
-                        app.phase = TurnPhase::Idle;
-                        app.cancel_flag = None;
+                        app.finish_stream();
                     }
                     TurnWait::TimedOut => {
                         turn_stream = None;
@@ -377,14 +416,17 @@ pub(crate) async fn run_app(options: TuiOptions, ctx: SessionContext) -> anyhow:
                 dirty = true;
             }
             _ = ticker.tick() => {
+                dirty |= app.expire_ctrl_c_notice(Instant::now());
                 if !dirty {
                     continue;
                 }
                 if let Ok(size) = terminal.size() {
                     app.term_width = size.width;
                     app.term_height = size.height;
+                    let layout = frame_layout(size.width);
                     let th = app.transcript_height();
-                    app.viewport.on_content_changed(app.content_rows(size.width), th);
+                    let rows = app.content_rows(layout.content_w);
+                    app.viewport.on_content_changed(rows, th);
                 }
                 terminal.draw(|f| crate::view::draw(f, &app))?;
                 dirty = false;
@@ -585,6 +627,25 @@ mod tests {
         )
     }
 
+    fn assert_failed_tool(app: &App, index: usize, reason: &str) {
+        match &app.blocks[index] {
+            Block::Tool {
+                state: ToolState::Failed { output_len, error },
+                ..
+            } => {
+                assert_eq!(*output_len, 0);
+                assert!(error.as_deref().is_some_and(|error| error.contains(reason)));
+            }
+            other => panic!("expected failed tool, got {other:?}"),
+        }
+    }
+
+    fn start_tool(app: &mut App, name: &str) {
+        app.apply_turn_event(TurnEvent::ToolCallStarted {
+            id: "call-1".into(),
+            name: name.into(),
+        });
+    }
     #[test]
     fn token_deltas_coalesce_into_one_assistant_block() {
         let mut app = test_app();
@@ -647,6 +708,30 @@ mod tests {
     }
 
     #[test]
+    fn terminal_event_closes_running_tools() {
+        let mut app = test_app();
+        start_tool(&mut app, "mutate.edit");
+        app.apply_turn_event(TurnEvent::TurnFailed {
+            reason: "provider failed".into(),
+        });
+
+        assert_failed_tool(&app, 0, "provider failed");
+    }
+
+    #[test]
+    fn stream_end_closes_running_tools() {
+        let mut app = test_app();
+        app.phase = TurnPhase::Streaming;
+        app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+        start_tool(&mut app, "mutate.edit");
+        app.finish_stream();
+
+        assert_eq!(app.phase, TurnPhase::Idle);
+        assert!(app.cancel_flag.is_none());
+        assert_failed_tool(&app, 0, "turn ended before tool completion");
+    }
+
+    #[test]
     fn esc_during_turn_sets_cancel_flag_and_does_not_end_phase() {
         let mut app = test_app();
         app.phase = TurnPhase::Streaming;
@@ -668,6 +753,16 @@ mod tests {
     }
 
     #[test]
+    fn paste_grows_input_without_submitting() {
+        let mut app = test_app();
+        let submitted = app.apply_action(KeyAction::Paste("a\nb\nc".into()));
+        assert!(submitted.is_none());
+        assert_eq!(app.input.text(), "a\nb\nc");
+        assert_eq!(input_visual_height(&app, frame_layout(80).content_w), 3);
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+
+    #[test]
     fn double_ctrl_c_within_window_quits_single_does_not() {
         let mut app = test_app();
         assert!(!matches!(ctrl_c_action(&mut app), KeyAction::Quit));
@@ -683,6 +778,16 @@ mod tests {
         assert!(!matches!(ctrl_c_action(&mut app), KeyAction::Quit));
         app.apply_action(KeyAction::CancelOrClear);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_notice_expiry_requests_redraw_once() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.last_ctrl_c = Some(now - CTRL_C_WINDOW - Duration::from_millis(1));
+        assert!(app.expire_ctrl_c_notice(now));
+        assert!(app.last_ctrl_c.is_none());
+        assert!(!app.expire_ctrl_c_notice(now));
     }
 
     #[test]
@@ -720,9 +825,11 @@ mod tests {
         let mut app = test_app();
         app.phase = TurnPhase::Streaming;
         app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+        start_tool(&mut app, "fetch.web");
         app.apply_stream_idle_timeout();
         assert_eq!(app.phase, TurnPhase::Idle);
         assert!(app.cancel_flag.is_none());
+        assert_failed_tool(&app, 0, "stream timed out");
         match app.blocks.last() {
             Some(Block::Status(StatusKind::TurnFailed { reason })) => {
                 assert!(reason.contains(&lattice_api::STREAM_IDLE_TIMEOUT_SECS.to_string()));

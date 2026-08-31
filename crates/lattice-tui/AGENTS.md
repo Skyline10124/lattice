@@ -6,11 +6,12 @@ Crate-local guidance for `lattice-tui`.
 
 This crate owns the full-screen TUI shell for LATTICE. It enters an alternate
 screen via `ratatui`/`crossterm`, executes turns through
-`lattice_api::stream_turn`, and renders a three-region layout: transcript
-(flex), input (1..=6 rows), status (1 row). The forthcoming transcript card
-renderer (#116) lands here as the `render/` module (not a new crate);
-`lattice-cli` consumes it through the existing `lattice-cli -> lattice-tui`
-edge. Do not create `render/` in this crate until #116.
+`lattice_api::stream_turn`, and renders a left conversation column
+(transcript, separator, 2..=5-row input, bottom line) beside a right status
+column. The forthcoming transcript card renderer (#116) lands here as the
+`render/` module (not a new crate); `lattice-cli` consumes it through the
+existing `lattice-cli -> lattice-tui` edge. Do not create `render/` in this
+crate until #116.
 
 ## Boundaries
 
@@ -73,21 +74,24 @@ Do not port the following from other TUI chat clients:
 
 ## v1 克制清单
 
-Three regions, nothing else:
+Left conversation column plus right status column, nothing else:
 
 ```text
-┌────────────────────────────────────────────┐
-│ transcript                      (flex)     │
-│                                            │
-├────────────────────────────────────────────┤
-│ input                     (1..=6 rows)     │
-├────────────────────────────────────────────┤
-│ status                          (1 row)    │
-└────────────────────────────────────────────┘
+┌──────────────────────────────────────┬─┬────────────────┐
+│ transcript                           │ │ status         │
+│                                      │ │                │
+├──────────────────────────────────────┤ │                │
+│ > input                     (2..=5) │ │                │
+│                                      │ │                │
+│  PROMPT                              │ │                │
+└──────────────────────────────────────┴─┴────────────────┘
 ```
 
-`transcript` 取剩余全部高度；`input` 随内容 1–6 行、超过 6 行内部滚动；`status`
-恒为 1 行。**不画边框**（框线视觉语言归 #149 决定）。
+`transcript` takes the remaining height. The input grows from 2 to 5 rows,
+then scrolls internally. The bottom line is always one row. Wide frames render
+the `PROMPT` tag there and use the full-height right status column. Frames
+narrower than 56 columns remove the right column and merge the tag and status
+into the bottom line. Do not draw borders; the diagram shows geometry only.
 
 Explicitly NOT in v1:
 
@@ -99,6 +103,54 @@ Explicitly NOT in v1:
 - 多于三个的界面区域；弹层、模态、toast。
 - Tool call 卡片。v1 只有通用状态行（§9）。
 - 会话分支 / 时间线视图。
+
+## Layout lock
+
+All dimensions are terminal cells. Integer division applies.
+
+| Quantity | Value |
+| --- | --- |
+| `status_w` | `clamp(frame_w / 8, 16, 24)` |
+| `gap` | 1 |
+| `gutter` | 2 |
+| `left_w` | `frame_w - status_w - gap` |
+| `content_w` | `left_w - gutter`, with no upper bound |
+| narrow frame | `frame_w < 56`; no right column |
+| transcript height | `frame_h - (input_h + 2)`, saturating at 0 |
+
+The gutter reserves two cells for fold-state symbols and is not body width. The
+gap is blank. Wide status content has one cell of left padding. Rendering,
+viewport row counts, input wrapping, and cursor placement must all use the same
+`content_w`. At 80 columns, `status_w / left_w / content_w` is `16 / 63 / 61`;
+at 176 columns it is `22 / 153 / 151`.
+
+## Color lock
+
+The TUI supports dark terminal themes. Truecolor terminals use the listed hex
+values; other terminals use the named-color fallback. Do not probe terminfo or
+256-color support.
+
+| Foreground role | Cassette token | Hex | Named fallback |
+| --- | --- | --- | --- |
+| `User` | iris-7 | `#8695e3` | `LightBlue` |
+| `Assistant` | cream-2 | `#f5f3ef` | `White` |
+| `ToolOk` | cyan-7 | `#2ab0b0` | `Cyan` |
+| `ToolErr` | signal-red-9 | `#cb2b31` | `Red` |
+| `DimMeta` | warm-gray-8 | `#857f78` | `DarkGray` |
+
+| Filled surface | Cassette token | Hex | Named fallback | Text |
+| --- | --- | --- | --- | --- |
+| right status / narrow status segment | navy-11 | `#2c4267` | `Blue` | `DimMeta` |
+| `PROMPT` tag | iris-9 | `#5965ca` | `LightBlue` | `Assistant` |
+
+Do not add amber, a sixth foreground role, a left-column background, or a theme
+abstraction.
+
+## Tool collapse lock
+
+`▸` / `▾` (ASCII `>` / `v`) indicate state; they are not controls. Do not add
+keys or mouse handling. Successful tools stay collapsed on one line. Failed
+tools stay expanded with their error summary. Running tools stay on one line.
 
 ## Verification
 

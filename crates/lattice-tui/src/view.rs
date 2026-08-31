@@ -8,8 +8,49 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Block, StatusKind, ToolState, TurnPhase};
+use crate::app::{App, Block, INPUT_MAX_ROWS, INPUT_MIN_ROWS, StatusKind, ToolState, TurnPhase};
 use crate::input::CTRL_C_WINDOW;
+
+pub(crate) const STATUS_MIN: u16 = 16;
+pub(crate) const STATUS_MAX: u16 = 24;
+pub(crate) const GAP: u16 = 1;
+pub(crate) const GUTTER: u16 = 2;
+pub(crate) const NARROW_MIN: u16 = 56;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatusSlot {
+    Right { w: u16 },
+    BottomLine,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameLayout {
+    pub(crate) left_w: u16,
+    pub(crate) content_w: u16,
+    pub(crate) status: StatusSlot,
+}
+
+pub(crate) fn status_w(frame_w: u16) -> u16 {
+    (frame_w / 8).clamp(STATUS_MIN, STATUS_MAX)
+}
+
+pub(crate) fn frame_layout(frame_w: u16) -> FrameLayout {
+    if frame_w < NARROW_MIN {
+        return FrameLayout {
+            left_w: frame_w,
+            content_w: frame_w.saturating_sub(GUTTER),
+            status: StatusSlot::BottomLine,
+        };
+    }
+
+    let status_w = status_w(frame_w);
+    let left_w = frame_w.saturating_sub(status_w).saturating_sub(GAP);
+    FrameLayout {
+        left_w,
+        content_w: left_w.saturating_sub(GUTTER),
+        status: StatusSlot::Right { w: status_w },
+    }
+}
 
 pub(crate) struct Viewport {
     /// First visible transcript row.
@@ -26,10 +67,13 @@ impl Viewport {
         }
     }
 
-    /// Content grew to `content_rows`; viewport height is `height`.
+    /// Content changed to `content_rows`; viewport height is `height`.
     pub(crate) fn on_content_changed(&mut self, content_rows: usize, height: usize) {
+        let max = content_rows.saturating_sub(height);
         if self.follow {
-            self.scroll = content_rows.saturating_sub(height);
+            self.scroll = max;
+        } else {
+            self.scroll = self.scroll.min(max);
         }
     }
 
@@ -55,12 +99,14 @@ impl Viewport {
     pub(crate) fn scroll(&self) -> usize {
         self.scroll
     }
+
     pub(crate) fn following(&self) -> bool {
         self.follow
     }
 }
 
-/// Style slots. Exactly five roles, terminal semantic colors only — no RGB.
+/// Exactly five foreground roles. Truecolor changes values, not vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Role {
     User,
     Assistant,
@@ -69,38 +115,48 @@ pub(crate) enum Role {
     DimMeta,
 }
 
-#[rustfmt::skip]
-pub(crate) fn role_style(role: Role) -> Style {
-    Style::default().fg(match role {
-        Role::User => Color::Cyan,
-        Role::Assistant => Color::White,
-        Role::ToolOk => Color::Green,
-        Role::ToolErr => Color::Red,
-        Role::DimMeta => Color::DarkGray,
-    })
+fn truecolor_terminal() -> bool {
+    std::env::var("COLORTERM")
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "truecolor" | "24bit"))
 }
 
-/// Wrap one block into styled lines at width `w`.
 #[rustfmt::skip]
-pub(crate) fn block_lines(block: &Block, w: u16) -> Vec<Line<'static>> {
-    let u = locale_utf8();
-    match block {
-        Block::User(text) => wrap_styled(text, w, role_style(Role::User)),
-        Block::Assistant(text) => wrap_styled(text, w, role_style(Role::Assistant)),
-        Block::Tool { name, state, .. } => {
-            let (kind, extra, role) = match state {
-                ToolState::Running => (SymbolKind::Running, " (running)".into(), Role::DimMeta),
-                ToolState::Ok { output_len } => (SymbolKind::Ok, format!("  {output_len} chars"), Role::ToolOk),
-                ToolState::Failed { output_len, error } => {
-                    let mut extra = format!("  {output_len} chars");
-                    if let Some(err) = error { extra.push(' '); extra.push_str(err); }
-                    (SymbolKind::Failed, extra, Role::ToolErr)
-                }
-            };
-            wrap_styled(&format!("  {} {name}{extra}", symbol(kind, u)), w, role_style(role))
-        }
-        Block::Status(kind) => status_block_lines(kind, w, u),
+fn role_color(role: Role, truecolor: bool) -> Color {
+    match (role, truecolor) {
+        (Role::User, true) => Color::Rgb(0x86, 0x95, 0xe3),
+        (Role::Assistant, true) => Color::Rgb(0xf5, 0xf3, 0xef),
+        (Role::ToolOk, true) => Color::Rgb(0x2a, 0xb0, 0xb0),
+        (Role::ToolErr, true) => Color::Rgb(0xcb, 0x2b, 0x31),
+        (Role::DimMeta, true) => Color::Rgb(0x85, 0x7f, 0x78),
+        (Role::User, false) => Color::LightBlue,
+        (Role::Assistant, false) => Color::White,
+        (Role::ToolOk, false) => Color::Cyan,
+        (Role::ToolErr, false) => Color::Red,
+        (Role::DimMeta, false) => Color::DarkGray,
     }
+}
+
+pub(crate) fn role_style(role: Role) -> Style {
+    Style::default().fg(role_color(role, truecolor_terminal()))
+}
+
+fn status_surface_style() -> Style {
+    let bg = if truecolor_terminal() {
+        Color::Rgb(0x2c, 0x42, 0x67)
+    } else {
+        Color::Blue
+    };
+    role_style(Role::DimMeta).bg(bg)
+}
+
+fn prompt_style() -> Style {
+    let bg = if truecolor_terminal() {
+        Color::Rgb(0x59, 0x65, 0xca)
+    } else {
+        Color::LightBlue
+    };
+    role_style(Role::Assistant).bg(bg)
 }
 
 /// Status symbols, with an ASCII fallback when `unicode == false`.
@@ -116,6 +172,7 @@ pub(crate) fn symbol(state: SymbolKind, unicode: bool) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum SymbolKind {
     Running,
     Ok,
@@ -123,84 +180,266 @@ pub(crate) enum SymbolKind {
     Cancelled,
 }
 
-pub(crate) fn draw(frame: &mut Frame, app: &App) {
-    let area = frame.area();
-    let input_h = input_visual_height(app, area.width);
-    let chunks = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(input_h),
-        Constraint::Length(1),
-    ])
-    .split(area);
-    draw_transcript(frame, app, chunks[0]);
-    draw_input(frame, app, chunks[1]);
-    draw_status(frame, app, chunks[2]);
-}
-
-#[rustfmt::skip]
-pub(crate) fn locale_utf8() -> bool {
-    ["LC_ALL", "LANG"].iter().any(|key| {
-        std::env::var(key).ok().is_some_and(|v| v.to_ascii_uppercase().contains("UTF-8"))
-    })
-}
-
-#[rustfmt::skip]
-fn status_block_lines(kind: &StatusKind, w: u16, u: bool) -> Vec<Line<'static>> {
-    let dim = role_style(Role::DimMeta);
-    let err = role_style(Role::ToolErr);
-    let ok = role_style(Role::ToolOk);
-    match kind {
-        StatusKind::Committed { commit_id } => {
-            wrap_styled(&format!("  {} committed {commit_id}", symbol(SymbolKind::Ok, u)), w, ok)
-        }
-        StatusKind::CommitFailed { reason } => {
-            wrap_styled(&format!("  {} commit failed: {reason}", symbol(SymbolKind::Failed, u)), w, err)
-        }
-        StatusKind::TurnFailed { reason } => {
-            wrap_styled(&format!("  {} {reason}", symbol(SymbolKind::Failed, u)), w, err)
-        }
-        StatusKind::Cancelled { reason } => {
-            let mark = symbol(SymbolKind::Cancelled, u);
-            let text = match reason {
-                Some(r) => format!("  {mark} cancelled: {r}"),
-                None => format!("  {mark} cancelled"),
-            };
-            wrap_styled(&text, w, err)
-        }
-        StatusKind::LlmRetry { attempt, max_attempts, delay_ms, message } => wrap_styled(
-            &format!("  {} llm retry {attempt}/{max_attempts} after {delay_ms}ms: {message}", symbol(SymbolKind::Running, u)),
-            w, dim,
-        ),
-        StatusKind::LlmFailed { attempt, max_attempts, message } => wrap_styled(
-            &format!("  {} llm failed {attempt}/{max_attempts}: {message}", symbol(SymbolKind::Failed, u)),
-            w, err,
-        ),
-        StatusKind::Notice(lines) => lines.iter().flat_map(|line| wrap_styled(line, w, dim)).collect(),
+fn fold_symbol(expanded: bool, unicode: bool) -> &'static str {
+    match (expanded, unicode) {
+        (false, true) => "▸",
+        (true, true) => "▾",
+        (false, false) => ">",
+        (true, false) => "v",
     }
 }
 
-#[rustfmt::skip]
-fn wrap_styled(text: &str, w: u16, style: Style) -> Vec<Line<'static>> {
-    wrap_text(text, w).into_iter().map(|s| Line::from(Span::styled(s, style))).collect()
+pub(crate) fn draw(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    let geometry = frame_layout(area.width);
+    match geometry.status {
+        StatusSlot::Right { w } => {
+            let columns = Layout::horizontal([
+                Constraint::Length(geometry.left_w),
+                Constraint::Length(GAP),
+                Constraint::Length(w),
+            ])
+            .split(area);
+            draw_left(frame, app, columns[0], geometry.content_w, false);
+            draw_right_status(frame, app, columns[2]);
+        }
+        StatusSlot::BottomLine => {
+            draw_left(frame, app, area, geometry.content_w, true);
+        }
+    }
 }
 
-fn wrap_text(text: &str, w: u16) -> Vec<String> {
-    let w = w.max(1) as usize;
+fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, narrow: bool) {
+    let input_h = input_visual_height(app, content_w);
+    let [transcript, separator, input, bottom] = left_regions(area, input_h);
+    draw_transcript(frame, app, transcript, content_w);
+    draw_separator(frame, separator);
+    draw_input(frame, app, input, content_w);
+    if narrow {
+        draw_bottom_status(frame, app, bottom);
+    } else {
+        draw_prompt_tag(frame, bottom);
+    }
+}
+
+fn left_regions(area: Rect, input_h: u16) -> [Rect; 4] {
+    let bottom_h = area.height.min(1);
+    let above_bottom = area.height.saturating_sub(bottom_h);
+    let input_h = input_h.min(above_bottom);
+    let above_input = above_bottom.saturating_sub(input_h);
+    let separator_h = above_input.min(1);
+    let transcript_h = above_input.saturating_sub(separator_h);
+
+    let separator_y = area.y.saturating_add(transcript_h);
+    let input_y = separator_y.saturating_add(separator_h);
+    let bottom_y = input_y.saturating_add(input_h);
+    [
+        Rect::new(area.x, area.y, area.width, transcript_h),
+        Rect::new(area.x, separator_y, area.width, separator_h),
+        Rect::new(area.x, input_y, area.width, input_h),
+        Rect::new(area.x, bottom_y, area.width, bottom_h),
+    ]
+}
+
+pub(crate) fn locale_utf8() -> bool {
+    ["LC_ALL", "LANG"].iter().any(|key| {
+        std::env::var(key)
+            .ok()
+            .is_some_and(|value| value.to_ascii_uppercase().contains("UTF-8"))
+    })
+}
+
+/// One source of truth for transcript rendering and viewport row counts.
+pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> {
+    let unicode = locale_utf8();
+    let mut lines = Vec::new();
+    let mut assistant_header = false;
+    for block in &app.blocks {
+        match block {
+            Block::User(text) => {
+                separate(&mut lines);
+                lines.extend(body("你", content_w, role_style(Role::User)));
+                lines.extend(body(text, content_w, role_style(Role::User)));
+                assistant_header = false;
+            }
+            Block::Assistant(text) => {
+                ensure_assistant_header(
+                    &mut lines,
+                    &mut assistant_header,
+                    &app.ctx.active_agent,
+                    content_w,
+                );
+                lines.extend(body(text, content_w, role_style(Role::Assistant)));
+            }
+            Block::Tool { name, state, .. } => {
+                ensure_assistant_header(
+                    &mut lines,
+                    &mut assistant_header,
+                    &app.ctx.active_agent,
+                    content_w,
+                );
+                lines.extend(tool_lines(name, state, content_w, unicode));
+            }
+            Block::Status(StatusKind::Notice(notice)) => {
+                for text in notice {
+                    lines.extend(body(text, content_w, role_style(Role::DimMeta)));
+                }
+            }
+            Block::Status(kind) => {
+                ensure_assistant_header(
+                    &mut lines,
+                    &mut assistant_header,
+                    &app.ctx.active_agent,
+                    content_w,
+                );
+                lines.extend(status_lines(kind, content_w, unicode));
+            }
+        }
+    }
+    lines
+}
+
+fn separate(lines: &mut Vec<Line<'static>>) {
+    let last_has_text = lines.last().is_some_and(|line| {
+        line.spans
+            .iter()
+            .any(|span| !span.content.trim().is_empty())
+    });
+    if last_has_text {
+        lines.push(Line::default());
+    }
+}
+
+fn ensure_assistant_header(
+    lines: &mut Vec<Line<'static>>,
+    shown: &mut bool,
+    agent: &str,
+    content_w: u16,
+) {
+    if !*shown {
+        separate(lines);
+        lines.extend(body(agent, content_w, role_style(Role::Assistant)));
+        *shown = true;
+    }
+}
+
+fn body(text: &str, content_w: u16, style: Style) -> Vec<Line<'static>> {
+    wrap_text(text, content_w)
+        .into_iter()
+        .map(|text| {
+            if text.is_empty() {
+                Line::default()
+            } else {
+                Line::from(vec![Span::raw("  "), Span::styled(text, style)])
+            }
+        })
+        .collect()
+}
+
+fn tool_lines(name: &str, state: &ToolState, content_w: u16, unicode: bool) -> Vec<Line<'static>> {
+    let dim = role_style(Role::DimMeta);
+    let err = role_style(Role::ToolErr);
+    match state {
+        ToolState::Running => body(
+            &format!("{name} · running {}", symbol(SymbolKind::Running, unicode)),
+            content_w,
+            dim,
+        ),
+        ToolState::Ok { output_len } => vec![Line::from(vec![
+            Span::styled(format!("{} ", fold_symbol(false, unicode)), dim),
+            Span::styled(symbol(SymbolKind::Ok, unicode), role_style(Role::ToolOk)),
+            Span::styled(format!(" {name} · {output_len} B"), dim),
+        ])],
+        ToolState::Failed { error, .. } => {
+            let mut lines = vec![Line::from(vec![
+                Span::styled(format!("{} ", fold_symbol(true, unicode)), dim),
+                Span::styled(symbol(SymbolKind::Failed, unicode), err),
+                Span::styled(format!(" {name}"), dim),
+            ])];
+            if let Some(error) = error {
+                lines.extend(body(error, content_w, err));
+            }
+            lines
+        }
+    }
+}
+
+fn status_lines(kind: &StatusKind, content_w: u16, unicode: bool) -> Vec<Line<'static>> {
+    let dim = role_style(Role::DimMeta);
+    let err = role_style(Role::ToolErr);
+    let (text, style) = match kind {
+        StatusKind::Committed { commit_id } => (
+            format!("{} committed {commit_id}", symbol(SymbolKind::Ok, unicode)),
+            role_style(Role::ToolOk),
+        ),
+        StatusKind::CommitFailed { reason } => (
+            format!(
+                "{} commit failed: {reason}",
+                symbol(SymbolKind::Failed, unicode)
+            ),
+            err,
+        ),
+        StatusKind::TurnFailed { reason } => (
+            format!("{} {reason}", symbol(SymbolKind::Failed, unicode)),
+            err,
+        ),
+        StatusKind::Cancelled { reason } => {
+            let mark = symbol(SymbolKind::Cancelled, unicode);
+            (
+                reason.as_ref().map_or_else(
+                    || format!("{mark} cancelled"),
+                    |reason| format!("{mark} cancelled: {reason}"),
+                ),
+                err,
+            )
+        }
+        StatusKind::LlmRetry {
+            attempt,
+            max_attempts,
+            delay_ms,
+            message,
+        } => (
+            format!(
+                "{} llm retry {attempt}/{max_attempts} after {delay_ms}ms: {message}",
+                symbol(SymbolKind::Running, unicode)
+            ),
+            dim,
+        ),
+        StatusKind::LlmFailed {
+            attempt,
+            max_attempts,
+            message,
+        } => (
+            format!(
+                "{} llm failed {attempt}/{max_attempts}: {message}",
+                symbol(SymbolKind::Failed, unicode)
+            ),
+            err,
+        ),
+        StatusKind::Notice(_) => return Vec::new(),
+    };
+    body(&text, content_w, style)
+}
+
+fn wrap_text(text: &str, width: u16) -> Vec<String> {
+    let width = width.max(1) as usize;
     let mut out = Vec::new();
     for paragraph in text.split('\n') {
         if paragraph.is_empty() {
             out.push(String::new());
             continue;
         }
-        let mut cur = String::new();
+        let mut current = String::new();
         for ch in paragraph.chars() {
             let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if !cur.is_empty() && UnicodeWidthStr::width(cur.as_str()).saturating_add(ch_w) > w {
-                out.push(std::mem::take(&mut cur));
+            if !current.is_empty()
+                && UnicodeWidthStr::width(current.as_str()).saturating_add(ch_w) > width
+            {
+                out.push(std::mem::take(&mut current));
             }
-            cur.push(ch);
+            current.push(ch);
         }
-        out.push(cur);
+        out.push(current);
     }
     if out.is_empty() {
         out.push(String::new());
@@ -209,78 +448,323 @@ fn wrap_text(text: &str, w: u16) -> Vec<String> {
 }
 
 fn visual_cursor(line: &str, char_index: usize, width: u16) -> (usize, usize) {
-    let w = width.max(1) as usize;
+    let width = width.max(1) as usize;
     let prefix: String = line.chars().take(char_index).collect();
-    let lines = wrap_text(&prefix, width);
+    let lines = wrap_text(&prefix, width as u16);
     let last_w = lines
         .last()
-        .map(|s| UnicodeWidthStr::width(s.as_str()))
+        .map(|line| UnicodeWidthStr::width(line.as_str()))
         .unwrap_or(0);
     let row = lines.len().saturating_sub(1);
-    if last_w >= w && !prefix.is_empty() {
+    if last_w >= width && !prefix.is_empty() {
         (row + 1, 0)
     } else {
         (row, last_w)
     }
 }
 
-#[rustfmt::skip]
-pub(crate) fn input_visual_height(app: &App, width: u16) -> u16 {
-    let rows: usize = app.input.lines.iter().map(|l| wrap_text(l, width).len().max(1)).sum();
-    rows.clamp(1, 6) as u16
-}
-
-#[rustfmt::skip]
-fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let lines: Vec<Line<'static>> = app.blocks.iter().flat_map(|b| block_lines(b, area.width)).collect();
-    let start = app.viewport.scroll().min(lines.len());
-    let end = (start + area.height as usize).min(lines.len());
-    frame.render_widget(Paragraph::new(lines[start..end].to_vec()), area);
-}
-
-#[rustfmt::skip]
-fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
+fn input_visual(app: &App, content_w: u16) -> (Vec<String>, usize, usize) {
     let mut visual = Vec::new();
     let mut cursor_row = 0usize;
     let mut cursor_col = 0usize;
-    for (i, line) in app.input.lines.iter().enumerate() {
-        let wrapped = wrap_text(line, area.width);
-        if i < app.input.cursor.0 {
+    for (index, line) in app.input.lines.iter().enumerate() {
+        let wrapped = wrap_text(line, content_w);
+        if index < app.input.cursor.0 {
             cursor_row += wrapped.len().max(1);
-        } else if i == app.input.cursor.0 {
-            let (row, col) = visual_cursor(line, app.input.cursor.1, area.width);
+        } else if index == app.input.cursor.0 {
+            let (row, col) = visual_cursor(line, app.input.cursor.1, content_w);
             cursor_row += row;
             cursor_col = col;
         }
         visual.extend(wrapped);
     }
-    let h = area.height as usize;
-    let scroll = cursor_row.saturating_sub(h.saturating_sub(1));
-    let shown: Vec<Line> = visual.iter().skip(scroll).take(h).map(|s| Line::from(s.clone())).collect();
+    while visual.len() <= cursor_row {
+        visual.push(String::new());
+    }
+    (visual, cursor_row, cursor_col)
+}
+
+pub(crate) fn input_visual_height(app: &App, content_w: u16) -> u16 {
+    let (visual, cursor_row, _) = input_visual(app, content_w);
+    visual
+        .len()
+        .max(cursor_row + 1)
+        .clamp(INPUT_MIN_ROWS as usize, INPUT_MAX_ROWS as usize) as u16
+}
+
+fn draw_transcript(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
+    let lines = transcript_lines(app, content_w);
+    let start = app.viewport.scroll().min(lines.len());
+    let end = (start + area.height as usize).min(lines.len());
+    frame.render_widget(Paragraph::new(lines[start..end].to_vec()), area);
+}
+
+fn draw_separator(frame: &mut Frame, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let unit = if locale_utf8() { "─" } else { "-" };
+    let line = unit.repeat(area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(line, role_style(Role::DimMeta)))),
+        area,
+    );
+}
+
+fn draw_input(frame: &mut Frame, app: &App, area: Rect, content_w: u16) {
+    let (visual, cursor_row, cursor_col) = input_visual(app, content_w);
+    let height = area.height as usize;
+    let scroll = cursor_row.saturating_sub(height.saturating_sub(1));
+    let shown = visual
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(height)
+        .map(|(index, text)| {
+            let prompt = if index == 0 { "> " } else { "  " };
+            Line::from(vec![
+                Span::styled(prompt, role_style(Role::User)),
+                Span::styled(text.clone(), role_style(Role::Assistant)),
+            ])
+        })
+        .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(shown), area);
-    let screen_y = (cursor_row - scroll) as u16;
-    if screen_y < area.height {
-        frame.set_cursor_position((area.x + cursor_col as u16, area.y + screen_y));
+
+    let screen_y = cursor_row.saturating_sub(scroll) as u16;
+    let cursor_x = area
+        .x
+        .saturating_add(GUTTER)
+        .saturating_add(cursor_col as u16);
+    if screen_y < area.height && cursor_x < area.x.saturating_add(area.width) {
+        frame.set_cursor_position((cursor_x, area.y.saturating_add(screen_y)));
     }
 }
 
-#[rustfmt::skip]
-fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
-    let nl = if app.kitty_keyboard { "Shift+Enter 换行" } else { "Alt+Enter 换行" };
-    let phase = match app.phase {
-        TurnPhase::Idle => "idle",
-        TurnPhase::Streaming => "streaming",
-        TurnPhase::Committing => "committing",
-        TurnPhase::Cancelling => "cancelling",
-    };
-    let ctrl = if app.last_ctrl_c.is_some_and(|t| t.elapsed() <= CTRL_C_WINDOW) {
-        "  再按一次 Ctrl+C 退出"
+fn draw_prompt_tag(frame: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let x = area.x.saturating_add(GUTTER.min(area.width));
+    let width = area.width.saturating_sub(GUTTER).min(6);
+    if width == 0 {
+        return;
+    }
+    let tag = truncate_display("PROMPT", width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(tag, prompt_style()))).style(prompt_style()),
+        Rect::new(x, area.y, width, 1),
+    );
+}
+
+fn draw_right_status(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let available = area.width.saturating_sub(1) as usize;
+    let mut rows = vec![Line::default(); area.height as usize];
+    set_status_row(&mut rows, 0, &app.ctx.session_id, Role::DimMeta, available);
+    set_status_row(
+        &mut rows,
+        1,
+        &app.ctx.active_agent,
+        Role::DimMeta,
+        available,
+    );
+    set_status_row(
+        &mut rows,
+        3,
+        phase_text(app.phase),
+        phase_role(app.phase),
+        available,
+    );
+    if !app.viewport.following() {
+        set_status_row(&mut rows, 5, "[scroll]", Role::DimMeta, available);
+    }
+
+    let height = rows.len();
+    if ctrl_c_visible(app) {
+        set_status_row(
+            &mut rows,
+            height.saturating_sub(3),
+            "2 秒内再按一次 Ctrl+C",
+            Role::ToolErr,
+            available,
+        );
+    }
+    let key = if app.kitty_keyboard {
+        "S-Enter"
     } else {
-        ""
+        "Alt+Enter"
     };
-    let follow = if app.viewport.following() { "" } else { "  [scroll]" };
-    let text = format!("{}  {}  {phase}  {nl}{ctrl}{follow}", app.ctx.session_id, app.ctx.active_agent);
-    frame.render_widget(Paragraph::new(Line::from(Span::styled(text, role_style(Role::DimMeta)))), area);
+    set_status_row(
+        &mut rows,
+        height.saturating_sub(2),
+        key,
+        Role::DimMeta,
+        available,
+    );
+    set_status_row(
+        &mut rows,
+        height.saturating_sub(1),
+        "换行",
+        Role::DimMeta,
+        available,
+    );
+
+    frame.render_widget(Paragraph::new(rows).style(status_surface_style()), area);
+}
+
+fn set_status_row(
+    rows: &mut [Line<'static>],
+    row: usize,
+    text: &str,
+    role: Role,
+    available: usize,
+) {
+    if row >= rows.len() {
+        return;
+    }
+    rows[row] = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(truncate_display(text, available), role_style(role)),
+    ]);
+}
+
+fn draw_bottom_status(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let gutter = area.width.min(GUTTER);
+    let tag_width = area.width.saturating_sub(gutter).min(6);
+    if tag_width > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate_display("PROMPT", tag_width as usize),
+                prompt_style(),
+            )))
+            .style(prompt_style()),
+            Rect::new(area.x.saturating_add(gutter), area.y, tag_width, 1),
+        );
+    }
+
+    let status_x = area.x.saturating_add(gutter).saturating_add(tag_width);
+    let status_width = area.width.saturating_sub(gutter).saturating_sub(tag_width);
+    if status_width == 0 {
+        return;
+    }
+    let line = bottom_status_line(app, status_width as usize);
+    frame.render_widget(
+        Paragraph::new(line).style(status_surface_style()),
+        Rect::new(status_x, area.y, status_width, 1),
+    );
+}
+
+fn bottom_status_line(app: &App, width: usize) -> Line<'static> {
+    let phase = phase_text(app.phase);
+    let scroll = (!app.viewport.following()).then_some("[scroll]");
+    let key = if app.kitty_keyboard {
+        "S-Enter 换行"
+    } else {
+        "Alt+Enter 换行"
+    };
+    let full = [
+        app.ctx.session_id.as_str(),
+        app.ctx.active_agent.as_str(),
+        phase,
+        scroll.unwrap_or(""),
+        key,
+    ];
+    let key =
+        (joined_width(full.into_iter().filter(|part| !part.is_empty())) <= width).then_some(key);
+
+    let tail = [Some(phase), scroll, key];
+    let tail_width = joined_width(tail.into_iter().flatten());
+    let agent_width = display_width(&app.ctx.active_agent);
+    let session_room = width
+        .saturating_sub(tail_width)
+        .saturating_sub(agent_width)
+        .saturating_sub(6);
+    let session = truncate_display(&app.ctx.session_id, session_room);
+    let session_cost = display_width(&session) + usize::from(!session.is_empty()) * 3;
+    let agent_room = width
+        .saturating_sub(tail_width)
+        .saturating_sub(session_cost)
+        .saturating_sub(3);
+    let agent = truncate_display(&app.ctx.active_agent, agent_room);
+
+    let mut spans = Vec::new();
+    for field in [&session, &agent]
+        .into_iter()
+        .filter(|field| !field.is_empty())
+    {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", role_style(Role::DimMeta)));
+        }
+        spans.push(Span::styled(field.clone(), role_style(Role::DimMeta)));
+    }
+    if !spans.is_empty() {
+        spans.push(Span::styled(" · ", role_style(Role::DimMeta)));
+    }
+    spans.push(Span::styled(
+        truncate_display(phase, width),
+        role_style(phase_role(app.phase)),
+    ));
+    for field in [scroll, key].into_iter().flatten() {
+        spans.push(Span::styled(
+            format!(" · {field}"),
+            role_style(Role::DimMeta),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn joined_width<'a>(parts: impl Iterator<Item = &'a str>) -> usize {
+    let parts = parts.collect::<Vec<_>>();
+    parts.iter().map(|part| display_width(part)).sum::<usize>() + parts.len().saturating_sub(1) * 3
+}
+
+fn phase_text(phase: TurnPhase) -> &'static str {
+    match phase {
+        TurnPhase::Idle => "idle",
+        TurnPhase::Streaming => "stream",
+        TurnPhase::Committing => "commit",
+        TurnPhase::Cancelling => "cancel",
+    }
+}
+
+fn phase_role(phase: TurnPhase) -> Role {
+    match phase {
+        TurnPhase::Streaming => Role::User,
+        TurnPhase::Cancelling => Role::ToolErr,
+        TurnPhase::Idle | TurnPhase::Committing => Role::DimMeta,
+    }
+}
+
+fn ctrl_c_visible(app: &App) -> bool {
+    app.last_ctrl_c
+        .is_some_and(|then| then.elapsed() <= CTRL_C_WINDOW)
+}
+
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn truncate_display(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut used = 0usize;
+    text.chars()
+        .take_while(|ch| {
+            let next = used.saturating_add(UnicodeWidthChar::width(*ch).unwrap_or(0));
+            if next > width {
+                false
+            } else {
+                used = next;
+                true
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -304,125 +788,173 @@ mod tests {
     }
 
     #[test]
-    fn follow_pins_to_bottom_on_growth() {
-        let mut v = Viewport::new();
-        v.on_content_changed(5, 10);
-        assert_eq!(v.scroll(), 0);
-        v.on_content_changed(20, 10);
-        assert_eq!(v.scroll(), 10);
-        assert!(v.following());
+    fn layout_boundaries_are_underflow_safe() {
+        for width in [1, 7, 55, 56, 80, 176] {
+            let _ = frame_layout(width);
+        }
+        assert_eq!(frame_layout(55).status, StatusSlot::BottomLine);
+        assert_eq!(frame_layout(56).status, StatusSlot::Right { w: 16 });
+        assert_eq!(
+            frame_layout(80),
+            FrameLayout {
+                left_w: 63,
+                content_w: 61,
+                status: StatusSlot::Right { w: 16 },
+            }
+        );
+        assert_eq!(
+            frame_layout(176),
+            FrameLayout {
+                left_w: 153,
+                content_w: 151,
+                status: StatusSlot::Right { w: 22 },
+            }
+        );
     }
 
     #[test]
-    fn page_up_breaks_follow_and_growth_does_not_move_viewport() {
-        let mut v = Viewport::new();
-        v.on_content_changed(30, 10);
-        v.page_up(10);
-        assert!(!v.following());
-        let pinned = v.scroll();
-        v.on_content_changed(50, 10);
-        assert_eq!(v.scroll(), pinned);
-        assert!(!v.following());
+    fn follow_pins_and_resize_clamps_scroll() {
+        let mut viewport = Viewport::new();
+        viewport.on_content_changed(20, 10);
+        assert_eq!(viewport.scroll(), 10);
+        viewport.page_up(10);
+        assert!(!viewport.following());
+        viewport.on_content_changed(5, 10);
+        assert_eq!(viewport.scroll(), 0);
     }
 
     #[test]
     fn page_down_to_bottom_restores_follow() {
-        let mut v = Viewport::new();
-        v.on_content_changed(30, 10);
-        v.page_up(10);
-        assert!(!v.following());
-        v.page_down(30, 10);
-        assert!(v.following());
-        assert_eq!(v.scroll(), 20);
+        let mut viewport = Viewport::new();
+        viewport.on_content_changed(30, 10);
+        viewport.page_up(10);
+        viewport.page_down(30, 10);
+        assert!(viewport.following());
+        assert_eq!(viewport.scroll(), 20);
     }
 
     #[test]
-    fn wrap_text_splits_cjk_by_display_width() {
-        assert_eq!(
-            wrap_text("中文中文", 4),
-            vec!["中文".to_string(), "中文".to_string()]
-        );
-        assert_eq!(wrap_text("中文中文", 8), vec!["中文中文".to_string()]);
-        assert_eq!(wrap_text("abcd", 4), vec!["abcd".to_string()]);
-    }
-
-    #[test]
-    fn symbol_falls_back_to_ascii_without_utf8_locale() {
-        assert_eq!(symbol(SymbolKind::Ok, true), "✓");
-        assert_eq!(symbol(SymbolKind::Ok, false), "+");
-        assert_eq!(symbol(SymbolKind::Failed, false), "x");
-        assert_eq!(symbol(SymbolKind::Running, false), ".");
-
-        // Also drive the locale decision itself, not just the branch it feeds:
-        // the caller's `unicode` flag comes from `locale_utf8()`, so passing
-        // `false` by hand never proves a non-UTF-8 locale reaches ASCII.
-        // SAFETY: single-threaded test; both vars are restored before return.
-        let saved = ["LC_ALL", "LANG"].map(|k| (k, std::env::var(k).ok()));
-        unsafe {
-            std::env::set_var("LC_ALL", "C");
-            std::env::set_var("LANG", "C");
-        }
-        assert!(!locale_utf8(), "C locale is not UTF-8");
-        assert_eq!(symbol(SymbolKind::Ok, locale_utf8()), "+");
-        unsafe {
-            std::env::remove_var("LC_ALL");
-            std::env::set_var("LANG", "en_US.UTF-8");
-        }
-        assert!(locale_utf8(), "UTF-8 locale is detected");
-        assert_eq!(symbol(SymbolKind::Ok, locale_utf8()), "✓");
-        for (key, value) in saved {
-            unsafe {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn three_regions_draw_on_test_backend_without_panic() {
-        let mut app = test_app();
-        app.blocks
-            .push(Block::Status(StatusKind::Notice(vec!["hello".into()])));
-        app.input.set_text("typed");
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal.draw(|f| draw(f, &app)).expect("draw");
-        let buf = terminal.backend().buffer();
-        let row_has = |y: u16| (0..80u16).any(|x| buf[(x, y)].symbol() != " ");
-        assert!(row_has(0), "transcript region should be drawn");
-        assert!(row_has(22), "input region should be drawn");
-        assert!(row_has(23), "status region should be drawn");
-    }
-
-    #[test]
-    fn draw_matches_deterministic_text_fixture() {
+    fn transcript_groups_one_agent_header_and_shares_row_count() {
         let mut app = test_app();
         app.blocks.extend([
-            Block::User("mock prompt".into()),
-            Block::Assistant("mock line 01\nmock line 02".into()),
-            Block::Status(StatusKind::Notice(vec!["mock notice".into()])),
+            Block::User("question".into()),
+            Block::Assistant("before tool".into()),
+            Block::Tool {
+                id: "opaque-id".into(),
+                name: "observe.workspace".into(),
+                state: ToolState::Ok { output_len: 1204 },
+            },
+            Block::Assistant("after tool".into()),
+            Block::Status(StatusKind::Committed {
+                commit_id: "abc".into(),
+            }),
+            Block::User("next".into()),
         ]);
-        app.input.set_text("follow-up");
-        let backend = TestBackend::new(40, 8);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal.draw(|frame| draw(frame, &app)).expect("draw");
 
-        let buffer = terminal.backend().buffer();
-        let screen = (0..8u16)
+        let lines = transcript_lines(&app, 61);
+        let text = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(text.iter().filter(|line| line.trim() == "agent").count(), 1);
+        assert!(text.iter().any(|line| line.contains("1204 B")));
+        assert!(!text.iter().any(|line| line.contains("opaque-id")));
+        assert_eq!(lines.len(), app.content_rows(61));
+        let Some(tool) = text
+            .iter()
+            .position(|line| line.contains("observe.workspace"))
+        else {
+            panic!("tool line missing");
+        };
+        assert_eq!(text[tool - 1].trim(), "before tool");
+        assert_eq!(text[tool + 1].trim(), "after tool");
+    }
+
+    #[test]
+    fn failed_tool_expands_error_and_success_uses_bytes() {
+        let mut app = test_app();
+        app.blocks.extend([
+            Block::Tool {
+                id: "ok".into(),
+                name: "observe.workspace".into(),
+                state: ToolState::Ok { output_len: 1204 },
+            },
+            Block::Tool {
+                id: "failed".into(),
+                name: "mutate.edit".into(),
+                state: ToolState::Failed {
+                    output_len: 0,
+                    error: Some("expected_hash mismatch".into()),
+                },
+            },
+        ]);
+        let text = transcript_lines(&app, 61)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("1204 B"));
+        assert!(!text.contains("chars"));
+        assert!(text.contains("expected_hash mismatch"));
+    }
+
+    #[test]
+    fn input_height_clamps_and_cursor_wraps_cjk() {
+        let mut app = test_app();
+        assert_eq!(input_visual_height(&app, 10), 2);
+        app.input.set_text("a\nb\nc");
+        assert_eq!(input_visual_height(&app, 10), 3);
+        app.input.set_text("a\nb\nc\nd\ne\nf");
+        assert_eq!(input_visual_height(&app, 10), 5);
+        assert_eq!(visual_cursor("中文", 1, 2), (1, 0));
+    }
+
+    #[test]
+    fn input_prompt_appears_only_on_first_visual_line() -> anyhow::Result<()> {
+        let mut app = test_app();
+        app.input.set_text("abcd");
+        let mut terminal = Terminal::new(TestBackend::new(8, 4))?;
+        terminal.draw(|frame| draw_input(frame, &app, Rect::new(0, 0, 8, 2), 6))?;
+        let screen = (0..2u16)
             .map(|y| {
-                (0..40u16)
-                    .map(|x| buffer[(x, y)].symbol())
+                (0..8u16)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                     .collect::<String>()
-                    .trim_end()
-                    .to_owned()
             })
             .collect::<Vec<_>>()
             .join("\n");
+        assert_eq!(screen.matches('>').count(), 1);
         assert_eq!(
-            screen,
-            "mock prompt\nmock line 01\nmock line 02\nmock notice\n\n\nfollow-up\nsess  agent  idle  Alt+Enter 换 行"
+            terminal.get_cursor_position()?,
+            ratatui::layout::Position::new(6, 0)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn colors_have_truecolor_and_named_fallbacks() {
+        assert_eq!(role_color(Role::User, true), Color::Rgb(0x86, 0x95, 0xe3));
+        assert_eq!(role_color(Role::User, false), Color::LightBlue);
+        assert_eq!(role_color(Role::ToolOk, false), Color::Cyan);
+        assert_eq!(role_color(Role::ToolErr, false), Color::Red);
+    }
+
+    #[test]
+    fn symbols_fall_back_to_ascii() {
+        assert_eq!(symbol(SymbolKind::Ok, true), "✓");
+        assert_eq!(symbol(SymbolKind::Ok, false), "+");
+        assert_eq!(fold_symbol(false, true), "▸");
+        assert_eq!(fold_symbol(false, false), ">");
+        assert_eq!(fold_symbol(true, false), "v");
+    }
+
+    #[test]
+    fn wide_and_narrow_frames_draw_without_panic() -> anyhow::Result<()> {
+        for width in [1, 7, 55, 56, 80, 176] {
+            let mut app = test_app();
+            app.blocks
+                .push(Block::Status(StatusKind::Notice(vec!["hello".into()])));
+            app.input.set_text("typed");
+            let mut terminal = Terminal::new(TestBackend::new(width, 24))?;
+            terminal.draw(|frame| draw(frame, &app))?;
+        }
+        Ok(())
     }
 }
