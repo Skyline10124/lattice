@@ -639,6 +639,13 @@ mod tests {
             other => panic!("expected failed tool, got {other:?}"),
         }
     }
+
+    fn start_tool(app: &mut App, name: &str) {
+        app.apply_turn_event(TurnEvent::ToolCallStarted {
+            id: "call-1".into(),
+            name: name.into(),
+        });
+    }
     #[test]
     fn token_deltas_coalesce_into_one_assistant_block() {
         let mut app = test_app();
@@ -703,10 +710,7 @@ mod tests {
     #[test]
     fn terminal_event_closes_running_tools() {
         let mut app = test_app();
-        app.apply_turn_event(TurnEvent::ToolCallStarted {
-            id: "call-1".into(),
-            name: "mutate.edit".into(),
-        });
+        start_tool(&mut app, "mutate.edit");
         app.apply_turn_event(TurnEvent::TurnFailed {
             reason: "provider failed".into(),
         });
@@ -719,10 +723,7 @@ mod tests {
         let mut app = test_app();
         app.phase = TurnPhase::Streaming;
         app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
-        app.apply_turn_event(TurnEvent::ToolCallStarted {
-            id: "call-1".into(),
-            name: "mutate.edit".into(),
-        });
+        start_tool(&mut app, "mutate.edit");
         app.finish_stream();
 
         assert_eq!(app.phase, TurnPhase::Idle);
@@ -824,10 +825,7 @@ mod tests {
         let mut app = test_app();
         app.phase = TurnPhase::Streaming;
         app.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
-        app.apply_turn_event(TurnEvent::ToolCallStarted {
-            id: "call-1".into(),
-            name: "fetch.web".into(),
-        });
+        start_tool(&mut app, "fetch.web");
         app.apply_stream_idle_timeout();
         assert_eq!(app.phase, TurnPhase::Idle);
         assert!(app.cancel_flag.is_none());
