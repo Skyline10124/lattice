@@ -752,6 +752,16 @@ mod tests {
     }
 
     #[test]
+    fn paste_grows_input_without_submitting() {
+        let mut app = test_app();
+        let submitted = app.apply_action(KeyAction::Paste("a\nb\nc".into()));
+        assert!(submitted.is_none());
+        assert_eq!(app.input.text(), "a\nb\nc");
+        assert_eq!(input_visual_height(&app, frame_layout(80).content_w), 3);
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+
+    #[test]
     fn double_ctrl_c_within_window_quits_single_does_not() {
         let mut app = test_app();
         assert!(!matches!(ctrl_c_action(&mut app), KeyAction::Quit));
