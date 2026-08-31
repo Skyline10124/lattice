@@ -2,6 +2,31 @@
 
 Applied fixes across code review phases. Entries are append-only; never delete or overwrite.
 
+## GitHub #179 acceptance audit: restore the all-feature clippy gate — 2026-08-31
+
+**Severity:** MEDIUM（acceptance evidence / test-only lint）
+
+**Problem:** 验收第 15 条要求 all-feature clippy，但 `cargo xtask ci` 的 workspace clippy 不带
+`--all-features`，此前的 focused clippy 也只覆盖 `lattice-session`。在当前 branch 首次运行
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` 时，
+`direct_crash_barriers::wait_for_ack` 的嵌套 `if let` 触发 `clippy::collapsible_if`。因此第 15 条
+此前没有完整证据，且实际为失败。
+
+**Fix:** 将两层 `if let` 合为一个 let-chain，不改变 ack 部分写入重试语义。第 12 条也逐项复核：
+barrier/matrix 实现在 `6e5d2094`，`T-GH34-04` 的关闭记录在 `36177b28`，当前
+`FINDINGS.md` 已关闭该项；完整 crash target 与普通 system harness 都在当前 source head 复跑。
+
+**Verification:**
+
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — 首次按预期 FAIL，
+  修正后 PASS。
+- 使用本工作树 feature binary 运行完整 `direct_crash_barriers` target — PASS（7 passed）。
+- `env -u LATTICE_BIN cargo xtask ci` — PASS，包含 fmt、workspace clippy、两个 boundary gates、
+  24 crate tests、完整普通 system harness、tool-codegen 与 Tool artifact verify。
+- `cargo fmt --all -- --check`、修改文件 LSP diagnostics、`git diff --check` — PASS。
+
+**Changed files:** `crates/lattice-system-harness/tests/direct_crash_barriers.rs`、`FIX.md`。
+
 ## GitHub #179 review: make conservative terminal recovery repeatable — 2026-08-30
 
 **Severity:** HIGH（repeated-crash reconciliation correctness）

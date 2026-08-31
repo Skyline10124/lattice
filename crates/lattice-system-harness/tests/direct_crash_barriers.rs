@@ -1004,10 +1004,10 @@ fn collect_tree_files(tree: &gix::Tree<'_>, prefix: &str, out: &mut Vec<(String,
 fn wait_for_ack(path: &std::path::Path, timeout: Duration) -> Value {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(bytes) = std::fs::read(path) {
-            if let Ok(facts) = serde_json::from_slice(&bytes) {
-                return facts;
-            }
+        if let Ok(bytes) = std::fs::read(path)
+            && let Ok(facts) = serde_json::from_slice(&bytes)
+        {
+            return facts;
         }
         assert!(Instant::now() < deadline, "barrier ack was not published");
         std::thread::sleep(Duration::from_millis(5));
