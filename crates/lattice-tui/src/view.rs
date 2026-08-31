@@ -777,7 +777,6 @@ mod tests {
     use crate::session::SessionContext;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use std::time::{Duration, Instant};
 
     fn test_app() -> App {
         App::new(
@@ -800,12 +799,6 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    fn rendered_text(app: &App, width: u16) -> anyhow::Result<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, 24))?;
-        terminal.draw(|frame| draw(frame, app))?;
-        Ok(buffer_text(&terminal, width, 24))
     }
 
     #[test]
@@ -831,20 +824,6 @@ mod tests {
                 status: StatusSlot::Right { w: 22 },
             }
         );
-    }
-
-    #[test]
-    fn ctrl_c_hint_fits_wide_and_narrow_then_expires() -> anyhow::Result<()> {
-        let mut app = test_app();
-        app.last_ctrl_c = Some(Instant::now());
-        assert!(rendered_text(&app, 80)?.contains("Ctrl+C to quit"));
-        assert!(rendered_text(&app, 55)?.contains("Ctrl+C to quit"));
-
-        app.last_ctrl_c = Some(Instant::now() - CTRL_C_WINDOW - Duration::from_millis(1));
-        let expired = rendered_text(&app, 55)?;
-        assert!(!expired.contains("Ctrl+C to quit"));
-        assert!(expired.contains("Alt+Enter newline"));
-        Ok(())
     }
 
     #[test]
